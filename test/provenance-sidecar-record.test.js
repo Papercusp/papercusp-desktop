@@ -510,32 +510,72 @@ test('verify-provenance rejects a matching health sha carried by an HTTP error r
   assert.equal(JSON.parse(successResponse.stdout).healthMatch, true);
 });
 
-test('verify-provenance rejects an empty or malformed latest.json platforms map', () => {
+test('verify-provenance binds latest.json URLs to the release target and signed artifact', () => {
   const dir = tmp();
+  const releaseBase = 'https://example.invalid/releases';
+  const releaseTag = 'desktop-v0.0.0-alpha';
   const artifact = path.join(dir, 'Papercusp_GUI_0.0.0_amd64.AppImage');
-  fs.writeFileSync(artifact, 'verified fixture bytes');
-  const sha256 = crypto.createHash('sha256').update(fs.readFileSync(artifact)).digest('hex');
+  const spacedArtifact = path.join(dir, 'Papercusp GUI_0.0.0_amd64.AppImage');
+  const fixtureBytes = Buffer.from('verified fixture bytes');
+  fs.writeFileSync(artifact, fixtureBytes);
+  fs.writeFileSync(spacedArtifact, fixtureBytes);
+  const sha256 = crypto.createHash('sha256').update(fixtureBytes).digest('hex');
+
+  // Build real Ed25519 signatures in Tauri's legacy `Ed` minisign shape and
+  // pass them through the production signature verifier. Both artifacts carry
+  // byte-identical payloads so the negative controls discriminate on URL
+  // binding, never on an incidental content or signature mismatch.
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const keyId = Buffer.from('0102030405060708', 'hex');
+  const publicDer = publicKey.export({ format: 'der', type: 'spki' });
+  const publicBlock = Buffer.concat([Buffer.from('Ed'), keyId, publicDer.subarray(-32)]);
+  const signatureFor = (file) => {
+    const artifactSignature = crypto.sign(null, fs.readFileSync(file), privateKey);
+    const signatureBlock = Buffer.concat([Buffer.from('Ed'), keyId, artifactSignature]);
+    const signatureFile = Buffer.from(
+      `untrusted comment: test signature\n${signatureBlock.toString('base64')}\n`,
+    ).toString('base64');
+    fs.writeFileSync(`${file}.sig`, signatureFile);
+    return signatureFile;
+  };
+  const artifactSignature = signatureFor(artifact);
+  const spacedArtifactSignature = signatureFor(spacedArtifact);
+
   const provenance = {
     version: '0.0.0',
     buildSha: 'abc1234',
     gitHead: 'a'.repeat(40),
     gitDirty: false,
-    artifacts: [{ name: path.basename(artifact), sha256, sig: false }],
+    releaseHostSha256: crypto.createHash('sha256').update(releaseBase).digest('hex'),
+    artifacts: [
+      { name: path.basename(artifact), bytes: fixtureBytes.length, sha256, sig: true },
+      { name: path.basename(spacedArtifact), bytes: fixtureBytes.length, sha256, sig: true },
+    ],
   };
   fs.writeFileSync(path.join(dir, 'build-provenance.json'), JSON.stringify(provenance));
   const manifestPath = path.join(dir, 'latest.json');
-  const run = (manifest, args = []) => {
+  const run = (manifest) => {
     fs.writeFileSync(manifestPath, JSON.stringify(manifest));
-    return spawnSync('bash', [VERIFIER, dir, '--latest-json', manifestPath, '--json', ...args], {
-      encoding: 'utf8',
-    });
+    return spawnSync(
+      'bash',
+      [
+        VERIFIER,
+        dir,
+        '--latest-json',
+        manifestPath,
+        '--pubkey',
+        publicBlock.toString('base64'),
+        '--json',
+      ],
+      { encoding: 'utf8' },
+    );
   };
 
   for (const [label, manifest] of [
-    ['missing', { version: '0.0.0' }],
-    ['empty', { version: '0.0.0', platforms: {} }],
-    ['null', { version: '0.0.0', platforms: null }],
-    ['array', { version: '0.0.0', platforms: [] }],
+    ['missing', { version: '0.0.0', channel: 'alpha' }],
+    ['empty', { version: '0.0.0', channel: 'alpha', platforms: {} }],
+    ['null', { version: '0.0.0', channel: 'alpha', platforms: null }],
+    ['array', { version: '0.0.0', channel: 'alpha', platforms: [] }],
   ]) {
     const result = run(manifest);
     assert.equal(result.status, 1, `${label} platforms unexpectedly passed: ${result.stderr || result.stdout}`);
@@ -543,41 +583,51 @@ test('verify-provenance rejects an empty or malformed latest.json platforms map'
     assert.match(verdict.failures.join('\n'), /non-empty platforms object/);
   }
 
-  // Prove the new guard discriminates rather than merely rejecting every
-  // supplied manifest. Build a real Ed25519 signature in Tauri's legacy `Ed`
-  // minisign shape and pass it through the production signature verifier.
-  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
-  const keyId = Buffer.from('0102030405060708', 'hex');
-  const publicDer = publicKey.export({ format: 'der', type: 'spki' });
-  const publicBlock = Buffer.concat([Buffer.from('Ed'), keyId, publicDer.subarray(-32)]);
-  const artifactSignature = crypto.sign(null, fs.readFileSync(artifact), privateKey);
-  const signatureBlock = Buffer.concat([Buffer.from('Ed'), keyId, artifactSignature]);
-  const signatureFile = Buffer.from(
-    `untrusted comment: test signature\n${signatureBlock.toString('base64')}\n`,
-  ).toString('base64');
-  fs.writeFileSync(`${artifact}.sig`, signatureFile);
-  fs.writeFileSync(
-    path.join(dir, 'build-provenance.json'),
-    JSON.stringify({
-      ...provenance,
-      artifacts: [{ ...provenance.artifacts[0], sig: true }],
-    }),
-  );
-
-  const valid = run(
-    {
-      version: '0.0.0',
-      platforms: {
-        'linux-x86_64': {
-          url: `https://example.invalid/${path.basename(artifact)}`,
-          signature: signatureFile,
-        },
+  const manifestFor = (url, signature = artifactSignature) => ({
+    version: '0.0.0',
+    channel: 'alpha',
+    platforms: {
+      'linux-x86_64': {
+        url,
+        signature,
       },
     },
-    ['--pubkey', publicBlock.toString('base64')],
-  );
+  });
+
+  // Positive control: the canonical host + tag + exact artifact is accepted.
+  const canonicalUrl = `${releaseBase}/${releaseTag}/${path.basename(artifact)}`;
+  const valid = run(manifestFor(canonicalUrl));
   assert.equal(valid.status, 0, `valid manifest failed: ${valid.stderr || valid.stdout}`);
   assert.equal(JSON.parse(valid.stdout).manifest['linux-x86_64'].ok, true);
+
+  // The old basename-only check returned PASS for both of these byte-identical
+  // controls. A signed filename is not enough: the updater would download from
+  // the manifest URL, so its release host and release tag are part of identity.
+  const foreignHost = run(
+    manifestFor(`https://attacker.invalid/releases/${releaseTag}/${path.basename(artifact)}`),
+  );
+  assert.equal(foreignHost.status, 1, 'a foreign manifest host unexpectedly passed');
+  assert.match(JSON.parse(foreignHost.stdout).failures.join('\n'), /release host/);
+
+  const staleTag = run(
+    manifestFor(`${releaseBase}/desktop-v9.9.9-alpha/${path.basename(artifact)}`),
+  );
+  assert.equal(staleTag.status, 1, 'a stale manifest release tag unexpectedly passed');
+  assert.match(JSON.parse(staleTag.stdout).failures.join('\n'), /release tag/);
+
+  // Generated macOS/Windows names contain spaces, encoded as %20 in the URL.
+  // Decode the URL path once before matching it to the raw provenance name.
+  const encodedName = run(
+    manifestFor(
+      `${releaseBase}/${releaseTag}/${encodeURIComponent(path.basename(spacedArtifact))}`,
+      spacedArtifactSignature,
+    ),
+  );
+  assert.equal(encodedName.status, 0, encodedName.stderr || encodedName.stdout);
+  assert.equal(
+    JSON.parse(encodedName.stdout).manifest['linux-x86_64'].url_basename,
+    path.basename(spacedArtifact),
+  );
 });
 
 test('same artifact bytes cannot silently acquire a different baked buildSha', () => {
