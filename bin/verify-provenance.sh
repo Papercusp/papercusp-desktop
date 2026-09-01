@@ -18,7 +18,9 @@
 #      (b) if a latest.json manifest is present, every per-platform url references
 #          an artifact whose sha256 was verified AND its signature field equals
 #          that artifact's on-disk .sig — so the manifest cannot point the updater
-#          at a different/stale file than the one we just verified.
+#          at a different/stale file than the one we just verified; the platform
+#          key must also match the artifact family/architecture the updater can
+#          consume (a signed artifact under the wrong canonical key is still dead).
 #
 # Verification standard (D-007, VMs unavailable): this script is `bash -n`-clean,
 # functionally tested against synthetic fixtures covering every failure branch,
@@ -402,6 +404,33 @@ if LATEST_JSON:
                 "darwin-aarch64",
             )
             canonical_platform_key_set = set(canonical_platform_keys)
+
+            def artifact_matches_platform(platform_key, artifact_name):
+                """Match a manifest key to the updater artifact shape it serves.
+
+                The generator emits AppImages for Linux, setup/zip/MSI bundles
+                for Windows, and one universal .app.tar.gz for both Darwin
+                keys. Keep the architecture distinction for Linux because an
+                arm bundle is not runnable by an x86 updater (and vice versa).
+                """
+                lower_name = artifact_name.lower()
+                if platform_key == "linux-x86_64":
+                    return (
+                        lower_name.endswith(".appimage")
+                        and "aarch64" not in lower_name
+                        and "arm64" not in lower_name
+                    )
+                if platform_key == "linux-aarch64":
+                    return (
+                        lower_name.endswith(".appimage")
+                        and ("aarch64" in lower_name or "arm64" in lower_name)
+                    )
+                if platform_key == "windows-x86_64":
+                    return lower_name.endswith(("-setup.exe", "-setup.zip", ".msi"))
+                if platform_key in ("darwin-x86_64", "darwin-aarch64"):
+                    return lower_name.endswith(".app.tar.gz")
+                return False
+
             # WI-4243: provenance names may carry a subdir (e.g. "deb/App.deb");
             # a manifest URL carries the basename. Refuse an ambiguous duplicate
             # instead of silently taking whichever provenance row appeared first.
@@ -556,14 +585,21 @@ if LATEST_JSON:
                 name = next(iter(names)) if len(names) == 1 else None
                 if name is None:
                     failures.append(f"latest.json[{platform_key}] url {base!r} is not an artifact in this provenance"); ok = False
-                elif name not in verified_names:
-                    failures.append(f"latest.json[{platform_key}] points at {base!r} whose sha256 did not verify"); ok = False
                 else:
-                    disk_sig = sig_content_by_name.get(name)
-                    if disk_sig is None:
-                        failures.append(f"latest.json[{platform_key}] references {base!r} but it has no on-disk .sig to compare"); ok = False
-                    elif sig_field != disk_sig:
-                        failures.append(f"latest.json[{platform_key}] signature does not match {base}.sig (manifest points at different/stale bytes)"); ok = False
+                    if not artifact_matches_platform(platform_key, name):
+                        failures.append(
+                            f"latest.json[{platform_key}] artifact {name!r} is incompatible "
+                            "with this platform key"
+                        )
+                        ok = False
+                    if name not in verified_names:
+                        failures.append(f"latest.json[{platform_key}] points at {base!r} whose sha256 did not verify"); ok = False
+                    else:
+                        disk_sig = sig_content_by_name.get(name)
+                        if disk_sig is None:
+                            failures.append(f"latest.json[{platform_key}] references {base!r} but it has no on-disk .sig to compare"); ok = False
+                        elif sig_field != disk_sig:
+                            failures.append(f"latest.json[{platform_key}] signature does not match {base}.sig (manifest points at different/stale bytes)"); ok = False
                 manifest_report[platform_key] = {"url_basename": base, "ok": ok}
 
 ok = len(failures) == 0

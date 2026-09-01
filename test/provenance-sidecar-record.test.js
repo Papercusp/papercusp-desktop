@@ -732,6 +732,130 @@ test('verify-provenance binds latest.json URLs to the release path and signed ar
   assert.match(JSON.parse(wrongVersion.stdout).failures.join('\n'), /version .* does not match/);
 });
 
+test('verify-provenance binds canonical platform keys to compatible artifact families', () => {
+  const dir = tmp();
+  const releaseBase = 'https://example.invalid/releases';
+  const releaseTag = 'desktop-v0.0.0-alpha';
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const keyId = Buffer.from('0102030405060708', 'hex');
+  const publicDer = publicKey.export({ format: 'der', type: 'spki' });
+  const publicBlock = Buffer.concat([Buffer.from('Ed'), keyId, publicDer.subarray(-32)]);
+
+  const makeArtifact = (name, contents) => {
+    const file = path.join(dir, name);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const bytes = Buffer.from(contents);
+    fs.writeFileSync(file, bytes);
+    const artifactSignature = crypto.sign(null, bytes, privateKey);
+    const signatureBlock = Buffer.concat([Buffer.from('Ed'), keyId, artifactSignature]);
+    const signature = Buffer.from(
+      `untrusted comment: test signature\n${signatureBlock.toString('base64')}\n`,
+    ).toString('base64');
+    fs.writeFileSync(`${file}.sig`, signature);
+    return {
+      name,
+      basename: path.basename(name),
+      bytes: bytes.length,
+      sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+      signature,
+    };
+  };
+
+  const artifacts = {
+    linuxX86: makeArtifact(
+      'Papercusp_GUI_0.0.0_amd64.AppImage',
+      'signed Linux x86_64 fixture',
+    ),
+    linuxArm: makeArtifact(
+      'aarch64/Papercusp_GUI_0.0.0_arm64.AppImage',
+      'signed Linux aarch64 fixture',
+    ),
+    windows: makeArtifact(
+      'Papercusp_GUI_0.0.0_x64-setup.exe',
+      'signed Windows fixture',
+    ),
+    darwin: makeArtifact(
+      'Papercusp_GUI_0.0.0_universal.app.tar.gz',
+      'signed universal Darwin fixture',
+    ),
+  };
+
+  fs.writeFileSync(
+    path.join(dir, 'build-provenance.json'),
+    JSON.stringify({
+      version: '0.0.0',
+      buildSha: 'abc1234',
+      gitHead: 'a'.repeat(40),
+      gitDirty: false,
+      artifacts: Object.values(artifacts).map(({ name, bytes, sha256 }) => ({
+        name,
+        bytes,
+        sha256,
+        sig: true,
+      })),
+    }),
+  );
+
+  const manifestPath = path.join(dir, 'latest.json');
+  const run = (platformKey, artifact) => {
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: '0.0.0',
+        channel: 'alpha',
+        platforms: {
+          [platformKey]: {
+            signature: artifact.signature,
+            url: `${releaseBase}/${releaseTag}/${encodeURIComponent(artifact.basename)}`,
+          },
+        },
+      }),
+    );
+    return spawnSync(
+      'bash',
+      [
+        VERIFIER,
+        dir,
+        '--latest-json',
+        manifestPath,
+        '--pubkey',
+        publicBlock.toString('base64'),
+        '--json',
+      ],
+      { encoding: 'utf8' },
+    );
+  };
+
+  // Every canonical key/family pairing emitted by the producer is accepted.
+  for (const [platformKey, artifact] of [
+    ['linux-x86_64', artifacts.linuxX86],
+    ['linux-aarch64', artifacts.linuxArm],
+    ['windows-x86_64', artifacts.windows],
+    ['darwin-x86_64', artifacts.darwin],
+    ['darwin-aarch64', artifacts.darwin],
+  ]) {
+    const result = run(platformKey, artifact);
+    assert.equal(result.status, 0, `${platformKey} positive control failed: ${result.stderr || result.stdout}`);
+    assert.equal(JSON.parse(result.stdout).manifest[platformKey].ok, true);
+  }
+
+  // A valid signature is not enough when the updater key points at a different
+  // OS/architecture. These controls isolate the key/family binding failure.
+  for (const [platformKey, artifact] of [
+    ['windows-x86_64', artifacts.linuxX86],
+    ['linux-x86_64', artifacts.windows],
+    ['linux-aarch64', artifacts.linuxX86],
+    ['darwin-x86_64', artifacts.windows],
+    ['darwin-aarch64', artifacts.linuxArm],
+  ]) {
+    const result = run(platformKey, artifact);
+    assert.equal(result.status, 1, `${platformKey} cross-family control unexpectedly passed`);
+    const verdict = JSON.parse(result.stdout);
+    assert.match(verdict.failures.join('\n'), /incompatible with this platform key/);
+    assert.equal(verdict.manifest[platformKey].ok, false);
+  }
+});
+
 test('same artifact bytes cannot silently acquire a different baked buildSha', () => {
   const out = tmp();
   const artifact = path.join(out, 'Papercusp_GUI_0.0.18_x64-setup.exe');
