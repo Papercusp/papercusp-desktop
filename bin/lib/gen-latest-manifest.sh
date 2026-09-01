@@ -286,6 +286,24 @@ def build_platforms(artifacts, want_token, reject_token):
             "signature": sig,
             "url": repo_url(bin_path.name),
         }
+
+    def appimage_platform_key(art):
+        """Return exactly one Linux platform key for an AppImage.
+
+        The arm64 release leg normally carries its architecture in the
+        filename (``aarch64``/``arm64``) or in Cargo's target directory. Do
+        not first classify every AppImage as x86_64 and then add an arm key:
+        that publishes one set of ARM bytes under two platform keys, and the
+        last artifact visited can silently overwrite the x86 entry.
+        """
+        name = art.name.lower()
+        if "aarch64" in name or "arm64" in name:
+            return "linux-aarch64"
+        target_parts = {part.lower() for part in art.parts}
+        if target_parts.intersection({"aarch64-unknown-linux-gnu", "aarch64", "arm64"}):
+            return "linux-aarch64"
+        return "linux-x86_64"
+
     for art in artifacts:
         if reject_token in art.name:
             continue
@@ -297,7 +315,9 @@ def build_platforms(artifacts, want_token, reject_token):
             continue
         if art.suffix == ".AppImage":
             sig = art.with_suffix(art.suffix + ".sig")
-            add("linux-x86_64", art, sig)
+            # One artifact produces one architecture entry. In particular,
+            # an aarch64 AppImage must never also acquire the x86_64 key.
+            add(appimage_platform_key(art), art, sig)
         # Windows — NSIS setup.exe is the v1 artifact (plan
         # windows-desktop-release-readiness-2026-06-11 D-003); MSI kept as
         # fallback for an opportunistic WiX build.
@@ -307,9 +327,6 @@ def build_platforms(artifacts, want_token, reject_token):
         elif art.name.endswith(".msi") and "windows-x86_64" not in platforms:
             sig = art.with_suffix(".msi.sig")
             add("windows-x86_64", art, sig)
-        if "aarch64" in str(art) and art.suffix == ".AppImage":
-            sig = art.with_suffix(".AppImage.sig")
-            add("linux-aarch64", art, sig)
         # macOS universal .app.tar.gz serves BOTH darwin arches (D-006)
         if art.name.endswith(".app.tar.gz"):
             sig = pathlib.Path(str(art) + ".sig")

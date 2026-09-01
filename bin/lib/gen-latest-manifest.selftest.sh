@@ -39,7 +39,7 @@ WORK="$(mktemp -d /tmp/genlatest-selftest.XXXXXX)"
 VER="9.9.9"
 cleanup() {
   rm -rf "$WORK"
-  for ch in alpha beta stable; do
+  for ch in alpha beta stable nightly; do
     local tag; tag="$(desktop_release_tag "$VER" "$ch" 2>/dev/null)"
     [[ -n "$tag" ]] || continue
     rm -f "$(gen_latest_manifest_json_path "$tag")" \
@@ -89,6 +89,41 @@ else
 fi
 [[ -f "$GUI_SERVER_JSON" ]] && bad "latest-server.json written despite no Server artifact (should not exist)" \
   || ok "no Server artifact ⇒ latest-server.json NOT written (4)"
+
+# 2b) ARM-only cut: an aarch64 AppImage must produce ONLY the ARM key. The old
+#     producer first inserted this same artifact as linux-x86_64 and then added
+#     linux-aarch64, so both keys pointed at identical ARM bytes.
+ARM_APPIMAGE="$WORK/papercusp-test_${VER}_aarch64.AppImage"
+ARM_SIG="$WORK/papercusp-test_${VER}_aarch64.AppImage.sig"
+: > "$ARM_APPIMAGE"; printf 'arm-signature' > "$ARM_SIG"
+TAG_ARM="$(desktop_release_tag "$VER" nightly)"
+PAPERCUSP_UPDATE_BASE_URL="https://example.com/releases" \
+  gen_latest_manifest "$VER" nightly "$TAG_ARM" "$ARM_APPIMAGE" "$ARM_SIG" >/dev/null 2>&1
+ARM_JSON="$(gen_latest_manifest_json_path "$TAG_ARM")"
+python3 - "$ARM_JSON" <<'PY' && ok "aarch64 AppImage emits only linux-aarch64" || bad "aarch64 AppImage was classified as multiple Linux architectures"
+import json, sys
+m = json.load(open(sys.argv[1]))
+assert sorted(m["platforms"]) == ["linux-aarch64"], m["platforms"]
+p = m["platforms"]["linux-aarch64"]
+assert p["signature"] == "arm-signature", p
+assert p["url"].endswith("papercusp-test_9.9.9_aarch64.AppImage"), p
+PY
+
+# 2c) Mixed x86+ARM cut: each artifact keeps its own key and URL.
+TAG_ARCH_MIX="$(desktop_release_tag "$VER" beta)"
+PAPERCUSP_UPDATE_BASE_URL="https://example.com/releases" \
+  gen_latest_manifest "$VER" beta "$TAG_ARCH_MIX" "$GUI_APPIMAGE" "$GUI_SIG" "$ARM_APPIMAGE" "$ARM_SIG" >/dev/null 2>&1
+ARCH_MIX_JSON="$(gen_latest_manifest_json_path "$TAG_ARCH_MIX")"
+python3 - "$ARCH_MIX_JSON" <<'PY' && ok "mixed x86_64+aarch64 AppImages retain distinct platform entries" || bad "mixed Linux architectures were conflated"
+import json, sys
+m = json.load(open(sys.argv[1]))
+p = m["platforms"]
+assert sorted(p) == ["linux-aarch64", "linux-x86_64"], p
+assert p["linux-x86_64"]["signature"] == "gui-signature", p
+assert p["linux-x86_64"]["url"].endswith("papercusp-test_9.9.9_amd64.AppImage"), p
+assert p["linux-aarch64"]["signature"] == "arm-signature", p
+assert p["linux-aarch64"]["url"].endswith("papercusp-test_9.9.9_aarch64.AppImage"), p
+PY
 
 # 3) mixed cut: GUI Linux AppImage + Server Linux AppImage ⇒ both manifests, no
 #    cross-leak (WI-3696/WI-4404).
