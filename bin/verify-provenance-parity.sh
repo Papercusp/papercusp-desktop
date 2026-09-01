@@ -52,7 +52,7 @@ PROVENANCE_GIT_ROOT="$ROOT" PROVENANCE_PACKED_SRC_FINGERPRINT=testfp PROVENANCE_
 python3 - "$TMP/lin/build-provenance.json" "$TMP/win/build-provenance.json" <<'PY' || fail "schema conformance check failed (see above)"
 import json, sys
 lin = json.load(open(sys.argv[1])); win = json.load(open(sys.argv[2]))
-BASE = {"version":str,"buildSha":str,"reused":bool,"gitHead":str,"gitDirty":bool,"builtAtUtc":str,"artifacts":list}
+BASE = {"version":str,"buildSha":str,"reused":bool,"gitHead":str,"gitDirty":bool,"dirtySource":dict,"builtAtUtc":str,"artifacts":list}
 def check(name, d, extra_expected):
     for k,t in BASE.items():
         if k not in d: raise SystemExit(f"  {name}: missing shared-schema key {k!r}")
@@ -66,6 +66,19 @@ def check(name, d, extra_expected):
             raise SystemExit(f"  {name}: artifact name not a string")
         if not isinstance(a.get("sig"), bool):
             raise SystemExit(f"  {name}: artifact sig not a bool (WI-4243 per-artifact sig recording)")
+        if not isinstance(a.get("mtimeEpochSec"), int) or not isinstance(a.get("mtimeUtc"), str) or not isinstance(a.get("completedAtUtc"), str):
+            raise SystemExit(f"  {name}: artifact lacks its own mtime provenance")
+    dirty = d["dirtySource"]
+    if dirty.get("schemaVersion") != 1 or not isinstance(dirty.get("repositories"), list):
+        raise SystemExit(f"  {name}: malformed content-addressed dirtySource manifest")
+    for repo in dirty["repositories"]:
+        if not isinstance(repo, dict) or not isinstance(repo.get("label"), str) or not isinstance(repo.get("files"), list):
+            raise SystemExit(f"  {name}: malformed dirtySource repository row")
+        for row in repo["files"]:
+            if not isinstance(row, dict) or not isinstance(row.get("status"), str) or not isinstance(row.get("path"), str):
+                raise SystemExit(f"  {name}: malformed dirtySource file row")
+            if row.get("sha256") is not None and (not isinstance(row["sha256"], str) or len(row["sha256"]) != 64):
+                raise SystemExit(f"  {name}: malformed dirtySource file hash")
     got_extra = {k for k in ("packedSrcFingerprint","signed") if k in d}
     if got_extra != extra_expected:
         raise SystemExit(f"  {name}: leg-specific fields {got_extra} != expected {extra_expected}")

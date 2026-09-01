@@ -262,7 +262,12 @@ reap_release_legs() { # kill this cut's own orphaned build-tool descendants, if 
   done
   return 0
 }
-trap reap_release_legs EXIT
+cleanup_release_local() {
+  reap_release_legs
+  [[ -z "${_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST:-}" ]] \
+    || rm -f "$_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST"
+}
+trap cleanup_release_local EXIT
 
 # ── Release host (plan desktop-release-hosting-r2-2026-07-12) ────────────────
 # Where the shipped app looks for updates, and where the artifacts get uploaded.
@@ -421,6 +426,16 @@ if [[ -n "$_short_head" ]] \
 else
   BUILD_SHA="$_short_head"
 fi
+# Capture the exact dirty source set at the SAME phase boundary as gitHead and
+# gitDirty. The primary desktop repository contains the Rust shell; the workspace
+# repository contains the operator source packed into the sidecar. Labels are
+# stable manifest namespaces and prevent checkout paths from leaking.
+_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/papercusp-release-dirty-source.XXXXXX")"
+bash "$ROOT/bin/emit-build-provenance.sh" --capture-dirty-source \
+  "$_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST" \
+  "desktop=$ROOT" "workspace=$ROOT/.." \
+  || { echo "ERROR: could not capture content-addressed source provenance at cut start" >&2; exit 2; }
+export PROVENANCE_SOURCE_DIRTY_MANIFEST="$_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST"
 # Preserve the input state NOW, before the cutter bumps versions or regenerates
 # tracked env-sidecars. Every provenance emitter inherits these values; its own
 # later checkout observation rides separately as git*AtEmit. Without this phase

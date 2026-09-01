@@ -32,6 +32,11 @@
 #     metadata-only recovery from replacing the identity baked into /api/health.
 #   PROVENANCE_REPLACE_VERSION_FROM   — the equivalent compare-and-swap seam for
 #     the baked app version. Same-byte version rewrites are otherwise refused.
+#   PROVENANCE_SOURCE_DIRTY_MANIFEST   — a JSON snapshot written by this script's
+#     `--capture-source GIT_ROOT MANIFEST_OUT` mode at the same cut-start boundary
+#     as PROVENANCE_SOURCE_GIT_HEAD / _DIRTY. It records the porcelain status set
+#     and a sha256 for every dirty working-tree path, so a dirty build can answer
+#     "did it contain these exact source bytes?" without pickaxe/mtime folklore.
 #
 # Usage:
 #   emit-build-provenance.sh OUT_DIR VERSION BUILD_SHA REUSED ARTIFACT...
@@ -109,20 +114,173 @@ provenance_submodule_worktree_dirty() {
 
 capture_provenance_source() {
   local candidate="${1:?git root required}"
-  local git_root
+  local git_root status_output
   git_root="$(git -C "$candidate" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$candidate")"
   CAPTURED_PROVENANCE_GIT_HEAD="$(git -C "$git_root" rev-parse HEAD 2>/dev/null || echo unknown)"
   CAPTURED_PROVENANCE_GIT_DIRTY=true
-  if git -C "$git_root" diff --quiet HEAD 2>/dev/null \
+  if status_output="$(git -C "$git_root" status --porcelain=v1 --untracked-files=all 2>/dev/null)" \
+     && [[ -z "$status_output" ]] \
      && ! provenance_submodule_worktree_dirty "$git_root"; then
     CAPTURED_PROVENANCE_GIT_DIRTY=false
   fi
 }
 
+# Write a content-addressed snapshot of every dirty path in one or more git
+# repositories. Node is already a build prerequisite on every host that runs
+# this emitter; using it here keeps NUL-delimited porcelain parsing, JSON string
+# escaping, symlinks, and filenames with whitespace exact on both GNU/Linux and
+# macOS (whose /bin/bash is still 3.2).
+#
+# Arguments after OUT are LABEL=GIT_ROOT. Labels, never absolute host paths, are
+# written into the shipping manifest so local checkout locations do not leak.
+capture_dirty_source_manifest() {
+  local out="${1:?manifest output required}"
+  shift
+  [[ $# -gt 0 ]] || { echo "dirty-source capture requires at least one LABEL=GIT_ROOT" >&2; return 2; }
+  command -v node >/dev/null 2>&1 || {
+    echo "node is required to capture content-addressed dirty-source provenance" >&2
+    return 2
+  }
+  node - "$out" "$@" <<'NODE'
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+
+const [out, ...specs] = process.argv.slice(2);
+const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
+
+function git(root, args, encoding = 'buffer') {
+  const result = spawnSync('git', ['-C', root, ...args], {
+    encoding,
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  if (result.status !== 0) {
+    const stderr = Buffer.isBuffer(result.stderr)
+      ? result.stderr.toString('utf8')
+      : String(result.stderr || '');
+    throw new Error(`git ${args.join(' ')} failed in ${root}: ${stderr.trim()}`);
+  }
+  return result.stdout;
+}
+
+function snapshotRepository(label, candidate, seen = new Set()) {
+  const root = fs.realpathSync(candidate);
+  if (seen.has(root)) throw new Error(`recursive repository provenance at ${root}`);
+  const nextSeen = new Set(seen).add(root);
+  const head = String(git(root, ['rev-parse', 'HEAD'], 'utf8')).trim() || 'unknown';
+  const raw = git(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
+  const fields = raw.toString('utf8').split('\0');
+  if (fields.at(-1) === '') fields.pop();
+  const files = [];
+
+  for (let i = 0; i < fields.length; i += 1) {
+    const record = fields[i];
+    if (record.length < 4 || record[2] !== ' ') {
+      throw new Error(`malformed porcelain-v1 record in ${label}: ${JSON.stringify(record)}`);
+    }
+    const status = record.slice(0, 2);
+    const relativePath = record.slice(3);
+    let oldPath;
+    // In porcelain v1 -z mode, rename/copy destinations precede their source
+    // path and the two names are separated by NUL rather than " -> ".
+    if (/[RC]/.test(status)) {
+      i += 1;
+      if (i >= fields.length) throw new Error(`rename/copy record lacks old path: ${relativePath}`);
+      oldPath = fields[i];
+    }
+
+    const absolutePath = path.resolve(root, relativePath);
+    const relativeCheck = path.relative(root, absolutePath);
+    if (relativeCheck.startsWith('..') || path.isAbsolute(relativeCheck)) {
+      throw new Error(`dirty path escapes repository: ${relativePath}`);
+    }
+
+    const row = {
+      status,
+      path: relativePath,
+      sha256: null,
+      kind: 'missing',
+      mtimeEpochSec: null,
+      mtimeUtc: null,
+    };
+    if (oldPath !== undefined) row.oldPath = oldPath;
+    try {
+      const stat = fs.lstatSync(absolutePath);
+      row.mtimeEpochSec = Math.floor(stat.mtimeMs / 1000);
+      row.mtimeUtc = new Date(row.mtimeEpochSec * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+      if (stat.isSymbolicLink()) {
+        row.kind = 'symlink';
+        row.sha256 = sha256(Buffer.from(fs.readlinkSync(absolutePath)));
+      } else if (stat.isFile()) {
+        row.kind = 'file';
+        row.sha256 = sha256(fs.readFileSync(absolutePath));
+      } else if (stat.isDirectory()) {
+        // A dirty submodule is one porcelain row. Hash its own content-addressed
+        // snapshot rather than merely its HEAD, which would miss worktree edits.
+        try {
+          const nested = snapshotRepository('nested', absolutePath, nextSeen);
+          row.kind = 'git-repository';
+          row.sha256 = sha256(Buffer.from(JSON.stringify({
+            gitHead: nested.gitHead,
+            files: nested.files,
+          })));
+        } catch {
+          row.kind = 'directory';
+        }
+      } else {
+        row.kind = 'other';
+      }
+    } catch (error) {
+      if (error && error.code !== 'ENOENT') throw error;
+    }
+    files.push(row);
+  }
+
+  files.sort((a, b) => a.path.localeCompare(b.path) || a.status.localeCompare(b.status));
+  return { label, gitHead: head, files };
+}
+
+const repositories = specs.map((spec) => {
+  const split = spec.indexOf('=');
+  if (split <= 0 || split === spec.length - 1) {
+    throw new Error(`repository spec must be LABEL=GIT_ROOT, got ${spec}`);
+  }
+  const label = spec.slice(0, split);
+  const root = spec.slice(split + 1);
+  if (!/^[A-Za-z0-9._-]+$/.test(label)) throw new Error(`unsafe repository label: ${label}`);
+  return snapshotRepository(label, root);
+});
+
+const manifest = {
+  schemaVersion: 1,
+  capturedAtUtc: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+  status: 'captured',
+  repositories,
+};
+const temporary = `${out}.tmp.${process.pid}`;
+fs.writeFileSync(temporary, `${JSON.stringify(manifest)}\n`, { mode: 0o600 });
+fs.renameSync(temporary, out);
+NODE
+}
+
 if [[ "${1:-}" == "--capture-source" ]]; then
-  [[ $# -eq 2 ]] || { echo "usage: $0 --capture-source GIT_ROOT" >&2; exit 2; }
+  [[ $# -eq 2 || $# -eq 3 ]] \
+    || { echo "usage: $0 --capture-source GIT_ROOT [DIRTY_MANIFEST_OUT]" >&2; exit 2; }
   capture_provenance_source "$2"
+  if [[ $# -eq 3 ]]; then
+    capture_dirty_source_manifest "$3" "primary=$2"
+  fi
   printf '%s\n%s\n' "$CAPTURED_PROVENANCE_GIT_HEAD" "$CAPTURED_PROVENANCE_GIT_DIRTY"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--capture-dirty-source" ]]; then
+  [[ $# -ge 3 ]] \
+    || { echo "usage: $0 --capture-dirty-source OUT LABEL=GIT_ROOT..." >&2; exit 2; }
+  _dirty_out="$2"
+  shift 2
+  capture_dirty_source_manifest "$_dirty_out" "$@"
   exit 0
 fi
 
@@ -154,6 +312,18 @@ GIT_DIRTY="${PROVENANCE_SOURCE_GIT_DIRTY:-$GIT_DIRTY_AT_EMIT}"
 
 # Portable file size: GNU stat (-c, the Linux dev box) then BSD stat (-f).
 _bytes() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; }
+
+# The artifact's own filesystem time is the relevant clock for containment.
+# `builtAtUtc` below is the MANIFEST/run finish and can be later than an artifact
+# whose compilation finished earlier. Keep the source epoch too, so consumers do
+# not have to parse an ISO timestamp when making an exact comparison.
+_mtime_epoch() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
+_mtime_utc() {
+  local epoch
+  epoch="$(_mtime_epoch "$1")"
+  date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ
+}
 
 # WI-37746 (closes the WI-37738 stranding class): the release host BAKED INTO
 # THESE BINARIES, recorded as a SHA-256 FINGERPRINT — never the URL itself.
@@ -290,7 +460,9 @@ _existing_artifacts_match() {
 }
 
 _identity_only_repair=0
+_existing_artifacts_same=0
 if _existing_artifacts_match "$@"; then
+  _existing_artifacts_same=1
   _existing_version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PROV" | head -1)"
   _existing_build_sha="$(sed -n 's/.*"buildSha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PROV" | head -1)"
   [[ -n "$_existing_version" && -n "$_existing_build_sha" ]] || {
@@ -315,6 +487,53 @@ if _existing_artifacts_match "$@"; then
     _identity_only_repair=1
   fi
 fi
+
+# Resolve the content-addressed source snapshot only after the identity-repair
+# early return above: a metadata CAS repair must preserve the original record
+# byte-for-byte except for its explicitly authorized identity field.
+_dirty_source_tmp=""
+_dirty_source_manifest="${PROVENANCE_SOURCE_DIRTY_MANIFEST:-}"
+if [[ "$REUSED" == "true" && "$_existing_artifacts_same" == "1" ]]; then
+  # Reused bytes belong to the prior build, never today's checkout. Preserve the
+  # prior manifest when one exists; otherwise say unavailable rather than stamp
+  # current-source hashes onto bytes they did not produce.
+  _dirty_source_tmp="$(mktemp "${TMPDIR:-/tmp}/papercusp-dirty-source-reuse.XXXXXX")"
+  if node - "$PROV" "$_dirty_source_tmp" <<'NODE'
+const fs = require('node:fs');
+const [input, output] = process.argv.slice(2);
+const value = JSON.parse(fs.readFileSync(input, 'utf8')).dirtySource;
+if (!value || typeof value !== 'object' || Array.isArray(value)) process.exit(3);
+fs.writeFileSync(output, `${JSON.stringify(value)}\n`);
+NODE
+  then
+    _dirty_source_manifest="$_dirty_source_tmp"
+  else
+    printf '%s\n' '{"schemaVersion":1,"capturedAtUtc":null,"status":"unavailable","reason":"reused-provenance-had-no-dirty-source","repositories":[]}' >"$_dirty_source_tmp"
+    _dirty_source_manifest="$_dirty_source_tmp"
+  fi
+elif [[ -z "$_dirty_source_manifest" && -z "${PROVENANCE_SOURCE_GIT_HEAD+x}" ]]; then
+  # A direct emitter call has no earlier phase boundary. Capture honestly at
+  # emit time and label that clock; canonical producers pass a cut-start file.
+  _dirty_source_tmp="$(mktemp "${TMPDIR:-/tmp}/papercusp-dirty-source-emit.XXXXXX")"
+  capture_dirty_source_manifest "$_dirty_source_tmp" "primary=$GIT_ROOT"
+  _dirty_source_manifest="$_dirty_source_tmp"
+elif [[ -z "$_dirty_source_manifest" ]]; then
+  _dirty_source_tmp="$(mktemp "${TMPDIR:-/tmp}/papercusp-dirty-source-unavailable.XXXXXX")"
+  printf '%s\n' '{"schemaVersion":1,"capturedAtUtc":null,"status":"unavailable","reason":"build-start-manifest-not-supplied","repositories":[]}' >"$_dirty_source_tmp"
+  _dirty_source_manifest="$_dirty_source_tmp"
+fi
+
+[[ -r "$_dirty_source_manifest" ]] \
+  || { echo "ERROR: dirty-source manifest is unreadable: $_dirty_source_manifest" >&2; exit 2; }
+DIRTY_SOURCE_JSON="$(node - "$_dirty_source_manifest" <<'NODE'
+const fs = require('node:fs');
+const value = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+if (!value || typeof value !== 'object' || Array.isArray(value)) {
+  throw new Error('dirty-source manifest must be a JSON object');
+}
+process.stdout.write(JSON.stringify(value));
+NODE
+)" || { echo "ERROR: invalid dirty-source manifest: $_dirty_source_manifest" >&2; exit 2; }
 
 # A compare-and-swap repair is intentionally NOT a re-emit. The existing record
 # describes when/where the bytes were built; recomputing gitHeadAtEmit,
@@ -361,6 +580,7 @@ fi
   printf '  "reused": %s,\n'      "$REUSED"
   printf '  "gitHead": "%s",\n'   "$GIT_HEAD"
   printf '  "gitDirty": %s,\n'    "$GIT_DIRTY"
+  printf '  "dirtySource": %s,\n' "$DIRTY_SOURCE_JSON"
   printf '  "gitHeadAtEmit": "%s",\n' "$GIT_HEAD_AT_EMIT"
   printf '  "gitDirtyAtEmit": %s,\n' "$GIT_DIRTY_AT_EMIT"
   # Optional leg-specific fields (P-002 consolidation) — emitted only when the
@@ -395,11 +615,12 @@ fi
   for f in "$@"; do
     [[ -e "$f" ]] || continue
     (( _first )) || printf ',\n'; _first=0
-    printf '    { "name": "%s", "bytes": %s, "sha256": "%s", "sig": %s }' \
+    printf '    { "name": "%s", "bytes": %s, "sha256": "%s", "sig": %s, "mtimeEpochSec": %s, "mtimeUtc": "%s", "completedAtUtc": "%s" }' \
       "$(_name "$f")" "$(_bytes "$f")" "$(sha256sum "$f" | cut -d' ' -f1)" \
-      "$([[ -f "$f.sig" ]] && echo true || echo false)"
+      "$([[ -f "$f.sig" ]] && echo true || echo false)" "$(_mtime_epoch "$f")" "$(_mtime_utc "$f")" "$(_mtime_utc "$f")"
   done
   printf '\n  ]\n}\n'
 } > "$PROV"
+[[ -z "$_dirty_source_tmp" ]] || rm -f "$_dirty_source_tmp"
 echo "==> build provenance written: $PROV"
 cat "$PROV"
