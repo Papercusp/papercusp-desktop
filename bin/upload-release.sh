@@ -638,37 +638,63 @@ fi
 echo "  ✓ all artifacts published and verified against local bytes"
 
 echo
-echo "==> verifying the public read path (${BASE%/*}/<secret>/latest.json)"
-TMP_MANIFEST="$(mktemp)"
-trap 'rm -f "$TMP_MANIFEST"' EXIT
-# NOTE: on a connection-level failure (DNS, TLS, timeout) curl writes "000" via
-# -w AND exits non-zero. Do NOT add a `|| echo "000"` fallback here: that
-# CONCATENATES a second "000" onto curl's, yielding "000000", which then matches
-# neither the unreachable branch nor 200 — and an unbound domain gets reported as
-# a hard failure, i.e. exactly the confusion this two-way split exists to remove.
-HTTP_CODE="$(curl -sS -o "$TMP_MANIFEST" -w '%{http_code}' --max-time 30 "${BASE}/latest.json" 2>/dev/null)" || true
+echo "==> verifying every public manifest feed (${BASE%/*}/<secret>/<feed>)"
+PUBLIC_MANIFEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-public-manifests.XXXXXX")"
+trap 'rm -rf "$PUBLIC_MANIFEST_DIR"' EXIT
 
-if [[ -z "$HTTP_CODE" || "$HTTP_CODE" == "000" ]]; then
-  # Could not connect at all — almost always the custom domain is not bound yet
-  # (the hostname does not resolve). The upload itself is fine and verified above.
-  HOSTNAME_ONLY="$(printf '%s' "$BASE" | sed -E 's#^https?://([^/]+).*#\1#')"
-  echo "  ⚠ ${HOSTNAME_ONLY} is not reachable — the artifacts ARE uploaded and intact," >&2
-  echo "    but the R2 bucket is not yet published at this hostname, so installed apps" >&2
-  echo "    cannot download them. One-time setup, in Cloudflare:" >&2
-  echo "      R2 → ${R2_BUCKET} → Settings → Custom Domains → Connect Domain → ${HOSTNAME_ONLY}" >&2
-  echo "    Re-run this script afterwards to complete the verification." >&2
-  exit 2
-fi
+# Fetch one manifest path and prove BOTH identity dimensions:
+#   (1) the served bytes equal the local manifest uploaded to this path; and
+#   (2) the served document names the VERSION+CHANNEL this invocation intends.
+# Byte equality alone is self-referential: a stale local manifest and its stale
+# uploaded copy agree perfectly while the release never advances.
+verify_public_manifest_identity() {
+  local local_manifest="$1" manifest_path="$2" tmp_manifest="$3" label="$4"
+  local http_code hostname_only identity served_version served_channel
 
-if [[ "$HTTP_CODE" != "200" ]]; then
-  echo "  ✗ GET latest.json returned HTTP $HTTP_CODE" >&2
-  exit 1
-fi
-if ! diff -q "$LATEST_JSON" "$TMP_MANIFEST" >/dev/null; then
-  echo "  ✗ served latest.json does NOT match what we uploaded" >&2
-  exit 1
-fi
-echo "  ✓ latest.json served and byte-identical"
+  # NOTE: on a connection-level failure curl writes "000" via -w AND exits
+  # non-zero. Do not append another fallback "000" or it becomes "000000".
+  http_code="$(curl -sS -o "$tmp_manifest" -w '%{http_code}' --max-time 30 \
+    "${BASE}/${manifest_path}" 2>/dev/null)" || true
+  if [[ -z "$http_code" || "$http_code" == "000" ]]; then
+    hostname_only="$(printf '%s' "$BASE" | sed -E 's#^https?://([^/]+).*#\1#')"
+    echo "  ⚠ ${hostname_only} is not reachable — the artifacts ARE uploaded and intact," >&2
+    echo "    but the R2 bucket is not yet published at this hostname, so installed apps" >&2
+    echo "    cannot download them. One-time setup, in Cloudflare:" >&2
+    echo "      R2 → ${R2_BUCKET} → Settings → Custom Domains → Connect Domain → ${hostname_only}" >&2
+    echo "    Re-run this script afterwards to complete the verification." >&2
+    return 2
+  fi
+  if [[ "$http_code" != "200" ]]; then
+    echo "  ✗ GET ${manifest_path} returned HTTP $http_code" >&2
+    return 1
+  fi
+  if ! diff -q "$local_manifest" "$tmp_manifest" >/dev/null; then
+    echo "  ✗ served ${manifest_path} does NOT match uploaded ${label}" >&2
+    return 1
+  fi
+  if ! identity="$(python3 - "$tmp_manifest" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    manifest = json.load(source)
+if not isinstance(manifest, dict):
+    raise SystemExit("served manifest is not a JSON object")
+version = manifest.get("version")
+channel = manifest.get("channel")
+if not isinstance(version, str) or not isinstance(channel, str):
+    raise SystemExit("served manifest lacks string version/channel identity")
+print(f"{version}\t{channel}")
+PY
+  )"; then
+    echo "  ✗ served ${manifest_path} has malformed release identity" >&2
+    return 1
+  fi
+  IFS=$'\t' read -r served_version served_channel <<< "$identity"
+  if [[ "$served_version" != "$VERSION" || "$served_channel" != "$CHANNEL" ]]; then
+    echo "  ✗ served ${manifest_path} identifies ${served_version:-<missing>}/${served_channel:-<missing>}, expected ${VERSION}/${CHANNEL}" >&2
+    return 1
+  fi
+  echo "  ✓ ${manifest_path}: byte-identical ${label}, identity ${VERSION}/${CHANNEL}"
+}
 
 # Spot-check that each artifact URL the manifest ADVERTISES is actually fetchable
 # (no full download — these are gigabytes). Verifying the bucket is not enough:
@@ -686,7 +712,8 @@ echo "  ✓ latest.json served and byte-identical"
 # permission/missing-object problem worth failing on. A short retry still guards
 # a genuinely transient 429/5xx, but we do NOT retry a 403 (with a good UA it is
 # real). Probe via range-GET — exactly what tauri-plugin-updater does.
-python3 - "$TMP_MANIFEST" <<'PY'
+probe_public_manifest_artifacts() {
+python3 - "$1" <<'PY'
 import json, sys, time, urllib.request, urllib.error
 m = json.load(open(sys.argv[1]))
 # A real-client UA — r2.dev 403s the default Python-urllib bot UA (see comment).
@@ -729,6 +756,31 @@ for key, entry in (m.get("platforms") or {}).items():
 if bad:
     sys.exit(f"\n{bad} advertised artifact url(s) are NOT fetchable — the manifest lies. Fix before shipping.")
 PY
+}
+
+# Verify exactly the paths the existing channel registry told upload_manifest()
+# to write. This includes <channel>/latest.json for every channel, the permanent
+# root for update lanes, and deliberately NO root for side-by-side nightly.
+verify_public_manifest_feeds() {
+  local local_manifest="$1" manifest_name="$2" label="$3"
+  local manifest_path tmp_manifest count=0
+  while IFS= read -r manifest_path; do
+    [[ -n "$manifest_path" ]] || continue
+    tmp_manifest="$PUBLIC_MANIFEST_DIR/feed-${count}.json"
+    verify_public_manifest_identity "$local_manifest" "$manifest_path" "$tmp_manifest" "$label" || return
+    probe_public_manifest_artifacts "$tmp_manifest" || return
+    count=$((count + 1))
+  done < <(desktop_channel_feed_paths "$CHANNEL" "$manifest_name")
+  if [[ "$count" -eq 0 ]]; then
+    echo "  ✗ channel registry emitted no public path for ${label}" >&2
+    return 1
+  fi
+}
+
+verify_public_manifest_feeds "$LATEST_JSON" "latest.json" "latest.json"
+if [[ -f "$LATEST_SERVER_JSON" ]]; then
+  verify_public_manifest_feeds "$LATEST_SERVER_JSON" "latest-server.json" "latest-server.json"
+fi
 
 # Only after the independent public manifest + artifact probes pass may the
 # registry call this release LIVE. The finalizer re-reads the row and repeats
