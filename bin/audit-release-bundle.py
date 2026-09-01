@@ -705,7 +705,15 @@ def identity_literals():
     if home and home not in ("/root", "/", "/home"):
         lits["build-home-path"] = home
     host = socket.gethostname()
-    if host and not host.startswith(("runner", "ci-", "localhost")):
+    # The seed cut re-execs under `bwrap --unshare-uts --hostname <neutral>` and runs this
+    # probe INSIDE that child (cut-seed-cli.ts releaseSeedRedactionValues), so gethostname()
+    # returns the neutral label there — the deliberate, shipped value every SST carries in
+    # rocksdb.creating.host.identity. Reporting it as build-hostname fed it to the seed
+    # projection AND the staged-seed guard, which red-ed cut #4 (2026-09-01) on its own fix.
+    # The real build hostname reaches the child via PAPERCUSP_SEED_REAL_HOSTNAME and is
+    # merged back by the caller; the neutral label is never identity.
+    neutral_host = os.environ.get("PAPERCUSP_SEED_BUILD_HOSTNAME") or "papercusp-build"
+    if host and host != neutral_host and not host.startswith(("runner", "ci-", "localhost")):
         lits["build-hostname"] = host
     for key, cfg in (("build-git-email", "user.email"), ("build-git-name", "user.name")):
         try:
