@@ -112,6 +112,7 @@ PUBKEY="$PUBKEY" NODE_HELPER="$NODE_HELPER" \
 REQUIRE_SIGNED="$REQUIRE_SIGNED" ALLOW_DIRTY="$ALLOW_DIRTY" JSON="$JSON" \
 python3 <<'PY'
 import os, sys, json, hashlib, subprocess, pathlib
+from urllib.parse import unquote, urlsplit
 
 DIR = pathlib.Path(os.environ["DIR"])
 PROV = pathlib.Path(os.environ["PROV"])
@@ -131,6 +132,10 @@ try:
     prov = json.loads(PROV.read_text())
 except Exception as e:
     print(f"build-provenance.json is not valid JSON: {e}", file=sys.stderr)
+    sys.exit(2)
+
+if not isinstance(prov, dict):
+    print("build-provenance.json must contain a JSON object", file=sys.stderr)
     sys.exit(2)
 
 version = prov.get("version")
@@ -203,7 +208,10 @@ def verify_sig(artifact: pathlib.Path, sig: pathlib.Path) -> bool:
 
 artifacts_report = []
 prov_artifacts = prov.get("artifacts") or []
-if not prov_artifacts:
+if not isinstance(prov_artifacts, list):
+    failures.append("build-provenance.json artifacts must be an array of object rows")
+    prov_artifacts = []
+elif not prov_artifacts:
     failures.append("build-provenance.json lists no artifacts — nothing to verify")
 
 verified_names = set()          # names whose sha256 matched (D-004b anchors on these)
@@ -247,6 +255,7 @@ def safe_artifact_path(name):
         return None
     return candidate
 
+artifact_names = set()
 for a in prov_artifacts:
     if not isinstance(a, dict):
         failures.append("provenance artifacts must contain only object rows")
@@ -254,20 +263,58 @@ for a in prov_artifacts:
         continue
     name = a.get("name")
     recorded = a.get("sha256")
+    recorded_bytes = a.get("bytes")
+    recorded_sig = a.get("sig")
     path = safe_artifact_path(name)
     if path is None:
         artifacts_report.append({"name": name, "present": False, "sha256Ok": None, "sigOk": None})
         continue
-    entry = {"name": name, "present": path.is_file(), "sha256Ok": None, "sigOk": None}
+    if name in artifact_names:
+        failures.append(f"provenance contains duplicate artifact row {name!r}")
+    artifact_names.add(name)
+    row_schema_ok = True
+    if type(recorded_bytes) is not int or recorded_bytes < 0:
+        failures.append(
+            f"artifact {name!r} bytes must be a non-negative integer; got {recorded_bytes!r}"
+        )
+        row_schema_ok = False
+    sha_schema_ok = (
+        isinstance(recorded, str)
+        and len(recorded) == 64
+        and all(c in "0123456789abcdefABCDEF" for c in recorded)
+    )
+    if not sha_schema_ok:
+        failures.append(
+            f"artifact {name!r} sha256 must be a 64-character hex string; got {recorded!r}"
+        )
+        row_schema_ok = False
+    if type(recorded_sig) is not bool:
+        failures.append(
+            f"artifact {name!r} sig must be a JSON boolean; got {recorded_sig!r}"
+        )
+        row_schema_ok = False
+    entry = {
+        "name": name,
+        "present": path.is_file(),
+        "bytesOk": None,
+        "sha256Ok": None,
+        "sigOk": None,
+    }
     if not path.is_file():
         failures.append(f"artifact {name!r} recorded in provenance is missing from {DIR}")
         artifacts_report.append(entry)
         continue
+    actual_bytes = path.stat().st_size
+    entry["bytesOk"] = isinstance(recorded_bytes, int) and actual_bytes == recorded_bytes
+    if not entry["bytesOk"]:
+        failures.append(
+            f"artifact {name!r} bytes {actual_bytes} != recorded {recorded_bytes} (LABELED!=PACKED)"
+        )
     actual = sha256_file(path)
-    entry["sha256Ok"] = (actual == recorded)
-    if actual != recorded:
+    entry["sha256Ok"] = sha_schema_ok and actual.lower() == recorded.lower()
+    if not entry["sha256Ok"]:
         failures.append(f"artifact {name!r} sha256 {actual} != recorded {recorded} (LABELED!=PACKED)")
-    else:
+    elif row_schema_ok and entry["bytesOk"]:
         verified_names.add(name)
     # 4a. signature
     sig = pathlib.Path(str(path) + ".sig")
@@ -302,6 +349,33 @@ if LATEST_JSON:
             manifest = None
         if manifest is not None:
             manifest_report = {}
+            if not isinstance(manifest, dict):
+                failures.append("latest.json must be a JSON object")
+                manifest = {}
+
+            # A signed filename identifies bytes, but the updater consumes the
+            # whole URL. Bind the URL's release-tag segment to the manifest's
+            # version/channel before accepting a row; otherwise a byte-identical
+            # artifact can be certified under a stale release path. The download
+            # host/base is intentionally not checked here: release-host.sh keeps
+            # the baked poll host and movable artifact CDN as separate knobs.
+            manifest_version = manifest.get("version")
+            manifest_channel = manifest.get("channel")
+            expected_release_tag = None
+            if manifest_version != version:
+                failures.append(
+                    f"latest.json version {manifest_version!r} does not match "
+                    f"build-provenance version {version!r}"
+                )
+            if manifest_channel not in ("alpha", "beta", "stable", "nightly"):
+                failures.append(
+                    "latest.json channel must be alpha|beta|stable|nightly; "
+                    f"got {manifest_channel!r}"
+                )
+            elif isinstance(version, str) and version.strip():
+                suffix = "" if manifest_channel == "stable" else f"-{manifest_channel}"
+                expected_release_tag = f"desktop-v{version}{suffix}"
+
             platforms = manifest.get("platforms")
             if not isinstance(platforms, dict) or not platforms:
                 # An empty (or malformed) platform map is not a harmless
@@ -314,18 +388,120 @@ if LATEST_JSON:
                 )
                 platforms = {}
             # WI-4243: provenance names may carry a subdir (e.g. "deb/App.deb");
-            # a manifest url only carries the basename — match on basenames.
-            prov_name_by_base = {}
+            # a manifest URL carries the basename. Refuse an ambiguous duplicate
+            # instead of silently taking whichever provenance row appeared first.
+            prov_names_by_base = {}
             for a in prov_artifacts:
                 n = a.get("name") if isinstance(a, dict) else None
                 if isinstance(n, str) and n:
-                    prov_name_by_base.setdefault(n.rsplit("/", 1)[-1], n)
+                    prov_names_by_base.setdefault(n.rsplit("/", 1)[-1], set()).add(n)
+            for base_name, names in prov_names_by_base.items():
+                if len(names) > 1:
+                    failures.append(
+                        f"provenance artifact basename {base_name!r} is ambiguous across "
+                        f"{len(names)} rows; latest.json cannot bind it to one artifact"
+                    )
+
             for platform_key, meta in platforms.items():
-                url = (meta or {}).get("url", "")
-                sig_field = ((meta or {}).get("signature", "") or "").strip()
-                base = url.rsplit("/", 1)[-1] if url else ""
-                name = prov_name_by_base.get(base)
                 ok = True
+                base = ""
+                if not isinstance(meta, dict):
+                    failures.append(
+                        f"latest.json[{platform_key}] must be an object with url + signature"
+                    )
+                    manifest_report[platform_key] = {"url_basename": base, "ok": False}
+                    continue
+
+                url = meta.get("url")
+                signature = meta.get("signature")
+                sig_field = signature.strip() if isinstance(signature, str) else ""
+                if not isinstance(signature, str) or not signature.strip():
+                    failures.append(
+                        f"latest.json[{platform_key}] signature must be a non-empty string"
+                    )
+                    ok = False
+
+                observed_tag = None
+                if not isinstance(url, str) or not url or url != url.strip():
+                    failures.append(
+                        f"latest.json[{platform_key}] url must be a non-empty trimmed string"
+                    )
+                    ok = False
+                else:
+                    try:
+                        parts = urlsplit(url)
+                        # Accessing hostname/port performs additional authority
+                        # validation (e.g. malformed IPv6 or nonnumeric ports).
+                        hostname = parts.hostname
+                        _ = parts.port
+                    except (TypeError, ValueError, UnicodeError) as e:
+                        failures.append(
+                            f"latest.json[{platform_key}] url is malformed: {e}"
+                        )
+                        parts = None
+                        hostname = None
+                        ok = False
+
+                    if parts is not None:
+                        if (
+                            parts.scheme.lower() not in ("http", "https")
+                            or not hostname
+                            or parts.username is not None
+                            or parts.password is not None
+                            or parts.query
+                            or parts.fragment
+                            or not parts.path.startswith("/")
+                        ):
+                            failures.append(
+                                f"latest.json[{platform_key}] url must be an absolute HTTP(S) "
+                                "artifact URL without credentials, query, or fragment"
+                            )
+                            ok = False
+
+                        raw_segments = parts.path[1:].split("/") if parts.path.startswith("/") else []
+                        if len(raw_segments) < 2 or any(segment == "" for segment in raw_segments):
+                            failures.append(
+                                f"latest.json[{platform_key}] url path must end in "
+                                "<release-tag>/<artifact-name> without empty segments"
+                            )
+                            ok = False
+                        else:
+                            try:
+                                decoded_segments = [
+                                    unquote(segment, errors="strict") for segment in raw_segments
+                                ]
+                            except (UnicodeError, ValueError) as e:
+                                failures.append(
+                                    f"latest.json[{platform_key}] url path encoding is malformed: {e}"
+                                )
+                                decoded_segments = []
+                                ok = False
+
+                            if decoded_segments:
+                                observed_tag = decoded_segments[-2]
+                                base = decoded_segments[-1]
+                                if (
+                                    not base
+                                    or "/" in base
+                                    or "\\" in base
+                                    or base in (".", "..")
+                                ):
+                                    failures.append(
+                                        f"latest.json[{platform_key}] url artifact name is not a safe basename"
+                                    )
+                                    ok = False
+                                if (
+                                    expected_release_tag is not None
+                                    and observed_tag != expected_release_tag
+                                ):
+                                    failures.append(
+                                        f"latest.json[{platform_key}] release tag {observed_tag!r} "
+                                        f"does not match expected {expected_release_tag!r}"
+                                    )
+                                    ok = False
+
+                names = prov_names_by_base.get(base, set())
+                name = next(iter(names)) if len(names) == 1 else None
                 if name is None:
                     failures.append(f"latest.json[{platform_key}] url {base!r} is not an artifact in this provenance"); ok = False
                 elif name not in verified_names:
