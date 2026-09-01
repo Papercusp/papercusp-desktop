@@ -387,6 +387,21 @@ if LATEST_JSON:
                     "an empty or malformed map makes updater clients falsely read up to date"
                 )
                 platforms = {}
+            # The updater resolves a deliberately closed set of platform keys.
+            # A manifest may contain a SUBSET while a multi-platform cut is
+            # still being assembled, but an arbitrary key is not a harmless
+            # extension: clients skip it and can report themselves up to date
+            # while the verifier has certified a release with no usable target.
+            # Keep this list in lockstep with gen-latest-manifest.sh and the
+            # updater's platform resolver; reject aliases such as linux-x64.
+            canonical_platform_keys = (
+                "linux-x86_64",
+                "linux-aarch64",
+                "windows-x86_64",
+                "darwin-x86_64",
+                "darwin-aarch64",
+            )
+            canonical_platform_key_set = set(canonical_platform_keys)
             # WI-4243: provenance names may carry a subdir (e.g. "deb/App.deb");
             # a manifest URL carries the basename. Refuse an ambiguous duplicate
             # instead of silently taking whichever provenance row appeared first.
@@ -398,6 +413,16 @@ if LATEST_JSON:
             for platform_key, meta in platforms.items():
                 ok = True
                 base = ""
+                if platform_key not in canonical_platform_key_set:
+                    failures.append(
+                        f"latest.json[{platform_key}] uses unsupported platform key; "
+                        f"expected one of {', '.join(canonical_platform_keys)}"
+                    )
+                    manifest_report[platform_key] = {
+                        "url_basename": base,
+                        "ok": False,
+                    }
+                    continue
                 if not isinstance(meta, dict):
                     failures.append(
                         f"latest.json[{platform_key}] must be an object with url + signature"

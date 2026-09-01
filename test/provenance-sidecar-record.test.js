@@ -656,6 +656,34 @@ test('verify-provenance binds latest.json URLs to the release path and signed ar
   );
   assert.equal(movableCdn.status, 0, movableCdn.stderr || movableCdn.stdout);
 
+  // The updater only resolves the canonical platform vocabulary. A byte- and
+  // signature-identical artifact under an alias must fail closed instead of
+  // certifying a manifest that every client silently ignores.
+  for (const unsupportedKey of ['linux-x64', 'linux']) {
+    const unsupported = run({
+      ...manifestFor(canonicalUrl),
+      platforms: {
+        [unsupportedKey]: {
+          url: canonicalUrl,
+          signature: artifactSignature,
+        },
+      },
+    });
+    assert.equal(
+      unsupported.status,
+      1,
+      `${unsupportedKey} manifest key unexpectedly passed: ${unsupported.stderr || unsupported.stdout}`,
+    );
+    assert.match(
+      JSON.parse(unsupported.stdout).failures.join('\n'),
+      /uses unsupported platform key/,
+    );
+    assert.equal(
+      JSON.parse(unsupported.stdout).manifest[unsupportedKey].ok,
+      false,
+    );
+  }
+
   // The old basename-only check returned PASS here. The bytes and signature are
   // unchanged, so only the stale release path can explain the rejection.
   const staleTag = run(
