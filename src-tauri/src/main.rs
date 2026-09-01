@@ -62,6 +62,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
+use tauri_specta::Event as _;
 
 /// Minimal RFC 3986 percent-encoding for the path component. Only the
 /// reserved + unsafe set; we avoid pulling in a full url crate dep just
@@ -4338,8 +4339,16 @@ fn point_window_at_operator<R: tauri::Runtime>(
 /// never floods the webview. `reason` distinguishes which supervisor gave up,
 /// since the two watchers cover different roles (GUI-side Server-bundle
 /// respawn vs. the Server's own in-process serve.mjs child respawn).
-#[derive(Debug, serde::Serialize, Clone)]
-struct OperatorDeadPayload {
+#[derive(
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    Clone,
+    specta::Type,
+    tauri_specta::Event,
+)]
+#[tauri_specta(event_name = "operator-dead")]
+pub struct OperatorDeadPayload {
     reason: String,
     respawns: usize,
     window_secs: u64,
@@ -4372,14 +4381,12 @@ fn notify_operator_dead(
     respawns: usize,
     window_secs: u64,
 ) {
-    let _ = app_handle.emit(
-        "operator-dead",
-        OperatorDeadPayload {
-            reason: reason.to_string(),
-            respawns,
-            window_secs,
-        },
-    );
+    let _ = OperatorDeadPayload {
+        reason: reason.to_string(),
+        respawns,
+        window_secs,
+    }
+    .emit(app_handle);
     use tauri_plugin_notification::NotificationExt;
     if let Err(e) = app_handle
         .notification()
@@ -8787,8 +8794,8 @@ pub fn run() {
     // and emits a typed `bindings.ts` for the frontend on each debug
     // build. The frontend imports typed wrappers from `@/bindings`
     // instead of stringly-typed `invoke('cmd', ...)`.
-    let specta_builder =
-        tauri_specta::Builder::<tauri::Wry>::new().commands(tauri_specta::collect_commands![
+    let specta_builder = tauri_specta::Builder::<tauri::Wry>::new()
+        .commands(tauri_specta::collect_commands![
             workspaces_list,
             workspaces_create,
             workspaces_rename,
@@ -8829,7 +8836,8 @@ pub fn run() {
             env_switch::list_envs,
             docs_search::open_docs_search_palette,
             open_route_in_app,
-        ]);
+        ])
+        .events(tauri_specta::collect_events![OperatorDeadPayload]);
 
     // Export to packages/operator-core — the ONE home for the generated bindings.
     // apps/operator/lib/tauri-bindings.ts is a thin re-export of this file, which
@@ -9002,7 +9010,11 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
                 env_switch::retarget_for_url(webview.app_handle(), payload.url());
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
+            // Mount the same typed event registry Specta used to generate the
+            // frontend listener. This keeps the Rust event name + payload and
+            // the TypeScript binding on one authored contract.
+            specta_builder.mount_events(app);
             // WI-36794 — FIRST, before anything touches a state dir: the tauri
             // identity overlay and the baked channel stamp are set INDEPENDENTLY
             // at build time, and either one without the other is a build that
