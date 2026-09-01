@@ -89,11 +89,12 @@ function startHealthFixtureServer() {
 }
 
 /** Run the real emitter; return the parsed build-provenance.json it wrote. */
-function emit({ sidecarDir, gitRoot, extraEnv = {} } = {}) {
+function emit({ sidecarDir, gitRoot, artifactMtime, extraEnv = {} } = {}) {
   const out = path.join(tmp(), 'out');
   fs.mkdirSync(out, { recursive: true });
   const artifact = path.join(out, 'App_0.0.0_amd64.deb');
   fs.writeFileSync(artifact, 'fixture');
+  if (artifactMtime) fs.utimesSync(artifact, artifactMtime, artifactMtime);
 
   const env = { ...process.env, PROVENANCE_GIT_ROOT: gitRoot || path.join(BIN, '..'), ...extraEnv };
   if (sidecarDir) env.PROVENANCE_SIDECAR_DIR = sidecarDir;
@@ -106,8 +107,10 @@ function emit({ sidecarDir, gitRoot, extraEnv = {} } = {}) {
   return JSON.parse(fs.readFileSync(path.join(out, 'build-provenance.json'), 'utf8'));
 }
 
-function captureSource(gitRoot) {
-  const result = spawnSync('bash', [EMITTER, '--capture-source', gitRoot], {
+function captureSource(gitRoot, manifestPath) {
+  const args = [EMITTER, '--capture-source', gitRoot];
+  if (manifestPath) args.push(manifestPath);
+  const result = spawnSync('bash', args, {
     encoding: 'utf8',
   });
   assert.equal(result.status, 0, `source capture exited ${result.status}: ${result.stderr}`);
@@ -115,7 +118,11 @@ function captureSource(gitRoot) {
   assert.equal(fields.length, 2, `source capture returned ${fields.length} fields`);
   assert.match(fields[0], /^[0-9a-f]{40}$/);
   assert.match(fields[1], /^(?:true|false)$/);
-  return { head: fields[0], dirty: fields[1] };
+  return {
+    head: fields[0],
+    dirty: fields[1],
+    manifest: manifestPath ? JSON.parse(fs.readFileSync(manifestPath, 'utf8')) : undefined,
+  };
 }
 
 /** A sidecar dir carrying its OWN provenance, written by the same real emitter. */
@@ -272,6 +279,63 @@ test('clean build-start provenance survives cutter-authored dirt at emit time', 
   assert.equal(doc.gitDirtyAtEmit, true, 'post-preflight cutter mutations stay visible as diagnostics');
 });
 
+test('dirty build-start provenance content-binds source paths and each artifact clock', () => {
+  const repo = tmp();
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
+    assert.equal(r.status, 0, `git ${args.join(' ')} failed: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  git(['init', '-q', '-b', 'main']);
+  git(['config', 'user.email', 'provenance@test']);
+  git(['config', 'user.name', 'Provenance Test']);
+  git(['config', 'commit.gpgsign', 'false']);
+  const sourcePath = path.join(repo, 'src', 'main.rs');
+  fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+  fs.writeFileSync(sourcePath, 'fn answer() -> u8 { 1 }\n');
+  git(['add', '.']);
+  git(['commit', '-qm', 'base source']);
+
+  const capturedBytes = 'fn answer() -> u8 { 42 }\n';
+  fs.writeFileSync(sourcePath, capturedBytes);
+  fs.writeFileSync(path.join(repo, 'new-source.rs'), 'pub const NEW: bool = true;\n');
+  const manifestPath = path.join(tmp(), 'dirty-source.json');
+  const source = captureSource(repo, manifestPath);
+  assert.equal(source.dirty, 'true');
+
+  // Mutating after capture models the long build window. The manifest must keep
+  // the exact bytes accepted at cut start, never silently re-read this later edit.
+  fs.writeFileSync(sourcePath, 'fn answer() -> u8 { 99 }\n');
+  const artifactMtime = new Date('2026-08-10T22:31:00Z');
+  const doc = emit({
+    gitRoot: repo,
+    artifactMtime,
+    extraEnv: {
+      PROVENANCE_SOURCE_GIT_HEAD: source.head,
+      PROVENANCE_SOURCE_GIT_DIRTY: source.dirty,
+      PROVENANCE_SOURCE_DIRTY_MANIFEST: manifestPath,
+    },
+  });
+
+  assert.equal(doc.dirtySource.status, 'captured');
+  assert.equal(doc.dirtySource.repositories.length, 1);
+  const files = new Map(doc.dirtySource.repositories[0].files.map((row) => [row.path, row]));
+  assert.equal(files.get('src/main.rs').status, ' M');
+  assert.equal(typeof files.get('src/main.rs').mtimeEpochSec, 'number');
+  assert.match(files.get('src/main.rs').mtimeUtc, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(
+    files.get('src/main.rs').sha256,
+    crypto.createHash('sha256').update(capturedBytes).digest('hex'),
+    'manifest must hash build-start content, not a later worktree mutation',
+  );
+  assert.equal(files.get('new-source.rs').status, '??');
+  assert.match(files.get('new-source.rs').sha256, /^[0-9a-f]{64}$/);
+  assert.equal(doc.artifacts[0].mtimeEpochSec, Math.floor(artifactMtime.getTime() / 1000));
+  assert.equal(doc.artifacts[0].mtimeUtc, '2026-08-10T22:31:00Z');
+  assert.equal(doc.artifacts[0].completedAtUtc, '2026-08-10T22:31:00Z');
+  assert.notEqual(doc.artifacts[0].mtimeUtc, doc.builtAtUtc);
+});
+
 test('direct sidecar producer captures provenance before dependency mutations', () => {
   const builder = fs.readFileSync(path.join(BIN, 'build-desktop-sidecar.sh'), 'utf8');
   const captureAt = builder.indexOf('emit-build-provenance.sh" --capture-source');
@@ -286,6 +350,7 @@ test('direct sidecar producer captures provenance before dependency mutations', 
   assert.ok(emitAt > dependencyMutationAt, 'final provenance must still be emitted after artifact assembly');
   assert.match(builder, /export PROVENANCE_SOURCE_GIT_HEAD=/);
   assert.match(builder, /export PROVENANCE_SOURCE_GIT_DIRTY=/);
+  assert.match(builder, /PROVENANCE_SOURCE_DIRTY_MANIFEST/);
 });
 
 test('release-audited sidecar fails closed on dirty or moving source before publish', () => {
