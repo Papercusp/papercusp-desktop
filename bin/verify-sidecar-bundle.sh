@@ -573,8 +573,11 @@ _ri="$BIN/papercusp-remote-initializer"
 # bump re-armed the same trap. Matches the CONSTANT declaration, not the older example version
 # that still appears in that file's leading doc comment.
 _ri_src="$(cd "$(dirname "$0")/../.." && pwd)/libs/generic/deployment-driver/src/workspace-host-remote-initializer.ts"
+# Quote-AGNOSTIC on purpose: the TS formatter has flipped this constant between single and
+# double quotes (build #2 2026-09-01 failed here when the source moved to double quotes while
+# this regex demanded single) — match either and strip both.
 _ri_ver="$(grep -A1 'WORKSPACE_HOST_REMOTE_INITIALIZER_PROTOCOL_VERSION *=' "$_ri_src" 2>/dev/null \
-           | grep -oE "'papercusp-gcp-iap-initialization-v[0-9]+'" | head -1 | tr -d "'")"
+           | grep -oE "[\"']papercusp-gcp-iap-initialization-v[0-9]+[\"']" | head -1 | tr -d "\"'")"
 if [[ -z "$_ri_ver" ]]; then
   # FAIL CLOSED, and deliberately not with an empty string: the content assertion below is
   # `grep -qF "$_ri_ver"`, which an empty value makes match EVERY artifact — a silently vacuous
