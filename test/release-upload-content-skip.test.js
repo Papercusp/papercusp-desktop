@@ -401,3 +401,69 @@ test('mobile remote_state compares multipart bytes instead of trusting the ETag 
   });
   assert.equal(unavailable, 'metadata-unavailable');
 });
+
+test('public verification accepts byte-identical manifests only when VERSION identity advances exactly', () => {
+  const result = publicManifestVerification({
+    version: '9.8.7',
+    channel: 'stable',
+    // The served bytes are identical to the uploaded local manifest, but that
+    // manifest is stale by one version. A bytes-only check would incorrectly
+    // pass this exact release-stuck scenario.
+    localIdentity: { version: '9.8.6', channel: 'stable' },
+    feedPaths: ['stable/latest.json'],
+  });
+
+  assert.notEqual(result.status, 0, 'a stale byte-identical feed must fail closed');
+  assert.match(
+    result.stderr,
+    /identifies 9\.8\.6\/stable, expected 9\.8\.7\/stable/,
+    'the failure must name both served and intended release identities',
+  );
+});
+
+test('public verification rejects a byte-identical manifest with the wrong CHANNEL', () => {
+  const result = publicManifestVerification({
+    version: '9.8.7',
+    channel: 'stable',
+    localIdentity: { version: '9.8.7', channel: 'beta' },
+    feedPaths: ['stable/latest.json'],
+  });
+
+  assert.notEqual(result.status, 0, 'a channel-mismatched feed must fail closed');
+  assert.match(result.stderr, /identifies 9\.8\.7\/beta, expected 9\.8\.7\/stable/);
+});
+
+test('public verification enumerates update-lane channel feed first and permanent root last', () => {
+  const result = publicManifestVerification({
+    version: '9.8.7',
+    channel: 'stable',
+    feedPaths: ['stable/latest.json', 'latest.json'],
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.requestPaths, ['stable/latest.json', 'latest.json']);
+});
+
+test('public verification enumerates nightly as side-by-side feed only, never the root', () => {
+  const result = publicManifestVerification({
+    version: '9.8.7',
+    channel: 'nightly',
+    feedPaths: ['nightly/latest.json'],
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.requestPaths, ['nightly/latest.json']);
+  assert.equal(result.requestPaths.includes('latest.json'), false);
+});
+
+test('public verification applies the same feed rail to the optional Server manifest', () => {
+  const result = publicManifestVerification({
+    version: '9.8.7',
+    channel: 'stable',
+    manifestName: 'latest-server.json',
+    feedPaths: ['stable/latest-server.json', 'latest-server.json'],
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.requestPaths, ['stable/latest-server.json', 'latest-server.json']);
+});
