@@ -211,7 +211,7 @@ papercusp_require_free_gb() {
       echo "       Staging target: $dir" >&2
       echo "       ${free_gb}GB is free on disk, but ${reserved}GB is already RESERVED by other" >&2
       echo "       in-flight builds on this filesystem, so starting now would over-commit it." >&2
-      echo "       Wait for them to finish, or free space (stale cargo target dirs, npm caches)." >&2
+      echo "       Wait for them to finish, or free space (stale cargo target dirs, old builds)." >&2
       return 28
     fi
     ttl="${PAPERCUSP_DISK_RESERVATION_TTL_SEC:-21600}"
@@ -245,7 +245,7 @@ papercusp_require_free_gb() {
     echo "       Staging target: $dir" >&2
     echo "       This build stages multi-GB trees; starting now would fail MID-COPY and can" >&2
     echo "       leave a PARTIALLY-staged bundle that still looks valid to later steps." >&2
-    echo "       Free space first (stale cargo target dirs, npm/playwright caches, old builds)," >&2
+    echo "       Free space first (stale cargo target dirs, old builds), then rerun the build." >&2
     echo "       or point the staging dir at a roomier filesystem." >&2
     return 28 # ENOSPC — callers `|| exit $?` to preserve it
   fi

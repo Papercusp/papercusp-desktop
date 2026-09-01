@@ -84,6 +84,14 @@ case "$OUT" in
   *) bad "the refusal did not name the measured dir — the reader cannot tell WHICH fs is full" ;;
 esac
 
+# Playwright's browser cache is deliberately not advertised as reclaimable:
+# e2e consumers now regenerate it through scripts/ensure-playwright-browsers.mjs.
+if grep -q 'npm/playwright caches' "$LIB"; then
+  bad "disk preflight still suggests deleting the Playwright cache without a regeneration action"
+else
+  ok "disk preflight does not suggest deleting the Playwright cache"
+fi
+
 # Fail-OPEN when the path cannot be measured at all.
 if papercusp_require_free_gb "" 99999999 "selftest (unmeasurable)" >/dev/null 2>&1; then
   ok "require_free_gb fails OPEN when it cannot measure (never a new way for builds to die)"
