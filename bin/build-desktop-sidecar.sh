@@ -3085,6 +3085,50 @@ fetch_brew_keg() {
   printf '%s\n' "$outdir"
 }
 
+# WI-2039869 (2026-09-01): Homebrew has begun DROPPING darwin/amd64 (Intel-mac)
+# bottles from formulae's newest versions — first measured hit: pcre2 10.48,
+# whose ghcr index carries only darwin/arm64 + linux, which failed the P-101
+# x86_64 cross-bake with "no darwin/amd64 manifest in the index". When the
+# brew-API stable version ships no darwin/<arch> bottle, walk the ghcr tag list
+# newest-first and return the newest version that DOES (10.47_1 for pcre2 —
+# incl. the preferred sonoma build). ABI: these vendored dylibs keep their
+# install-name/SOVERSION across patch/minor bumps (libpcre2-8.0.dylib,
+# libintl.8.dylib, libreadline.8.dylib), the same contract the sonoma
+# preference in _fetch_brew_bottle_raw already relies on. On any probe failure
+# this echoes the original version unchanged so the real fetch reports the
+# real error. Callers: postgresql@major, readline, git, pcre2/gettext.
+_brew_ver_with_darwin_bottle() {
+  local formula="$1" ver="$2" arch="$3" repo="$4"
+  local brew_arch; case "$arch" in x64) brew_arch=amd64 ;; arm64) brew_arch=arm64 ;; *) printf '%s\n' "$ver"; return 0 ;; esac
+  local token; token="$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])' 2>/dev/null)"
+  [[ -n "$token" ]] || { printf '%s\n' "$ver"; return 0; }
+  _bvwdb_has_darwin() {
+    curl -fsSL -H "Authorization: Bearer $token" -H "Accept: application/vnd.oci.image.index.v1+json" \
+      "https://ghcr.io/v2/${repo}/manifests/$1" 2>/dev/null | python3 -c '
+import sys,json
+want=sys.argv[1]
+try: idx=json.load(sys.stdin)
+except Exception: sys.exit(1)
+for m in idx.get("manifests",[]):
+    p=m.get("platform",{}) or {}
+    if p.get("os")=="darwin" and p.get("architecture")==want: sys.exit(0)
+sys.exit(1)' "$brew_arch"
+  }
+  if _bvwdb_has_darwin "$ver"; then printf '%s\n' "$ver"; return 0; fi
+  echo "  ⚠ bottle($formula): v$ver ships no darwin/$brew_arch bottle (Homebrew dropped Intel-mac bottles for it) — probing older tags" >&2
+  local tags; tags="$(curl -fsSL -H "Authorization: Bearer $token" "https://ghcr.io/v2/${repo}/tags/list?n=100" 2>/dev/null | python3 -c 'import sys,json;print("\n".join(json.load(sys.stdin).get("tags",[])))' 2>/dev/null | grep -E '^[0-9]' | sort -rV)"
+  local t probed=0
+  while IFS= read -r t; do
+    [[ -n "$t" && "$t" != "$ver" ]] || continue
+    probed=$((probed+1)); [[ $probed -le 8 ]] || break
+    if _bvwdb_has_darwin "$t"; then
+      echo "  ⚠ bottle($formula): falling back to v$t — the newest tag with a darwin/$brew_arch bottle" >&2
+      printf '%s\n' "$t"; return 0
+    fi
+  done <<< "$tags"
+  printf '%s\n' "$ver"; return 0
+}
+
 # WI-5651: fetch the pgvector Homebrew bottle for a darwin target and normalize
 # to <out>/vector.dylib + <out>/extension/ (from share/postgresql@18/extension).
 fetch_pgvector_darwin_bottle() {
@@ -3313,6 +3357,7 @@ _cross_darwin_pg_keg=""
 if [[ "$_cross_darwin" == "1" ]]; then
   _brew_pg_ver="$(curl -fsSL "https://formulae.brew.sh/api/formula/postgresql@${EMBEDDED_PG_MAJOR}.json" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["versions"]["stable"])' 2>/dev/null)"
   [[ -n "$_brew_pg_ver" ]] || { echo "ERROR: could not resolve postgresql@${EMBEDDED_PG_MAJOR} stable version from the brew formula api"; exit 1; }
+  _brew_pg_ver="$(_brew_ver_with_darwin_bottle "postgresql@${EMBEDDED_PG_MAJOR}" "$_brew_pg_ver" "$TARGET_ARCH" "homebrew/core/postgresql/${EMBEDDED_PG_MAJOR}")"
   echo "  → cross: fetching postgresql@${EMBEDDED_PG_MAJOR} ${_brew_pg_ver} darwin-${TARGET_ARCH} client tools from ghcr (no brew on ${_host_os})"
   _cross_darwin_pg_keg="$(fetch_brew_keg "postgresql@${EMBEDDED_PG_MAJOR}" "$_brew_pg_ver" "$TARGET_ARCH" "homebrew/core/postgresql/${EMBEDDED_PG_MAJOR}" "$(mktemp -d)/pgkeg")" \
     || { echo "ERROR: postgresql@${EMBEDDED_PG_MAJOR} darwin bottle fetch failed (see above)"; exit 1; }
@@ -3320,6 +3365,7 @@ if [[ "$_cross_darwin" == "1" ]]; then
   # bin/.pg-lib (its only dep, libncurses, is a macOS system lib — leave it).
   _brew_rl_ver="$(curl -fsSL "https://formulae.brew.sh/api/formula/readline.json" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["versions"]["stable"])' 2>/dev/null)"
   [[ -n "$_brew_rl_ver" ]] || { echo "ERROR: could not resolve readline stable version from the brew formula api"; exit 1; }
+  _brew_rl_ver="$(_brew_ver_with_darwin_bottle readline "$_brew_rl_ver" "$TARGET_ARCH" "homebrew/core/readline")"
   echo "  → cross: fetching readline ${_brew_rl_ver} darwin-${TARGET_ARCH} bottle (libreadline.8 for psql)"
   _cross_rl_keg="$(fetch_brew_keg readline "$_brew_rl_ver" "$TARGET_ARCH" "homebrew/core/readline" "$(mktemp -d)/rlkeg")" \
     || { echo "ERROR: readline darwin bottle fetch failed (see above)"; exit 1; }
@@ -4208,6 +4254,7 @@ if [[ "$_cross_darwin" == "1" ]]; then
   command -v file >/dev/null 2>&1 || { echo "ERROR: 'file' not found on the build host — required to distinguish Mach-O binaries from scripts while vendoring git (EI-3620)"; exit 1; }
   _brew_git_ver="$(curl -fsSL "https://formulae.brew.sh/api/formula/git.json" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["versions"]["stable"])' 2>/dev/null)"
   [[ -n "$_brew_git_ver" ]] || { echo "ERROR: could not resolve git stable version from the brew formula api"; exit 1; }
+  _brew_git_ver="$(_brew_ver_with_darwin_bottle git "$_brew_git_ver" "$TARGET_ARCH" "homebrew/core/git")"
   echo "  → cross: fetching git ${_brew_git_ver} darwin-${TARGET_ARCH} bottle from ghcr (no brew on ${_host_os})"
   _cross_darwin_git_keg="$(fetch_brew_keg git "$_brew_git_ver" "$TARGET_ARCH" "homebrew/core/git" "$(mktemp -d)/gitkeg")" \
     || { echo "ERROR: git darwin bottle fetch failed (see above)"; exit 1; }
@@ -4235,6 +4282,7 @@ if [[ "$_cross_darwin" == "1" ]]; then
     fi
     _gd_ver="$(curl -fsSL "https://formulae.brew.sh/api/formula/${_gd_formula}.json" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["versions"]["stable"])' 2>/dev/null)"
     [[ -n "$_gd_ver" ]] || { echo "ERROR: could not resolve $_gd_formula stable version from the brew formula api"; exit 1; }
+    _gd_ver="$(_brew_ver_with_darwin_bottle "$_gd_formula" "$_gd_ver" "$TARGET_ARCH" "homebrew/core/$_gd_formula")"
     echo "  → cross: fetching $_gd_formula ${_gd_ver} darwin-${TARGET_ARCH} bottle (git dep)"
     _gd_keg="$(fetch_brew_keg "$_gd_formula" "$_gd_ver" "$TARGET_ARCH" "homebrew/core/$_gd_formula" "$(mktemp -d)/${_gd_formula}keg")" \
       || { echo "ERROR: $_gd_formula darwin bottle fetch failed (see above)"; exit 1; }
