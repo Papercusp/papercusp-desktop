@@ -220,15 +220,28 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
   const builder = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
 
   for (const exact of [
+    '"compilerRuntimeProvenance": {',
+    '"builderHost": "linux-x64"',
+    '"platformOwnedRecipes": {',
+    '"linuxX64": "papercusp-desktop/bin/lib/vm-release-trust-toolchain.sh"',
+    '"macOS": "papercusp-desktop/bin/release-local.sh"',
+    '"windowsX64": "papercusp-desktop/bin/build-windows-cross.sh"',
+    '"shippedTargetTriples": {',
+    '"linuxX64": ["x86_64-unknown-linux-gnu"]',
+    '"macOS": ["x86_64-apple-darwin", "aarch64-apple-darwin"]',
+    '"windowsX64": ["x86_64-pc-windows-msvc"]',
     'PAPERCUSP_VM_NODE_VERSION="v24.18.1"',
+    'license": "MIT"',
     'd6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0',
     'PAPERCUSP_VM_GO_VERSION="1.26.6"',
+    'license": "BSD-3-Clause"',
     '708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89',
     'PAPERCUSP_VM_GH_VERSION="2.98.0"',
     'a255baf71d13fe5947a4eb7ad521ffd412d64cee',
     'PAPERCUSP_VM_GH_X_MOD_VERSION="v0.40.0"',
     'PAPERCUSP_VM_KOPIA_VERSION="0.23.1"',
     '72ec08fd8edb86c67ed27099bf1b955e1f308ffa',
+    'license": "Apache-2.0"',
     // These three move TOGETHER and must be bumped here in the same change that bumps
     // the helper: x/crypto v0.53.0 -> v0.55.0 for GO-2026-6303 (High) forced x/net to
     // >= v0.57.0 (v0.58.0 chosen, matching the gh leg) and x/text to v0.41.0. See the
@@ -242,6 +255,7 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
     '555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f',
     'PAPERCUSP_VM_OPENSSL_VERSION="3.5.8"',
     'a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2',
+    '"opensslLicense": "Apache-2.0"',
   ]) {
     assert.equal(helper.includes(exact), true, `missing trust-toolchain pin: ${exact}`);
   }
@@ -497,7 +511,7 @@ test('vm-release sidecar build rejects missing artifact identity before toolchai
     { sha: ' \t ', version: '9.8.7', label: 'blank SHA' },
     { sha: 'deadbeef', version: ' unknown ', label: 'unknown version' },
   ]) {
-    const r = runBuilderVmReleaseIdentityPreflight(input);
+    const r = runBuilderVmReleaseIdentityPreflight({ ...input, advance: true });
     const output = `${r.stdout}${r.stderr}`;
     assert.equal(r.status, 2, `${input.label}\n${output}`);
     assert.match(output, /vm-release requires non-empty PAPERCUSP_BUILD_SHA and PAPERCUSP_DESKTOP_VERSION before building/);
