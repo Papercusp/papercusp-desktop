@@ -11,6 +11,8 @@ import { spawnSync } from 'node:child_process';
 
 const helper = path.join(import.meta.dirname, '..', 'bin', 'vm-rig', 'seed-resource-root.sh');
 const stageEnvSidecars = path.join(import.meta.dirname, '..', 'bin', 'stage-env-sidecars.sh');
+const currentComposer = path.join(import.meta.dirname, '..', 'bin', 'vm-rig', 'compose-rig-sidecar-current.sh');
+const currentLauncher = path.join(import.meta.dirname, '..', 'bin', 'vm-rig', 'boot-headless-current.sh');
 
 function fixtureManifest(potId = 'papercusp') {
   return JSON.stringify({
@@ -111,6 +113,20 @@ test('all four rig launchers source the shared resolver and leave the seed unset
     assert.match(source, /resolve_seed_resource_dir/);
     assert.match(source, /unset PAPERCUSP_SEED_DIR/);
   }
+});
+
+test('current-payload composer deploys the launcher dependency and launcher fails closed when absent', () => {
+  const composer = fs.readFileSync(currentComposer, 'utf8');
+  const launcher = fs.readFileSync(currentLauncher, 'utf8');
+  assert.match(composer, /\[ -r "\$HERE\/seed-resource-root\.sh" \]/);
+  assert.match(
+    composer,
+    /rsync -a --chmod=F755 "\$HERE\/seed-resource-root\.sh" "\$VM:\$REMOTE_LAUNCHER_DIR\/seed-resource-root\.sh"/,
+  );
+  assert.match(
+    launcher,
+    /if \[\[ ! -r "\$HERE\/seed-resource-root\.sh" \]\]; then[\s\S]*?exit 1[\s\S]*?fi\nsource "\$HERE\/seed-resource-root\.sh"/,
+  );
 });
 
 test('env-sidecar staging carries the primary provenance formats beside the exact bundle copy', () => {

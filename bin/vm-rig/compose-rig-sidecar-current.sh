@@ -60,6 +60,7 @@ REMOTE_DIR="${PCUSP_RIG_SIDECAR_DIR:-/Users/aviweiss/rig-sidecar-current}"
 REMOTE_HOME="${PCUSP_RIG_HOME:-/Users/aviweiss}"
 REMOTE_SERVICE_USER="${PCUSP_RIG_SERVICE_USER:-aviweiss}"
 REMOTE_LAUNCHER="${PCUSP_RIG_CURRENT_LAUNCHER:-${REMOTE_HOME}/.papercusp/vm-rig/boot-headless-current.sh}"
+REMOTE_LAUNCHER_DIR="$(dirname "$REMOTE_LAUNCHER")"
 REMOTE_LAUNCHD_DIR="${PCUSP_RIG_LAUNCHD_DIR:-${REMOTE_HOME}/.papercusp/vm-rig/launchd}"
 # Staging dir for the composed bundle, rsynced to $REMOTE_DIR below. It is pure
 # build OUTPUT and MUST NOT default inside the repo: it used to default to
@@ -85,6 +86,10 @@ for d in "$MAIN_SQL_SRC" "$LOCKS_SQL_SRC" "$PROMPTS_SRC" "$WEB_DIR/bin/bundle-ho
 done
 [ -x "$HERE/boot-headless-current.sh" ] || {
   echo "FATAL: $HERE/boot-headless-current.sh must be executable (tracked mode 0755)" >&2
+  exit 1
+}
+[ -r "$HERE/seed-resource-root.sh" ] || {
+  echo "FATAL: $HERE/seed-resource-root.sh is required by the current-payload launcher" >&2
   exit 1
 }
 
@@ -207,7 +212,7 @@ if [ "$PUSH" = "1" ]; then
   REMOTE_DIR_Q="$(printf '%q' "$REMOTE_DIR")"
   REMOTE_HOME_Q="$(printf '%q' "$REMOTE_HOME")"
   REMOTE_LAUNCHER_Q="$(printf '%q' "$REMOTE_LAUNCHER")"
-  REMOTE_LAUNCHER_DIR_Q="$(printf '%q' "$(dirname "$REMOTE_LAUNCHER")")"
+  REMOTE_LAUNCHER_DIR_Q="$(printf '%q' "$REMOTE_LAUNCHER_DIR")"
   REMOTE_LAUNCHD_DIR_Q="$(printf '%q' "$REMOTE_LAUNCHD_DIR")"
   REMOTE_SERVICE_USER_Q="$(printf '%q' "$REMOTE_SERVICE_USER")"
   REMOTE_INSTALLER_Q="${REMOTE_LAUNCHD_DIR_Q}/install-launchdaemon.sh"
@@ -223,6 +228,10 @@ if [ "$PUSH" = "1" ]; then
   rsync -a --delete "$OUT/sql/"     "$VM:$REMOTE_STAGE/sql/"
   rsync -a --delete "$OUT/prompts/" "$VM:$REMOTE_STAGE/prompts/"
   rsync -a --chmod=F755 "$HERE/boot-headless-current.sh" "$VM:$REMOTE_LAUNCHER"
+  # The launcher sources this sibling at runtime. Keep the helper in the same
+  # install transaction; omitting it makes the launcher continue without the
+  # resolver under `set -uo pipefail`, silently falling back to no seed.
+  rsync -a --chmod=F755 "$HERE/seed-resource-root.sh" "$VM:$REMOTE_LAUNCHER_DIR/seed-resource-root.sh"
   rsync -a --chmod=F755 "$DESKTOP_ROOT/src-tauri/launchd/install-launchdaemon.sh" "$VM:$REMOTE_LAUNCHD_DIR/install-launchdaemon.sh"
   rsync -a "$DESKTOP_ROOT/src-tauri/launchd/com.papercusp.server.plist.template" "$VM:$REMOTE_LAUNCHD_DIR/com.papercusp.server.plist.template"
   rsync -a "$DESKTOP_ROOT/src-tauri/launchd/com.papercusp.server.current.plist.template" "$VM:$REMOTE_LAUNCHD_DIR/com.papercusp.server.current.plist.template"

@@ -24,6 +24,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # All rig launchers use the same manifest-checked bundle/resource-root resolver;
 # never trust a stale hard-coded /Applications path as a seed authority.
 # shellcheck source=/dev/null
+if [[ ! -r "$HERE/seed-resource-root.sh" ]]; then
+  echo "FATAL: missing required seed resolver: $HERE/seed-resource-root.sh" >&2
+  exit 1
+fi
 source "$HERE/seed-resource-root.sh"
 
 APP="/Applications/Papercusp Server.app"
