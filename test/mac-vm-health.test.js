@@ -2,10 +2,13 @@ import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import net from 'node:net';
 import test from 'node:test';
 
 const script = new URL('../bin/mac-vm-health.sh', import.meta.url).pathname;
+const qmpCommand = new URL('../bin/qmp-command.py', import.meta.url).pathname;
+const screenshot = new URL('../bin/mac-vm-screenshot.sh', import.meta.url).pathname;
 const vmcall = new URL('../bin/vm-rig/vmcall.sh', import.meta.url).pathname;
 const vmRigDeploy = new URL('../bin/vm-rig/deploy.sh', import.meta.url).pathname;
 const probeSession = new URL('../bin/vm-rig/probe-session.sh', import.meta.url).pathname;
@@ -13,14 +16,14 @@ const loginPreflight = new URL('../bin/vm-rig/preflight-login.sh', import.meta.u
 const currentBoot = new URL('../bin/vm-rig/boot-headless-current.sh', import.meta.url).pathname;
 const currentComposer = new URL('../bin/vm-rig/compose-rig-sidecar-current.sh', import.meta.url).pathname;
 
-async function fixture({ ssh = true, qmp = true, operatorProbe = '' } = {}) {
+async function fixture({ ssh = true, qmp = true, qmpExit = qmp ? 0 : 1, operatorProbe = '' } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'mac-vm-health-'));
   const bin = path.join(dir, 'bin');
   execFileSync('mkdir', ['-p', bin]);
   for (const [name, body] of Object.entries({
     systemctl: '#!/bin/sh\nexit 0\n',
     ssh: `#!/bin/sh\nif [ -n "$MAC_VM_SSH_MARKER" ]; then : > "$MAC_VM_SSH_MARKER"; fi\nif [ -n "$MAC_VM_OPERATOR_PROBE_RESULT" ]; then printf '%s\\n' "$MAC_VM_OPERATOR_PROBE_RESULT"; fi\nexit ${ssh ? 0 : 1}\n`,
-    qmp: `#!/bin/sh\nif [ -n "$MAC_VM_QMP_MARKER" ]; then : > "$MAC_VM_QMP_MARKER"; fi\nexit ${qmp ? 0 : 1}\n`,
+    qmp: `#!/bin/sh\nif [ -n "$MAC_VM_QMP_MARKER" ]; then : > "$MAC_VM_QMP_MARKER"; fi\nexit ${qmpExit}\n`,
   })) {
     const file = path.join(bin, name);
     await writeFile(file, body); await chmod(file, 0o755);
@@ -158,6 +161,17 @@ test('classifies a running QEMU with dead SSH and stale disk as picker-suspect',
   assert.equal(JSON.parse(result.stdout).status, 'picker-suspect');
 });
 
+test('reports a silent QMP greeting as slot contention without claiming QEMU is wedged', async () => {
+  const { env } = await fixture({ ssh: false, qmpExit: 75 });
+  const result = spawnSync('bash', [script, '--json'], { env, encoding: 'utf8' });
+  assert.equal(result.status, 1);
+  const health = JSON.parse(result.stdout);
+  assert.equal(health.status, 'qmp-slot-contended');
+  assert.equal(health.qmp_probe_status, 'slot-contended');
+  assert.match(health.detail, /another client may hold the single-client slot/);
+  assert.match(health.detail, /not proven wedged/);
+});
+
 test('distinguishes an active service from an unavailable QEMU control plane', async () => {
   const { env } = await fixture({ qmp: false, ssh: false });
   const result = spawnSync('bash', [script, '--json'], { env, encoding: 'utf8' });
@@ -188,6 +202,7 @@ test('distinguishes an active service from an unavailable QEMU control plane', a
     guest_panic_epoch: 0,
     guest_panic_report: '',
     qmp_running: false,
+    qmp_probe_status: 'unavailable',
     qmp_probe_skipped: false,
     qemu_log_bounded: false,
     recovery: 'not-requested',
@@ -257,6 +272,7 @@ test('detects QEMU FD/CLOSE_WAIT exhaustion before probing SSH and bounds the wa
     assert.equal(health.ssh_ok, false);
     assert.equal(health.ssh_probe_skipped, true);
     assert.equal(health.qmp_running, false);
+    assert.equal(health.qmp_probe_status, 'skipped');
     assert.equal(health.qmp_probe_skipped, true);
     assert.equal(health.qemu_log_bounded, true);
     assert.match(health.detail, /CLOSE_WAIT sockets; SSH\/QMP probes skipped/);
@@ -276,6 +292,77 @@ test('recovery is opt-in and refused without the picker signature', async () => 
   const result = spawnSync('bash', [script, '--recover-picker'], { env, encoding: 'utf8' });
   assert.equal(result.status, 2);
   assert.match(result.stderr, /refusing recovery/);
+});
+
+test('shared QMP helper exits distinctly when a connected socket never sends a greeting', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'qmp-command-'));
+  const socketPath = path.join(dir, 'qmp.sock');
+  const server = net.createServer(() => {});
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(socketPath, resolve);
+    });
+    const result = spawnSync('python3', [qmpCommand, socketPath, 'query-status'], {
+      env: { ...process.env, PAPERCUSP_QMP_TIMEOUT_SEC: '0.05' },
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 75, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /another client may hold the single-client socket/);
+    assert.match(result.stderr, /main loop is not proven wedged/);
+  } finally {
+    server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('shared QMP helper negotiates capabilities and runs one command', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'qmp-command-'));
+  const socketPath = path.join(dir, 'qmp.sock');
+  const commands = [];
+  const server = net.createServer((socket) => {
+    socket.write(`${JSON.stringify({ QMP: { version: {}, capabilities: [] } })}\n`);
+    let buffer = '';
+    socket.on('data', (chunk) => {
+      buffer += chunk;
+      while (buffer.includes('\n')) {
+        const newline = buffer.indexOf('\n');
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        const request = JSON.parse(line);
+        commands.push(request.execute);
+        const reply = request.execute === 'query-status' ? { return: { running: true } } : { return: {} };
+        socket.write(`${JSON.stringify(reply)}\n`);
+      }
+    });
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(socketPath, resolve);
+    });
+    const result = await new Promise((resolve, reject) => {
+      const child = spawn('python3', [qmpCommand, socketPath, 'query-status'], {
+        env: { ...process.env, PAPERCUSP_QMP_TIMEOUT_SEC: '1' },
+      });
+      let stderr = '';
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      child.once('error', reject);
+      child.once('close', (status) => resolve({ status, stderr }));
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(commands, ['qmp_capabilities', 'query-status']);
+  } finally {
+    server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('screenshot path reuses the contention-aware QMP helper', async () => {
+  const source = await readFile(screenshot, 'utf8');
+  assert.match(source, /qmp-command\.py/);
+  assert.doesNotMatch(source, /f\.readline\(\)\s*# greeting/);
 });
 
 async function vmcallFixture(result) {

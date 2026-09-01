@@ -17,6 +17,7 @@ FD_EXHAUSTION_PCT="${MAC_VM_FD_EXHAUSTION_PCT:-90}"
 CLOSE_WAIT_THRESHOLD="${MAC_VM_CLOSE_WAIT_THRESHOLD:-256}"
 CLOSE_WAIT_OCCUPANCY_PCT="${MAC_VM_CLOSE_WAIT_OCCUPANCY_PCT:-75}"
 QEMU_LOG_MAX_BYTES="${MAC_VM_QEMU_LOG_MAX_BYTES:-67108864}"
+QMP_HELPER="${MAC_VM_QMP_HELPER:-$(dirname "$0")/qmp-command.py}"
 RECOVER=0
 JSON=0
 
@@ -300,32 +301,26 @@ if [[ -e "$DISK_IMAGE" ]]; then
 fi
 
 qmp_running=false
+qmp_probe_status=unavailable
 qmp_cmd() {
   local execute="$1"
   if [[ -n "${MAC_VM_QMP_PROBE:-}" ]]; then
     "$MAC_VM_QMP_PROBE" "$execute"
     return
   fi
-  python3 - "$QMP_SOCK" "$execute" <<'PY'
-import json, socket, sys
-sock, execute = sys.argv[1:]
-s = socket.socket(socket.AF_UNIX); s.settimeout(4); s.connect(sock)
-f = s.makefile('rwb', buffering=0)
-if not f.readline(): raise RuntimeError('QMP greeting missing (another client may hold the single-client socket)')
-f.write(b'{"execute":"qmp_capabilities"}\n'); json.loads(f.readline())
-payload = {"execute": execute}
-if execute == "send-key":
-    payload["arguments"] = {"keys":[{"type":"qcode","data":"ret"}]}
-f.write((json.dumps(payload)+'\n').encode())
-reply = json.loads(f.readline())
-if 'error' in reply: raise RuntimeError(reply['error'])
-if execute == 'query-status' and reply.get('return',{}).get('running') is not True: raise RuntimeError('VM is not running')
-PY
+  python3 "$QMP_HELPER" "$QMP_SOCK" "$execute"
 }
 if [[ "$qemu_fd_exhausted" == true ]]; then
   qmp_probe_skipped=true
+  qmp_probe_status=skipped
 else
-  qmp_cmd query-status >/dev/null 2>&1 && qmp_running=true
+  if qmp_cmd query-status >/dev/null; then
+    qmp_running=true
+    qmp_probe_status=ok
+  else
+    qmp_rc=$?
+    if [[ "$qmp_rc" == 75 ]]; then qmp_probe_status=slot-contended; fi
+  fi
 fi
 
 status=unhealthy
@@ -345,6 +340,9 @@ elif [[ "$ssh_ok" == true && "$operator_lost_after_reboot" == true ]]; then
   detail="guest rebooted after operator start; stale discovery pid=${operator_pid} port=${operator_port} is not backed by both its operator process (alive=${operator_pid_alive}) and listener (listening=${operator_port_listening})"
 elif [[ "$ssh_ok" == true ]]; then
   status=healthy; detail="macOS guest SSH is reachable"
+elif [[ "$qmp_probe_status" == slot-contended ]]; then
+  status=qmp-slot-contended
+  detail="QMP socket accepted a client but sent no greeting; another client may hold the single-client slot (QEMU main loop is not proven wedged)"
 elif [[ "$service_active" == true && "$qmp_running" == true && "$disk_age" -ge "$STALE_SEC" ]]; then
   status=picker-suspect
   detail="QEMU is running but guest SSH is unreachable and disk writes are stale"
@@ -368,19 +366,19 @@ fi
 
 if [[ "$JSON" == 1 ]]; then
   if [[ "$qemu_pid" =~ ^[0-9]+$ ]]; then qemu_pid_json="$qemu_pid"; else qemu_pid_json=null; fi
-  printf '{"status":"%s","service_active":%s,"qemu_process_found":%s,"qemu_pid":%s,"qemu_fd_count":%s,"qemu_fd_limit":%s,"qemu_close_wait_count":%s,"qemu_fd_exhausted":%s,"ssh_ok":%s,"ssh_probe_skipped":%s,"operator_probe_ok":%s,"guest_boot_epoch":%s,"operator_started_at_ms":%s,"operator_pid":%s,"operator_pid_alive":%s,"operator_port":%s,"operator_port_listening":%s,"operator_lost_after_reboot":%s,"guest_kernel_panic":%s,"guest_panic_epoch":%s,"guest_panic_report":"%s","qmp_running":%s,"qmp_probe_skipped":%s,"disk_age_sec":%s,"qemu_log_bounded":%s,"recovery":"%s","detail":"%s"}\n' \
+  printf '{"status":"%s","service_active":%s,"qemu_process_found":%s,"qemu_pid":%s,"qemu_fd_count":%s,"qemu_fd_limit":%s,"qemu_close_wait_count":%s,"qemu_fd_exhausted":%s,"ssh_ok":%s,"ssh_probe_skipped":%s,"operator_probe_ok":%s,"guest_boot_epoch":%s,"operator_started_at_ms":%s,"operator_pid":%s,"operator_pid_alive":%s,"operator_port":%s,"operator_port_listening":%s,"operator_lost_after_reboot":%s,"guest_kernel_panic":%s,"guest_panic_epoch":%s,"guest_panic_report":"%s","qmp_running":%s,"qmp_probe_status":"%s","qmp_probe_skipped":%s,"disk_age_sec":%s,"qemu_log_bounded":%s,"recovery":"%s","detail":"%s"}\n' \
     "$status" "$service_active" "$qemu_process_found" "$qemu_pid_json" \
     "$qemu_fd_count" "$qemu_fd_limit" "$qemu_close_wait_count" "$qemu_fd_exhausted" \
     "$ssh_ok" "$ssh_probe_skipped" "$operator_probe_ok" "$guest_boot_epoch" \
     "$operator_started_at_ms" "$operator_pid" "$operator_pid_alive" "$operator_port" \
     "$operator_port_listening" "$operator_lost_after_reboot" \
     "$guest_kernel_panic" "$guest_panic_epoch" "$guest_panic_report" \
-    "$qmp_running" "$qmp_probe_skipped" "$disk_age" \
+    "$qmp_running" "$qmp_probe_status" "$qmp_probe_skipped" "$disk_age" \
     "$qemu_log_bounded" "$recovery" "$detail"
 else
-  printf 'mac-vm-health: %s — %s (service=%s ssh=%s operator_reboot=%s qmp=%s fd=%s/%s close_wait=%s log_bounded=%s disk_age=%ss recovery=%s)\n' \
+  printf 'mac-vm-health: %s — %s (service=%s ssh=%s operator_reboot=%s qmp=%s/%s fd=%s/%s close_wait=%s log_bounded=%s disk_age=%ss recovery=%s)\n' \
     "$status" "$detail" "$service_active" "$ssh_ok" "$operator_lost_after_reboot" \
-    "$qmp_running" \
+    "$qmp_running" "$qmp_probe_status" \
     "$qemu_fd_count" "$qemu_fd_limit" "$qemu_close_wait_count" "$qemu_log_bounded" \
     "$disk_age" "$recovery"
 fi

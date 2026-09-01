@@ -25,6 +25,7 @@
 set -euo pipefail
 
 QMP_SOCK="${2:-$HOME/macos-vm/OSX-KVM/qmp.sock}"
+QMP_HELPER="${MAC_VM_QMP_HELPER:-$(dirname "$0")/qmp-command.py}"
 OUT_PNG="${1:-/tmp/mac-vm-screenshot-$(date +%Y%m%d-%H%M%S).png}"
 TMP_PPM="$(mktemp /tmp/mac-vm-screendump-XXXXXX.ppm)"
 trap 'rm -f "$TMP_PPM"' EXIT
@@ -46,34 +47,10 @@ if ! command -v convert >/dev/null 2>&1; then
   exit 1
 fi
 
-# QMP handshake + screendump, per agent-insights/mac-vm-qmp-recovery.mdx: read
-# the greeting line, negotiate capabilities, then request a screendump to a
-# host-side PPM path. Errors from qemu (malformed request, VM paused, etc.)
-# surface as a QMP {"error":...} reply printed to stderr for visibility.
-python3 - "$QMP_SOCK" "$TMP_PPM" <<'PYEOF'
-import json, socket, sys
-
-qmp_sock, ppm_path = sys.argv[1], sys.argv[2]
-
-s = socket.socket(socket.AF_UNIX)
-s.settimeout(10)
-s.connect(qmp_sock)
-f = s.makefile('rw')
-f.readline()  # greeting (capabilities banner)
-
-def cmd(c):
-    f.write(json.dumps(c) + '\n')
-    f.flush()
-    reply = f.readline()
-    parsed = json.loads(reply) if reply else {}
-    if 'error' in parsed:
-        print(f"QMP error for {c!r}: {parsed['error']}", file=sys.stderr)
-        sys.exit(1)
-    return parsed
-
-cmd({"execute": "qmp_capabilities"})
-cmd({"execute": "screendump", "arguments": {"filename": ppm_path}})
-PYEOF
+# The helper gives a connected-but-silent greeting its own exit code and
+# message, avoiding the historical "wedged main loop" inference.
+PAPERCUSP_QMP_TIMEOUT_SEC="${PAPERCUSP_QMP_TIMEOUT_SEC:-10}" \
+  python3 "$QMP_HELPER" "$QMP_SOCK" screendump "$TMP_PPM"
 
 convert "$TMP_PPM" "$OUT_PNG"
 
