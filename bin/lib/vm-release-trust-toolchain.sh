@@ -145,11 +145,31 @@ _pc_vm_cache_valid() {
   PC_VM_EXPECTED_PINS="$(cat <<JSON
 {
   "revision": "$PAPERCUSP_VM_TRUST_REVISION",
-  "node": { "version": "$PAPERCUSP_VM_NODE_VERSION" },
-  "go": { "version": "$PAPERCUSP_VM_GO_VERSION" },
+  "compilerRuntimeProvenance": {
+    "builderHost": "linux-x64",
+    "platformOwnedRecipes": {
+      "linuxX64": "papercusp-desktop/bin/lib/vm-release-trust-toolchain.sh",
+      "macOS": "papercusp-desktop/bin/release-local.sh",
+      "windowsX64": "papercusp-desktop/bin/build-windows-cross.sh"
+    },
+    "shippedTargetTriples": {
+      "linuxX64": ["x86_64-unknown-linux-gnu"],
+      "macOS": ["x86_64-apple-darwin", "aarch64-apple-darwin"],
+      "windowsX64": ["x86_64-pc-windows-msvc"]
+    }
+  },
+  "node": {
+    "version": "$PAPERCUSP_VM_NODE_VERSION",
+    "license": "MIT"
+  },
+  "go": {
+    "version": "$PAPERCUSP_VM_GO_VERSION",
+    "license": "BSD-3-Clause"
+  },
   "githubCli": {
     "version": "$PAPERCUSP_VM_GH_VERSION-papercusp.1",
     "commit": "$PAPERCUSP_VM_GH_COMMIT",
+    "license": "MIT",
     "moduleOverrides": {
       "golang.org/x/mod": "$PAPERCUSP_VM_GH_X_MOD_VERSION",
       "golang.org/x/net": "$PAPERCUSP_VM_GH_X_NET_VERSION",
@@ -159,6 +179,7 @@ _pc_vm_cache_valid() {
   "kopia": {
     "version": "$PAPERCUSP_VM_KOPIA_VERSION-papercusp.1",
     "commit": "$PAPERCUSP_VM_KOPIA_COMMIT",
+    "license": "Apache-2.0",
     "moduleOverrides": {
       "golang.org/x/crypto": "$PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION",
       "golang.org/x/mod": "$PAPERCUSP_VM_KOPIA_X_MOD_VERSION",
@@ -169,6 +190,8 @@ _pc_vm_cache_valid() {
   },
   "postgresql": {
     "version": "$PAPERCUSP_VM_POSTGRES_VERSION",
+    "license": "PostgreSQL",
+    "opensslLicense": "Apache-2.0",
     "opensslVersion": "$PAPERCUSP_VM_OPENSSL_VERSION"
   }
 }
@@ -476,18 +499,34 @@ manifest = {
     "schemaVersion": 1,
     "revision": "$PAPERCUSP_VM_TRUST_REVISION",
     "platform": "linux-x64",
+    "compilerRuntimeProvenance": {
+        "builderHost": "linux-x64",
+        "platformOwnedRecipes": {
+            "linuxX64": "papercusp-desktop/bin/lib/vm-release-trust-toolchain.sh",
+            "macOS": "papercusp-desktop/bin/release-local.sh",
+            "windowsX64": "papercusp-desktop/bin/build-windows-cross.sh",
+        },
+        "shippedTargetTriples": {
+            "linuxX64": ["x86_64-unknown-linux-gnu"],
+            "macOS": ["x86_64-apple-darwin", "aarch64-apple-darwin"],
+            "windowsX64": ["x86_64-pc-windows-msvc"],
+        },
+    },
     "node": {
         "version": "$PAPERCUSP_VM_NODE_VERSION",
+        "license": "MIT",
         "archiveSha256": "$PAPERCUSP_VM_NODE_LINUX_X64_SHA256",
         "binarySha256": digest("bin/node"),
     },
     "go": {
         "version": "$PAPERCUSP_VM_GO_VERSION",
+        "license": "BSD-3-Clause",
         "archiveSha256": "$PAPERCUSP_VM_GO_LINUX_X64_SHA256",
     },
     "githubCli": {
         "version": "$PAPERCUSP_VM_GH_VERSION-papercusp.1",
         "commit": "$PAPERCUSP_VM_GH_COMMIT",
+        "license": "MIT",
         "sourceSha256": "$PAPERCUSP_VM_GH_SOURCE_SHA256",
         "binarySha256": digest("bin/gh"),
         "moduleOverrides": {
@@ -499,6 +538,7 @@ manifest = {
     "kopia": {
         "version": "$PAPERCUSP_VM_KOPIA_VERSION-papercusp.1",
         "commit": "$PAPERCUSP_VM_KOPIA_COMMIT",
+        "license": "Apache-2.0",
         "sourceSha256": "$PAPERCUSP_VM_KOPIA_SOURCE_SHA256",
         "binarySha256": digest("bin/kopia"),
         "moduleOverrides": {
@@ -511,8 +551,10 @@ manifest = {
     },
     "postgresql": {
         "version": "$PAPERCUSP_VM_POSTGRES_VERSION",
+        "license": "PostgreSQL",
         "sourceSha256": "$PAPERCUSP_VM_POSTGRES_SOURCE_SHA256",
         "opensslVersion": "$PAPERCUSP_VM_OPENSSL_VERSION",
+        "opensslLicense": "Apache-2.0",
         "opensslSourceSha256": "$PAPERCUSP_VM_OPENSSL_SOURCE_SHA256",
         "postgresBinarySha256": digest("postgresql/bin/postgres"),
         "extensions": {

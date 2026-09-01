@@ -88,6 +88,37 @@ if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" \
 fi
 unset _release_owner_name
 
+# D-043 / P-052: dogfood remains the historical source-rich developer bundle.
+# vm-release is a separate fail-closed build profile whose final sidecar is
+# pruned and audited below. Validate the profile before source capture so a
+# misspelled knob or missing vm-release artifact identity cannot be masked by a
+# missing/unreadable repo path.
+DISTRIBUTION_PROFILE="${PAPERCUSP_DISTRIBUTION_PROFILE:-dogfood}"
+case "$DISTRIBUTION_PROFILE" in
+  dogfood|vm-release) ;;
+  *)
+    echo "ERROR: PAPERCUSP_DISTRIBUTION_PROFILE must be dogfood or vm-release (got '$DISTRIBUTION_PROFILE')" >&2
+    exit 2
+    ;;
+esac
+
+# WI-41712 / WI-2024456: build-linux-local.sh supplies these two values, but
+# this producer is also a supported direct entrypoint. A direct vm-release build
+# once spent nearly two hours assembling the sidecar before the prune gate
+# discovered both values were absent. Mirror audit-release-bundle.py's exact
+# non-empty/known contract here, before source capture, toolchain, or dependency
+# work, while retaining the final audit as the artifact-bound backstop.
+_vm_release_build_sha="${PAPERCUSP_BUILD_SHA:-}"
+_vm_release_desktop_version="${PAPERCUSP_DESKTOP_VERSION:-}"
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" \
+   && ( -z "${_vm_release_build_sha//[[:space:]]/}" \
+     || -z "${_vm_release_desktop_version//[[:space:]]/}" \
+     || "$_vm_release_desktop_version" =~ ^[[:space:]]*[Uu][Nn][Kk][Nn][Oo][Ww][Nn][[:space:]]*$ ) ]]; then
+  echo "ERROR: PAPERCUSP_DISTRIBUTION_PROFILE=vm-release requires non-empty PAPERCUSP_BUILD_SHA and PAPERCUSP_DESKTOP_VERSION before building." >&2
+  echo "       Pass the immutable source SHA and desktop version explicitly; refusing before toolchain work." >&2
+  exit 2
+fi
+
 # Direct sidecar builds are release producers too. Preserve the source state at
 # entry, before dependency generations/npm installs mutate tracked build state;
 # emit-build-provenance.sh records the later checkout separately as *AtEmit.
@@ -142,36 +173,6 @@ if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" \
   exit 1
 fi
 
-# D-043 / P-052: dogfood remains the historical source-rich developer bundle.
-# vm-release is a separate fail-closed build profile whose final sidecar is
-# pruned and audited below. Keep the profile validation in this producer too:
-# direct sidecar builds must not be able to misspell the knob and silently emit
-# a dogfood payload for a customer VM package.
-DISTRIBUTION_PROFILE="${PAPERCUSP_DISTRIBUTION_PROFILE:-dogfood}"
-case "$DISTRIBUTION_PROFILE" in
-  dogfood|vm-release) ;;
-  *)
-    echo "ERROR: PAPERCUSP_DISTRIBUTION_PROFILE must be dogfood or vm-release (got '$DISTRIBUTION_PROFILE')" >&2
-    exit 2
-    ;;
-esac
-
-# WI-41712: build-linux-local.sh supplies these two values, but this producer is
-# also a supported direct entrypoint. A direct vm-release build once spent nearly
-# two hours assembling the sidecar before the prune gate discovered both values
-# were absent. Mirror audit-release-bundle.py's exact non-empty/known contract
-# here, before any toolchain or dependency work, while retaining the final audit
-# as the artifact-bound backstop.
-_vm_release_build_sha="${PAPERCUSP_BUILD_SHA:-}"
-_vm_release_desktop_version="${PAPERCUSP_DESKTOP_VERSION:-}"
-if [[ "$DISTRIBUTION_PROFILE" == "vm-release" \
-   && ( -z "${_vm_release_build_sha//[[:space:]]/}" \
-     || -z "${_vm_release_desktop_version//[[:space:]]/}" \
-     || "$_vm_release_desktop_version" =~ ^[[:space:]]*[Uu][Nn][Kk][Nn][Oo][Ww][Nn][[:space:]]*$ ) ]]; then
-  echo "ERROR: PAPERCUSP_DISTRIBUTION_PROFILE=vm-release requires non-empty PAPERCUSP_BUILD_SHA and PAPERCUSP_DESKTOP_VERSION before building." >&2
-  echo "       Pass the immutable source SHA and desktop version explicitly; refusing before toolchain work." >&2
-  exit 2
-fi
 # EI-21832562420831737: having DEMANDED an immutable source sha above, refuse to read a tree
 # that holds anything else. Nothing did: the release audit, SBOM and vulnerability gates all
 # inspect the FINISHED bundle, so a cut taken on the shared checkout baked peers' uncommitted

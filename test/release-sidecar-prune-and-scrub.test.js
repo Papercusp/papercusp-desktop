@@ -511,7 +511,7 @@ test('vm-release sidecar build rejects missing artifact identity before toolchai
     { sha: ' \t ', version: '9.8.7', label: 'blank SHA' },
     { sha: 'deadbeef', version: ' unknown ', label: 'unknown version' },
   ]) {
-    const r = runBuilderVmReleaseIdentityPreflight({ ...input, advance: true });
+    const r = runBuilderVmReleaseIdentityPreflight(input);
     const output = `${r.stdout}${r.stderr}`;
     assert.equal(r.status, 2, `${input.label}\n${output}`);
     assert.match(output, /vm-release requires non-empty PAPERCUSP_BUILD_SHA and PAPERCUSP_DESKTOP_VERSION before building/);
