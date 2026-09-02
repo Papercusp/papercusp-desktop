@@ -182,7 +182,9 @@ scenario_coord_p008_custody() {
   fi
   echo "    ✓ positive control: $b was reachable immediately before the bootout"
 
-  cd_vm_down || { echo "CD-1 SETUP FAIL — the bootout command itself failed; the rig may be untouched"; return 2; }
+  # A bootout that did not actually unload the job is a SETUP failure: the later
+  # bootstrap would race the half-torn-down job and the VM would not come back.
+  cd_vm_down || { echo "CD-1 SETUP FAIL — the job did not unload cleanly; refusing to proceed into a bootstrap race"; cd_vm_up || true; return 2; }
 
   local down=0 i
   for i in 1 2 3 4 5 6 7 8; do
@@ -213,12 +215,23 @@ scenario_coord_p008_custody() {
 
   # ── bring the member BACK ───────────────────────────────────────────────────
   echo "[3] bring $b BACK — kickstart → boot re-reads state → swarm rejoin → CATCH-UP"
-  cd_vm_up || { echo "CD-2 FAIL — kickstart command failed; $b may still be DOWN. INVESTIGATE, do not re-run blind."; return 1; }
-  if cd_vm_healthy 180; then
-    echo "    ✓ $b came back healthy after kickstart"
+  # ⚠ A FAILED BRING-BACK IS A SETUP FAILURE, NOT A CD VERDICT.
+  # If $b never comes back, NO catch-up probe was exercised — so reporting "CD-2 FAIL"
+  # would describe a product defect that was never tested. Measured 2026-09-02T19:43Z:
+  # a bootout/bootstrap race left the daemon unloaded and this printed "CD-2 FAIL — vm
+  # did not come back", which reads as a catch-up failure. Exit 2 (no verdict), never 1.
+  if ! cd_vm_up; then
+    echo "CD-* SETUP FAIL — could not bring $b back up; NO catch-up probe ran, so this is NOT a federation verdict."
+    echo "    The rig may be LEFT DOWN. Restore it before anything else:"
+    echo "      ssh <vm> 'sudo -n launchctl bootstrap system /Library/LaunchDaemons/com.papercusp.server.plist'"
+    return 2
+  fi
+  if cd_vm_healthy 240; then
+    echo "    ✓ $b came back healthy after the bring-back"
   else
-    echo "CD-2 FAIL — $b did not come back healthy within 180s of the kickstart. INVESTIGATE, do not re-run blind."
-    return 1
+    echo "CD-* SETUP FAIL — $b did not become healthy in time. NO catch-up probe ran, so this is NOT a federation verdict."
+    echo "    Check the VM before re-running; do not re-run blind."
+    return 2
   fi
 
   # ── CD-2: catch-up of every offline-window op ───────────────────────────────

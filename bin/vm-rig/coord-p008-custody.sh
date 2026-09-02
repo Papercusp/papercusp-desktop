@@ -138,24 +138,63 @@ vm_daemon_program() {
   ssh "${SSH_OPTS[@]}" "$VM" "sudo -n launchctl print $DAEMON 2>/dev/null | awk '/program = /{print \$3; exit}'" 2>/dev/null
 }
 
+# ⚠ BOOTOUT IS ASYNCHRONOUS. `launchctl bootout` returns as soon as the request is
+# accepted, NOT when the job has finished unloading — and a `bootstrap` issued into
+# that window fails with "Bootstrap failed: 5: Input/output error". MEASURED on the
+# first live run (2026-09-02T19:43Z): bootout succeeded, the immediate bootstrap
+# silently failed, the job was absent from `launchctl list`, and the VM never came
+# back. So this waits for the job to be genuinely GONE before returning.
 cd_vm_down() {
   echo "    → launchctl bootout $DAEMON"
   ssh "${SSH_OPTS[@]}" "$VM" "sudo -n launchctl bootout $DAEMON" 2>&1 | sed 's/^/      /'
-  # bootout returns non-zero when the job was already gone; the scenario proves the
-  # partition by the VM's own unreachability, not by this exit code.
-  return 0
+  # bootout exits non-zero when the job was already gone, so its status is not the
+  # signal; the job's ACTUAL disappearance is. Wait for it, so the later bootstrap
+  # is not issued into a half-torn-down job.
+  local i
+  for i in $(seq 1 20); do
+    if ! ssh "${SSH_OPTS[@]}" "$VM" "sudo -n launchctl print $DAEMON >/dev/null 2>&1"; then
+      echo "      job fully unloaded after ~$((i))s"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "      ⚠ job STILL loaded 20s after bootout — a bootstrap now would race it"
+  return 1
 }
 
+# Bring the daemon back, and VERIFY it actually loaded. Returns non-zero when it
+# did not, so the caller can report a SETUP failure instead of a product verdict.
+#
+# ⚠ THIS FUNCTION USED TO `return 0` UNCONDITIONALLY. That is precisely the
+# setup-failure-disguised-as-a-finding defect this scenario file warns about in its
+# header and guards against for INSERTs via _cd_insert — reproduced here in the
+# lifecycle seam. A failed bring-back then surfaced as "CD-2 FAIL — vm did not come
+# back", which reads exactly like a catch-up/product defect, when in fact no probe
+# had been exercised at all. A bring-back that fails is a SETUP FAIL, never a CD verdict.
 cd_vm_up() {
-  echo "    → launchctl bootstrap/kickstart $DAEMON"
-  ssh "${SSH_OPTS[@]}" "$VM" "
-    if sudo -n launchctl print $DAEMON >/dev/null 2>&1; then
-      sudo -n launchctl kickstart -k $DAEMON
-    else
-      sudo -n launchctl bootstrap system $PLIST
+  local attempt out
+  for attempt in 1 2 3; do
+    echo "    → launchctl bootstrap/kickstart $DAEMON (attempt $attempt)"
+    out="$(ssh "${SSH_OPTS[@]}" "$VM" "
+      if sudo -n launchctl print $DAEMON >/dev/null 2>&1; then
+        sudo -n launchctl kickstart -k $DAEMON 2>&1
+      else
+        sudo -n launchctl bootstrap system $PLIST 2>&1
+      fi
+    " 2>&1)"
+    [ -n "$out" ] && printf '%s\n' "$out" | sed 's/^/      /'
+
+    # The command's exit status is not trustworthy across ssh here; ask launchd what
+    # it actually holds.
+    if ssh "${SSH_OPTS[@]}" "$VM" "sudo -n launchctl print $DAEMON >/dev/null 2>&1"; then
+      echo "      job is loaded"
+      return 0
     fi
-  " 2>&1 | sed 's/^/      /'
-  return 0
+    echo "      job did NOT load (launchd does not know it) — settling before retry"
+    sleep 5
+  done
+  echo "      ✗ could not bring $DAEMON back after 3 attempts"
+  return 1
 }
 
 # Wait for the VM to be genuinely serving again, and RE-DISCOVER its embedded PG
@@ -252,9 +291,12 @@ elif [ -n "$PROGRAM_AFTER" ]; then
 fi
 
 echo
-if [ "$rc" = 0 ]; then
-  echo "RESULT: ALL CD probes PASS on the real two-machine rig ($TOWER_HOST <-> $VM_HOSTNAME)"
-else
-  echo "RESULT: one or more CD probes FAILED on the real two-machine rig ($TOWER_HOST <-> $VM_HOSTNAME)"
-fi
+# rc=2 means the run could not EXERCISE its probes (setup/lifecycle failure). Reporting
+# that as "probes FAILED" would manufacture a product verdict out of a rig problem, so
+# the three outcomes stay distinct all the way to the exit status.
+case "$rc" in
+  0) echo "RESULT: ALL CD probes PASS on the real two-machine rig ($TOWER_HOST <-> $VM_HOSTNAME)" ;;
+  2) echo "RESULT: NO VERDICT — the run could not exercise its probes (setup/lifecycle failure). This is NOT a federation finding; nothing about P-008 is proved or disproved." ;;
+  *) echo "RESULT: one or more CD probes FAILED on the real two-machine rig ($TOWER_HOST <-> $VM_HOSTNAME)" ;;
+esac
 exit "$rc"
