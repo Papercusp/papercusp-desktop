@@ -60,20 +60,98 @@ _wd_setup() { echo "  ⚠ SETUP FAIL $*"; WD_SETUP=$((WD_SETUP+1)); }
 # An MCP-level error is a SETUP failure by construction: it means the product call
 # never ran, so nothing downstream of it may be reported as a federation finding.
 WD_MCP_OUT=""
+#
+# ⚠ JUDGE THE ENVELOPE, NEVER THE PAYLOAD — and this file earned that the hard way.
+# The first version of this function grepped the WHOLE response for
+#   "isError":true | "ok":false | "error":
+# On the very first live run, a perfectly SUCCESSFUL fleet:create was reported as a
+# SETUP FAIL, because the tool's own result PROSE contains an `"errors":[...]` array
+# of harmless advisories ("loop: no concrete harness available…"). Two `"error":`
+# substrings inside a 2,241-byte success response were enough.
+#
+# That is the SAME defect class this whole driver is built to prevent, one level up:
+# an instrument that cannot tell "the call failed" from "the call succeeded and
+# mentioned a failure". A grep over a JSON document cannot make that distinction,
+# because it has no idea which nesting level it is looking at — so this parses.
+# Envelope truth only: a JSON-RPC top-level `error`, or `result.isError === true`.
+# Anything inside result.content[].text is the TOOL'S payload and is none of this
+# function's business.
+#
+# (The bug was contained rather than costly, and that is the point: it surfaced as
+# rc=2 NO VERDICT with the gate cleanly restored, not as a red against the product.
+# A collapsed exit code would have filed it as a work-distribution defect.)
 _wd_mcp() {
-  local inst="$1" tool="$2" args="$3" out
+  local inst="$1" tool="$2" args="$3" out verdict
   out="$(rig_mcp "$inst" "$tool" "$args" 2>&1)"
   WD_MCP_OUT="$out"
   if [ -z "$out" ]; then
     _wd_setup "$tool on $inst returned NOTHING (transport failure — no verdict is available from this run)"
     return 1
   fi
-  # tr -d '\\' first: the payload is JSON-inside-JSON, so the error keys arrive escaped.
-  if printf '%s' "$out" | tr -d '\\' | grep -Eq '"isError" *: *true|"ok" *: *false|MCP_ERROR|NO_TOKEN|"error" *:'; then
-    _wd_setup "$tool on $inst ERRORED: $(printf '%s' "$out" | tr -d '\n' | tail -c 320)"
-    return 1
-  fi
-  return 0
+  # The sidecar answers text/event-stream, so the JSON rides on a `data:` line.
+  verdict="$(printf '%s' "$out" | python3 -c '
+import sys, json
+raw = sys.stdin.read()
+doc = None
+for line in raw.splitlines():
+    line = line.strip()
+    if line.startswith("data:"):
+        line = line[5:].strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        doc = json.loads(line)
+    except Exception:
+        continue
+if doc is None:
+    print("UNPARSEABLE no JSON-RPC document in the response")
+    raise SystemExit(0)
+if isinstance(doc.get("error"), dict):
+    e = doc["error"]
+    print("RPCERROR %s %s" % (e.get("code"), str(e.get("message"))[:200]))
+    raise SystemExit(0)
+res = doc.get("result")
+texts = []
+if isinstance(res, dict):
+    for c in (res.get("content") or []):
+        if isinstance(c, dict) and c.get("type") == "text":
+            texts.append(str(c.get("text", "")))
+if isinstance(res, dict) and res.get("isError") is True:
+    print("TOOLERROR(isError) %s" % (" ".join(texts))[:280].replace("\n", " "))
+    raise SystemExit(0)
+# These tools ALSO refuse with a clean MCP envelope and `ok:false` in their own
+# payload (measured: resource:delegate answering `hive_required` returns
+# result.content[0].text = {"ok":false,"error":"hive_required",...} with isError
+# UNSET). So the payload has to be read too — but read as a DOCUMENT, at its top
+# level only. That is what separates a refusal from a success that merely carries a
+# nested `errors:[...]` advisory list.
+for t in texts:
+    s = t.strip()
+    if s.startswith("{"):
+        try:
+            p = json.loads(s)
+        except Exception:
+            continue
+        if isinstance(p, dict) and p.get("ok") is False:
+            print("TOOLREFUSED %s %s" % (p.get("error"), str(p.get("detail", ""))[:220].replace("\n", " ")))
+            raise SystemExit(0)
+    elif s.startswith("format:"):
+        # the toon rendering: a top-level `ok: false` line is the same refusal
+        for ln in s.splitlines():
+            if ln.strip() == "ok: false":
+                print("TOOLREFUSED(toon) %s" % s[:220].replace("\n", " "))
+                raise SystemExit(0)
+print("OK")
+' 2>/dev/null)"
+  case "$verdict" in
+    OK) return 0 ;;
+    "")
+      _wd_setup "$tool on $inst — could not evaluate the response envelope (parser produced nothing). Refusing to call this either a success or a product failure"
+      return 1 ;;
+    *)
+      _wd_setup "$tool on $inst ERRORED: $verdict"
+      return 1 ;;
+  esac
 }
 
 # Bounded poll of a count query on one host. Echoes 1 (satisfied) / 0 (never).
@@ -109,8 +187,13 @@ scenario_p202_workdist() {
   # SETUP b: the VM donates the CHEAPEST possible seat. haiku/low/count 1 is
   # deliberate — the honor leg boots a real agent, and this run must not be a
   # meaningful draw on inference budget.
+  # `hive` is NOT optional here. This workspace hosts TWO shared hives (papercusp and
+  # shared-hive-test-hive-2), so resource:delegate refuses with `hive_required` rather
+  # than guessing — "without it the seat would be delegated locally but never
+  # discoverable pot-wide", i.e. WD-2 would then fail for a reason that is not a
+  # federation defect at all. Found by calibrating the MCP detector against a real refusal.
   _wd_mcp vm 'resource:delegate' \
-    "{\"fleetSlug\":\"$WD_FLEET\",\"kind\":\"agent_slot\",\"model\":\"haiku\",\"effort\":\"low\",\"count\":1}" \
+    "{\"fleetSlug\":\"$WD_FLEET\",\"kind\":\"agent_slot\",\"model\":\"haiku\",\"effort\":\"low\",\"count\":1,\"hive\":\"$WD_HIVE\"}" \
     || return 2
   echo "    VM delegated 1 haiku/low agent_slot to '$WD_FLEET'"
 
@@ -153,7 +236,7 @@ scenario_p202_workdist() {
   # this run, so it cannot pick up a stranger's open offer from the 19 already on
   # these hosts.
   _wd_mcp tower 'fleet:request_remote_spawn' \
-    "{\"fleet\":\"$WD_FLEET\",\"plan\":\"$WD_PLAN\",\"count\":1}" \
+    "{\"fleet\":\"$WD_FLEET\",\"plan\":\"$WD_PLAN\",\"count\":1,\"hive\":\"$WD_HIVE\"}" \
     || return 2
 
   if [ "$(_wd_wait tower p2p_work_offers "fleet_slug='$WD_FLEET' AND offer_kind='spawn_request' AND origin='local'" 20)" = 1 ]; then
@@ -185,18 +268,45 @@ scenario_p202_workdist() {
   # would produce a false "honor leg broken".
   # A disposition is therefore the honest signal that the hook ran at all: gate-off is
   # a SILENT skip by design (no disposition, no receipt, no consumption).
+  #
+  # ⚠ 'honoring' IS NOT AN OUTCOME — IT IS THE ATOMIC CLAIM. delegated-spawn-honor.ts
+  # gate 5 writes 'honoring' (WHERE NULL) purely so two concurrent hooks cannot
+  # double-spawn, and only then does it spawn and settle to 'honored' or
+  # 'refused:<code>' (both written with { expect: 'honoring' }).
+  # The first live run of this driver broke out of this loop on the FIRST non-empty
+  # value, caught 'honoring' at ~0s, and WD-6 then judged an IN-FLIGHT operation as a
+  # finished one — reporting "honored but consumed ZERO seats" as a product red. The
+  # true terminal state seconds later was 'honored' with 1 seat consumed and a receipt
+  # emitted. That is a SAMPLING race in the probe, not a defect in the subject, and it
+  # is the same rule as everywhere else in this file: do not assert a result before the
+  # thing that produces it has finished.
+  # So: poll for a TERMINAL disposition, and treat a claim that never settles as its
+  # own distinct finding rather than as an unbacked honor.
   local waited=0
   while [ "$waited" -lt 300 ]; do
     disp="$(_wd_one vm "SELECT coalesce(local_disposition,'') FROM harness_shared.p2p_work_offers WHERE offer_id='$req_offer';")"
-    [ -n "$disp" ] && break
+    case "$disp" in
+      honored|refused:*) break ;;
+    esac
     sleep 5; waited=$((waited+5))
   done
-  if [ -n "$disp" ]; then
-    _wd_ok "WD-5 SPAWN: honor hook ran on the VM after ~${waited}s — local_disposition='$disp'"
-  else
-    _wd_bad "WD-5 SPAWN — the VM never disposed $req_offer within 300s. The honor hook stayed silent even though the accept-delegated-seats gate was armed BEFORE the request federated (a silent skip past an armed gate)"
-    return 1
-  fi
+  case "$disp" in
+    honored|refused:*)
+      _wd_ok "WD-5 SPAWN: honor hook ran and SETTLED on the VM after ~${waited}s — local_disposition='$disp'"
+      ;;
+    honoring)
+      _wd_bad "WD-5 SPAWN — the VM claimed $req_offer ('honoring') but never settled it within 300s. The atomic claim is dangling: no 'honored', no 'refused:<code>'. That is a stuck honor, distinct from a silent skip and distinct from a refusal"
+      return 1
+      ;;
+    "")
+      _wd_bad "WD-5 SPAWN — the VM never disposed $req_offer within 300s. The honor hook stayed silent even though the accept-delegated-seats gate was armed BEFORE the request federated (a silent skip past an armed gate)"
+      return 1
+      ;;
+    *)
+      _wd_bad "WD-5 SPAWN — unrecognised disposition '$disp' for $req_offer (the honor path's contract is honoring -> honored | refused:<code>)"
+      return 1
+      ;;
+  esac
 
   echo
   echo "── WD-6  COMPLETE: the outcome is BACKED, not just self-reported ──"
@@ -207,11 +317,11 @@ scenario_p202_workdist() {
   local consumed
   consumed="$(_wd_one vm "SELECT count(*) FROM harness_shared.agent_seat_consumptions WHERE fleet_slug='$WD_FLEET';")"
   case "$disp" in
-    honored*|honoring*)
+    honored)
       if [ -n "$consumed" ] && [ "$consumed" != "0" ]; then
-        _wd_ok "WD-6 COMPLETE: disposition '$disp' is BACKED by $consumed real seat consumption(s) on the VM"
+        _wd_ok "WD-6 COMPLETE: disposition 'honored' is BACKED by $consumed real seat consumption(s) on the VM"
       else
-        _wd_bad "WD-6 COMPLETE — the VM reports '$disp' but consumed ZERO seats for '$WD_FLEET'. 'opened' is not 'spawned'; on macOS the local login is ASSUMED (assumed-darwin-keychain), so an unbacked honor claim is exactly the failure this leg exists to catch"
+        _wd_bad "WD-6 COMPLETE — the VM reports 'honored' but consumed ZERO seats for '$WD_FLEET'. 'opened' is not 'spawned'; on macOS the local login is ASSUMED (assumed-darwin-keychain), so an unbacked honor claim is exactly the failure this leg exists to catch"
       fi
       ;;
     refused:*)
@@ -241,6 +351,13 @@ scenario_p202_workdist() {
   # appeared on the tower. WD-2 above is the control that makes this measurement mean
   # something today.
   local vm_rcpt tower_rcpt
+  # ⚠ THE MODULE HEADER SAYS "Success needs no receipt — the members' federated
+  # presence IS the signal". MEASURED ON BUILD #8, THAT IS OUT OF DATE: the honor
+  # path emits a kind='honored' receipt too (delegated-spawn-honor.ts ~line 1029), and
+  # the first live run of this driver produced one. So a SUCCESS is origin-observable
+  # through exactly the same channel as a refusal, and this leg asserts it either way
+  # rather than excusing the success case. The prose was trusted; the artifact was
+  # probed; the artifact won.
   vm_rcpt="$(_wd_one vm "SELECT count(*) FROM harness_shared.p2p_receipts WHERE offer_id='$req_offer';")"
   if [ -z "$vm_rcpt" ] || [ "$vm_rcpt" = "0" ]; then
     case "$disp" in
@@ -248,7 +365,7 @@ scenario_p202_workdist() {
         _wd_bad "WD-7 ORIGIN-OBSERVABLE — the VM refused ('$disp') but emitted NO receipt at all for $req_offer. A refusal past gate 2 is contractually LOUD (D-004 no-silent-drops); the origin can never learn why"
         ;;
       *)
-        _wd_skip "WD-7 ORIGIN-OBSERVABLE — DETECTED: disposition '$disp' emitted no receipt, which is the documented contract for a SUCCESS (the members' federated presence is the signal, not a receipt). Nothing to carry, so origin-observability of the OUTCOME is not measured by this run"
+        _wd_skip "WD-7 ORIGIN-OBSERVABLE — DETECTED: disposition '$disp' emitted no receipt on this build, so there is nothing to carry and origin-observability of the OUTCOME is NOT measured by this run. (Older prose says success needs no receipt; build #8 does emit one, so read this SKIP as 'unexpected', not 'as designed'.)"
         ;;
     esac
   else
