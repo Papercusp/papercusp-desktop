@@ -134,6 +134,29 @@ echo "=============================================================="
 echo
 echo "=== 0. controls + host census (does this box let the run fail?) ==="
 
+# C0 ABORTS rather than accumulating, because it is the one control whose
+# violation makes the REST of this script destructive-for-nothing. Section 4
+# `rm -rf`s /Applications/Papercusp{,' GUI',' Server'}.app — including the bundle
+# the com.papercusp.server LaunchDaemon executes — and section 6 then proves the
+# install by `open`ing the GUI. With no Aqua (GUI login) session, `open` CANNOT
+# work (launchd refuses: OSLaunchdErrorDomain Code=125 "Domain does not support
+# specified action"), so the run is guaranteed to delete the working install and
+# then fail to demonstrate a new one. Voiding here, before section 4, is the
+# difference between "this box cannot run the test" and a wrecked rig.
+# /dev/console is owned by the console user when someone is logged in and by root
+# at the login window; `who` is empty there. Measured 2026-09-02: this VM sits at
+# loginwindow with autoLoginUser set but not taking, so this is the live state,
+# not a hypothetical.
+CONSOLE_USER="$(stat -f %Su /dev/console 2>/dev/null)"
+if [ -z "$CONSOLE_USER" ] || [ "$CONSOLE_USER" = "root" ]; then
+  void "C0 no Aqua (GUI login) session: /dev/console owner='${CONSOLE_USER:-unreadable}', who='$(who 2>/dev/null | tr '\n' ';')' — \`open\` cannot launch a GUI app, so this run would DELETE the installed apps and then be unable to prove a fresh one"
+  note "ABORTING BEFORE THE DESTRUCTIVE SECTION — nothing has been removed."
+  note "Give the VM a console session (auto-login: com.apple.loginwindow autoLoginUser"
+  note "+ a CURRENT /etc/kcpassword, FileVault off), then re-run."
+  emit_verdict
+fi
+pass "C0 Aqua session present (console user '$CONSOLE_USER') — \`open\` can launch the GUI"
+
 HOST_NODE=$(command -v node 2>/dev/null)
 HOST_NPM=$(command -v npm 2>/dev/null)
 if [ -n "$HOST_NODE" ] || [ -n "$HOST_NPM" ]; then
