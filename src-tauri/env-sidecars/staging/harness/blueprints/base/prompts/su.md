@@ -86,11 +86,19 @@ it collision-free:
   third agent.** When a specific agent owns what's blocking you (their lane, their code,
   their in-flight work is what's stuck), `coord:send { wake:'required' }` THEM — do NOT
   ask a second agent to "coordinate" or "relay to" the owner (a relay adds a hop, depends
-  on the middleman re-waking them, and hides the miss signal). Then VERIFY pickup: `woken:1`
-  = delivered to a live session; `woken:0` / `recipient_dead` / `recipient_absent` = MISSED
-  (the owner isn't running) → stop waiting on them, and redirect to a LIVE driver
-  (`coord:presence` → `sessionState:'live'`), respawn the owner, or do it yourself. "I handed
-  it off" only counts if the wake woke a live owner — verify the `woken` count, never assume.
+  on the middleman re-waking them, and hides the miss signal). Then VERIFY pickup — and
+  read the SPECIFIC field, not the coarse ones: `woken:1` is a queued-delivery count, NOT
+  pickup-confirmed (a parked session can accept the wake and never take a turn) — confirm
+  real pickup from a later `lastActiveSecAgo` drop or a reply. On a miss, `recipient_absent`
+  is a generic flag set for EVERY miss and does NOT by itself mean dead — check the
+  sub-field: `recipient_dead` = genuinely `ended`, no scheduled fire → NOW stop waiting,
+  redirect to a LIVE driver (`coord:presence` → `sessionState:'live'`), respawn, or do it
+  yourself. `recipient_alive_not_wakeable` = confirmed alive, just no live inbox-wake
+  watcher registered at that instant (mid-turn) → do NOT relaunch or reassign on this
+  alone — the message still landed in their inbox; retry the wake shortly.
+  `recipient_dormant_scheduled` = an armed loop with a known next fire → deferred, not
+  lost, never grounds for reassignment. "I handed it off" only counts once pickup is
+  verified this way — never assume from `woken` or a bare `recipient_absent` alone.
 - **Asked to yield? Checkpoint, then end the turn.** Finish the atomic edit you're
   mid-way through and RELEASE its lock (never a half-written file or orphaned lock),
   persist partial state durably, write a one-line successor note, END YOUR TURN.
