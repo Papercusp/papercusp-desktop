@@ -74,6 +74,21 @@ cleanup() { rm -f "$BUILD_MARKER"; }
 trap cleanup EXIT
 
 cd "$ROOT"
+# tauri.conf.json sets bundle.createUpdaterArtifacts, so `tauri build` signs the updater
+# artifact AFTER the .deb is bundled and exits non-zero without a private key
+# ("A public key has been found, but no private key… TAURI_SIGNING_PRIVATE_KEY").
+# Measured 2026-09-02 08:13Z (endgame P-302): the .deb was already on disk when the
+# build "failed", and every caller of this script (npm run build, the live-federation
+# gate's base build, rig scripts) read that exit as "no artifact". Default the key the
+# same way bin/build-and-archive-deb.sh does — Tauri accepts a key PATH in this
+# variable — and only when the file exists, so a box without a key still fails loudly
+# on the signature step rather than silently shipping unsigned updater artifacts.
+if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+  _SIGNING_KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
+  if [[ -r "$_SIGNING_KEY_FILE" ]]; then
+    export TAURI_SIGNING_PRIVATE_KEY="$_SIGNING_KEY_FILE"
+  fi
+fi
 tauri "$TAURI_SUBCOMMAND" "${BUNDLE_ARGS[@]}" "${TAURI_ARGS[@]}"
 
 CARGO_TARGET_ROOT="$(
