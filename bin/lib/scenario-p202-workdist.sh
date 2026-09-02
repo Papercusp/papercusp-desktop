@@ -324,14 +324,31 @@ scenario_p202_workdist() {
         _wd_bad "WD-6 COMPLETE — the VM reports 'honored' but consumed ZERO seats for '$WD_FLEET'. 'opened' is not 'spawned'; on macOS the local login is ASSUMED (assumed-darwin-keychain), so an unbacked honor claim is exactly the failure this leg exists to catch"
       fi
       ;;
-    refused:*)
-      # A refusal is a legitimate P-202 outcome, NOT a rig failure to be retried into
-      # a green. What must hold is that it is loud, and that it did not quietly spend
-      # a seat on the way out.
+    refused:spawn_failed|refused:member_boot_unconfirmed)
+      # ⚠ "A REFUSAL MUST NOT SPEND" IS NOT THE PRODUCT'S CONTRACT, and asserting it
+      # here produced a false red on the second live run. Seats are taken by
+      # consumeSeatAtBoot — "Boot-time seat consumption (bootstrap-su, after the
+      # WI-1893 fleet stamp)" — i.e. BY THE MEMBER, at ITS boot, not by the honor path.
+      # So for the two post-boot refusal codes the member DID boot (and legitimately
+      # consumed) before its agent died or failed to prove a turn. A consumption is
+      # therefore EXPECTED here, and its ABSENCE is the surprising direction.
+      # (That the seat stays consumed after such a death is a known, separately-tracked
+      # seat-leak concern — WI-5317 — not something this drill re-files.)
       if [ -n "$consumed" ] && [ "$consumed" != "0" ]; then
-        _wd_bad "WD-6 COMPLETE — the VM REFUSED ('$disp') yet still consumed $consumed seat(s) for '$WD_FLEET' (fail-closed contract broken: a refusal must not spend)"
+        _wd_ok "WD-6 COMPLETE: post-boot refusal '$disp' with $consumed seat consumption(s) — consistent with consume-at-boot: the member booted, took its seat, then failed. The refusal CODE is this run's product finding; WD-7 decides whether the origin can see it"
       else
-        _wd_ok "WD-6 COMPLETE: the VM refused loudly ('$disp') and consumed no seats — fail-closed held. The refusal CODE is this run's product finding; WD-7 decides whether the origin can see it"
+        _wd_bad "WD-6 COMPLETE — '$disp' is a POST-BOOT refusal code, yet ZERO seats were consumed for '$WD_FLEET'. Either the member never actually booted (so this code is misreported) or consumeSeatAtBoot did not fire"
+      fi
+      ;;
+    refused:*)
+      # Every OTHER refusal code is a gate refusal reached BEFORE any member boots
+      # (expired, seat_ref_unknown, audience_refused, seats_exhausted,
+      # agent_runtime_missing, an account-resolution refusal). Nothing has booted, so
+      # nothing may have been spent. THIS is where fail-closed is actually testable.
+      if [ -n "$consumed" ] && [ "$consumed" != "0" ]; then
+        _wd_bad "WD-6 COMPLETE — the VM refused at a PRE-BOOT gate ('$disp') yet consumed $consumed seat(s) for '$WD_FLEET' (fail-closed broken: a gate refusal spends nothing, because no member ever boots)"
+      else
+        _wd_ok "WD-6 COMPLETE: pre-boot gate refusal '$disp' spent no seats — fail-closed held. The refusal CODE is this run's product finding; WD-7 decides whether the origin can see it"
       fi
       ;;
     *)
