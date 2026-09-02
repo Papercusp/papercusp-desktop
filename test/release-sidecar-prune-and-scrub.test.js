@@ -266,22 +266,34 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
   ]) {
     assert.equal(helper.includes(exact), true, `missing trust-toolchain pin: ${exact}`);
   }
-  // A DECLARED pin is not an APPLIED pin, and the gap is not hypothetical: gh shipped
-  // google.golang.org/grpc v1.83.0 inside GHSA-vp52-pcj8-j9qc's affected range precisely
-  // because no override existed for it, and the exact-string list above can only ever
-  // catch a pin someone remembered to declare. So walk every module-override variable the
-  // helper declares and require each one to be (a) requested via `go get` and (b) asserted
-  // against the BUILT binary — because `go get` raising a version and the binary actually
-  // embedding it are two different claims, and only the second one ships.
+  // A DECLARED pin is not an APPLIED pin. Every module-override variable must actually be
+  // requested via `go get`, or it is documentation that silently governs nothing.
   const declaredOverrides = [...helper.matchAll(
     /^(PAPERCUSP_VM_(?:GH|KOPIA)_(?:X_[A-Z]+|GRPC)_VERSION)=/gm,
   )].map((m) => m[1]);
   assert.ok(declaredOverrides.length >= 8,
     `expected the helper to declare several module overrides, found ${declaredOverrides.length}`);
   for (const name of declaredOverrides) {
-    const binary = name.startsWith('PAPERCUSP_VM_GH_') ? 'gh' : 'kopia';
     assert.ok(helper.includes(`@$${name}"`),
       `${name} is declared but never requested via go get — a pin nothing applies`);
+  }
+
+  // Stronger requirement, but only where the evidence supports it. `go get` RAISING a
+  // version and the shipped binary actually EMBEDDING it are two different claims, and
+  // only the second one ships — so a pin bumped for a CVE must be asserted against the
+  // built binary. This list is deliberately the set MEASURED to be embedded rather than
+  // every declared override: the 2026-09-02 SBOM named google.golang.org/grpc inside both
+  // /bin/gh and /bin/kopia, and x/crypto/x/net/x/text are already asserted for kopia.
+  // x/tools is NOT here on purpose — nothing has shown it survives into either binary,
+  // and asserting an absent module would fail the build rather than protect it. Add a
+  // module here once an SBOM shows it embedded, not on the assumption that it is.
+  for (const [binary, name] of [
+    ['gh', 'PAPERCUSP_VM_GH_GRPC_VERSION'],
+    ['kopia', 'PAPERCUSP_VM_KOPIA_GRPC_VERSION'],
+    ['kopia', 'PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION'],
+    ['kopia', 'PAPERCUSP_VM_KOPIA_X_NET_VERSION'],
+    ['kopia', 'PAPERCUSP_VM_KOPIA_X_TEXT_VERSION'],
+  ]) {
     assert.match(helper, new RegExp(`_pc_vm_assert_module[^\\n]*bin/${binary}[^\\n]*\\$${name}"`),
       `${name} is applied but never asserted against the built ${binary} binary — a silent pin`);
   }
