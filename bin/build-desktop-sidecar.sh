@@ -91,6 +91,18 @@ if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" \
   echo "       Export it at run time (never write it into a tracked file), then re-run." >&2
   echo "       Refusing now because the final identity audit cannot certify without it." >&2
   exit 2
+elif [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" != "1" ]]; then
+  # EI-22084619262074810: this fail-late gap cost a full ~35min sidecar bake before
+  # build-mac-cross.sh's downstream [sidecar-freshness:darwin] gate discovered the
+  # missing attestation (build-mac-cross.sh:sidecar-freshness.js:release-audit-unattested).
+  # Say so loudly, now, before any expensive work starts. NON-BLOCKING on purpose: an
+  # unaudited dev/dogfood sidecar remains the correct default for ordinary local builds.
+  echo "NOTE: building WITHOUT a release identity audit (PAPERCUSP_RELEASE_AUDIT is not 1)." >&2
+  echo "      This sidecar will be REFUSED by build-mac-cross.sh's sidecar-freshness gate" >&2
+  echo "      and by release cuts, which both require a releaseIdentityAudit attestation." >&2
+  echo "      If this build feeds a cross-build or release cut, stop now and re-run with:" >&2
+  echo "        PAPERCUSP_RELEASE_AUDIT=1 PAPERCUSP_RELEASE_OWNER_NAME=<name>" >&2
+  echo "      (canonical supply: source ~/.papercusp/release-identity.env, set -a, at runtime)." >&2
 fi
 unset _release_owner_name
 

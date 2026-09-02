@@ -161,6 +161,10 @@ test('a required release audit fails closed without a successful sidecar attesta
   assert.equal(blocksBuild(r.verdict), true);
   assert.match(describe(r), /UNAUDITED SIDECAR/);
   assert.match(describe(r), /PAPERCUSP_RELEASE_AUDIT=1/);
+  // EI-22084619262074810: the FATAL text used to name only the env var, not WHERE
+  // to get its value — a caller who already knows they need PAPERCUSP_RELEASE_AUDIT=1
+  // still has to go find PAPERCUSP_RELEASE_OWNER_NAME's canonical source by hand.
+  assert.match(describe(r), /~\/\.papercusp\/release-identity\.env/);
 });
 
 test('a required release audit passes only with the final-scan attestation', () => {
@@ -576,6 +580,25 @@ test('build-desktop-sidecar.sh RECORDS provenance into the published sidecar', (
   assert.ok(scan > 0, 'the final assembled-sidecar identity scan must exist');
   assert.ok(attestation > scan,
     'the release audit attestation must be recorded only AFTER the final scan succeeds');
+});
+
+test('build-desktop-sidecar.sh WARNS upfront when building without a release identity audit', () => {
+  // EI-22084619262074810: a clean-clone sidecar built WITHOUT PAPERCUSP_RELEASE_AUDIT=1
+  // completed successfully and only got refused ~35 minutes later, downstream, by
+  // build-mac-cross.sh's sidecar-freshness gate. The fix is fail-EARLY information, not
+  // a behavior change — an unaudited dev/dogfood sidecar must still succeed here.
+  const src = fs.readFileSync(path.join(BIN, 'build-desktop-sidecar.sh'), 'utf8');
+  const ownerNameCheckAt = src.indexOf('PAPERCUSP_RELEASE_AUDIT=1 requires a non-empty PAPERCUSP_RELEASE_OWNER_NAME');
+  const advisoryAt = src.indexOf('building WITHOUT a release identity audit');
+  const firstExpensiveWorkAt = src.indexOf('emit-build-provenance.sh');
+  assert.ok(ownerNameCheckAt > 0, 'the existing AUDIT=1-requires-owner-name refusal must still exist');
+  assert.ok(advisoryAt > 0, 'an unaudited build must print an upfront advisory that downstream consumers will refuse it');
+  assert.ok(
+    advisoryAt < firstExpensiveWorkAt,
+    'the advisory must print before the first expensive/toolchain work, not after — that is the whole point',
+  );
+  assert.match(src, /build-mac-cross\.sh/, 'the advisory must name the actual downstream consumer that will refuse this sidecar');
+  assert.match(src, /~\/\.papercusp\/release-identity\.env/, 'the advisory must point at the canonical identity source, not just the env var name');
 });
 
 for (const script of ['build-mac-cross.sh', 'build-windows-cross.sh', 'build-and-archive-deb.sh']) {
