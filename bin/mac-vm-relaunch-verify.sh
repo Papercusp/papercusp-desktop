@@ -13,14 +13,65 @@
 # This script emits a machine-readable verdict.  The checks intentionally keep
 # running after a failure so the operator gets the complete relaunch picture;
 # `emit_verdict` at the end is the only exit path.
+#
+# THIS SCRIPT EMITS A VERDICT. exit 0 = PASS, 1 = FAIL, 2 = VOID.  (D-009 shape,
+# same as mac-vm-fresh-install-e2e.sh.)
+#
+# VOID exists because this script's whole method — quit the apps, then `open`
+# them again — silently stops being a test when the Mac has no Aqua (GUI login)
+# session.  `open` then cannot launch ANY GUI app: launchd refuses with
+# OSLaunchdErrorDomain Code=125 "Domain does not support specified action".
+# Run headless over SSH at the login window, every iteration failed identically
+# and the script reported "VERDICT: FAIL (3 failed relaunch(es))" — a red that
+# reads exactly like the WI-3139 crash regression this script exists to detect,
+# but which says nothing whatever about the app.  A verdict that cannot tell
+# "the app is broken" from "the environment cannot run this test" is not a
+# signal, which is the same defect D-009 was written about one level up.
+#
+# The control is checked FIRST, BEFORE any teardown, and that ordering is the
+# point.  The teardown (osascript quit + pkill of GUI, Server and sidecar) is
+# unconditional, and the ONLY thing that brings those processes back is the
+# `open` call that cannot work here — so a headless run used to leave the VM
+# with zero Papercusp processes and the operator DOWN, needing a manual
+# `sudo launchctl kickstart -k system/com.papercusp.server` to recover.  Voiding
+# before the first pkill means an unrunnable run destroys nothing at all.
+# restore_server() below is defence-in-depth for a run that dies mid-flight.
 GUILOG="$HOME/.papercusp/logs/gui.log"
 N=3
 PASS=0
 FAILURES=0
+VOIDS=0
+TORE_DOWN=0
+
+void() { echo "  VOID  $*"; VOIDS=$((VOIDS+1)); }
+
+# Defence-in-depth: if we tore the apps down and are exiting for ANY reason with
+# the Server still absent, put it back.  The Server runs as a system LaunchDaemon
+# (/Library/LaunchDaemons/com.papercusp.server.plist, RunAtLoad+KeepAlive), so it
+# is restorable headless; the GUI is not, and deliberately is not attempted here.
+restore_server() {
+  [ "$TORE_DOWN" = "1" ] || return 0
+  command -v launchctl >/dev/null 2>&1 || return 0
+  pgrep -f 'Papercusp Server.app/Contents/Resources/sidecar' >/dev/null 2>&1 && return 0
+  echo "  [restore] Server is down on exit — kickstarting com.papercusp.server"
+  if sudo -n launchctl kickstart -k system/com.papercusp.server >/dev/null 2>&1; then
+    echo "  [restore] kickstart issued"
+  else
+    echo "  [restore] WARNING: kickstart FAILED — the Server is still DOWN, recover with:"
+    echo "  [restore]   sudo launchctl kickstart -k system/com.papercusp.server"
+  fi
+}
+trap restore_server EXIT
 
 emit_verdict() {
   echo
   echo "================ VERDICT ================"
+  if [ "$VOIDS" -gt 0 ]; then
+    echo "VERDICT: VOID ($VOIDS control(s) violated) — this run could not have FAILED,"
+    echo "               so it is not evidence either way. NOT an app failure."
+    echo "=========================================="
+    exit 2
+  fi
   if [ "$FAILURES" -gt 0 ]; then
     echo "VERDICT: FAIL ($FAILURES failed relaunch(es))"
     echo "=========================================="
@@ -39,6 +90,33 @@ if [ "${MAC_VM_VERDICT_TEST_FAIL:-0}" = "1" ]; then
   emit_verdict
 fi
 
+# Test-only escape hatch for the VOID path, mirroring the FAIL one above so the
+# control below can be exercised without an unrunnable Mac.
+if [ "${MAC_VM_VERDICT_TEST_VOID:-0}" = "1" ]; then
+  void "synthetic control violation requested by the verdict guard"
+  emit_verdict
+fi
+
+# ── CONTROL C1: an Aqua (GUI login) session must exist ───────────────────────
+# Run FIRST, before any teardown. `open` needs a GUI session; without one it
+# fails with OSLaunchdErrorDomain Code=125 and EVERY iteration "fails" for a
+# reason that has nothing to do with the app.
+# /dev/console is owned by the console user when someone is logged in, and by
+# root at the login window — the cheapest reliable discriminator, and it needs
+# no GUI itself. Corroborated by `who` (empty at the login window).
+CONSOLE_USER="$(stat -f %Su /dev/console 2>/dev/null)"
+if [ -z "$CONSOLE_USER" ] || [ "$CONSOLE_USER" = "root" ]; then
+  echo "=== control C1: Aqua session ==="
+  void "C1 no Aqua (GUI login) session: /dev/console owner is '${CONSOLE_USER:-unreadable}', \`who\` = '$(who 2>/dev/null | tr '\n' ';')'."
+  echo "        \`open\` cannot launch a GUI app in this state (OSLaunchdErrorDomain Code=125),"
+  echo "        so GUI relaunch is UNTESTABLE here. This is NOT a WI-3139 regression."
+  echo "        Nothing was torn down. To make this testable, give the VM a console"
+  echo "        session (auto-login: /Library/Preferences/com.apple.loginwindow"
+  echo "        autoLoginUser + a CURRENT /etc/kcpassword, FileVault off), then re-run."
+  emit_verdict
+fi
+echo "=== control C1: Aqua session OK (console user '$CONSOLE_USER') ==="
+
 guipid() { pgrep -f 'Papercusp GUI.app/Contents/MacOS' 2>/dev/null | head -1; }
 ophealth() {
   for P in $(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -i node | grep -oE '127.0.0.1:[0-9]+' | grep -oE '[0-9]+$' | sort -u); do
@@ -53,6 +131,8 @@ for i in $(seq 1 $N); do
   echo
   echo "########## RELAUNCH $i/$N ##########"
   # --- quit both apps (full relaunch — matches the crash repro) ---
+  # From here the Server is down until `open` brings it back; arm the restore trap.
+  TORE_DOWN=1
   osascript -e 'tell application id "com.papercusp.gui" to quit' 2>/dev/null
   osascript -e 'tell application id "com.papercusp.server" to quit' 2>/dev/null
   sleep 4
