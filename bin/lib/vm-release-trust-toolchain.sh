@@ -25,7 +25,28 @@
 # changed x/net alone already invalidates the cache. Both are kept deliberately — the
 # revision is the human-legible marker, the pin comparison is the one that cannot be
 # forgotten.
-PAPERCUSP_VM_TRUST_REVISION="2026-08-29-r2"
+# 2026-09-02-r1 — google.golang.org/grpc -> v1.83.1 in BOTH Go binaries, for
+# GHSA-vp52-pcj8-j9qc / CVE-2026-84304 (High, CVSS 4.0 8.7): gRPC-Go heap memory
+# exhaustion via HTTP/2 DATA frame fragmentation. Affected range is `<= 1.83.0`, fixed
+# in 1.83.1 — read from the grype DB's own record, which is the same DB the sidecar's
+# fail-closed vulnerability gate consults, so the gate and this pin cannot disagree.
+# The advisory was PUBLISHED 2026-09-01T21:32Z, i.e. AFTER the r18 bundle was built on
+# 2026-08-31 — r18 passed this gate legitimately and was not negligent; it simply
+# predates the disclosure. Measured on the r19 build, which went RED with exactly two
+# High matches and nothing else:
+#   [High] /bin/gh    — google.golang.org/grpc@v1.83.0 GHSA-vp52-pcj8-j9qc
+#   [High] /bin/kopia — google.golang.org/grpc@v1.82.1 GHSA-vp52-pcj8-j9qc
+# NOTE THE ASYMMETRY, because it is the part that bit: kopia already had an explicit
+# grpc pin (so it sat at the pinned v1.82.1), while gh had NONE and floated to whatever
+# MVS resolved — v1.83.0. Both are affected, so gh needed a NEW pin rather than a bump.
+# An unpinned module is not "already current"; it is unmeasured, and it only became
+# visible here because the SBOM names every module in the shipped binary.
+# NO CO-PIN IS NEEDED, and this was resolved from the module proxy BEFORE rebuilding
+# rather than discovered one 14-minute build at a time (the lesson the x/net co-pin
+# below cost). grpc v1.83.1's go.mod requires x/net v0.55.0, x/text v0.37.0 (indirect)
+# and x/crypto v0.51.0 (indirect) — every one BELOW the versions already pinned here
+# (v0.58.0 / v0.41.0 / v0.55.0), so MVS takes ours and no existing pin moves.
+PAPERCUSP_VM_TRUST_REVISION="2026-09-02-r1"
 
 PAPERCUSP_VM_NODE_VERSION="v24.18.1"
 PAPERCUSP_VM_NODE_LINUX_X64_SHA256="d6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0"
@@ -39,6 +60,12 @@ PAPERCUSP_VM_GH_SOURCE_SHA256="52e8e45fb5f5431dd269966c97bbf398fd5c8f1b6fafdc02a
 PAPERCUSP_VM_GH_X_MOD_VERSION="v0.40.0"
 PAPERCUSP_VM_GH_X_NET_VERSION="v0.58.0"
 PAPERCUSP_VM_GH_X_TOOLS_VERSION="v0.49.0"
+# NEW in 2026-09-02-r1, and note it is a NEW PIN rather than a bump: gh had no grpc
+# override at all, so the module floated on MVS and shipped v1.83.0 — inside the
+# GHSA-vp52-pcj8-j9qc affected range `<= 1.83.0`. Pinning it makes the version a
+# declared, asserted fact instead of a resolution artifact, which is the only reason
+# the kopia leg's exposure was already visible while this one was not.
+PAPERCUSP_VM_GH_GRPC_VERSION="v1.83.1"
 
 PAPERCUSP_VM_KOPIA_VERSION="0.23.1"
 PAPERCUSP_VM_KOPIA_COMMIT="72ec08fd8edb86c67ed27099bf1b955e1f308ffa"
@@ -61,10 +88,14 @@ PAPERCUSP_VM_KOPIA_X_NET_VERSION="v0.58.0"
 # than an MVS upgrade — the same failure shape as the x/net pin above, which is why it
 # was worth resolving all of them from the module proxy before rebuilding instead of
 # discovering them one expensive build at a time. Checked at the same time and NOT
-# needing a bump: grpc v1.82.1 (wants only x/net v0.53.0 / x/text v0.36.0, both below
-# these, so MVS takes ours) and x/mod v0.40.0 (wants x/tools, unpinned for kopia).
+# needing a bump: x/mod v0.40.0 (wants x/tools, unpinned for kopia).
+# (2026-09-02-r1 CORRECTION: this comment used to also say grpc v1.82.1 did not need a
+# bump. That was true of its CO-PIN pressure and remains true — v1.83.1 still wants only
+# x/net v0.55.0 / x/text v0.37.0, below ours — but it was never a statement about grpc's
+# own vulnerability status, and it read like one. grpc moved to v1.83.1 for
+# GHSA-vp52-pcj8-j9qc; see the trust-revision block at the top.)
 PAPERCUSP_VM_KOPIA_X_TEXT_VERSION="v0.41.0"
-PAPERCUSP_VM_KOPIA_GRPC_VERSION="v1.82.1"
+PAPERCUSP_VM_KOPIA_GRPC_VERSION="v1.83.1"
 
 PAPERCUSP_VM_POSTGRES_VERSION="18.6"
 PAPERCUSP_VM_POSTGRES_SOURCE_SHA256="555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f"
@@ -173,7 +204,8 @@ _pc_vm_cache_valid() {
     "moduleOverrides": {
       "golang.org/x/mod": "$PAPERCUSP_VM_GH_X_MOD_VERSION",
       "golang.org/x/net": "$PAPERCUSP_VM_GH_X_NET_VERSION",
-      "golang.org/x/tools": "$PAPERCUSP_VM_GH_X_TOOLS_VERSION"
+      "golang.org/x/tools": "$PAPERCUSP_VM_GH_X_TOOLS_VERSION",
+      "google.golang.org/grpc": "$PAPERCUSP_VM_GH_GRPC_VERSION"
     }
   },
   "kopia": {
@@ -260,7 +292,8 @@ _pc_vm_build_go_tools() {
     "$go_bin" get \
       "golang.org/x/mod@$PAPERCUSP_VM_GH_X_MOD_VERSION" \
       "golang.org/x/net@$PAPERCUSP_VM_GH_X_NET_VERSION" \
-      "golang.org/x/tools@$PAPERCUSP_VM_GH_X_TOOLS_VERSION"
+      "golang.org/x/tools@$PAPERCUSP_VM_GH_X_TOOLS_VERSION" \
+      "google.golang.org/grpc@$PAPERCUSP_VM_GH_GRPC_VERSION"
     CGO_ENABLED=0 "$go_bin" build -trimpath -buildvcs=false \
       -ldflags "-buildid= -X github.com/cli/cli/v2/internal/build.Version=${PAPERCUSP_VM_GH_VERSION}-papercusp.1 -X github.com/cli/cli/v2/internal/build.Date=2026-08-20" \
       -o "$output/bin/gh" ./cmd/gh
