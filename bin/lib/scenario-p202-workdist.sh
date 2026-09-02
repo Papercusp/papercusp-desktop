@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+# scenario-p202-workdist.sh — the LIVE-2 CROSS-MACHINE WORK-DISTRIBUTION probes
+# (endgame p2p-public-release-endgame-2026-09-01 P-202; = remaining-lanes P-205/P-508,
+# authorized for fresh execution by D-073).
+#
+# Driven by bin/vm-rig/p202-workdist.sh against the REAL two-machine rig
+# (tower <-> Mac VM). This file holds ONLY probes; every seam it needs is supplied
+# by the driver:
+#
+#   drv_psql <inst> <sql>        the SQL seam            (inst = tower | vm)
+#   rig_mcp  <inst> <tool> <json>  the product MCP seam  (echoes the raw response)
+#   wd_bundle_has <inst> <sym>   is <sym> in that host's shipped bundle (rc 0/1)
+#   WD_FLEET / WD_PLAN / WD_RUNID   the throwaway identifiers for this run
+#
+# ── WHY THIS EXISTS SEPARATELY FROM bin/work-distribution-drill.sh ────────────
+# That drill is SINGLE-BOX and says so: its FED-REAP leg is "UNPROVABLE ON ONE BOX
+# BY CONSTRUCTION". The matrix scenarios (scenarios/{fleet-directory,seat-offer,
+# spawn-request,work-item,fed-reap}.sh, orders 55-59) prove the federation legs on
+# two LOCAL FRAMES, and spawn-request.sh's own header defers the one leg that
+# matters most: "The HONOR leg (gate ON -> real member terminals) deliberately
+# rides the P-010 live 2-box drill, not the matrix: a matrix run must not boot LLM
+# sessions." THIS is that 2-box drill. It drives the honor leg on real hardware.
+#
+# ── THE FOUR RULES THIS FILE IS BUILT AROUND (each cost a run to learn) ───────
+# 1. ASSERT SETUP SUCCEEDED BEFORE ASSERTING ITS RESULT. A probe whose setup
+#    failure is indistinguishable from its finding manufactures false product
+#    defects. Every MCP write here goes through _wd_mcp, which SEPARATES "the call
+#    errored" (SETUP FAIL, no verdict) from "the call worked and the row did not
+#    appear" (a real finding).
+# 2. EVERY NEGATIVE ASSERTION NEEDS A POSITIVE CONTROL. WD-7 asserts a receipt
+#    reached the ORIGIN. Its control is WD-3, which proves the very same VM->tower
+#    direction carried a row EARLIER IN THIS SAME RUN. Without that, a dead wire
+#    and a dropped receipt are the same observation.
+# 3. A RUN THAT COULD NOT EXERCISE ITS PROBES EXITS DIFFERENTLY FROM ONE WHOSE
+#    PROBES FAILED — rc 2 "NO VERDICT" vs rc 1 "FAILED". Collapsing those is how a
+#    rig problem gets filed as a product bug.
+# 4. THE VM'S EMBEDDED PG PORT IS RANDOMIZED PER BOOT. The driver re-discovers it;
+#    a stale port makes every query fail to connect and reads as durable loss.
+#
+# ── AND ONE MORE, SPECIFIC TO THIS LANE ──────────────────────────────────────
+# "opened: N/N" IS NOT PROOF OF SPAWN. On macOS probeLocalClaudeLogin returns
+# usable:true with evidence 'assumed-darwin-keychain' — it ASSUMES the login rather
+# than verifying it (honor-account-resolution.ts), so a member can be "opened" and
+# then die without taking a turn. The product has its own guard for this
+# (refused:member_boot_unconfirmed) and the rig has produced it live. So WD-8 never
+# reads the honor path's self-report as success: an 'honored' disposition must be
+# backed by an actual seat consumption row, or it is a red.
+#
+# Exit: 0 every probe green · 1 one or more red · 2 setup failed (NO VERDICT)
+
+WD_PASS=0; WD_FAIL=0; WD_SKIP=0; WD_SETUP=0
+_wd_ok()    { echo "  ✓ $*"; WD_PASS=$((WD_PASS+1)); }
+_wd_bad()   { echo "  ✗ $*"; WD_FAIL=$((WD_FAIL+1)); }
+_wd_skip()  { echo "  ⏭ SKIP $*"; WD_SKIP=$((WD_SKIP+1)); }
+# A SETUP failure is NOT a product verdict. It means the run could not be performed.
+_wd_setup() { echo "  ⚠ SETUP FAIL $*"; WD_SETUP=$((WD_SETUP+1)); }
+
+# ── the MCP seam, with the setup/finding split baked in ───────────────────────
+# Echoes the raw response on stdout; returns 0 only when the call itself succeeded.
+# An MCP-level error is a SETUP failure by construction: it means the product call
+# never ran, so nothing downstream of it may be reported as a federation finding.
+WD_MCP_OUT=""
+_wd_mcp() {
+  local inst="$1" tool="$2" args="$3" out
+  out="$(rig_mcp "$inst" "$tool" "$args" 2>&1)"
+  WD_MCP_OUT="$out"
+  if [ -z "$out" ]; then
+    _wd_setup "$tool on $inst returned NOTHING (transport failure — no verdict is available from this run)"
+    return 1
+  fi
+  # tr -d '\\' first: the payload is JSON-inside-JSON, so the error keys arrive escaped.
+  if printf '%s' "$out" | tr -d '\\' | grep -Eq '"isError" *: *true|"ok" *: *false|MCP_ERROR|NO_TOKEN|"error" *:'; then
+    _wd_setup "$tool on $inst ERRORED: $(printf '%s' "$out" | tr -d '\n' | tail -c 320)"
+    return 1
+  fi
+  return 0
+}
+
+# Bounded poll of a count query on one host. Echoes 1 (satisfied) / 0 (never).
+# Deliberately count-based: a zero row-count and a failed connection look identical
+# in a bare psql result, so the caller must have proven the host answers SQL first
+# (WD-0 does exactly that, which is why it is a preflight and not a probe).
+_wd_wait() {
+  local inst="$1" table="$2" pred="$3" tries="${4:-45}" n
+  for _ in $(seq 1 "$tries"); do
+    n="$(drv_psql "$inst" "SELECT count(*) FROM harness_shared.$table WHERE $pred;" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$n" ] && [ "$n" != "0" ]; then echo 1; return; fi
+    sleep 2
+  done
+  echo 0
+}
+
+_wd_one() { drv_psql "$1" "$2" 2>/dev/null | tr -d '[:space:]'; }
+
+# ═════════════════════════════════════════════════════════════════════════════
+scenario_p202_workdist() {
+  local seat_offer="" req_offer="" disp="" rc
+
+  echo
+  echo "── WD-1  OFFER: the VM delegates agent seats to the tower's fleet ──"
+  # SETUP a: the fleet must exist on the OWNER before seats can be spent against it
+  # (request_remote_spawn refuses "no fleet '<slug>' in this workspace", and only the
+  # fleet LEADER may spend — creating it here makes this caller the leader).
+  _wd_mcp tower 'fleet:create' \
+    "{\"name\":\"$WD_FLEET\",\"description\":\"P-202 LIVE-2 cross-machine work-distribution acceptance $WD_RUNID\"}" \
+    || return 2
+  echo "    fleet '$WD_FLEET' created on tower (this caller is its leader)"
+
+  # SETUP b: the VM donates the CHEAPEST possible seat. haiku/low/count 1 is
+  # deliberate — the honor leg boots a real agent, and this run must not be a
+  # meaningful draw on inference budget.
+  _wd_mcp vm 'resource:delegate' \
+    "{\"fleetSlug\":\"$WD_FLEET\",\"kind\":\"agent_slot\",\"model\":\"haiku\",\"effort\":\"low\",\"count\":1}" \
+    || return 2
+  echo "    VM delegated 1 haiku/low agent_slot to '$WD_FLEET'"
+
+  # FINDING: the delegation must have PUBLISHED a local seat-offer on the VM.
+  # (WI-5447 is the sibling bug in the other direction — a revoked allotment
+  # leaving its offer 'open' — so the offer row is a fact worth asserting, not a
+  # restatement of the call above.)
+  if [ "$(_wd_wait vm p2p_work_offers "fleet_slug='$WD_FLEET' AND offer_kind='seat' AND origin='local'" 20)" = 1 ]; then
+    seat_offer="$(_wd_one vm "SELECT offer_id FROM harness_shared.p2p_work_offers WHERE fleet_slug='$WD_FLEET' AND offer_kind='seat' AND origin='local' LIMIT 1;")"
+    _wd_ok "WD-1 OFFER published on the VM: $seat_offer"
+  else
+    _wd_bad "WD-1 OFFER — resource:delegate succeeded but NO local seat-offer row exists on the VM for '$WD_FLEET' (publish leg failed silently)"
+    return 1
+  fi
+
+  echo
+  echo "── WD-2  the seat-offer federates VM -> TOWER, with unforgeable attribution ──"
+  # This is BOTH a leg and the POSITIVE CONTROL for WD-7. It proves the VM->tower
+  # direction carries rows in THIS run, so a later missing receipt cannot be
+  # explained away as a dead wire — and cannot be blamed on the wire either.
+  # author_pubkey ~ '^[0-9a-f]{64}$' is the exact-key authentication P-508 asks
+  # for: that stamp is applied by the RECEIVER from the substrate author, so a
+  # side-writer leaves it NULL or base64. Presence of the 64-hex form IS the verify.
+  if [ "$(_wd_wait tower p2p_work_offers "offer_id='$seat_offer' AND origin='remote' AND author_pubkey ~ '^[0-9a-f]{64}\$'" 60)" = 1 ]; then
+    _wd_ok "WD-2 seat-offer $seat_offer reached the TOWER origin='remote' with 64-hex substrate attribution (VM->tower wire PROVEN LIVE this run; exact-key auth green)"
+  else
+    # Distinguish "arrived unattributed" from "never arrived" — they are different
+    # defects and the second one invalidates WD-7's control.
+    if [ "$(_wd_one tower "SELECT count(*) FROM harness_shared.p2p_work_offers WHERE offer_id='$seat_offer';")" != "0" ]; then
+      _wd_bad "WD-2 seat-offer $seat_offer reached the tower but WITHOUT 64-hex author_pubkey attribution (exact-key authentication leg broken)"
+    else
+      _wd_bad "WD-2 seat-offer $seat_offer NEVER reached the tower — the VM->tower direction is not carrying rows, so WD-7 has no positive control and this run cannot judge origin-observability"
+    fi
+    return 1
+  fi
+
+  echo
+  echo "── WD-3  PULL: the tower authors the SIGNED spawn-request against that offer ──"
+  # request_remote_spawn matches seat-offers by fleet slug, and WD_FLEET is unique to
+  # this run, so it cannot pick up a stranger's open offer from the 19 already on
+  # these hosts.
+  _wd_mcp tower 'fleet:request_remote_spawn' \
+    "{\"fleet\":\"$WD_FLEET\",\"plan\":\"$WD_PLAN\",\"count\":1}" \
+    || return 2
+
+  if [ "$(_wd_wait tower p2p_work_offers "fleet_slug='$WD_FLEET' AND offer_kind='spawn_request' AND origin='local'" 20)" = 1 ]; then
+    req_offer="$(_wd_one tower "SELECT offer_id FROM harness_shared.p2p_work_offers WHERE fleet_slug='$WD_FLEET' AND offer_kind='spawn_request' AND origin='local' LIMIT 1;")"
+    _wd_ok "WD-3 PULL: signed spawn_request stored on the tower: $req_offer"
+  else
+    _wd_bad "WD-3 PULL — request_remote_spawn succeeded but no local spawn_request row exists on the tower for '$WD_FLEET' (author leg failed silently)"
+    return 1
+  fi
+
+  echo
+  echo "── WD-4  the spawn-request federates TOWER -> VM, signature-verified ──"
+  if [ "$(_wd_wait vm p2p_work_offers "offer_id='$req_offer' AND origin='remote' AND author_pubkey ~ '^[0-9a-f]{64}\$'" 90)" = 1 ]; then
+    _wd_ok "WD-4 spawn_request $req_offer reached the VM origin='remote' with 64-hex attribution (the projection verified the signature before applying)"
+  else
+    if [ "$(_wd_one vm "SELECT count(*) FROM harness_shared.p2p_work_offers WHERE offer_id='$req_offer';")" != "0" ]; then
+      _wd_bad "WD-4 spawn_request $req_offer reached the VM but WITHOUT 64-hex attribution"
+    else
+      _wd_bad "WD-4 spawn_request $req_offer NEVER reached the VM (tower->VM direction) — the honor path was never given anything to honor"
+    fi
+    return 1
+  fi
+
+  echo
+  echo "── WD-5  SPAWN: the VM's honor hook ACTS on the request ──"
+  # The gate was armed by the driver BEFORE WD-3, on purpose: delegated-spawn-honor.ts
+  # states there is NO re-trigger on a later ACCEPT_DELEGATED_SEATS flip — a request
+  # that lands while the gate is off sits un-disposed and EXPIRES. Arming afterwards
+  # would produce a false "honor leg broken".
+  # A disposition is therefore the honest signal that the hook ran at all: gate-off is
+  # a SILENT skip by design (no disposition, no receipt, no consumption).
+  local waited=0
+  while [ "$waited" -lt 300 ]; do
+    disp="$(_wd_one vm "SELECT coalesce(local_disposition,'') FROM harness_shared.p2p_work_offers WHERE offer_id='$req_offer';")"
+    [ -n "$disp" ] && break
+    sleep 5; waited=$((waited+5))
+  done
+  if [ -n "$disp" ]; then
+    _wd_ok "WD-5 SPAWN: honor hook ran on the VM after ~${waited}s — local_disposition='$disp'"
+  else
+    _wd_bad "WD-5 SPAWN — the VM never disposed $req_offer within 300s. The honor hook stayed silent even though the accept-delegated-seats gate was armed BEFORE the request federated (a silent skip past an armed gate)"
+    return 1
+  fi
+
+  echo
+  echo "── WD-6  COMPLETE: the outcome is BACKED, not just self-reported ──"
+  # The load-bearing asymmetry (delegated-spawn-honor.ts): a refusal is LOUD and
+  # carries a receipt; a SUCCESS needs no receipt because the members' federated
+  # presence IS the signal. So each branch is checked against a different witness,
+  # and neither is allowed to rest on the honor path's own prose.
+  local consumed
+  consumed="$(_wd_one vm "SELECT count(*) FROM harness_shared.agent_seat_consumptions WHERE fleet_slug='$WD_FLEET';")"
+  case "$disp" in
+    honored*|honoring*)
+      if [ -n "$consumed" ] && [ "$consumed" != "0" ]; then
+        _wd_ok "WD-6 COMPLETE: disposition '$disp' is BACKED by $consumed real seat consumption(s) on the VM"
+      else
+        _wd_bad "WD-6 COMPLETE — the VM reports '$disp' but consumed ZERO seats for '$WD_FLEET'. 'opened' is not 'spawned'; on macOS the local login is ASSUMED (assumed-darwin-keychain), so an unbacked honor claim is exactly the failure this leg exists to catch"
+      fi
+      ;;
+    refused:*)
+      # A refusal is a legitimate P-202 outcome, NOT a rig failure to be retried into
+      # a green. What must hold is that it is loud, and that it did not quietly spend
+      # a seat on the way out.
+      if [ -n "$consumed" ] && [ "$consumed" != "0" ]; then
+        _wd_bad "WD-6 COMPLETE — the VM REFUSED ('$disp') yet still consumed $consumed seat(s) for '$WD_FLEET' (fail-closed contract broken: a refusal must not spend)"
+      else
+        _wd_ok "WD-6 COMPLETE: the VM refused loudly ('$disp') and consumed no seats — fail-closed held. The refusal CODE is this run's product finding; WD-7 decides whether the origin can see it"
+      fi
+      ;;
+    *)
+      _wd_bad "WD-6 COMPLETE — unrecognised disposition '$disp' for $req_offer (neither an honor nor a loud refusal; the honor path's contract is honored|honoring|refused:<code>)"
+      ;;
+  esac
+
+  echo
+  echo "── WD-7  ORIGIN-OBSERVABLE: the outcome reaches the REQUESTER ──"
+  # THE LEG THIS WHOLE DRIVER EXISTS FOR. P-205's bar is "every leg observable from
+  # the ORIGIN, any silent leg = FAIL", and request_remote_spawn's own contract says
+  # "a refusal federates back as a p2p receipt (p2p:trace with this requestOfferId)".
+  # local_disposition is HOST-LOCAL and never federates, so the receipt is the ONLY
+  # channel by which the origin learns the outcome.
+  # This rig has already produced the silent case once: VM receipt a03458d1
+  # (member_boot_unconfirmed, 2026-08-13) is stamped for federation yet has never
+  # appeared on the tower. WD-2 above is the control that makes this measurement mean
+  # something today.
+  local vm_rcpt tower_rcpt
+  vm_rcpt="$(_wd_one vm "SELECT count(*) FROM harness_shared.p2p_receipts WHERE offer_id='$req_offer';")"
+  if [ -z "$vm_rcpt" ] || [ "$vm_rcpt" = "0" ]; then
+    case "$disp" in
+      refused:*)
+        _wd_bad "WD-7 ORIGIN-OBSERVABLE — the VM refused ('$disp') but emitted NO receipt at all for $req_offer. A refusal past gate 2 is contractually LOUD (D-004 no-silent-drops); the origin can never learn why"
+        ;;
+      *)
+        _wd_skip "WD-7 ORIGIN-OBSERVABLE — DETECTED: disposition '$disp' emitted no receipt, which is the documented contract for a SUCCESS (the members' federated presence is the signal, not a receipt). Nothing to carry, so origin-observability of the OUTCOME is not measured by this run"
+        ;;
+    esac
+  else
+    if [ "$(_wd_wait tower p2p_receipts "offer_id='$req_offer' AND origin='remote' AND author_pubkey ~ '^[0-9a-f]{64}\$'" 90)" = 1 ]; then
+      _wd_ok "WD-7 ORIGIN-OBSERVABLE: the VM's receipt for $req_offer reached the TOWER origin='remote' with 64-hex attribution — the requester can see the outcome and who signed it"
+    else
+      tower_rcpt="$(_wd_one tower "SELECT count(*) FROM harness_shared.p2p_receipts WHERE offer_id='$req_offer';")"
+      if [ -n "$tower_rcpt" ] && [ "$tower_rcpt" != "0" ]; then
+        _wd_bad "WD-7 ORIGIN-OBSERVABLE — the receipt reached the tower but WITHOUT 64-hex attribution (unattributed outcome: the origin cannot tell who signed it)"
+      else
+        _wd_bad "WD-7 ORIGIN-OBSERVABLE — SILENT LEG. The VM emitted $vm_rcpt receipt(s) for $req_offer and NONE reached the tower, while WD-2 proved the VM->tower direction carried a row in this same run. The requester is left with no way to learn the outcome. P-205: any silent leg = FAIL"
+      fi
+    fi
+  fi
+
+  echo
+  echo "── WD-8  METER: probed from the artifact, never asserted from memory ──"
+  # D-018's rule, learned the expensive way on this very lane: A LEG MAY NOT STATE A
+  # REASON, IT MAY ONLY RUN A PROBE. The bundle is tree-shaken, so a symbol no
+  # production path reaches is ABSENT from the shipped file — absence is signal.
+  # Reporting this as a RED would file a product defect for a leg that was never
+  # built; reporting it as a silent green would hide a release gap. It is a SKIP with
+  # a detected reason, and the SKIP is the release evidence.
+  if wd_bundle_has vm 'recordSpendDurable'; then
+    local spend_rows
+    spend_rows="$(_wd_one vm "SELECT count(*) FROM harness_shared.p2p_metering_spend WHERE fleet_slug='$WD_FLEET';")"
+    if [ -n "$spend_rows" ] && [ "$spend_rows" != "0" ]; then
+      _wd_ok "WD-8 METER: the spend writer ships AND recorded $spend_rows row(s) for this run's fleet"
+    else
+      _wd_bad "WD-8 METER — the spend writer SHIPS in this bundle but no spend row was written for '$WD_FLEET' (the ledger has a writer and it did not fire)"
+    fi
+  else
+    _wd_skip "WD-8 METER — DETECTED: recordSpendDurable is ABSENT from the VM's tree-shaken bundle, so the metering ledger has NO production writer on this build. The tables exist and are READ (loadMeteringLedger, host-availability) but nothing in production writes them. P-202's meter leg is UNBUILT, not broken"
+  fi
+
+  echo
+  echo "── WD-9  REVOCATION: honest scope statement, not a vacuous green ──"
+  # Deliberately NOT re-implemented here. The federated withdrawal path
+  # (reapForeignSessionsForRevocation, gated on provenance origin='remote') has its
+  # own registered cross-node scenario — scenarios/fed-reap.sh, order 59 — and P-202's
+  # own item text scopes this run to offer->pull->spawn->complete->meter. Claiming it
+  # from this driver without driving it would be exactly the D-018 rot.
+  if wd_bundle_has vm 'reapForeignSessionsForRevocation'; then
+    _wd_skip "WD-9 REVOCATION — DETECTED: the federated withdrawal hook SHIPS in this bundle, but this driver does not exercise it. NOT COVERED BY THIS RUN BY CONSTRUCTION — prove it with: bin/local-matrix.sh --only=fed_reap (scenarios/fed-reap.sh, order 59)"
+  else
+    _wd_bad "WD-9 REVOCATION — reapForeignSessionsForRevocation is ABSENT from the VM's shipped bundle: the federated withdrawal path does not ship at all on this build"
+  fi
+
+  return 0
+}
+
+# Render the verdict. Kept here so the driver and any future caller cannot disagree
+# about what a given counter combination MEANS — in particular that a setup failure
+# is not a red.
+wd_verdict() {
+  echo
+  echo "════════════════════════════════════════════════════════"
+  echo "P-202 LIVE-2 cross-machine work-distribution: PASS=$WD_PASS FAIL=$WD_FAIL SKIP=$WD_SKIP SETUP-FAIL=$WD_SETUP"
+  if [ "$WD_SETUP" -gt 0 ]; then
+    echo "RESULT: NO VERDICT — the run could not exercise its probes (setup failed)."
+    echo "  This is NOT a federation or work-distribution verdict. Nothing here may be"
+    echo "  filed as a product defect. Fix the rig/setup and re-run."
+    return 2
+  fi
+  if [ "$WD_FAIL" -gt 0 ]; then
+    echo "RESULT: FAILED — $WD_FAIL probe(s) red (see above)."
+    return 1
+  fi
+  echo "OVERALL: PASS — every exercised leg green; $WD_SKIP leg(s) reported with a DETECTED reason (read them: they are the release evidence for what is unbuilt or uncovered)."
+  return 0
+}
