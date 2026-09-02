@@ -300,6 +300,11 @@ _pc_vm_build_go_tools() {
   )
   "$output/bin/gh" --version | head -1 | grep -Fq "gh version ${PAPERCUSP_VM_GH_VERSION}-papercusp.1"
   _pc_vm_assert_module "$go_bin" "$output/bin/gh" golang.org/x/mod "$PAPERCUSP_VM_GH_X_MOD_VERSION"
+  # Asserted because this is the security-relevant pin: `go get` raising a version and the
+  # BUILT BINARY actually embedding it are two different claims, and only the second one
+  # ships. Without this, a pin that silently failed to take would read as applied right up
+  # until the SBOM gate caught it 14 minutes later — or, worse, did not.
+  _pc_vm_assert_module "$go_bin" "$output/bin/gh" google.golang.org/grpc "$PAPERCUSP_VM_GH_GRPC_VERSION"
 
   _pc_vm_download \
     "https://codeload.github.com/kopia/kopia/tar.gz/$PAPERCUSP_VM_KOPIA_COMMIT" \
@@ -566,6 +571,7 @@ manifest = {
             "golang.org/x/mod": "$PAPERCUSP_VM_GH_X_MOD_VERSION",
             "golang.org/x/net": "$PAPERCUSP_VM_GH_X_NET_VERSION",
             "golang.org/x/tools": "$PAPERCUSP_VM_GH_X_TOOLS_VERSION",
+            "google.golang.org/grpc": "$PAPERCUSP_VM_GH_GRPC_VERSION",
         },
     },
     "kopia": {

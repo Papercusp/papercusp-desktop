@@ -250,7 +250,14 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
     'PAPERCUSP_VM_KOPIA_X_MOD_VERSION="v0.40.0"',
     'PAPERCUSP_VM_KOPIA_X_NET_VERSION="v0.58.0"',
     'PAPERCUSP_VM_KOPIA_X_TEXT_VERSION="v0.41.0"',
-    'PAPERCUSP_VM_KOPIA_GRPC_VERSION="v1.82.1"',
+    // Both grpc pins moved to v1.83.1 together for GHSA-vp52-pcj8-j9qc / CVE-2026-84304
+    // (High, gRPC-Go heap exhaustion via HTTP/2 DATA frame fragmentation; affected
+    // <= 1.83.0, fixed 1.83.1). The gh pin is NEW rather than a bump: gh previously had
+    // no grpc override and floated on MVS to v1.83.0, which is inside the affected range.
+    // No co-pin moved with them — v1.83.1 wants x/net v0.55.0, x/text v0.37.0 and
+    // x/crypto v0.51.0, all below the versions pinned above.
+    'PAPERCUSP_VM_GH_GRPC_VERSION="v1.83.1"',
+    'PAPERCUSP_VM_KOPIA_GRPC_VERSION="v1.83.1"',
     'PAPERCUSP_VM_POSTGRES_VERSION="18.6"',
     '555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f',
     'PAPERCUSP_VM_OPENSSL_VERSION="3.5.8"',
@@ -259,6 +266,26 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
   ]) {
     assert.equal(helper.includes(exact), true, `missing trust-toolchain pin: ${exact}`);
   }
+  // A DECLARED pin is not an APPLIED pin, and the gap is not hypothetical: gh shipped
+  // google.golang.org/grpc v1.83.0 inside GHSA-vp52-pcj8-j9qc's affected range precisely
+  // because no override existed for it, and the exact-string list above can only ever
+  // catch a pin someone remembered to declare. So walk every module-override variable the
+  // helper declares and require each one to be (a) requested via `go get` and (b) asserted
+  // against the BUILT binary — because `go get` raising a version and the binary actually
+  // embedding it are two different claims, and only the second one ships.
+  const declaredOverrides = [...helper.matchAll(
+    /^(PAPERCUSP_VM_(?:GH|KOPIA)_(?:X_[A-Z]+|GRPC)_VERSION)=/gm,
+  )].map((m) => m[1]);
+  assert.ok(declaredOverrides.length >= 8,
+    `expected the helper to declare several module overrides, found ${declaredOverrides.length}`);
+  for (const name of declaredOverrides) {
+    const binary = name.startsWith('PAPERCUSP_VM_GH_') ? 'gh' : 'kopia';
+    assert.ok(helper.includes(`@$${name}"`),
+      `${name} is declared but never requested via go get — a pin nothing applies`);
+    assert.match(helper, new RegExp(`_pc_vm_assert_module[^\\n]*bin/${binary}[^\\n]*\\$${name}"`),
+      `${name} is applied but never asserted against the built ${binary} binary — a silent pin`);
+  }
+
   assert.match(helper, /_pc_vm_verify_sha256[\s\S]*actual[\s\S]*expected/,
     'downloads must be content-verified, not version-label trusted');
   assert.match(helper, /--with-ssl=openssl/,
