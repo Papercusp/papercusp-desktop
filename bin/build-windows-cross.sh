@@ -194,8 +194,17 @@ command -v cargo-xwin >/dev/null 2>&1 || command -v cargo >/dev/null 2>&1 \
   || fail "cargo not on PATH"
 cargo xwin --version >/dev/null 2>&1 \
   || fail "cargo-xwin not installed (cargo install cargo-xwin) — the Windows cross toolchain"
-rustup target list --installed 2>/dev/null | grep -qx "$TARGET" \
-  || fail "rustup target $TARGET not installed (rustup target add $TARGET)"
+# Capture-then-match rather than `rustup ... | grep -qx`: under `set -o pipefail` an
+# early-exiting grep can SIGPIPE the producer, so the pipeline reports failure even on a
+# match — refusing a toolchain that IS installed. Same fix (and same reason) as the
+# win_targets_installed check in release-local.sh, and as the `grep -a` on the binary a
+# few hundred lines below. Enforced by `npm run lint:pipefail-sigpipe`.
+# The newline fencing preserves `grep -qx`'s whole-line-match semantics.
+rustup_targets="$(rustup target list --installed 2>/dev/null || true)"
+case $'\n'"$rustup_targets"$'\n' in
+  *$'\n'"$TARGET"$'\n'*) ;;
+  *) fail "rustup target $TARGET not installed (rustup target add $TARGET)" ;;
+esac
 command -v wine >/dev/null 2>&1 || fail "wine not installed (apt install wine + dpkg --add-architecture i386)"
 command -v xvfb-run >/dev/null 2>&1 || fail "xvfb-run not installed (apt install xvfb) — ISCC runs headless under it"
 [[ -f "$ISCC_EXE" ]] || fail "ISCC not found at $ISCC_EXE — provision Inno Setup 6.7.3 under WINEPREFIX=$WINEPREFIX_INNO"

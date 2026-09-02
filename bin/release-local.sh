@@ -1359,7 +1359,10 @@ CARGO_TARGET_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-v
 # Overrides: PAPERCUSP_ALLOW_REUSE_UNVERIFIED=1 (no prior provenance) /
 # PAPERCUSP_ALLOW_REUSE_VERSION_MISMATCH=1 (deliberate cross-version salvage).
 _prov_version() {  # $1 = build-provenance.json path → prints the version string
-  grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$1" 2>/dev/null | head -1 | sed -E 's/.*"([^"]*)"$/\1/'
+  # `|| true` as on the two siblings below: `grep | head -1` under `set -o pipefail`
+  # returns 141 when head exits first and SIGPIPEs grep, which `set -e` would turn into
+  # an aborted release. Callers test the captured string for emptiness, not the status.
+  grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$1" 2>/dev/null | head -1 | sed -E 's/.*"([^"]*)"$/\1/' || true
 }
 _prov_string() {  # $1 = json path, $2 = top-level string field
   grep -oE '"'"$2"'"[[:space:]]*:[[:space:]]*"[^"]*"' "$1" 2>/dev/null | head -1 | sed -E 's/.*"([^"]*)"$/\1/' || true
