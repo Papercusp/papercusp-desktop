@@ -61,6 +61,30 @@ _cr_ws() {
   printf '%s' "$ws"
 }
 
+# Run a probe's own INSERT and REFUSE to continue if the write itself was rejected.
+#
+# This exists because of a measured false verdict during authoring: CR-1's INSERT
+# violated `coord_conversations_scope_slug_check` (scope defaults to 'operator',
+# and that constraint forbids 'operator' together with a non-NULL harness_slug),
+# the error was swallowed by `2>/dev/null`, no row was ever written — and the leg
+# then reported "conversation row did NOT federate", which reads exactly like a
+# product defect. A probe whose SETUP failure is indistinguishable from its FINDING
+# is the false-verdict class this rig exists to refuse, so a rejected write is
+# reported as SETUP FAIL, never as a federation verdict.
+#
+# Both signals are checked: the exit status AND an `ERROR:` line in the output,
+# because the vm leg crosses ssh, where a psql exit code can be masked.
+_cr_insert() {
+  local inst="$1" label="$2" sql="$3" out st
+  out="$(drv_psql "$inst" "$sql" 2>&1)"; st=$?
+  if [ "$st" -ne 0 ] || printf '%s' "$out" | grep -q '^ERROR:'; then
+    echo "$label SETUP FAIL — this probe's own INSERT was REJECTED on $inst, so the line below is NOT a federation verdict:"
+    printf '%s\n' "$out" | grep -E '^(ERROR|DETAIL):' | head -3 | sed 's/^/    /'
+    return 1
+  fi
+  return 0
+}
+
 # Poll dst until a row appears. $1 inst, $2 sql returning one non-empty token,
 # $3 tries (default 30, 3s apart = 90s).
 _cr_wait_present() {
@@ -111,16 +135,25 @@ scenario_coord_p008_remainder() {
   # ── CR-1 — conversation visibility: a coord_conversations row federates a→b ──
   # state='resolved' deliberately: a probe row must never surface as OPEN work in
   # a live agent's conversation list.
+  # `scope` is NOT optional here and does not default usefully: it defaults to
+  # 'operator', and coord_conversations_scope_slug_check requires
+  #   (scope='harness' AND harness_slug IS NOT NULL) OR (scope='operator' AND harness_slug IS NULL)
+  # so a harness-scoped conversation MUST say scope='harness' explicitly. It is
+  # also the federating shape — an operator-scope conversation has no harness_slug
+  # and therefore, by the same contract CC-4 asserts, stays local by design.
   local cid="CR1-CONV-$stamp"
-  drv_psql "$a" "INSERT INTO harness_shared.coord_conversations
-      (workspace_id,id,kind,harness_slug,asker_id,title,body,state,origin)
-    VALUES ('$ws_a','$cid','discussion','$sslug_a','ccp-probe',
+  if _cr_insert "$a" "CR-1" "INSERT INTO harness_shared.coord_conversations
+      (workspace_id,id,kind,scope,harness_slug,asker_id,title,body,state,origin)
+    VALUES ('$ws_a','$cid','discussion','harness','$sslug_a','ccp-probe',
       '[ccp-probe] P-008 conversation federation probe',
       'Probe row written by bin/vm-rig/coord-p008-remainder.sh. Safe to ignore.',
-      'resolved','local');" >/dev/null 2>&1
-  res="$(_cr_wait_present "$b" "SELECT id FROM harness_shared.coord_conversations WHERE id='$cid' AND origin='remote' LIMIT 1;")"
-  if [ "$res" = 1 ]; then echo "CR-1 PASS — conversation row federated a→b (origin=remote)"
-  else echo "CR-1 FAIL — conversation row did NOT federate a→b within window"; rc=1; fi
+      'resolved','local');"; then
+    res="$(_cr_wait_present "$b" "SELECT id FROM harness_shared.coord_conversations WHERE id='$cid' AND origin='remote' LIMIT 1;")"
+    if [ "$res" = 1 ]; then echo "CR-1 PASS — conversation row federated a→b (origin=remote)"
+    else echo "CR-1 FAIL — conversation row did NOT federate a→b within window"; rc=1; fi
+  else
+    rc=1
+  fi
 
   # ── CR-2 — conversation visibility, thread half: coord_threads + coord_thread_posts ──
   # coord_thread_posts.id has no default (the app assigns it), so the probe picks an
@@ -128,18 +161,21 @@ scenario_coord_p008_remainder() {
   local tid="CR2-THREAD-$stamp"
   local pmid="CR2-POST-$stamp"
   local post_id=$((9000000000000 + stamp))
-  drv_psql "$a" "INSERT INTO harness_shared.coord_threads
+  if _cr_insert "$a" "CR-2" "INSERT INTO harness_shared.coord_threads
       (workspace_id,thread_id,parent_kind,parent_ref,title,created_by,harness_slug,origin)
     VALUES ('$ws_a','$tid','conversation','$cid',
-      '[ccp-probe] P-008 thread federation probe','ccp-probe','$sslug_a','local');" >/dev/null 2>&1
-  drv_psql "$a" "INSERT INTO harness_shared.coord_thread_posts
+      '[ccp-probe] P-008 thread federation probe','ccp-probe','$sslug_a','local');" &&
+     _cr_insert "$a" "CR-2" "INSERT INTO harness_shared.coord_thread_posts
       (id,workspace_id,thread_id,author_id,body,harness_slug,origin,post_msg_id)
     VALUES ($post_id,'$ws_a','$tid','ccp-probe',
       '[ccp-probe] P-008 thread post federation probe. Safe to ignore.',
-      '$sslug_a','local','$pmid');" >/dev/null 2>&1
-  res="$(_cr_wait_present "$b" "SELECT post_msg_id FROM harness_shared.coord_thread_posts WHERE post_msg_id='$pmid' AND origin='remote' LIMIT 1;")"
-  if [ "$res" = 1 ]; then echo "CR-2 PASS — conversation thread POST federated a→b (origin=remote)"
-  else echo "CR-2 FAIL — thread post did NOT federate a→b within window"; rc=1; fi
+      '$sslug_a','local','$pmid');"; then
+    res="$(_cr_wait_present "$b" "SELECT post_msg_id FROM harness_shared.coord_thread_posts WHERE post_msg_id='$pmid' AND origin='remote' LIMIT 1;")"
+    if [ "$res" = 1 ]; then echo "CR-2 PASS — conversation thread POST federated a→b (origin=remote)"
+    else echo "CR-2 FAIL — thread post did NOT federate a→b within window"; rc=1; fi
+  else
+    rc=1
+  fi
 
   # ── CR-3 — directed reply/report to ORIGIN (a→b→a) ────────────────────────────
   # The leg CC-3 does not cover: CC-3 proves a row authored on b reaches a. This
@@ -148,25 +184,29 @@ scenario_coord_p008_remainder() {
   # which is what "reply/report to origin" means operationally. The linkage lives
   # in body->>'related_msg_id' (indexed: coord_event_log_related_msg_id_idx).
   local orig="CR3-ORIG-$stamp" reply="CR3-REPLY-$stamp"
-  drv_psql "$a" "INSERT INTO harness_shared.coord_event_log
+  if ! _cr_insert "$a" "CR-3" "INSERT INTO harness_shared.coord_event_log
       (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin)
     VALUES ('$ws_a','messages','ccp-probe','$orig',
       '{\"kind\":\"message\",\"text\":\"[ccp-probe] P-008 directed-reply origin\"}'::jsonb,
-      '$sslug_a','local');" >/dev/null 2>&1
-  # a→b must land first, or the reply would be a reply to something b has not seen.
-  res="$(_cr_wait_present "$b" "SELECT msg_id FROM harness_shared.coord_event_log WHERE msg_id='$orig' AND origin='remote' LIMIT 1;")"
-  if [ "$res" != 1 ]; then
-    echo "CR-3 FAIL — the ORIGINAL never reached $b, so the reply leg could not be exercised (not a reply-path verdict)"
+      '$sslug_a','local');"; then
     rc=1
   else
-    drv_psql "$b" "INSERT INTO harness_shared.coord_event_log
+    # a→b must land first, or the reply would be a reply to something b has not seen.
+    res="$(_cr_wait_present "$b" "SELECT msg_id FROM harness_shared.coord_event_log WHERE msg_id='$orig' AND origin='remote' LIMIT 1;")"
+    if [ "$res" != 1 ]; then
+      echo "CR-3 FAIL — the ORIGINAL never reached $b, so the reply leg could not be exercised (not a reply-path verdict)"
+      rc=1
+    elif ! _cr_insert "$b" "CR-3" "INSERT INTO harness_shared.coord_event_log
         (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin)
       VALUES ('$ws_b','messages','ccp-probe','$reply',
         '{\"kind\":\"message\",\"text\":\"[ccp-probe] P-008 directed reply to origin\",\"related_msg_id\":\"$orig\"}'::jsonb,
-        '$sslug_b','local');" >/dev/null 2>&1
-    res="$(_cr_wait_present "$a" "SELECT msg_id FROM harness_shared.coord_event_log WHERE msg_id='$reply' AND origin='remote' AND body->>'related_msg_id'='$orig' LIMIT 1;")"
-    if [ "$res" = 1 ]; then echo "CR-3 PASS — directed reply federated b→a WITH related_msg_id linkage to the origin's message"
-    else echo "CR-3 FAIL — the reply did not reach the origin with its related_msg_id intact"; rc=1; fi
+        '$sslug_b','local');"; then
+      rc=1
+    else
+      res="$(_cr_wait_present "$a" "SELECT msg_id FROM harness_shared.coord_event_log WHERE msg_id='$reply' AND origin='remote' AND body->>'related_msg_id'='$orig' LIMIT 1;")"
+      if [ "$res" = 1 ]; then echo "CR-3 PASS — directed reply federated b→a WITH related_msg_id linkage to the origin's message"
+      else echo "CR-3 FAIL — the reply did not reach the origin with its related_msg_id intact"; rc=1; fi
+    fi
   fi
 
   # ── CR-4 — TRUST NEGATIVE: a row scoped to a harness b is NOT a member of ─────
@@ -183,15 +223,32 @@ scenario_coord_p008_remainder() {
     echo "CR-4 FAIL — could not resolve a harness on $a that $b is not in; the trust negative could NOT be constructed (P-008 treats a skipped leg as failure)"
     rc=1
   else
+    # The insert guard matters MOST on a negative leg: if the write is rejected the
+    # row never exists, nothing can cross, and the absence assertion would report a
+    # confident PASS for a boundary it never tested — a false GREEN, the worse
+    # direction. So a rejected write here fails the leg instead of passing it.
     local fmid="CR4-FOREIGN-$stamp"
-    drv_psql "$a" "INSERT INTO harness_shared.coord_event_log
+    if ! _cr_insert "$a" "CR-4" "INSERT INTO harness_shared.coord_event_log
         (workspace_id,surface,writer_key,msg_id,body,harness_slug,origin)
       VALUES ('$ws_a','messages','ccp-probe','$fmid',
         '{\"kind\":\"message\",\"text\":\"[ccp-probe] P-008 trust negative — must not cross\"}'::jsonb,
-        '$foreign','local');" >/dev/null 2>&1
-    res="$(_cr_wait_absent "$b" "SELECT msg_id FROM harness_shared.coord_event_log WHERE msg_id='$fmid' LIMIT 1;")"
-    if [ "$res" = 1 ]; then echo "CR-4 PASS — row scoped to foreign harness '$foreign' correctly did NOT cross to $b (trust boundary holds)"
-    else echo "CR-4 FAIL — a row scoped to harness '$foreign' LEAKED to $b, which is not a member (trust boundary breach)"; rc=1; fi
+        '$foreign','local');"; then
+      rc=1
+    else
+      # Positive control for the negative: the row must actually EXIST on a. Without
+      # this, "absent on b" is unfalsifiable — it reads identically whether the
+      # boundary held or the probe never wrote anything.
+      local planted
+      planted="$(drv_psql "$a" "SELECT msg_id FROM harness_shared.coord_event_log WHERE msg_id='$fmid' LIMIT 1;" 2>/dev/null | tr -d '[:space:]')"
+      if [ -z "$planted" ]; then
+        echo "CR-4 FAIL — the foreign-harness row is not present on $a after a clean INSERT; the negative could not be tested (not a boundary verdict)"
+        rc=1
+      else
+        res="$(_cr_wait_absent "$b" "SELECT msg_id FROM harness_shared.coord_event_log WHERE msg_id='$fmid' LIMIT 1;")"
+        if [ "$res" = 1 ]; then echo "CR-4 PASS — row scoped to foreign harness '$foreign' is present on $a and correctly did NOT cross to $b (trust boundary holds)"
+        else echo "CR-4 FAIL — a row scoped to harness '$foreign' LEAKED to $b, which is not a member (trust boundary breach)"; rc=1; fi
+      fi
+    fi
   fi
 
   echo
