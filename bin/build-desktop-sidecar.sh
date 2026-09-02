@@ -55,6 +55,12 @@ source "$HERE/lib/source-roots.sh"
 # on BASH_SOURCE so being sourced never runs anything.
 # shellcheck source=lib/pinned-deps.sh
 source "$HERE/lib/pinned-deps.sh"
+# Same contract again: transformers-models.sh only defines functions and guards its own
+# dispatcher on BASH_SOURCE, so sourcing it here runs nothing. It owns the step that gives a
+# pristine-clone build the runtime-downloaded ONNX weights `npm ci` never fetches
+# (EI-22077502575226404); it is inert unless PAPERCUSP_TRANSFORMERS_MODEL_CACHE is set.
+# shellcheck source=lib/transformers-models.sh
+source "$HERE/lib/transformers-models.sh"
 REPO_ROOT="$(papercusp_repo_root "$ROOT")"
 PAPERCUSP_ROOT="${PAPERCUSP_ROOT:-$REPO_ROOT/libs/papercusp}"
 WEB_DIR="$REPO_ROOT/apps/operator"
@@ -1993,21 +1999,33 @@ copy_pkg_closure() {
     # the directory changed.
     local _transformers_cache="$dest/.cache"
     local _transformers_models="$dest/models"
-    if [[ "$cur" == "@huggingface/transformers" && -d "$_transformers_cache" ]]; then
-      find "$_transformers_cache" -mindepth 1 -maxdepth 1 ! -name 'onnx-community' -exec rm -rf {} +
-      if [[ -d "$_transformers_cache/onnx-community" ]]; then
-        find "$_transformers_cache/onnx-community" -mindepth 1 -maxdepth 1 \
-          ! -name 'harrier-oss-v1-0.6b-ONNX' ! -name 'embeddinggemma-300m-ONNX' -exec rm -rf {} +
-        # Relocate the survivors OUT of .cache/ (D-178). Merge rather than
-        # clobber: `models/` may already exist in a future package version.
-        mkdir -p "$_transformers_models"
-        if [[ -d "$_transformers_models/onnx-community" ]]; then
-          echo "ERROR: $_transformers_models/onnx-community already exists — refusing to merge two model roots (D-178)" >&2
-          exit 1
+    if [[ "$cur" == "@huggingface/transformers" ]]; then
+      if [[ -d "$_transformers_cache" ]]; then
+        find "$_transformers_cache" -mindepth 1 -maxdepth 1 ! -name 'onnx-community' -exec rm -rf {} +
+        if [[ -d "$_transformers_cache/onnx-community" ]]; then
+          find "$_transformers_cache/onnx-community" -mindepth 1 -maxdepth 1 \
+            ! -name 'harrier-oss-v1-0.6b-ONNX' ! -name 'embeddinggemma-300m-ONNX' -exec rm -rf {} +
+          # Relocate the survivors OUT of .cache/ (D-178). Merge rather than
+          # clobber: `models/` may already exist in a future package version.
+          mkdir -p "$_transformers_models"
+          if [[ -d "$_transformers_models/onnx-community" ]]; then
+            echo "ERROR: $_transformers_models/onnx-community already exists — refusing to merge two model roots (D-178)" >&2
+            exit 1
+          fi
+          mv "$_transformers_cache/onnx-community" "$_transformers_models/onnx-community" \
+            || { echo "ERROR: failed to relocate transformers models out of .cache (D-178)" >&2; exit 1; }
         fi
-        mv "$_transformers_cache/onnx-community" "$_transformers_models/onnx-community" \
-          || { echo "ERROR: failed to relocate transformers models out of .cache (D-178)" >&2; exit 1; }
       fi
+      # EI-22077502575226404: everything above only MOVES weights that a runtime download
+      # already put in `.cache/`. A pristine clone + `npm ci` has none — nothing fetches
+      # them — so the relocation is a no-op and the fail-closed presence check near the end
+      # of this script FATALs, which is how P-101 build #3 died (exit 5). This is the step
+      # that can SOURCE them, and it is opt-in: it returns immediately when the models are
+      # already staged (every host-tree build) or when PAPERCUSP_TRANSFORMERS_MODEL_CACHE
+      # is unset, so the guard's fail-closed behaviour is unchanged for builds that do not
+      # ask for it. The `.cache` condition deliberately no longer gates this — that was the
+      # bug: with no `.cache` there was no code path at all.
+      papercusp_stage_transformers_models "$_transformers_models" || exit 1
       prune_transformers_model_fragments "$_transformers_models"
     fi
     # `.cache/` is now unconditionally removed — including for
