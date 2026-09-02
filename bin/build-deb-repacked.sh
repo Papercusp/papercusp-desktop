@@ -4,6 +4,18 @@
 # env-sidecar deduplication repacker.
 set -euo pipefail
 
+# rustup installs cargo into ~/.cargo/bin, which an interactive shell gets from the
+# profile but a systemd --user unit (papercup-live-federation-gate.service) or an
+# operator-spawned shell does NOT. Without this the very first cargo call dies with
+# "cargo metadata … No such file or directory" and the gate's local-matrix leg goes
+# dark behind a missing base .deb (WI-2141192, measured 2026-09-02 base-build.log).
+# A script a unit invokes must not depend on the caller's interactive PATH.
+if ! command -v cargo >/dev/null 2>&1; then
+  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+  [ -x "$HOME/.cargo/bin/cargo" ] && export PATH="$HOME/.cargo/bin:$PATH"
+fi
+command -v cargo >/dev/null 2>&1 || { echo "FATAL: cargo not resolvable (checked PATH and ~/.cargo/bin) — install rustup or fix PATH" >&2; exit 12; }
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROFILE="release"
