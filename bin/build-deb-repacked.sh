@@ -89,6 +89,19 @@ if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
     export TAURI_SIGNING_PRIVATE_KEY="$_SIGNING_KEY_FILE"
   fi
 fi
+# WI-2143486: DEFAULTING THE KEY WITHOUT DEFAULTING THE PASSWORD ONLY MOVES THE ERROR.
+# When TAURI_SIGNING_PRIVATE_KEY_PASSWORD is UNSET, Tauri's signer PROMPTS for it. Under any
+# non-interactive caller (the systemd live-federation gate, CI, a detached agent shell) there
+# is no controlling terminal, so the prompt fails and the whole build exits non-zero with
+# "incorrect updater private key password: No such device or address (os error 6)" — an error
+# message that blames the password's CONTENT when the real fault is that nothing could be READ.
+# Exporting it (empty by default, honouring any caller-supplied value) makes the signer use the
+# empty password instead of asking. bin/build-and-archive-deb.sh has always done exactly this;
+# the fix above landed here on 2026-09-02 without the companion line, so `npm run build` kept
+# failing after emitting a complete .deb and the gate stayed base-package-missing from
+# 2026-08-28 onward. Verified 2026-09-03 with same-capability controls against the real key in
+# a tty-less process: exported-empty SIGNS, unset reproduces the exact error string above.
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 tauri "$TAURI_SUBCOMMAND" "${BUNDLE_ARGS[@]}" "${TAURI_ARGS[@]}"
 
 CARGO_TARGET_ROOT="$(

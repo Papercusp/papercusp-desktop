@@ -2002,17 +2002,42 @@ if [ -z "${GATE_DEB:-}" ]; then
     memory_phase_guard "post-build/pre-repack"
   fi
   if [ "$FAIL_BUILD" != 1 ] && { [ "$SKIP_MATRIX" != 1 ] || local_matrix_due; }; then
-    CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$HOME/.cargo-target}"
+    # WI-2143486: ASK CARGO WHERE IT WRITES; DO NOT RE-DERIVE IT FROM ONE OF ITS INPUTS.
+    # CARGO_TARGET_DIR is only one input to cargo's effective target directory —
+    # ~/.cargo/config.toml's `target-dir` overrides the built-in default just as well, and it
+    # is invisible to this expression. Measured 2026-09-03: config.toml moved target-dir to
+    # /mnt/data/cargo-target while this line still resolved $HOME/.cargo-target, a different
+    # filesystem holding no bundle dir at all — so every glob below pointed at an empty tree
+    # and the selector reported "no candidate" for artifacts that existed. Derive the real
+    # value the same way bin/build-deb-repacked.sh already does, and keep the historical
+    # expression only as the fallback for when cargo cannot answer.
+    CARGO_TARGET_ROOT="$(
+      cd "$DESKTOP_DIR/src-tauri" 2>/dev/null \
+        && cargo metadata --no-deps --format-version 1 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null
+    )"
+    if [ -n "$CARGO_TARGET_ROOT" ]; then
+      log "cargo target_directory (derived): $CARGO_TARGET_ROOT"
+    else
+      CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$HOME/.cargo-target}"
+      log "WARN: could not derive cargo target_directory from cargo metadata — falling back to $CARGO_TARGET_ROOT"
+    fi
     # WI-40905: GUI and Server Debian artifacts share the Papercusp*_amd64.deb
     # filename family.  Selecting only by mtime fed a newer papercusp-server
     # package to the GUI content-matrix; the repack succeeded, then the smoke
     # failed because /usr/bin/papercusp-desktop was absent.  Read the package
     # identity that the Debian writer emits and keep the newest GUI candidate.
-    if BASE_DEB="$(fed_select_newest_deb_by_package papercusp-gui \
-      "$DESKTOP_DIR"/src-tauri/target/release/bundle/deb/Papercusp*_amd64.deb \
-      "$CARGO_TARGET_ROOT"/release/bundle/deb/Papercusp\ GUI_*_amd64.deb \
-      "$CARGO_TARGET_ROOT"/release/bundle/deb/Papercusp_*_amd64.deb \
-      /tmp/*/Papercusp_integrated.deb)"; then
+    # WI-2143486: ONE definition of the candidate set. The pre-build probe and the post-build
+    # re-select were duplicated line-for-line, so a glob added to one could silently miss the
+    # other — the self-build hatch would then build an artifact it could never re-find.
+    gate_select_base_gui_deb() {
+      fed_select_newest_deb_by_package papercusp-gui \
+        "$DESKTOP_DIR"/src-tauri/target/release/bundle/deb/Papercusp*_amd64.deb \
+        "$CARGO_TARGET_ROOT"/release/bundle/deb/Papercusp\ GUI_*_amd64.deb \
+        "$CARGO_TARGET_ROOT"/release/bundle/deb/Papercusp_*_amd64.deb \
+        /tmp/*/Papercusp_integrated.deb
+    }
+    if BASE_DEB="$(gate_select_base_gui_deb)"; then
       :
     else
       log "no existing Debian candidate declares Package=papercusp-gui"
@@ -2028,19 +2053,31 @@ if [ -z "${GATE_DEB:-}" ]; then
         # also fails, or the fresh build still matches no candidate, do we fall through below.
         BASE_DEB_BUILD_ATTEMPTED=1
         log "building a fresh base .deb (bounded, once) before giving up — this may take a while"
-        if ( cd "$DESKTOP_DIR" && npm run build ) >"$WORK/base-build.log" 2>&1; then
-          if BASE_DEB="$(fed_select_newest_deb_by_package papercusp-gui \
-            "$DESKTOP_DIR"/src-tauri/target/release/bundle/deb/Papercusp*_amd64.deb \
-            "$CARGO_TARGET_ROOT"/release/bundle/deb/Papercusp\ GUI_*_amd64.deb \
-            "$CARGO_TARGET_ROOT"/release/bundle/deb/Papercusp_*_amd64.deb \
-            /tmp/*/Papercusp_integrated.deb)"; then
-            log "fresh base .deb built and selected: $BASE_DEB"
-          else
-            log "built a Debian bundle but no fresh Package=papercusp-gui candidate matched any known glob — giving up ($WORK/base-build.log)"
-            BASE_DEB=""
-          fi
+        # WI-2143486: THE BUILD'S EXIT CODE IS NOT AN ANSWER TO "DOES THE ARTIFACT EXIST?".
+        # tauri.conf.json sets bundle.createUpdaterArtifacts, so `tauri build` signs the updater
+        # artifact AFTER the .deb has already been bundled to disk. Any failure in that trailing
+        # signature step — a missing/unreadable key, a password that cannot be read on a tty-less
+        # systemd oneshot — exits non-zero with a complete, repackable .deb sitting in the bundle
+        # dir. Gating the re-select on that exit code therefore discarded precisely the artifact
+        # this block exists to produce, then reported base-package-missing: a verdict about the
+        # BUILD PIPELINE rendered as a verdict about the ARTIFACT. Measured 2026-09-03: every
+        # window from 2026-08-28 onward logged "Bundling Papercusp GUI_0.0.18_amd64.deb ...
+        # Finished 1 bundle at: ..." and then died on "incorrect updater private key password",
+        # so the gate burned a full rebuild each window and still called itself artifact-less.
+        # Re-select UNCONDITIONALLY and let the selector — which reads each candidate's own
+        # Debian Package field — be the authority on what exists. The exit code is kept as
+        # diagnostics on the log line, never as a gate. (The signing failure itself is fixed at
+        # source in bin/build-deb-repacked.sh, which now exports the key password; this stays
+        # because ANY late-stage build failure must not be able to hide a produced artifact.)
+        BASE_BUILD_RC=0
+        ( cd "$DESKTOP_DIR" && npm run build ) >"$WORK/base-build.log" 2>&1 || BASE_BUILD_RC=$?
+        [ "$BASE_BUILD_RC" = 0 ] \
+          || log "base build exited $BASE_BUILD_RC — re-selecting anyway: a trailing signing/publish failure still leaves a usable .deb ($WORK/base-build.log)"
+        if BASE_DEB="$(gate_select_base_gui_deb)"; then
+          log "fresh base .deb built and selected: $BASE_DEB (build rc=$BASE_BUILD_RC)"
         else
-          log "BUILD FAILED building a fresh base .deb — $WORK/base-build.log — giving up"
+          log "base build rc=$BASE_BUILD_RC and no Package=papercusp-gui candidate matched any known glob — giving up ($WORK/base-build.log)"
+          BASE_DEB=""
         fi
       fi
       if [ -z "$BASE_DEB" ]; then
