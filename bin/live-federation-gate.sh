@@ -2011,9 +2011,20 @@ if [ -z "${GATE_DEB:-}" ]; then
     # and the selector reported "no candidate" for artifacts that existed. Derive the real
     # value the same way bin/build-deb-repacked.sh already does, and keep the historical
     # expression only as the fallback for when cargo cannot answer.
+    # WI-2143486 follow-up: resolve cargo the same way bin/build-deb-repacked.sh:15 does.
+    # WI-2141192 established that ~/.cargo/bin is NOT on the systemd user unit's PATH — an
+    # interactive shell gets it from the rustup profile snippet, a unit does not. That fix was
+    # applied to build-deb-repacked.sh, which is why the BUILD works under systemd; this file
+    # never got it, so the derivation above ran `cargo` with no cargo on PATH, silently returned
+    # empty, and fell through to exactly the broken fallback it was written to replace.
+    # Verified 2026-09-03: `env -i PATH="$(systemctl --user show-environment | sed -n 's/^PATH=//p')"
+    # sh -c 'command -v cargo'` => not found. The bug is invisible interactively, where it works.
+    CARGO_BIN="cargo"
+    command -v cargo >/dev/null 2>&1 || \
+      { [ -x "$HOME/.cargo/bin/cargo" ] && CARGO_BIN="$HOME/.cargo/bin/cargo"; }
     CARGO_TARGET_ROOT="$(
       cd "$DESKTOP_DIR/src-tauri" 2>/dev/null \
-        && cargo metadata --no-deps --format-version 1 2>/dev/null \
+        && "$CARGO_BIN" metadata --no-deps --format-version 1 2>/dev/null \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null
     )"
     if [ -n "$CARGO_TARGET_ROOT" ]; then
