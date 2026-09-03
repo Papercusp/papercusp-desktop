@@ -148,9 +148,12 @@ _WIN_REMAP="--remap-path-prefix=$HOME=/build"
 _WIN_CRT_STATIC="-C target-feature=+crt-static"
 ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 # Resolve the cargo target dir ONCE, deterministically — this box relocates it
-# via ~/.cargo/config.toml (target-dir = ~/.cargo-target) AND src-tauri/target is
-# a symlink, so a naive "$SRC_TAURI/target/..." path is wrong. Same derivation
-# release-local.sh uses (its line ~1134).
+# via ~/.cargo/config.toml `[build] target-dir` (a shared cache on the data disk
+# since 2026-09-03; read the config, never assume the path) AND src-tauri/target
+# is a symlink, so a naive "$SRC_TAURI/target/..." path is wrong. Same derivation
+# release-local.sh uses. The disk preflight below reserves against THIS dir, which
+# is where the build writes — so the reservation lands on the same mount the Node
+# cargo admission gate (scripts/lib/cargo-result.mjs diskProbePathFor) reads.
 CARGO_TARGET_ROOT="$(cd "$SRC_TAURI" && cargo metadata --no-deps --format-version 1 2>/dev/null \
   | python3 -c 'import sys,json;print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null || true)"
 [[ -n "$CARGO_TARGET_ROOT" ]] || CARGO_TARGET_ROOT="$SRC_TAURI/target"
