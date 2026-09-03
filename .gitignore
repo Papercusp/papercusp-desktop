@@ -9,6 +9,20 @@
 # docs-viewer project links. Dropping the slash covers both shapes.
 src-tauri/target
 
+# Coverage reports — `cargo llvm-cov` (P-010) and any Vitest --coverage run.
+#
+# The SUPERPROJECT .gitignore already carries this exact rule set, but a
+# superproject ignore does NOT govern inside a submodule: `git check-ignore`
+# run from the repo root answers "is in submodule <p>" and declines, so the
+# rule silently stops at this boundary. Without a copy HERE, git-sync (which
+# commits the superproject AND every submodule) sweeps the generated report
+# into this repo. Same class as EI-22195215129102176, where a non-ignored
+# coverage dir swept 74 files / +54,104 lines into the tree during P-012.
+coverage/
+coverage-*/
+**/coverage/
+**/coverage-*/
+
 # Seed corestore reuse caches (PAPERCUSP_SEED_REUSE_CORESTORE=1 build workaround
 # writes ~100MB+ blobs that git-sync must never sweep — >100MB rejects the push)
 src-tauri/.seed-corestore-reuse-*/
