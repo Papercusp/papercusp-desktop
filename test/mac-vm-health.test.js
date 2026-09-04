@@ -365,13 +365,16 @@ test('screenshot path reuses the contention-aware QMP helper', async () => {
   assert.doesNotMatch(source, /f\.readline\(\)\s*# greeting/);
 });
 
-async function vmcallFixture(result) {
+async function vmcallFixture(result, { source, timeoutSec } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'vm-rig-vmcall-'));
   const fakeMcp = path.join(dir, 'mcp-call.mjs');
   // vmcall.sh runs this with the discovered Node binary. Keeping the fake
   // transport as a real JS file means the same Node binary also exercises the
   // driver's JSON-result validator.
-  await writeFile(fakeMcp, "process.stdout.write(process.env.VM_RIG_FAKE_RESULT ?? '');\n");
+  await writeFile(
+    fakeMcp,
+    source ?? "process.stdout.write(process.env.VM_RIG_FAKE_RESULT ?? '');\n",
+  );
   return {
     dir,
     env: {
@@ -380,6 +383,7 @@ async function vmcallFixture(result) {
       PCUSP_MCP_CALL: fakeMcp,
       PAPERCUSP_HONO_PORT: '34567',
       VM_RIG_FAKE_RESULT: result,
+      ...(timeoutSec === undefined ? {} : { PCUSP_VM_CALL_TIMEOUT_SEC: String(timeoutSec) }),
     },
   };
 }
@@ -402,6 +406,25 @@ test('vm-rig driver forwards a parseable JSON MCP result and exits 0', async () 
     const result = spawnSync('bash', [vmcall, 'coord:whoami', '{}'], { env, encoding: 'utf8' });
     assert.equal(result.status, 0);
     assert.deepEqual(JSON.parse(result.stdout), { ok: true });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('vm-rig driver fails closed when the selected operator MCP child hangs', async () => {
+  const { dir, env } = await vmcallFixture(undefined, {
+    timeoutSec: 1,
+    source: "process.stdout.write('partial\\n'); setInterval(() => {}, 1000);\n",
+  });
+  try {
+    const startedAt = Date.now();
+    const result = spawnSync('bash', [vmcall, 'dev:service_health', '{}'], { env, encoding: 'utf8' });
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(result.status, 124, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /MCP_RESULT_TIMEOUT/);
+    assert.match(result.stderr, /within 1s/);
+    assert.equal(result.stdout, 'partial\n');
+    assert.ok(elapsedMs < 5000, `hung child should be bounded, elapsed ${elapsedMs}ms`);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

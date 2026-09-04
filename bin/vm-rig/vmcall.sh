@@ -48,6 +48,19 @@ fi
 if [ -z "$PORT" ]; then echo "NO_OPERATOR_PORT"; exit 3; fi
 echo "[vmcall port=$PORT]" >&2
 
+# A 200 /api/health response proves only that something is listening. Bound the
+# actual MCP child as well, so a selected operator whose event loop is wedged
+# fails closed instead of leaving read-only VM diagnostics running forever.
+MCP_TIMEOUT_SEC="${PCUSP_VM_CALL_TIMEOUT_SEC:-30}"
+case "$MCP_TIMEOUT_SEC" in
+  ''|*[!0-9]*) echo "MCP_TIMEOUT_INVALID: PCUSP_VM_CALL_TIMEOUT_SEC must be a positive integer" >&2; exit 2 ;;
+esac
+[ "$MCP_TIMEOUT_SEC" -gt 0 ] || {
+  echo "MCP_TIMEOUT_INVALID: PCUSP_VM_CALL_TIMEOUT_SEC must be a positive integer" >&2
+  exit 2
+}
+MCP_TIMEOUT_SEC=$((10#$MCP_TIMEOUT_SEC))
+
 # Keep the result visible to the caller, but do not trust the child's exit code
 # alone.  The VM-rig deploy self-test historically saw rc=0 even when the
 # operator returned no MCP result at all: a silent child stdout is not proof of
@@ -60,8 +73,38 @@ OUT="$(mktemp "${TMPDIR:-/tmp}/vmcall.XXXXXX")" || {
 cleanup() { rm -f "$OUT"; }
 trap cleanup EXIT HUP INT TERM
 
-PAPERCUSP_HONO_PORT="$PORT" "$NODE" "$MCP" "$@" >"$OUT"
+run_mcp_with_timeout() {
+  PAPERCUSP_HONO_PORT="$PORT" "$NODE" "$MCP" "$@" >"$OUT" &
+  local child_pid=$!
+  local deadline=$((SECONDS + MCP_TIMEOUT_SEC))
+
+  while kill -0 "$child_pid" 2>/dev/null; do
+    if (( SECONDS >= deadline )); then
+      # Re-check after the deadline comparison to avoid turning a just-finished
+      # child into a false timeout. SIGKILL is the backstop for a child that
+      # ignores TERM; either way, wait reaps it before the temp file is removed.
+      if kill -0 "$child_pid" 2>/dev/null; then
+        echo "MCP_RESULT_TIMEOUT: MCP call did not complete within ${MCP_TIMEOUT_SEC}s; the selected operator listener may be alive but unresponsive" >&2
+        kill -TERM "$child_pid" 2>/dev/null || true
+        sleep 0.1
+        kill -KILL "$child_pid" 2>/dev/null || true
+        wait "$child_pid" 2>/dev/null || true
+        return 124
+      fi
+      break
+    fi
+    sleep 0.1
+  done
+  wait "$child_pid"
+}
+
+run_mcp_with_timeout "$@"
 rc=$?
+
+if [ "$rc" -eq 124 ]; then
+  cat "$OUT"
+  exit "$rc"
+fi
 
 if [ "$rc" -ne 0 ]; then
   cat "$OUT"
