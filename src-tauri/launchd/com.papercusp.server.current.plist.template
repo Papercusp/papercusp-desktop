@@ -36,6 +36,13 @@
         <string>__PAPERCUSP_CURRENT_PAYLOAD__</string>
         <key>PAPERCUSP_HONO_PORT</key>
         <string>__PAPERCUSP_CURRENT_PORT__</string>
+        <!-- A bundled sidecar cannot derive its source identity from git. The
+             current-payload installer binds the exact stamped payload SHA so
+             /api/health remains provenance-bearing under launchd. -->
+        <key>PAPERCUSP_BUILD_SHA</key>
+        <string>__PAPERCUSP_CURRENT_BUILD_SHA__</string>
+        <key>PAPERCUSP_BUILD_VERSION</key>
+        <string>__PAPERCUSP_CURRENT_BUILD_VERSION__</string>
     </dict>
 
     <key>WorkingDirectory</key>

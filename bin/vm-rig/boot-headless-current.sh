@@ -309,14 +309,27 @@ process_cmdline() {
   ps -o command= -p "$1" 2>/dev/null | sed 's/^[[:space:]]*//'
 }
 
+process_executable() {
+  lsof -nP -a -p "$1" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1
+}
+
 is_current_operator_pid() {
-  local op="$1" cmd
+  local op="$1" cmd exe
   case "$op" in ''|*[!0-9]*) return 1 ;; esac
   kill -0 "$op" 2>/dev/null || return 1
   cmd="$(process_cmdline "$op")"
   case "$cmd" in
     "$NODE"*"$SERVE"*--ensure*) return 0 ;;
     "$NODE"*"$SIDECAR/serve.mjs"*) return 0 ;;
+  esac
+  # macOS ps may collapse argv[0] to the executable basename (`node`) even
+  # though lsof retains the exact mapped binary. Accept that display only when
+  # BOTH the executable and serve path bind to this installed/current payload.
+  exe="$(process_executable "$op")"
+  [ "$exe" = "$NODE" ] || return 1
+  case "$cmd" in
+    *"$SERVE"*--ensure*) return 0 ;;
+    *"$SIDECAR/serve.mjs"*) return 0 ;;
   esac
   return 1
 }
@@ -327,6 +340,26 @@ pid_from_file() {
   op="$(sed -nE 's/^[[:space:]]*([0-9]+).*/\1/p' "$file" | head -1)"
   is_current_operator_pid "$op" || return 1
   printf '%s\n' "$op"
+}
+
+# EI-22367240585613586: launchd's failed-start loop can overwrite the discovery
+# record and PID file while a prior Tauri-owned Server operator still owns the
+# port. Recover only from a UNIQUE listener whose mapped node executable and
+# serve argv both validate above; this is still exact-owner resolution, never a
+# broad process-table sweep.
+pid_from_unique_port_owner() {
+  local listener count parent parent_exe
+  listener="$(lsof -nP -iTCP:"$HONO_PORT" -sTCP:LISTEN -t 2>/dev/null | sort -u)"
+  [ -n "$listener" ] || return 1
+  count="$(printf '%s\n' "$listener" | wc -l | tr -d ' ')"
+  [ "$count" = 1 ] || return 1
+  is_current_operator_pid "$listener" || return 1
+  parent="$(ps -o ppid= -p "$listener" 2>/dev/null | tr -d ' ')"
+  parent_exe="$(process_executable "$parent")"
+  case "$parent_exe" in
+    "$APP/Contents/MacOS/"*) printf '%s\n' "$parent" ;;
+    *) printf '%s\n' "$listener" ;;
+  esac
 }
 
 resolve_current_operator_pid() {
@@ -343,7 +376,7 @@ resolve_current_operator_pid() {
       return 0
     fi
   fi
-  pid_from_file "$PIDFILE"
+  pid_from_file "$PIDFILE" || pid_from_unique_port_owner
 }
 
 stop_owned_operator() {

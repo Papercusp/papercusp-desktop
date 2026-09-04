@@ -419,9 +419,11 @@ test('macOS Server starts without a console login (LaunchDaemon, not a gui-domai
   const templatePath = path.join(launchdDir, 'com.papercusp.server.plist.template');
   const currentTemplatePath = path.join(launchdDir, 'com.papercusp.server.current.plist.template');
   const installerPath = path.join(launchdDir, 'install-launchdaemon.sh');
+  const currentLauncherPath = path.join(desktopRoot, 'bin/vm-rig/boot-headless-current.sh');
   const template = fs.readFileSync(templatePath, 'utf8');
   const currentTemplate = fs.readFileSync(currentTemplatePath, 'utf8');
   const installer = fs.readFileSync(installerPath, 'utf8');
+  const currentLauncher = fs.readFileSync(currentLauncherPath, 'utf8');
   const rustMain = fs.readFileSync(path.join(desktopRoot, 'src-tauri/src/main.rs'), 'utf8');
   const contract = require(path.join(desktopRoot, 'src-tauri/distribution-contract.json'));
 
@@ -493,6 +495,15 @@ test('macOS Server starts without a console login (LaunchDaemon, not a gui-domai
   assert.match(currentTemplate, /<key>PAPERCUSP_RIG_HOME<\/key>\s*<string>__PAPERCUSP_SERVICE_HOME__<\/string>/);
   assert.match(currentTemplate, /<key>PAPERCUSP_RIG_SIDECAR_DIR<\/key>\s*<string>__PAPERCUSP_CURRENT_PAYLOAD__<\/string>/);
   assert.match(currentTemplate, /<key>PAPERCUSP_HONO_PORT<\/key>\s*<string>__PAPERCUSP_CURRENT_PORT__<\/string>/);
+  // EI-22368205971185543: a generated current-payload sidecar has no baked
+  // source SHA. The LaunchDaemon must receive the exact payload identity so a
+  // healthy :3070 response cannot be mistaken for an unproven bundle.
+  assert.match(currentTemplate, /<key>PAPERCUSP_BUILD_SHA<\/key>\s*<string>__PAPERCUSP_CURRENT_BUILD_SHA__<\/string>/);
+  assert.match(currentTemplate, /<key>PAPERCUSP_BUILD_VERSION<\/key>\s*<string>__PAPERCUSP_CURRENT_BUILD_VERSION__<\/string>/);
+  assert.match(installer, /--build-sha\)/);
+  assert.match(installer, /--build-version\)/);
+  assert.match(installer, /CURRENT_PAYLOAD}\/BUILD-STAMP\.txt/);
+  assert.match(installer, /health_sha=.*CURRENT_BUILD_SHA/);
 
   const currentDeclared = [...new Set(currentTemplate.match(/__PAPERCUSP_[A-Z_]+__/g) || [])];
   for (const token of currentDeclared) {
@@ -518,6 +529,15 @@ test('macOS Server starts without a console login (LaunchDaemon, not a gui-domai
   assert.match(installer, /operator_pid" = "\$service_pid"/);
   assert.match(installer, /lsof -nP -a -p "\$service_pid" -iTCP:"\$CURRENT_PORT" -sTCP:LISTEN/);
   assert.match(installer, /curl -fsS -m 2 "http:\/\/127\.0\.0\.1:\$\{CURRENT_PORT\}\/api\/health"/);
+
+  // EI-22367240585613586: if launchd's discovery/PID files are stale, the
+  // exact-owner stop may recover from a unique port listener only after its
+  // executable + serve path are validated; it must never fall back to a broad
+  // `pkill`/process-table sweep.
+  assert.match(currentLauncher, /process_executable\(\)/);
+  assert.match(currentLauncher, /pid_from_unique_port_owner\(\)/);
+  assert.match(currentLauncher, /lsof -nP -iTCP:"\$HONO_PORT" -sTCP:LISTEN -t/);
+  assert.match(currentLauncher, /pid_from_file "\$PIDFILE" \|\| pid_from_unique_port_owner/);
 
   // The contract recorded linuxUserUnit and no macOS counterpart, which is how
   // the platform asymmetry stayed invisible. Keep both named.

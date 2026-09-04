@@ -13,6 +13,9 @@
 #   sudo ./install-launchdaemon.sh --current-payload /Users/alice/rig-sidecar-current \
 #     --current-launcher /Users/alice/.papercusp/vm-rig/boot-headless-current.sh
 #                                                   # supervise a composed payload
+#   sudo ./install-launchdaemon.sh --current-payload /Users/alice/rig-sidecar-current \
+#     --build-sha <immutable-source-sha> --build-version <version>
+#                                                   # bind launchd health identity explicitly
 #   sudo ./install-launchdaemon.sh --bootout-only   # quiesce before an atomic deploy
 #
 # Idempotent: re-running replaces the plist and re-bootstraps cleanly.
@@ -32,6 +35,8 @@ MODE="install"
 CURRENT_PAYLOAD=""
 CURRENT_LAUNCHER=""
 CURRENT_PORT="${PAPERCUSP_HONO_PORT:-3070}"
+CURRENT_BUILD_SHA=""
+CURRENT_BUILD_VERSION=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -41,6 +46,8 @@ while [ $# -gt 0 ]; do
     --current-payload) CURRENT_PAYLOAD="${2:?--current-payload needs an absolute directory}"; shift 2 ;;
     --current-launcher) CURRENT_LAUNCHER="${2:?--current-launcher needs an absolute executable}"; shift 2 ;;
     --port) CURRENT_PORT="${2:?--port needs a port number}"; shift 2 ;;
+    --build-sha) CURRENT_BUILD_SHA="${2:?--build-sha needs an immutable source sha}"; shift 2 ;;
+    --build-version) CURRENT_BUILD_VERSION="${2:?--build-version needs a release version}"; shift 2 ;;
     -h|--help) sed -n '2,24p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -111,6 +118,27 @@ if [ -n "$CURRENT_PAYLOAD" ] || [ -n "$CURRENT_LAUNCHER" ]; then
   # that unrelated binary made the persistent repair impossible after reboot
   # and left the old direct-node LaunchDaemon serving a stale schema instead.
   [ -x "${SIDECAR_DIR}/bin/node" ] || { echo "FATAL: ${SIDECAR_DIR}/bin/node is missing or not executable" >&2; exit 1; }
+
+  # A generated sidecar is intentionally identity-less unless its launcher
+  # receives PAPERCUSP_BUILD_SHA. Prefer explicit deploy input; otherwise the
+  # composed payload's BUILD-STAMP.txt is the writer's immutable source pin.
+  # Never accept an empty/unknown stamp: /api/health sha:null would make a
+  # healthy process indistinguishable from the wrong bytes (EI-22368205971185543).
+  if [ -z "$CURRENT_BUILD_SHA" ] && [ -f "${CURRENT_PAYLOAD}/BUILD-STAMP.txt" ]; then
+    CURRENT_BUILD_SHA="$(sed -n 's/^sha=//p' "${CURRENT_PAYLOAD}/BUILD-STAMP.txt" | head -1)"
+  fi
+  case "$CURRENT_BUILD_SHA" in
+    ''|unknown|*[!A-Za-z0-9._-]*)
+      echo "FATAL: current-payload mode requires an explicit or stamped build SHA" >&2
+      exit 2
+      ;;
+  esac
+  if [ -z "$CURRENT_BUILD_VERSION" ] && [ -f "${CURRENT_PAYLOAD}/build-provenance.json" ]; then
+    CURRENT_BUILD_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${CURRENT_PAYLOAD}/build-provenance.json" | head -1)"
+  fi
+  case "$CURRENT_BUILD_VERSION" in
+    ''|*[!A-Za-z0-9._-]*) CURRENT_BUILD_VERSION="0.0.0" ;;
+  esac
 else
   [ -x "$BINARY" ] || { echo "FATAL: ${BINARY} is missing or not executable — install Papercusp Server first" >&2; exit 1; }
 fi
@@ -140,6 +168,8 @@ template_body="${template_body//__PAPERCUSP_SERVICE_HOME__/$SERVICE_HOME}"
 template_body="${template_body//__PAPERCUSP_CURRENT_PAYLOAD__/$CURRENT_PAYLOAD}"
 template_body="${template_body//__PAPERCUSP_CURRENT_LAUNCHER__/$CURRENT_LAUNCHER}"
 template_body="${template_body//__PAPERCUSP_CURRENT_PORT__/$CURRENT_PORT}"
+template_body="${template_body//__PAPERCUSP_CURRENT_BUILD_SHA__/$CURRENT_BUILD_SHA}"
+template_body="${template_body//__PAPERCUSP_CURRENT_BUILD_VERSION__/$CURRENT_BUILD_VERSION}"
 printf '%s\n' "$template_body" > "$TMP_PLIST"
 
 if ! plutil -lint "$TMP_PLIST" >/dev/null; then
@@ -175,7 +205,7 @@ launchctl bootstrap system "$PLIST_DEST"
 launchctl enable "system/${LABEL}"
 
 verify_current_service() {
-  local i service_pid operator_pid command discovery="${SERVICE_HOME}/.papercusp/operator.json"
+  local i service_pid operator_pid command health health_sha discovery="${SERVICE_HOME}/.papercusp/operator.json"
   for i in $(seq 1 180); do
     service_pid="$(launchctl print "system/${LABEL}" 2>/dev/null \
       | sed -nE 's/^[[:space:]]*pid = ([0-9]+)$/\1/p' | head -1)"
@@ -184,9 +214,11 @@ verify_current_service() {
       command="$(ps -o command= -p "$service_pid" 2>/dev/null | sed 's/^[[:space:]]*//')"
       case "$command" in
         "${SIDECAR_DIR}/bin/node"*"${CURRENT_PAYLOAD}/serve.mjs"*--ensure*)
+          health="$(curl -fsS -m 2 "http://127.0.0.1:${CURRENT_PORT}/api/health" 2>/dev/null || true)"
+          health_sha="$(printf '%s' "$health" | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
           if lsof -nP -a -p "$service_pid" -iTCP:"$CURRENT_PORT" -sTCP:LISTEN >/dev/null 2>&1 \
-            && curl -fsS -m 2 "http://127.0.0.1:${CURRENT_PORT}/api/health" >/dev/null 2>&1; then
-            echo "verified current LaunchDaemon pid=${service_pid} owns :${CURRENT_PORT} and exact payload ${CURRENT_PAYLOAD}/serve.mjs"
+            && [ "$health_sha" = "$CURRENT_BUILD_SHA" ]; then
+            echo "verified current LaunchDaemon pid=${service_pid} owns :${CURRENT_PORT}, exact payload ${CURRENT_PAYLOAD}/serve.mjs, buildSha=${health_sha}"
             return 0
           fi
           ;;
