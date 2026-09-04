@@ -2964,7 +2964,6 @@ dependencies = [
  "rand 0.8.6",
  "reqwest 0.12.28",
  "rusqlite",
- "scopeguard",
  "serde",
  "serde_json",
  "specta",
