@@ -17,7 +17,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 /// Bridge protocol version exposed via `GET /version`. Bumped whenever the
 /// HTTP surface changes shape so CLI clients can feature-detect.
-pub const BRIDGE_VERSION: &str = "0.7.0";
+pub const BRIDGE_VERSION: &str = "0.8.0";
 
 /// Owns the discovery token for exactly as long as the Tauri application.
 ///
@@ -172,6 +172,11 @@ struct HealthResponse {
     webview_ready: bool,
     sidecars_alive: bool,
     sidecars: Vec<SidecarSummary>,
+    /// EI-19357343092509867: the operator port THIS bridge's desktop routes
+    /// `/api/*` to right now. Read from the live atomic for every request so
+    /// an environment switch is visible immediately; a startup/persisted
+    /// target can be stale after `retarget_api` runs.
+    selected_api_port: u16,
     /// EI-13218: is the origin the main webview is CURRENTLY displaying
     /// actually answering HTTP right now? `sidecars_alive` above is PID-based
     /// only (`pid_alive`, a signal-0 check) and — in production — `sidecars`
@@ -818,6 +823,8 @@ pub fn start_bridge(
                             webview_ready,
                             sidecars_alive,
                             sidecars,
+                            selected_api_port: crate::SELECTED_API_PORT
+                                .load(std::sync::atomic::Ordering::Relaxed),
                             operator_reachable,
                         };
                         let json = serde_json::to_string(&resp).unwrap();
@@ -1121,6 +1128,21 @@ fn devtools_response() -> DevtoolsResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_response_serializes_the_live_selected_api_port_contract() {
+        let response = HealthResponse {
+            uptime_ms: 123,
+            webview_ready: true,
+            sidecars_alive: true,
+            sidecars: Vec::new(),
+            selected_api_port: 3170,
+            operator_reachable: Some(true),
+        };
+
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["selected_api_port"], 3170);
+    }
 
     #[test]
     fn bridge_token_file_guard_keeps_token_until_application_state_drops() {
