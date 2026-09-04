@@ -116,19 +116,28 @@ discover_vm() {
   local out
   # The Mac's embedded PG port is randomized per boot and there is no psql on its
   # PATH — the only one is inside the packaged app — so both are discovered from
-  # the live postmaster's argv rather than hardcoded. The bundle path is captured
-  # here too so the census probes do not re-glob it per symbol.
-  out="$(ssh "${SSH_OPTS[@]}" "$VM" '
+  # the live postmaster/operator rather than hardcoded. Bind the bundle to the
+  # UNIQUE process that owns the MCP port. A plain /Applications/Papercusp*.app
+  # glob is not provenance: when GUI + Server are both installed it selects GUI
+  # first even while Server owns :3070 (EI-22368619345712144).
+  out="$({
+    ssh "${SSH_OPTS[@]}" "$VM" "PORT='$VM_MCP_PORT' bash -s" <<'EOS'
     P=$(ps -axo args | grep "[e]mbedded-postgres" | grep -oE " -p [0-9]+" | grep -oE "[0-9]+" | head -1)
-    B=""; S=""
-    for c in /Applications/Papercusp*.app/Contents/Resources/sidecar/bin/psql; do
-      [ -x "$c" ] && B="$c" && break
-    done
+    L=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | sort -u)
+    [ -n "$L" ] || exit 1
+    [ "$(printf '%s\n' "$L" | wc -l | tr -d ' ')" = 1 ] || exit 1
+    CMD=$(ps -o command= -p "$L" 2>/dev/null | sed 's/^[[:space:]]*//')
+    S=""
     for c in /Applications/Papercusp*.app/Contents/Resources/sidecar/serve.mjs; do
-      [ -f "$c" ] && S="$c" && break
+      [ -f "$c" ] || continue
+      case "$CMD" in *"$c"*) S="$c"; break ;; esac
     done
+    [ -n "$S" ] || exit 1
+    B="${S%/serve.mjs}/bin/psql"
+    [ -x "$B" ] || exit 1
     printf "%s\t%s\t%s\t%s" "$P" "$B" "$S" "$(hostname)"
-  ' 2>/dev/null)" || return 1
+EOS
+  } 2>/dev/null)" || return 1
   VM_PG_PORT="$(printf '%s' "$out" | cut -f1)"
   VM_PSQL_BIN="$(printf '%s' "$out" | cut -f2)"
   VM_BUNDLE="$(printf '%s' "$out" | cut -f3)"
@@ -244,32 +253,47 @@ gate_global_state() {
 
 restore_gate() {
   [ "$GATE_ARMED" = 1 ] || return 0
-  local want_desc after
+  local want_desc after resolved attempt
   if [ "$GATE_PRIOR_PRESENT" = 1 ]; then
     want_desc="enabled=$GATE_PRIOR (it had an explicit override before this run)"
     echo; echo "── restoring the VM's accept-delegated-seats override to $want_desc ──"
-    rig_mcp vm 'flags:set' \
-      "{\"key\":\"$GATE_FLAG\",\"enabled\":$GATE_PRIOR,\"reason\":\"P-202 LIVE-2 drill $WD_RUNID: restoring the prior explicit override\"}" >/dev/null 2>&1
   else
     want_desc="CLEARED (no '@global' override existed before this run; the code default governs)"
     echo; echo "── restoring the VM's accept-delegated-seats override: $want_desc ──"
-    rig_mcp vm 'flags:set' \
-      "{\"key\":\"$GATE_FLAG\",\"enabled\":null,\"reason\":\"P-202 LIVE-2 drill $WD_RUNID: clearing the temporary drill override\"}" >/dev/null 2>&1
   fi
-  after="$(gate_global_state)"
-  local resolved
-  resolved="$(rig_mcp vm 'flags:get' "{\"key\":\"$GATE_FLAG\"}" 2>/dev/null | grep -oE 'true|false' | tail -1)"
-  if [ "$GATE_PRIOR_PRESENT" = 1 ]; then
-    [ "$resolved" = "$GATE_PRIOR" ] && { echo "    restored (resolved=$resolved, @global row: $after)"; GATE_ARMED=0; return 0; }
-  else
-    case "$after" in
-      false:*) echo "    restored (override CLEARED from @global; resolved=$resolved)"; GATE_ARMED=0; return 0 ;;
-    esac
-  fi
-  echo "    ⚠⚠ GATE NOT RESTORED — @global row now reads '$after', resolved='$resolved'."
+
+  # EI-22368854625222938: one flags:set clear returned without restoring the
+  # authoritative row, and the EXIT trap walked away with the owner-authority
+  # gate pinned ON. Restoration is a safety boundary, not best-effort cleanup:
+  # retry the idempotent write and prove BOTH stored shape + resolved value.
+  for attempt in $(seq 1 5); do
+    if [ "$GATE_PRIOR_PRESENT" = 1 ]; then
+      rig_mcp vm 'flags:set' \
+        "{\"key\":\"$GATE_FLAG\",\"enabled\":$GATE_PRIOR,\"reason\":\"P-202 LIVE-2 drill $WD_RUNID: restoring the prior explicit override (attempt $attempt)\"}" >/dev/null 2>&1 || true
+    else
+      rig_mcp vm 'flags:set' \
+        "{\"key\":\"$GATE_FLAG\",\"enabled\":null,\"reason\":\"P-202 LIVE-2 drill $WD_RUNID: clearing the temporary drill override (attempt $attempt)\"}" >/dev/null 2>&1 || true
+    fi
+    after="$(gate_global_state)"
+    resolved="$(rig_mcp vm 'flags:get' "{\"key\":\"$GATE_FLAG\"}" 2>/dev/null | grep -oE 'true|false' | tail -1)"
+    if [ "$GATE_PRIOR_PRESENT" = 1 ]; then
+      if [ "$after" = "true:$GATE_PRIOR" ] && [ "$resolved" = "$GATE_PRIOR" ]; then
+        echo "    restored (resolved=$resolved, @global row: $after, attempt=$attempt)"
+        GATE_ARMED=0
+        return 0
+      fi
+    elif [ "$after" = "false:-" ] && [ "$resolved" = "false" ]; then
+      echo "    restored (override CLEARED from @global; resolved=$resolved, attempt=$attempt)"
+      GATE_ARMED=0
+      return 0
+    fi
+    echo "    restore attempt $attempt not yet verified (@global='$after', resolved='$resolved')" >&2
+    sleep 2
+  done
+
+  echo "    ⚠⚠ GATE NOT RESTORED after 5 attempts — @global row reads '$after', resolved='$resolved'."
   echo "    The VM may still be accepting delegated seats. Fix it by hand on the VM:"
   echo "      flags:set { key:'$GATE_FLAG', enabled:null, reason:'restore after P-202 drill' }"
-  GATE_ARMED=0
   return 1
 }
 trap restore_gate EXIT INT TERM
