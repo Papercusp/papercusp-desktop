@@ -212,6 +212,40 @@ test('distinguishes an active service from an unavailable QEMU control plane', a
   assert.ok(Number.isInteger(diskAge) && diskAge >= 0, `disk age should be a non-negative integer, got ${diskAge}`);
 });
 
+test('bounds the active and rotated qemu logs without touching unrelated logs', async () => {
+  const { dir, env } = await fixture({ qmp: false, ssh: false });
+  const logs = path.join(dir, 'logs');
+  const active = path.join(logs, 'qemu-20260904-120000.log');
+  const rotated = path.join(logs, 'qemu-20260903-120000.log');
+  const current = path.join(logs, 'qemu-current.log');
+  const unrelated = path.join(logs, 'other.log');
+  const activeLog = 'active-prefix\n'.repeat(20) + 'active-latest\n';
+  const rotatedLog = 'rotated-prefix\n'.repeat(20) + 'rotated-latest\n';
+  const unrelatedLog = 'unrelated\n'.repeat(20);
+  try {
+    await mkdir(logs, { recursive: true });
+    await writeFile(active, activeLog);
+    await writeFile(rotated, rotatedLog);
+    await writeFile(unrelated, unrelatedLog);
+    await symlink(path.basename(active), current);
+
+    const result = spawnSync('bash', [script, '--json'], {
+      env: { ...env, MAC_VM_QEMU_LOG: current, MAC_VM_QEMU_LOG_MAX_BYTES: '20' },
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 1);
+    const health = JSON.parse(result.stdout);
+    assert.equal(health.qemu_log_bounded, true);
+    assert.ok((await stat(active)).size <= 20);
+    assert.ok((await stat(rotated)).size <= 20);
+    assert.equal((await stat(unrelated)).size, Buffer.byteLength(unrelatedLog));
+    assert.match(await readFile(current, 'utf8'), /active-latest/);
+    assert.match(await readFile(rotated, 'utf8'), /rotated-latest/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 async function exhaustedQemuFixture() {
   const fixtureState = await fixture({ qmp: true, ssh: false });
   const { dir, env } = fixtureState;

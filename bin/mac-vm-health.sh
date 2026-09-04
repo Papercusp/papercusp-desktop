@@ -12,6 +12,7 @@ STALE_SEC="${MAC_VM_STALE_SEC:-900}"
 QMP_DIR="$(dirname "$QMP_SOCK")"
 QEMU_PIDFILE="${MAC_VM_QEMU_PIDFILE:-$QMP_DIR/qemu.pid}"
 QEMU_LOG="${MAC_VM_QEMU_LOG:-$QMP_DIR/logs/qemu-current.log}"
+QEMU_LOG_DIR="$(dirname "$QEMU_LOG")"
 PROC_ROOT="${MAC_VM_PROC_ROOT:-/proc}"
 FD_EXHAUSTION_PCT="${MAC_VM_FD_EXHAUSTION_PCT:-90}"
 CLOSE_WAIT_THRESHOLD="${MAC_VM_CLOSE_WAIT_THRESHOLD:-256}"
@@ -157,20 +158,39 @@ fi
 # QEMU writes its stderr to the current log through an already-open file
 # descriptor. Trim in place (rather than rename) so the running process keeps
 # writing to the bounded inode, while retaining the newest diagnostic tail.
-bound_qemu_log() {
+#
+# The durable launcher rotates by creating qemu-<timestamp>.log and moving the
+# qemu-current.log symlink. Bound both the configured current target and every
+# rotated qemu log in that directory: limiting only the symlink leaves old
+# inodes permanently outside the cap.
+bound_qemu_log_file() {
+  local log_path="$1"
+  local log_size log_tmp
   [[ "$QEMU_LOG_MAX_BYTES" =~ ^[0-9]+$ && "$QEMU_LOG_MAX_BYTES" -gt 0 ]] || return 0
-  [[ -f "$QEMU_LOG" ]] || return 0
-  if ! log_size="$(stat -c %s "$QEMU_LOG" 2>/dev/null)"; then
+  [[ -f "$log_path" ]] || return 0
+  if ! log_size="$(stat -c %s "$log_path" 2>/dev/null)"; then
     return 0
   fi
   [[ "$log_size" =~ ^[0-9]+$ && "$log_size" -gt "$QEMU_LOG_MAX_BYTES" ]] || return 0
-  log_tmp="$(mktemp "${QEMU_LOG}.cap.XXXXXX" 2>/dev/null || true)"
+  log_tmp="$(mktemp "${log_path}.cap.XXXXXX" 2>/dev/null || true)"
   [[ -n "$log_tmp" ]] || return 0
-  if tail -c "$QEMU_LOG_MAX_BYTES" "$QEMU_LOG" > "$log_tmp" 2>/dev/null && \
-     cat "$log_tmp" > "$QEMU_LOG" 2>/dev/null; then
+  if tail -c "$QEMU_LOG_MAX_BYTES" "$log_path" > "$log_tmp" 2>/dev/null && \
+     cat "$log_tmp" > "$log_path" 2>/dev/null; then
     qemu_log_bounded=true
   fi
   rm -f "$log_tmp"
+}
+
+bound_qemu_log() {
+  bound_qemu_log_file "$QEMU_LOG"
+  [[ -d "$QEMU_LOG_DIR" ]] || return 0
+  while IFS= read -r -d '' log_path; do
+    # The configured path may be a symlink to the newest qemu-*.log, so the
+    # target can be visited twice. The second pass is already under the cap
+    # and is harmless; skip only an exact path match.
+    [[ "$log_path" == "$QEMU_LOG" ]] && continue
+    bound_qemu_log_file "$log_path"
+  done < <(find "$QEMU_LOG_DIR" -maxdepth 1 -type f -name 'qemu-*.log' -print0 2>/dev/null)
 }
 bound_qemu_log
 
