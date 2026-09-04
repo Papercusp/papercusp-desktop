@@ -41,6 +41,43 @@ use tauri::{Manager, UriSchemeContext, UriSchemeResponder, Wry};
 
 use crate::SidecarState;
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CspPolicy {
+    report_only_header: String,
+    policy: String,
+}
+
+fn csp_policy() -> &'static CspPolicy {
+    static POLICY: std::sync::OnceLock<CspPolicy> = std::sync::OnceLock::new();
+    POLICY.get_or_init(|| {
+        serde_json::from_str(include_str!(
+            "../../../libs/generic/desktop-ipc/src/csp-policy.json"
+        ))
+        .expect("shared desktop CSP policy must be valid JSON")
+    })
+}
+
+/// Attach the shared report-only policy to document responses only. CSP on a
+/// script, stylesheet, image, or font response has no effect.
+fn with_report_only_csp(mut response: Response<Vec<u8>>) -> Response<Vec<u8>> {
+    let is_html = response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/html"));
+    if is_html {
+        let policy = csp_policy();
+        let header_name =
+            tauri::http::header::HeaderName::from_bytes(policy.report_only_header.as_bytes())
+                .expect("shared desktop CSP header name must be valid");
+        let header_value = tauri::http::header::HeaderValue::from_str(&policy.policy)
+            .expect("shared desktop CSP policy must be a valid header value");
+        response.headers_mut().insert(header_name, header_value);
+    }
+    response
+}
+
 /// The scheme name. On Windows/Android Tauri maps custom schemes onto
 /// `http://papercusp.localhost`; on Linux/macOS it is `papercusp://localhost`.
 pub const SCHEME: &str = "papercusp";
@@ -304,11 +341,12 @@ fn render_bundled_spa(spa_root: &std::path::Path, path: &str) -> Response<Vec<u8
         Ok(b) => b,
         Err(e) => return error_response(404, &format!("papercusp: {e}")),
     };
-    Response::builder()
+    let response = Response::builder()
         .status(200)
         .header("content-type", mime_for(&file))
         .body(body)
-        .unwrap_or_else(|_| error_response(500, "papercusp: failed to build static response"))
+        .unwrap_or_else(|_| error_response(500, "papercusp: failed to build static response"));
+    with_report_only_csp(response)
 }
 
 /// MIME type for a bundled static file, by extension.
@@ -425,11 +463,12 @@ fn resolve_static_or_forward(
         return None; // symlink escape — don't serve
     }
     let body = std::fs::read(&canon).ok()?;
-    Response::builder()
+    let response = Response::builder()
         .status(200)
         .header("content-type", mime_for(&canon))
         .body(body)
-        .ok()
+        .ok()?;
+    Some(with_report_only_csp(response))
 }
 
 /// Async URI-scheme handler. Forwards the request to the loopback base on a
@@ -567,9 +606,10 @@ fn forward(app: &tauri::AppHandle, request: Request<Vec<u8>>) -> Response<Vec<u8
                 }
                 builder = builder.header(k.as_str(), v.as_bytes());
             }
-            builder
+            let response = builder
                 .body(body)
-                .unwrap_or_else(|_| error_response(500, "papercusp: failed to build response"))
+                .unwrap_or_else(|_| error_response(500, "papercusp: failed to build response"));
+            with_report_only_csp(response)
         }
         Err(e) => {
             // EI-18892233692082064: a connect/timeout failure on the document
@@ -663,6 +703,14 @@ mod tests {
         let resp = render_bundled_spa(&root.dir, "/");
         assert_eq!(resp.status().as_u16(), 200);
         assert_eq!(
+            resp.headers()
+                .get(csp_policy().report_only_header.as_str())
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            csp_policy().policy,
+        );
+        assert_eq!(
             String::from_utf8_lossy(resp.body()),
             "<html>real index</html>"
         );
@@ -684,7 +732,37 @@ mod tests {
         let root = TempSpaRoot::new("render-asset");
         let resp = render_bundled_spa(&root.dir, "/assets/index-a1b2c3.js");
         assert_eq!(resp.status().as_u16(), 200);
+        assert!(resp
+            .headers()
+            .get(csp_policy().report_only_header.as_str())
+            .is_none());
         assert_eq!(String::from_utf8_lossy(resp.body()), "console.log('hi')");
+    }
+
+    #[test]
+    fn report_only_csp_is_shared_and_html_only() {
+        let html = Response::builder()
+            .header("content-type", "text/html; charset=utf-8")
+            .body(Vec::new())
+            .unwrap();
+        let html = with_report_only_csp(html);
+        assert_eq!(
+            html.headers()
+                .get(csp_policy().report_only_header.as_str())
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            csp_policy().policy,
+        );
+
+        let script = Response::builder()
+            .header("content-type", "text/javascript")
+            .body(Vec::new())
+            .unwrap();
+        assert!(with_report_only_csp(script)
+            .headers()
+            .get(csp_policy().report_only_header.as_str())
+            .is_none());
     }
 
     #[test]
