@@ -26,10 +26,14 @@ const path = require('node:path');
 const test = require('node:test');
 
 const {
-  REQUIRED_SIDECAR_ENTRYPOINTS,
+  GUI_PRODUCT_NAME,
+  SERVER_PRODUCT_NAME,
+  REQUIRED_GUI_SIDECAR_ENTRYPOINTS,
+  REQUIRED_SERVER_SIDECAR_ENTRYPOINTS,
   PLACEHOLDER_MARKER,
   resourceRootFor,
   sidecarDirFor,
+  requiredSidecarEntrypointsFor,
   inspectInstalledApp,
   describeIncompleteInstall,
 } = require('../bin/lib/installed-app-tree.js');
@@ -41,24 +45,26 @@ const {
  * `sidecar` selects what goes in that dir — mirroring the three states seen on
  * disk: a real bundle, build.rs's placeholder, and a half-populated dir.
  */
-function makeTree(sidecar) {
+function makeTree(sidecar, productName = GUI_PRODUCT_NAME) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-installed-tree-'));
   const binDir = path.join(tmp, 'bin');
-  const sidecarDir = path.join(tmp, 'lib', 'Papercusp GUI', 'sidecar');
+  const sidecarDir = path.join(tmp, 'lib', productName, 'sidecar');
   fs.mkdirSync(binDir, { recursive: true });
   fs.mkdirSync(sidecarDir, { recursive: true });
 
   const appPath = path.join(binDir, 'papercusp-desktop');
   fs.writeFileSync(appPath, '#!/bin/true\n');
+  const required = requiredSidecarEntrypointsFor(productName);
 
   if (sidecar === 'complete') {
-    for (const entry of REQUIRED_SIDECAR_ENTRYPOINTS) {
+    for (const entry of required) {
+      fs.mkdirSync(path.dirname(path.join(sidecarDir, entry)), { recursive: true });
       fs.writeFileSync(path.join(sidecarDir, entry), '// bundle\n');
     }
   } else if (sidecar === 'placeholder') {
     fs.writeFileSync(path.join(sidecarDir, PLACEHOLDER_MARKER), 'Placeholder created by build.rs\n');
   } else if (sidecar === 'partial') {
-    fs.writeFileSync(path.join(sidecarDir, REQUIRED_SIDECAR_ENTRYPOINTS[0]), '// bundle\n');
+    fs.writeFileSync(path.join(sidecarDir, required[0]), '// bundle\n');
   } else if (sidecar === 'absent') {
     fs.rmSync(sidecarDir, { recursive: true, force: true });
   }
@@ -86,13 +92,14 @@ test('resolves the resource tree the way a launched binary does', () => {
   assert.equal(sidecarDirFor(cargoBin), '/t/lib/Papercusp GUI/sidecar');
 });
 
-test('a real bundled sidecar reads as complete', () => {
+test('a thin GUI with its packaged SPA reads as complete', () => {
   const { tmp, appPath } = makeTree('complete');
   try {
     const report = inspectInstalledApp(appPath);
     assert.equal(report.complete, true);
     assert.equal(report.placeholder, false);
     assert.deepEqual(report.missing, []);
+    assert.deepEqual(report.required, REQUIRED_GUI_SIDECAR_ENTRYPOINTS);
     // A complete tree must produce NO message — otherwise the guard would cry
     // wolf on every good build and get muted.
     assert.equal(describeIncompleteInstall(report), null);
@@ -101,13 +108,25 @@ test('a real bundled sidecar reads as complete', () => {
   }
 });
 
-test('build.rs placeholder is reported as never-built, naming the sidecar script', () => {
-  const { tmp, appPath } = makeTree('placeholder');
+test('a Server bundle still requires both operator entrypoints', () => {
+  const { tmp, appPath } = makeTree('complete', SERVER_PRODUCT_NAME);
   try {
-    const report = inspectInstalledApp(appPath);
+    const report = inspectInstalledApp(appPath, SERVER_PRODUCT_NAME);
+    assert.equal(report.complete, true);
+    assert.deepEqual(report.required, REQUIRED_SERVER_SIDECAR_ENTRYPOINTS);
+    assert.deepEqual(report.missing, []);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('build.rs placeholder is reported as never-built, naming the sidecar script', () => {
+  const { tmp, appPath } = makeTree('placeholder', SERVER_PRODUCT_NAME);
+  try {
+    const report = inspectInstalledApp(appPath, SERVER_PRODUCT_NAME);
     assert.equal(report.complete, false);
     assert.equal(report.placeholder, true);
-    assert.deepEqual(report.missing, REQUIRED_SIDECAR_ENTRYPOINTS);
+    assert.deepEqual(report.missing, REQUIRED_SERVER_SIDECAR_ENTRYPOINTS);
 
     const msg = describeIncompleteInstall(report);
     // The remediation is the whole point: an agent hitting this must be told
@@ -122,13 +141,13 @@ test('build.rs placeholder is reported as never-built, naming the sidecar script
 });
 
 test('a half-populated sidecar names exactly what is missing', () => {
-  const { tmp, appPath } = makeTree('partial');
+  const { tmp, appPath } = makeTree('partial', SERVER_PRODUCT_NAME);
   try {
-    const report = inspectInstalledApp(appPath);
+    const report = inspectInstalledApp(appPath, SERVER_PRODUCT_NAME);
     assert.equal(report.complete, false);
     assert.equal(report.placeholder, false);
     // Only the genuinely-absent entrypoint — the present one must not be listed.
-    assert.deepEqual(report.missing, REQUIRED_SIDECAR_ENTRYPOINTS.slice(1));
+    assert.deepEqual(report.missing, REQUIRED_SERVER_SIDECAR_ENTRYPOINTS.slice(1));
     assert.match(describeIncompleteInstall(report), /sidecar-preload\.js/);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -144,22 +163,29 @@ test('an absent sidecar dir is a result, not a throw', () => {
     const report = inspectInstalledApp(appPath);
     assert.equal(report.exists, true, 'the BINARY exists — only its resources do not');
     assert.equal(report.complete, false);
-    assert.deepEqual(report.missing, REQUIRED_SIDECAR_ENTRYPOINTS);
+    assert.deepEqual(report.missing, REQUIRED_GUI_SIDECAR_ENTRYPOINTS);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('the required list matches what the Rust refuses to boot without', () => {
+test('the Server required list matches what the Rust refuses to boot without', () => {
   // This guard only has value while it agrees with main.rs's
   // missing_sidecar_entrypoints. If that list grows, a build missing the new
   // entrypoint would pass here and still FATAL at runtime — the exact silent
   // gap this module exists to close. Read the real source, not a copy.
   const mainRs = fs.readFileSync(path.join(__dirname, '../src-tauri/src/main.rs'), 'utf8');
-  for (const entry of REQUIRED_SIDECAR_ENTRYPOINTS) {
+  for (const entry of REQUIRED_SERVER_SIDECAR_ENTRYPOINTS) {
     assert.ok(
       mainRs.includes(`"${entry}"`),
       `${entry} is required by this guard but no longer appears in main.rs — the lists have drifted`,
     );
+  }
+});
+
+test('the GUI contract is attach-only and never requires Server entrypoints', () => {
+  assert.deepEqual(requiredSidecarEntrypointsFor(GUI_PRODUCT_NAME), ['spa/index.html']);
+  for (const serverOnly of REQUIRED_SERVER_SIDECAR_ENTRYPOINTS) {
+    assert(!requiredSidecarEntrypointsFor(GUI_PRODUCT_NAME).includes(serverOnly));
   }
 });

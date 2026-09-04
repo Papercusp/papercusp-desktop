@@ -1,16 +1,15 @@
 'use strict';
 /**
- * Is a BUILT papercusp-desktop binary backed by a COMPLETE installation tree?
+ * Is a BUILT papercusp-desktop binary backed by a COMPLETE installation tree
+ * for the PRODUCT ROLE it was bundled as?
  *
  * WHY THIS EXISTS (EI-18885442084466501)
  * ------------------------------------------------------------------
- * `tauri build` bundles whatever is sitting in `src-tauri/sidecar/` at the time.
- * On a fresh checkout `build.rs` puts a PLACEHOLDER there — an empty directory
- * carrying `PLACEHOLDER-README.txt` — purely so the `bundle.resources` globs
- * match. Only `bin/build-desktop-sidecar.sh` replaces it with the real bundle,
- * and NOTHING in `npm run build` (= plain `tauri build`) calls that script. So a
- * perfectly successful-looking build can, and routinely does, emit an app whose
- * operator can never start.
+ * The desktop now ships as TWO products from one Rust binary. Papercusp GUI is
+ * attach-only and deliberately carries only `sidecar/spa`; Papercusp Server owns
+ * `serve.mjs` and the full runtime. Treating the GUI like the old self-hosting app
+ * makes every correct thin-GUI package look corrupt, while treating the Server
+ * like the GUI would let a genuinely unbootable backend through.
  *
  * The failure is silent and expensive because it is INVISIBLE AT LAUNCH. The app
  * starts, the window opens, the webview paints its shell — and only then does it
@@ -30,25 +29,35 @@
  *
  * So the check has to be on the ARTIFACT, before anything is measured.
  *
- * The required-entrypoint list below is deliberately the SAME list the Rust
- * enforces at boot (`missing_sidecar_entrypoints`, src-tauri/src/main.rs) — this
- * module answers "will the app refuse to start?" and must not drift from the
- * code that does the refusing.
+ * The role-specific lists below mirror the product distribution contract and
+ * the Rust role split (`app_role.rs` + `missing_sidecar_entrypoints` in main.rs).
+ * This module answers "does this artifact contain what THIS product needs?".
  */
 const fs = require('node:fs');
 const path = require('node:path');
 
-/**
- * Mirrors `missing_sidecar_entrypoints` in src-tauri/src/main.rs. Keep in sync:
- * if the Rust starts requiring another entrypoint, a build missing it would
- * otherwise pass this guard and still FATAL at runtime.
- */
-const REQUIRED_SIDECAR_ENTRYPOINTS = ['serve.mjs', 'sidecar-preload.js'];
+const GUI_PRODUCT_NAME = 'Papercusp GUI';
+const SERVER_PRODUCT_NAME = 'Papercusp Server';
+
+/** The attach-only GUI renders its shell from the packaged SPA. */
+const REQUIRED_GUI_SIDECAR_ENTRYPOINTS = ['spa/index.html'];
+
+/** Mirrors `missing_sidecar_entrypoints` in src-tauri/src/main.rs. */
+const REQUIRED_SERVER_SIDECAR_ENTRYPOINTS = ['serve.mjs', 'sidecar-preload.js'];
+
+// Backward-compatible export for callers that mean the operator-owning Server.
+const REQUIRED_SIDECAR_ENTRYPOINTS = REQUIRED_SERVER_SIDECAR_ENTRYPOINTS;
 
 /** Written by build.rs into the placeholder sidecar dir. */
 const PLACEHOLDER_MARKER = 'PLACEHOLDER-README.txt';
 
-const DEFAULT_PRODUCT_NAME = 'Papercusp GUI';
+const DEFAULT_PRODUCT_NAME = GUI_PRODUCT_NAME;
+
+function requiredSidecarEntrypointsFor(productName = DEFAULT_PRODUCT_NAME) {
+  return productName === SERVER_PRODUCT_NAME
+    ? REQUIRED_SERVER_SIDECAR_ENTRYPOINTS
+    : REQUIRED_GUI_SIDECAR_ENTRYPOINTS;
+}
 
 /**
  * Where a launched binary looks for its bundled resources.
@@ -77,21 +86,26 @@ function sidecarDirFor(appBinaryPath, productName = DEFAULT_PRODUCT_NAME) {
  *
  * @returns {{
  *   appPath: string, exists: boolean, sidecarDir: string,
- *   missing: string[], placeholder: boolean, complete: boolean,
+ *   productName: string, required: string[], missing: string[],
+ *   placeholder: boolean, complete: boolean,
  * }}
  */
 function inspectInstalledApp(appBinaryPath, productName = DEFAULT_PRODUCT_NAME) {
   const sidecarDir = sidecarDirFor(appBinaryPath, productName);
-  const missing = REQUIRED_SIDECAR_ENTRYPOINTS.filter(
+  const required = requiredSidecarEntrypointsFor(productName);
+  const missing = required.filter(
     (entry) => !fs.existsSync(path.join(sidecarDir, entry)),
   );
+  const exists = fs.existsSync(appBinaryPath);
   return {
     appPath: appBinaryPath,
-    exists: fs.existsSync(appBinaryPath),
+    exists,
+    productName,
     sidecarDir,
+    required,
     missing,
     placeholder: fs.existsSync(path.join(sidecarDir, PLACEHOLDER_MARKER)),
-    complete: missing.length === 0,
+    complete: exists && missing.length === 0,
   };
 }
 
@@ -105,6 +119,17 @@ function inspectInstalledApp(appBinaryPath, productName = DEFAULT_PRODUCT_NAME) 
  */
 function describeIncompleteInstall(report) {
   if (report.complete) return null;
+  if (report.productName === GUI_PRODUCT_NAME) {
+    return (
+      `Incomplete ${GUI_PRODUCT_NAME} installation: the attach-only GUI resource tree at ` +
+      `${report.sidecarDir} is missing ${report.missing.join(', ')}.\n\n` +
+      `  binary: ${report.appPath}\n\n` +
+      `The GUI must carry its packaged SPA, but it must NOT carry Server-only ` +
+      `serve.mjs or sidecar-preload.js. Rebuild the current SPA/sidecar source if its ` +
+      `freshness guard reports drift, then run \`npm run build\` to re-bundle the thin GUI.\n\n` +
+      `(thin GUI / Server product split)`
+    );
+  }
   const lead = report.placeholder
     ? `the sidecar was NEVER BUILT — ${report.sidecarDir} still holds build.rs's ` +
       `placeholder (${PLACEHOLDER_MARKER}), not a real bundle`
@@ -126,9 +151,14 @@ function describeIncompleteInstall(report) {
 }
 
 module.exports = {
+  GUI_PRODUCT_NAME,
+  SERVER_PRODUCT_NAME,
+  REQUIRED_GUI_SIDECAR_ENTRYPOINTS,
+  REQUIRED_SERVER_SIDECAR_ENTRYPOINTS,
   REQUIRED_SIDECAR_ENTRYPOINTS,
   PLACEHOLDER_MARKER,
   DEFAULT_PRODUCT_NAME,
+  requiredSidecarEntrypointsFor,
   resourceRootFor,
   sidecarDirFor,
   inspectInstalledApp,
