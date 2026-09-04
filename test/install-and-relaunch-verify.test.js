@@ -90,7 +90,13 @@ case "$*" in
       printf '{"sha":"old-sha","version":"0.0.17"}\\n'
     fi
     ;;
-  *"schtasks /run /tn papercusp-e2e"*) : > "$MOCK_FLIPPED" ;;
+  *"schtasks /run /tn papercusp-e2e"*)
+    if [[ "$*" != *"cmd /c"* ]]; then
+      printf 'Input redirection is not supported: relaunch must use cmd /c\\n' >&2
+      exit 1
+    fi
+    : > "$MOCK_FLIPPED"
+    ;;
 esac
 `);
   const scp = executable(shims, 'scp', `#!/usr/bin/env bash
@@ -291,6 +297,7 @@ test('Windows auto-resolves, pushes, and installs the complete Server span befor
     assert.ok(guiInstall >= 0, 'GUI installer was not invoked');
     assert.ok(serverInstall > guiInstall, 'Server must install after GUI');
     assert.ok(relaunch > serverInstall, 'neither app may relaunch before matching Server install finishes');
+    assert.match(lines[relaunch], /cmd \/c .*schtasks \/run \/tn papercusp-e2e.*schtasks \/run \/tn papercusp-server-e2e/);
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
