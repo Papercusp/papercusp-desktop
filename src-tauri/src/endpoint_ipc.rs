@@ -21,22 +21,22 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tauri::ipc::Channel;
+use tauri::ipc::{Channel, InvokeResponseBody, IpcResponse};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 use crate::endpoint_ipc_framing::{
-    decode_event_bin_payload, encode_frame, FrameDecoder, FrameType,
+    decode_event_bin_routing_id, encode_frame, FrameDecoder, FrameType,
 };
 
 /// One event surfaced to the webview JS. Tagged JSON via Serde.
 ///
 /// The TS shape (apps/operator):
 ///   { kind: 'event', name: string, data: unknown }
-///   | { kind: 'binary', name: string, data: number[] }
+///   | ArrayBuffer // raw EVENT_BIN payload; decoded by ipc-stream.ts
 ///   | { kind: 'done', result: ToolResult }
 ///   | { kind: 'error', code: string, message: string }
-#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[derive(Debug, Clone, Deserialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EndpointEvent {
     /// JSON-valued event (delta, tool_call, suggestion, cost, etc.).
@@ -44,18 +44,42 @@ pub enum EndpointEvent {
         name: String,
         data: serde_json::Value,
     },
-    /// Binary event — Uint8Array on the wire, base64 string in JSON
-    /// for transport across Tauri's IPC serializer. Frontend hook
-    /// decodes back into Uint8Array.
-    Binary {
-        name: String,
-        /// Base64-encoded binary payload.
-        data: String,
-    },
+    /// Binary event. `payload` is the original EVENT_BIN wire payload:
+    /// `[8B call id BE][4B name length BE][name UTF-8][binary]`.
+    ///
+    /// Its custom `IpcResponse` implementation sends this variant as
+    /// `InvokeResponseBody::Raw`, so Tauri delivers an ArrayBuffer without a
+    /// base64 or JSON-array round trip. Keeping control and raw messages on the
+    /// SAME Channel preserves Tauri's per-channel ordering index; a second raw
+    /// channel would let a small JSON `done` overtake a large binary fetch.
+    Binary { payload: Vec<u8> },
     /// Tool returned successfully.
     Done { result: serde_json::Value },
     /// Dispatch or handler failed (role gate, quota, timeout, throw).
     Error { code: String, message: String },
+}
+
+/// Mixed JSON-control/raw-binary response for one ordered Tauri Channel.
+///
+/// Removing `Serialize` from `EndpointEvent` is deliberate: Tauri's blanket
+/// `IpcResponse for T: Serialize` always produces JSON. This local implementation
+/// is the typed seam that selects Raw only for the binary variant.
+impl IpcResponse for EndpointEvent {
+    fn body(self) -> tauri::Result<InvokeResponseBody> {
+        let json = match self {
+            Self::Binary { payload } => return Ok(InvokeResponseBody::Raw(payload)),
+            Self::Event { name, data } => {
+                serde_json::json!({ "kind": "event", "name": name, "data": data })
+            }
+            Self::Done { result } => serde_json::json!({ "kind": "done", "result": result }),
+            Self::Error { code, message } => {
+                serde_json::json!({ "kind": "error", "code": code, "message": message })
+            }
+        };
+        serde_json::to_string(&json)
+            .map(InvokeResponseBody::Json)
+            .map_err(Into::into)
+    }
 }
 
 /// Wire-shape envelopes used to parse server-emitted JSON payloads.
@@ -645,17 +669,14 @@ async fn reader_loop(
                     }
                 }
                 FrameType::EventBin => {
-                    match decode_event_bin_payload(&frame.payload) {
-                        Ok(decoded) => {
-                            if let Some(sink) = in_flight.get(&decoded.id) {
-                                // base64-encode for serde-friendly JSON IPC. Frontend
-                                // hook (ipc-stream.ts) atob's back to Uint8Array.
-                                use base64::Engine;
-                                let b64 = base64::engine::general_purpose::STANDARD
-                                    .encode(&decoded.binary);
+                    match decode_event_bin_routing_id(&frame.payload) {
+                        Ok(id) => {
+                            if let Some(sink) = in_flight.get(&id) {
+                                // Move the original EVENT_BIN payload into Tauri's Raw
+                                // response. No base64 and no second multi-MB copy just to
+                                // re-frame bytes the Node server already framed for us.
                                 sink.try_send_event(EndpointEvent::Binary {
-                                    name: decoded.name,
-                                    data: b64,
+                                    payload: frame.payload,
                                 });
                             }
                         }
@@ -1404,46 +1425,62 @@ mod tests {
         );
     }
 
-    // ── EndpointEvent wire shape ────────────────────────────────────────────
+    // ── EndpointEvent mixed JSON/raw wire shape ─────────────────────────────
     //
     // The webview hook (ipc-stream.ts) switches on `kind` and reads these
     // exact field names — a serde rename would silently break the frontend.
 
     #[test]
-    fn endpoint_event_serializes_with_snake_case_kind_tags() {
+    fn endpoint_event_uses_json_for_controls_and_raw_for_binary() {
         let event = EndpointEvent::Event {
             name: "delta".into(),
             data: serde_json::json!({ "text": "hi" }),
         };
-        assert_eq!(
-            serde_json::to_value(&event).unwrap(),
-            serde_json::json!({ "kind": "event", "name": "delta", "data": { "text": "hi" } })
-        );
-
-        let binary = EndpointEvent::Binary {
-            name: "audio".into(),
-            data: "AQID".into(),
+        let InvokeResponseBody::Json(event_json) = event.body().unwrap() else {
+            panic!("control event must use JSON");
         };
         assert_eq!(
-            serde_json::to_value(&binary).unwrap(),
-            serde_json::json!({ "kind": "binary", "name": "audio", "data": "AQID" })
+            serde_json::from_str::<serde_json::Value>(&event_json).unwrap(),
+            serde_json::json!({
+                "kind": "event", "name": "delta", "data": { "text": "hi" }
+            })
         );
+
+        let raw = crate::endpoint_ipc_framing::encode_event_bin_payload(7, "audio", &[1, 2, 3]);
+        let InvokeResponseBody::Raw(binary) = EndpointEvent::Binary {
+            payload: raw.clone(),
+        }
+        .body()
+        .unwrap() else {
+            panic!("binary event must use Tauri Raw");
+        };
+        assert_eq!(binary, raw);
 
         let done = EndpointEvent::Done {
             result: serde_json::json!({ "ok": true }),
         };
+        let InvokeResponseBody::Json(done_json) = done.body().unwrap() else {
+            panic!("done must use JSON");
+        };
         assert_eq!(
-            serde_json::to_value(&done).unwrap(),
-            serde_json::json!({ "kind": "done", "result": { "ok": true } })
+            serde_json::from_str::<serde_json::Value>(&done_json).unwrap(),
+            serde_json::json!({
+                "kind": "done", "result": { "ok": true }
+            })
         );
 
         let error = EndpointEvent::Error {
             code: "quota".into(),
             message: "over".into(),
         };
+        let InvokeResponseBody::Json(error_json) = error.body().unwrap() else {
+            panic!("error must use JSON");
+        };
         assert_eq!(
-            serde_json::to_value(&error).unwrap(),
-            serde_json::json!({ "kind": "error", "code": "quota", "message": "over" })
+            serde_json::from_str::<serde_json::Value>(&error_json).unwrap(),
+            serde_json::json!({
+                "kind": "error", "code": "quota", "message": "over"
+            })
         );
     }
 
@@ -1453,7 +1490,9 @@ mod tests {
             code: "c".into(),
             message: "m".into(),
         };
-        let json = serde_json::to_string(&original).unwrap();
+        let InvokeResponseBody::Json(json) = original.body().unwrap() else {
+            panic!("error must use JSON");
+        };
         let back: EndpointEvent = serde_json::from_str(&json).unwrap();
         match back {
             EndpointEvent::Error { code, message } => {
@@ -1548,6 +1587,38 @@ mod tests {
         assert_eq!(bodies.len(), 3);
         assert!(bodies[0].contains("\"e0\""));
         assert!(bodies[2].contains("\"e2\""));
+    }
+
+    #[test]
+    fn call_sink_forwards_binary_as_raw_without_base64() {
+        let captured: Arc<std::sync::Mutex<Vec<InvokeResponseBody>>> =
+            Arc::new(std::sync::Mutex::new(vec![]));
+        let sink_captured = captured.clone();
+        let sink = CallSink {
+            channel: Channel::new(move |body| {
+                sink_captured.lock().unwrap().push(body);
+                Ok(())
+            }),
+            events_sent: AtomicU64::new(0),
+            overflowed: AtomicBool::new(false),
+            last_activity_ms: AtomicU64::new(now_ms()),
+            idle_timeout_ms: AtomicU64::new(IPC_CALL_IDLE_TIMEOUT_MS),
+        };
+        let raw = crate::endpoint_ipc_framing::encode_event_bin_payload(
+            42,
+            "body",
+            &[0xde, 0xad, 0xbe, 0xef],
+        );
+
+        assert!(sink.try_send_event(EndpointEvent::Binary {
+            payload: raw.clone()
+        }));
+        let mut bodies = captured.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        match bodies.pop().unwrap() {
+            InvokeResponseBody::Raw(actual) => assert_eq!(actual, raw),
+            InvokeResponseBody::Json(_) => panic!("binary event regressed to JSON/base64"),
+        }
     }
 
     #[test]
