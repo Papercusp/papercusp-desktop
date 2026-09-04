@@ -38,7 +38,13 @@ PAPERCUSP_TRANSFORMERS_MODELS=(harrier-oss-v1-0.6b-ONNX embeddinggemma-300m-ONNX
 # and they are not hypothetical: the host cache carries several right now, so a copy step
 # that did not exclude them would ship hundreds of MiB of garbage.
 papercusp_transformers_is_fragment() {
-  case "${1:-}" in
+  # Match the filename, never the absolute path. Atomic sidecar builds stage under a
+  # directory named `<output>.tmp.<pid>`; testing the whole path therefore classified
+  # every legitimate `model.onnx_data*` below that directory as a download fragment.
+  # The standalone helper fixtures did not carry `.tmp.` in a parent, so they missed the
+  # exact production shape until EI-22356733765630454 traced the full build.
+  local name="${1##*/}"
+  case "$name" in
     *.tmp.*|*.partial|*.part) return 0 ;;
     *) return 1 ;;
   esac
