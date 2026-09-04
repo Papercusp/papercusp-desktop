@@ -104,10 +104,25 @@ pub struct DecodedEventBin {
     pub binary: Vec<u8>,
 }
 
-pub fn decode_event_bin_payload(payload: &[u8]) -> Result<DecodedEventBin, FrameError> {
+/// Validate an EVENT_BIN payload and return only the call id used to route it.
+///
+/// The desktop reader forwards the original payload directly through Tauri's
+/// raw channel response, so it must not allocate/copy the multi-megabyte binary
+/// tail merely to discover which per-call channel owns it.
+pub fn decode_event_bin_routing_id(payload: &[u8]) -> Result<u64, FrameError> {
     if payload.len() < 12 {
         return Err(FrameError::EventBinTooShort(payload.len()));
     }
+    let id = u64::from_be_bytes(payload[0..8].try_into().expect("8-byte id slice"));
+    let name_len = u32::from_be_bytes(payload[8..12].try_into().expect("4-byte name length"));
+    if 12 + name_len as usize > payload.len() {
+        return Err(FrameError::EventBinNameLenOverflow(name_len, payload.len()));
+    }
+    Ok(id)
+}
+
+pub fn decode_event_bin_payload(payload: &[u8]) -> Result<DecodedEventBin, FrameError> {
+    decode_event_bin_routing_id(payload)?;
     let mut cursor = &payload[..];
     let id = cursor.get_u64();
     let name_len = cursor.get_u32();
@@ -213,6 +228,10 @@ mod tests {
             &[0xde, 0xad, 0xbe, 0xef],
         );
         let decoded = decode_event_bin_payload(&payload).unwrap();
+        assert_eq!(
+            decode_event_bin_routing_id(&payload).unwrap(),
+            123_456_789_012_345u64
+        );
         assert_eq!(decoded.id, 123_456_789_012_345u64);
         assert_eq!(decoded.name, "image_chunk");
         assert_eq!(decoded.binary, vec![0xde, 0xad, 0xbe, 0xef]);
