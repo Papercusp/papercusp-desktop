@@ -2,16 +2,18 @@
 # vm-federation.sh — VM-based two-instance federation proof (Phase 2 of
 # linux-test-vm-and-federation-2026-06-04, P-009/P-010/P-011/P-012).
 #
-# Proves the packaged .deb federates between SEPARATE MACHINES: each instance
-# runs in its own pristine Ubuntu VM (real OS, real network hop over the
-# papercusp-fedbr0 host bridge), with its own GitHub identity, write-free
-# admission (attestation gist), and a deterministic host-run hyperdht/testnet
-# bootstrap. The assert core is the same bin/lib/federation-asserts.sh the
+# Proves the packaged Papercusp Server .deb federates between SEPARATE
+# MACHINES: each instance runs in its own pristine Ubuntu VM (real OS, real
+# network hop over the papercusp-fedbr0 host bridge), with its own GitHub
+# identity, write-free admission (attestation gist), and a deterministic
+# host-run hyperdht/testnet bootstrap. The thin Papercusp GUI is attach-only;
+# this runner deliberately exercises the Server-owned operator + embedded-PG
+# runtime. The assert core is the same bin/lib/federation-asserts.sh the
 # one-box smokes use (D-003) — only the driver differs.
 #
 # Modes:
 #   --vms=2 (default)  fed-a VM ↔ fed-b VM                       (P-009)
-#   --vms=1            host-local packaged instance ↔ fed-a VM    (P-010)
+#   --vms=1            host-local packaged Server sidecar ↔ fed-a VM (P-010)
 #   --dht=testnet (default) host-run hyperdht/testnet on the bridge IP
 #   --dht=public       no PAPERCUSP_DHT_BOOTSTRAP — the real public DHT.
 #                      Best-effort (P-012): same-host VMs share one public IP
@@ -31,7 +33,7 @@
 #   --dht-bootstrap=HOST:PORT  attach to an already-running testnet (e.g. one
 #                      left up by a prior --keep-up run) instead of spawning
 #                      a new one
-#   --deb=PATH         .deb to test (default: newest in the bundle output)
+#   --deb=PATH         Server .deb to test (default: newest Package=papercusp-server)
 #
 # Pass criteria (the local merge proof, now cross-machine): both instances
 # boot; [swarm] peer_connected in both logs (join FAILED → fail); a feature
@@ -54,6 +56,8 @@ VMCTL="$DESKTOP_DIR/scripts/linux-test-vm/vmctl"
 set +e
 
 # ── args ────────────────────────────────────────────────────────────────────
+EXPECTED_DEB_PACKAGE="papercusp-server"
+EXPECTED_DEB_BINARY="papercusp-server"
 VMS=2; DHT=testnet; NET=bridge; RESET=1; INSTALL=1; KEEP_UP=0; DEB=""; DHT_BOOTSTRAP_OVERRIDE=""
 for arg in "$@"; do
   case "$arg" in
@@ -74,7 +78,38 @@ for arg in "$@"; do
     *) die "unknown arg: $arg (see --help)" ;;
   esac
 done
-[ -n "$DEB" ] || DEB="$(default_deb)"
+
+# common.sh's default_deb() is intentionally GUI-only. The VM federation proof
+# is a Server-role run after the thin-GUI split, and GUI/Server artifacts share
+# a filename family, so resolve the implicit artifact by dpkg's writer-owned
+# Package field rather than by filename or mtime alone.
+select_server_deb() {
+  local bundle candidate
+  local -a candidates=()
+  for bundle in \
+    "$DESKTOP_DIR/src-tauri/target/release/bundle/deb" \
+    "${CARGO_TARGET_DIR:-$HOME/.cargo-target}/release/bundle/deb"; do
+    [ -d "$bundle" ] || continue
+    while IFS= read -r -d '' candidate; do
+      candidates+=("$candidate")
+    done < <(find "$bundle" -maxdepth 1 -type f -name 'Papercusp*_amd64.deb' -print0 2>/dev/null)
+  done
+  [ "${#candidates[@]}" -gt 0 ] || {
+    echo "FATAL: no Papercusp .deb candidates found; build a Server package with:" >&2
+    echo "  PAPERCUSP_DISTRIBUTION_PROFILE=vm-release bin/build-linux-local.sh" >&2
+    return 1
+  }
+  fed_select_newest_deb_by_package "$EXPECTED_DEB_PACKAGE" "${candidates[@]}"
+}
+
+if [ -z "$DEB" ]; then
+  DEB="$(select_server_deb)" || die "no Server .deb available (pass --deb=PATH or build with PAPERCUSP_DISTRIBUTION_PROFILE=vm-release)"
+fi
+DEB="$(readlink -f "$DEB" 2>/dev/null || printf '%s' "$DEB")"
+[ -f "$DEB" ] || die "selected Server .deb does not exist: $DEB"
+DEB_PACKAGE="$(dpkg-deb -f "$DEB" Package 2>/dev/null || true)"
+[ "$DEB_PACKAGE" = "$EXPECTED_DEB_PACKAGE" ] || die \
+  "selected .deb '$DEB' has Package='${DEB_PACKAGE:-unknown}', expected Package=$EXPECTED_DEB_PACKAGE (the VM proof requires the Papercusp Server artifact)"
 P_A_USER="${P_A_USER:-papercupai}"
 P_B_USER="${P_B_USER:-aviynw}"
 OPERATOR_DIR="${PAPERCUSP_OPERATOR_DIR:-/home/marsh-office/papercupai-workspace/papercusp/apps/operator}"
@@ -82,25 +117,8 @@ OPERATOR_DIR="${PAPERCUSP_OPERATOR_DIR:-/home/marsh-office/papercupai-workspace/
 # path used a synthetic repo id; the hive model clones a real repo). Override with
 # PAPERCUSP_FED_REPO_URL. Needs VM→github egress (slirp user-net provides NAT).
 REPO_URL="${PAPERCUSP_FED_REPO_URL:-https://github.com/octocat/Hello-World}"
-DISPLAY_NUM="${PAPERCUSP_SMOKE_DISPLAY:-149}"   # only used by --vms=1's host instance
-# EI-18729820545388373: fed_ensure_display is called via `$(...)` command
-# substitution (launch_local_instance below), which runs it in a SUBSHELL — any
-# FED_KILL_PIDS+=() it did internally would be lost the instant that subshell
-# exits, so fed_cleanup_scoped's PID-kill loop can never see the Xvfb it started.
-# two-instance-federation-smoke.sh (the sibling one-box driver using the same
-# fed_ensure_display helper) already carries the correct fix for this: track
-# whether THIS run started Xvfb via the STARTED_XVFB flag (fed_ensure_display's
-# own stdout, captured across the subshell boundary) and reap it by DISPLAY
-# NUMBER — not by PID — in cleanup(). vm-federation.sh had copied the
-# fed_ensure_display call but dropped that matching cleanup half, so every
-# --vms=1 run leaked its Xvfb :149 past teardown (confirmed live: pid 1674673
-# still alive and DISPLAY :149 still busy after cleanup() had already run).
-# Must be initialized before `trap cleanup EXIT` — set -u means an unset
-# reference in cleanup() (e.g. an early exit before launch_local_instance ever
-# ran) would abort the trap itself instead of running it.
-STARTED_XVFB=0
 WORK="$(mktemp -d /tmp/vm-fed.XXXXXX)"
-PKG="$WORK/pkg"; BIN="$PKG/usr/bin/papercusp-desktop"
+PKG="$WORK/pkg"
 SLUG="vmfed${WORK##*.}"   # per-run unique → reused embedded-PG state can't false-pass the merge
 
 if [ "$NET" = "socket" ]; then
@@ -110,7 +128,7 @@ fi
 
 # ── instance table ──────────────────────────────────────────────────────────
 # inst 'a' / 'b'; FED_KIND decides which driver primitive serves it.
-declare -gA FED_KIND FED_VM FED_IDX FED_USER FED_TOKEN
+declare -gA FED_KIND FED_VM FED_IDX FED_USER FED_TOKEN FED_LOG FED_LOCAL_HONO FED_LOCAL_PG
 if [ "$VMS" = 2 ]; then
   FED_KIND[a]=vm;    FED_VM[a]=fed-a; FED_IDX[a]=1
 else
@@ -132,36 +150,24 @@ drv_applog() {
   local inst="$1"
   case "${FED_KIND[$inst]}" in
     local) echo "${FED_LOG[$inst]}" ;;
-    vm)    echo "/home/tester/papercusp-app.log" ;;
-  esac
-}
-# WI-6180: ~/papercusp-app.log is ONLY the Tauri GUI process's stdout capture
-# (see launch_vm_instance) — in the current packaged build its entire contents
-# are libEGL DRI warnings. The sidecar writes its boot markers ("…ready on
-# localhost:PORT db=papercusp", "[serve] listening on …") to its OWN structured
-# log, so fed_wait_boot grepping the GUI capture alone could never match and
-# false-REDed every 2-VM run as BOOT_TIMEOUT against a perfectly healthy app.
-#
-# Deliberately EMPTY for the `local` kind: on a host-local instance this path is
-# the HOST operator's own serve.log, and letting the probe read it would resolve
-# a FOREIGN operator's ports — a false positive that would also defeat
-# fed_assert_isolated's distinct-ports check. VM guests have no such ambiguity.
-drv_sidecar_log() {
-  local inst="$1"
-  case "${FED_KIND[$inst]}" in
-    local) echo "" ;;
     vm)    echo "/home/tester/.papercusp/logs/serve.log" ;;
   esac
 }
+# The Server service's sidecar log is the authoritative boot log on VMs. The
+# local --vms=1 instance is launched directly from the extracted Server sidecar,
+# so its FED_LOG entry is already that instance's own structured log.
+drv_sidecar_log() {
+  echo ""
+}
 # EI-18687938054040755: the data-path capability probe needs the bundle path on
-# whichever machine hosts this instance. Hybrid like the rest of this vtable —
-# a local instance resolves through fed_local_launch_sidecar's registry, a vm
-# instance through the packaged .deb layout.
+# whichever machine hosts this instance. The local driver reverse-maps its
+# extracted Server sidecar; VM guests use the Server package's fixed install
+# root (captured by fed_extract_deb, not guessed from the GUI layout).
 drv_appbundle() {
   local inst="$1"
   case "${FED_KIND[$inst]}" in
     local) drv_appbundle_local "$inst" ;;
-    vm)    echo "/usr/lib/Papercusp/sidecar/serve.mjs" ;;
+    vm)    printf '/usr/lib/%s/sidecar/serve.mjs\n' "${FED_APP_DIRNAME:-Papercusp Server}" ;;
   esac
 }
 drv_psql() {   # SQL goes over stdin — robust against nested quoting
@@ -189,11 +195,6 @@ cleanup() {
     log "--keep-up: preserved host/local instance logs → $dest"
   fi
   fed_cleanup_scoped "$WORK"
-  # fed_cleanup_scoped's scan can't catch this one: it kills FED_KILL_PIDS (never
-  # populated here — see the STARTED_XVFB comment above) plus any process whose
-  # cmdline carries $WORK, and Xvfb's own argv (`Xvfb :149 -screen 0 …`) never
-  # does — $WORK only appears in the redirect target, which isn't part of argv.
-  [ "$STARTED_XVFB" = "1" ] && pkill -f "Xvfb :$DISPLAY_NUM" 2>/dev/null || true
   if [ "$KEEP_UP" = 0 ]; then
     local n
     for n in $(fed_vm_names); do "$VMCTL" down "$n" || true; done
