@@ -178,7 +178,10 @@ case "$PLATFORM" in
     # live finding: GUI-only relaunch left the stale operator adopted forever).
     # Both tasks are provisioned on the win VM (papercusp-launch.cmd /
     # papercusp-server-launch.cmd, console session via schtasks).
-    RELAUNCH_CMD="${RELAUNCH_CMD:-schtasks /run /tn papercusp-e2e & schtasks /run /tn papercusp-server-e2e}"
+    # Use an explicit cmd parser: the OpenSSH Windows command host is not
+    # guaranteed to apply cmd.exe's compound-command semantics, so an
+    # unwrapped `&` can fail before schtasks runs.
+    RELAUNCH_CMD="${RELAUNCH_CMD:-cmd /c \"schtasks /run /tn papercusp-e2e & schtasks /run /tn papercusp-server-e2e\"}"
     ;;
   mac)
     REMOTE_DIR="${REMOTE_DIR:-/tmp}"
