@@ -899,13 +899,19 @@ AUTO you skip the ask and still register per the tiers.
   the active drain item/plan. Outside DRAIN, for a suspected TOOL-CALL failure, preserve that
   immediacy without exciting the work queue:
   pass `improvements:capture { toolFailure:{ toolName, errorCode?, status?, message,
-  schemaRevision?, fieldPath?, runtimeVersion?, reproduced?, clearServerMismatch?, hardInternal? } }`.
+  schemaRevision?, fieldPath?, runtimeVersion?, reproduced?, clearServerMismatch?, hardInternal?,
+  directEvidence?: { kind, expected, actual } } }`.
   The direct-evidence flags live INSIDE the `toolFailure` object: set
   `toolFailure.reproduced:true`, `toolFailure.clearServerMismatch:true`, or
   `toolFailure.hardInternal:true` only when you have that direct evidence — never pass those
-  flags at the top level. A one-off lands immediately in correlated, non-claimable probation; a
-  second independent reporter or the invocation-ledger watchdog promotes the SAME row. Those
-  nested flags bypass probation.
+  flags at the top level. A classifier-owned `caller` refusal needs inspectable evidence to
+  bypass probation: pass `toolFailure.directEvidence` with `kind` (`valid-input-reproduction` |
+  `server-contract-mismatch` | `hard-internal`) plus non-empty `expected` and `actual`; the legacy
+  booleans alone do not override a caller classification. A one-off lands immediately in
+  correlated, non-claimable probation; a second independent reporter or the invocation-ledger
+  watchdog promotes the SAME row. The legacy nested flags still bypass probation for non-caller
+  classes; structured direct evidence can override a caller classification without making that
+  inferred class terminal.
   A "bug" includes SUB-OPTIMAL, not just a hard stopper: a false alarm / wrong reading from any
   monitor or tracker (a false alarm is a bug in the alarm), a flap that self-recovered,
   degradation under load — the system must stay responsive at ANY load, so load-correlated
