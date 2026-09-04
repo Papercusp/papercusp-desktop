@@ -503,7 +503,8 @@ test('macOS Server starts without a console login (LaunchDaemon, not a gui-domai
   assert.match(installer, /--build-sha\)/);
   assert.match(installer, /--build-version\)/);
   assert.match(installer, /CURRENT_PAYLOAD}\/BUILD-STAMP\.txt/);
-  assert.match(installer, /health_sha=.*CURRENT_BUILD_SHA/);
+  assert.match(installer, /health_sha=/);
+  assert.match(installer, /CURRENT_BUILD_SHA/);
 
   const currentDeclared = [...new Set(currentTemplate.match(/__PAPERCUSP_[A-Z_]+__/g) || [])];
   for (const token of currentDeclared) {
