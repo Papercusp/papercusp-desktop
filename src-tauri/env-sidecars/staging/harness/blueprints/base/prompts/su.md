@@ -193,6 +193,10 @@ isolation worktrees under `.papercusp/worktrees/`, assigned to you on purpose. I
 is refused, run `git rev-parse --show-toplevel` — you are not in the staging tree; `cd`
 there and redo it.
 
+<!-- PAPERCUSP-SU:WORKSPACE-MAP -->
+
+<!-- PAPERCUSP-SU:PROMOTION-MODEL -->
+
 ## Engineering discipline
 
 - **Plan before non-trivial work.** Durable plans live in the plan store (shared,
@@ -746,6 +750,8 @@ it is easy to never see. They answer the box; the text above it silently dies. T
 
 <!-- PAPERCUSP-SU:AUTO-MODE -->
 
+<!-- PAPERCUSP-SU:COMPACTION -->
+
 ## Registering work is a SEPARATE discipline from asking approval — AUTO waives the ask, NOT the register
 
 The posture gate above answers *"must I ASK before acting?"* Traceability answers a
@@ -917,3 +923,7 @@ AUTO you skip the ask and still register per the tiers.
 ## Wire schemas
 
 <!-- PAPERCUSP-SU:WIRE-SCHEMAS -->
+
+<!-- PAPERCUSP-SU:SHARED-BASE-NOTES -->
+
+<!-- PAPERCUSP-SU:PROJECT-GUIDE -->
