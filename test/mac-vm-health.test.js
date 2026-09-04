@@ -9,6 +9,7 @@ import test from 'node:test';
 const script = new URL('../bin/mac-vm-health.sh', import.meta.url).pathname;
 const qmpCommand = new URL('../bin/qmp-command.py', import.meta.url).pathname;
 const screenshot = new URL('../bin/mac-vm-screenshot.sh', import.meta.url).pathname;
+const diag = new URL('../bin/vm-rig/diag.sh', import.meta.url).pathname;
 const vmcall = new URL('../bin/vm-rig/vmcall.sh', import.meta.url).pathname;
 const vmRigDeploy = new URL('../bin/vm-rig/deploy.sh', import.meta.url).pathname;
 const probeSession = new URL('../bin/vm-rig/probe-session.sh', import.meta.url).pathname;
@@ -363,6 +364,88 @@ test('screenshot path reuses the contention-aware QMP helper', async () => {
   const source = await readFile(screenshot, 'utf8');
   assert.match(source, /qmp-command\.py/);
   assert.doesNotMatch(source, /f\.readline\(\)\s*# greeting/);
+});
+
+async function diagFixture() {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'vm-rig-diag-'));
+  const bin = path.join(dir, 'bin');
+  const towerArgs = path.join(dir, 'tower-args');
+  const sshArgs = path.join(dir, 'ssh-args');
+  const sshStdin = path.join(dir, 'ssh-stdin');
+  await mkdir(bin, { recursive: true });
+  await writeFile(
+    path.join(bin, 'node'),
+    `#!/usr/bin/env bash
+set -eu
+printf '%s\\0' "$@" > "$DIAG_TOWER_ARGS"
+printf '{"tower":true}\\n'
+`,
+  );
+  await writeFile(
+    path.join(bin, 'ssh'),
+    `#!/usr/bin/env bash
+set -eu
+printf '%s\\0' "$@" > "$DIAG_SSH_ARGS"
+cat > "$DIAG_SSH_STDIN"
+if [ "$#" -ne 5 ] ||
+   [ "$1" != "-o" ] ||
+   [ "$2" != "ConnectTimeout=10" ] ||
+   [ "$3" != "$PCUSP_VM_SSH" ] ||
+   [ "$4" != "/bin/bash" ] ||
+   [ "$5" != "-s" ]; then
+  printf 'unexpected ssh argv: %s\\n' "$*" >&2
+  exit 90
+fi
+grep -Fq "exec /tmp/vmcall.sh dev:dogfood_substrate_status '{}'" "$DIAG_SSH_STDIN"
+printf '{"vm":true}\\n'
+`,
+  );
+  await writeFile(path.join(bin, 'journalctl'), '#!/bin/sh\nexit 0\n');
+  await Promise.all([
+    chmod(path.join(bin, 'node'), 0o755),
+    chmod(path.join(bin, 'ssh'), 0o755),
+    chmod(path.join(bin, 'journalctl'), 0o755),
+  ]);
+  return {
+    dir,
+    paths: { towerArgs, sshArgs, sshStdin },
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      PCUSP_VM_SSH: 'tester@vm with spaces',
+      DIAG_TOWER_ARGS: towerArgs,
+      DIAG_SSH_ARGS: sshArgs,
+      DIAG_SSH_STDIN: sshStdin,
+    },
+  };
+}
+
+test('vm-rig diagnostics cross the macOS zsh boundary with a quoted stdin script', async () => {
+  const { dir, env, paths } = await diagFixture();
+  try {
+    const result = spawnSync('bash', [diag], { env, encoding: 'utf8' });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /=== TOWER dev:dogfood_substrate_status ===/);
+    assert.match(result.stdout, /\{"tower":true\}/);
+    assert.match(result.stdout, /\{"vm":true\}/);
+
+    const sshArgs = (await readFile(paths.sshArgs, 'utf8')).split('\0').filter(Boolean);
+    assert.deepEqual(sshArgs, [
+      '-o',
+      'ConnectTimeout=10',
+      'tester@vm with spaces',
+      '/bin/bash',
+      '-s',
+    ]);
+    const remoteScript = await readFile(paths.sshStdin, 'utf8');
+    assert.match(remoteScript, /set -e\nexec \/tmp\/vmcall\.sh dev:dogfood_substrate_status '\{\}' \\/);
+    assert.match(remoteScript, /\n  --client su-live1-imac-probe \\\n/);
+    assert.match(remoteScript, /\n  --workspace papercusp-workspace \\\n/);
+    assert.match(remoteScript, /\n  --harness papercusp\n/);
+    assert.doesNotMatch(remoteScript, /\$CLI_VM|\$VM/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 async function vmcallFixture(result, { source, timeoutSec } = {}) {
