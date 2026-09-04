@@ -4241,6 +4241,16 @@ fn server_shell_alive(workspace_home: &std::path::Path) -> bool {
     shell_heartbeat_fresh(hb.ts, unix_now_secs(), SERVER_SHELL_HEARTBEAT_MAX_AGE)
 }
 
+/// Build the one successful-attach signal shared by initial boot, fallback,
+/// delayed boot recovery, and dynamic-port watcher recovery. The explicit
+/// restored latch makes a successful attach win over diagnostic retry loops
+/// that were already in flight when the operator became reachable.
+fn operator_attach_inject(base: &str, app_base: &str) -> String {
+    format!(
+        "window.__papercuspBase = '{base}'; window.__papercuspAppBase = '{app_base}'; window.__PAPERCUSP_TAURI__ = {{ kind: 'native' }}; window.__papercuspServerConnectionRestored = true; delete window.__papercuspServerConnectionRequired; delete window.__papercuspBootError; window.dispatchEvent(new CustomEvent('papercusp:base')); window.dispatchEvent(new CustomEvent('papercusp:server-connection-restored'));"
+    )
+}
+
 /// Point the main window at the operator on `port`: compute the app origin
 /// (the custom-protocol origin when it's on — Linux default; otherwise the HTTP
 /// loopback base), navigate-or-reload the webview there, and (re-)inject
@@ -4297,10 +4307,7 @@ fn point_window_at_operator<R: tauri::Runtime>(
     //    the global; if a future consumer genuinely needs it post-reload, add the
     //    re-inject to the EXISTING on_page_load handler (main.rs:7521) rather than
     //    widening this burst. (WI-7982)
-    let inject = format!(
-        "window.__papercuspBase = '{}'; window.__papercuspAppBase = '{}'; window.__PAPERCUSP_TAURI__ = {{ kind: 'native' }}; window.dispatchEvent(new CustomEvent('papercusp:base'));",
-        base, app_base
-    );
+    let inject = operator_attach_inject(&base, &app_base);
     // Already on the app origin (custom-protocol statics session) → reload so
     // the SPA boots fresh against the live operator instead of sitting on dead
     // 503'd /api fetches; anywhere else (custom protocol off, or a stale HTTP
@@ -5173,6 +5180,12 @@ fn window_has_remote_server_navigation<R: tauri::Runtime>(
         .unwrap_or(false)
 }
 
+fn local_attach_diagnostic_guard(inject: &str) -> String {
+    format!(
+        "if (!(window.location.protocol === 'https:' && !window.location.username && !window.location.password) && !window.__papercuspServerConnectionRestored) {{ {inject} }}"
+    )
+}
+
 /// Evaluate a local-attach diagnostic only while the current document still
 /// belongs to local boot. The Rust URL check stops the bounded retry loop after
 /// a remote navigation. The same predicate is repeated inside the evaluated JS
@@ -5184,10 +5197,7 @@ fn eval_local_attach_diagnostic<R: tauri::Runtime>(
     ticks: u32,
     delay: Duration,
 ) {
-    let guarded_inject = format!(
-        "if (!(window.location.protocol === 'https:' && \
-         !window.location.username && !window.location.password)) {{ {inject} }}"
-    );
+    let guarded_inject = local_attach_diagnostic_guard(inject);
     for _ in 0..ticks {
         if window_has_remote_server_navigation(window) {
             println!(
@@ -5202,7 +5212,41 @@ fn eval_local_attach_diagnostic<R: tauri::Runtime>(
 
 #[cfg(test)]
 mod remote_server_navigation_tests {
-    use super::is_remote_server_navigation;
+    use super::{
+        is_remote_server_navigation, local_attach_diagnostic_guard, operator_attach_inject,
+    };
+
+    #[test]
+    fn successful_operator_attach_clears_and_outlives_stale_diagnostics() {
+        let attach = operator_attach_inject("http://127.0.0.1:3170", "papercusp://localhost");
+        for required in [
+            "window.__papercuspServerConnectionRestored = true",
+            "delete window.__papercuspServerConnectionRequired",
+            "delete window.__papercuspBootError",
+            "papercusp:server-connection-restored",
+        ] {
+            assert!(
+                attach.contains(required),
+                "the central attach seam must retain {required:?}"
+            );
+        }
+
+        let restored = attach
+            .find("papercusp:server-connection-restored")
+            .expect("the central attach seam emits restoration");
+        assert!(
+            attach
+                .find("delete window.__papercuspServerConnectionRequired")
+                .unwrap()
+                < restored
+                && attach.find("delete window.__papercuspBootError").unwrap() < restored,
+            "stale failure globals must be cleared before React handles restoration"
+        );
+
+        let guarded = local_attach_diagnostic_guard("emitFailure()");
+        assert!(guarded.contains("!window.__papercuspServerConnectionRestored"));
+        assert!(guarded.contains("emitFailure()"));
+    }
 
     #[test]
     fn credential_free_https_is_an_intentional_remote_server_navigation() {
