@@ -44,8 +44,10 @@ use crate::SidecarState;
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CspPolicy {
-    header: String,
-    policy: String,
+    enforcing_header: String,
+    report_only_header: String,
+    enforcing_policy: String,
+    report_only_policy: String,
 }
 
 fn csp_policy() -> &'static CspPolicy {
@@ -58,7 +60,9 @@ fn csp_policy() -> &'static CspPolicy {
     })
 }
 
-/// Attach the shared (now ENFORCING) policy to document responses only. CSP on a
+/// Attach the shared D-002 policy pair to document responses only. Code/content
+/// origins enforce; the strict local-only connection policy remains report-only
+/// so preserved voice signaling is observed without being blocked. CSP on a
 /// script, stylesheet, image, or font response has no effect.
 fn with_csp(mut response: Response<Vec<u8>>) -> Response<Vec<u8>> {
     let is_html = response
@@ -68,12 +72,16 @@ fn with_csp(mut response: Response<Vec<u8>>) -> Response<Vec<u8>> {
         .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/html"));
     if is_html {
         let policy = csp_policy();
-        let header_name =
-            tauri::http::header::HeaderName::from_bytes(policy.header.as_bytes())
+        for (name, value) in [
+            (&policy.enforcing_header, &policy.enforcing_policy),
+            (&policy.report_only_header, &policy.report_only_policy),
+        ] {
+            let header_name = tauri::http::header::HeaderName::from_bytes(name.as_bytes())
                 .expect("shared desktop CSP header name must be valid");
-        let header_value = tauri::http::header::HeaderValue::from_str(&policy.policy)
-            .expect("shared desktop CSP policy must be a valid header value");
-        response.headers_mut().insert(header_name, header_value);
+            let header_value = tauri::http::header::HeaderValue::from_str(value)
+                .expect("shared desktop CSP policy must be a valid header value");
+            response.headers_mut().insert(header_name, header_value);
+        }
     }
     response
 }
@@ -704,11 +712,19 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 200);
         assert_eq!(
             resp.headers()
-                .get(csp_policy().header.as_str())
+                .get(csp_policy().enforcing_header.as_str())
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            csp_policy().policy,
+            csp_policy().enforcing_policy,
+        );
+        assert_eq!(
+            resp.headers()
+                .get(csp_policy().report_only_header.as_str())
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            csp_policy().report_only_policy,
         );
         assert_eq!(
             String::from_utf8_lossy(resp.body()),
@@ -734,19 +750,30 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 200);
         assert!(resp
             .headers()
-            .get(csp_policy().header.as_str())
+            .get(csp_policy().enforcing_header.as_str())
+            .is_none());
+        assert!(resp
+            .headers()
+            .get(csp_policy().report_only_header.as_str())
             .is_none());
         assert_eq!(String::from_utf8_lossy(resp.body()), "console.log('hi')");
     }
 
     #[test]
-    fn csp_is_enforcing_shared_and_html_only() {
-        // Pinned to the LITERAL name, not to csp_policy().header — asserting the
-        // served header equals the field it was read from is a tautology that
-        // would still pass if the shared JSON regressed to report-only. P-005
-        // clause 4 flipped this deliberately; a silent flip back must fail here.
-        assert_eq!(csp_policy().header, "Content-Security-Policy");
-        assert_ne!(csp_policy().header, "Content-Security-Policy-Report-Only");
+    fn csp_is_split_shared_and_html_only() {
+        // Pin both literal names and the D-002 directive split. A JSON field
+        // asserting itself would not catch the single-header regression.
+        assert_eq!(csp_policy().enforcing_header, "Content-Security-Policy");
+        assert_eq!(
+            csp_policy().report_only_header,
+            "Content-Security-Policy-Report-Only"
+        );
+        assert!(csp_policy()
+            .enforcing_policy
+            .contains("connect-src 'self' * ws:"));
+        assert!(!csp_policy()
+            .report_only_policy
+            .contains("connect-src 'self' *"));
 
         let html = Response::builder()
             .header("content-type", "text/html; charset=utf-8")
@@ -755,17 +782,20 @@ mod tests {
         let html = with_csp(html);
         assert_eq!(
             html.headers()
-                .get(csp_policy().header.as_str())
+                .get(csp_policy().enforcing_header.as_str())
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            csp_policy().policy,
+            csp_policy().enforcing_policy,
         );
-        // And the report-only header must not ALSO be attached.
-        assert!(html
-            .headers()
-            .get("Content-Security-Policy-Report-Only")
-            .is_none());
+        assert_eq!(
+            html.headers()
+                .get(csp_policy().report_only_header.as_str())
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            csp_policy().report_only_policy,
+        );
 
         let script = Response::builder()
             .header("content-type", "text/javascript")
@@ -773,7 +803,15 @@ mod tests {
             .unwrap();
         assert!(with_csp(script)
             .headers()
-            .get(csp_policy().header.as_str())
+            .get(csp_policy().enforcing_header.as_str())
+            .is_none());
+        let script = Response::builder()
+            .header("content-type", "text/javascript")
+            .body(Vec::new())
+            .unwrap();
+        assert!(with_csp(script)
+            .headers()
+            .get(csp_policy().report_only_header.as_str())
             .is_none());
     }
 
