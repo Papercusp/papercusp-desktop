@@ -704,7 +704,7 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 200);
         assert_eq!(
             resp.headers()
-                .get(csp_policy().report_only_header.as_str())
+                .get(csp_policy().header.as_str())
                 .unwrap()
                 .to_str()
                 .unwrap(),
@@ -734,13 +734,20 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 200);
         assert!(resp
             .headers()
-            .get(csp_policy().report_only_header.as_str())
+            .get(csp_policy().header.as_str())
             .is_none());
         assert_eq!(String::from_utf8_lossy(resp.body()), "console.log('hi')");
     }
 
     #[test]
-    fn report_only_csp_is_shared_and_html_only() {
+    fn csp_is_enforcing_shared_and_html_only() {
+        // Pinned to the LITERAL name, not to csp_policy().header — asserting the
+        // served header equals the field it was read from is a tautology that
+        // would still pass if the shared JSON regressed to report-only. P-005
+        // clause 4 flipped this deliberately; a silent flip back must fail here.
+        assert_eq!(csp_policy().header, "Content-Security-Policy");
+        assert_ne!(csp_policy().header, "Content-Security-Policy-Report-Only");
+
         let html = Response::builder()
             .header("content-type", "text/html; charset=utf-8")
             .body(Vec::new())
@@ -748,12 +755,17 @@ mod tests {
         let html = with_csp(html);
         assert_eq!(
             html.headers()
-                .get(csp_policy().report_only_header.as_str())
+                .get(csp_policy().header.as_str())
                 .unwrap()
                 .to_str()
                 .unwrap(),
             csp_policy().policy,
         );
+        // And the report-only header must not ALSO be attached.
+        assert!(html
+            .headers()
+            .get("Content-Security-Policy-Report-Only")
+            .is_none());
 
         let script = Response::builder()
             .header("content-type", "text/javascript")
@@ -761,7 +773,7 @@ mod tests {
             .unwrap();
         assert!(with_csp(script)
             .headers()
-            .get(csp_policy().report_only_header.as_str())
+            .get(csp_policy().header.as_str())
             .is_none());
     }
 
