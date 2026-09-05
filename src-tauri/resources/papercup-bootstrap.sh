@@ -1,6 +1,117 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ── network preflight (EI-20574262390154687) ─────────────────────────────────
+#
+# This script CANNOT complete without internet: it apt-installs base packages
+# and then downloads three pinned artifacts (overmind from github.com, kopia
+# from kopia.io + packages.kopia.io, node from nodejs.org). That is a surprising
+# dependency for an installer that already ships ~3.4 GB, so make it EXPLICIT
+# and fail on it FIRST.
+#
+# Before this existed, a machine that was offline, behind a strict proxy, or on
+# a network blocking any one of those hosts failed PARTWAY THROUGH provisioning
+# — after the Windows installer had already reported success and written its
+# uninstall entry — surfacing a raw curl/apt error from inside a WSL distro.
+# The user saw a first-launch failure with no indication of which host was
+# unreachable or that the network was the problem at all.
+#
+# This check runs INSIDE the distro deliberately. It is the only place that
+# sees the network stack that will actually perform the downloads: the distro's
+# resolver, its proxy environment, and its REAL apt mirror — which is baked
+# into the rootfs and therefore cannot be known from the Windows side. The
+# Windows-side preflight (wsl_setup.rs, before `wsl --import`) is the fail-fast
+# half; this one is the authoritative half.
+#
+# Constraints this block must respect, all of them load-bearing:
+#   * No curl — curl is one of the packages installed BELOW, so it is not
+#     guaranteed to exist yet on a minimal image. bash's /dev/tcp needs no
+#     packages at all.
+#   * Prompt-free and idempotent, like every other step here (see the kopia
+#     --batch --yes note below for what a single interactive prompt costs).
+#   * Runs before ANY mutation, so a failure leaves the distro untouched.
+
+preflight_hostport() {
+  # "https://host:port/path" -> "host:port", defaulting the port from the
+  # scheme. Strips userinfo so a mirror with credentials still resolves.
+  local uri="$1" scheme rest host
+  scheme="${uri%%://*}"
+  rest="${uri#*://}"
+  rest="${rest%%/*}"
+  rest="${rest##*@}"
+  case "$rest" in
+    *:*) printf '%s\n' "$rest" ;;
+    *)
+      case "$scheme" in
+        https) printf '%s:443\n' "$rest" ;;
+        *)     printf '%s:80\n'  "$rest" ;;
+      esac
+      ;;
+  esac
+}
+
+preflight_targets() {
+  # The fixed downloads this script performs, as "host:port|what it is for".
+  printf '%s\n' \
+    "github.com:443|the overmind process supervisor" \
+    "kopia.io:443|the kopia signing key" \
+    "packages.kopia.io:80|the kopia apt repository (backup engine)" \
+    "nodejs.org:443|the pinned Node runtime"
+  # Plus whatever apt mirrors THIS image is actually configured for — read from
+  # the image rather than assumed, since a rebased or mirrored rootfs can point
+  # anywhere. Legacy one-line format:
+  { cat /etc/apt/sources.list 2>/dev/null || true
+    cat /etc/apt/sources.list.d/*.list 2>/dev/null || true
+  } | awk '$1 ~ /^deb/ { for (i = 2; i <= NF; i++) if ($i ~ /^https?:\/\//) { print $i; break } }' \
+    | while read -r uri; do
+        printf '%s|an apt mirror (base packages)\n' "$(preflight_hostport "$uri")"
+      done
+  # deb822 format (.sources) — Ubuntu 24.04's default:
+  { cat /etc/apt/sources.list.d/*.sources 2>/dev/null || true; } \
+    | awk 'tolower($1) == "uris:" { for (i = 2; i <= NF; i++) print $i }' \
+    | while read -r uri; do
+        printf '%s|an apt mirror (base packages)\n' "$(preflight_hostport "$uri")"
+      done
+}
+
+preflight_reachable() { # host port -> 0 reachable, non-zero not
+  timeout 6 bash -c "exec 3<>/dev/tcp/${1}/${2}" 2>/dev/null
+}
+
+if [ "${PAPERCUP_SKIP_NETWORK_PREFLIGHT:-0}" != "1" ]; then
+  preflight_unreachable=()
+  while IFS='|' read -r hostport purpose; do
+    [ -n "$hostport" ] || continue
+    if ! preflight_reachable "${hostport%%:*}" "${hostport##*:}"; then
+      preflight_unreachable+=("${hostport%%:*} — needed for ${purpose}")
+    fi
+  done < <(preflight_targets | sort -u -t'|' -k1,1)
+
+  if [ "${#preflight_unreachable[@]}" -gt 0 ]; then
+    {
+      echo "ERROR: papercup provisioning cannot start — the network is unreachable."
+      echo
+      echo "Setting up the papercup runtime downloads system packages and three"
+      echo "pinned binaries, so it cannot run offline. These are unreachable from"
+      echo "inside the papercup-runtime WSL distro:"
+      for entry in "${preflight_unreachable[@]}"; do
+        echo "  - ${entry}"
+      done
+      echo
+      echo "Nothing has been changed: provisioning stopped before making any"
+      echo "changes, so simply launch Papercup again once this is fixed."
+      echo
+      echo "Fix: connect this machine to the internet, or allow the hosts above"
+      echo "through your proxy or firewall, then relaunch."
+      echo
+      echo "If you believe this check is wrong — for example an HTTP proxy that"
+      echo "only accepts CONNECT, which a plain TCP probe cannot see — you can"
+      echo "skip it by setting PAPERCUP_SKIP_NETWORK_PREFLIGHT=1."
+    } >&2
+    exit 3
+  fi
+fi
+
 # Configure the default user. WSL's default-user is set via
 # /etc/wsl.conf; create the user if missing.
 DEFAULT_USER="papercup"
