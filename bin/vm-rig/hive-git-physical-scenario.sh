@@ -218,7 +218,7 @@ JSON
 
 phase_g_contract() {
   cat <<'JSON'
-{"schemaVersion":"hive-git-physical-phase-contract/v1","phase":"G","planItem":"P-308","state":"executor-installed","ready":true,"missingAssertions":[],"target":{"topology":"two-host-attested-ephemeral-protocol-adapter","repositoryLifetime":"one-phase-execution"},"causalOrder":["outerPhysicalIdentitiesPreflighted","ephemeralAuthorityHandoffPublished","successorGrantDerivedFromHandoff","successorAdvanceAccepted","staleAuthorityRejectedWithoutRefMove","retryableUnknownShaHeldCursor","retryableUngrantedEpochHeldCursor","evidenceArrivalAdvancedCursor","pgReadFailureFailedOpenLegacy","nonFastForwardPushRecoveredWithoutForce","coreKeyRotatedWithStableEphemeralNamespace","exactGitRoundTripVerified","temporaryStateRemoved","outerHostReceiptsAttestSameRunManifest"],"requiredObservations":["truthfulPhysicalVsEphemeralIdentityBoundary","signedHandoffAndDerivedEpochGrant","acceptedSuccessorAndRejectedStaleAdvance","unchangedReceiverRefAfterStaleReplay","durableRetryCursorBeforeAndAfterEvidence","structuredPostgresFallback","noisyNonFastForwardAndSuccessfulRetry","noForcePush","distinctCoreKeys","stableEphemeralDeviceNamespace","exactCommitAndPayloadRoundTrip","temporaryRepositoryCleanup"],"forbiddenEvidence":["protocolSignerRepresentedAsPhysicalHost","summaryOnlyLegPass","callerSelectedRepoPath","callerSelectedProtocolKey","preAuthoredManifest","environmentSuppliedCommand"],"productionSurfaces":["publishHandoffToken","deriveIntegratorGrant","signStagingAdvance","acceptStagingAdvanceFF","runWorktreeBridgeTick","decideWorktreeBridgePersistence","deriveMaxGrantedEpoch","readPotGitMode","runGitSync","openOwnLog","deviceNamespaceKey","writeNamespaceRef","readNamespaceRef"],"externalCommandOverrides":false}
+{"schemaVersion":"hive-git-physical-phase-contract/v1","phase":"G","planItem":"P-308","state":"executor-installed","ready":true,"missingAssertions":[],"target":{"topology":"two-host-attested-ephemeral-protocol-adapter","repositoryLifetime":"one-phase-execution"},"causalOrder":["outerPhysicalIdentitiesPreflighted","singleOwningHivePublicationTermDerived","ownerCountersignedAdvanceAccepted","deviceOnlyHigherTermRejectedWithoutRefMove","staleOwnerPublicationRejectedWithoutRefMove","retryableUnknownShaHeldCursor","retryableUnknownGenerationHeldCursor","evidenceArrivalAdvancedCursor","pgReadFailureFailedOpenLegacy","nonFastForwardPushRecoveredWithoutForce","coreKeyRotatedWithStableEphemeralNamespace","exactGitRoundTripVerified","temporaryStateRemoved","outerHostReceiptsAttestSameRunManifest"],"requiredObservations":["truthfulPhysicalVsEphemeralIdentityBoundary","singleOwningHiveCountersignatureAndSignedContext","acceptedPublicationAndRejectedDeviceOnlyHigherTerm","rejectedStaleOwnerPublication","unchangedReceiverRefAfterDeniedAttempts","durableRetryCursorBeforeAndAfterEvidence","structuredPostgresFallback","noisyNonFastForwardAndSuccessfulRetry","noForcePush","distinctCoreKeys","stableEphemeralDeviceNamespace","exactCommitAndPayloadRoundTrip","temporaryRepositoryCleanup"],"forbiddenEvidence":["protocolSignerRepresentedAsPhysicalHost","automaticOwnershipFailover","summaryOnlyLegPass","callerSelectedRepoPath","callerSelectedProtocolKey","preAuthoredManifest","environmentSuppliedCommand"],"productionSurfaces":["nextHivePublicationTerm","requireHiveEffectAuthority","signStagingAdvance","acceptStagingAdvanceFF","runWorktreeBridgeTick","decideWorktreeBridgePersistence","readPotGitMode","runGitSync","openOwnLog","deviceNamespaceKey","writeNamespaceRef","readNamespaceRef"],"externalCommandOverrides":false}
 JSON
 }
 
@@ -966,13 +966,13 @@ NODE
   "$TSX" "$PRODUCER" phase-f-verify "$phase_dir/verify-input.json" \
     >"$phase_dir/verdict.json"
 }
-phase_g_crash_epoch_chaos() {
+phase_g_owner_authority_chaos() {
   [ -x "$TSX" ] && [ -f "$PRODUCER" ] \
     || fail 'phase G local producer is unavailable'
 
   # The already-preflighted tower and VM keys bind this adapter to the outer
-  # two-host manifest. The protocol authority, survivor, and restart identity
-  # are deliberately fresh EPHEMERAL keypairs: neither may be relabelled as a
+  # two-host manifest. The owning hive, publishers, and restart identity
+  # are deliberately fresh EPHEMERAL keypairs: none may be relabelled as a
   # physical host. Both real hosts attest the complete manifest afterward.
   local phase_dir="$run_dir/phase-g"
   local run_id="$physical_run_id"
@@ -988,7 +988,7 @@ const fs = require('node:fs');
 const [dir, runId, startedAt, finishedAt, towerDeviceKey, vmDeviceKey] = process.argv.slice(2);
 const result = JSON.parse(fs.readFileSync(`${dir}/result.json`, 'utf8'));
 const input = {
-  schemaVersion: 'hive-git-physical-phase-g-input/v1',
+  schemaVersion: 'hive-git-physical-phase-g-input/v2',
   runId,
   window: { startedAt, finishedAt },
   identities: { towerDeviceKey, vmDeviceKey },
@@ -1059,7 +1059,7 @@ run_all_phases() {
   phase_d_worktree_materialization
   phase_e_github_bridge
   phase_f_lifecycle_safety
-  phase_g_crash_epoch_chaos
+  phase_g_owner_authority_chaos
 }
 
 verify_physical_vm_source() {
