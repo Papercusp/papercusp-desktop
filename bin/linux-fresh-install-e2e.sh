@@ -16,7 +16,13 @@
 #      installed/discoverable Server and remains alive through a bounded
 #      missing-Server observation; and
 #   4. the GUI never opens an artifact-owned /api/health endpoint. A health
-#      endpoint here is a failure: it means the GUI started self-hosting again.
+#      endpoint here is a failure: it means the GUI started self-hosting again;
+#      and
+#   5. the packaged payload runs on a host with NO system WebKitGTK — the one
+#      thing legs 1-4 structurally cannot see, because they run on a host that
+#      supplies it (EI-20082207759701826 / EI-20075266271803900). Needs docker;
+#      when docker is absent the leg is SKIPPED and says so rather than letting
+#      a PASS imply it was checked.
 #
 # It does NOT prove dpkg installation, Papercusp Server boot, GUI-to-Server
 # attachment, or the rendered guidance text. Those require the two-product
@@ -35,6 +41,9 @@
 #   PC_L_LOCAL_DIR=<dir>           artifact source when PC_L_SOURCE=local
 #   PC_L_OBSERVE_SECONDS=15        bounded GUI-only cold-start observation
 #   PC_L_KEEP=1                    retain the unique run directory for diagnosis
+#   PC_L_PRISTINE=auto|0           leg 5 (pristine-box runtime proof). auto = run
+#                                  it when docker is usable; 0 = skip it LOUDLY
+#   PC_L_PRISTINE_OBSERVE=120      seconds leg 5 observes the containerised app
 #
 # Deliberately not `set -e`: assertions accumulate into one explicit verdict.
 
@@ -361,6 +370,42 @@ else
   pass "GUI remained alive for ${WAITED}s with no Server available"
   pass "GUI opened no artifact-owned /api/health endpoint (never self-hosted)"
   note "rendered missing-Server guidance is outside this shell-only verdict and needs the two-product/UI rig"
+fi
+
+echo
+echo "=== 5. pristine-box runtime proof (host with NO system WebKitGTK) ==="
+# EI-20082207759701826. Every leg above runs on THIS host — which carries system
+# WebKitGTK (measured on the build box: dpkg -l | grep -c webkit2gtk = 3). A host
+# that supplies the library cannot observe an artifact that only works BECAUSE the
+# host supplies it, which is exactly how EI-20075266271803900 survived a year of
+# release verification: the AppImage hard-failed on every user's box and passed
+# here. So this leg re-runs the payload section 4 already extracted inside a
+# container that has no WebKitGTK at all, and asserts the app reaches its renderer.
+PRISTINE_SCRIPT="$HERE/verify-appimage-pristine.sh"
+PRISTINE_LOG="$RUN_DIR/pristine.log"
+if [ "${PC_L_PRISTINE:-auto}" = "0" ]; then
+  skip "pristine-box runtime proof (disabled by PC_L_PRISTINE=0)"
+  note "NOT PROVEN: that the artifact runs without system WebKitGTK (EI-20075266271803900 class)"
+elif [ ! -x "$PRISTINE_SCRIPT" ]; then
+  # A missing detector is the gap itself, not a skippable extra: VOID, because a
+  # PASS here would again mean "nobody checked".
+  void "verify-appimage-pristine.sh is missing or not executable at $PRISTINE_SCRIPT"
+elif [ -z "${EXTRACT_ROOT:-}" ] || [ ! -d "${EXTRACT_ROOT:-}" ]; then
+  skip "pristine-box runtime proof (section 4 produced no extracted payload)"
+elif ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+  skip "pristine-box runtime proof (no usable docker on this host)"
+  note "NOT PROVEN: that the artifact runs without system WebKitGTK (EI-20075266271803900 class)"
+else
+  note "this leg pulls a base image and boots the app in a container; expect a few minutes"
+  if PC_PRISTINE_OBSERVE="${PC_L_PRISTINE_OBSERVE:-120}" \
+     bash "$PRISTINE_SCRIPT" --appdir "$EXTRACT_ROOT" >"$PRISTINE_LOG" 2>&1; then
+    pass "AppImage runs on a host with NO system WebKitGTK"
+    grep -m1 -E 'leg A PASS:' "$PRISTINE_LOG" | sed 's/^ *//' | while read -r l; do note "$l"; done
+    grep -m1 -E '\[webkit-render\] applied' "$PRISTINE_LOG" | sed 's/^ *//' | while read -r l; do note "$l"; done
+  else
+    fail "AppImage does NOT survive a pristine (webkit-free) host — EI-20075266271803900 class"
+    tail -25 "$PRISTINE_LOG" 2>/dev/null | sed 's/^/        | /'
+  fi
 fi
 
 emit_verdict
