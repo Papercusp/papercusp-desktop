@@ -17,7 +17,14 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 /// Bridge protocol version exposed via `GET /version`. Bumped whenever the
 /// HTTP surface changes shape so CLI clients can feature-detect.
-pub const BRIDGE_VERSION: &str = "0.8.0";
+pub const BRIDGE_VERSION: &str = "0.8.1";
+
+/// Reserved object key used by the injected callback to carry a thrown
+/// in-page exception back to the HTTP handler without making it look like a
+/// successful primitive result. Normal object results are JSON-stringified
+/// before they cross this seam, so this tagged object cannot collide with a
+/// user expression's ordinary return value.
+const EVAL_ERROR_RESULT_KEY: &str = "__papercusp_dev_bridge_error";
 
 /// Owns the discovery token for exactly as long as the Tauri application.
 ///
@@ -913,12 +920,21 @@ pub fn start_bridge(
 
                         loop {
                             if let Some(value) = results.remove(&request_id) {
-                                let resp = EvalResponse { result: value };
-                                let json = serde_json::to_string(&resp).unwrap();
                                 let header =
                                     Header::from_bytes("Content-Type", "application/json").unwrap();
-                                let _ = request
-                                    .respond(Response::from_string(json).with_header(header));
+                                if let Some(error) = eval_error_message(&value) {
+                                    let json = serde_json::json!({ "error": error }).to_string();
+                                    let _ = request.respond(
+                                        Response::from_string(json)
+                                            .with_header(header)
+                                            .with_status_code(500),
+                                    );
+                                } else {
+                                    let resp = EvalResponse { result: value };
+                                    let json = serde_json::to_string(&resp).unwrap();
+                                    let _ = request
+                                        .respond(Response::from_string(json).with_header(header));
+                                }
                                 break;
                             }
 
@@ -1078,14 +1094,23 @@ fn build_eval_callback_js(js: &str, request_id: &str) -> String {
             }} catch(e) {{
                 await window.__TAURI__.core.invoke("__dev_bridge_result", {{
                     id: {id},
-                    value: "ERROR: " + e.message
+                    value: {{
+                        {error_key}: "ERROR: " + String(e?.message ?? e)
+                    }}
                 }});
             }}
         }})();
         "#,
         js = serde_json::to_string(js).unwrap(),
         id = serde_json::to_string(request_id).unwrap(),
+        error_key = EVAL_ERROR_RESULT_KEY,
     )
+}
+
+fn eval_error_message(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get(EVAL_ERROR_RESULT_KEY)
+        .and_then(serde_json::Value::as_str)
 }
 
 /// Build a `/devtools` response for the current platform. v1 emits useful
@@ -1358,6 +1383,23 @@ mod tests {
         // No unescaped newline from the payload inside the eval(...) call.
         let eval_line = js.lines().find(|l| l.contains("await eval(")).unwrap();
         assert!(eval_line.contains(r#"\n"#));
+    }
+
+    #[test]
+    fn eval_callback_js_reports_thrown_errors_on_a_dedicated_channel() {
+        let js = build_eval_callback_js("throw new Error('boom')", "req-1");
+        assert!(js.contains(EVAL_ERROR_RESULT_KEY));
+        assert!(js.contains(r#""ERROR: " + String(e?.message ?? e)"#));
+        assert!(!js.contains(r#"value: "ERROR: " + e.message"#));
+    }
+
+    #[test]
+    fn eval_error_message_only_matches_the_reserved_error_object() {
+        let error = serde_json::json!({ EVAL_ERROR_RESULT_KEY: "ERROR: boom" });
+        assert_eq!(eval_error_message(&error), Some("ERROR: boom"));
+
+        let ordinary_string = serde_json::json!("ERROR: boom");
+        assert_eq!(eval_error_message(&ordinary_string), None);
     }
 
     // ── /devtools platform response ─────────────────────────────────────────
