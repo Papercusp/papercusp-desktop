@@ -230,6 +230,7 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
     '"linuxX64": ["x86_64-unknown-linux-gnu"]',
     '"macOS": ["x86_64-apple-darwin", "aarch64-apple-darwin"]',
     '"windowsX64": ["x86_64-pc-windows-msvc"]',
+    'PAPERCUSP_VM_TRUST_REVISION="2026-09-05-r1"',
     'PAPERCUSP_VM_NODE_VERSION="v24.18.1"',
     'license": "MIT"',
     'd6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0',
@@ -238,15 +239,18 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
     '708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89',
     'PAPERCUSP_VM_GH_VERSION="2.98.0"',
     'a255baf71d13fe5947a4eb7ad521ffd412d64cee',
+    // GO-2026-6354 and GO-2026-6355 affect x/crypto before v0.56.0. gh used to
+    // inherit v0.55.0 through x/net, so this must remain an explicit pin rather
+    // than an accidental MVS result.
+    'PAPERCUSP_VM_GH_X_CRYPTO_VERSION="v0.56.0"',
     'PAPERCUSP_VM_GH_X_MOD_VERSION="v0.40.0"',
     'PAPERCUSP_VM_KOPIA_VERSION="0.23.1"',
     '72ec08fd8edb86c67ed27099bf1b955e1f308ffa',
     'license": "Apache-2.0"',
-    // These three move TOGETHER and must be bumped here in the same change that bumps
-    // the helper: x/crypto v0.53.0 -> v0.55.0 for GO-2026-6303 (High) forced x/net to
-    // >= v0.57.0 (v0.58.0 chosen, matching the gh leg) and x/text to v0.41.0. See the
-    // co-pin comments in bin/lib/vm-release-trust-toolchain.sh.
-    'PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION="v0.55.0"',
+    // These three stay compatible as x/crypto moves to v0.56.0 for GO-2026-6354/6355:
+    // it requires x/net >= v0.57.0 (v0.58.0 already pinned) and x/text v0.41.0.
+    // See the co-pin comments in bin/lib/vm-release-trust-toolchain.sh.
+    'PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION="v0.56.0"',
     'PAPERCUSP_VM_KOPIA_X_MOD_VERSION="v0.40.0"',
     'PAPERCUSP_VM_KOPIA_X_NET_VERSION="v0.58.0"',
     'PAPERCUSP_VM_KOPIA_X_TEXT_VERSION="v0.41.0"',
@@ -288,6 +292,7 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
   // and asserting an absent module would fail the build rather than protect it. Add a
   // module here once an SBOM shows it embedded, not on the assumption that it is.
   for (const [binary, name] of [
+    ['gh', 'PAPERCUSP_VM_GH_X_CRYPTO_VERSION'],
     ['gh', 'PAPERCUSP_VM_GH_GRPC_VERSION'],
     ['kopia', 'PAPERCUSP_VM_KOPIA_GRPC_VERSION'],
     ['kopia', 'PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION'],
