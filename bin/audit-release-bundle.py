@@ -426,8 +426,8 @@ KNOWN_SENSITIVE_IDENTITIES = {
 
 
 # Product strings that LEGITIMATELY embed a denylisted identity literal and must
-# ship (WI-38233, 2026-08-12). Both were MEASURED as the only non-incidental uses
-# in the 0.0.16 bundle, not assumed — the two incidental ones found in the same
+# ship (WI-38233, 2026-08-12). Each was MEASURED as a non-incidental use in the
+# 0.0.16 bundle, not assumed — the two incidental ones found in the same
 # sweep (a UI placeholder "aviynw10", a test workspace name in a prose string)
 # were fixed at SOURCE instead of being listed here, which is the default and
 # should stay the default.
@@ -444,20 +444,27 @@ KNOWN_SENSITIVE_IDENTITIES = {
 #     — so the operator default cannot move to it yet, and this entry must STAY.
 #     Delete it only once that flap is fixed AND the default has actually moved;
 #     removing it earlier makes the gate red rather than merely unused.
-#   • ["aviynw","papercupai"] — CANONICAL_HIVE_TEAM_ALLOWLIST, the real hive-invite
-#     team allowlist. Scrubbing it breaks hive invites outright.
+#   • RETIRED 2026-09-05 (WI-38322) — the CANONICAL_HIVE_TEAM_ALLOWLIST pair, in
+#     both quoting styles. It was accepted on the premise that scrubbing the team
+#     allowlist would break hive invites outright. Commit 3af797a3d3 removed the
+#     owner's login from that constant instead — it is merged back in at RUNTIME
+#     from state.githubLogin and deduped, so nothing broke — and from then on the
+#     entry accepted nothing. MEASURED 2026-09-05 in the shipped 0.0.17 sidecar:
+#     both quoting styles occur 0 times, while the post-fix compiled form
+#     ["papercupai"] occurs 4 (positive control). A DEAD acceptance is not merely
+#     tidy-up: the rule below is ARITHMETIC, so re-adding a real login to the
+#     allowlist would have had those bytes counted as authorised and PASSED —
+#     the acceptance would have silently re-licensed the exact leak this entry
+#     was created to disclose. Do not restore it; and do not "fix" a future audit
+#     hit by re-adding a login to canonical-hive-team-allowlist.ts.
 #
 # This is an ACCEPTANCE, not an exclude, and it is COUNTED rather than matched: a
 # file is accepted only when EVERY occurrence of the literal sits inside one of
 # these strings. One unexplained occurrence and the file still FAILS — so a new
 # leak of the bare handle still reds the gate, including inside these very files.
-# Both quoting styles are listed because only the minified bundle is measured
-# above; an unminified build emits the source form.
-AUTHORISED_PRODUCT_STRINGS = (
-    "papercusp-cupboard.aviynw.workers.dev",
-    '["aviynw","papercupai"]',
-    "['aviynw', 'papercupai']",
-)
+# Where a literal has two quoting styles, BOTH must be listed: only the minified
+# bundle is measured above, and an unminified build emits the source form.
+AUTHORISED_PRODUCT_STRINGS = ("papercusp-cupboard.aviynw.workers.dev",)
 
 
 def _count_occurrences(path, needle):
