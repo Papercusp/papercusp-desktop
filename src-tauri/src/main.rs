@@ -7593,6 +7593,73 @@ mod download_progress_throttle_tests {
     }
 }
 
+/// Download → VERIFY → tear the sidecar down → install, in that order.
+///
+/// WI-2144851 (P-007, "verify signed updates / rollback FAILURE cases"): the
+/// obvious call, `Update::download_and_install(on_chunk, on_download_finish)`,
+/// invokes its `on_download_finish` hook BEFORE the minisign check. Measured at
+/// the crate source — `tauri-plugin-updater-2.10.1/src/updater.rs`:
+///
+/// ```text
+///   710:  on_download_finish();
+///   712:  verify_signature(&buffer, &self.signature, &self.config.pubkey)?;
+/// ```
+///
+/// Passing the sidecar teardown as that hook therefore tore the operator down
+/// for an artifact whose signature had NOT been checked yet. When the check then
+/// REJECTED the artifact — the security control working exactly as intended, and
+/// the only barrier left once `dangerousInsecureTransportProtocol` is on — the
+/// `?` returned before `app.restart()`, leaving the app with a killed sidecar and
+/// a LATCHED `shutdown_done`. `spawn_serve_supervisor` reads that latch as
+/// "normal quit / self-update — don't fight the teardown" and never respawns, so
+/// a correctly-refused update (bad signature, tampered bytes, truncated download)
+/// bricked the running app until the user manually quit and relaunched it. The
+/// same hazard covers the deliberate-downgrade path, which is the rollback half
+/// of the same sub-goal.
+///
+/// Splitting the plugin call restores the ordering the teardown comment always
+/// claimed: `download()` returns ONLY after `verify_signature` succeeds, so the
+/// teardown now runs on a VERIFIED payload, immediately before the swap — which
+/// still satisfies EI-9002 (the bytes stream through the sidecar's own
+/// `/api/updates` proxy, so it must stay up for the whole download) and WI-2667
+/// (flag `shutdown_done` FIRST so the Server-side serve supervisor does not
+/// respawn the operator we are about to swap out). If the swap ITSELF fails, the
+/// latch is cleared so the supervisor revives the operator instead of leaving a
+/// half-updated app with no backend.
+async fn download_verify_then_install(
+    app: &AppHandle,
+    update: tauri_plugin_updater::Update,
+) -> Result<(), String> {
+    let progress_reporter = make_download_progress_reporter(app.clone());
+    // Nothing is torn down until this returns, and it only returns on a payload
+    // whose signature verified against the pubkey baked into tauri.conf.json.
+    let bytes = update
+        .download(progress_reporter, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let set_shutdown = |done: bool| {
+        let state: tauri::State<SidecarState> = app.state();
+        state
+            .shutdown_done
+            .store(done, std::sync::atomic::Ordering::SeqCst);
+    };
+
+    // Verified payload in hand — NOW tear the sidecar down (children must not
+    // outlive the parent across the binary swap).
+    set_shutdown(true);
+    kill_sidecar(app);
+
+    if let Err(e) = update.install(bytes) {
+        // The swap failed with the sidecar already down. Un-latch so the
+        // supervisor stops reading this as a deliberate teardown and revives the
+        // operator, then surface the real failure to the caller.
+        set_shutdown(false);
+        return Err(e.to_string());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 #[specta::specta]
 async fn install_update(app: AppHandle) -> Result<(), String> {
@@ -7626,26 +7693,11 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     // the sidecar's OWN /api/updates proxy — the download URL captured by
     // `updater.check()` points at it. Killing the sidecar BEFORE the download
     // destroys that endpoint mid-fetch (host log: GET 200 → ConnectionResetError),
-    // the update silently no-ops, and the old version keeps running. So tear the
-    // sidecar down in `on_download_finish` — AFTER the payload is fully on hand,
-    // BEFORE the binary swap (children must not outlive the parent across the
-    // swap). WI-2667 still holds: flag `shutdown_done` FIRST so the Server-side
-    // serve supervisor does NOT respawn the operator we're about to swap out
-    // from under (the app restarts immediately after the install).
-    let teardown_app = app.clone();
-    let progress_reporter = make_download_progress_reporter(app.clone());
-    update
-        .download_and_install(progress_reporter, move || {
-            {
-                let state: tauri::State<SidecarState> = teardown_app.state();
-                state
-                    .shutdown_done
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-            kill_sidecar(&teardown_app);
-        })
-        .await
-        .map_err(|e| e.to_string())?;
+    // the update silently no-ops, and the old version keeps running. So the
+    // teardown lands AFTER the payload is fully on hand AND VERIFIED, BEFORE the
+    // binary swap — see `download_verify_then_install` for why that ordering
+    // cannot be expressed as `download_and_install`'s `on_download_finish` hook.
+    download_verify_then_install(&app, update).await?;
 
     // tauri-plugin-process is in scope so we can restart cleanly.
     app.restart();
@@ -7902,25 +7954,12 @@ async fn revert_to(app: AppHandle, tag: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("rollback target {tag} is not installable"))?;
 
-    // Identical sidecar-safe teardown to install_update (EI-9002 / WI-2667): the
-    // update bytes stream through the sidecar's OWN /api/updates proxy, so tear the
-    // sidecar down in on_download_finish — AFTER the payload is fully on hand,
-    // BEFORE the binary swap — and flag `shutdown_done` FIRST so the Server-side
-    // serve supervisor does NOT respawn the operator we're about to swap out.
-    let teardown_app = app.clone();
-    let progress_reporter = make_download_progress_reporter(app.clone());
-    update
-        .download_and_install(progress_reporter, move || {
-            {
-                let state: tauri::State<SidecarState> = teardown_app.state();
-                state
-                    .shutdown_done
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-            kill_sidecar(&teardown_app);
-        })
-        .await
-        .map_err(|e| e.to_string())?;
+    // Identical sidecar-safe teardown to install_update (EI-9002 / WI-2667), and
+    // identically ordered AFTER the minisign verification (WI-2144851): a
+    // downgrade is exactly where an unverified-artifact teardown would hurt most,
+    // because the whole point of the path is to install an OLDER build whose
+    // "newer than current" gate has been deliberately switched off above.
+    download_verify_then_install(&app, update).await?;
 
     // tauri-plugin-process is in scope so we can restart cleanly.
     app.restart();
