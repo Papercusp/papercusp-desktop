@@ -100,12 +100,25 @@ for dep in "$SOCAT_BIN" timeout; do
 done
 
 # ── resolve the qemu process ─────────────────────────────────────────────────
-# Excluding our own process tree is load-bearing: pgrep -f matches the FULL command
-# line, and this script's argv contains $VM_PATTERN verbatim (it was passed as an
-# argument), so an unguarded pgrep matches ITSELF and reports a VM that is not there.
-# Same guard vm-preflight.sh uses.
-qemu_pids="$(pgrep -f "$VM_PATTERN" 2>/dev/null | grep -vxF -e "$$" -e "$PPID" || true)"
-qemu_pid="$(printf '%s\n' "$qemu_pids" | head -n1)"
+# Self-match is the trap here: pgrep -f matches the FULL command line, and this
+# script's argv contains $VM_PATTERN verbatim (it was passed as an argument), so an
+# unguarded pgrep matches ITSELF and reports a VM that is not there.
+#
+# Excluding $$/$PPID is NOT sufficient — measured 2026-09-05 while building this: a
+# COMMAND-SUBSTITUTION SUBSHELL has its own pid, is neither $$ nor $PPID, and sailed
+# straight through that guard, so `--vm 'qemu-system.*no-such-vm-xyz'` "found" a VM.
+# So filter on IDENTITY instead of on pids: keep only candidates whose argv[0] is
+# actually a qemu binary. A bash/pgrep/subshell self-match cannot pass that by
+# construction, whatever its pid, and it also survives the race where a matched
+# process exits before we can read its /proc entry.
+qemu_pid=""
+while read -r cand; do
+  [[ -n "$cand" && -r "/proc/$cand/cmdline" ]] || continue
+  cand_argv0="$(tr '\0' '\n' < "/proc/$cand/cmdline" 2>/dev/null | head -n1 || true)"
+  [[ "${cand_argv0##*/}" == qemu-* ]] || continue
+  qemu_pid="$cand"
+  break
+done < <(pgrep -f "$VM_PATTERN" 2>/dev/null || true)
 
 if [[ -z "$MONITOR_SOCKET" ]]; then
   [[ -n "$qemu_pid" ]] || die "no qemu process matches /$VM_PATTERN/ — the VM is not running (override with --vm, or point at a socket with --socket)" 2
@@ -162,8 +175,9 @@ if [[ ! -s "$TMP_PPM" ]]; then
   if [[ -n "$qemu_pid" ]]; then
     echo "  qemu pid $qemu_pid IS running and matched /$VM_PATTERN/ — the monitor, not the VM, is the problem." >&2
   else
-    echo "  no qemu process matched /$VM_PATTERN/ — the socket file may be a stale leftover from a dead VM." >&2
-    echo "  (~/windows-vm/qemu-monitor.sock is exactly such a leftover; the live VM listens elsewhere.)" >&2
+    echo "  no qemu process matched /$VM_PATTERN/ — the socket file is most likely a leftover from a VM" >&2
+    echo "  that has already exited (the file outlives the process). Check with --vm, or drop --socket to" >&2
+    echo "  let this script derive the live VM's own monitor path." >&2
   fi
   exit 4
 fi
