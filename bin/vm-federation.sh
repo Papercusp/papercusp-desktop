@@ -129,14 +129,29 @@ fi
 # ── instance table ──────────────────────────────────────────────────────────
 # inst 'a' / 'b'; FED_KIND decides which driver primitive serves it.
 declare -gA FED_KIND FED_VM FED_IDX FED_USER FED_TOKEN FED_LOG FED_LOCAL_HONO FED_LOCAL_PG
+declare -gA FED_VM_HOME FED_VM_PORT FED_VM_PG_PORT
 if [ "$VMS" = 2 ]; then
   FED_KIND[a]=vm;    FED_VM[a]=fed-a; FED_IDX[a]=1
+  FED_VM_HOME[a]="/home/tester/.papercusp-vm-fed/a"
+  FED_VM_PORT[a]=$((18000 + FED_IDX[a]))
+  FED_VM_PG_PORT[a]=$((18500 + FED_IDX[a]))
 else
   FED_KIND[a]=local; FED_LOG[a]="$WORK/a.log"
 fi
 FED_KIND[b]=vm; FED_VM[b]=fed-b; FED_IDX[b]=2
-[ "$VMS" = 1 ] && { FED_VM[b]=fed-a; FED_IDX[b]=1; }
+[ "$VMS" = 1 ] && {
+  FED_VM[b]=fed-a
+  FED_IDX[b]=1
+  FED_VM_HOME[b]="/home/tester/.papercusp-vm-fed/b"
+  FED_VM_PORT[b]=$((18000 + FED_IDX[b]))
+  FED_VM_PG_PORT[b]=$((18500 + FED_IDX[b]))
+}
 FED_USER[a]="$P_A_USER"; FED_USER[b]="$P_B_USER"
+if [ "$VMS" = 1 ]; then
+  # Stagger the host-side sidecar ports once and reuse them across boot retries.
+  FED_LOCAL_HONO[a]="$(fed_pick_free_port 18071)"
+  FED_LOCAL_PG[a]="$(fed_pick_free_port 18532)"
+fi
 
 # ── the vm/mixed driver vtable (overrides the lib's local-only default) ─────
 drv_exec() {
@@ -150,14 +165,17 @@ drv_applog() {
   local inst="$1"
   case "${FED_KIND[$inst]}" in
     local) echo "${FED_LOG[$inst]}" ;;
-    vm)    echo "/home/tester/.papercusp/logs/serve.log" ;;
+    vm)    echo "${FED_VM_HOME[$inst]}/papercusp-server.log" ;;
   esac
 }
-# The Server service's sidecar log is the authoritative boot log on VMs. The
-# local --vms=1 instance is launched directly from the extracted Server sidecar,
-# so its FED_LOG entry is already that instance's own structured log.
+# The Server service's sidecar log is the authoritative boot log on VMs. Keep
+# the wrapper log as drv_applog so fed_wait_boot can retain both diagnostics.
 drv_sidecar_log() {
-  echo ""
+  local inst="$1"
+  case "${FED_KIND[$inst]}" in
+    local) echo "" ;;
+    vm)    echo "${FED_VM_HOME[$inst]}/.papercusp/logs/serve.log" ;;
+  esac
 }
 # EI-18687938054040755: the data-path capability probe needs the bundle path on
 # whichever machine hosts this instance. The local driver reverse-maps its
@@ -352,38 +370,45 @@ launch_vm_instance() {  # <inst> [wipe]   wipe=1 (first launch) clears PG state
   printf 'GH_TOKEN=%s\nPAPERCUSP_FED_DHT_MODE=%s\n%s\n' "${FED_TOKEN[$inst]}" "$DHT" \
     "${BOOTSTRAP:+PAPERCUSP_DHT_BOOTSTRAP=$BOOTSTRAP}" \
     | vm_ssh "$name" 'umask 077; cat > ~/fed.env'
-  # The desktop puts the embedded-PG data dir at ~/.papercusp-workspaces/.shared/
-  # embedded-pg-data (NOT ~/.papercusp). WIPE=1 (first launch of a run) clears it
-  # for a clean initdb + clean migration sequence — a reused dir can carry a
-  # half-applied schema (e.g. a re-run migration ALTERing harness_features, now a
-  # view post unify-work-items → "ADD COLUMN cannot be performed" → PG exits → no
-  # DB). WIPE=0 (relaunch retry) PRESERVES the now-clean dir so the embedded-PG
-  # spawn is a fast RESTART (~3s) that wins the desktop's 30s sidecar-start budget
-  # instead of a fresh initdb (~20-30s) that loses it under concurrent 2-VM load.
+  # The headless Server owns the sidecar and embedded PG. Use an isolated HOME
+  # per VM instance so its workspace registry, operator discovery files, logs,
+  # and shared state cannot collide with the host operator or a retry.
+  # WIPE=1 (first launch of a run) clears the isolated state for a clean initdb +
+  # migration sequence. WIPE=0 preserves it so ensure_booted's retry is a fast
+  # restart instead of another fresh initdb.
   # WI-6176: WIPE must be passed as a vm_run ARGUMENT, never as a `WIPE=… vm_run`
   # shell prefix — vm_run is `ssh … 'bash -s'` and forwards no environment, so the
   # prefix form left the guest with WIPE UNSET, took the ${WIPE:-1} wipe branch on
   # EVERY relaunch, and made ensure_booted's preserve-the-data-dir retry (below)
   # inert: each attempt re-ran a fresh ~20-30s initdb and lost the same race.
-  vm_run "$name" "WIPE=$wipe" <<'EOF'
-pkill -f papercusp-desktop 2>/dev/null; pkill -f 'sidecar/serve.mjs' 2>/dev/null
+  vm_run "$name" "WIPE=$wipe VM_HOME=${FED_VM_HOME[$inst]} VM_PORT=${FED_VM_PORT[$inst]} VM_PG_PORT=${FED_VM_PG_PORT[$inst]}" <<'EOF'
+pkill -f papercusp-desktop 2>/dev/null
+pkill -f papercusp-server 2>/dev/null
+pkill -f 'sidecar/serve.mjs' 2>/dev/null
 pkill -f embedded-postgres 2>/dev/null; sleep 1
-rm -f ~/papercusp-app.log ~/.papercusp-workspaces/.shared/embedded-pg-data/postmaster.pid 2>/dev/null
-if [ "${WIPE:-1}" = 1 ]; then rm -rf ~/.papercusp ~/.papercusp-workspaces; fi
-mkdir -p ~/.papercusp ~/fed
-export DISPLAY=:0 XAUTHORITY="$HOME/.Xauthority"
-for _ in $(seq 1 30); do xdpyinfo -display :0 >/dev/null 2>&1 && break; sleep 1; done
-xdpyinfo -display :0 >/dev/null 2>&1 || { echo "X :0 not ready (see ~/startx.log)"; exit 1; }
+home="${VM_HOME:?}"
+state_root="$home/.papercusp-workspaces/.shared"
+sidecar_dir="/usr/lib/Papercusp Server/sidecar"
+embedded_pg_root="$state_root/embedded-pg-data"
+rm -f "$home/papercusp-server.log" "$embedded_pg_root/postmaster.pid" 2>/dev/null
+if [ "${WIPE:-1}" = 1 ]; then rm -rf "$home/.papercusp" "$home/.papercusp-workspaces"; fi
+mkdir -p "$home" "$state_root" "$embedded_pg_root" "$home/fed"
 set -a; . ~/fed.env; set +a
-setsid bash -c 'exec /usr/bin/papercusp-desktop' >"$HOME/papercusp-app.log" 2>&1 </dev/null &
-sleep 1; echo "launched (wipe=${WIPE:-1})"
+export HOME="$home" USERPROFILE="$home"
+export PAPERCUSP_SIDECAR_DIR="$sidecar_dir"
+export PAPERCUSP_PORT="${VM_PORT:?}"
+export PAPERCUSP_EMBEDDED_PG_ROOT="$embedded_pg_root"
+export PAPERCUSP_BIND_HOST=127.0.0.1 PAPERCUSP_BACKGROUND_WORKERS=1
+setsid bash -c 'exec /usr/bin/papercusp-server --headless-service' >"$home/papercusp-server.log" 2>&1 </dev/null &
+sleep 1; echo "launched Server headless-service (wipe=${WIPE:-1}, port=${PAPERCUSP_PORT}, pg_root=${PAPERCUSP_EMBEDDED_PG_ROOT})"
 EOF
 }
 launch_local_instance() {  # <inst> — the --vms=1 host-side instance
   local inst="$1"
-  fed_log "launch packaged app on the HOST (identity ${FED_USER[$inst]})"
-  STARTED_XVFB="$(fed_ensure_display "$DISPLAY_NUM" "$WORK")"
-  local envs=(GH_TOKEN="${FED_TOKEN[$inst]}")
+  local home="$WORK/inst-$inst" sidecar
+  sidecar="$(fed_sidecar_dir "$PKG")"
+  fed_log "launch packaged Server sidecar on the HOST (identity ${FED_USER[$inst]}, hono=${FED_LOCAL_HONO[$inst]}, pg=${FED_LOCAL_PG[$inst]})"
+  local envs=(PAPERCUSP_GITHUB_LOGIN="${FED_USER[$inst]}")
   [ -n "$BOOTSTRAP" ] && envs+=(PAPERCUSP_DHT_BOOTSTRAP="$BOOTSTRAP")
   # EI-502: the --vms=1 HOST-side instance must ANNOUNCE a bridge-reachable address.
   # Without this it binds hyperdht to 0.0.0.0 and the DHT learns its address as
@@ -406,7 +431,8 @@ launch_local_instance() {  # <inst> — the --vms=1 host-side instance
   # ... "$FEDBR_HOST_IP"). Under --net=socket there is no bridge and no such address,
   # so leave it unset and let hyperdht bind 0.0.0.0 as before.
   [ "$NET" = bridge ] && [ -n "${FEDBR_HOST_IP:-}" ] && envs+=(PAPERCUSP_DHT_HOST="$FEDBR_HOST_IP")
-  fed_local_launch "$WORK/inst-$inst" "${FED_LOG[$inst]}" "$BIN" "$DISPLAY_NUM" "${envs[@]}"
+  fed_local_launch_sidecar "$home" "${FED_LOG[$inst]}" "$sidecar" \
+    "${FED_LOCAL_HONO[$inst]}" "${FED_LOCAL_PG[$inst]}" "${envs[@]}"
 }
 launch_instance() {  # <inst> [wipe]
   case "${FED_KIND[$1]}" in

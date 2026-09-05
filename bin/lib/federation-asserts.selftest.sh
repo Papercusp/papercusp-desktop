@@ -438,6 +438,34 @@ for fn in fed_local_launch fed_local_launch_sidecar; do
   fi
 done
 
+# WI-22048803455221383: the VM federation driver must exercise the packaged
+# Server role, never the GUI/X shell. In --vms=1 mode the host half must use
+# the same extracted Server sidecar helper as the local federation smokes, with
+# two independently selected ports.
+vm_federation_file="$DIR/../vm-federation.sh"
+vm_launch_body="$(awk '/^launch_vm_instance\(\)/{p=1} p{print} p&&/^}$/{exit}' "$vm_federation_file")"
+local_launch_body="$(awk '/^launch_local_instance\(\)/{p=1} p{print} p&&/^}$/{exit}' "$vm_federation_file")"
+if grep -qF '/usr/bin/papercusp-server --headless-service' <<<"$vm_launch_body" \
+  && grep -qF 'PAPERCUSP_SIDECAR_DIR=' <<<"$vm_launch_body" \
+  && grep -qF 'PAPERCUSP_PORT=' <<<"$vm_launch_body" \
+  && grep -qF 'PAPERCUSP_EMBEDDED_PG_ROOT=' <<<"$vm_launch_body" \
+  && grep -qF 'export HOME="$home"' <<<"$vm_launch_body" \
+  && ! grep -qE 'xdpyinfo|DISPLAY=|/usr/bin/papercusp-desktop' <<<"$vm_launch_body"; then
+  ok "vm-federation launches the packaged Server headless-service with explicit isolated state (WI-22048803455221383)"
+else
+  bad "vm-federation still launches the GUI/X path or omits an explicit Server state contract (WI-22048803455221383)"
+fi
+if grep -qF 'fed_local_launch_sidecar' <<<"$local_launch_body" \
+  && ! grep -qF 'fed_local_launch "' <<<"$local_launch_body" \
+  && grep -qF 'FED_LOCAL_HONO[a]=' "$vm_federation_file" \
+  && grep -qF 'FED_LOCAL_PG[a]=' "$vm_federation_file" \
+  && grep -qF 'fed_pick_free_port' "$vm_federation_file" \
+  && grep -qF 'PAPERCUSP_GITHUB_LOGIN=' <<<"$local_launch_body"; then
+  ok "vm-federation --vms=1 uses the extracted Server sidecar with distinct ports and account selection (WI-22048803455221383)"
+else
+  bad "vm-federation --vms=1 can regress to GUI/X launch or collide local sidecar ports (WI-22048803455221383)"
+fi
+
 # WI-40905: credentialed attestation preflight must not inherit the operator's
 # ambient HOME; gh/npx and encrypted-key fallback state stay account-scoped.
 if grep -q 'HOME="\$identity_dir"' "$DIR/federation-asserts.sh"; then
