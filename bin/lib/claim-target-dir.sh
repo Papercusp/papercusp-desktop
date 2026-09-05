@@ -73,8 +73,8 @@ source "$__pc_claim_dir/release-artifacts.sh"
 # and the next launcher correctly sees a free slot and builds into a dir a live desktop
 # depends on. That is the gap this closes.
 #
-# `fuser` answers from the kernel's exe MAPPING, which is the whole point: it cannot be
-# fooled by argv. The check this replaces could, and did. `pgrep -af '[t]auri dev'`
+# Read the kernel's executable links, never argv. The check this replaces could,
+# and did, get fooled: `pgrep -af '[t]auri dev'`
 # matched the wrapper's OWN ANCESTOR on every `npm run tauri -- dev` launch, because npm
 # rewrites its process title to `npm run tauri dev …` — and it also matched any peer
 # agent's shell that had merely typed the string. Bracketing `[t]auri` guards the pgrep's
@@ -82,14 +82,52 @@ source "$__pc_claim_dir/release-artifacts.sh"
 # "a desktop build is already running but holds NO slot lock" on launches where nothing
 # else was running at all, and it is the reason a warning was never enough here (WI-37452).
 #
-# KNOWN BLIND SPOTS, measured rather than assumed:
-#   - If the binary was REPLACED after the app started, the running process holds the old
-#     inode and this returns false. Catching that needs a /proc-wide exe scan: ~18s across
-#     the ~5600 processes on this box, far too slow for a launch path.
+# Linux uses one in-process /proc scan, reading only exe links. `fuser -s` also
+# walks unrelated processes' file descriptors and stalled a verifier for minutes
+# BEFORE Cargo started (EI-22467167909855383). Spawning readlink once per PID is
+# expensive too; Node is already required by this npm launcher. A renamed or
+# deleted executable under the target root still protects that root.
+# KNOWN BLIND SPOT:
 #   - A build started OUTSIDE this wrapper (a bare `cargo tauri dev`) has no app running
 #     yet, so nothing here can see it. That path is unprotected by construction.
 __pc_desktop_running_in() {
   local dir="$1"
+  if [[ -d /proc/self ]]; then
+    local status=0
+    # An unavailable probe must never be interpreted as an unused target root.
+    node - "$dir" <<'JS' || status=$?
+const fs = require('node:fs');
+const path = require('node:path');
+let root = path.resolve(process.argv[2]);
+try { root = fs.realpathSync(root); } catch (error) {
+  if (error.code !== 'ENOENT') process.exit(2);
+}
+let pids;
+try { pids = fs.readdirSync('/proc'); } catch { process.exit(2); }
+let unknown = false;
+for (const pid of pids) {
+  if (!/^\d+$/.test(pid)) continue;
+  try {
+    const exe = fs.readlinkSync(`/proc/${pid}/exe`).replace(/ \(deleted\)$/, '');
+    if (exe.startsWith(root + path.sep)) process.exit(0);
+  } catch (error) {
+    // Match fuser's visibility: exited/kernel tasks have no executable link;
+    // nondumpable tasks (including the same user's keyring) deny ptrace reads.
+    // Those denials say nothing about this target root. The launcher flock is
+    // still authoritative, and ordinary orphaned desktop executables remain
+    // readable. Unexpected probe failures retain the safety fence.
+    if (['ENOENT', 'ESRCH', 'EACCES', 'EPERM'].includes(error.code)) continue;
+    unknown = true;
+  }
+}
+process.exit(unknown ? 2 : 1);
+JS
+    if [[ "$status" == 1 ]]; then return 1; fi
+    if [[ "$status" != 0 ]]; then
+      echo "→ executable identity probe unavailable for $dir — treating the slot as occupied" >&2
+    fi
+    return 0
+  fi
   command -v fuser >/dev/null 2>&1 || return 1
   fuser -s "${dir}/debug/papercusp-desktop" 2>/dev/null
 }

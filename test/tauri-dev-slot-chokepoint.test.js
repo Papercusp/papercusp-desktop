@@ -461,20 +461,21 @@ test('no launcher routes around the chokepoint with a bare `tauri dev`', () => {
  *     warm shared cache for a COLD ~10min build, forever, for a phantom peer.
  * -------------------------------------------------------------------------- */
 
-const HAVE_FUSER = spawnSync('bash', ['-c', 'command -v fuser'], { encoding: 'utf8' }).status === 0;
-const CAN_PROBE = HAVE_FUSER && existsSync('/proc/self/exe') && existsSync('/bin/sleep');
-const NO_PROBE_REASON = 'needs Linux /proc + fuser(1) + /bin/sleep to stage a running desktop';
+const CAN_PROBE = existsSync('/proc/self/exe') && existsSync('/bin/sleep');
+const NO_PROBE_REASON = 'needs Linux /proc + /bin/sleep to stage a running desktop';
 
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
 /** Source the claim in a sandboxed HOME, optionally under an ancestor renamed the way npm renames itself. */
-function claimIn(home, { ancestorTitle } = {}) {
+function claimIn(home, { ancestorTitle, env = {} } = {}) {
   const inner = `. ${shq(CLAIM)}; printf '%s' "\${CARGO_TARGET_DIR:-}"`;
   const cmd = ancestorTitle ? `exec -a ${shq(ancestorTitle)} bash -c ${shq(inner)}` : inner;
   const res = spawnSync('bash', ['-c', cmd], {
-    env: { ...process.env, HOME: home, CARGO_TARGET_DIR: '' },
+    env: { ...process.env, HOME: home, CARGO_TARGET_DIR: '', ...env },
     encoding: 'utf8',
+    timeout: 10_000,
   });
+  if (res.error) throw res.error;
   return { targetDir: res.stdout ?? '', stderr: res.stderr ?? '' };
 }
 
@@ -482,9 +483,8 @@ function claimIn(home, { ancestorTitle } = {}) {
  * Stage a real process executing out of `<home>/.cargo-target/debug/papercusp-desktop`
  * while holding NO slot lock — i.e. a desktop whose launcher was reaped.
  *
- * Readiness is confirmed by reading /proc/<pid>/exe, deliberately a DIFFERENT
- * mechanism from the fuser probe under test: gating on the probe itself would
- * make the assertion circular.
+ * Readiness checks the staged PID directly. Slot selection still has to DISCOVER
+ * that PID among the live population; no fixture PID is passed to the probe.
  */
 function startOrphanedDesktop(home) {
   const dir = join(home, '.cargo-target', 'debug');
@@ -557,6 +557,36 @@ test('a desktop still RUNNING out of a slot is not handed that slot, even with i
       join(home, '.cargo-target'),
       'the shared slot must be reclaimable once nothing is running out of it',
     );
+  } finally {
+    child?.kill('SIGKILL');
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('Linux slot discovery never calls the unrelated file-descriptor scanner', { skip: CAN_PROBE ? false : NO_PROBE_REASON }, () => {
+  const home = mkdtempSync(join(tmpdir(), 'slot-exe-only-'));
+  const shimDir = join(home, 'bin');
+  mkdirSync(shimDir);
+  const marker = join(home, 'fuser-called');
+  writeFileSync(join(shimDir, 'fuser'), `#!/bin/sh\ntouch ${shq(marker)}\nexit 0\n`);
+  chmodSync(join(shimDir, 'fuser'), 0o755);
+  try {
+    const result = claimIn(home, { env: { PATH: `${shimDir}:${process.env.PATH}` } });
+    assert.strictEqual(result.targetDir, join(home, '.cargo-target'));
+    assert.strictEqual(existsSync(marker), false, 'startup must inspect executable identity without fuser FD scans');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('replacing an orphaned executable cannot make its live target root look free', { skip: CAN_PROBE ? false : NO_PROBE_REASON }, () => {
+  const home = mkdtempSync(join(tmpdir(), 'slot-replaced-exe-'));
+  let child;
+  try {
+    child = startOrphanedDesktop(home);
+    const bin = join(home, '.cargo-target', 'debug', 'papercusp-desktop');
+    rmSync(bin);
+    copyFileSync('/bin/sleep', bin);
+    assert.match(readlinkSync(`/proc/${child.pid}/exe`), /\(deleted\)$/);
+    assert.strictEqual(claimIn(home).targetDir, join(home, '.cargo-target-dev2'));
   } finally {
     child?.kill('SIGKILL');
     rmSync(home, { recursive: true, force: true });
