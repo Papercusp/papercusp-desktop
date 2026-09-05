@@ -1084,6 +1084,30 @@ verify_physical_vm_source() {
   || fail "scenario is not execution-ready ($IMPLEMENTATION_STATE); A-G phase executors have not all landed"
 [ "${HIVE_GIT_PHYSICAL_EXECUTE:-}" = "$EXPECTED_PLAN" ] \
   || fail 'destructive physical run requires HIVE_GIT_PHYSICAL_EXECUTE to equal the canonical plan slug'
+
+# The staged VM source root is EPHEMERAL by design: hive-git-physical-probe.sh
+# creates /tmp/hive-git-physical-source.$$ on the VM, exports it here as
+# HIVE_GIT_PHYSICAL_VM_SOURCE for exactly one invocation, and removes it again
+# from its EXIT/HUP/INT/TERM trap. Nothing persists that path, so there is no
+# staged root for a post-interruption caller to inherit or rediscover.
+#
+# Refuse with the cause NAMED rather than pasting an unusable value into
+# VM_PRODUCER. Left unchecked, an unset value yields the absolute nonsense path
+# /packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts, which the
+# VM reports as ERR_MODULE_NOT_FOUND — an error that reads as a broken VM
+# dev-source tree and sends the reader hunting there, when the real cause is a
+# missing input. Measured 2026-09-05 (EI-20407955869521811): the VM's dev-source
+# tree and its tsx loader are both present, so that reading was always a
+# misdiagnosis. The shape check pins the same staging contract the probe's own
+# cleanup guard enforces (/tmp/hive-git-physical-source.[0-9]*), which is the
+# only path this driver's producer is ever staged at.
+[ -n "$VM_SOURCE" ] \
+  || fail 'HIVE_GIT_PHYSICAL_VM_SOURCE is unset. The staged VM source root is ephemeral (hive-git-physical-probe.sh removes it on exit) and is never persisted, so this driver cannot be resumed directly after an interruption. Re-drive through hive-git-physical-probe.sh, which is the only producer of that tree and exports this variable; its --source-preflight mode stages and verifies without mutating the rig.'
+require_absolute 'HIVE_GIT_PHYSICAL_VM_SOURCE' "$VM_SOURCE"
+case "$VM_SOURCE" in
+  /tmp/hive-git-physical-source.[0-9]*) ;;
+  *) fail "HIVE_GIT_PHYSICAL_VM_SOURCE=$VM_SOURCE is not a probe-staged source root (expected /tmp/hive-git-physical-source.<pid>). Only hive-git-physical-probe.sh stages the VM producer, and it stages nowhere else; a hand-supplied root — including the installed dev-source tree, which carries no producer — resolves VM_PRODUCER to a path that does not exist and surfaces as ERR_MODULE_NOT_FOUND." ;;
+esac
 verify_physical_vm_source
 
 scenario_started_at="$(now_iso)"
