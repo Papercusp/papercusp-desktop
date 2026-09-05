@@ -44,7 +44,7 @@ use crate::SidecarState;
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CspPolicy {
-    report_only_header: String,
+    header: String,
     policy: String,
 }
 
@@ -58,9 +58,9 @@ fn csp_policy() -> &'static CspPolicy {
     })
 }
 
-/// Attach the shared report-only policy to document responses only. CSP on a
+/// Attach the shared (now ENFORCING) policy to document responses only. CSP on a
 /// script, stylesheet, image, or font response has no effect.
-fn with_report_only_csp(mut response: Response<Vec<u8>>) -> Response<Vec<u8>> {
+fn with_csp(mut response: Response<Vec<u8>>) -> Response<Vec<u8>> {
     let is_html = response
         .headers()
         .get("content-type")
@@ -69,7 +69,7 @@ fn with_report_only_csp(mut response: Response<Vec<u8>>) -> Response<Vec<u8>> {
     if is_html {
         let policy = csp_policy();
         let header_name =
-            tauri::http::header::HeaderName::from_bytes(policy.report_only_header.as_bytes())
+            tauri::http::header::HeaderName::from_bytes(policy.header.as_bytes())
                 .expect("shared desktop CSP header name must be valid");
         let header_value = tauri::http::header::HeaderValue::from_str(&policy.policy)
             .expect("shared desktop CSP policy must be a valid header value");
@@ -346,7 +346,7 @@ fn render_bundled_spa(spa_root: &std::path::Path, path: &str) -> Response<Vec<u8
         .header("content-type", mime_for(&file))
         .body(body)
         .unwrap_or_else(|_| error_response(500, "papercusp: failed to build static response"));
-    with_report_only_csp(response)
+    with_csp(response)
 }
 
 /// MIME type for a bundled static file, by extension.
@@ -468,7 +468,7 @@ fn resolve_static_or_forward(
         .header("content-type", mime_for(&canon))
         .body(body)
         .ok()?;
-    Some(with_report_only_csp(response))
+    Some(with_csp(response))
 }
 
 /// Async URI-scheme handler. Forwards the request to the loopback base on a
@@ -609,7 +609,7 @@ fn forward(app: &tauri::AppHandle, request: Request<Vec<u8>>) -> Response<Vec<u8
             let response = builder
                 .body(body)
                 .unwrap_or_else(|_| error_response(500, "papercusp: failed to build response"));
-            with_report_only_csp(response)
+            with_csp(response)
         }
         Err(e) => {
             // EI-18892233692082064: a connect/timeout failure on the document
@@ -745,7 +745,7 @@ mod tests {
             .header("content-type", "text/html; charset=utf-8")
             .body(Vec::new())
             .unwrap();
-        let html = with_report_only_csp(html);
+        let html = with_csp(html);
         assert_eq!(
             html.headers()
                 .get(csp_policy().report_only_header.as_str())
@@ -759,7 +759,7 @@ mod tests {
             .header("content-type", "text/javascript")
             .body(Vec::new())
             .unwrap();
-        assert!(with_report_only_csp(script)
+        assert!(with_csp(script)
             .headers()
             .get(csp_policy().report_only_header.as_str())
             .is_none());
