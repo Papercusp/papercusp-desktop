@@ -501,13 +501,30 @@ const WSL_ROUTE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 ///
 /// Compiled under `test` on every dev platform — the file's standing idiom
 /// (`windows_path_to_wsl`, `self_heal_probe_due`, `wsl_papercusp_home_dir`) —
-/// and here it is not merely convenient but the only available verification:
-/// this box has NO working Windows compile gate (`cargo check --target
-/// x86_64-pc-windows-msvc` fails in a build script for want of `lib.exe`, and
-/// no mingw toolchain is installed either — measured again 2026-08-11,
-/// matching WI-2149's finding). Anything left inside a `cfg(windows)` body is
-/// therefore not just untested but UNCOMPILED here, so the retry logic lives
-/// on this side of the line and the Windows-only part stays a thin shim.
+/// so the retry logic is unit-testable here rather than only on Windows.
+///
+/// ⚠ This comment used to assert that the box had NO working Windows compile
+/// gate, and that anything inside a `cfg(windows)` body was therefore
+/// UNCOMPILED here. That is FALSE and has been retired: run
+/// `npm --prefix papercusp-desktop run check:windows` (cargo-xwin, which
+/// supplies the MSVC CRT + Windows SDK) and the whole Windows-only surface of
+/// this binary typechecks against the real `x86_64-pc-windows-msvc` target —
+/// measured 2026-08-11 and independently re-measured 2026-09-05, exit 0 in
+/// ~58s from a COLD target dir. The old claim was only ever measured against
+/// bare `cargo check --target x86_64-pc-windows-msvc` (dies in a build script
+/// for want of `lib.exe`) and mingw (not installed); neither command covers
+/// cargo-xwin, which exists precisely to solve the `lib.exe` failure.
+///
+/// So keeping the logic in this pure core and the Windows-only part a thin
+/// shim is a deliberate CHOICE — it is the better testing idiom — and no
+/// longer a workaround for a compile gate that does not exist. It does.
+///
+/// The general lesson, worth more than the fact: a negative capability claim
+/// ("X cannot be done here") is only ever as strong as the specific commands
+/// someone tried, yet it propagates as though it were a property of the
+/// machine. This one survived months and several re-assertions because every
+/// re-check re-ran the same two failing commands. Re-derive such a claim
+/// against the tools actually installed before letting it shape a design.
 ///
 /// Returns true when the WSL route is (or becomes) the right one to use.
 #[cfg(any(target_os = "windows", test))]
