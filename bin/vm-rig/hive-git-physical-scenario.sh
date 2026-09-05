@@ -271,6 +271,7 @@ require_absolute 'vm identity' "$vm_identity"
 [ -f "$vm_identity" ] || fail 'vm identity must be a readable regular file'
 [ -r "$vm_identity" ] || fail 'vm identity is not readable'
 
+
 # The producer creates all three paths inside one private run directory. Pinning
 # that shape prevents a direct caller from mixing a fresh output with identities
 # or observations banked in another run.
