@@ -1636,11 +1636,27 @@ mod tests {
         }
 
         // …and the reverse direction, which is the one that actually catches
-        // drift: every host the script downloads from must be preflighted.
-        let mut download_hosts: Vec<String> = Vec::new();
+        // drift: every host the script fetches from must be preflighted.
+        //
+        // TWO fetch shapes, because the script has two. Scanning only `curl`
+        // would leave this check blind to exactly the category that
+        // `packages.kopia.io` belongs to — an apt repository the SCRIPT ITSELF
+        // adds — so a second `deb` source could be added and never probed, in
+        // the one direction that is supposed to catch drift.
+        //
+        // Apt MIRRORS baked into the rootfs stay out of scope deliberately (see
+        // BOOTSTRAP_NETWORK_HOSTS): Windows cannot know them, so the bootstrap's
+        // own preflight reads them from the image instead. Only sources this
+        // script writes are statically knowable, and those are checked here.
+        let mut fetch_hosts: Vec<String> = Vec::new();
         for line in script.lines() {
             let trimmed = line.trim_start();
-            if !trimmed.starts_with("curl ") {
+            if trimmed.starts_with('#') {
+                continue; // a URL in a comment is documentation, not a fetch
+            }
+            let is_curl = trimmed.starts_with("curl ");
+            let is_apt_source = trimmed.contains("deb [") || trimmed.contains("deb http");
+            if !is_curl && !is_apt_source {
                 continue;
             }
             let Some(scheme_end) = trimmed.find("://") else {
@@ -1651,22 +1667,31 @@ mod tests {
                 .take_while(|c| !matches!(c, '/' | '"' | '\'' | ' '))
                 .collect();
             if !host.is_empty() {
-                download_hosts.push(host);
+                fetch_hosts.push(host);
             }
         }
 
         // Positive control: a scan that silently matched nothing would make every
         // assertion below vacuous and read exactly like a clean pass.
         assert!(
-            !download_hosts.is_empty(),
-            "parsed zero curl hosts out of papercup-bootstrap.sh — the scan broke, \
+            !fetch_hosts.is_empty(),
+            "parsed zero fetch hosts out of papercup-bootstrap.sh — the scan broke, \
              so this test proves nothing"
         );
 
-        for host in &download_hosts {
+        // Per-leg positive control. The check above is satisfied by the curl leg
+        // alone, so without this the apt-source leg could silently stop matching
+        // and the gap it closes would reopen while the test still passed.
+        assert!(
+            fetch_hosts.iter().any(|h| h == "packages.kopia.io"),
+            "the apt-source leg matched nothing — it has regressed to curl-only, \
+             so a `deb` source could drift unprobed. Parsed: {fetch_hosts:?}"
+        );
+
+        for host in &fetch_hosts {
             assert!(
                 BOOTSTRAP_NETWORK_HOSTS.iter().any(|(h, _, _)| h == host),
-                "papercup-bootstrap.sh downloads from {host}, but the Windows preflight \
+                "papercup-bootstrap.sh fetches from {host}, but the Windows preflight \
                  does not probe it — add it to BOOTSTRAP_NETWORK_HOSTS"
             );
         }
