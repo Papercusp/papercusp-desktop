@@ -9,6 +9,17 @@
 #
 # Usage (ON the VM, usually via ssh):
 #   /tmp/vmcall.sh <ns:verb> '<jsonArgs>' [--client X --workspace Y --harness Z]
+#
+# QUOTING-SAFE JSON — prefer these over the positional form for any payload
+# carrying apostrophes or other shell-hostile text. An ssh-driven call puts the
+# payload through TWO shells, and a quote lost between them does not fail loudly:
+# it reaches mcp-call as a truncated fragment (`fleetSlug:p...`) and surfaces as a
+# JSON parse error about a payload you believe you quoted correctly
+# (EI-20320664768533929). Neither form needs a remote `jq` to assemble:
+#   /tmp/vmcall.sh <ns:verb> --json-file /tmp/args.json [--client X ...]
+#   printf '%s' "$payload" | /tmp/vmcall.sh <ns:verb> --json - [--client X ...]
+# Every argument is forwarded to mcp-call.mjs verbatim — nothing here parses the
+# payload — so these are exactly the flags mcp-call.mjs itself documents.
 # Env:
 #   PCUSP_VM_NODE      node binary (default: auto-detect the packaged sidecar's)
 #   PCUSP_MCP_CALL     mcp-call.mjs path (default /tmp/mcp-call.mjs)
@@ -73,8 +84,20 @@ OUT="$(mktemp "${TMPDIR:-/tmp}/vmcall.XXXXXX")" || {
 cleanup() { rm -f "$OUT"; }
 trap cleanup EXIT HUP INT TERM
 
+# `--json -` tells mcp-call.mjs to read the payload from stdin (fd 0), but the MCP
+# child below is BACKGROUNDED (`&`) so the deadline loop can bound it — and bash
+# redirects a background command's stdin from /dev/null whenever job control is
+# off, which is always the case in the non-interactive ssh invocation this script
+# exists to serve. Left alone, the stdin form reads an EMPTY payload and fails as
+# a confusing parse error rather than as "no input", i.e. it fails in the same
+# silent direction as the lost-quoting bug the flag was reached for to avoid.
+# Duplicate stdin onto fd 3 while it is still the caller's, and hand the child
+# fd 3 explicitly. Harmless when there is no stdin: fd 3 is then the inherited
+# empty/closed stdin and the child sees EOF instead of blocking.
+exec 3<&0
+
 run_mcp_with_timeout() {
-  PAPERCUSP_HONO_PORT="$PORT" "$NODE" "$MCP" "$@" >"$OUT" &
+  PAPERCUSP_HONO_PORT="$PORT" "$NODE" "$MCP" "$@" >"$OUT" <&3 &
   local child_pid=$!
   local deadline=$((SECONDS + MCP_TIMEOUT_SEC))
 
