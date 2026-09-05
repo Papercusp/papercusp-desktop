@@ -3931,26 +3931,35 @@ if [[ "${PAPERCUSP_STAGE_SCRUB:-1}" == "1" && -f "$HERE/audit-release-bundle.py"
   _scrub_sidecar_db_sql "primary sidecar" "$SIDECAR_DIR/db-sql"
 fi
 
-# WI-3047 guard: assert what we just copied EXACTLY matches the source tree at
-# this instant (same count, same highest migration number) — cheap defense-in-
-# depth against a partial/failed cp, a stale leftover db-sql/ from a prior
-# build (hence the rm -rf above), or a future refactor that decouples this copy
-# from the seed build below. Root cause of the WI-3047 incident was actually a
-# STALE `libs/papercusp` SUBMODULE checkout (see the freshness check in
-# release-local.sh, which is where that class is actually caught); this check
-# covers the narrower "the tree itself and what got shipped disagree" case so a
-# regression here is a red build, not a silent runtime error a user hits.
-_tree_sql_max="$(ls "$PAPERCUSP_ROOT/libs/db/sql/"*.sql 2>/dev/null | xargs -n1 basename | grep -oE '^[0-9]+' | sort -n | tail -1)"
-_tree_sql_count="$(ls "$PAPERCUSP_ROOT/libs/db/sql/"*.sql 2>/dev/null | wc -l | tr -d ' ')"
-_shipped_sql_max="$(ls "$SIDECAR_DIR/db-sql/"*.sql 2>/dev/null | xargs -n1 basename | grep -oE '^[0-9]+' | sort -n | tail -1)"
-_shipped_sql_count="$(ls "$SIDECAR_DIR/db-sql/"*.sql 2>/dev/null | wc -l | tr -d ' ')"
-if [[ -z "$_tree_sql_max" || "$_tree_sql_max" != "$_shipped_sql_max" || "$_tree_sql_count" != "$_shipped_sql_count" ]]; then
-  echo "ERROR: shipped sidecar/db-sql/ (highest=$_shipped_sql_max, count=$_shipped_sql_count) does not match"
-  echo "       the source tree libs/db/sql/ (highest=$_tree_sql_max, count=$_tree_sql_count) — refusing to ship"
-  echo "       a schema that could silently diverge from the tree (WI-3047)."
-  exit 1
-fi
-echo "    ✓ shipped db-sql/ matches the tree (highest migration $_tree_sql_max, $_tree_sql_count files)"
+# WI-3047 guard: assert the exact migration FILENAME SET, not only count + highest.
+# Run it twice: the first call catches a partial copy before the expensive seed build;
+# the second catches any later profile-prune regression before the payload is certified.
+# The second call is load-bearing: EI-22447063248857569 measured vm-release pruning 17
+# production migrations whose filenames contained `test` or `spec`, AFTER the seed build
+# had successfully validated the complete set. Count/highest were never re-read, so a
+# signed bundle differed from the schema that its own green build had exercised.
+assert_sidecar_db_sql_matches_source() {
+  local phase="$1"
+  local source_names shipped_names source_count shipped_count source_max shipped_max
+  source_names="$(find "$PAPERCUSP_ROOT/libs/db/sql" -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | LC_ALL=C sort)"
+  shipped_names="$(find "$SIDECAR_DIR/db-sql" -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | LC_ALL=C sort)"
+  source_count="$(printf '%s\n' "$source_names" | sed '/^$/d' | wc -l | tr -d ' ')"
+  shipped_count="$(printf '%s\n' "$shipped_names" | sed '/^$/d' | wc -l | tr -d ' ')"
+  source_max="$(printf '%s\n' "$source_names" | grep -oE '^[0-9]+' | sort -n | tail -1)"
+  shipped_max="$(printf '%s\n' "$shipped_names" | grep -oE '^[0-9]+' | sort -n | tail -1)"
+  if [[ -z "$source_names" || "$source_names" != "$shipped_names" ]]; then
+    echo "ERROR: shipped sidecar/db-sql/ differs from source during $phase"
+    echo "       shipped highest=$shipped_max count=$shipped_count; source highest=$source_max count=$source_count"
+    echo "       missing from shipped payload:"
+    comm -23 <(printf '%s\n' "$source_names") <(printf '%s\n' "$shipped_names") | sed 's/^/         - /'
+    echo "       unexpected in shipped payload:"
+    comm -13 <(printf '%s\n' "$source_names") <(printf '%s\n' "$shipped_names") | sed 's/^/         + /'
+    echo "       refusing a runtime schema that differs from the set this build claims to ship."
+    exit 1
+  fi
+  echo "    ✓ shipped db-sql/ exact filename set matches source during $phase (highest migration $source_max, $source_count files)"
+}
+assert_sidecar_db_sql_matches_source "pre-seed copy"
 
 # ── Pre-migrated LOGICAL seed (desktop first-boot fast path) ────────────────
 # Boot the JUST-BUNDLED embedded-PG ONCE at build time (initdb + apply every
@@ -4774,6 +4783,7 @@ fi
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
   echo "→ pruning vm-release sidecar to the runtime-only allowlist (D-043/P-052)"
   python3 "$HERE/audit-release-bundle.py" --prune-vm-release "$SIDECAR_DIR"
+  assert_sidecar_db_sql_matches_source "after vm-release prune"
   echo "→ auditing vm-release payload + root/cloud-owner threat boundary"
   python3 "$HERE/audit-release-bundle.py" --audit-vm-release "$SIDECAR_DIR"
 fi

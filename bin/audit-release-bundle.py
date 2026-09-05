@@ -1500,6 +1500,7 @@ VM_RELEASE_BOUNDARY_PATH = os.path.join(
     "apps", "operator", "runtime", "vm-release-threat-boundary.json"
 )
 VM_RELEASE_ASSET_ALLOWLIST = (
+    "db-sql/",                   # ordered runtime migrations; names may contain test/spec
     "templates/",                 # materialized app/template product assets
     "prompts/",                   # runtime agent prompt assets
     "rubrics/",                   # runtime evaluation assets
