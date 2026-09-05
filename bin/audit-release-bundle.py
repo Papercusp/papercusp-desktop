@@ -438,6 +438,12 @@ KNOWN_SENSITIVE_IDENTITIES = {
 #     these bytes say. Scrubbing it does not hide the handle, it only breaks the
 #     client. Removing it for real means moving the worker to a custom domain —
 #     infrastructure, not a release fix.
+#     ⚠ 2026-09-05 (WI-38321): the custom domain cupboard.papercusp.com EXISTS and
+#     is bound to this worker (proven by a byte-identical /listings payload), but
+#     its DNS FLAPS between the Cloudflare edge and the stale 18.204.152.241 apex
+#     — so the operator default cannot move to it yet, and this entry must STAY.
+#     Delete it only once that flap is fixed AND the default has actually moved;
+#     removing it earlier makes the gate red rather than merely unused.
 #   • ["aviynw","papercupai"] — CANONICAL_HIVE_TEAM_ALLOWLIST, the real hive-invite
 #     team allowlist. Scrubbing it breaks hive invites outright.
 #
