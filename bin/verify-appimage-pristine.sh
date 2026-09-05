@@ -42,6 +42,9 @@
 #     `export LD_LIBRARY_PATH=` line — add a lib dir to the build and this guard
 #     covers it on the next run with no edit here;
 #   * the WebKit helper dirs come from parsing the AppRun's own `for _wk in` line;
+#   * the exec'd binary comes from parsing the AppRun's own `exec "$HERE/…"` line
+#     — rename the binary and this guard follows it instead of silently scanning
+#     one object fewer;
 #   * the ELF set is every ELF actually found in those dirs, not a soname list.
 # The only hand-maintained list is HOST_STACK below, and it is a cry-wolf knob
 # (which libs a stock desktop legitimately supplies), not a subset of our payload:
@@ -63,6 +66,72 @@ set -euo pipefail
 fail() { echo "FATAL: $*" >&2; exit 2; }
 note() { echo "    $*"; }
 step() { echo "==> $*"; }
+
+# ── derive_scope <appdir> ──────────────────────────────────────────────────────
+# Sets LIBDIRS / WKDIRS / EXECTARGET from the AppRun that actually shipped.
+# Defined as a function (rather than inline) so `--derive-only` — and therefore
+# the unit guard in test/appimage-pristine-derivation.test.js — exercises THIS
+# code rather than a JavaScript re-implementation of these regexes that could
+# drift away from it silently.
+derive_scope() {
+  local appdir="$1"
+  [[ -r "$appdir/AppRun" ]] || fail "no readable AppRun in $appdir"
+
+  # --- library search path -----------------------------------------------------
+  local ldline
+  ldline="$(grep -m1 '^export LD_LIBRARY_PATH=' "$appdir/AppRun" || true)"
+  [[ -n "$ldline" ]] \
+    || fail "AppRun has no 'export LD_LIBRARY_PATH=' line — this guard derives its scope from it; the AppRun contract changed and this script must be updated deliberately"
+  mapfile -t LIBDIRS < <(
+    printf '%s\n' "$ldline" | grep -oE '\$HERE/[A-Za-z0-9_./+-]+' | sed 's|^\$HERE/||' | sort -u
+  )
+  [[ "${#LIBDIRS[@]}" -gt 0 ]] || fail "derived an EMPTY library search path from the AppRun — refusing to run a guard that would inspect nothing"
+  note "library dirs derived from AppRun (${#LIBDIRS[@]}): ${LIBDIRS[*]}"
+
+  # --- webkit helper dirs ------------------------------------------------------
+  local wkline
+  wkline="$(grep -m1 '^for _wk in' "$appdir/AppRun" || true)"
+  mapfile -t WKDIRS < <(
+    printf '%s\n' "$wkline" | grep -oE '\$HERE/[A-Za-z0-9_./+-]+' | sed 's|^\$HERE/||' | sort -u
+  )
+  note "webkit helper dirs derived from AppRun (${#WKDIRS[@]}): ${WKDIRS[*]:-<none>}"
+
+  # --- the exec'd binary -------------------------------------------------------
+  # Derived, not hardcoded: a hardcoded `usr/bin/papercusp-desktop` would keep
+  # PASSING after a rename while silently scanning the main binary no longer —
+  # the exact silent-subset failure this guard's header forbids.
+  EXECTARGET="$(
+    grep -m1 -E '^exec[[:space:]]+"\$HERE/' "$appdir/AppRun" \
+      | grep -oE '\$HERE/[^"]+' | sed 's|^\$HERE/||' || true
+  )"
+  [[ -n "$EXECTARGET" ]] \
+    || fail "AppRun has no 'exec \"\$HERE/…\"' line — cannot derive which binary ships as the entrypoint; refusing to guess"
+  [[ -x "$appdir/$EXECTARGET" ]] \
+    || fail "AppRun execs '$EXECTARGET' but the packaged payload has no executable there — the artifact cannot start at all"
+  note "entrypoint derived from AppRun: $EXECTARGET"
+
+  # --- the 3b-ii invariant, re-asserted on the PACKAGED artifact ---------------
+  # build-appimage.sh asserts this on the AppDir at build time.  Re-assert it here
+  # on what actually shipped: WebKitGTK resolves its helpers against the process
+  # CWD, so this one line is what lets them spawn on a webkit-free host.
+  grep -qE '^cd "\$HERE"' "$appdir/AppRun" \
+    || fail "packaged AppRun does not 'cd \"\$HERE\"' — WebKit resolves its relativized PKGLIBEXECDIR against the process CWD, so helper spawn WILL fail on a host without system WebKitGTK. Reproduces EI-20075266271803900."
+  note "AppRun 'cd \"\$HERE\"' present (3b-ii holds on the packaged artifact)"
+}
+
+# `--derive-only <appdir>` runs ONLY the derivation above against an already
+# extracted AppDir and prints the machine-readable result.  No docker, no
+# unsquashfs, no AppImage — that is what lets a fast unit guard exercise the real
+# derivation with seeded AppRun mutations.
+if [[ "${1:-}" = "--derive-only" ]]; then
+  DERIVE_DIR="${2:-}"
+  [[ -n "$DERIVE_DIR" && -d "$DERIVE_DIR" ]] || fail "usage: $0 --derive-only <appdir>"
+  derive_scope "$DERIVE_DIR"
+  echo "DERIVED_LIBDIRS=${LIBDIRS[*]}"
+  echo "DERIVED_WKDIRS=${WKDIRS[*]:-}"
+  echo "DERIVED_EXEC=$EXECTARGET"
+  exit 0
+fi
 
 APPIMAGE="${1:-}"
 [[ -n "$APPIMAGE" ]] || fail "usage: $0 <path-to-GUI-AppImage>"
@@ -131,30 +200,7 @@ unsquashfs -q -no-progress -o "$OFFSET" -d "$APPDIR" "$APPIMAGE" >/dev/null \
 note "extracted $(du -sh "$APPDIR" 2>/dev/null | cut -f1) to $APPDIR"
 
 step "3. deriving the guard's scope from the shipped AppRun"
-# --- library search path -------------------------------------------------------
-LDLINE="$(grep -m1 '^export LD_LIBRARY_PATH=' "$APPDIR/AppRun" || true)"
-[[ -n "$LDLINE" ]] \
-  || fail "AppRun has no 'export LD_LIBRARY_PATH=' line — this guard derives its scope from it; the AppRun contract changed and this script must be updated deliberately"
-mapfile -t LIBDIRS < <(
-  printf '%s\n' "$LDLINE" | grep -oE '\$HERE/[A-Za-z0-9_./+-]+' | sed 's|^\$HERE/||' | sort -u
-)
-[[ "${#LIBDIRS[@]}" -gt 0 ]] || fail "derived an EMPTY library search path from the AppRun — refusing to run a guard that would inspect nothing"
-note "library dirs derived from AppRun (${#LIBDIRS[@]}): ${LIBDIRS[*]}"
-
-# --- webkit helper dirs --------------------------------------------------------
-WKLINE="$(grep -m1 '^for _wk in' "$APPDIR/AppRun" || true)"
-mapfile -t WKDIRS < <(
-  printf '%s\n' "$WKLINE" | grep -oE '\$HERE/[A-Za-z0-9_./+-]+' | sed 's|^\$HERE/||' | sort -u
-)
-note "webkit helper dirs derived from AppRun (${#WKDIRS[@]}): ${WKDIRS[*]:-<none>}"
-
-# --- the 3b-ii invariant, re-asserted on the PACKAGED artifact -----------------
-# build-appimage.sh asserts this on the AppDir at build time.  Re-assert it here
-# on what actually shipped: WebKitGTK resolves its helpers against the process
-# CWD, so this one line is what lets them spawn on a webkit-free host.
-grep -qE '^cd "\$HERE"' "$APPDIR/AppRun" \
-  || fail "packaged AppRun does not 'cd \"\$HERE\"' — WebKit resolves its relativized PKGLIBEXECDIR against the process CWD, so helper spawn WILL fail on a host without system WebKitGTK. Reproduces EI-20075266271803900."
-note "AppRun 'cd \"\$HERE\"' present (3b-ii holds on the packaged artifact)"
+derive_scope "$APPDIR"
 
 step "4. running the pristine-box checks in $IMAGE"
 # The sidecar is deliberately NOT patchelf'd and ships its own self-contained
@@ -197,7 +243,9 @@ find $SCAN -type f \( -perm -u+x -o -name '*.so' -o -name '*.so.*' \) -print0 2>
   | xargs -0 -r file -h --mime-type 2>/dev/null \
   | awk -F': ' '$2 ~ /application\/x-(sharedlib|executable|pie-executable)/ {print $1}' \
   > "$ELVES"
-[ -x "$A/usr/bin/papercusp-desktop" ] && echo "$A/usr/bin/papercusp-desktop" >> "$ELVES"
+[ -x "$A/$PC_EXEC" ] || fail "derived entrypoint '$PC_EXEC' is not executable inside the container"
+echo "$A/$PC_EXEC" >> "$ELVES"
+sort -u -o "$ELVES" "$ELVES"
 COUNT="$(wc -l < "$ELVES" | tr -d ' ')"
 [ "$COUNT" -gt 0 ] || fail "found ZERO ELF objects in the derived scope — the guard would pass vacuously"
 echo "    scanning $COUNT ELF object(s) across the derived scope"
@@ -273,6 +321,7 @@ DOCKER_ARGS=(
   -v "$WORK/incontainer.sh:/incontainer.sh:ro"
   -e "PC_LIBDIRS=${LIBDIRS[*]}"
   -e "PC_WKDIRS=${WKDIRS[*]:-}"
+  -e "PC_EXEC=$EXECTARGET"
   -e "PC_OBSERVE=$OBSERVE"
   -e "PC_SKIP_RUNTIME=${PC_PRISTINE_SKIP_RUNTIME:-0}"
   -e "HOST_STACK=$HOST_STACK"
