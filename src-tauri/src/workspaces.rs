@@ -946,6 +946,16 @@ mod tests {
     // 5418554290 unchanged, while a temp-file + rename over the same path moved it
     // to 5418554291. So `assert_ne!` on consecutive inodes is a real falsifier for
     // this specific revert, not a tautology.
+    //
+    // UNIX-ONLY BY MECHANISM, not by convenience: the falsifier IS the inode moving,
+    // and Windows has no inode — `std::fs::Metadata::ino()` does not exist there, so
+    // this test cannot even be COMPILED for x86_64-pc-windows-msvc. The property under
+    // test (write_registry renames a fresh file into place rather than truncating the
+    // live one) is platform-independent and stays enforced on unix, where we actually
+    // run; only this probe is unix-shaped. Gating it is what lets
+    // `cargo xwin check --all-targets` pass for the Windows target, so a Windows
+    // compile gate can cover TEST code and not just `--bins` (EI-20113642710585614).
+    #[cfg(unix)]
     #[test]
     fn write_registry_replaces_the_inode_rather_than_truncating_in_place() {
         use std::os::unix::fs::MetadataExt;
