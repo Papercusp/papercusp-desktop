@@ -20,7 +20,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-const vmcall = path.join(import.meta.dirname, '..', 'bin', 'vm-rig', 'vmcall.sh');
+// Overridable so a falsifiability probe can point this at a MUTATED COPY outside
+// the tree (scripts/mutation-probe.sh tier 2) instead of mutating the shared
+// checkout, where a git-sync sweep could commit the mutant mid-run.
+const vmcall =
+  process.env.VMCALL_SCRIPT ||
+  path.join(import.meta.dirname, '..', 'bin', 'vm-rig', 'vmcall.sh');
 
 /**
  * Stand in for mcp-call.mjs, echoing back BOTH argv and whatever reached stdin
