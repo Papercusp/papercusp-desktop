@@ -133,10 +133,26 @@ if [[ "${1:-}" = "--derive-only" ]]; then
   exit 0
 fi
 
-APPIMAGE="${1:-}"
-[[ -n "$APPIMAGE" ]] || fail "usage: $0 <path-to-GUI-AppImage>"
-[[ -f "$APPIMAGE" ]] || fail "no AppImage at $APPIMAGE"
-APPIMAGE="$(cd "$(dirname "$APPIMAGE")" && pwd)/$(basename "$APPIMAGE")"
+# `--appdir <dir>` runs the pristine legs against a payload the CALLER already
+# extracted (e.g. linux-fresh-install-e2e.sh, which self-extracts the artifact
+# with its own runtime and asserts that step itself).  It skips steps 1-2 only;
+# every assertion that matters — the derivation, the webkit-free precondition,
+# the DT_NEEDED sweep, the launched-app marker — is unchanged.  Re-extracting a
+# 6+ GB payload a caller already has on disk is minutes of pure waste.
+MODE="appimage"
+APPDIR_IN=""
+if [[ "${1:-}" = "--appdir" ]]; then
+  MODE="appdir"
+  APPDIR_IN="${2:-}"
+  [[ -n "$APPDIR_IN" && -d "$APPDIR_IN" ]] || fail "usage: $0 --appdir <extracted-appdir>"
+  APPDIR_IN="$(cd "$APPDIR_IN" && pwd)"
+  APPIMAGE=""
+else
+  APPIMAGE="${1:-}"
+  [[ -n "$APPIMAGE" ]] || fail "usage: $0 <path-to-GUI-AppImage> | $0 --appdir <extracted-appdir>"
+  [[ -f "$APPIMAGE" ]] || fail "no AppImage at $APPIMAGE"
+  APPIMAGE="$(cd "$(dirname "$APPIMAGE")" && pwd)/$(basename "$APPIMAGE")"
+fi
 
 OBSERVE="${PC_PRISTINE_OBSERVE:-45}"
 case "$OBSERVE" in ''|*[!0-9]*|0) fail "PC_PRISTINE_OBSERVE must be a positive integer" ;; esac
@@ -150,7 +166,13 @@ IMAGE="${PC_PRISTINE_IMAGE:-ubuntu:24.04}"
 # wolf on every build.
 HOST_STACK="libgtk-3-0t64 libgl1 libgbm1 libdrm2 libx11-xcb1 libasound2t64 xvfb procps file"
 
-for tool in docker unsquashfs python3; do
+# unsquashfs/python3 are needed ONLY to open a packaged .AppImage (steps 1-2).
+# Demanding them in --appdir mode would refuse on a host that has everything the
+# run actually uses — a false RED, which is the cry-wolf failure this guard's
+# HOST_STACK note warns about, one level up.
+REQUIRED_TOOLS=(docker)
+[[ "$MODE" = "appimage" ]] && REQUIRED_TOOLS+=(unsquashfs python3)
+for tool in "${REQUIRED_TOOLS[@]}"; do
   command -v "$tool" >/dev/null 2>&1 || fail "required tool missing: $tool"
 done
 docker info >/dev/null 2>&1 || fail "docker daemon is not available"
@@ -165,6 +187,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [[ "$MODE" = "appdir" ]]; then
+  APPDIR="$APPDIR_IN"
+  step "1-2. using the caller's already-extracted payload: $APPDIR"
+  [[ -x "$APPDIR/AppRun" ]] || fail "supplied AppDir has no executable AppRun"
+else
 step "1. locating the squashfs payload (without executing the artifact)"
 # An AppImage type-2 is an ELF runtime with the squashfs appended immediately
 # after the section-header table.  Deriving the offset from the ELF header keeps
@@ -198,6 +225,7 @@ unsquashfs -q -no-progress -o "$OFFSET" -d "$APPDIR" "$APPIMAGE" >/dev/null \
   || fail "unsquashfs failed at offset $OFFSET"
 [[ -x "$APPDIR/AppRun" ]] || fail "extracted payload has no executable AppRun"
 note "extracted $(du -sh "$APPDIR" 2>/dev/null | cut -f1) to $APPDIR"
+fi
 
 step "3. deriving the guard's scope from the shipped AppRun"
 derive_scope "$APPDIR"
