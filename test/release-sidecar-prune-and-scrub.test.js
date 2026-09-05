@@ -92,6 +92,12 @@ test('vm-release prune removes non-runtime residue, preserves allowlisted assets
     // Runtime bytes that must survive.
     write('serve.mjs', 'export {};\n');
     write('db-sql/001-runtime.sql', 'select 1;\n');
+    // Migration names describe the schema they implement. `test` and `spec`
+    // therefore do not make SQL under db-sql/ a test fixture: pruning these two
+    // real production-shaped names makes a fresh database fail after packaging,
+    // even though the pre-prune seed build validated the complete migration set.
+    write('db-sql/850-test-runs-future-timestamp-clamp.sql', 'select 1;\n');
+    write('db-sql/851-first-class-plan-spec-clauses.sql', 'select 1;\n');
     write('apps/operator/scripts/hooks/omp/coord-hook.mjs', 'export {};\n');
     write('internal-docs/guide.html', '<h1>runtime docs</h1>\n');
     // Product templates are runtime CONTENT; their own source/tests are copied
@@ -142,6 +148,8 @@ test('vm-release prune removes non-runtime residue, preserves allowlisted assets
     for (const rel of [
       'serve.mjs',
       'db-sql/001-runtime.sql',
+      'db-sql/850-test-runs-future-timestamp-clamp.sql',
+      'db-sql/851-first-class-plan-spec-clauses.sql',
       'apps/operator/scripts/hooks/omp/coord-hook.mjs',
       'internal-docs/guide.html',
       'templates/papercusp-webapp/src/main.ts',
@@ -196,6 +204,10 @@ test('vm-release build profile bundles OMP hooks and gates the final sidecar bef
   const profileValidation = sh.indexOf('dogfood|vm-release');
   const bundle = sh.indexOf('esbuild-bundling OMP runtime hooks for vm-release');
   const prune = sh.indexOf('--prune-vm-release');
+  const postPruneSqlGate = sh.indexOf(
+    'assert_sidecar_db_sql_matches_source "after vm-release prune"',
+    prune,
+  );
   const auditAt = sh.indexOf('--audit-vm-release');
   const verifier = sh.indexOf('release-bundle dependency verifier');
   const vulnerabilityGate = sh.indexOf('--audit-vulnerabilities');
@@ -207,9 +219,9 @@ test('vm-release build profile bundles OMP hooks and gates the final sidecar bef
   assert.doesNotMatch(sh.slice(bundle, prune), /--sourcemap/,
     'the vm-release OMP bundle must not embed source maps/sourceContent');
   assert.ok(
-    prune > bundle && auditAt > prune && verifier > auditAt &&
+    prune > bundle && postPruneSqlGate > prune && auditAt > postPruneSqlGate && verifier > auditAt &&
       vulnerabilityGate > verifier && publish > vulnerabilityGate,
-    'bundle → prune → audit → runtime verify → SBOM/Grype must all precede atomic publish',
+    'bundle → prune → exact SQL-set gate → audit → runtime verify → SBOM/Grype must precede publish',
   );
   assert.match(sh, /if \[\[ "\$DISTRIBUTION_PROFILE" == "vm-release" \]\][\s\S]*?else[\s\S]*?copying omp hook TypeScript bundle/,
     'dogfood must retain the historical readable TypeScript hook copy');
