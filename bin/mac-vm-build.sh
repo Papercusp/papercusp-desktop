@@ -9,7 +9,9 @@
 #   1. SwiftTerm term-shim → src-tauri/resources/ (universal when the
 #      toolchain allows; absence degrades to NewWindow at runtime)
 #   2. sidecar via bin/build-desktop-sidecar.sh (darwin host-arch binaries —
-#      the sidecar deliberately stays single-arch, see D-006)
+#      the sidecar deliberately stays single-arch, see
+#      mac-desktop-release-readiness-2026-06-11#D-006 — note D-003 of that same
+#      plan reads the opposite way; D-006 is the one that resolves it)
 #   3. tauri build --target universal-apple-darwin (app + dmg + updater
 #      artifacts; .sig requires TAURI_SIGNING_PRIVATE_KEY in env)
 set -eo pipefail

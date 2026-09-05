@@ -751,9 +751,11 @@ fi
 # Build-set architecture invariant — fail FAST (seconds, no build) if this cut's
 # effective PAPERCUSP_BUILD_ROLES drops a required product. On mac/win the GUI
 # attaches to a separately-installed Papercusp Server, so a gui-only role set ships
-# a dead GUI (the 0.0.12 "Server dropped from the cut" class, D-004). For a
-# deliberate fast-iteration cut set PAPERCUSP_ALLOW_INCOMPLETE_ROLES=1 (a conscious
-# warning). Plan release-readiness-preflight-gate-2026-07-19 P-002.
+# a dead GUI (the 0.0.12 "Server dropped from the cut" class,
+# desktop-build-speed-2026-07-16#D-004 — NOT this section's plan, which has no
+# D-004). For a deliberate fast-iteration cut set
+# PAPERCUSP_ALLOW_INCOMPLETE_ROLES=1 (a conscious warning). Plan
+# release-readiness-preflight-gate-2026-07-19 P-002.
 if [[ "${PAPERCUSP_SKIP_BUILDSET_CHECK:-0}" != "1" ]]; then
   echo "==> checking build-set completeness (roles=${PAPERCUSP_BUILD_ROLES})"
   ( cd "$ROOT/.." && npx tsx apps/operator/lib/release/preflight-build-set.ts ) \
