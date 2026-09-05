@@ -139,13 +139,17 @@ else
   FED_KIND[a]=local; FED_LOG[a]="$WORK/a.log"
 fi
 FED_KIND[b]=vm; FED_VM[b]=fed-b; FED_IDX[b]=2
-[ "$VMS" = 1 ] && {
+if [ "$VMS" = 2 ]; then
+  FED_VM_HOME[b]="/home/tester/.papercusp-vm-fed/b"
+  FED_VM_PORT[b]=$((18000 + FED_IDX[b]))
+  FED_VM_PG_PORT[b]=$((18500 + FED_IDX[b]))
+else
   FED_VM[b]=fed-a
   FED_IDX[b]=1
   FED_VM_HOME[b]="/home/tester/.papercusp-vm-fed/b"
   FED_VM_PORT[b]=$((18000 + FED_IDX[b]))
   FED_VM_PG_PORT[b]=$((18500 + FED_IDX[b]))
-}
+fi
 FED_USER[a]="$P_A_USER"; FED_USER[b]="$P_B_USER"
 if [ "$VMS" = 1 ]; then
   # Stagger the host-side sidecar ports once and reuse them across boot retries.
