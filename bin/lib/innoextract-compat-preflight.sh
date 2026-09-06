@@ -1,26 +1,74 @@
 #!/usr/bin/env bash
-# Prove the configured extractor can read the Inno Setup format this build emits
-# before cargo spends time compiling it. A version string is not enough: compile
-# a tiny fixture with the exact ISCC binary used by the release, then require the
-# exact extractor selected for the audit to list its payload.
+# Select an extractor that can read the Inno Setup format this build emits before
+# cargo spends time compiling it. A version string is not enough: compile a tiny
+# fixture with the exact ISCC binary used by the release, then require the exact
+# extractor selected for the audit to list its payload. An explicit override is
+# authoritative. Without one, Papercusp-managed pinned toolchains are tried before
+# PATH so an older distro/user binary cannot shadow a compatible maintained build.
+
+_innoextract_absolute_executable() {
+  local requested="${1:-}"
+  local resolved=""
+
+  [[ -n "$requested" ]] || return 1
+  if [[ "$requested" == */* ]]; then
+    [[ -x "$requested" ]] || return 1
+    resolved="$(cd "$(dirname "$requested")" 2>/dev/null && pwd -P)/$(basename "$requested")"
+  else
+    resolved="$(command -v "$requested" 2>/dev/null || true)"
+    [[ -x "$resolved" ]] || return 1
+    if [[ "$resolved" != /* ]]; then
+      resolved="$(cd "$(dirname "$resolved")" 2>/dev/null && pwd -P)/$(basename "$resolved")"
+    fi
+  fi
+  printf '%s\n' "$resolved"
+}
+
+_innoextract_candidate_paths() {
+  local configured="${1:-}"
+  local candidate resolved path_candidate
+  local -a managed_candidates=()
+
+  if [[ -n "$configured" ]]; then
+    resolved="$(_innoextract_absolute_executable "$configured")" || {
+      echo "ERROR: configured Inno extractor is missing or not executable: $configured" >&2
+      return 1
+    }
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+
+  shopt -s nullglob
+  managed_candidates=("$HOME"/.papercusp/toolchains/innoextract-*/bin/innoextract)
+  shopt -u nullglob
+  for candidate in "${managed_candidates[@]}"; do
+    resolved="$(_innoextract_absolute_executable "$candidate")" || continue
+    printf '%s\n' "$resolved"
+  done
+
+  path_candidate="$(command -v innoextract 2>/dev/null || true)"
+  if [[ -n "$path_candidate" ]]; then
+    resolved="$(_innoextract_absolute_executable "$path_candidate")" || true
+    [[ -n "$resolved" ]] && printf '%s\n' "$resolved"
+  fi
+}
 
 innoextract_compat_preflight() (
   set -euo pipefail
 
-  local extractor="${1:-${PAPERCUSP_INNOEXTRACT:-}}"
+  local configured="${1:-${PAPERCUSP_INNOEXTRACT:-}}"
   local wine_prefix="${2:-${PAPERCUSP_WINE_INNO_PREFIX:-$HOME/.papercusp/wine-inno}}"
   local iscc_exe="${3:-${PAPERCUSP_ISCC_EXE:-$wine_prefix/drive_c/InnoSetup6/ISCC.exe}}"
-  local work probe_iss probe_win probe_exe list_log
+  local candidate_output extractor work probe_iss probe_win probe_exe list_log
+  local -a candidates=()
+  local -A seen=()
 
-  if [[ -z "$extractor" ]]; then
-    extractor="$(command -v innoextract 2>/dev/null || true)"
-  elif [[ "$extractor" != */* ]]; then
-    extractor="$(command -v "$extractor" 2>/dev/null || true)"
-  fi
-  [[ -x "$extractor" ]] || {
-    echo "ERROR: configured Inno extractor is missing or not executable: ${extractor:-<unset>}" >&2
+  candidate_output="$(_innoextract_candidate_paths "$configured")" || return 1
+  [[ -n "$candidate_output" ]] || {
+    echo "ERROR: no Inno extractor candidate found in ~/.papercusp/toolchains or PATH" >&2
     return 1
   }
+  mapfile -t candidates <<< "$candidate_output"
   for command_name in wine winepath xvfb-run timeout; do
     command -v "$command_name" >/dev/null 2>&1 || {
       echo "ERROR: $command_name is required for the Inno extractor compatibility preflight" >&2
@@ -74,21 +122,28 @@ innoextract_compat_preflight() (
     return 1
   }
 
-  list_log="$work/innoextract-list.log"
-  if ! "$extractor" -l "$probe_exe" >"$list_log" 2>&1; then
-    echo "ERROR: configured Inno extractor cannot list an Inno 6.7 fixture" >&2
-    echo "       extractor: $extractor" >&2
-    echo "       ISCC: $iscc_exe" >&2
-    tail -40 "$list_log" >&2 || true
-    return 1
-  fi
-  grep -qi 'probe-payload\.txt' "$list_log" || {
-    echo "ERROR: configured Inno extractor listed no probe payload for the Inno 6.7 fixture" >&2
-    echo "       extractor: $extractor" >&2
-    tail -40 "$list_log" >&2 || true
-    return 1
-  }
-  echo "  Inno extractor compatibility preflight passed (Inno 6.7 fixture): $extractor"
+  for extractor in "${candidates[@]}"; do
+    [[ -n "$extractor" && -z "${seen[$extractor]:-}" ]] || continue
+    seen["$extractor"]=1
+    list_log="$work/innoextract-list-${#seen[@]}.log"
+    if ! "$extractor" -l "$probe_exe" >"$list_log" 2>&1; then
+      echo "WARN: rejecting Inno extractor that cannot list the Inno 6.7 fixture: $extractor" >&2
+      tail -40 "$list_log" >&2 || true
+      continue
+    fi
+    if ! grep -qi 'probe-payload\.txt' "$list_log"; then
+      echo "WARN: rejecting Inno extractor that listed no probe payload: $extractor" >&2
+      tail -40 "$list_log" >&2 || true
+      continue
+    fi
+    echo "  Inno extractor compatibility preflight passed (Inno 6.7 fixture): $extractor" >&2
+    printf '%s\n' "$extractor"
+    return 0
+  done
+
+  echo "ERROR: no candidate Inno extractor can list the Inno 6.7 fixture" >&2
+  echo "       ISCC: $iscc_exe" >&2
+  return 1
 )
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

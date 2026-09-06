@@ -22,15 +22,17 @@ test('the Inno compatibility preflight runs before the first cargo-xwin build', 
   const preflightAt = builder.indexOf(
     'innoextract_compat_preflight "${PAPERCUSP_INNOEXTRACT:-}"',
   );
+  const exportAt = builder.indexOf('export PAPERCUSP_INNOEXTRACT');
   const cargoVersionAt = builder.indexOf('\ncargo xwin --version');
   const cargoBuildAt = builder.indexOf('\n      cargo xwin build');
 
   assert.ok(preflightAt >= 0, 'Windows builder must invoke the compatibility preflight');
+  assert.ok(exportAt >= 0, 'Windows builder must export the selected extractor');
   assert.ok(cargoVersionAt >= 0, 'Windows builder must retain the cargo-xwin toolchain check');
   assert.ok(cargoBuildAt >= 0, 'Windows builder must retain the cargo-xwin build');
   assert.ok(
-    preflightAt < cargoVersionAt && preflightAt < cargoBuildAt,
-    'the real Inno producer/consumer probe must fail before any cargo-xwin invocation',
+    preflightAt < exportAt && exportAt < cargoVersionAt && exportAt < cargoBuildAt,
+    'the real Inno producer/consumer probe must select and export before cargo-xwin',
   );
   assert.match(
     builder,
@@ -45,6 +47,86 @@ test('the Inno compatibility preflight runs before the first cargo-xwin build', 
   assert.match(helper, /AppVersion=6\.7\.3/);
   assert.match(helper, /probe-payload\\\.txt/);
   assert.match(helper, /grep -qi 'probe-payload\\\.txt'/);
+});
+
+test('a compatible Papercusp-managed extractor wins over a stale PATH binary', (t) => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-innoextract-select-'));
+  t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+
+  const home = path.join(sandbox, 'home');
+  const fakeBin = path.join(sandbox, 'bin');
+  const winePrefix = path.join(sandbox, 'wine');
+  const iscc = path.join(winePrefix, 'drive_c', 'InnoSetup6', 'ISCC.exe');
+  const managed = path.join(
+    home,
+    '.papercusp',
+    'toolchains',
+    'innoextract-maintained',
+    'bin',
+    'innoextract',
+  );
+  const calls = path.join(sandbox, 'calls.log');
+
+  fs.mkdirSync(path.dirname(managed), { recursive: true });
+  fs.mkdirSync(fakeBin, { recursive: true });
+  fs.mkdirSync(path.dirname(iscc), { recursive: true });
+  fs.writeFileSync(iscc, 'mock ISCC\n');
+
+  const writeExecutable = (file, body) => {
+    fs.writeFileSync(file, `#!/usr/bin/env bash\nset -euo pipefail\n${body}\n`, {
+      mode: 0o755,
+    });
+  };
+  writeExecutable(
+    managed,
+    'printf "managed\\n" >> "$PAPERCUSP_TEST_CALL_LOG"\n' +
+      '[[ "${1:-}" == "-l" ]]\n' +
+      'printf "probe-payload.txt\\n"',
+  );
+  writeExecutable(
+    path.join(fakeBin, 'innoextract'),
+    'printf "stale-path\\n" >> "$PAPERCUSP_TEST_CALL_LOG"\nexit 23',
+  );
+  writeExecutable(path.join(fakeBin, 'winepath'), '[[ "$1" == "-w" ]]\nprintf "%s\\n" "$2"');
+  writeExecutable(
+    path.join(fakeBin, 'wine'),
+    'probe_iss="${@: -1}"\n' +
+      'mkdir -p "$(dirname "$probe_iss")/out"\n' +
+      'printf "fixture\\n" > "$(dirname "$probe_iss")/out/innoextract-compat-probe.exe"',
+  );
+  writeExecutable(
+    path.join(fakeBin, 'xvfb-run'),
+    '[[ "${1:-}" == "-a" ]] && shift\nexec "$@"',
+  );
+  writeExecutable(path.join(fakeBin, 'timeout'), 'shift\nexec "$@"');
+
+  const env = {
+    ...process.env,
+    HOME: home,
+    PATH: `${fakeBin}:${process.env.PATH || ''}`,
+    PAPERCUSP_TEST_CALL_LOG: calls,
+  };
+  delete env.PAPERCUSP_INNOEXTRACT;
+
+  const output = execFileSync(
+    'bash',
+    [
+      '-c',
+      'source "$1"; innoextract_compat_preflight "" "$2" "$3"',
+      'bash',
+      helperPath,
+      winePrefix,
+      iscc,
+    ],
+    { encoding: 'utf8', env },
+  );
+
+  assert.equal(output.trim(), managed, 'resolver must return the passing managed absolute path');
+  assert.equal(
+    fs.readFileSync(calls, 'utf8'),
+    'managed\n',
+    'the stale PATH binary must not run once a managed candidate passes the real-format probe',
+  );
 });
 
 test('audit-release-bundle.py uses PAPERCUSP_INNOEXTRACT for executable expansion', () => {

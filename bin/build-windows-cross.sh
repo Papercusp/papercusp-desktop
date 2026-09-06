@@ -51,9 +51,12 @@
 #                             (byte-identical to the current prod builds).
 #   WINDOWS_SIGN_DIGEST       Authenticode digest (default sha256)
 #   WINDOWS_SIGN_TIMESTAMP_URL RFC3161 TS server (default digicert); empty => no TS
-#   PAPERCUSP_INNOEXTRACT     optional innoextract path/command override. The
-#                             selected consumer is fixture-tested before cargo
-#                             xwin and inherited by the finished-artifact audit.
+#   PAPERCUSP_INNOEXTRACT     optional authoritative innoextract path/command
+#                             override. Otherwise a compatible pinned
+#                             ~/.papercusp/toolchains build is selected before
+#                             PATH. The selected absolute consumer is
+#                             fixture-tested before cargo xwin and inherited by
+#                             the finished-artifact audit.
 #
 # PREREQS (release-local.sh does these before calling any Windows leg; this
 # script SHIPS the tree as-is and never rebuilds them — same fail-closed
@@ -186,11 +189,15 @@ SPAN_DEFINE=()
 [[ "${PAPERCUSP_SINGLE_FILE:-0}" == "1" ]] && SPAN_DEFINE=("/DSingleFile")
 
 # Producer/consumer contract guard: compile a real tiny Inno 6.7 fixture with
-# the exact ISCC selected for this build, then require the exact extractor used
-# by the finished-artifact audit to list its payload. A version string cannot
-# prove compatibility; this must run before any cargo-xwin invocation.
-innoextract_compat_preflight "${PAPERCUSP_INNOEXTRACT:-}" "$WINEPREFIX_INNO" "$ISCC_EXE" \
-  || fail "Inno extractor compatibility preflight failed — refusing to start cargo xwin"
+# the exact ISCC selected for this build, then select an extractor that can list
+# its payload. A version string cannot prove compatibility; this must run before
+# any cargo-xwin invocation. Export the returned absolute path so the finished-
+# artifact audit consumes the exact binary that passed this probe rather than
+# resolving PATH again after hours of build work.
+PAPERCUSP_INNOEXTRACT="$(
+  innoextract_compat_preflight "${PAPERCUSP_INNOEXTRACT:-}" "$WINEPREFIX_INNO" "$ISCC_EXE"
+)" || fail "Inno extractor compatibility preflight failed — refusing to start cargo xwin"
+export PAPERCUSP_INNOEXTRACT
 
 # ── Toolchain preflight ──────────────────────────────────────────────────────
 command -v cargo-xwin >/dev/null 2>&1 || command -v cargo >/dev/null 2>&1 \
@@ -602,7 +609,8 @@ if (( ${#_FINISHED_INSTALLERS[@]} == 0 )); then
   fail "no *-setup.exe in $OUT_DIR to scan — packing produced nothing, or OUT_DIR is wrong"
 fi
 set +e
-python3 "$HERE/audit-release-bundle.py" --scan-artifact "${_FINISHED_INSTALLERS[@]}"
+PAPERCUSP_INNOEXTRACT="$PAPERCUSP_INNOEXTRACT" \
+  python3 "$HERE/audit-release-bundle.py" --scan-artifact "${_FINISHED_INSTALLERS[@]}"
 _artifact_rc=$?
 set -e
 if [[ $_artifact_rc -eq 2 ]]; then
