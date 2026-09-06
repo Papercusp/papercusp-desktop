@@ -1023,6 +1023,6 @@ test('the future Darwin sidecar build receives release identity and source prove
     'the sidecar emitter must receive the cut-start build SHA, not an empty default',
   );
   assert.match(command, /PAPERCUSP_BUILD_VERSION=\$VERSION/);
-  assert.match(command, /PROVENANCE_SOURCE_GIT_HEAD=\$PROVENANCE_SOURCE_GIT_HEAD/);
+  assert.match(command, /PROVENANCE_SOURCE_GIT_HEAD=\$EXPECTED_SOURCE_SHA/);
   assert.match(command, /PROVENANCE_SOURCE_GIT_DIRTY=\$PROVENANCE_SOURCE_GIT_DIRTY/);
 });
