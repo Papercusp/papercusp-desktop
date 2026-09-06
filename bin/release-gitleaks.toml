@@ -93,13 +93,32 @@ regexes = [
     # beginning of the generated BPE table, before that bound.
     '''(?i)IOKApiI=''',
     '''(?i)\b50257\b''',
-    '''(?i)sortKey3=e3\.sortKey===void 0\?null:String\(e3\.sortKey\)''',
+    # Esbuild's temporary symbol suffix changes when an unrelated import lands.
+    # Match the complete generated expression instead of pinning one suffix.
+    '''(?i)sortKey[0-9]+=[A-Za-z_$][A-Za-z0-9_$]*\.sortKey===void 0\?null:String\([A-Za-z_$][A-Za-z0-9_$]*\.sortKey\)''',
     '''(?i)\bprojectKey\b''',
     '''(?i)\bfullAccessRoles\b''',
     '''(?i)\b(?:canonical[-_ ])?invite[-_ ]secret\b''',
     '''(?i)case.{0,40}\bkey\b''',
     '''(?i)\btoken,''',
     '''(?i)(?:account.{0,80}token|token.{0,80}account)''',
+]
+
+# Two first-party expressions are classified only because minification removes
+# the separator after a name containing "key" / "token". Match the detector's
+# exact finding, rather than its whole (potentially very large) source line, so
+# another credential-like value on that line still fails the release.
+[[rules.allowlists]]
+description = "Known minified first-party expressions in assembled serve.mjs"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = [
+    '''(?:^|/)serve\.mjs$''',
+]
+regexTarget = "match"
+regexes = [
+    '''(?i)\.signWithDeviceKey,verdictFns=await''',
+    '''(?i)\btoken[0-9]+,consumed=await\b''',
 ]
 
 # Gitleaks also recursively decodes base64-looking substrings before applying

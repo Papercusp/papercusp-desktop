@@ -51,7 +51,9 @@ function generatedFixtures() {
   const serveLines = [
     'const iterator = { key: "' + generatedValue + '" }; // case key/value iterator',
     'const bpe = { tokenTable: "secretaries IOKApiI= 50257 ICA= ICAg ICAgIA==" , key: "' + generatedValue + '" };',
-    'const sort = "sortKey3=e3.sortKey===void 0?null:String(e3.sortKey); key: "' + generatedValue + '";',
+    'const sort = "sortKey3=e17.sortKey===void 0?null:String(e17.sortKey)";',
+    'const signerImport = ".signWithDeviceKey,verdictFns=await ";',
+    'const certBattery = "token3,consumed=await ";',
     'const firebase = { projectKey: "' + generatedValue + '" };',
     'const roles = { fullAccessRoles: "' + generatedValue + '" };',
     'const invite = { "invite-secret": "' + generatedValue + '" };',
@@ -86,7 +88,7 @@ test('release gitleaks config keeps default detectors and uses conjunctive gener
   const config = fs.readFileSync(configPath, 'utf8');
   assert.match(config, /minVersion = "v8\.30\.1"/);
   assert.match(config, /\[extend\]\s+useDefault = true/);
-  assert.equal((config.match(/condition = "AND"/g) || []).length, 6);
+  assert.equal((config.match(/condition = "AND"/g) || []).length, 7);
   assert.match(config, /targetRules = \["gcp-api-key"\]/);
   assert.match(config, /targetRules = \["generic-api-key"\]/);
   assert.match(config, /regexTarget = "line"/);
@@ -102,6 +104,8 @@ test('release gitleaks config keeps default detectors and uses conjunctive gener
   assert.match(config, /regexTarget = "match"/);
   assert.match(config, /Authentication IFJhbms=/);
   assert.match(config, /\\.ContainsKey IGNvbGxhcHNlZA==/);
+  assert.match(config, /\\.signWithDeviceKey,verdictFns=await/);
+  assert.match(config, /token\[0-9\]\+,consumed=await/);
   assert.match(config, /personal-vault/);
 });
 
@@ -143,6 +147,33 @@ test('decoded BPE match allowlist is exact and remains path-constrained', () => 
     !result.report.some((finding) => finding.Match?.includes('Authentication IFJhbms=')),
     'the known public BPE match was not suppressed',
   );
+});
+
+test('minified first-party expression exceptions survive symbol renumbering but remain exact', () => {
+  const knownLines = [
+    'sortKey3=e42.sortKey===void 0?null:String(e42.sortKey)',
+    '.signWithDeviceKey,verdictFns=await ',
+    'token17,consumed=await ',
+  ];
+  const baseline = scan({ 'serve.mjs': knownLines.join('\n') + '\n' }, { config: false });
+  assert.equal(baseline.status, 1, 'known minified expressions no longer exercise the default detector');
+  assert.ok(baseline.report.length >= knownLines.length);
+
+  const allowed = scan({ 'serve.mjs': knownLines.join('\n') + '\n' });
+  assert.equal(allowed.status, 0, 'known minified expressions must pass in serve.mjs');
+  assert.deepEqual(allowed.report, []);
+
+  const nearMisses = [
+    'sortKey3=e42.otherKey===void 0?null:String(e42.otherKey)',
+    '.signWithDeviceKey,otherVerdictFns=await ',
+    'token17,produced=await ',
+  ];
+  const nearMiss = scan({ 'serve.mjs': nearMisses.join('\n') + '\n' });
+  assert.equal(nearMiss.status, 1, 'nearby generated expressions were over-allowlisted');
+  assert.ok(nearMiss.report.length >= nearMisses.length);
+
+  const wrongPath = scan({ 'other.mjs': knownLines.join('\n') + '\n' });
+  assert.equal(wrongPath.status, 1, 'serve.mjs exceptions escaped their path constraint');
 });
 
 test('an unrelated raw token remains a release-gate finding', () => {
