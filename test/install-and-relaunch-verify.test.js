@@ -193,7 +193,7 @@ printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
   return { root, deb, server, log, flipped, configured, updated, ssh, scp, emitDpkgWarning };
 }
 
-function macFixture() {
+function macFixture({ executeInstall = false, freeGb = 20 } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'install-relaunch-mac-'));
   const artifacts = join(root, 'artifacts');
   const shims = join(root, 'shims');
@@ -216,6 +216,45 @@ function macFixture() {
 
   const log = join(root, 'transport.log');
   const flipped = join(root, 'flipped');
+  const applications = join(root, 'Applications');
+  mkdirSync(applications);
+  for (const product of ['Papercusp GUI', 'Papercusp Server']) {
+    mkdirSync(join(applications, `${product}.app`));
+    writeFileSync(join(applications, `${product}.app`, 'payload'), 'known-good');
+    mkdirSync(join(applications, `${product}.app.rollback`));
+    writeFileSync(join(applications, `${product}.app.rollback`, 'payload'), 'retained-rollback');
+  }
+  executable(shims, 'hdiutil', `#!/usr/bin/env bash
+if [[ "$1" == attach ]]; then
+  while [[ "$1" != -mountpoint ]]; do shift; done
+  mount_dir="$2"
+  for product in 'Papercusp GUI' 'Papercusp Server'; do
+    mkdir -p "$mount_dir/$product.app"
+    printf 'new-build' > "$mount_dir/$product.app/payload"
+  done
+elif [[ "$1" == detach ]]; then
+  rm -rf "$2"
+fi
+`);
+  executable(shims, 'du', `#!/usr/bin/env bash
+# Expanded app is just over 2 GiB; admission must round UP to 3 GiB.
+printf '2097153\\t%s\\n' "\${@: -1}"
+`);
+  executable(shims, 'df', `#!/usr/bin/env bash
+printf 'DF %s\\n' "\${@: -1}" >> "$MOCK_LOG"
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n'
+printf 'fixture 104857600 0 %s 0%% /fixture-app-volume\\n' "$((MOCK_FREE_GB * 1024 * 1024))"
+`);
+  executable(shims, 'ditto', `#!/usr/bin/env bash
+reserved=0
+for claim in "$PAPERCUSP_DISK_RESERVATION_DIR"/*/*.res; do
+  [[ -f "$claim" ]] && grep -q '^gb=3$' "$claim" && reserved=1
+done
+[[ "$reserved" == 1 ]] || { printf 'copy had no disk reservation\\n' >&2; exit 99; }
+printf 'COPY %s\\n' "\${@: -1}" >> "$MOCK_LOG"
+cp -R "\${@: -2:1}" "\${@: -1}"
+`);
+  for (const name of ['xattr', 'codesign']) executable(shims, name, '#!/usr/bin/env bash\nexit 0\n');
   const ssh = executable(shims, 'ssh', `#!/usr/bin/env bash
 printf 'SSH %s\\n' "$*" >> "$MOCK_LOG"
 case "$*" in
@@ -233,6 +272,15 @@ case "$*" in
       printf 'resource fork, Finder information, or similar detritus not allowed\\n' >&2
       exit 1
     fi
+    if [[ "$MOCK_EXECUTE_INSTALL" == 1 ]]; then
+      command="\${@: -1}"
+      app_root=/Applications
+      mount_prefix=/tmp/papercusp-dmg
+      command="\${command//"$app_root"/$MOCK_APPLICATIONS}"
+      command="\${command//"$mount_prefix"/$MOCK_ROOT/papercusp-dmg}"
+      bash -c "$command"
+      exit $?
+    fi
     ;;
   *"open -n"*"Papercusp GUI.app"*) : > "$MOCK_FLIPPED" ;;
 esac
@@ -241,7 +289,7 @@ esac
 printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
 `);
 
-  return { root, dmg, server, log, flipped, ssh, scp };
+  return { root, dmg, server, log, flipped, ssh, scp, shims, applications, executeInstall, freeGb };
 }
 
 function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
@@ -258,6 +306,14 @@ function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
   if (f.updated) env.MOCK_UPDATED = f.updated;
   if (f.emitDpkgWarning) env.MOCK_EMIT_DPKG_WARNING = '1';
   if (f.requireHostKeyOptions) env.MOCK_REQUIRE_HOST_KEY_OPTIONS = '1';
+  if (f.executeInstall) {
+    env.PATH = `${f.shims}:${process.env.PATH}`;
+    env.MOCK_EXECUTE_INSTALL = '1';
+    env.MOCK_APPLICATIONS = f.applications;
+    env.MOCK_ROOT = f.root;
+    env.MOCK_FREE_GB = String(f.freeGb);
+    env.PAPERCUSP_DISK_RESERVATION_DIR = join(f.root, 'reservations');
+  }
   return spawnSync('bash', [
     SCRIPT,
     '--platform', platform,
@@ -484,6 +540,42 @@ test('macOS DMG install verifies matching GUI and Server apps before split-role 
       relaunchCommand.indexOf('Papercusp Server.app') < relaunchCommand.indexOf('Papercusp GUI.app'),
       'new Server must launch first so its serve --ensure owns the identity flip',
     );
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('macOS refuses low-space staging before copy and preserves installed and rollback apps', () => {
+  const f = macFixture({ executeInstall: true, freeGb: 2 });
+  try {
+    const result = runVerify(f, [], 'mac', f.dmg);
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /insufficient disk/);
+    assert.match(result.stdout, /need ~3GB/);
+    const log = readFileSync(f.log, 'utf8');
+    assert.doesNotMatch(log, /^COPY /m);
+    assert.equal(existsSync(f.flipped), false);
+    for (const product of ['Papercusp GUI', 'Papercusp Server']) {
+      assert.equal(readFileSync(join(f.applications, `${product}.app`, 'payload'), 'utf8'), 'known-good');
+      assert.equal(readFileSync(join(f.applications, `${product}.app.rollback`, 'payload'), 'utf8'), 'retained-rollback');
+    }
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('macOS reserves the expanded app on its destination filesystem before each role copy', () => {
+  const f = macFixture({ executeInstall: true, freeGb: 3 });
+  try {
+    const result = runVerify(f, [], 'mac', f.dmg);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const log = readFileSync(f.log, 'utf8');
+    assert.ok(log.includes(`DF ${f.applications}\n`));
+    for (const product of ['Papercusp GUI', 'Papercusp Server']) {
+      assert.equal(readFileSync(join(f.applications, `${product}.app`, 'payload'), 'utf8'), 'new-build');
+      assert.equal(readFileSync(join(f.applications, `${product}.app.rollback`, 'payload'), 'utf8'), 'retained-rollback');
+    }
+    assert.equal(existsSync(f.flipped), true);
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

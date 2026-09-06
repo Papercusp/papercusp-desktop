@@ -149,9 +149,30 @@ json_num() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" 
 # remote path after platform resolution. Keeping this in one helper prevents
 # the GUI and Server safety sequences from drifting apart.
 mac_dmg_install_command() { # $1=product name, $2=artifact placeholder
-  local product="$1" artifact_placeholder="$2"
-  printf 'set -e; mount_dir=$(mktemp -d /tmp/papercusp-dmg.XXXXXX); stage="/Applications/.%s.app.install.$$"; target="/Applications/%s.app"; cleanup() { hdiutil detach "$mount_dir" >/dev/null 2>&1 || true; rmdir "$mount_dir" >/dev/null 2>&1 || true; rm -rf "$stage"; }; trap cleanup EXIT HUP INT TERM; hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" %s >/dev/null; app_src="$mount_dir/%s.app"; test -d "$app_src"; rm -rf "$stage"; ditto --noextattr --noqtn "$app_src" "$stage"; xattr -cr "$stage"; codesign --verify --deep --strict "$stage"; rm -rf "$target"; mv "$stage" "$target"' \
-    "$product" "$product" "$artifact_placeholder" "$product"
+  local product="$1" artifact_placeholder="$2" script
+  # Send the maintained portable check-and-reserve helper with the remote command.
+  # The receiving shell owns its reservation through copy/verification/replacement;
+  # no second process can accidentally release the claim before staging finishes.
+  script="$(
+    cat "$HERE/lib/disk-preflight.sh"
+    printf '\nset -e; set -o pipefail; '
+    printf 'mount_dir=$(mktemp -d /tmp/papercusp-dmg.XXXXXX); stage="/Applications/.%s.app.install.$$"; target="/Applications/%s.app"; cleanup() { hdiutil detach "$mount_dir" >/dev/null 2>&1 || true; rmdir "$mount_dir" >/dev/null 2>&1 || true; rm -rf "$stage"; }; trap cleanup EXIT HUP INT TERM; hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" %s >/dev/null; app_src="$mount_dir/%s.app"; test -d "$app_src"; ' \
+      "$product" "$product" "$artifact_placeholder" "$product"
+    cat <<'INSTALL'
+app_kib=$(du -sk "$app_src" | awk '{print $1}')
+case "$app_kib" in ''|*[!0-9]*) echo "cannot measure expanded app size: $app_src" >&2; exit 2 ;; esac
+need_gb=$(( (app_kib + 1048575) / 1048576 ))
+papercusp_require_free_gb "$(dirname "$target")" "$need_gb" "native app staging"
+rm -rf "$stage"
+ditto --noextattr --noqtn "$app_src" "$stage"
+xattr -cr "$stage"
+codesign --verify --deep --strict "$stage"
+rm -rf "$target"
+mv "$stage" "$target"
+INSTALL
+  )"
+  # %q keeps the helper and paths intact across SSH's remote-shell boundary.
+  printf 'bash -c %q' "$script"
 }
 
 # ── Per-platform defaults ───────────────────────────────────────────────────
