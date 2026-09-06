@@ -97,6 +97,12 @@ if grep -Fq "$HOLDING_MARKER" "$SITE_DIR/index.html"; then
 fi
 
 if [[ "$IS_HOLDING_PAGE" == "0" ]]; then
+  for required in "assets/project-history.js" "assets/project-history.css" "assets/vditor/dist/js/lute/lute.min.js"; do
+    if [[ ! -f "$SITE_DIR/$required" ]]; then
+      echo "ERROR: missing shared Project History asset $required — regenerate before publishing." >&2
+      exit 1
+    fi
+  done
   if [[ ! -f "$SITE_DIR/history.json" ]]; then
     echo "ERROR: no history.json in $SITE_DIR — regenerate; the app's Update Center needs it." >&2
     exit 1
@@ -265,6 +271,16 @@ aws s3 sync "$SITE_DIR/work-items" "s3://${R2_BUCKET}/${KEY_PREFIX}/work-items" 
   --cache-control 'no-cache, max-age=0' \
   --delete --only-show-errors
 
+# Shared History documents and their self-hosted renderer must be available
+# before the release index advertises its new change-history links.
+for directory in assets changes; do
+  if [[ -d "$SITE_DIR/$directory" ]]; then
+    echo "==> uploading shared Project History $directory"
+    aws s3 sync "$SITE_DIR/$directory" "s3://${R2_BUCKET}/${KEY_PREFIX}/$directory" \
+      --endpoint-url "$ENDPOINT" --cache-control 'no-cache, max-age=0' --only-show-errors
+  fi
+done
+
 # history.json is what the INSTALLED APP's Update Center fetches (the same rail as
 # latest.json). It is not optional: without it every user's update history is empty.
 echo "==> uploading history.json (the in-app Update Center reads this)"
@@ -337,6 +353,28 @@ if ! diff -q "$SITE_DIR/history.json" "$TMP_HISTORY" >/dev/null; then
 fi
 cp "$TMP_HISTORY" "$TMP_PAGE/history.json"
 echo "  ✓ history.json served and byte-identical"
+
+if [[ "$IS_HOLDING_PAGE" == "0" ]]; then
+  # Follow the current release's actual link, then verify its document and the
+  # main renderer assets through the same public HTTPS path a browser uses.
+  CHANGE_PAGE="$(node - "$TMP_PAGE/index.html" <<'NODE'
+const fs = require('node:fs');
+const html = fs.readFileSync(process.argv[2], 'utf8');
+const match = html.match(/href="(changes\/[A-Za-z0-9._-]+\.html)"/);
+if (!match) process.exit(1);
+process.stdout.write(match[1]);
+NODE
+)"
+  for relative in "$CHANGE_PAGE" "${CHANGE_PAGE%.html}.json" assets/project-history.js assets/project-history.css assets/vditor/dist/js/lute/lute.min.js; do
+    mkdir -p "$TMP_PAGE/$(dirname "$relative")"
+    if ! curl -fsS --max-time 60 "${BASE}/${relative}" -o "$TMP_PAGE/$relative" 2>/dev/null || \
+       ! cmp -s "$SITE_DIR/$relative" "$TMP_PAGE/$relative"; then
+      echo "ERROR: served Project History file differs or is unavailable: $relative" >&2
+      exit 1
+    fi
+  done
+  echo "  ✓ shared Project History page, data, renderer and plan assets served byte-identically"
+fi
 
 # Follow one REAL link from the served index and compare that detail page too.
 # Holding pages intentionally have no release/detail links, so the index-only
