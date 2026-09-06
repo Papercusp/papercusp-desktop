@@ -1163,6 +1163,10 @@ export PAPERCUSP_SIDECAR_MIN_EPOCH_SEC="$(date +%s)"
 # source.tar.zst audit structurally cannot be — it never sees the sidecar's
 # docs-qa copies). Prune runs regardless; this flag makes the scan a HARD gate.
 export PAPERCUSP_RELEASE_AUDIT=1
+# The sidecar packages the superproject, while the installer provenance above
+# names the desktop submodule. Keep the sidecar's cut-start identity in the
+# same repository as its source-drift check; BUILD_SHA stays the desktop label.
+PROVENANCE_SOURCE_GIT_HEAD="$EXPECTED_SOURCE_SHA" \
 "${PC_NICE[@]}" bash "$ROOT/bin/build-desktop-sidecar.sh"
 # P-004: the exact sha of the serve.mjs we just built — exported so every leg's
 # packer asserts it packs THIS byte-identical sidecar (fail-closed on a
@@ -1643,7 +1647,7 @@ elif [[ "$WITH_MAC" == "1" ]]; then
       PAPERCUSP_SIDECAR_OUT="$MAC_SIDECAR_DIR" \
       "PAPERCUSP_BUILD_SHA=$BUILD_SHA" \
       "PAPERCUSP_BUILD_VERSION=$VERSION" \
-      "PROVENANCE_SOURCE_GIT_HEAD=$PROVENANCE_SOURCE_GIT_HEAD" \
+      "PROVENANCE_SOURCE_GIT_HEAD=$EXPECTED_SOURCE_SHA" \
       "PROVENANCE_SOURCE_GIT_DIRTY=$PROVENANCE_SOURCE_GIT_DIRTY" \
       bash "$ROOT/bin/build-desktop-sidecar.sh"
     # 2) universal .app + .app.tar.gz(+.sig) + dmg, bundling that darwin sidecar.
