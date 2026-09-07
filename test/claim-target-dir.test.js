@@ -23,27 +23,51 @@ const {
   mkdirSync,
   readFileSync,
 } = require('node:fs');
-const { tmpdir } = require('node:os');
+const { tmpdir, homedir } = require('node:os');
 const { join } = require('node:path');
 
 const HELPER = join(__dirname, '..', 'bin', 'lib', 'claim-target-dir.sh');
 const BUILD_LINUX = readFileSync(join(__dirname, '..', 'bin', 'build-linux-local.sh'), 'utf8');
 const BUILD_APPIMAGE = readFileSync(join(__dirname, '..', 'bin', 'build-appimage.sh'), 'utf8');
+const RUSTUP_HOME = process.env.RUSTUP_HOME || join(homedir(), '.rustup');
 
 let home;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'wi7101-'));
+  mkdirSync(join(home, '.cargo'));
+  mkdirSync(join(home, 'src-tauri', 'src'), { recursive: true });
+  writeFileSync(join(home, 'src-tauri', 'Cargo.toml'),
+    '[package]\nname = "target-slot-fixture"\nversion = "0.1.0"\nedition = "2021"\n');
+  writeFileSync(join(home, 'src-tauri', 'src', 'lib.rs'), '');
+  configureTarget(join(home, '.cargo-target'));
 });
 afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
+
+function configureTarget(target) {
+  writeFileSync(join(home, '.cargo', 'config.toml'), `[build]\ntarget-dir = ${JSON.stringify(target)}\n`);
+}
+
+function isolatedEnv(env = {}) {
+  return {
+    ...process.env,
+    HOME: home,
+    CARGO_HOME: join(home, '.cargo'),
+    RUSTUP_HOME,
+    CARGO_TARGET_DIR: '',
+    CARGO_BUILD_TARGET_DIR: undefined,
+    PAPERCUSP_DESKTOP_TARGET_ROOT: home,
+    ...env,
+  };
+}
 
 /** Source the helper and report the CARGO_TARGET_DIR it settled on. */
 function claim(env = {}) {
   return execFileSync(
     'bash',
     ['-c', `set -euo pipefail; . "${HELPER}"; printf '%s' "\${CARGO_TARGET_DIR:-}"`],
-    { env: { ...process.env, HOME: home, CARGO_TARGET_DIR: '', ...env }, encoding: 'utf8' },
+    { cwd: home, env: isolatedEnv(env), encoding: 'utf8' },
   );
 }
 
@@ -70,7 +94,7 @@ function holdSlotViaExec(env = {}) {
   const child = spawn(
     'bash',
     ['-c', `. "${HELPER}" 2>/dev/null; echo "$CARGO_TARGET_DIR"; exec sleep 30`],
-    { env: { ...process.env, HOME: home, CARGO_TARGET_DIR: '', ...env }, stdio: ['ignore', 'pipe', 'ignore'] },
+    { cwd: home, env: isolatedEnv(env), stdio: ['ignore', 'pipe', 'ignore'] },
   );
   return new Promise((resolve) => {
     child.stdout.once('data', (buf) => resolve({ child, dir: buf.toString().trim() }));
@@ -78,9 +102,50 @@ function holdSlotViaExec(env = {}) {
 }
 
 test('a lone instance keeps the shared dir, so the ordinary case is unchanged', () => {
-  // Slot 0 must stay ~/.cargo-target by NAME, or every warm cache already on the
-  // box is orphaned and the first launch after this change is a cold build.
+  // The historical configuration still selects its existing warm cache.
   assert.strictEqual(claim(), join(home, '.cargo-target'));
+});
+
+test('slot zero honors Cargo-configured relocation instead of forcing the home filesystem', () => {
+  const relocated = join(home, 'data disk', 'cargo-target');
+  configureTarget(relocated);
+  assert.strictEqual(claim(), relocated);
+});
+
+test('relocated target slots retain concurrency isolation on the configured filesystem', async () => {
+  const relocated = join(home, 'data disk', 'cargo-target');
+  configureTarget(relocated);
+  const held = await holdSlotViaExec();
+  try {
+    assert.strictEqual(held.dir, relocated);
+    assert.strictEqual(claim(), `${relocated}-dev2`);
+  } finally {
+    held.child.kill();
+  }
+});
+
+test('Cargo build-target environment configuration is honored', () => {
+  const selected = join(home, 'environment-target');
+  assert.strictEqual(claim({ CARGO_BUILD_TARGET_DIR: selected }), selected);
+});
+
+test('the selected project config wins over Cargo home config', () => {
+  const selected = join(home, 'project-target');
+  mkdirSync(join(home, 'src-tauri', '.cargo'));
+  writeFileSync(join(home, 'src-tauri', '.cargo', 'config.toml'),
+    `[build]\ntarget-dir = ${JSON.stringify(selected)}\n`);
+  assert.strictEqual(claim(), selected);
+});
+
+test('with no configured relocation the allocator follows Cargo default target placement', () => {
+  rmSync(join(home, '.cargo', 'config.toml'));
+  assert.strictEqual(claim(), join(home, 'src-tauri', 'target'));
+});
+
+test('unreadable Cargo configuration refuses before claiming a fallback home target', () => {
+  writeFileSync(join(home, '.cargo', 'config.toml'), '[build\ntarget-dir =');
+  assert.throws(() => claim(), /cannot resolve Cargo target directory/);
+  assert.ok(!existsSync(join(home, '.papercusp', 'desktop-dev-slots', 'slot0.lock')));
 });
 
 test('a second concurrent instance gets a DIFFERENT dir, never the shared one', async () => {
@@ -214,7 +279,7 @@ test('Linux artifact collection invokes relocation recovery before creating bund
 });
 
 test('direct AppImage entrypoint claims a target slot before Cargo metadata', () => {
-  const claimAt = BUILD_APPIMAGE.indexOf('. "$DESK/bin/lib/claim-target-dir.sh"');
+  const claimAt = BUILD_APPIMAGE.indexOf('. "$ORCHESTRATOR_HERE/lib/claim-target-dir.sh"');
   const metadataAt = BUILD_APPIMAGE.indexOf('cargo metadata --no-deps');
   assert.ok(claimAt >= 0, 'build-appimage must source claim-target-dir.sh');
   assert.ok(metadataAt >= 0, 'build-appimage must read Cargo metadata');

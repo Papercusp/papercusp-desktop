@@ -34,6 +34,20 @@ const GUARD = join(DESKTOP_DIR, 'bin', 'tauri-guarded');
 // already happened once here (db6d7b02b1). Defaults to the real path.
 const CLAIM = process.env.PROBE_CLAIM_SCRIPT || join(DESKTOP_DIR, 'bin', 'lib', 'claim-target-dir.sh');
 
+// These tests exercise wrapper/lock behavior, not Cargo configuration parsing
+// (covered with real Cargo in claim-target-dir.test.js). A metadata-only probe
+// keeps their sandboxed HOME independent of the host's installed Rust toolchain.
+function prepareCargoProbe(fixtureRoot) {
+  const probeBin = join(fixtureRoot, 'cargo-probe-bin');
+  mkdirSync(probeBin, { recursive: true });
+  writeFileSync(join(probeBin, 'cargo'),
+    '#!/usr/bin/env node\n' +
+    'if (process.argv.slice(2).join(" ") !== "metadata --no-deps --format-version 1") process.exit(3);\n' +
+    'process.stdout.write(JSON.stringify({target_directory: require("node:path").join(process.env.HOME, ".cargo-target")}));\n',
+    { mode: 0o755 });
+  return probeBin;
+}
+
 /**
  * Run the guard with a stub `tauri` first on PATH, in a sandboxed HOME, and
  * report the CARGO_TARGET_DIR the real CLI would have been exec'd with. Driving
@@ -53,7 +67,7 @@ function runGuard(args) {
         ...process.env,
         HOME: home,
         CARGO_TARGET_DIR: '',
-        PATH: `${shimDir}:${process.env.PATH}`,
+        PATH: `${shimDir}:${prepareCargoProbe(home)}:${process.env.PATH}`,
         // Routing/claim probes must never wait on a real concurrent release
         // writer. The dedicated contention tests below exercise that behavior.
         PAPERCUSP_SIDECAR_LOCK: join(home, 'sidecar.lock'),
@@ -83,7 +97,7 @@ function runGuardResult(args, tauriScript) {
         ...process.env,
         HOME: home,
         CARGO_TARGET_DIR: '',
-        PATH: `${shimDir}:${process.env.PATH}`,
+        PATH: `${shimDir}:${prepareCargoProbe(home)}:${process.env.PATH}`,
         PAPERCUSP_SIDECAR_LOCK: join(home, 'sidecar.lock'),
       },
       encoding: 'utf8',
@@ -171,7 +185,7 @@ test('the Tauri chokepoint waits for an in-flight sidecar publish before startup
     ...process.env,
     HOME: home,
     CARGO_TARGET_DIR: '',
-    PATH: `${shimDir}:${process.env.PATH}`,
+    PATH: `${shimDir}:${prepareCargoProbe(home)}:${process.env.PATH}`,
     PAPERCUSP_SIDECAR_LOCK: lock,
   };
   let holder;
@@ -243,7 +257,7 @@ test('a long-lived `tauri dev` yields its parent-held sidecar reader lock on SIG
     ...process.env,
     HOME: home,
     CARGO_TARGET_DIR: '',
-    PATH: `${shimDir}:${process.env.PATH}`,
+    PATH: `${shimDir}:${prepareCargoProbe(home)}:${process.env.PATH}`,
     PAPERCUSP_SIDECAR_LOCK: lock,
   };
   let guard;
@@ -471,7 +485,10 @@ function claimIn(home, { ancestorTitle, env = {} } = {}) {
   const inner = `. ${shq(CLAIM)}; printf '%s' "\${CARGO_TARGET_DIR:-}"`;
   const cmd = ancestorTitle ? `exec -a ${shq(ancestorTitle)} bash -c ${shq(inner)}` : inner;
   const res = spawnSync('bash', ['-c', cmd], {
-    env: { ...process.env, HOME: home, CARGO_TARGET_DIR: '', ...env },
+    env: {
+      ...process.env, HOME: home, CARGO_TARGET_DIR: '', ...env,
+      PATH: `${prepareCargoProbe(home)}:${env.PATH || process.env.PATH}`,
+    },
     encoding: 'utf8',
     timeout: 10_000,
   });

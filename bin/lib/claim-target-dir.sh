@@ -8,8 +8,8 @@
 #   exec npm run tauri -- dev ...
 #
 # WHY THIS EXISTS (WI-7101)
-# ~/.cargo/config.toml pins `build.target-dir=~/.cargo-target` for the whole box
-# (set 2026-06-17, to stop per-checkout target/ dirs bloating to ~150G). So every
+# Cargo configuration pins a shared `build.target-dir` for the whole box
+# (originally ~/.cargo-target, later relocated to the data disk). So every
 # papercusp-desktop build shares ONE target dir — including the GENERATED
 # app-manifest under `<target>/debug/build/papercusp-desktop-*/out/app-manifest`.
 # Two concurrent builds interleave writes to it and BOTH die with:
@@ -185,6 +185,41 @@ papercusp_prepare_collection_target_root() {
   }
 }
 
+# Ask Cargo for its effective placement, including project configuration,
+# CARGO_HOME and CARGO_BUILD_TARGET_DIR. Parsing one TOML file or retaining the
+# historical HOME/.cargo-target name silently overrides a configured relocation
+# (EI-22589688521091797). Query the actual target project, not the current
+# orchestrator's checkout, when executing an exact-source release retry.
+__pc_cargo_target_root() {
+  local project="${PAPERCUSP_DESKTOP_TARGET_ROOT:-${ROOT:-$PWD}}"
+  if [[ -f "$project/src-tauri/Cargo.toml" ]]; then
+    project="$project/src-tauri"
+  elif [[ ! -f "$project/Cargo.toml" ]]; then
+    project="$__pc_claim_dir/../../src-tauri"
+  fi
+  node - "$project" <<'JS'
+const { execFileSync } = require('node:child_process');
+const path = require('node:path');
+const env = { ...process.env };
+// The caller already honored a non-empty explicit override. An exported empty
+// value must not hide Cargo's configuration during this read-only resolution.
+delete env.CARGO_TARGET_DIR;
+try {
+  const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--format-version', '1'], {
+    cwd: process.argv[2], env, encoding: 'utf8', timeout: 10000,
+    maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+  }));
+  if (typeof metadata.target_directory !== 'string' || !path.isAbsolute(metadata.target_directory)) {
+    throw new Error('Cargo metadata did not return an absolute target_directory');
+  }
+  process.stdout.write(metadata.target_directory);
+} catch (error) {
+  console.error(`ERROR: cannot resolve Cargo target directory for ${process.argv[2]} — refusing to claim a different filesystem: ${String(error.stderr || error.message).slice(0, 1200)}`);
+  process.exit(1);
+}
+JS
+}
+
 __pc_claim_target_dir() {
   # An explicit CARGO_TARGET_DIR is a deliberate choice (a .deb cut on an
   # isolated dir, a test harness) — never second-guess it.
@@ -207,13 +242,14 @@ __pc_claim_target_dir() {
     return 0
   fi
 
+  local shared
+  shared="$(__pc_cargo_target_root)" || return 1
   mkdir -p "$__pc_slot_lockdir"
 
-  local shared="${HOME}/.cargo-target"
   local i dir lockfile
   for ((i = 0; i < slots; i++)); do
-    # Slot 0 IS the pre-existing shared dir — keep the name so every warm cache
-    # already on this box stays usable instead of being orphaned on first run.
+    # Slot 0 IS Cargo's configured shared dir. Keep its existing warm cache,
+    # and derive every extra slot on the same configured filesystem.
     if ((i == 0)); then dir="$shared"; else dir="${shared}-dev$((i + 1))"; fi
     lockfile="${__pc_slot_lockdir}/slot${i}.lock"
 
