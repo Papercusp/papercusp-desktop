@@ -17,6 +17,8 @@ const path = require('node:path');
 
 const VERIFY_SCRIPT = path.resolve(__dirname, '../../scripts/verify-tauri-headless.sh');
 const source = fs.readFileSync(VERIFY_SCRIPT, 'utf8');
+const DEV_OPERATOR_SCRIPT = path.resolve(__dirname, '../bin/dev-operator-ifneeded.sh');
+const devOperatorSource = fs.readFileSync(DEV_OPERATOR_SCRIPT, 'utf8');
 
 test('captures file-backed assertion argv before boot and records a sha256 manifest', () => {
   assert.match(source, /ASSERTION_CWD="\$PWD"/);
@@ -97,4 +99,67 @@ test('cleans bridge credentials from the runtime temp directory used for discove
     /rm -f -- "\/tmp\/tauri-dev-bridge-\$BRIDGE_PID\.token"/,
     'a hard-coded /tmp cleanup diverges from Node os.tmpdir() when TMPDIR is scoped',
   );
+});
+
+test('pins the operator source graph before Tauri launch and cleans it on both exits', () => {
+  const snapshot = source.indexOf('snapshot_operator_source()');
+  const snapshotCall = source.indexOf('snapshot_operator_source || exit $?');
+  const work = source.indexOf('WORK="$(mktemp -d');
+  const launch = source.indexOf('cat > "$WORK/launch.sh" <<LAUNCH');
+  const sourceEnv = source.indexOf('$OPERATOR_SOURCE_ENV_LINE', launch);
+  const teardown = source.indexOf('teardown() {');
+  const stop = source.indexOf('OPERATOR_SOURCE_ROOT"');
+
+  assert.ok(snapshot > work, 'the operator snapshot must live under the per-run WORK dir');
+  assert.ok(snapshotCall > snapshot, 'the operator source snapshot helper must run');
+  assert.ok(launch > snapshotCall, 'the operator source must be frozen before Tauri launch');
+  assert.ok(sourceEnv > launch, 'generated launch.sh must export the frozen operator source root');
+  assert.ok(source.indexOf('papercusp_pinned_deps_snapshot_locked', snapshot) > snapshot);
+  assert.ok(source.indexOf('cleanup_operator_source_snapshot', teardown) > teardown);
+  assert.ok(stop > 0, 'boot-only stop.sh must clean the operator source root');
+  for (const excluded of [
+    "--exclude='node_modules'",
+    "--exclude='papercusp-desktop'",
+    "--exclude='.git'",
+    "--exclude='dist'",
+    "--exclude='coverage'",
+  ]) {
+    assert.ok(source.includes(excluded), `source snapshot must retain exclusion ${excluded}`);
+  }
+});
+
+test('explicit verifier source roots are marker-checked and cannot fall back to the live checkout', () => {
+  assert.match(devOperatorSource, /PAPERCUSP_DEV_SOURCE_ROOT/);
+  assert.match(devOperatorSource, /apps\/operator\/package\.json/);
+  assert.match(devOperatorSource, /libs\/papercusp\/package\.json/);
+  assert.match(devOperatorSource, /PAPERCUSP_DEV_SOURCE_ROOT.*readable directory/);
+  assert.match(devOperatorSource, /DEFAULT_DEV_CMD=.*cd \$DEV_OPERATOR_DIR_Q/);
+  assert.match(devOperatorSource, /DEFAULT_DEV_CMD=.*cd \.\.\/apps\/operator/);
+});
+
+test('a mutation after the simulated launch cannot change the captured operator source', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-tauri-operator-source-'));
+  try {
+    const donor = path.join(dir, 'donor');
+    const snapshot = path.join(dir, 'snapshot');
+    const sourceFile = path.join(donor, 'packages', 'operator-core', 'lib', 'mutation-fixture.ts');
+    fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
+    fs.mkdirSync(path.join(donor, 'apps', 'operator'), { recursive: true });
+    fs.writeFileSync(path.join(donor, 'apps', 'operator', 'package.json'), '{}\n');
+    fs.mkdirSync(path.join(donor, 'libs', 'papercusp'), { recursive: true });
+    fs.writeFileSync(path.join(donor, 'libs', 'papercusp', 'package.json'), '{}\n');
+    fs.writeFileSync(sourceFile, 'export const version = "captured";\n');
+    fs.cpSync(donor, snapshot, { recursive: true, dereference: false });
+
+    // Model the verifier's launch boundary: a later shared-checkout edit is
+    // outside the process's captured source read path.
+    fs.writeFileSync(sourceFile, 'export const version = "mutated-after-launch";\n');
+    assert.match(
+      fs.readFileSync(path.join(snapshot, 'packages', 'operator-core', 'lib', 'mutation-fixture.ts'), 'utf8'),
+      /captured/,
+    );
+    assert.match(fs.readFileSync(sourceFile, 'utf8'), /mutated-after-launch/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

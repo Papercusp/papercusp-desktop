@@ -102,7 +102,24 @@ if [ -n "${PAPERCUSP_BIND_HOST:-}" ]; then
   printf -v DEV_BIND_HOST_Q '%q' "$PAPERCUSP_BIND_HOST"
   DEV_BIND_OVERRIDE="PAPERCUSP_BIND_HOST=$DEV_BIND_HOST_Q "
 fi
+# An isolated verifier supplies PAPERCUSP_DEV_SOURCE_ROOT. Resolve it exactly
+# (marker check, no walk-up) and fail closed if it is incomplete: the verifier
+# must never silently fall back to the mutable shared checkout. With no
+# override, preserve the established ordinary desktop launch unchanged.
 DEFAULT_DEV_CMD="cd ../apps/operator && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env ${DEV_BIND_OVERRIDE}PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR=1 PAPERCUSP_SYSTEM_HEALTH_SPAWN_SIDECAR=1 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT npx tsx bin/hono-host.ts"
+DEV_SOURCE_ROOT="${PAPERCUSP_DEV_SOURCE_ROOT:-}"
+if [ -n "$DEV_SOURCE_ROOT" ]; then
+  DEV_SOURCE_ROOT="$(cd "$DEV_SOURCE_ROOT" 2>/dev/null && pwd -P)" || {
+    echo "[tauri] FATAL: PAPERCUSP_DEV_SOURCE_ROOT is not a readable directory: ${PAPERCUSP_DEV_SOURCE_ROOT}" >&2
+    exit 1
+  }
+  if [ ! -f "$DEV_SOURCE_ROOT/apps/operator/package.json" ] || [ ! -f "$DEV_SOURCE_ROOT/libs/papercusp/package.json" ]; then
+    echo "[tauri] FATAL: PAPERCUSP_DEV_SOURCE_ROOT is missing exact Papercusp markers (apps/operator/package.json and libs/papercusp/package.json): $DEV_SOURCE_ROOT" >&2
+    exit 1
+  fi
+  printf -v DEV_OPERATOR_DIR_Q '%q' "$DEV_SOURCE_ROOT/apps/operator"
+  DEFAULT_DEV_CMD="cd $DEV_OPERATOR_DIR_Q && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env ${DEV_BIND_OVERRIDE}PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR=1 PAPERCUSP_SYSTEM_HEALTH_SPAWN_SIDECAR=1 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT npx tsx bin/hono-host.ts"
+fi
 # Test seam: lets the reaper mechanics be exercised with a harmless
 # long-running command instead of booting the real dev stack.
 DEV_CMD="${OPERATOR_DEV_CMD:-$DEFAULT_DEV_CMD}"
