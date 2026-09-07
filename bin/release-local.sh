@@ -107,9 +107,10 @@ VERSION="$1"
 CHANNEL="$2"
 # An exact-source salvage cut deliberately combines the current orchestration
 # script with a frozen target tree: callers source this file while setting $0
-# to the frozen worktree entrypoint. Keep those roots separate. Libraries that
-# THIS script revision calls must follow BASH_SOURCE[0]; build scripts and
-# artifact paths continue to follow the target-tree $0 (EI-21078401508503033).
+# to the frozen worktree entrypoint. Keep those roots separate. Libraries and
+# orchestrator-owned producer scripts that THIS script revision calls follow
+# BASH_SOURCE[0]; target roots and artifact paths continue to follow the
+# target-tree $0 (EI-21078401508503033).
 ORCHESTRATOR_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -1551,7 +1552,12 @@ elif [[ "$WITH_WINDOWS" == "1" ]]; then
   # The cross producer never cuts seed — release-local cut it once above (it
   # ignores the VM-only PAPERCUSP_SKIP_SEED_CUT). The old PAPERCUSP_WINDOWS_CROSS
   # opt-in is gone (cross is unconditional); passing it is now a harmless no-op.
-  WIN_PRODUCER="$ROOT/bin/build-windows-cross.sh"
+  # Exact-source salvage combines the CURRENT producer logic with the FROZEN
+  # target tree, just like release-local itself. Source the current producer
+  # while setting $0 to the frozen entrypoint so its ROOT/artifact paths remain
+  # pinned to the release source instead of silently switching to canonical.
+  WIN_PRODUCER="$ORCHESTRATOR_HERE/build-windows-cross.sh"
+  WIN_TARGET_ENTRYPOINT="$ROOT/bin/build-windows-cross.sh"
   echo "==> [parallel] launching Windows x86_64 build NATIVELY on Linux (cross-compile, no VM) (log: $WIN_LEG_LOG)"
   # Native MSVC build (VM: in the QEMU Windows 11 VM, windows-desktop-release-
   # readiness-2026-06-11 D-001; cross: on this box, WI-5651). SKIP the per-build
@@ -1567,7 +1573,7 @@ elif [[ "$WITH_WINDOWS" == "1" ]]; then
     # verbatim for a deliberate fast gui-only cut. (WI-5559 previously stripped
     # roles here to force gui-only — reversed: that shipped a dead Windows build.)
     win_env+=("PAPERCUSP_BUILD_ROLES=$PAPERCUSP_BUILD_ROLES")
-    env "${win_env[@]}" bash "$WIN_PRODUCER"
+    env "${win_env[@]}" bash -c 'source "$1"' "$WIN_TARGET_ENTRYPOINT" "$WIN_PRODUCER"
   ) >"$WIN_LEG_LOG" 2>&1 &
   WIN_PID=$!
 fi
