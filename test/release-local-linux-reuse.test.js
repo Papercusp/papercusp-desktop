@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -28,6 +29,111 @@ const cutStartHarness = sliceBetween(
   '# EI-20551860898590077: bind every artifact',
   'echo "==> bumping version in manifests"',
 );
+const supervisorHarness = sliceBetween('LEG_NAMES=()', '\n# Android remains OUTSIDE');
+
+// Stub the expensive builders, not the orchestration or provenance emitter.
+// The real Linux child must finish repacking/signing before the real supervisor
+// records it as salvage, even when another platform has already failed.
+function runFreshWithFailedSibling({ emitterFails = false } = {}) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-linux-salvage-'));
+  const bin = path.join(temp, 'bin');
+  const bundle = path.join(temp, 'target', 'release', 'bundle');
+  const tag = path.basename(temp);
+  const linuxLog = `/tmp/papercusp-linuxleg-${tag}.log`;
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'repack-deb-xz.sh'), [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    'printf ":repacked" >> "$1"',
+    'printf "final-deb-signature" > "$1.sig"',
+  ].join('\n'));
+  fs.writeFileSync(path.join(bin, 'build-appimage.sh'), [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    `mkdir -p ${JSON.stringify(path.join(bundle, 'appimage'))}`,
+    `printf "final-appimage" > ${JSON.stringify(path.join(bundle, 'appimage', 'Papercusp_GUI_0.0.18_amd64.AppImage'))}`,
+    `printf "final-appimage-signature" > ${JSON.stringify(path.join(bundle, 'appimage', 'Papercusp_GUI_0.0.18_amd64.AppImage.sig'))}`,
+  ].join('\n'));
+  const emitter = path.join(bin, 'emit-build-provenance.sh');
+  if (emitterFails) fs.writeFileSync(emitter, 'exit 23\n');
+  else fs.symlinkSync(path.join(root, 'bin', 'emit-build-provenance.sh'), emitter);
+
+  try {
+    const command = [
+      'set -euo pipefail',
+      `ROOT=${JSON.stringify(temp)}`,
+      `ORCHESTRATOR_HERE=${JSON.stringify(bin)}`,
+      `CARGO_TARGET_ROOT=${JSON.stringify(path.join(temp, 'target'))}`,
+      `TAG=${JSON.stringify(tag)}`,
+      'VERSION=0.0.18',
+      'BUILD_SHA=original-baked-sha',
+      `PROVENANCE_SOURCE_GIT_HEAD=${'a'.repeat(40)}`,
+      'PROVENANCE_SOURCE_GIT_DIRTY=false',
+      "PAPERCUSP_BUILD_ROLES='gui server'",
+      'PAPERCUSP_REUSE_LINUX=0',
+      'PAPERCUSP_LINUX_RUSTFLAGS=',
+      'TAURI_CLI_VERSION=2.0.0',
+      'KEY_FILE=unused-test-key',
+      'DESKTOP_CHANNEL_BUILD_ENV=(); DESKTOP_CHANNEL_BUILD_CFG=(); PC_NICE=()',
+      'CHANNEL=alpha',
+      'npx() {',
+      '  local role=GUI',
+      '  [[ "$*" != *tauri.server.conf.json* ]] || role=Server',
+      '  mkdir -p "$CARGO_TARGET_ROOT/release/bundle/deb"',
+      '  printf "raw:%s" "$role" > "$CARGO_TARGET_ROOT/release/bundle/deb/Papercusp_${role}_0.0.18_amd64.deb"',
+      '}',
+      linuxReuseHarness,
+      `WIN_LEG_LOG=${JSON.stringify(path.join(temp, 'windows.log'))}`,
+      ': > "$WIN_LEG_LOG"',
+      '(exit 7) & WIN_PID=$!',
+      'MAC_PID=; ANDROID_PID=',
+      'RELEASE_LEG_HEARTBEAT_S=0',
+      'RELEASE_ABORT_ON_LEG_FAILURE=0',
+      'RELEASE_SALVAGE_GRACE_S=',
+      supervisorHarness,
+    ].join('\n');
+    const result = spawnSync('bash', ['-c', command], { encoding: 'utf8', timeout:30000 });
+    const receiptPath = path.join(bundle, 'build-provenance.json');
+    const receipt = fs.existsSync(receiptPath) ? JSON.parse(fs.readFileSync(receiptPath, 'utf8')) : null;
+    const finalHashes = Object.fromEntries(
+      (receipt?.artifacts || []).map((artifact) => [
+        artifact.name,
+        crypto.createHash('sha256').update(fs.readFileSync(path.join(bundle, artifact.name))).digest('hex'),
+      ]),
+    );
+    return { result, receipt, finalHashes };
+  } finally {
+    fs.rmSync(temp, { recursive:true, force:true });
+    fs.rmSync(linuxLog, { force:true });
+  }
+}
+
+test('completed Linux salvage retains final-byte provenance when a sibling fails', () => {
+  const { result, receipt, finalHashes } = runFreshWithFailedSibling();
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stdout, /win leg FAILED \(rc=7\)/);
+  assert.match(result.stdout, /linux leg SUCCEEDED/);
+  assert.match(result.stdout, /SALVAGED .*linux/);
+  assert.ok(receipt, 'successful Linux sibling lost its required reuse provenance');
+  assert.equal(receipt.version, '0.0.18');
+  assert.equal(receipt.buildSha, 'original-baked-sha');
+  assert.equal(receipt.gitHead, 'a'.repeat(40));
+  assert.equal(receipt.gitDirty, false);
+  assert.equal(receipt.reused, false);
+  assert.equal(receipt.artifacts.length, 3);
+  for (const artifact of receipt.artifacts) {
+    assert.equal(artifact.sha256, finalHashes[artifact.name], 'receipt must hash final repacked bytes');
+    assert.equal(artifact.sig, true, 'receipt must follow final updater signing');
+  }
+});
+
+test('a Linux provenance failure cannot be reported as successful salvage', () => {
+  const { result, receipt } = runFreshWithFailedSibling({ emitterFails:true });
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stdout, /linux leg FAILED \(rc=23\)/);
+  assert.doesNotMatch(result.stdout, /linux leg SUCCEEDED/);
+  assert.equal(receipt, null);
+});
 
 function runCutStart({ linux = 0, windows = 0, mac = 0 } = {}) {
   const command = [
