@@ -164,6 +164,58 @@ __pc_restore_missing_symlink_referent() {
   echo "→ restored missing $label referent $target (preserved symlink $root)" >&2
 }
 
+# Materialize a derived target root before handing it to Cargo.  The configured
+# shared root can live below a parent that the desktop user may traverse but
+# cannot modify (the production /mnt/data/cargo-target placement is exactly
+# that shape).  In that case Cargo cannot create a sibling such as
+# /mnt/data/cargo-target-dev2: its own temporary mkdir fails with EACCES before
+# compilation begins.  Keep the preferred sibling when its parent permits it;
+# otherwise place the stable slot inside the already-writable shared root.  The
+# fallback remains on the configured filesystem and outside Cargo's ordinary
+# debug/release namespace.
+__pc_prepare_derived_target_root() {
+  local preferred="${1:?preferred target root required}"
+  local shared="${2:?shared target root required}"
+  local slot_name="${3:?slot name required}"
+  local fallback_parent fallback
+
+  if [[ -d "$preferred" && -w "$preferred" && -x "$preferred" ]]; then
+    printf '%s\n' "$preferred"
+    return 0
+  fi
+  if [[ ! -e "$preferred" && ! -L "$preferred" ]] \
+    && mkdir -- "$preferred" 2>/dev/null; then
+    printf '%s\n' "$preferred"
+    return 0
+  fi
+
+  fallback_parent="$shared/.papercusp-target-slots"
+  fallback="$fallback_parent/$slot_name"
+  if [[ ! -d "$shared" || ! -w "$shared" || ! -x "$shared" ]]; then
+    echo "ERROR: cannot prepare target slot $preferred and shared root is not writable: $shared" >&2
+    return 1
+  fi
+  if ! mkdir -p -- "$fallback_parent" 2>/dev/null; then
+    echo "ERROR: cannot prepare target-slot fallback parent: $fallback_parent" >&2
+    return 1
+  fi
+  if [[ -e "$fallback" && ! -d "$fallback" ]]; then
+    echo "ERROR: target-slot fallback exists but is not a directory: $fallback" >&2
+    return 1
+  fi
+  if [[ ! -e "$fallback" ]] && ! mkdir -- "$fallback" 2>/dev/null; then
+    echo "ERROR: cannot prepare target-slot fallback: $fallback" >&2
+    return 1
+  fi
+  if [[ ! -w "$fallback" || ! -x "$fallback" ]]; then
+    echo "ERROR: target-slot fallback is not writable: $fallback" >&2
+    return 1
+  fi
+
+  echo "→ target slot $preferred cannot be materialized; using writable same-filesystem fallback $fallback" >&2
+  printf '%s\n' "$fallback"
+}
+
 # Prepare a source-tree collection target without replacing relocation links.
 # The completed package already lives in an isolated Cargo root and must be
 # copied into the canonical source-tree target. Recreate only the missing
@@ -244,13 +296,28 @@ __pc_claim_target_dir() {
 
   local shared
   shared="$(__pc_cargo_target_root)" || return 1
+  # Cargo metadata tells us the authoritative root, but does not promise that
+  # it already exists.  Materialize that explicit configured path before slot
+  # selection so a writable relocation parent remains usable and every derived
+  # fallback has a real shared root to live below.  Preserve symlinks for the
+  # guarded recovery path in the loop below.
+  if [[ ! -e "$shared" && ! -L "$shared" ]]; then
+    if ! mkdir -p -- "$shared" 2>/dev/null; then
+      echo "ERROR: cannot materialize configured Cargo target root: $shared" >&2
+      return 1
+    fi
+  elif [[ -e "$shared" && ! -d "$shared" ]]; then
+    echo "ERROR: configured Cargo target root exists but is not a directory: $shared" >&2
+    return 1
+  fi
   mkdir -p "$__pc_slot_lockdir"
 
-  local i dir lockfile
+  local i dir lockfile preferred_dir
   for ((i = 0; i < slots; i++)); do
     # Slot 0 IS Cargo's configured shared dir. Keep its existing warm cache,
     # and derive every extra slot on the same configured filesystem.
     if ((i == 0)); then dir="$shared"; else dir="${shared}-dev$((i + 1))"; fi
+    preferred_dir="$dir"
     lockfile="${__pc_slot_lockdir}/slot${i}.lock"
 
     # fd 8 deliberately: bin/cargo-build-safe.sh uses fd 9 for the sidecar lock,
@@ -286,6 +353,23 @@ __pc_claim_target_dir() {
         exec 8>&-
         continue
       fi
+      if ((i > 0)); then
+        dir="$(__pc_prepare_derived_target_root "$dir" "$shared" "dev$((i + 1))")" || {
+          echo "→ slot $i SKIPPED: target root $preferred_dir cannot be prepared safely" >&2
+          exec 8>&-
+          continue
+        }
+        if [[ "$dir" != "$preferred_dir" ]] \
+          && release_artifacts_retention_path_is_leased "$dir" >/dev/null 2>&1; then
+          echo "→ slot $i SKIPPED: fallback target root $dir is covered by an active release-retention lease" >&2
+          exec 8>&-
+          continue
+        fi
+      elif [[ -d "$dir" && ( ! -w "$dir" || ! -x "$dir" ) ]]; then
+        echo "→ slot $i SKIPPED: configured shared target root is not writable: $dir" >&2
+        exec 8>&-
+        continue
+      fi
       # The lock was free — but that only means no LAUNCHER is alive. Before building
       # into this dir, ask the question that actually decides safety: is a desktop still
       # RUNNING out of it? If so, skip the slot and isolate. Failing safe costs a cold
@@ -317,7 +401,12 @@ __pc_claim_target_dir() {
   # Every slot busy. Fall back to a private per-pid dir: a cold build is slow,
   # but it is CORRECT, and correctness is what this whole file is protecting.
   # Never fall back to the shared dir — that is precisely the corruption path.
-  export CARGO_TARGET_DIR="${shared}-pid$$"
+  local private_target="${shared}-pid$$"
+  private_target="$(__pc_prepare_derived_target_root "$private_target" "$shared" "pid$$")" || {
+    echo "ERROR: all target-dir slots are busy and no private target root can be prepared safely" >&2
+    return 1
+  }
+  export CARGO_TARGET_DIR="$private_target"
   echo "⚠ all $slots target-dir slots are busy — using private $CARGO_TARGET_DIR (cold build)." >&2
   echo "  Raise PAPERCUSP_DESKTOP_TARGET_SLOTS if this box routinely runs more desktops than that." >&2
   return 0

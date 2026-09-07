@@ -21,6 +21,7 @@ const {
   symlinkSync,
   writeFileSync,
   mkdirSync,
+  chmodSync,
   readFileSync,
 } = require('node:fs');
 const { tmpdir, homedir } = require('node:os');
@@ -121,6 +122,46 @@ test('relocated target slots retain concurrency isolation on the configured file
     assert.strictEqual(claim(), `${relocated}-dev2`);
   } finally {
     held.child.kill();
+  }
+});
+
+test('relocated slots use a writable same-filesystem fallback when the configured parent forbids siblings', async () => {
+  const relocationParent = join(home, 'root-owned-data');
+  const relocated = join(relocationParent, 'cargo-target');
+  mkdirSync(relocated, { recursive: true });
+  configureTarget(relocated);
+  chmodSync(relocationParent, 0o555);
+  const held = await holdSlotViaExec();
+  try {
+    assert.strictEqual(held.dir, relocated);
+    const fallback = join(relocated, '.papercusp-target-slots', 'dev2');
+    assert.strictEqual(claim(), fallback);
+    assert.ok(lstatSync(fallback).isDirectory(), 'the allocator must materialize the fallback before Cargo starts');
+    assert.ok(!existsSync(`${relocated}-dev2`), 'the allocator must not pretend the forbidden sibling exists');
+  } finally {
+    held.child.kill();
+    chmodSync(relocationParent, 0o700);
+  }
+});
+
+test('private overflow also stays usable below a non-writable configured parent', async () => {
+  const relocationParent = join(home, 'root-owned-overflow');
+  const relocated = join(relocationParent, 'cargo-target');
+  mkdirSync(relocated, { recursive: true });
+  configureTarget(relocated);
+  chmodSync(relocationParent, 0o555);
+  const held = await holdSlotViaExec({ PAPERCUSP_DESKTOP_TARGET_SLOTS: '1' });
+  try {
+    assert.strictEqual(held.dir, relocated);
+    const overflow = claim({ PAPERCUSP_DESKTOP_TARGET_SLOTS: '1' });
+    assert.ok(
+      overflow.startsWith(join(relocated, '.papercusp-target-slots', 'pid')),
+      `expected private fallback below the writable shared root, got ${overflow}`,
+    );
+    assert.ok(lstatSync(overflow).isDirectory(), 'the private fallback must exist before Cargo starts');
+  } finally {
+    held.child.kill();
+    chmodSync(relocationParent, 0o700);
   }
 });
 
