@@ -353,6 +353,68 @@ test('desktop launcher shares the resolved operator port with Tauri devUrl (EI-2
   );
 });
 
+test('frozen host entry: runs the validated plain-node bundle inside the frozen source root (EI-22616267024724225)', async () => {
+  const port = await testPort();
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-dev-operator-bundle-'));
+  const sourceRoot = path.join(tmp, 'source');
+  const operatorDir = path.join(sourceRoot, 'apps/operator');
+  const bundle = path.join(operatorDir, 'dist-verify/hono-host.mjs');
+  const marker = path.join(tmp, 'started.json');
+  let wrapper;
+
+  try {
+    fs.mkdirSync(path.dirname(bundle), { recursive: true });
+    fs.mkdirSync(path.join(sourceRoot, 'libs/papercusp'), { recursive: true });
+    fs.writeFileSync(path.join(operatorDir, 'package.json'), '{}\n');
+    fs.writeFileSync(path.join(sourceRoot, 'libs/papercusp/package.json'), '{}\n');
+    fs.writeFileSync(
+      bundle,
+      [
+        "import { writeFileSync } from 'node:fs';",
+        `writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ pid: process.pid, port: process.env.PAPERCUSP_HONO_PORT, vmid: process.env.DBOS__VMID }));`,
+        'setInterval(() => {}, 1000);',
+        '',
+      ].join('\n'),
+    );
+
+    wrapper = spawn('bash', [script], {
+      env: {
+        ...process.env,
+        OPERATOR_DEV_PORT: String(port),
+        PAPERCUSP_DEV_SOURCE_ROOT: sourceRoot,
+        PAPERCUSP_DEV_HOST_ENTRY: bundle,
+      },
+      stdio: 'ignore',
+    });
+
+    const started = await waitFor(
+      () => {
+        if (!fs.existsSync(marker)) return undefined;
+        const value = JSON.parse(fs.readFileSync(marker, 'utf8'));
+        return Number.isInteger(value.pid) && value.pid > 1 ? value : undefined;
+      },
+      { timeoutMs: 10_000 },
+    );
+    assert(started, 'plain-node frozen host entry never started');
+    assert.equal(started.port, String(port));
+    assert.equal(started.vmid, `desktop-dev-${port}`);
+    assert(pidAlive(started.pid), 'plain-node frozen host should be alive before wrapper teardown');
+
+    wrapper.kill('SIGTERM');
+    const reaped = await waitFor(() => !pidAlive(started.pid), { timeoutMs: 20_000 });
+    assert(reaped, 'plain-node frozen host survived wrapper teardown');
+  } finally {
+    if (wrapper && !wrapper.killed) {
+      try {
+        wrapper.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // WI-41422: the live npx → tsx launcher normalised a signalled Hono child to
 // exit 0. The old loop treated that as an intentional stop and ended the whole
 // wrapper, so dev:restart returned success while :3270 stayed down. Wrapper

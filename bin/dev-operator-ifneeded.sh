@@ -106,8 +106,8 @@ fi
 # (marker check, no walk-up) and fail closed if it is incomplete: the verifier
 # must never silently fall back to the mutable shared checkout. With no
 # override, preserve the established ordinary desktop launch unchanged.
-DEFAULT_DEV_CMD="cd ../apps/operator && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env ${DEV_BIND_OVERRIDE}PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR=1 PAPERCUSP_SYSTEM_HEALTH_SPAWN_SIDECAR=1 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT npx tsx bin/hono-host.ts"
 DEV_SOURCE_ROOT="${PAPERCUSP_DEV_SOURCE_ROOT:-}"
+DEV_OPERATOR_DIR="../apps/operator"
 if [ -n "$DEV_SOURCE_ROOT" ]; then
   DEV_SOURCE_ROOT="$(cd "$DEV_SOURCE_ROOT" 2>/dev/null && pwd -P)" || {
     echo "[tauri] FATAL: PAPERCUSP_DEV_SOURCE_ROOT is not a readable directory: ${PAPERCUSP_DEV_SOURCE_ROOT}" >&2
@@ -117,9 +117,50 @@ if [ -n "$DEV_SOURCE_ROOT" ]; then
     echo "[tauri] FATAL: PAPERCUSP_DEV_SOURCE_ROOT is missing exact Papercusp markers (apps/operator/package.json and libs/papercusp/package.json): $DEV_SOURCE_ROOT" >&2
     exit 1
   fi
-  printf -v DEV_OPERATOR_DIR_Q '%q' "$DEV_SOURCE_ROOT/apps/operator"
-  DEFAULT_DEV_CMD="cd $DEV_OPERATOR_DIR_Q && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env ${DEV_BIND_OVERRIDE}PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR=1 PAPERCUSP_SYSTEM_HEALTH_SPAWN_SIDECAR=1 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT npx tsx bin/hono-host.ts"
+  DEV_OPERATOR_DIR="$DEV_SOURCE_ROOT/apps/operator"
 fi
+
+# EI-22616267024724225: a frozen verifier snapshot has a unique path on every
+# run, so tsx cannot reuse its warm loader path. tsx's module.register worker
+# performs synchronous Atomics.wait RPCs for runtime resolutions; concurrent
+# cold boots have starved server.listen() past the verifier's owned-origin
+# deadline. Let the verifier hand us the plain-Node artifact produced by the
+# existing bundle-host.sh recipe while preserving this launcher's env,
+# supervision and reaping contract byte-for-byte.
+DEV_HOST_COMMAND="npx tsx bin/hono-host.ts"
+DEV_HOST_ENTRY="${PAPERCUSP_DEV_HOST_ENTRY:-}"
+if [ -n "$DEV_HOST_ENTRY" ]; then
+  case "$DEV_HOST_ENTRY" in
+    /*) ;;
+    *)
+      echo "[tauri] FATAL: PAPERCUSP_DEV_HOST_ENTRY must be an absolute path: $DEV_HOST_ENTRY" >&2
+      exit 1
+      ;;
+  esac
+  DEV_HOST_ENTRY_DIR="$(cd "$(dirname -- "$DEV_HOST_ENTRY")" 2>/dev/null && pwd -P)" || {
+    echo "[tauri] FATAL: PAPERCUSP_DEV_HOST_ENTRY parent is not readable: $DEV_HOST_ENTRY" >&2
+    exit 1
+  }
+  DEV_HOST_ENTRY="$DEV_HOST_ENTRY_DIR/$(basename -- "$DEV_HOST_ENTRY")"
+  [ -s "$DEV_HOST_ENTRY" ] || {
+    echo "[tauri] FATAL: PAPERCUSP_DEV_HOST_ENTRY is missing or empty: $DEV_HOST_ENTRY" >&2
+    exit 1
+  }
+  if [ -n "$DEV_SOURCE_ROOT" ]; then
+    case "$DEV_HOST_ENTRY" in
+      "$DEV_SOURCE_ROOT"/apps/operator/*) ;;
+      *)
+        echo "[tauri] FATAL: PAPERCUSP_DEV_HOST_ENTRY escapes PAPERCUSP_DEV_SOURCE_ROOT: $DEV_HOST_ENTRY" >&2
+        exit 1
+        ;;
+    esac
+  fi
+  printf -v DEV_HOST_ENTRY_Q '%q' "$DEV_HOST_ENTRY"
+  DEV_HOST_COMMAND="node $DEV_HOST_ENTRY_Q"
+  echo "[tauri] using frozen plain-node operator host: $DEV_HOST_ENTRY"
+fi
+printf -v DEV_OPERATOR_DIR_Q '%q' "$DEV_OPERATOR_DIR"
+DEFAULT_DEV_CMD="cd $DEV_OPERATOR_DIR_Q && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env ${DEV_BIND_OVERRIDE}PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR=1 PAPERCUSP_SYSTEM_HEALTH_SPAWN_SIDECAR=1 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT $DEV_HOST_COMMAND"
 # Test seam: lets the reaper mechanics be exercised with a harmless
 # long-running command instead of booting the real dev stack.
 DEV_CMD="${OPERATOR_DEV_CMD:-$DEFAULT_DEV_CMD}"
