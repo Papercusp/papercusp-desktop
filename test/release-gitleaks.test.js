@@ -122,6 +122,43 @@ test('known generated contexts pass only under their path-and-line allowlists', 
   assert.deepEqual(allowed.report, []);
 });
 
+test('Monaco generated contexts cover both shipped directory layouts and environment copies', () => {
+  const generated = generatedFixtures()['spa/monaco/vs/editor-TEST.js'];
+  const fixtures = Object.fromEntries([
+    'spa/monaco/vs/editor-TEST.js',
+    'spa/monaco/monaco/vs/editor-TEST.js',
+    'env-sidecars/staging/spa/monaco/vs/editor-TEST.js',
+    'env-sidecars/staging/spa/monaco/monaco/vs/editor-TEST.js',
+  ].map((file) => [file, generated]));
+
+  const baseline = scan(fixtures, { config: false });
+  assert.equal(baseline.status, 1);
+  assert.equal(new Set(baseline.report.map((finding) => finding.File)).size, 4,
+    'every shipped-layout fixture must exercise the credential detector');
+
+  const allowed = scan(fixtures);
+  assert.equal(allowed.status, 0, 'the nested shipped Monaco layout was not recognized');
+  assert.deepEqual(allowed.report, []);
+});
+
+test('nested Monaco exception still requires the exact path shape and generated line marker', () => {
+  const generated = generatedFixtures()['spa/monaco/vs/editor-TEST.js'];
+  const canary = ['A9f3Kx7L', 'm2Qp8Rz4', 'V6nC1wH7'].join('');
+  const fixtures = {
+    'spa/monaco/monaco/monaco/vs/editor-TEST.js': generated,
+    'spa/monaco/monaco/vs/unrelated-TEST.js': generated,
+    'unrelated/editor-TEST.js': generated,
+    'spa/monaco/monaco/vs/editor-TEST.js':
+      generated + '\nconst token = "' + canary + '";\n',
+  };
+  const result = scan(fixtures);
+  assert.equal(result.status, 1, 'unrelated paths or a separate raw-token line passed');
+  for (const relative of Object.keys(fixtures)) {
+    assert.ok(result.report.some((finding) => finding.File.endsWith(relative)),
+      'the path-and-line constraint missed its negative canary: ' + relative);
+  }
+});
+
 test('decoded BPE match allowlist is exact and remains path-constrained', () => {
   const generatedValue = ['N3y-9Aq2P1', 'rS7vX4cL'].join('');
   const known = Buffer.from('Authentication IFJhbms= ' + generatedValue, 'utf8').toString('base64');

@@ -64,12 +64,16 @@ regexes = [
 # The generated Monaco bundle has a stable semantic marker but a content hash
 # in its filename. Keep the path and line marker conjunctive so another file
 # containing a key-like value is never covered by this exception.
+# The shipped vendor tree also carries monaco/monaco/vs; environment-sidecar
+# copies preserve that layout. Admit that exact second shape, not arbitrary
+# nesting, while retaining the same generated NKeyMap line requirement.
 [[rules.allowlists]]
 description = "Monaco's generated NKeyMap data"
 condition = "AND"
 targetRules = ["generic-api-key"]
 paths = [
     '''(?:^|/)spa/monaco/vs/editor-[A-Za-z0-9_-]+\.js$''',
+    '''(?:^|/)spa/monaco/monaco/vs/editor-[A-Za-z0-9_-]+\.js$''',
 ]
 regexTarget = "line"
 regexes = [
