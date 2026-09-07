@@ -3,7 +3,10 @@
 # cargo spends time compiling it. A version string is not enough: compile a tiny
 # fixture with the exact ISCC binary used by the release, then require the exact
 # extractor selected for the audit to list AND extract its payload intact, then
-# reject a corrupted copy. Listing alone never exercises the checksum consumer.
+# reject corrupted payloads, invalid headers, and truncated slices. Also exercise
+# both legacy 32-bit header branches using copies of the following slices.
+# The fixture spans disks:
+# a single-file fixture never exercises the next-slice header reader.
 # An explicit override is
 # authoritative. Without one, Papercusp-managed pinned toolchains are tried before
 # PATH so an older distro/user binary cannot shadow a compatible maintained build.
@@ -103,13 +106,23 @@ innoextract_compat_preflight() (
     'Uninstallable=no' \
     'CreateAppDir=no' \
     'Compression=none' \
+    'DiskSpanning=yes' \
+    'DiskSliceSize=8388608' \
     'OutputDir=out' \
     'OutputBaseFilename=innoextract-compat-probe' \
     '' \
     '[Files]' \
     'Source: "probe-payload.txt"; DestDir: "{app}"' \
     > "$probe_iss"
-  printf 'inno 6.7 compatibility payload\n' > "$work/probe-payload.txt"
+  python3 - "$work/probe-payload.txt" <<'PY'
+import pathlib
+import sys
+
+size = 12 * 1024 * 1024
+prefix = b"Papercusp Inno spanned integrity control v2\n"
+payload = (prefix + bytes(range(256)) * (size // 256 + 1))[:size]
+pathlib.Path(sys.argv[1]).write_bytes(payload)
+PY
 
   probe_win="$(WINEPREFIX="$wine_prefix" winepath -w "$probe_iss" 2>"$work/winepath.log")" || {
     echo "ERROR: winepath could not map the Inno compatibility fixture" >&2
@@ -152,6 +165,8 @@ innoextract_compat_preflight() (
         >"$work/extract-${#seen[@]}.log" 2>&1 <<'PY'
 import importlib.util
 import pathlib
+import shutil
+import struct
 import subprocess
 import sys
 
@@ -169,27 +184,98 @@ actual = dest / "app/probe-payload.txt"
 if not actual.is_file() or actual.read_bytes() != expected:
     raise SystemExit("fixture extraction did not preserve the exact payload bytes")
 
-# Compression=none gives one literal payload occurrence. Flip its first byte:
-# the unchanged header/checksum must now reject the damaged archive.
-packed = fixture.read_bytes()
-if packed.count(expected) != 1:
+# Prove a next-slice transition actually occurred. A success from a single-file
+# fixture cannot attest this reader, even if it tests checksum failure correctly.
+slices = sorted(fixture.parent.glob(fixture.stem + "-*.bin"))
+if len(slices) < 2:
+    raise SystemExit("ISCC fixture did not produce multiple payload slices")
+
+# Only following-slice headers are converted, so the first chunk's metadata
+# offset remains untouched. These are explicit reader-branch controls, NOT a
+# claim that an old ISCC producer was run. Payload bytes/checksums stay identical.
+pieces = [fixture, *slices]
+for magic in (b"idska16\x1a", b"idska32\x1a"):
+    legacy_dir = work / ("legacy-" + magic[:7].decode() + "-" + sys.argv[4])
+    legacy_dir.mkdir()
+    for piece in pieces:
+        shutil.copyfile(piece, legacy_dir / piece.name)
+    for piece in slices[1:]:
+        packed = piece.read_bytes()
+        header_size = {b"idskb32\x1a": 16, b"idska32\x1a": 12,
+                       b"idska16\x1a": 12}.get(packed[:8])
+        if header_size is None:
+            raise SystemExit("unknown producer slice format in legacy control")
+        payload = packed[header_size:]
+        (legacy_dir / piece.name).write_bytes(
+            magic + struct.pack("<I", len(payload) + 12) + payload
+        )
+    legacy_dest = work / ("extract-" + legacy_dir.name)
+    ok, method = audit._expand_installer(str(legacy_dir / fixture.name), str(legacy_dest))
+    actual = legacy_dest / "app/probe-payload.txt"
+    if not ok or not actual.is_file() or actual.read_bytes() != expected:
+        raise SystemExit("extractor failed the legacy-slice-header control")
+
+# Keep the declared size and remove either part of the header or payload.
+# A truncated NEXT slice must fail, not silently contribute partial bytes.
+for suffix, length in (("header", 10), ("payload", slices[1].stat().st_size - 1)):
+    truncated_dir = work / ("truncated-" + suffix + "-" + sys.argv[4])
+    truncated_dir.mkdir()
+    for piece in pieces:
+        shutil.copyfile(piece, truncated_dir / piece.name)
+    with (truncated_dir / slices[1].name).open("r+b") as stream:
+        stream.truncate(length)
+    result = subprocess.run(
+        [audit._innoextract_command(), "-t", "-s", str(truncated_dir / fixture.name)],
+        capture_output=True, text=True, check=False, timeout=15,
+    )
+    if result.returncode == 0 or "slice size" not in (result.stdout + result.stderr).lower():
+        raise SystemExit("extractor failed the truncated-slice control")
+
+# Compression=none exposes the unique prefix even though the complete payload
+# crosses slices. Corrupt a COPY of the whole set; never change another
+# candidate's control inputs or an actual release artifact.
+marker = expected[:64]
+matches = []
+for piece in pieces:
+    packed = piece.read_bytes()
+    for _ in range(packed.count(marker)):
+        matches.append((piece, packed.index(marker)))
+if len(matches) != 1:
     raise SystemExit("cannot establish the corruption control's unique payload")
-at = packed.index(expected)
-corrupt = work / ("corrupt-" + sys.argv[4] + ".exe")
-corrupt.write_bytes(packed[:at] + bytes([packed[at] ^ 1]) + packed[at + 1:])
+corrupt_dir = work / ("corrupt-" + sys.argv[4])
+corrupt_dir.mkdir()
+for piece in pieces:
+    shutil.copyfile(piece, corrupt_dir / piece.name)
+piece, at = matches[0]
+corrupt_piece = corrupt_dir / piece.name
+packed = corrupt_piece.read_bytes()
+corrupt_piece.write_bytes(packed[:at] + bytes([packed[at] ^ 1]) + packed[at + 1:])
+corrupt = corrupt_dir / fixture.name
 result = subprocess.run(
     [audit._innoextract_command(), "-t", "-s", str(corrupt)],
-    capture_output=True, text=True, check=False,
+    capture_output=True, text=True, check=False, timeout=15,
 )
 if result.returncode == 0 or not audit._innoextract_integrity_warning(result):
     raise SystemExit("extractor failed the corrupted-payload integrity control")
+
+# A bounded lookup must reject unknown magic, not compare past the magic table.
+shutil.copyfile(piece, corrupt_piece)
+first_slice = corrupt_dir / slices[0].name
+packed = first_slice.read_bytes()
+first_slice.write_bytes(b"notinno!" + packed[8:])
+result = subprocess.run(
+    [audit._innoextract_command(), "-t", "-s", str(corrupt)],
+    capture_output=True, text=True, check=False, timeout=15,
+)
+if result.returncode == 0 or "bad slice magic" not in (result.stdout + result.stderr).lower():
+    raise SystemExit("extractor failed the invalid-slice-header control")
 PY
     then
       echo "WARN: rejecting Inno extractor that failed extraction/integrity controls: $extractor" >&2
       tail -40 "$work/extract-${#seen[@]}.log" >&2 || true
       continue
     fi
-    echo "  Inno extractor compatibility preflight passed (Inno 6.7 fixture; extraction + corruption control): $extractor" >&2
+    echo "  Inno extractor compatibility preflight passed (Inno 6.7 spanned fixture; extraction + legacy headers + truncation + corruption + bad-header controls): $extractor" >&2
     printf '%s\n' "$extractor"
     return 0
   done

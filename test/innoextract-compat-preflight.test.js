@@ -19,21 +19,21 @@ const helperPath = path.join(root, 'bin/lib/innoextract-compat-preflight.sh');
 const helper = fs.readFileSync(helperPath, 'utf8');
 
 test('maintained upstream checksum patch has well-formed hunk lengths', () => {
-  const lines = fs.readFileSync(
-    path.join(root, 'bin/lib/innoextract-verification-metadata.patch'), 'utf8',
-  ).trimEnd().split('\n');
-  let hunks = 0;
-  for (let i = 0; i < lines.length; i += 1) {
-    const header = /^@@ -\d+,(\d+) \+\d+,(\d+) @@/.exec(lines[i]);
-    if (!header) continue;
-    let end = i + 1;
-    while (end < lines.length && !/^(?:@@|--- a\/)/.test(lines[end])) end += 1;
-    const body = lines.slice(i + 1, end);
-    assert.equal(body.filter((line) => /^[ -]/.test(line)).length, Number(header[1]));
-    assert.equal(body.filter((line) => /^[ +]/.test(line)).length, Number(header[2]));
-    hunks += 1;
+  for (const name of ['innoextract-verification-metadata.patch', 'innoextract-disk-slice-header.patch']) {
+    const lines = fs.readFileSync(path.join(root, 'bin/lib', name), 'utf8').trimEnd().split('\n');
+    let hunks = 0;
+    for (let i = 0; i < lines.length; i += 1) {
+      const header = /^@@ -\d+,(\d+) \+\d+,(\d+) @@/.exec(lines[i]);
+      if (!header) continue;
+      let end = i + 1;
+      while (end < lines.length && !/^(?:@@|--- a\/)/.test(lines[end])) end += 1;
+      const body = lines.slice(i + 1, end);
+      assert.equal(body.filter((line) => /^[ -]/.test(line)).length, Number(header[1]));
+      assert.equal(body.filter((line) => /^[ +]/.test(line)).length, Number(header[2]));
+      hunks += 1;
+    }
+    assert.ok(hunks > 0, 'an empty patch is not a repair');
   }
-  assert.ok(hunks > 0, 'an empty patch is not a repair');
 });
 
 test('a sourced current Windows producer keeps frozen source paths but loads current helpers', (t) => {
@@ -113,6 +113,8 @@ test('the Inno compatibility preflight runs before the first cargo-xwin build', 
   assert.match(helper, /AppVersion=6\.7\.3/);
   assert.match(helper, /probe-payload\\\.txt/);
   assert.match(helper, /grep -qi 'probe-payload\\\.txt'/);
+  assert.match(helper, /DiskSpanning=yes/);
+  assert.match(helper, /DiskSliceSize=8388608/);
 });
 
 test('compatibility requires extraction, intact bytes, and corruption refusal', (t) => {
@@ -148,7 +150,19 @@ test('compatibility requires extraction, intact bytes, and corruption refusal', 
     [
       'printf "managed\\n" >> "$PAPERCUSP_TEST_CALL_LOG"',
       'if [[ "${1:-}" == "-l" ]]; then printf "probe-payload.txt\\n"; exit 0; fi',
-      'if [[ "${@: -1}" == */corrupt-*.exe ]]; then',
+      'fixture="${@: -1}"',
+      'if [[ "$fixture" == */legacy-*/*.exe && "${PAPERCUSP_TEST_EXTRACT_MODE:-}" == reject-legacy ]]; then',
+      '  echo "bad slice magic number" >&2; exit 1',
+      'fi',
+      'if [[ "$fixture" == */truncated-*/*.exe ]]; then',
+      '  [[ "${PAPERCUSP_TEST_EXTRACT_MODE:-}" == ignore-truncation ]] && exit 0',
+      '  echo "bad slice size" >&2; exit 1',
+      'fi',
+      'if [[ "$fixture" == */corrupt-*/*.exe ]]; then',
+      '  if [[ "$(head -c 8 "${fixture%.exe}-1.bin")" == "notinno!" ]]; then',
+      '    [[ "${PAPERCUSP_TEST_EXTRACT_MODE:-}" == ignore-header ]] && exit 0',
+      '    echo "bad slice magic number" >&2; exit 1',
+      '  fi',
       '  [[ "${PAPERCUSP_TEST_EXTRACT_MODE:-}" == ignore-corruption ]] && exit 0',
       '  printf "Checksum mismatch: expected original, got corrupt\\n" >&2; exit 1',
       'fi',
@@ -157,7 +171,7 @@ test('compatibility requires extraction, intact bytes, and corruption refusal', 
       '  if [[ "$1" == "--output-dir" ]]; then out="$2"; shift 2; else shift; fi',
       'done',
       'mkdir -p "$out/app"',
-      'printf "inno 6.7 compatibility payload\\n" > "$out/app/probe-payload.txt"',
+      'cp "$(dirname "$fixture")/../probe-payload.txt" "$out/app/probe-payload.txt"',
       'case "${PAPERCUSP_TEST_EXTRACT_MODE:-}" in',
       '  warning) printf "Could not read back output checksum for multi-part file\\n" >&2 ;;',
       '  wrong-bytes) printf "wrong bytes\\n" > "$out/app/probe-payload.txt" ;;',
@@ -174,7 +188,16 @@ test('compatibility requires extraction, intact bytes, and corruption refusal', 
     path.join(fakeBin, 'wine'),
     'probe_iss="${@: -1}"\n' +
       'mkdir -p "$(dirname "$probe_iss")/out"\n' +
-      'cp "$(dirname "$probe_iss")/probe-payload.txt" "$(dirname "$probe_iss")/out/innoextract-compat-probe.exe"',
+      'base="$(dirname "$probe_iss")"\n' +
+      'printf "fixture stub\\n" > "$base/out/innoextract-compat-probe.exe"\n' +
+      'python3 - "$base" <<\'PY\'\n' +
+      'import pathlib, struct, sys\n' +
+      'base = pathlib.Path(sys.argv[1])\n' +
+      'payload = (base / "probe-payload.txt").read_bytes()\n' +
+      'for i, part in enumerate((payload[:6291456], payload[6291456:]), 1):\n' +
+      '    (base / "out" / f"innoextract-compat-probe-{i}.bin").write_bytes(\n' +
+      '        b"idskb32\\x1a" + struct.pack("<Q", len(part) + 16) + part)\n' +
+      'PY',
   );
   writeExecutable(
     path.join(fakeBin, 'xvfb-run'),
@@ -206,13 +229,15 @@ test('compatibility requires extraction, intact bytes, and corruption refusal', 
   assert.equal(output.trim(), managed, 'resolver must return the passing managed absolute path');
   assert.equal(
     fs.readFileSync(calls, 'utf8'),
-    'managed\nmanaged\nmanaged\n',
+    'managed\n'.repeat(8),
     'the stale PATH binary must not run once a managed candidate passes the real-format probe',
   );
 
-  // All three consumers can list successfully. Neither exit-zero warnings,
-  // plausible but wrong bytes, nor ignored corruption may pass the preflight.
-  for (const mode of ['warning', 'wrong-bytes', 'ignore-corruption']) {
+  // Listing is insufficient: exercise each refusal and compatibility obligation.
+  for (const mode of [
+    'warning', 'wrong-bytes', 'reject-legacy', 'ignore-truncation',
+    'ignore-corruption', 'ignore-header',
+  ]) {
     assert.throws(() => execFileSync(
       'bash',
       ['-c', 'source "$1"; innoextract_compat_preflight "$4" "$2" "$3"',
