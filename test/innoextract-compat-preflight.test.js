@@ -18,6 +18,24 @@ const audit = fs.readFileSync(path.join(root, 'bin/audit-release-bundle.py'), 'u
 const helperPath = path.join(root, 'bin/lib/innoextract-compat-preflight.sh');
 const helper = fs.readFileSync(helperPath, 'utf8');
 
+test('maintained upstream checksum patch has well-formed hunk lengths', () => {
+  const lines = fs.readFileSync(
+    path.join(root, 'bin/lib/innoextract-verification-metadata.patch'), 'utf8',
+  ).trimEnd().split('\n');
+  let hunks = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const header = /^@@ -\d+,(\d+) \+\d+,(\d+) @@/.exec(lines[i]);
+    if (!header) continue;
+    let end = i + 1;
+    while (end < lines.length && !/^(?:@@|--- a\/)/.test(lines[end])) end += 1;
+    const body = lines.slice(i + 1, end);
+    assert.equal(body.filter((line) => /^[ -]/.test(line)).length, Number(header[1]));
+    assert.equal(body.filter((line) => /^[ +]/.test(line)).length, Number(header[2]));
+    hunks += 1;
+  }
+  assert.ok(hunks > 0, 'an empty patch is not a repair');
+});
+
 test('a sourced current Windows producer keeps frozen source paths but loads current helpers', (t) => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-win-producer-routing-'));
   t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
@@ -97,7 +115,7 @@ test('the Inno compatibility preflight runs before the first cargo-xwin build', 
   assert.match(helper, /grep -qi 'probe-payload\\\.txt'/);
 });
 
-test('a compatible Papercusp-managed extractor wins over a stale PATH binary', (t) => {
+test('compatibility requires extraction, intact bytes, and corruption refusal', (t) => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-innoextract-select-'));
   t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
@@ -127,9 +145,25 @@ test('a compatible Papercusp-managed extractor wins over a stale PATH binary', (
   };
   writeExecutable(
     managed,
-    'printf "managed\\n" >> "$PAPERCUSP_TEST_CALL_LOG"\n' +
-      '[[ "${1:-}" == "-l" ]]\n' +
-      'printf "probe-payload.txt\\n"',
+    [
+      'printf "managed\\n" >> "$PAPERCUSP_TEST_CALL_LOG"',
+      'if [[ "${1:-}" == "-l" ]]; then printf "probe-payload.txt\\n"; exit 0; fi',
+      'if [[ "${@: -1}" == */corrupt-*.exe ]]; then',
+      '  [[ "${PAPERCUSP_TEST_EXTRACT_MODE:-}" == ignore-corruption ]] && exit 0',
+      '  printf "Checksum mismatch: expected original, got corrupt\\n" >&2; exit 1',
+      'fi',
+      'out=""',
+      'while (($#)); do',
+      '  if [[ "$1" == "--output-dir" ]]; then out="$2"; shift 2; else shift; fi',
+      'done',
+      'mkdir -p "$out/app"',
+      'printf "inno 6.7 compatibility payload\\n" > "$out/app/probe-payload.txt"',
+      'case "${PAPERCUSP_TEST_EXTRACT_MODE:-}" in',
+      '  warning) printf "Could not read back output checksum for multi-part file\\n" >&2 ;;',
+      '  wrong-bytes) printf "wrong bytes\\n" > "$out/app/probe-payload.txt" ;;',
+      'esac',
+      'exit 0',
+    ].join('\n'),
   );
   writeExecutable(
     path.join(fakeBin, 'innoextract'),
@@ -140,7 +174,7 @@ test('a compatible Papercusp-managed extractor wins over a stale PATH binary', (
     path.join(fakeBin, 'wine'),
     'probe_iss="${@: -1}"\n' +
       'mkdir -p "$(dirname "$probe_iss")/out"\n' +
-      'printf "fixture\\n" > "$(dirname "$probe_iss")/out/innoextract-compat-probe.exe"',
+      'cp "$(dirname "$probe_iss")/probe-payload.txt" "$(dirname "$probe_iss")/out/innoextract-compat-probe.exe"',
   );
   writeExecutable(
     path.join(fakeBin, 'xvfb-run'),
@@ -172,9 +206,25 @@ test('a compatible Papercusp-managed extractor wins over a stale PATH binary', (
   assert.equal(output.trim(), managed, 'resolver must return the passing managed absolute path');
   assert.equal(
     fs.readFileSync(calls, 'utf8'),
-    'managed\n',
+    'managed\nmanaged\nmanaged\n',
     'the stale PATH binary must not run once a managed candidate passes the real-format probe',
   );
+
+  // All three consumers can list successfully. Neither exit-zero warnings,
+  // plausible but wrong bytes, nor ignored corruption may pass the preflight.
+  for (const mode of ['warning', 'wrong-bytes', 'ignore-corruption']) {
+    assert.throws(() => execFileSync(
+      'bash',
+      ['-c', 'source "$1"; innoextract_compat_preflight "$4" "$2" "$3"',
+        'bash', helperPath, winePrefix, iscc, managed],
+      { encoding: 'utf8', env: { ...env, PAPERCUSP_TEST_EXTRACT_MODE: mode },
+        stdio: ['ignore', 'pipe', 'pipe'] },
+    ), (error) => {
+      assert.notEqual(error.status, 0);
+      assert.match(error.stderr, /failed extraction\/integrity controls/);
+      return true;
+    }, `must reject ${mode} even though the fixture listing passed`);
+  }
 });
 
 test('audit-release-bundle.py uses PAPERCUSP_INNOEXTRACT for executable expansion', () => {
@@ -188,6 +238,7 @@ test('audit-release-bundle.py uses PAPERCUSP_INNOEXTRACT for executable expansio
     [
       '#!/usr/bin/env bash',
       'set -euo pipefail',
+      '[[ " $* " == *" -t "* ]] || { echo "missing integrity test flag" >&2; exit 9; }',
       'out=""',
       'while (($#)); do',
       '  if [[ "$1" == "--output-dir" ]]; then out="$2"; shift 2; else shift; fi',
