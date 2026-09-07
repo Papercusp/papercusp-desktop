@@ -29,7 +29,9 @@
 #   PAPERCUSP_BUILD_SHA / PAPERCUSP_BUILD_VERSION  — build provenance (baked in)
 #   TAURI_SIGNING_PRIVATE_KEY / _PASSWORD          — sign the AppImage for the updater
 set -uo pipefail   # deliberately NOT -e: the tauri appimage step is EXPECTED to fail
-DESK="$(cd "$(dirname "$0")/.." && pwd)"
+ORCHESTRATOR_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DESK="${PAPERCUSP_DESKTOP_TARGET_ROOT:-$(cd "$ORCHESTRATOR_HERE/.." && pwd)}"
+DESK="$(cd "$DESK" && pwd)"
 cd "$DESK"
 
 # ── OWNER-NAME PREFLIGHT (EI-21227487662710416). The final AppImage identity
@@ -38,7 +40,7 @@ cd "$DESK"
 # invocation fails at the boundary that requires the input rather than after
 # minutes of runtime-closure work. Keep the policy in the shared audit helper;
 # the value is runtime-only and is never written into the tree.
-AUDIT_PY="$DESK/bin/audit-release-bundle.py"
+AUDIT_PY="$ORCHESTRATOR_HERE/audit-release-bundle.py"
 python3 "$AUDIT_PY" --owner-preflight \
   || { echo "ERROR: owner-name preflight failed — refusing to start AppImage build" >&2; exit 2; }
 
@@ -46,7 +48,7 @@ python3 "$AUDIT_PY" --owner-preflight \
 # direct entrypoint is also invoked outside release-local.sh, so it must establish
 # the same per-instance isolation itself (EI-217146).
 # shellcheck source=lib/claim-target-dir.sh
-. "$DESK/bin/lib/claim-target-dir.sh" || {
+. "$ORCHESTRATOR_HERE/lib/claim-target-dir.sh" || {
   echo "FATAL: cannot source bin/lib/claim-target-dir.sh — refusing to build without target-dir isolation" >&2
   exit 1
 }
@@ -55,7 +57,7 @@ CT="$(cd src-tauri && cargo metadata --no-deps --format-version 1 2>/dev/null \
         | python3 -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null)"
 [ -n "$CT" ] || CT="$HOME/.cargo-target"
 # shellcheck source=lib/release-artifacts.sh
-. "$DESK/bin/lib/release-artifacts.sh" || {
+. "$ORCHESTRATOR_HERE/lib/release-artifacts.sh" || {
   echo "FATAL: cannot source bin/lib/release-artifacts.sh — refusing to build without release-retention guards" >&2
   exit 1
 }
@@ -83,7 +85,7 @@ DESKTOP_CHANNEL_BUILD_CFG=()
 DESKTOP_CHANNEL_BUILD_ENV=()
 if [ -n "${PAPERCUSP_RELEASE_CHANNEL:-}" ]; then
   # shellcheck source=lib/gen-latest-manifest.sh
-  . "$DESK/bin/lib/gen-latest-manifest.sh" || {
+  . "$ORCHESTRATOR_HERE/lib/gen-latest-manifest.sh" || {
     echo "FATAL: cannot source bin/lib/gen-latest-manifest.sh — refusing to build a channel bundle without its identity" >&2; exit 1; }
   desktop_channel_identity "$PAPERCUSP_RELEASE_CHANNEL" || {
     echo "FATAL: unknown channel '$PAPERCUSP_RELEASE_CHANNEL' — refusing to build" >&2; exit 1; }
@@ -127,7 +129,7 @@ rm -rf "$CT/release/sidecar" "$CT/release/seed" "$CT/release/resources" 2>/dev/n
 # point; the helper is a no-op when a parent already exported a remap, so the release
 # path is unchanged and its cargo cache is not busted.
 # shellcheck source=lib/rust-path-remap.sh
-. "$DESK/bin/lib/rust-path-remap.sh" || {
+. "$ORCHESTRATOR_HERE/lib/rust-path-remap.sh" || {
   echo "FATAL: cannot source bin/lib/rust-path-remap.sh — refusing to build a bundle that would embed build-box paths" >&2; exit 1; }
 papercusp_export_rust_path_remap
 # Cargo drops target.*.rustflags when RUSTFLAGS is present; carry the release
@@ -367,6 +369,8 @@ copy_gstreamer_plugin_closure() {
   local -a _gst_queue=()
   local _gst_current _gst_real _gst_needed _gst_need _gst_candidate _gst_candidate_real
   local _gst_local _gst_host _gst_source_real _gst_filename _gst_target _gst_link
+  local _gst_origin _gst_runpaths _gst_runpath
+  local -a _gst_runpath_list=()
   local _gst_processed=0
   local _gst_count=0
   IFS=: read -r -a _gst_host_dir_list <<< "$_gst_host_dirs"
@@ -420,8 +424,33 @@ copy_gstreamer_plugin_closure() {
         continue
       fi
 
+      # Honor the current ELF's own DT_RUNPATH/DT_RPATH before falling back to
+      # the generic host directories. Some distro libraries keep private
+      # dependencies outside ldconfig's cache (Ubuntu's libpulse.so uses
+      # /usr/lib/x86_64-linux-gnu/pulseaudio for libpulsecommon), and the
+      # dynamic loader resolves those paths even though a flat host-dir lookup
+      # cannot. Resolve $ORIGIN without eval so an ELF cannot inject shell.
       _gst_host=""
+      _gst_origin="$(dirname "$_gst_real")"
+      _gst_runpaths="$("$_gst_objdump" -p "$_gst_real" 2>/dev/null \
+        | awk '$1 == "RUNPATH" || $1 == "RPATH" { print $2 }')"
+      while IFS= read -r _gst_runpath; do
+        [ -n "$_gst_runpath" ] || continue
+        IFS=: read -r -a _gst_runpath_list <<< "$_gst_runpath"
+        for _gst_candidate in "${_gst_runpath_list[@]}"; do
+          [ -n "$_gst_candidate" ] || continue
+          _gst_candidate="${_gst_candidate//\$\{ORIGIN\}/$_gst_origin}"
+          _gst_candidate="${_gst_candidate//\$ORIGIN/$_gst_origin}"
+          if [ -e "$_gst_candidate/$_gst_need" ]; then
+            _gst_host="$_gst_candidate/$_gst_need"
+            break
+          fi
+        done
+        [ -n "$_gst_host" ] && break
+      done <<< "$_gst_runpaths"
+
       for _gst_candidate in "${_gst_host_dir_list[@]}"; do
+        [ -z "$_gst_host" ] || break
         [ -n "$_gst_candidate" ] || continue
         if [ -e "$_gst_candidate/$_gst_need" ]; then
           _gst_host="$_gst_candidate/$_gst_need"

@@ -31,12 +31,14 @@ function commandPath(name) {
 const CC = commandPath('cc') || commandPath('gcc');
 const OBJDUMP = commandPath('objdump');
 
-function compileFixtureTree() {
+function compileFixtureTree({ privateRunpath = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'appimage-gst-closure-'));
   const host = path.join(root, 'host-libs');
+  const privateHost = path.join(root, 'private-libs');
   const source = path.join(root, 'plugins');
   const appdir = path.join(root, 'appdir');
   fs.mkdirSync(host, { recursive: true });
+  fs.mkdirSync(privateHost, { recursive: true });
   fs.mkdirSync(source, { recursive: true });
   fs.mkdirSync(path.join(appdir, 'usr', 'lib'), { recursive: true });
 
@@ -52,11 +54,11 @@ function compileFixtureTree() {
     assert.equal(result.status, 0, `fixture compile failed: ${result.stdout}${result.stderr}`);
   };
   const leafSource = write('leaf.c', 'const char *gst_fixture_leaf(void) { return "leaf"; }\n');
-  const depSource = write(
-    'dep.c',
-    'extern const char *gst_fixture_leaf(void);\n' +
-      'const char *gst_fixture_dep(void) { return gst_fixture_leaf(); }\n',
-  );
+  const depSource = write('dep.c', privateRunpath
+    ? 'extern const char *gst_fixture_private(void);\n' +
+      'const char *gst_fixture_dep(void) { return gst_fixture_private(); }\n'
+    : 'extern const char *gst_fixture_leaf(void);\n' +
+      'const char *gst_fixture_dep(void) { return gst_fixture_leaf(); }\n');
   const pluginSource = write(
     'plugin.c',
     'extern const char *gst_fixture_dep(void);\n' +
@@ -66,13 +68,34 @@ function compileFixtureTree() {
   const dep = path.join(host, 'libgstfixturedep.so.1.0');
   compile(leaf, leafSource, ['-Wl,-soname,libgstfixtureleaf.so.1']);
   fs.symlinkSync('libgstfixtureleaf.so.1.0', path.join(host, 'libgstfixtureleaf.so.1'));
-  compile(dep, depSource, [
-    '-Wl,-soname,libgstfixturedep.so.1',
-    '-L',
-    host,
-    '-Wl,-rpath,$ORIGIN',
-    '-Wl,-l:libgstfixtureleaf.so.1',
-  ]);
+  let privateLeaf = '';
+  if (privateRunpath) {
+    const privateSource = write(
+      'private.c',
+      'const char *gst_fixture_private(void) { return "private"; }\n',
+    );
+    privateLeaf = path.join(privateHost, 'libgstfixtureprivate.so.1.0');
+    compile(privateLeaf, privateSource, ['-Wl,-soname,libgstfixtureprivate.so.1']);
+    fs.symlinkSync(
+      'libgstfixtureprivate.so.1.0',
+      path.join(privateHost, 'libgstfixtureprivate.so.1'),
+    );
+    compile(dep, depSource, [
+      '-Wl,-soname,libgstfixturedep.so.1',
+      '-L',
+      privateHost,
+      `-Wl,-rpath,${privateHost}`,
+      '-Wl,-l:libgstfixtureprivate.so.1',
+    ]);
+  } else {
+    compile(dep, depSource, [
+      '-Wl,-soname,libgstfixturedep.so.1',
+      '-L',
+      host,
+      '-Wl,-rpath,$ORIGIN',
+      '-Wl,-l:libgstfixtureleaf.so.1',
+    ]);
+  }
   fs.symlinkSync('libgstfixturedep.so.1.0', path.join(host, 'libgstfixturedep.so.1'));
   compile(path.join(source, 'libgstapp.so'), pluginSource, [
     '-Wl,-soname,libgstapp.so',
@@ -88,7 +111,16 @@ function compileFixtureTree() {
   fs.copyFileSync(trueBinary, scanner);
   fs.chmodSync(scanner, 0o755);
 
-  return { root, host, source, appdir, scanner, closure: extractClosureBlock() };
+  return {
+    root,
+    host,
+    privateHost,
+    privateLeaf,
+    source,
+    appdir,
+    scanner,
+    closure: extractClosureBlock(),
+  };
 }
 
 function runClosureFixture(fixture, hostDirs = fixture.host) {
@@ -140,6 +172,21 @@ test('the closure walker is wired into the build and walks DT_NEEDED transitivel
   }
 });
 
+test('the closure walker honors a dependency DT_RUNPATH outside the flat host directories', { skip: !CC || !OBJDUMP }, () => {
+  const fixture = compileFixtureTree({ privateRunpath: true });
+  try {
+    const result = runClosureFixture(fixture);
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.ok(
+      fs.existsSync(path.join(fixture.appdir, 'usr', 'lib', 'libgstfixtureprivate.so.1')),
+      'the private DT_RUNPATH dependency must be copied into the AppDir',
+    );
+    assert.match(result.stdout, /GStreamer plugin ELF closure verified/);
+  } finally {
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('the closure guard fails closed when a plugin dependency cannot resolve', { skip: !CC || !OBJDUMP }, () => {
   const fixture = compileFixtureTree();
   const missingDir = path.join(fixture.root, 'no-such-host-libs');
@@ -165,6 +212,7 @@ test('the GStreamer guard requires an ELF closure walker and a fail-closed call 
   assert.match(CODE, /objdump.*required to resolve the GStreamer plugin ELF closure/);
   assert.match(CODE, /copy_gstreamer_plugin_closure \|\| exit 1/);
   assert.match(CODE, /PAPERCUSP_GSTREAMER_LIBRARY_DIRS/);
+  assert.match(CODE, /RUNPATH.*RPATH/);
 });
 
 test('AppRun directs GStreamer to the bundled plugin and scanner paths', () => {
