@@ -82,7 +82,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 SRC_TAURI="$ROOT/src-tauri"
 SOURCE_ROOT="$ROOT"
+SUPERPROJECT_ROOT="$(cd "$SOURCE_ROOT/.." && pwd)"
 OUTPUT_SRC_TAURI="$SRC_TAURI"
+BUILD_CONTAINER=""
 BUILD_ROOT=""
 BUILD_WORKTREE=0
 
@@ -272,6 +274,7 @@ cleanup() {
   elif [[ -n "$BUILD_ROOT" && -d "$BUILD_ROOT" ]]; then
     rm -rf -- "$BUILD_ROOT"
   fi
+  [[ -n "$BUILD_CONTAINER" && -d "$BUILD_CONTAINER" ]] && rm -rf -- "$BUILD_CONTAINER"
   exit "$status"
 }
 trap cleanup EXIT
@@ -350,7 +353,8 @@ else
   export PAPERCUSP_BUILD_SHA="$BUILD_COMMIT_SHORT"
 fi
 
-BUILD_ROOT="$(mktemp -d /tmp/papercusp-win-cross-source-XXXXXX)"
+BUILD_CONTAINER="$(mktemp -d /tmp/papercusp-win-cross-source-XXXXXX)"
+BUILD_ROOT="$BUILD_CONTAINER/papercusp-desktop"
 if ! git -C "$SOURCE_ROOT" worktree add --detach "$BUILD_ROOT" "$BUILD_COMMIT_SHA" >/dev/null 2>&1; then
   fail "could not create the isolated Windows build source at $BUILD_ROOT"
 fi
@@ -369,9 +373,29 @@ copy_snapshot_input() {
   cp -a --reflink=auto -- "$source" "$dest"
 }
 
+# custom_protocol.rs consumes this superproject-owned policy at compile time via
+# ../../../libs from src-tauri/src. The immutable boundary therefore includes
+# more than the papercusp-desktop repository: stage the exact committed policy
+# blob beside the private worktree so the relative include resolves without
+# reading mutable canonical-tree bytes.
+WINDOWS_CSP_POLICY_REL="libs/generic/desktop-ipc/src/csp-policy.json"
+copy_superproject_snapshot_blob() {
+  local rel="$1" dest="$BUILD_CONTAINER/$1" expected_blob actual_blob
+  expected_blob="$(git -C "$SUPERPROJECT_ROOT" rev-parse "HEAD:$rel" 2>/dev/null || true)"
+  [[ -n "$expected_blob" ]] \
+    || fail "required Windows superproject input is not tracked at HEAD: $SUPERPROJECT_ROOT/$rel"
+  mkdir -p -- "$(dirname "$dest")"
+  git -C "$SUPERPROJECT_ROOT" show "HEAD:$rel" > "$dest" \
+    || fail "could not materialize frozen Windows superproject input: $rel"
+  actual_blob="$(git hash-object "$dest" 2>/dev/null || true)"
+  [[ "$actual_blob" == "$expected_blob" ]] \
+    || fail "frozen Windows superproject input hash mismatch: $rel"
+}
+
 for _release_input in package.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json; do
   copy_snapshot_input "$_release_input"
 done
+copy_superproject_snapshot_blob "$WINDOWS_CSP_POLICY_REL"
 if [[ " $ROLES " == *" server "* ]]; then
   for _generated_input in src-tauri/sidecar src-tauri/env-sidecars src-tauri/seed src-tauri/resources; do
     copy_snapshot_input "$_generated_input"

@@ -10,6 +10,7 @@ const { test } = require('node:test');
 const bin = path.join(__dirname, '..', 'bin');
 const release = fs.readFileSync(process.env.PROBE_RELEASE_LOCAL || path.join(bin, 'release-local.sh'), 'utf8');
 const sidecar = fs.readFileSync(path.join(bin, 'build-desktop-sidecar.sh'), 'utf8');
+const windows = fs.readFileSync(path.join(bin, 'build-windows-cross.sh'), 'utf8');
 
 function section(text, start, end) {
   const from = text.indexOf(start);
@@ -29,6 +30,34 @@ test('mac leg asserts the freshly built Darwin sidecar, not the Linux hash', () 
   assert.match(calls.mac, /export PAPERCUSP_EXPECTED_SERVE_SHA=\"\$mac_expected_serve_sha\"/);
   assert.match(release, /PAPERCUSP_EXPECTED_SERVE_SHA=\$mac_expected_serve_sha/);
 });
+
+test('Windows exact-source salvage runs current producer logic against the frozen target root', () => {
+  assert.match(release, /WIN_PRODUCER=\"\$ORCHESTRATOR_HERE\/build-windows-cross\.sh\"/);
+  assert.match(release, /WIN_TARGET_ENTRYPOINT=\"\$ROOT\/bin\/build-windows-cross\.sh\"/);
+  assert.match(
+    release,
+    /bash -c 'source \"\$1\"' \"\$WIN_TARGET_ENTRYPOINT\" \"\$WIN_PRODUCER\"/,
+  );
+});
+
+test('Windows immutable source contains the superproject CSP policy at Rust include_str path', () => {
+  const worktreeDir = windows.match(/BUILD_ROOT=\"\$BUILD_CONTAINER\/([^\"]+)\"/)?.[1];
+  const policyRel = windows.match(/WINDOWS_CSP_POLICY_REL=\"([^\"]+)\"/)?.[1];
+  assert.equal(worktreeDir, 'papercusp-desktop');
+  assert.equal(policyRel, 'libs/generic/desktop-ipc/src/csp-policy.json');
+  assert.match(windows, /copy_superproject_snapshot_blob \"\$WINDOWS_CSP_POLICY_REL\"/);
+
+  const container = path.join(os.tmpdir(), 'papercusp-win-cross-source-fixture');
+  const compileTimePath = path.resolve(
+    container,
+    worktreeDir,
+    'src-tauri',
+    'src',
+    '../../../libs/generic/desktop-ipc/src/csp-policy.json',
+  );
+  assert.equal(compileTimePath, path.join(container, policyRel));
+});
+
 // Exercise the producer's real refusal, without compiling or altering the live tree.
 const headGuard = section(sidecar, '  _provenance_current_head=', '  unset _provenance_current_head\nfi\n');
 
