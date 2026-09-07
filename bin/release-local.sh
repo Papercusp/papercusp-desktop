@@ -1164,6 +1164,15 @@ export PAPERCUSP_SIDECAR_MIN_EPOCH_SEC="$(date +%s)"
 # source.tar.zst audit structurally cannot be — it never sees the sidecar's
 # docs-qa copies). Prune runs regardless; this flag makes the scan a HARD gate.
 export PAPERCUSP_RELEASE_AUDIT=1
+# D-186 / EI-21904084277182116: a release cut never consumes the immutable
+# dependency generation produced by npm-install-safe. build-desktop-sidecar.sh
+# defaults to the source-rich dogfood profile here, so its vm-release branch
+# cannot supply this invariant for us. Declare it at the release orchestrator
+# before invoking the target-tree producer — especially important for an
+# exact-source retry, where $ROOT names the frozen target while this current
+# orchestration owns the retry policy. Keep an explicit opt-in available for a
+# diagnostic cut that genuinely needs to exercise generation publication.
+export PAPERCUSP_SKIP_DEP_GENERATION="${PAPERCUSP_SKIP_DEP_GENERATION:-1}"
 # The sidecar packages the superproject, while the installer provenance above
 # names the desktop submodule. Keep the sidecar's cut-start identity in the
 # same repository as its source-drift check; BUILD_SHA stays the desktop label.

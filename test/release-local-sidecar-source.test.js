@@ -46,6 +46,15 @@ test('Linux AppImage exact-source salvage runs current producer logic against th
   assert.match(release, /bash "\$APPIMAGE_PRODUCER"/);
 });
 
+test('release sidecar skips unused dependency generation before invoking the frozen target producer', () => {
+  const skip =
+    'export PAPERCUSP_SKIP_DEP_GENERATION="${PAPERCUSP_SKIP_DEP_GENERATION:-1}"';
+  const skipAt = calls.linux.indexOf(skip);
+  const sidecarAt = calls.linux.indexOf('bash "$ROOT/bin/build-desktop-sidecar.sh"');
+  assert.ok(skipAt >= 0, 'release-local must declare the D-186 dependency-generation skip');
+  assert.ok(sidecarAt > skipAt, 'the skip must reach the target sidecar before it starts');
+});
+
 test('Windows immutable source contains the superproject CSP policy at Rust include_str path', () => {
   const worktreeDir = windows.match(/BUILD_ROOT=\"\$BUILD_CONTAINER\/([^\"]+)\"/)?.[1];
   const policyRel = windows.match(/WINDOWS_CSP_POLICY_REL=\"([^\"]+)\"/)?.[1];
@@ -246,12 +255,15 @@ for (const platform of Object.keys(calls)) {
           'set -euo pipefail',
           headGuard,
           'if [[ -n "${PAPERCUSP_SIDECAR_OUT:-}" ]]; then mkdir -p "$PAPERCUSP_SIDECAR_OUT"; printf "fixture\\n" > "$PAPERCUSP_SIDECAR_OUT/serve.mjs"; fi',
-          'printf "HEAD=%s DIRTY=%s BUILD=%s TARGET=%s\\n" "$PROVENANCE_SOURCE_GIT_HEAD" "$PROVENANCE_SOURCE_GIT_DIRTY" "$PAPERCUSP_BUILD_SHA" "${TARGET_OS:-linux}"',
+          'printf "HEAD=%s DIRTY=%s BUILD=%s TARGET=%s SKIP_DEP_GENERATION=%s\\n" "$PROVENANCE_SOURCE_GIT_HEAD" "$PROVENANCE_SOURCE_GIT_DIRTY" "$PAPERCUSP_BUILD_SHA" "${TARGET_OS:-linux}" "${PAPERCUSP_SKIP_DEP_GENERATION:-}"',
         ].join('\n'));
         const result = spawnSync('bash', ['-c', 'set -euo pipefail\nPC_NICE=()\n' + calls[platform]], {
           encoding: 'utf8',
           env: {
             ...process.env,
+            // calls.mac is an isolated later section of release-local.sh. In the
+            // real script it inherits the global export from calls.linux above.
+            ...(platform === 'mac' ? { PAPERCUSP_SKIP_DEP_GENERATION: '1' } : {}),
             ROOT: desktop,
             REPO_ROOT: workspace,
             EXPECTED_SOURCE_SHA: expected,
@@ -268,7 +280,12 @@ for (const platform of Object.keys(calls)) {
           assert.match(result.stderr, /source HEAD moved during build/);
         } else {
           assert.equal(result.status, 0, result.stderr);
-          assert.match(result.stdout, new RegExp(`HEAD=${expected} DIRTY=false BUILD=${desktopHead.slice(0, 8)} TARGET=${platform === 'mac' ? 'darwin' : 'linux'}`));
+          assert.match(
+            result.stdout,
+            new RegExp(
+              `HEAD=${expected} DIRTY=false BUILD=${desktopHead.slice(0, 8)} TARGET=${platform === 'mac' ? 'darwin' : 'linux'} SKIP_DEP_GENERATION=1`,
+            ),
+          );
         }
       } finally {
         fs.rmSync(temp, { recursive: true, force: true });
