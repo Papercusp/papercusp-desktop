@@ -342,6 +342,9 @@ BUILD_COMMIT_SHA="$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
 BUILD_COMMIT_SHORT="$(git -C "$SOURCE_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
 [[ -n "$BUILD_COMMIT_SHA" && -n "$BUILD_COMMIT_SHORT" ]] \
   || fail "could not resolve the Windows build source commit from $SOURCE_ROOT"
+BUILD_SUPERPROJECT_COMMIT_SHA="$(git -C "$SUPERPROJECT_ROOT" rev-parse --verify "${PAPERCUSP_EXPECTED_SOURCE_SHA:-HEAD}^{commit}" 2>/dev/null || true)"
+[[ -n "$BUILD_SUPERPROJECT_COMMIT_SHA" ]] \
+  || fail "could not resolve the Windows superproject source commit from $SUPERPROJECT_ROOT"
 
 if [[ -n "${PAPERCUSP_BUILD_SHA:-}" ]]; then
   _build_sha_label="${PAPERCUSP_BUILD_SHA%-dirty}"
@@ -381,13 +384,35 @@ copy_snapshot_input() {
 WINDOWS_CSP_POLICY_REL="libs/generic/desktop-ipc/src/csp-policy.json"
 copy_superproject_snapshot_blob() {
   local rel="$1" dest="$BUILD_CONTAINER/$1" expected_blob actual_blob
-  expected_blob="$(git -C "$SUPERPROJECT_ROOT" rev-parse "HEAD:$rel" 2>/dev/null || true)"
-  [[ -n "$expected_blob" ]] \
-    || fail "required Windows superproject input is not tracked at HEAD: $SUPERPROJECT_ROOT/$rel"
+  local source_repo="$SUPERPROJECT_ROOT" source_commit="$BUILD_SUPERPROJECT_COMMIT_SHA"
+  local source_path="" component tree_entry entry_mode entry_type entry_path
+  local -a components
+  IFS=/ read -r -a components <<< "$rel"
+  for component in "${components[@]}"; do
+    source_path="${source_path:+$source_path/}$component"
+    tree_entry="$(git -C "$source_repo" --literal-pathspecs ls-tree "$source_commit" -- "$source_path")" \
+      || fail "could not resolve required Windows superproject input: $rel"
+    read -r entry_mode entry_type expected_blob entry_path <<< "$tree_entry"
+    [[ -n "$expected_blob" ]] \
+      || fail "required Windows superproject input is not tracked at $source_commit: $rel"
+    if [[ "$entry_mode" == 160000 && "$entry_type" == commit ]]; then
+      source_repo="$source_repo/$source_path"
+      source_commit="$expected_blob"
+      source_path=""
+      [[ -e "$source_repo/.git" ]] \
+        || fail "required Windows submodule source repository is unavailable: $source_repo"
+      git -C "$source_repo" cat-file -e "$source_commit^{commit}" 2>/dev/null \
+        || fail "required Windows submodule source commit is unavailable: $source_commit ($source_repo)"
+    elif [[ "$entry_type" != tree && "$entry_mode" != 100644 && "$entry_mode" != 100755 ]]; then
+      fail "required Windows superproject input is not a regular blob: $rel"
+    fi
+  done
+  [[ "$entry_type" == blob && ( "$entry_mode" == 100644 || "$entry_mode" == 100755 ) ]] \
+    || fail "required Windows superproject input is not a regular blob: $rel"
   mkdir -p -- "$(dirname "$dest")"
-  git -C "$SUPERPROJECT_ROOT" show "HEAD:$rel" > "$dest" \
+  git -C "$source_repo" cat-file blob "$expected_blob" > "$dest" \
     || fail "could not materialize frozen Windows superproject input: $rel"
-  actual_blob="$(git hash-object "$dest" 2>/dev/null || true)"
+  actual_blob="$(git -C "$source_repo" hash-object "$dest" 2>/dev/null || true)"
   [[ "$actual_blob" == "$expected_blob" ]] \
     || fail "frozen Windows superproject input hash mismatch: $rel"
 }
