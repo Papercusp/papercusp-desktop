@@ -265,6 +265,12 @@ reap_release_legs() { # kill this cut's own orphaned build-tool descendants, if 
 }
 cleanup_release_local() {
   reap_release_legs
+  # The release orchestrator may reserve sidecar staging space before the long
+  # migration/toolchain preflights below. Release it on every exit, including a
+  # fail-fast before build-desktop-sidecar.sh gets a chance to run.
+  if declare -F papercusp_release_disk_reservation >/dev/null 2>&1; then
+    papercusp_release_disk_reservation
+  fi
   [[ -z "${_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST:-}" ]] \
     || rm -f "$_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST"
 }
@@ -322,6 +328,25 @@ source "$ORCHESTRATOR_HERE/lib/inno-spanned-server.sh"
 # shellcheck source=lib/claim-target-dir.sh
 source "$ORCHESTRATOR_HERE/lib/claim-target-dir.sh"
 require_release_host
+
+# EI-22579401012596804: reserve sidecar staging headroom BEFORE the long WSL,
+# toolchain, migration-lint, and migration boot-smoke preflights. Previously the
+# first disk claim lived inside build-desktop-sidecar.sh ~5 minutes later, so an
+# unrelated build could reserve the remaining bytes after this cut started and
+# make the cut fail rc28 only after all preflight work completed.
+#
+# This parent shell stays alive for the child sidecar build, so its pid-bound
+# reservation protects the whole interval. The child receives a zero additional
+# requirement below: it still runs the shared disk guard, but does not
+# double-count the 8GB already held by this release process. The reservation is
+# released immediately after the atomic sidecar publish completes; the EXIT
+# cleanup above is the failure-path backstop.
+# shellcheck source=lib/disk-preflight.sh
+source "$ORCHESTRATOR_HERE/lib/disk-preflight.sh"
+papercusp_require_free_gb \
+  "$ROOT/src-tauri/sidecar" \
+  "${PAPERCUSP_SIDECAR_MIN_FREE_GB:-8}" \
+  "release sidecar staging" || exit $?
 
 WITH_WINDOWS="${WITH_WINDOWS:-0}"
 WITH_ARM64="${WITH_ARM64:-0}"
@@ -1176,8 +1201,10 @@ export PAPERCUSP_SKIP_DEP_GENERATION="${PAPERCUSP_SKIP_DEP_GENERATION:-1}"
 # The sidecar packages the superproject, while the installer provenance above
 # names the desktop submodule. Keep the sidecar's cut-start identity in the
 # same repository as its source-drift check; BUILD_SHA stays the desktop label.
+PAPERCUSP_SIDECAR_MIN_FREE_GB=0 \
 PROVENANCE_SOURCE_GIT_HEAD="$EXPECTED_SOURCE_SHA" \
 "${PC_NICE[@]}" bash "$ROOT/bin/build-desktop-sidecar.sh"
+papercusp_release_disk_reservation
 # P-004: the exact sha of the serve.mjs we just built — exported so every leg's
 # packer asserts it packs THIS byte-identical sidecar (fail-closed on a
 # concurrent rebuild swapping it mid-cut). Doubles as a self-check that the

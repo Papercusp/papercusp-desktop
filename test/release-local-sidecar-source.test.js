@@ -55,6 +55,25 @@ test('release sidecar skips unused dependency generation before invoking the fro
   assert.ok(sidecarAt > skipAt, 'the skip must reach the target sidecar before it starts');
 });
 
+test('release reserves sidecar disk before long preflights and does not double-count it in the child', () => {
+  const reserveAt = release.indexOf('papercusp_require_free_gb \\\n  "$ROOT/src-tauri/sidecar"');
+  const migrationAt = release.indexOf('echo "==> checking migration safety (lint:migrations)"');
+  assert.ok(reserveAt >= 0, 'release-local must reserve sidecar staging space');
+  assert.ok(
+    migrationAt > reserveAt,
+    'sidecar disk reservation must precede migration lint and boot-smoke',
+  );
+
+  const childAt = calls.linux.indexOf('bash "$ROOT/bin/build-desktop-sidecar.sh"');
+  const releaseAt = calls.linux.indexOf('papercusp_release_disk_reservation');
+  assert.match(calls.linux, /PAPERCUSP_SIDECAR_MIN_FREE_GB=0 \\\nPROVENANCE_SOURCE_GIT_HEAD=/);
+  assert.ok(childAt >= 0 && releaseAt > childAt, 'parent reservation must outlive the child build');
+  assert.match(
+    release,
+    /cleanup_release_local\(\) \{[\s\S]*papercusp_release_disk_reservation[\s\S]*\n\}/,
+  );
+});
+
 test('Windows immutable source contains the superproject CSP policy at Rust include_str path', () => {
   const worktreeDir = windows.match(/BUILD_ROOT=\"\$BUILD_CONTAINER\/([^\"]+)\"/)?.[1];
   const policyRel = windows.match(/WINDOWS_CSP_POLICY_REL=\"([^\"]+)\"/)?.[1];
@@ -257,7 +276,14 @@ for (const platform of Object.keys(calls)) {
           'if [[ -n "${PAPERCUSP_SIDECAR_OUT:-}" ]]; then mkdir -p "$PAPERCUSP_SIDECAR_OUT"; printf "fixture\\n" > "$PAPERCUSP_SIDECAR_OUT/serve.mjs"; fi',
           'printf "HEAD=%s DIRTY=%s BUILD=%s TARGET=%s SKIP_DEP_GENERATION=%s\\n" "$PROVENANCE_SOURCE_GIT_HEAD" "$PROVENANCE_SOURCE_GIT_DIRTY" "$PAPERCUSP_BUILD_SHA" "${TARGET_OS:-linux}" "${PAPERCUSP_SKIP_DEP_GENERATION:-}"',
         ].join('\n'));
-        const result = spawnSync('bash', ['-c', 'set -euo pipefail\nPC_NICE=()\n' + calls[platform]], {
+        const result = spawnSync(
+          'bash',
+          [
+            '-c',
+            'set -euo pipefail\nPC_NICE=()\npapercusp_release_disk_reservation() { :; }\n' +
+              calls[platform],
+          ],
+          {
           encoding: 'utf8',
           env: {
             ...process.env,
@@ -274,7 +300,8 @@ for (const platform of Object.keys(calls)) {
             VERSION: '0.0.19',
             MAC_SIDECAR_DIR: path.join(temp, 'darwin-sidecar'),
           },
-        });
+          },
+        );
         if (drift) {
           assert.notEqual(result.status, 0);
           assert.match(result.stderr, /source HEAD moved during build/);
