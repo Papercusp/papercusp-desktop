@@ -3215,9 +3215,10 @@ def _expand_installer(path, dest):
     if low.endswith(".exe"):
         innoextract = _innoextract_command()
         if innoextract:
-            # --extract-unknown keeps files innoextract cannot classify rather
-            # than dropping them: an unclassified blob still has to be scanned.
-            r = sh(f"{q(innoextract)} -e -s --output-dir {q(dest)} {q(path)}")
+            # -e writes payloads, -t makes checksum mismatches fatal, and -s
+            # silences listings (NOT warnings). Unknown-file extraction stays
+            # enabled by default; never add --no-extract-unknown here.
+            r = sh(f"{q(innoextract)} -e -t -s --output-dir {q(dest)} {q(path)}")
             integrity_warning = _innoextract_integrity_warning(r)
             if integrity_warning:
                 print(
