@@ -1479,6 +1479,31 @@ assert_linux_artifact_cardinality() {  # $1 = Linux bundle dir
   fi
 }
 
+# A completed Linux child must leave its receipt alongside its final bytes,
+# BEFORE a failed sibling can stop the parent collector (EI-22598852936937011).
+# Reuse keeps the original baked identity; the shared emitter preserves its
+# existing receipt history and verifies the reused bytes.
+emit_linux_build_provenance() {
+  local bundle="$CARGO_TARGET_ROOT/release/bundle"
+  local sha="$BUILD_SHA" head="$PROVENANCE_SOURCE_GIT_HEAD" dirty="$PROVENANCE_SOURCE_GIT_DIRTY"
+  local reused=false tc_rustc tc_node
+  if [[ "$LINUX_REUSE" == "1" ]]; then
+    sha="$LINUX_REUSE_BUILD_SHA"; head="$LINUX_REUSE_GIT_HEAD"; dirty="$LINUX_REUSE_GIT_DIRTY"
+    reused=true
+  fi
+  tc_rustc="$(rustc --version 2>/dev/null | awk '{print $2}')"
+  tc_node="$(node --version 2>/dev/null)"
+  # Host == Linux builder. Hash primary installers only; .sig presence is
+  # recorded per artifact, after repacking and final updater signing.
+  PROVENANCE_TOOLCHAIN="$(printf '{ "rustc": "%s", "node": "%s", "tauriCli": "%s" }' "${tc_rustc:-unknown}" "${tc_node:-unknown}" "$TAURI_CLI_VERSION")" \
+  PROVENANCE_SIDECAR_DIR="$ROOT/src-tauri/sidecar" \
+  PROVENANCE_SOURCE_GIT_HEAD="$head" \
+  PROVENANCE_SOURCE_GIT_DIRTY="$dirty" \
+  PROVENANCE_GIT_ROOT="$ROOT" bash "$ROOT/bin/emit-build-provenance.sh" \
+    "$bundle" "$VERSION" "$sha" "$reused" \
+    "$bundle"/deb/*_"$VERSION"_*.deb "$bundle"/appimage/*_"$VERSION"_*.AppImage
+}
+
 LINUX_LEG_LOG="/tmp/papercusp-linuxleg-${TAG}.log"
 LINUX_PID=""; LINUX_REUSE=0
 if [[ "${PAPERCUSP_REUSE_LINUX:-0}" == "1" ]]; then
@@ -1529,6 +1554,10 @@ else
          PAPERCUSP_RELEASE_CHANNEL="$CHANNEL" PAPERCUSP_DESKTOP_TARGET_ROOT="$ROOT" \
          "${PC_NICE[@]}" bash "$APPIMAGE_PRODUCER")
     fi
+    assert_linux_artifact_cardinality "$CARGO_TARGET_ROOT/release/bundle"
+    # Required for honest salvage: failure must fail this leg, not be swallowed
+    # by the later all-platform collector or reported as Linux success.
+    emit_linux_build_provenance
   ) >"$LINUX_LEG_LOG" 2>&1 &
   LINUX_PID=$!
 fi
@@ -1941,41 +1970,12 @@ for f in "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb "$LINUX_BUNDLE"/appimage/*_"$VER
 done
 [[ "$linux_found" == "1" ]] || { echo "ERROR: no $VERSION linux artifacts in $LINUX_BUNDLE $([[ "$LINUX_REUSE" == "1" ]] && echo '(reuse)' || echo '(fresh build)')"; exit 1; }
 assert_linux_artifact_cardinality "$LINUX_BUNDLE"
-# EI-8914 parity (P-001, desktop-build-hardening-tri-platform-2026-07-11): the
-# Windows leg records build-provenance.json (inline in build-windows-on-vm.sh)
-# and the Mac leg does (below, WI-3850), but the Linux leg emitted NOTHING — so a
-# shipped .deb/.AppImage was untraceable to the source it was built from (the
-# LABELED!=PACKED class the whole plan eradicates). Emit the same provenance
-# (each installer's sha256 + gitHead/dirty + buildSha) next to the Linux bundle.
-# On PAPERCUSP_REUSE_LINUX, assert_reused_provenance already proved the prior
-# record was for this version; the replacement record marks the new cut's reuse
-# honestly instead of claiming these bytes were rebuilt from the current tree.
-# Fingerprint the primary installers (deb + AppImage, both gui+server roles via
-# the version-scoped globs), matching the mac call's primary-artifact scope — the
-# .sig files are signatures over these, covered by the signature dimension (P-010
-# / D-004), not the byte-provenance record. Best-effort: a provenance hiccup must
-# never fail a good release.
-# P-014: record the host toolchain (host == the Linux builder, so accurate) — rustc,
-# node, and the PINNED tauri-cli — so two cuts of the same gitHead are comparable and
-# a toolchain drift that changes the bytes is visible in the provenance record.
-_tc_rustc="$(rustc --version 2>/dev/null | awk '{print $2}')"
-_tc_node="$(node --version 2>/dev/null)"
-_linux_prov_sha="$BUILD_SHA"
-_linux_prov_head="$PROVENANCE_SOURCE_GIT_HEAD"
-_linux_prov_dirty="$PROVENANCE_SOURCE_GIT_DIRTY"
+# Fresh receipts were emitted by the completed Linux child. Only reused bytes
+# need collection-time stamping; assert_reused_provenance captured their original
+# identity above. Both paths use the same fail-closed shared emitter.
 if [[ "$LINUX_REUSE" == "1" ]]; then
-  _linux_prov_sha="$LINUX_REUSE_BUILD_SHA"
-  _linux_prov_head="$LINUX_REUSE_GIT_HEAD"
-  _linux_prov_dirty="$LINUX_REUSE_GIT_DIRTY"
+  emit_linux_build_provenance
 fi
-PROVENANCE_TOOLCHAIN="$(printf '{ "rustc": "%s", "node": "%s", "tauriCli": "%s" }' "${_tc_rustc:-unknown}" "${_tc_node:-unknown}" "$TAURI_CLI_VERSION")" \
-PROVENANCE_SIDECAR_DIR="$ROOT/src-tauri/sidecar" \
-PROVENANCE_SOURCE_GIT_HEAD="$_linux_prov_head" \
-PROVENANCE_SOURCE_GIT_DIRTY="$_linux_prov_dirty" \
-PROVENANCE_GIT_ROOT="$ROOT" bash "$ROOT/bin/emit-build-provenance.sh" \
-  "$LINUX_BUNDLE" "$VERSION" "$_linux_prov_sha" "$([[ "$LINUX_REUSE" == "1" ]] && echo true || echo false)" \
-  "$LINUX_BUNDLE"/deb/*_"$VERSION"_*.deb "$LINUX_BUNDLE"/appimage/*_"$VERSION"_*.AppImage \
-  || echo "WARNING: linux build-provenance.json emit failed (non-fatal) — linux artifacts shipped WITHOUT a provenance record"
 if [[ "$WITH_ARM64" == "1" ]]; then
   for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*_"$VERSION"_*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f")

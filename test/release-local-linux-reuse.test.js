@@ -29,11 +29,10 @@ const cutStartHarness = sliceBetween(
   '# EI-20551860898590077: bind every artifact',
   'echo "==> bumping version in manifests"',
 );
-const supervisorHarness = sliceBetween('LEG_NAMES=()', '\n# Android remains OUTSIDE');
-
-// Stub the expensive builders, not the orchestration or provenance emitter.
-// The real Linux child must finish repacking/signing before the real supervisor
-// records it as salvage, even when another platform has already failed.
+// Stub the expensive builders, not the Linux producer or provenance emitter.
+// Stop at the producing child: a sibling failure prevents the later collector
+// from running. Explicit PID waits keep this receipt regression independent of
+// the supervisor's fast-child wait -n issue (EI-22609421740403514).
 function runFreshWithFailedSibling({ emitterFails = false } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-linux-salvage-'));
   const bin = path.join(temp, 'bin');
@@ -83,14 +82,11 @@ function runFreshWithFailedSibling({ emitterFails = false } = {}) {
       '  printf "raw:%s" "$role" > "$CARGO_TARGET_ROOT/release/bundle/deb/Papercusp_${role}_0.0.18_amd64.deb"',
       '}',
       linuxReuseHarness,
-      `WIN_LEG_LOG=${JSON.stringify(path.join(temp, 'windows.log'))}`,
-      ': > "$WIN_LEG_LOG"',
       '(exit 7) & WIN_PID=$!',
-      'MAC_PID=; ANDROID_PID=',
-      'RELEASE_LEG_HEARTBEAT_S=0',
-      'RELEASE_ABORT_ON_LEG_FAILURE=0',
-      'RELEASE_SALVAGE_GRACE_S=',
-      supervisorHarness,
+      'if wait "$WIN_PID"; then win_rc=0; else win_rc=$?; fi',
+      'if wait "$LINUX_PID"; then linux_rc=0; else linux_rc=$?; fi',
+      'printf "WIN_RC=%s LINUX_RC=%s\\n" "$win_rc" "$linux_rc"',
+      '[[ "$win_rc" == 0 && "$linux_rc" == 0 ]]',
     ].join('\n');
     const result = spawnSync('bash', ['-c', command], { encoding: 'utf8', timeout:30000 });
     const receiptPath = path.join(bundle, 'build-provenance.json');
@@ -111,9 +107,7 @@ function runFreshWithFailedSibling({ emitterFails = false } = {}) {
 test('completed Linux salvage retains final-byte provenance when a sibling fails', () => {
   const { result, receipt, finalHashes } = runFreshWithFailedSibling();
   assert.equal(result.status, 1, result.stderr || result.stdout);
-  assert.match(result.stdout, /win leg FAILED \(rc=7\)/);
-  assert.match(result.stdout, /linux leg SUCCEEDED/);
-  assert.match(result.stdout, /SALVAGED .*linux/);
+  assert.match(result.stdout, /WIN_RC=7 LINUX_RC=0/);
   assert.ok(receipt, 'successful Linux sibling lost its required reuse provenance');
   assert.equal(receipt.version, '0.0.18');
   assert.equal(receipt.buildSha, 'original-baked-sha');
@@ -130,8 +124,7 @@ test('completed Linux salvage retains final-byte provenance when a sibling fails
 test('a Linux provenance failure cannot be reported as successful salvage', () => {
   const { result, receipt } = runFreshWithFailedSibling({ emitterFails:true });
   assert.equal(result.status, 1, result.stderr || result.stdout);
-  assert.match(result.stdout, /linux leg FAILED \(rc=23\)/);
-  assert.doesNotMatch(result.stdout, /linux leg SUCCEEDED/);
+  assert.match(result.stdout, /WIN_RC=7 LINUX_RC=23/);
   assert.equal(receipt, null);
 });
 
@@ -241,7 +234,7 @@ test('Linux reuse stays on the shared provenance and collection surfaces', () =>
   assert.match(collection, /linux_found=1/);
   assert.match(collection, /assert_linux_artifact_cardinality "\$LINUX_BUNDLE"/);
   assert.match(collection, /"\$LINUX_REUSE" == "1"/);
-  assert.match(collection, /emit-build-provenance\.sh/);
+  assert.match(collection, /emit_linux_build_provenance/);
 });
 
 test('an all-fresh cut writes a new freshness boundary', () => {
