@@ -10,7 +10,7 @@ const { test } = require('node:test');
 const bin = path.join(__dirname, '..', 'bin');
 const release = fs.readFileSync(process.env.PROBE_RELEASE_LOCAL || path.join(bin, 'release-local.sh'), 'utf8');
 const sidecar = fs.readFileSync(path.join(bin, 'build-desktop-sidecar.sh'), 'utf8');
-const windows = fs.readFileSync(path.join(bin, 'build-windows-cross.sh'), 'utf8');
+const windows = fs.readFileSync(process.env.PROBE_WINDOWS_CROSS || path.join(bin, 'build-windows-cross.sh'), 'utf8');
 
 function section(text, start, end) {
   const from = text.indexOf(start);
@@ -81,6 +81,7 @@ function initRepo(root, content) {
 const policyRel = 'libs/generic/desktop-ipc/src/csp-policy.json';
 const policyModuleRel = 'libs/generic/desktop-ipc';
 const policySnapshot = section(windows, 'copy_superproject_snapshot_blob() {', '\nfor _release_input');
+const policySourcePin = section(windows, 'BUILD_SUPERPROJECT_COMMIT_SHA=', '\nif [[ -n "${PAPERCUSP_BUILD_SHA');
 
 function policyFixture(context, submodule = true) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'windows-policy-source-'));
@@ -104,10 +105,12 @@ function policyFixture(context, submodule = true) {
   return { temp, workspace, output, policyRepo, policyPath, policy, sourceCommit: git(workspace, 'rev-parse', 'HEAD') };
 }
 
-function runPolicySnapshot(fixture, relativePath = policyRel) {
+function runPolicySnapshot(fixture, { sourceCommit = fixture.sourceCommit, afterPin = '' } = {}) {
   return spawnSync('bash', ['-c', [
     'set -euo pipefail',
     'fail() { echo "ERROR: $*" >&2; exit 1; }',
+    policySourcePin,
+    afterPin,
     policySnapshot,
     'copy_superproject_snapshot_blob "$POLICY_REL"',
   ].join('\n')], {
@@ -115,9 +118,9 @@ function runPolicySnapshot(fixture, relativePath = policyRel) {
     env: {
       ...process.env,
       SUPERPROJECT_ROOT: fixture.workspace,
-      BUILD_SUPERPROJECT_COMMIT_SHA: fixture.sourceCommit,
+      PAPERCUSP_EXPECTED_SOURCE_SHA: sourceCommit,
       BUILD_CONTAINER: fixture.output,
-      POLICY_REL: relativePath,
+      POLICY_REL: policyRel,
     },
   });
 }
@@ -145,6 +148,26 @@ test('Windows policy snapshot reads the real submodule layout with an unchanged 
   const result = runPolicySnapshot(fixture);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(fs.readFileSync(path.join(fixture.output, policyRel), 'utf8'), fixture.policy);
+});
+
+test('Windows policy snapshot pins HEAD once when no exact source override is supplied', (context) => {
+  const fixture = policyFixture(context, false);
+  const afterPin = [
+    'printf "newer committed policy\\n" > "$SUPERPROJECT_ROOT/$POLICY_REL"',
+    'git -C "$SUPERPROJECT_ROOT" commit -qam "advance after pin"',
+  ].join('\n');
+  const result = runPolicySnapshot(fixture, { sourceCommit: '', afterPin });
+  assert.equal(result.status, 0, result.stderr);
+  assert.notEqual(git(fixture.workspace, 'rev-parse', 'HEAD'), fixture.sourceCommit);
+  assert.equal(fs.readFileSync(path.join(fixture.output, policyRel), 'utf8'), fixture.policy);
+});
+
+test('Windows policy snapshot refuses an invalid source override without falling back to HEAD', (context) => {
+  const fixture = policyFixture(context);
+  const result = runPolicySnapshot(fixture, { sourceCommit: 'missing-source-commit' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /could not resolve the Windows superproject source commit/);
+  assert.equal(fs.existsSync(path.join(fixture.output, policyRel)), false);
 });
 
 test('Windows policy snapshot refuses an unavailable gitlink commit instead of using submodule HEAD', (context) => {
