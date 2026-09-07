@@ -192,6 +192,9 @@ cat > "$STUB_SIGNER" <<'STUB'
 #!/usr/bin/env bash
 # Stand-in for `tauri signer sign <file>`: same contract, no crypto.
 [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]] || exit 3   # refuse without a key, like the real one
+# The real CLI rejects simultaneous content/path options, including env inputs.
+[[ ! ${TAURI_SIGNING_PRIVATE_KEY_PATH+x} ]] || exit 4
+[[ "$TAURI_SIGNING_PRIVATE_KEY" == "${PAPERCUSP_EXPECT_SIGNING_KEY:-$TAURI_SIGNING_PRIVATE_KEY}" ]] || exit 5
 printf 'stub-signature\n' > "$1.sig"
 STUB
 chmod +x "$STUB_SIGNER"
@@ -751,6 +754,36 @@ if papercusp_normalize_spanned_server "$INNO" "$VER"; then
 else
   bad "spanned Server normalization failed unexpectedly under the signing seam"
 fi
+
+# EI-22617425259884298: resolving a path to content must also remove the inherited
+# path option from the child. Otherwise a fully provisioned release fails BEFORE
+# the signer reads the key. Keep caller env and the existing content-first
+# precedence intact; all cases use synthetic keys and the real helper.
+SIGNER_KEY_FILE="$WORK/signing key"
+printf '%s\n' "$TAURI_SIGNING_PRIVATE_KEY" > "$SIGNER_KEY_FILE"
+for key_mode in content path content-as-path; do
+  if (
+    export PAPERCUSP_EXPECT_SIGNING_KEY="$TAURI_SIGNING_PRIVATE_KEY"
+    case "$key_mode" in
+      content) export TAURI_SIGNING_PRIVATE_KEY_PATH="$WORK/unused-key" ;;
+      path)
+        unset TAURI_SIGNING_PRIVATE_KEY
+        export TAURI_SIGNING_PRIVATE_KEY_PATH="$SIGNER_KEY_FILE"
+        ;;
+      content-as-path)
+        export TAURI_SIGNING_PRIVATE_KEY="$SIGNER_KEY_FILE"
+        export TAURI_SIGNING_PRIVATE_KEY_PATH="$WORK/unused-key"
+        ;;
+    esac
+    original_key_path="$TAURI_SIGNING_PRIVATE_KEY_PATH"
+    papercusp_sign_spanned_server_zip "$ZIP" \
+      && [[ -s "$ZIP.sig" && "$TAURI_SIGNING_PRIVATE_KEY_PATH" == "$original_key_path" ]]
+  ); then
+    ok "signer isolates inherited key path ($key_mode) without changing caller env"
+  else
+    bad "signer leaked or changed inherited key path ($key_mode)"
+  fi
+done
 
 # 11) A KEYLESS build still yields a usable zip. Signing is best-effort at BUILD
 # time; refusing to SHIP an unsigned download is the publish guard's job. Getting

@@ -75,9 +75,13 @@ papercusp_sign_spanned_server_zip() {
   # The secret goes via the CLI's own env fallback, NEVER on argv: npx echoes the
   # resolved command line, which would print the private key into the build log and
   # expose it in `ps` for the life of the process.
-  if ! TAURI_SIGNING_PRIVATE_KEY="$key" \
-       TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
-       "${signer[@]}" "$zip" >/dev/null 2>&1 \
+  # Once resolved to content, the inherited path option must disappear in this
+  # child. Tauri rejects content + path even when both arrived through env.
+  # A subshell keeps the caller's path intact and the secret off `env`'s argv.
+  if ! ( unset TAURI_SIGNING_PRIVATE_KEY_PATH
+         TAURI_SIGNING_PRIVATE_KEY="$key" \
+         TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+         "${signer[@]}" "$zip" ) >/dev/null 2>&1 \
      || [[ ! -s "$zip.sig" ]]; then
     rm -f "$zip.sig"
     echo "WARNING: [win] tauri signer sign failed for $(basename "$zip") — leaving it UNSIGNED (EI-20595279927716716)" >&2
