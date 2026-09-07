@@ -78,8 +78,11 @@ set -euo pipefail
 # read offset into changed bytes. Matching } + exit 0 at EOF.
 {
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
+# release-local can source this current producer with $0 naming a frozen
+# release entrypoint. Helpers/audits belong to the producer we are executing;
+# source and artifact paths must still belong to that frozen target.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC_TAURI="$ROOT/src-tauri"
 SOURCE_ROOT="$ROOT"
 SUPERPROJECT_ROOT="$(cd "$SOURCE_ROOT/.." && pwd)"

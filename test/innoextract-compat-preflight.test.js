@@ -18,6 +18,54 @@ const audit = fs.readFileSync(path.join(root, 'bin/audit-release-bundle.py'), 'u
 const helperPath = path.join(root, 'bin/lib/innoextract-compat-preflight.sh');
 const helper = fs.readFileSync(helperPath, 'utf8');
 
+test('a sourced current Windows producer keeps frozen source paths but loads current helpers', (t) => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-win-producer-routing-'));
+  t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+  const current = path.join(sandbox, 'current producer');
+  const frozen = path.join(sandbox, 'frozen target');
+  const preludeEnd = builder.indexOf('\nTARGET=');
+  assert.ok(preludeEnd > 0, 'the executable producer prelude must precede TARGET');
+  const prelude = builder.slice(0, preludeEnd);
+  const libraries = [...prelude.matchAll(/source "\$HERE\/lib\/([^"]+)"/g)].map(
+    (match) => match[1],
+  );
+  assert.ok(libraries.includes('innoextract-compat-preflight.sh'));
+
+  // Execute the actual producer prelude, stopping before any build or host
+  // mutation. Both roots contain readable helpers: loading the stale one is a
+  // wrong-answer failure, not a missing-file failure that could mask routing.
+  for (const [directory, marker] of [[current, 'current'], [frozen, 'stale']]) {
+    fs.mkdirSync(path.join(directory, 'bin/lib'), { recursive: true });
+    for (const library of libraries) {
+      let body = '# fixture helper\n';
+      if (library === 'release-host.sh') body += 'load_release_host() { :; }\n';
+      if (library === 'innoextract-compat-preflight.sh') {
+        body += `innoextract_compat_preflight() { printf '%s\\n' '${marker}'; }\n`;
+      }
+      fs.writeFileSync(path.join(directory, 'bin/lib', library), body);
+    }
+  }
+  const producer = path.join(current, 'bin/build-windows-cross.sh');
+  const targetEntrypoint = path.join(frozen, 'bin/build-windows-cross.sh');
+  fs.writeFileSync(targetEntrypoint, '# frozen source entrypoint\n');
+  fs.writeFileSync(
+    producer,
+    `${prelude}\nprintf '%s\\n' "$HERE" "$ROOT" "$SRC_TAURI" "$(innoextract_compat_preflight)"\n}\n`,
+  );
+  const run = (entrypoint) => execFileSync(
+    'bash',
+    ['-c', 'source "$1"', entrypoint, producer],
+    { encoding: 'utf8' },
+  ).trim().split('\n');
+
+  assert.deepEqual(run(producer), [
+    path.join(current, 'bin'), current, path.join(current, 'src-tauri'), 'current',
+  ], 'ordinary invocation must retain the current source and helpers');
+  assert.deepEqual(run(targetEntrypoint), [
+    path.join(current, 'bin'), frozen, path.join(frozen, 'src-tauri'), 'current',
+  ], 'exact-source invocation must not load the frozen helper or move the source root');
+});
+
 test('the Inno compatibility preflight runs before the first cargo-xwin build', () => {
   const preflightAt = builder.indexOf(
     'innoextract_compat_preflight "${PAPERCUSP_INNOEXTRACT:-}"',
