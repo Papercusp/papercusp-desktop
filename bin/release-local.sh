@@ -1641,6 +1641,15 @@ elif [[ "$WITH_MAC" == "1" ]]; then
     #    (incl. the WI-5651 dangling-@loader_path gate) runs inside it.
     echo "==> building darwin sidecar -> $MAC_SIDECAR_DIR (TARGET_OS=darwin, for the mac .app)"
     rm -rf "$MAC_SIDECAR_DIR"
+    # The Linux leg exports PAPERCUSP_EXPECTED_SERVE_SHA for consumers that pack
+    # that exact sidecar (Windows and the Linux artifacts). Darwin builds a
+    # platform-specific sidecar here, so carrying the Linux hash into this leg
+    # is a false freshness assertion. Clear the inherited value while building,
+    # then bind the mac producer to the hash of the freshly assembled Darwin
+    # sidecar. This still catches a concurrent rebuild between assembly and
+    # packaging without making cross-platform JavaScript byte identity an
+    # accidental release invariant.
+    unset PAPERCUSP_EXPECTED_SERVE_SHA
     env \
       TARGET_OS=darwin \
       TARGET_ARCH=x64 \
@@ -1650,6 +1659,13 @@ elif [[ "$WITH_MAC" == "1" ]]; then
       "PROVENANCE_SOURCE_GIT_HEAD=$EXPECTED_SOURCE_SHA" \
       "PROVENANCE_SOURCE_GIT_DIRTY=$PROVENANCE_SOURCE_GIT_DIRTY" \
       bash "$ROOT/bin/build-desktop-sidecar.sh"
+    mac_expected_serve_sha="$(sha256sum "$MAC_SIDECAR_DIR/serve.mjs" 2>/dev/null | cut -d' ' -f1)"
+    if [[ -z "$mac_expected_serve_sha" ]]; then
+      echo "ERROR: Darwin sidecar build did not produce $MAC_SIDECAR_DIR/serve.mjs — cannot proceed" >&2
+      exit 1
+    fi
+    export PAPERCUSP_EXPECTED_SERVE_SHA="$mac_expected_serve_sha"
+    echo "==> mac sidecar freshness (P-004): serve.mjs sha=${mac_expected_serve_sha:0:12}…"
     # 2) universal .app + .app.tar.gz(+.sig) + dmg, bundling that darwin sidecar.
     #    env does not cross a child on its own, so forward the build identity like
     #    the Windows leg. PAPERCUSP_RELEASE_HOST is deliberately NOT forced here:
@@ -1663,6 +1679,7 @@ elif [[ "$WITH_MAC" == "1" ]]; then
       "PAPERCUSP_BUILD_VERSION=$VERSION"
       "PAPERCUSP_BUILD_ROLES=$PAPERCUSP_BUILD_ROLES"
       "PAPERCUSP_DARWIN_SIDECAR_DIR=$MAC_SIDECAR_DIR"
+      "PAPERCUSP_EXPECTED_SERVE_SHA=$mac_expected_serve_sha"
       "PAPERCUSP_MAC_OUT=$MAC_OUT"
       MAC_BUILD_TARGET=universal-apple-darwin
     )

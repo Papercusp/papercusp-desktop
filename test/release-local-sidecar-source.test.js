@@ -22,6 +22,13 @@ const calls = {
   linux: section(release, 'export PAPERCUSP_RELEASE_AUDIT=1\n', '# P-004: the exact sha'),
   mac: section(release, '    env \\\n      TARGET_OS=darwin', '    # 2) universal .app'),
 };
+
+test('mac leg asserts the freshly built Darwin sidecar, not the Linux hash', () => {
+  assert.match(release, /unset PAPERCUSP_EXPECTED_SERVE_SHA/);
+  assert.match(calls.mac, /mac_expected_serve_sha=\"\$\(sha256sum \"\$MAC_SIDECAR_DIR\/serve\.mjs\"/);
+  assert.match(calls.mac, /export PAPERCUSP_EXPECTED_SERVE_SHA=\"\$mac_expected_serve_sha\"/);
+  assert.match(release, /PAPERCUSP_EXPECTED_SERVE_SHA=\$mac_expected_serve_sha/);
+});
 // Exercise the producer's real refusal, without compiling or altering the live tree.
 const headGuard = section(sidecar, '  _provenance_current_head=', '  unset _provenance_current_head\nfi\n');
 
@@ -61,6 +68,7 @@ for (const platform of Object.keys(calls)) {
           '#!/usr/bin/env bash',
           'set -euo pipefail',
           headGuard,
+          'if [[ -n "${PAPERCUSP_SIDECAR_OUT:-}" ]]; then mkdir -p "$PAPERCUSP_SIDECAR_OUT"; printf "fixture\\n" > "$PAPERCUSP_SIDECAR_OUT/serve.mjs"; fi',
           'printf "HEAD=%s DIRTY=%s BUILD=%s TARGET=%s\\n" "$PROVENANCE_SOURCE_GIT_HEAD" "$PROVENANCE_SOURCE_GIT_DIRTY" "$PAPERCUSP_BUILD_SHA" "${TARGET_OS:-linux}"',
         ].join('\n'));
         const result = spawnSync('bash', ['-c', 'set -euo pipefail\nPC_NICE=()\n' + calls[platform]], {
