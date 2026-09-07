@@ -142,6 +142,27 @@ fn env_api_target() -> Option<u16> {
     parse_api_target(std::env::var("PAPERCUSP_DEV_API_TARGET").ok())
 }
 
+fn startup_api_port(explicit_target: Option<u16>, current: u16) -> u16 {
+    explicit_target.map(api_port_for_target).unwrap_or(current)
+}
+
+/// Prime the process-wide `/api` target before the dev endpoint-IPC
+/// supervisor starts. `env_switch::init` applies the same override later when
+/// it navigates the window, but letting the supervisor start first gives it a
+/// real window to connect to the static :3070 default and hydrate live state
+/// into an otherwise isolated test WebView.
+pub(crate) fn prime_explicit_api_target() {
+    let Some(target_port) = env_api_target() else {
+        return;
+    };
+    let current = crate::SELECTED_API_PORT.load(Ordering::Relaxed);
+    let api_port = startup_api_port(Some(target_port), current);
+    crate::SELECTED_API_PORT.store(api_port, Ordering::Relaxed);
+    println!(
+        "[env-switch] PAPERCUSP_DEV_API_TARGET :{target_port} — primed /api :{api_port} before IPC supervisor"
+    );
+}
+
 /// Accepts a bare port (`"3170"`), a `host:port` pair (`"127.0.0.1:3170"`), or a
 /// full URL (`"http://127.0.0.1:3170"`) — the natural thing to pass, and what
 /// docs/runbooks have specified — extracting the port from whichever form was
@@ -524,6 +545,15 @@ mod tests {
         // Garbage input (no parseable port anywhere) is rejected, not panics.
         assert_eq!(parse_api_target(Some("not-a-target".into())), None);
         assert_eq!(parse_api_target(Some("".into())), None);
+    }
+
+    #[test]
+    fn explicit_api_target_is_primed_before_ipc_start() {
+        assert_eq!(startup_api_port(Some(3370), 3070), 3370);
+        // The bare Vite target has no operator and deliberately maps to prod.
+        assert_eq!(startup_api_port(Some(3055), 3170), 3070);
+        // Without an explicit override, preserve the already-selected target.
+        assert_eq!(startup_api_port(None, 3170), 3170);
     }
 
     #[test]

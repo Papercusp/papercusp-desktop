@@ -9295,6 +9295,13 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
                 // fallback while the operator is down.
                 #[cfg(debug_assertions)]
                 if let Some(home) = std::env::var_os("HOME") {
+                    // An explicit custom target must be visible to the IPC
+                    // socket resolver BEFORE keep_warm can make its first
+                    // connection. Applying it only in env_switch::init below
+                    // allowed an isolated WebView to hydrate once from the
+                    // static :3070 default, then retain that live state after
+                    // the later reset/re-dial (EI-22626134896342971).
+                    env_switch::prime_explicit_api_target();
                     let papercusp_dir = std::path::PathBuf::from(home).join(".papercusp");
                     // EI-190: resolve the socket for the SELECTED operator
                     // (the dev wrapper's build switcher), re-read on every
