@@ -78,6 +78,125 @@ function initRepo(root, content) {
   return git(root, 'rev-parse', 'HEAD');
 }
 
+const policyRel = 'libs/generic/desktop-ipc/src/csp-policy.json';
+const policyModuleRel = 'libs/generic/desktop-ipc';
+const policySnapshot = section(windows, 'copy_superproject_snapshot_blob() {', '\nfor _release_input');
+
+function policyFixture(context, submodule = true) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'windows-policy-source-'));
+  context.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const workspace = path.join(temp, 'source workspace');
+  const output = path.join(temp, 'snapshot output');
+  initRepo(workspace, 'superproject source');
+  const policyRepo = submodule ? path.join(workspace, policyModuleRel) : workspace;
+  if (submodule) initRepo(policyRepo, 'policy module source');
+  const policyPath = path.join(workspace, policyRel);
+  const policy = '{"policy":"selected source"}\n';
+  fs.mkdirSync(path.dirname(policyPath), { recursive: true });
+  fs.writeFileSync(policyPath, policy);
+  git(policyRepo, 'add', submodule ? 'src/csp-policy.json' : policyRel);
+  git(policyRepo, 'commit', '-qm', 'selected policy');
+  if (submodule) {
+    const moduleCommit = git(policyRepo, 'rev-parse', 'HEAD');
+    git(workspace, 'update-index', '--add', '--cacheinfo', `160000,${moduleCommit},${policyModuleRel}`);
+    git(workspace, 'commit', '-qm', 'selected policy gitlink');
+  }
+  return { temp, workspace, output, policyRepo, policyPath, policy, sourceCommit: git(workspace, 'rev-parse', 'HEAD') };
+}
+
+function runPolicySnapshot(fixture, relativePath = policyRel) {
+  return spawnSync('bash', ['-c', [
+    'set -euo pipefail',
+    'fail() { echo "ERROR: $*" >&2; exit 1; }',
+    policySnapshot,
+    'copy_superproject_snapshot_blob "$POLICY_REL"',
+  ].join('\n')], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      SUPERPROJECT_ROOT: fixture.workspace,
+      BUILD_SUPERPROJECT_COMMIT_SHA: fixture.sourceCommit,
+      BUILD_CONTAINER: fixture.output,
+      POLICY_REL: relativePath,
+    },
+  });
+}
+
+for (const submodule of [false, true]) {
+  test(`Windows policy snapshot reads a pinned ${submodule ? 'gitlink' : 'superproject blob'}, not moved HEAD or dirty bytes`, (context) => {
+    const fixture = policyFixture(context, submodule);
+    fs.writeFileSync(fixture.policyPath, '{"policy":"newer commit"}\n');
+    git(fixture.policyRepo, 'commit', '-qam', 'policy moved');
+    if (submodule) {
+      const newerCommit = git(fixture.policyRepo, 'rev-parse', 'HEAD');
+      git(fixture.workspace, 'update-index', '--cacheinfo', `160000,${newerCommit},${policyModuleRel}`);
+      git(fixture.workspace, 'commit', '-qm', 'gitlink moved');
+    }
+    fs.writeFileSync(fixture.policyPath, '{"policy":"dirty working tree"}\n');
+    assert.notEqual(git(fixture.workspace, 'rev-parse', 'HEAD'), fixture.sourceCommit);
+    const result = runPolicySnapshot(fixture);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(fs.readFileSync(path.join(fixture.output, policyRel), 'utf8'), fixture.policy);
+  });
+}
+
+test('Windows policy snapshot reads the real submodule layout with an unchanged gitlink', (context) => {
+  const fixture = policyFixture(context);
+  const result = runPolicySnapshot(fixture);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.readFileSync(path.join(fixture.output, policyRel), 'utf8'), fixture.policy);
+});
+
+test('Windows policy snapshot refuses an unavailable gitlink commit instead of using submodule HEAD', (context) => {
+  const fixture = policyFixture(context);
+  const unavailableCommit = initRepo(path.join(fixture.temp, 'unrelated source'), 'unavailable object');
+  git(fixture.workspace, 'update-index', '--cacheinfo', `160000,${unavailableCommit},${policyModuleRel}`);
+  git(fixture.workspace, 'commit', '-qm', 'unavailable gitlink');
+  fixture.sourceCommit = git(fixture.workspace, 'rev-parse', 'HEAD');
+  const result = runPolicySnapshot(fixture);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /required Windows .* (?:input|commit)/);
+  assert.equal(fs.existsSync(path.join(fixture.output, policyRel)), false);
+});
+
+test('Windows policy snapshot refuses an uninitialized submodule even when loose policy bytes exist', (context) => {
+  const fixture = policyFixture(context);
+  fs.rmSync(path.join(fixture.policyRepo, '.git'), { recursive: true, force: true });
+  const result = runPolicySnapshot(fixture);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /required Windows .* (?:input|repository)/);
+  assert.equal(fs.existsSync(path.join(fixture.output, policyRel)), false);
+});
+
+test('Windows policy snapshot refuses a missing pinned blob despite untracked replacement bytes', (context) => {
+  const fixture = policyFixture(context);
+  git(fixture.policyRepo, 'rm', 'src/csp-policy.json');
+  git(fixture.policyRepo, 'commit', '-qm', 'policy removed');
+  const moduleCommit = git(fixture.policyRepo, 'rev-parse', 'HEAD');
+  git(fixture.workspace, 'update-index', '--cacheinfo', `160000,${moduleCommit},${policyModuleRel}`);
+  git(fixture.workspace, 'commit', '-qm', 'removed policy gitlink');
+  fixture.sourceCommit = git(fixture.workspace, 'rev-parse', 'HEAD');
+  fs.mkdirSync(path.dirname(fixture.policyPath), { recursive: true });
+  fs.writeFileSync(fixture.policyPath, fixture.policy);
+  const result = runPolicySnapshot(fixture);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /required Windows .*input/);
+  assert.equal(fs.existsSync(path.join(fixture.output, policyRel)), false);
+});
+
+test('Windows policy snapshot rejects symlinks rather than treating their targets as policy content', (context) => {
+  const fixture = policyFixture(context, false);
+  fs.rmSync(fixture.policyPath);
+  fs.symlinkSync('../../../source.txt', fixture.policyPath);
+  git(fixture.workspace, 'add', policyRel);
+  git(fixture.workspace, 'commit', '-qm', 'symlink policy');
+  fixture.sourceCommit = git(fixture.workspace, 'rev-parse', 'HEAD');
+  const result = runPolicySnapshot(fixture);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /required Windows .*input/);
+  assert.equal(fs.existsSync(path.join(fixture.output, policyRel)), false);
+});
+
 for (const platform of Object.keys(calls)) {
   for (const drift of [false, true]) {
     test(`${platform} sidecar ${drift ? 'still refuses real superproject drift' : 'uses the superproject identity with a distinct desktop repository'}`, () => {
