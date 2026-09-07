@@ -2,7 +2,9 @@
 # Select an extractor that can read the Inno Setup format this build emits before
 # cargo spends time compiling it. A version string is not enough: compile a tiny
 # fixture with the exact ISCC binary used by the release, then require the exact
-# extractor selected for the audit to list its payload. An explicit override is
+# extractor selected for the audit to list AND extract its payload intact, then
+# reject a corrupted copy. Listing alone never exercises the checksum consumer.
+# An explicit override is
 # authoritative. Without one, Papercusp-managed pinned toolchains are tried before
 # PATH so an older distro/user binary cannot shadow a compatible maintained build.
 
@@ -60,6 +62,7 @@ innoextract_compat_preflight() (
   local wine_prefix="${2:-${PAPERCUSP_WINE_INNO_PREFIX:-$HOME/.papercusp/wine-inno}}"
   local iscc_exe="${3:-${PAPERCUSP_ISCC_EXE:-$wine_prefix/drive_c/InnoSetup6/ISCC.exe}}"
   local candidate_output extractor work probe_iss probe_win probe_exe list_log
+  local audit_script
   local -a candidates=()
   local -A seen=()
 
@@ -69,7 +72,7 @@ innoextract_compat_preflight() (
     return 1
   }
   mapfile -t candidates <<< "$candidate_output"
-  for command_name in wine winepath xvfb-run timeout; do
+  for command_name in wine winepath xvfb-run timeout python3; do
     command -v "$command_name" >/dev/null 2>&1 || {
       echo "ERROR: $command_name is required for the Inno extractor compatibility preflight" >&2
       return 1
@@ -77,6 +80,11 @@ innoextract_compat_preflight() (
   done
   [[ -f "$iscc_exe" ]] || {
     echo "ERROR: ISCC is missing for the Inno extractor compatibility preflight: $iscc_exe" >&2
+    return 1
+  }
+  audit_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/audit-release-bundle.py"
+  [[ -f "$audit_script" ]] || {
+    echo "ERROR: finished-installer auditor is missing: $audit_script" >&2
     return 1
   }
 
@@ -136,12 +144,57 @@ innoextract_compat_preflight() (
       tail -40 "$list_log" >&2 || true
       continue
     fi
-    echo "  Inno extractor compatibility preflight passed (Inno 6.7 fixture): $extractor" >&2
+    # Exercise the exact final-audit consumer, not a parallel success predicate.
+    # Every candidate gets an empty output directory; a failed predecessor may
+    # have left plausible-looking bytes that must never satisfy its successor.
+    if ! PAPERCUSP_INNOEXTRACT="$extractor" python3 - \
+        "$audit_script" "$probe_exe" "$work" "${#seen[@]}" \
+        >"$work/extract-${#seen[@]}.log" 2>&1 <<'PY'
+import importlib.util
+import pathlib
+import subprocess
+import sys
+
+spec = importlib.util.spec_from_file_location("audit", sys.argv[1])
+audit = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(audit)
+fixture = pathlib.Path(sys.argv[2])
+work = pathlib.Path(sys.argv[3])
+dest = work / ("extract-" + sys.argv[4])
+ok, method = audit._expand_installer(str(fixture), str(dest))
+if not ok:
+    raise SystemExit("fixture extraction refused: " + method)
+expected = (work / "probe-payload.txt").read_bytes()
+actual = dest / "app/probe-payload.txt"
+if not actual.is_file() or actual.read_bytes() != expected:
+    raise SystemExit("fixture extraction did not preserve the exact payload bytes")
+
+# Compression=none gives one literal payload occurrence. Flip its first byte:
+# the unchanged header/checksum must now reject the damaged archive.
+packed = fixture.read_bytes()
+if packed.count(expected) != 1:
+    raise SystemExit("cannot establish the corruption control's unique payload")
+at = packed.index(expected)
+corrupt = work / ("corrupt-" + sys.argv[4] + ".exe")
+corrupt.write_bytes(packed[:at] + bytes([packed[at] ^ 1]) + packed[at + 1:])
+result = subprocess.run(
+    [audit._innoextract_command(), "-t", "-s", str(corrupt)],
+    capture_output=True, text=True, check=False,
+)
+if result.returncode == 0 or not audit._innoextract_integrity_warning(result):
+    raise SystemExit("extractor failed the corrupted-payload integrity control")
+PY
+    then
+      echo "WARN: rejecting Inno extractor that failed extraction/integrity controls: $extractor" >&2
+      tail -40 "$work/extract-${#seen[@]}.log" >&2 || true
+      continue
+    fi
+    echo "  Inno extractor compatibility preflight passed (Inno 6.7 fixture; extraction + corruption control): $extractor" >&2
     printf '%s\n' "$extractor"
     return 0
   done
 
-  echo "ERROR: no candidate Inno extractor can list the Inno 6.7 fixture" >&2
+  echo "ERROR: no candidate Inno extractor can list, extract and verify the Inno 6.7 fixture" >&2
   echo "       ISCC: $iscc_exe" >&2
   return 1
 )
