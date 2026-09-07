@@ -238,9 +238,22 @@ pub fn verify_channel_identity(identifier: &str) -> Result<(), String> {
 }
 
 pub fn workspaces_root() -> PathBuf {
+    // Match the Node registry reader. An isolated desktop passes a private
+    // registry root; reading the channel's ambient registry instead rewrites
+    // its webview URL to a workspace the isolated operator cannot serve.
+    resolve_workspaces_root(
+        shared_sidecar_home(),
+        std::env::var("PAPERCUSP_WORKSPACES_ROOT").ok().as_deref(),
+    )
+}
+
+fn resolve_workspaces_root(shared_home: PathBuf, explicit_root: Option<&str>) -> PathBuf {
+    if let Some(root) = explicit_root.filter(|root| !root.trim().is_empty()) {
+        return PathBuf::from(root);
+    }
     // Sibling of the data home under the SAME channel HOME. Identical to
     // `real_home().join(".papercusp-workspaces")` for an un-stamped build.
-    shared_sidecar_home().join(WORKSPACES_DIR_NAME)
+    shared_home.join(WORKSPACES_DIR_NAME)
 }
 
 fn registry_path() -> PathBuf {
@@ -717,6 +730,21 @@ pub fn delete(id: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_root_honors_private_registry_without_changing_channel_home() {
+        let channel_home = PathBuf::from("/home/owner/.papercusp-nightly");
+        assert_eq!(
+            resolve_workspaces_root(channel_home.clone(), Some("/tmp/owned-rig/workspaces")),
+            PathBuf::from("/tmp/owned-rig/workspaces")
+        );
+        for explicit in [None, Some(""), Some("  ")] {
+            assert_eq!(
+                resolve_workspaces_root(channel_home.clone(), explicit),
+                channel_home.join(WORKSPACES_DIR_NAME)
+            );
+        }
+    }
 
     // ---- WI-36794: channel-aware data home -------------------------------
     //
