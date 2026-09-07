@@ -40,6 +40,12 @@ test('Windows exact-source salvage runs current producer logic against the froze
   );
 });
 
+test('Linux AppImage exact-source salvage runs current producer logic against the frozen target root', () => {
+  assert.match(release, /APPIMAGE_PRODUCER="\$ORCHESTRATOR_HERE\/build-appimage\.sh"/);
+  assert.match(release, /PAPERCUSP_DESKTOP_TARGET_ROOT="\$ROOT"/);
+  assert.match(release, /bash "\$APPIMAGE_PRODUCER"/);
+});
+
 test('Windows immutable source contains the superproject CSP policy at Rust include_str path', () => {
   const worktreeDir = windows.match(/BUILD_ROOT=\"\$BUILD_CONTAINER\/([^\"]+)\"/)?.[1];
   const policyRel = windows.match(/WINDOWS_CSP_POLICY_REL=\"([^\"]+)\"/)?.[1];

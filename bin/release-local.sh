@@ -1487,10 +1487,11 @@ else
     # on the sidecar tree; build-appimage.sh finishes with appimagetool (no ELF-scan).
     if [[ " $PAPERCUSP_BUILD_ROLES " == *" gui "* ]]; then
       echo "==> building Linux AppImage (gui, via bin/build-appimage.sh — linuxdeploy workaround)"
+      APPIMAGE_PRODUCER="$ORCHESTRATOR_HERE/build-appimage.sh"
       (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
          TAURI_SIGNING_PRIVATE_KEY="${TAURI_SIGNING_PRIVATE_KEY:-$KEY_FILE}" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
-         PAPERCUSP_RELEASE_CHANNEL="$CHANNEL" \
-         "${PC_NICE[@]}" bash "$ROOT/bin/build-appimage.sh")
+         PAPERCUSP_RELEASE_CHANNEL="$CHANNEL" PAPERCUSP_DESKTOP_TARGET_ROOT="$ROOT" \
+         "${PC_NICE[@]}" bash "$APPIMAGE_PRODUCER")
     fi
   ) >"$LINUX_LEG_LOG" 2>&1 &
   LINUX_PID=$!
