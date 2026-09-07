@@ -94,12 +94,26 @@ done
 [[ -n "$ISO_BASE" ]] || fail "no isolation base free of an ancestor node_modules — the gate cannot prove anything, so it refuses to pass"
 
 ISO="$(mktemp -d "$ISO_BASE/pc-bootgate-XXXXXX")"
+
+# Bundle isolation and mutable boot state have different placement needs. The
+# bundle prefers the sidecar's device so `cp -al` remains instant and free, but
+# PGDATA performs thousands of writes + fsyncs during a fresh migration boot.
+# Keeping both below $ISO_BASE put that mutable database on the nearly-full
+# release filesystem on the 0.0.19 cut: PostgreSQL's final CHECKPOINT consumed
+# the gate's remaining 107 seconds. The exact same isolated bundle served in
+# 24 seconds when only HOME/PGDATA/log moved to /tmp. Keep those concerns split.
+STATE_BASE="${PAPERCUSP_BOOT_GATE_STATE_BASE:-${TMPDIR:-/tmp}}"
+[[ -d "$STATE_BASE" && -w "$STATE_BASE" ]] \
+  || fail "mutable-state base is not a writable directory: $STATE_BASE (set PAPERCUSP_BOOT_GATE_STATE_BASE)"
+STATE="$(mktemp -d "$STATE_BASE/pc-bootgate-state-XXXXXX")" \
+  || fail "could not create private mutable boot state below $STATE_BASE"
 cleanup() {
   [[ -n "${PID:-}" ]] && { kill -TERM "-$PID" 2>/dev/null; sleep 1; kill -KILL "-$PID" 2>/dev/null; }
-  rm -rf "$ISO"
+  rm -rf "$ISO" "$STATE"
 }
 trap cleanup EXIT
 echo "   isolated at $ISO (no ancestor node_modules)"
+echo "   mutable boot state at $STATE (HOME, PGDATA, logs)"
 
 HARDLINKED=0
 if cp -al "$SIDECAR" "$ISO/sidecar" 2>/dev/null; then
@@ -111,7 +125,7 @@ else
 fi
 B="$ISO/sidecar"
 B_NODE="$B/bin/$(basename "$NODE_BIN")"   # node or node.exe, inside the isolated copy
-mkdir -p "$ISO/home" "$ISO/pgdata" "$ISO/dev-source"
+mkdir -p "$STATE/home" "$STATE/pgdata" "$STATE/dev-source"
 # Hardlinks share inodes: a sidecar that wrote to its OWN dir IN PLACE would mutate
 # the real staged bundle the cut is about to pack. It doesn't today (the shipped
 # sidecar lives read-only under /usr/lib, so it can't), and this marker proves it
@@ -165,7 +179,7 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
 
   set -m
   env -i \
-    HOME="$ISO/home" \
+    HOME="$STATE/home" \
     PATH="$B/bin:/usr/bin:/bin" \
     LANG=C.UTF-8 TERM=dumb \
     PAPERCUSP_DESKTOP=1 \
@@ -173,7 +187,7 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
     PAPERCUSP_DISABLE_DOGFOOD_HIVE=1 \
     PAPERCUSP_HONO_PORT="$HTTP_PORT" \
     PAPERCUSP_PG_PORT="$PG_PORT" \
-    PAPERCUSP_PG_DATA_DIR="$ISO/pgdata" \
+    PAPERCUSP_PG_DATA_DIR="$STATE/pgdata" \
     PAPERCUSP_PG_SQL_DIR="$B/db-sql" \
     PAPERCUSP_PG_SEED_PATH="$PG_SEED" \
     PAPERCUSP_PG_RESTORE_BIN="$B/bin/pg_restore" \
@@ -183,8 +197,8 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
     PAPERCUSP_PROMPTS_DIR="$B/prompts" \
     PAPERCUSP_DOCS_ROOT="$B/internal-docs" \
     PAPERCUSP_SOURCE_ARCHIVE="$B/source.tar.zst" \
-    PAPERCUSP_DEV_SOURCE_DIR="$ISO/dev-source" \
-    "$B_NODE" "$B/serve.mjs" --ensure > "$ISO/boot.log" 2>&1 &
+    PAPERCUSP_DEV_SOURCE_DIR="$STATE/dev-source" \
+    "$B_NODE" "$B/serve.mjs" --ensure > "$STATE/boot.log" 2>&1 &
   PID=$!
 
   deadline=$(( $(date +%s) + BOOT_TIMEOUT ))
@@ -206,14 +220,14 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   # Tear the attempt's process tree down before deciding, so a retry's ports are free.
   kill -TERM "-$PID" 2>/dev/null; sleep 1; kill -KILL "-$PID" 2>/dev/null; PID=""
 
-  if [[ "$outcome" == "exited" ]] && grep -qiE "$PORT_COLLISION_RE" "$ISO/boot.log"; then
+  if [[ "$outcome" == "exited" ]] && grep -qiE "$PORT_COLLISION_RE" "$STATE/boot.log"; then
     echo "   ⚠ attempt $attempt hit a PG port collision (infra flake, not a bundle defect) — retrying with new ports" >&2
     continue
   fi
 
   # Anything else is a REAL failure — do not retry, do not mask it.
   echo "── last 25 lines of the packed sidecar's boot log ──" >&2
-  tail -25 "$ISO/boot.log" >&2
+  tail -25 "$STATE/boot.log" >&2
   if [[ "$outcome" == "exited" ]]; then
     fail "the packed sidecar EXITED (rc=${rc:-?}) instead of serving. This bundle is DOA on any machine that lacks a fallback operator."
   else
@@ -223,7 +237,7 @@ done
 
 if [[ $served -ne 1 ]]; then
   echo "── last 25 lines of the packed sidecar's boot log ──" >&2
-  tail -25 "$ISO/boot.log" >&2
+  tail -25 "$STATE/boot.log" >&2
   fail "could not obtain a clean boot in $MAX_ATTEMPTS attempts — every attempt hit a port collision. The box is too busy to gate on; re-run, or set PAPERCUSP_BOOT_GATE_ATTEMPTS higher."
 fi
 

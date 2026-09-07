@@ -11,6 +11,7 @@ const bin = path.join(__dirname, '..', 'bin');
 const release = fs.readFileSync(process.env.PROBE_RELEASE_LOCAL || path.join(bin, 'release-local.sh'), 'utf8');
 const sidecar = fs.readFileSync(path.join(bin, 'build-desktop-sidecar.sh'), 'utf8');
 const windows = fs.readFileSync(process.env.PROBE_WINDOWS_CROSS || path.join(bin, 'build-windows-cross.sh'), 'utf8');
+const bootGate = fs.readFileSync(path.join(bin, 'gate-sidecar-boots.sh'), 'utf8');
 
 function section(text, start, end) {
   const from = text.indexOf(start);
@@ -72,6 +73,22 @@ test('release reserves sidecar disk before long preflights and does not double-c
     release,
     /cleanup_release_local\(\) \{[\s\S]*papercusp_release_disk_reservation[\s\S]*\n\}/,
   );
+});
+
+test('packed-sidecar boot gate keeps mutable database state off the bundle-isolation filesystem', () => {
+  assert.match(
+    bootGate,
+    /STATE_BASE="\$\{PAPERCUSP_BOOT_GATE_STATE_BASE:-\$\{TMPDIR:-\/tmp\}\}"/,
+  );
+  assert.match(bootGate, /STATE="\$\(mktemp -d "\$STATE_BASE\/pc-bootgate-state-XXXXXX"\)"/);
+  assert.match(bootGate, /HOME="\$STATE\/home"/);
+  assert.match(bootGate, /PAPERCUSP_PG_DATA_DIR="\$STATE\/pgdata"/);
+  assert.match(bootGate, /PAPERCUSP_DEV_SOURCE_DIR="\$STATE\/dev-source"/);
+  assert.match(bootGate, /> "\$STATE\/boot\.log" 2>&1/);
+  assert.match(bootGate, /rm -rf "\$ISO" "\$STATE"/);
+
+  assert.doesNotMatch(bootGate, /PAPERCUSP_PG_DATA_DIR="\$ISO\//);
+  assert.doesNotMatch(bootGate, /> "\$ISO\/boot\.log" 2>&1/);
 });
 
 test('Windows immutable source contains the superproject CSP policy at Rust include_str path', () => {
