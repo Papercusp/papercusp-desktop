@@ -29,6 +29,42 @@ const cutStartHarness = sliceBetween(
   '# EI-20551860898590077: bind every artifact',
   'echo "==> bumping version in manifests"',
 );
+const supervisorHarness = sliceBetween(
+  'leg_heartbeat_line() {',
+  'supervise_legs\n\n# Android',
+);
+
+function runSupervisorWithFastFailedSibling() {
+  const command = [
+    'set -euo pipefail',
+    'LEG_HEARTBEAT_S=0',
+    'LEG_GRACE_PID=',
+    'LEG_TICK_PID=',
+    'RELEASE_SALVAGE_GRACE_S=0',
+    'LEG_NAMES=(fast slow)',
+    'LEG_STATE=(alive alive)',
+    'LEG_RC=( "" "" )',
+    'LEG_LOGS=(/dev/null /dev/null)',
+    '(sleep 0.02; exit 7) & fast_pid=$!',
+    '(sleep 0.2; exit 0) & slow_pid=$!',
+    // Let the fast child exit before wait -n starts. Bash can then collect the
+    // still-running sibling first and leave the fast PID stale in the set.
+    'sleep 0.05',
+    'LEG_PIDS=("$fast_pid" "$slow_pid")',
+    supervisorHarness,
+    'supervise_legs',
+  ].join('\n');
+  return spawnSync('bash', ['-c', command], { encoding: 'utf8', timeout: 2000 });
+}
+
+test('supervisor reaps a fast failed child left behind by wait -n', () => {
+  const result = runSupervisorWithFastFailedSibling();
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.equal(result.error, undefined, 'stale child must not leave the supervisor sleeping until timeout');
+  assert.match(result.stdout, /fast leg FAILED \(rc=7\)/);
+  assert.doesNotMatch(result.stdout, /SALVAGE GRACE .*EXPIRED/);
+});
+
 // Stub the expensive builders, not the Linux producer or provenance emitter.
 // Stop at the producing child: a sibling failure prevents the later collector
 // from running. Explicit PID waits keep this receipt regression independent of

@@ -1858,6 +1858,21 @@ supervise_legs() {
     # declared the linux leg FAILED mid-appimagetool on exactly that. `wait -n -p`
     # REPORTS the pid it collected, so "no pid reported" IS the no-verdict case and is
     # the whole guard: never grade a leg on a wakeup that named no child.
+    # A completed child can be absent from wait -n's candidate set even though
+    # its PID is still tracked. In that case bash returns 127 with no PID;
+    # probe the tracked legs and synchronously reap a dead one so its actual
+    # exit status still reaches the normal leg-accounting path. Without this,
+    # the stale PID stays in alive forever and the loop prints "no such job"
+    # every five seconds.
+    if [[ -z "$collected" && $rc -eq 127 ]]; then
+      for p in "${alive[@]}"; do
+        if ! kill -0 "$p" 2>/dev/null; then
+          collected="$p"
+          if wait "$p" 2>/dev/null; then rc=0; else rc=$?; fi
+          break
+        fi
+      done
+    fi
     if [[ -z "$collected" ]]; then
       (( rc == 127 )) && sleep 5   # non-child rc: poll instead of hot-spinning
       continue
