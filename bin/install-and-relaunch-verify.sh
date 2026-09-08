@@ -618,8 +618,37 @@ if [[ -z "$SHA_BEFORE" ]]; then
 fi
 
 # ── 2. PUSH ─────────────────────────────────────────────────────────────────
+# A custom staging destination may not exist yet. Create it idempotently and
+# require positive readback BEFORE copying any bytes. Windows OpenSSH parses
+# command text through cmd.exe: encode PowerShell instead of nesting shell
+# quotes around an arbitrary destination (spaces/apostrophes are legitimate).
+REMOTE_MKDIR_CMD="$(python3 - "$PLATFORM" "$REMOTE_DIR" <<'PY'
+import base64, shlex, sys
+platform, directory = sys.argv[1:]
+if platform == "windows":
+    literal = "'" + directory.replace("'", "''") + "'"
+    script = ("$ErrorActionPreference='Stop'; try { "
+              f"[System.IO.Directory]::CreateDirectory({literal}) | Out-Null; "
+              f"if (-not [System.IO.Directory]::Exists({literal})) {{ throw 'destination missing' }}; "
+              "Write-Output 'PC-REMOTE-DIR-READY' } catch { "
+              "[Console]::Error.WriteLine($_.Exception.Message); exit 1 }")
+    print("powershell -NoProfile -NonInteractive -EncodedCommand " +
+          base64.b64encode(script.encode("utf-16le")).decode())
+else:
+    quoted = shlex.quote(directory)
+    print(f"mkdir -p -- {quoted} && test -d {quoted} && printf 'PC-REMOTE-DIR-READY\\n'")
+PY
+)"
+REMOTE_MKDIR_OUT=""
+REMOTE_MKDIR_RC=0
+REMOTE_MKDIR_OUT="$(timeout 30 "${SSH[@]}" "$REMOTE_MKDIR_CMD" 2>&1 | tr -d '\r\0')" || REMOTE_MKDIR_RC=$?
+if [[ "$REMOTE_MKDIR_RC" -ne 0 || "$REMOTE_MKDIR_OUT" != *PC-REMOTE-DIR-READY* ]]; then
+  fail_check "remote staging directory: creation/readback failed (exit $REMOTE_MKDIR_RC)${REMOTE_MKDIR_OUT:+ — output: ${REMOTE_MKDIR_OUT:0:400}}"
+fi
+
 SCP=("$SCP_BIN" -i "$SSH_KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -o BatchMode=yes)
 for option in "${SCP_OPTIONS[@]}"; do SCP+=( -o "$option" ); done
+if [[ ${#FAILURES[@]} -eq 0 ]]; then
 SCP_OUT=""
 SCP_RC=0
 SCP_OUT="$("${SCP[@]}" "$ARTIFACT" "$SSH_HOST:$REMOTE_ARTIFACT" 2>&1)" || SCP_RC=$?
@@ -643,6 +672,7 @@ for server_path in "${SERVER_ARTIFACTS[@]}"; do
     fi
   fi
 done
+fi
 
 # ── 3. INSTALL (does NOT terminate the operator) ────────────────────────────
 run_installer() {

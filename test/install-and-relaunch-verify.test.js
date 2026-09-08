@@ -61,7 +61,7 @@ function writeProvenance(dir, sha = TARGET_SHA) {
   }));
 }
 
-function fixture({ requireHostKeyOptions = false } = {}) {
+function fixture({ requireHostKeyOptions = false, remoteMkdirFail = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'install-relaunch-server-'));
   const artifacts = join(root, 'artifacts');
   const shims = join(root, 'shims');
@@ -83,6 +83,14 @@ if [[ "$MOCK_REQUIRE_HOST_KEY_OPTIONS" == "1" && "$*" != *"StrictHostKeyChecking
   exit 255
 fi
 case "$*" in
+  *"powershell -NoProfile -NonInteractive -EncodedCommand"*)
+    if [[ "$MOCK_REMOTE_MKDIR_FAIL" == "1" ]]; then
+      printf 'destination access denied\\n' >&2
+      exit 5
+    fi
+    : > "$MOCK_REMOTE_DIR_READY"
+    printf 'PC-REMOTE-DIR-READY\\n'
+    ;;
   *"cmd /c echo VM-OK"*) printf 'VM-OK\\n' ;;
   *"--exec cat /home/papercup/.papercusp/operator.json"*) printf '{"port":15747}\\n' ;;
   *"--exec curl -sS -m 5 http://127.0.0.1:15747/api/health"*)
@@ -103,13 +111,14 @@ esac
 `);
   const scp = executable(shims, 'scp', `#!/usr/bin/env bash
 printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
+[[ -f "$MOCK_REMOTE_DIR_READY" ]] || { printf 'destination missing\\n' >&2; exit 1; }
 if [[ "$MOCK_REQUIRE_HOST_KEY_OPTIONS" == "1" && "$*" != *"StrictHostKeyChecking=no"* ]]; then
   printf 'Host key verification failed: rotated host key\\n' >&2
   exit 255
 fi
 `);
 
-  return { root, gui, server, slices, log, flipped, ssh, scp, requireHostKeyOptions };
+  return { root, gui, server, slices, log, flipped, ssh, scp, requireHostKeyOptions, remoteMkdirFail };
 }
 
 function linuxFixture({ emitDpkgWarning = false } = {}) {
@@ -139,6 +148,10 @@ function linuxFixture({ emitDpkgWarning = false } = {}) {
   const updated = join(root, 'updated');
   const ssh = executable(shims, 'ssh', `#!/usr/bin/env bash
 printf 'SSH %s\\n' "$*" >> "$MOCK_LOG"
+if [[ "$*" == *"PC-REMOTE-DIR-READY"* ]]; then
+  printf 'PC-REMOTE-DIR-READY\\n'
+  exit 0
+fi
 if [[ "$*" == *"apt-get update -qq"* ]]; then
   : > "$MOCK_UPDATED"
 fi
@@ -261,6 +274,7 @@ cp -R "\${@: -2:1}" "\${@: -1}"
 printf 'SSH %s\\n' "$*" >> "$MOCK_LOG"
 case "$*" in
   *"echo VM-OK"*) printf 'VM-OK\\n' ;;
+  *"PC-REMOTE-DIR-READY"*) printf 'PC-REMOTE-DIR-READY\\n' ;;
   *"PAPERCUSP_NATIVE_MAC_PREFLIGHT"*)
     case "$MOCK_NATIVE_PREFLIGHT" in
       no-console) printf 'macOS native preflight: SSH user must own the logged-in GUI console\\n' >&2; exit 2 ;;
@@ -319,6 +333,8 @@ function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
     PC_SCP: f.scp,
     MOCK_LOG: f.log,
     MOCK_FLIPPED: f.flipped,
+    MOCK_REMOTE_DIR_READY: join(f.root, 'remote-dir-ready'),
+    MOCK_REMOTE_MKDIR_FAIL: f.remoteMkdirFail ? '1' : '0',
     PAPERCUSP_SMOKE_RECEIPT_ROOT: f.root,
   };
   if (f.configured) env.MOCK_CONFIGURED = f.configured;
@@ -375,6 +391,40 @@ test('Windows auto-resolves, pushes, and installs the complete Server span befor
     assert.ok(serverInstall > guiInstall, 'Server must install after GUI');
     assert.ok(relaunch > serverInstall, 'neither app may relaunch before matching Server install finishes');
     assert.match(lines[relaunch], /cmd \/c .*schtasks \/run \/tn papercusp-e2e.*schtasks \/run \/tn papercusp-server-e2e/);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('Windows creates a literal custom remote directory before any SCP transfer', () => {
+  const f = fixture();
+  try {
+    const directory = "C:/Users/User/release notes' & files";
+    const result = runVerify(f, ['--remote-dir', directory]);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const lines = readFileSync(f.log, 'utf8').trim().split('\n');
+    const mkdirAt = lines.findIndex((s) => s.includes('-EncodedCommand'));
+    assert.ok(mkdirAt >= 0 && mkdirAt < lines.findIndex((s) => s.startsWith('SCP ')));
+    const encoded = lines[mkdirAt].split('-EncodedCommand ')[1];
+    const script = Buffer.from(encoded, 'base64').toString('utf16le');
+    assert.ok(script.includes("[System.IO.Directory]::CreateDirectory('C:/Users/User/release notes'' & files')"));
+    assert.ok(script.includes('PC-REMOTE-DIR-READY'));
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('remote directory failure blocks every upload, install, relaunch and smoke receipt', () => {
+  const f = fixture({ remoteMkdirFail: true });
+  try {
+    const result = runVerify(f, ['--smoke-receipt-tag', SMOKE_TAG]);
+    assert.equal(result.status, 1);
+    const verdict = JSON.parse(result.stdout);
+    assert.match(verdict.failures[0], /remote staging directory: creation\/readback failed/);
+    assert.equal(verdict.smokeReceipt, '');
+    const log = readFileSync(f.log, 'utf8');
+    assert.doesNotMatch(log, /^SCP /m);
+    assert.doesNotMatch(log, /\/VERYSILENT|schtasks \/run/);
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
