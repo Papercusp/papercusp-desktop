@@ -35,6 +35,10 @@
 # either with the same env):
 #   PAPERCUSP_BUILD_ROLES     roles to build (default "gui server")
 #   PAPERCUSP_BUILD_SHA       baked into the exe (option_env!, /api/health)
+#   PAPERCUSP_WINDOWS_SOURCE_REPAIR   exact committed-path GUI repair manifest
+#   PAPERCUSP_WINDOWS_SOURCE_REPAIR_REPO  repo containing its repair commits
+#   PAPERCUSP_WINDOWS_OUTPUT_DIR      separate, empty output directory (required
+#                                    for a repair; original cut stays immutable)
 #   PAPERCUSP_BUILD_VERSION   shipped version (option_env!); also the installer
 #                             filename version (falls back to tauri.conf.json)
 #   PAPERCUSP_RELEASE_HOST    the updater's poll host, baked at compile (load via
@@ -155,6 +159,19 @@ _WIN_REMAP="--remap-path-prefix=$HOME=/build"
 # either copy — it asserts the property on the produced binary.
 _WIN_CRT_STATIC="-C target-feature=+crt-static"
 ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
+SOURCE_REPAIR="${PAPERCUSP_WINDOWS_SOURCE_REPAIR:-}"
+if [[ -n "$SOURCE_REPAIR" ]]; then
+  [[ "$ROLES" == "gui" ]] || fail "source repair is GUI-only; preserve the frozen Server"
+  [[ -f "$SOURCE_REPAIR" ]] || fail "source repair manifest missing"
+  [[ -n "${PAPERCUSP_WINDOWS_OUTPUT_DIR:-}" ]] \
+    || fail "source repair requires a separate PAPERCUSP_WINDOWS_OUTPUT_DIR"
+  if [[ -e "$PAPERCUSP_WINDOWS_OUTPUT_DIR" ]]; then
+    [[ -d "$PAPERCUSP_WINDOWS_OUTPUT_DIR" ]] \
+      || fail "source repair output must be a directory"
+    [[ -z "$(find "$PAPERCUSP_WINDOWS_OUTPUT_DIR" -mindepth 1 -print -quit)" ]] \
+      || fail "source repair output must be empty; never overwrite prior artifacts"
+  fi
+fi
 # Resolve the cargo target dir ONCE, deterministically — this box relocates it
 # via ~/.cargo/config.toml `[build] target-dir` (a shared cache on the data disk
 # since 2026-09-03; read the config, never assume the path) AND src-tauri/target
@@ -365,6 +382,15 @@ if ! git -C "$SOURCE_ROOT" worktree add --detach "$BUILD_ROOT" "$BUILD_COMMIT_SH
   fail "could not create the isolated Windows build source at $BUILD_ROOT"
 fi
 BUILD_WORKTREE=1
+SOURCE_REPAIR_APPLIED=""
+if [[ -n "$SOURCE_REPAIR" ]]; then
+  SOURCE_REPAIR_APPLIED="$BUILD_CONTAINER/source-repair.json"
+  node "$HERE/lib/windows-source-repair.js" apply "$SOURCE_REPAIR" \
+    "${PAPERCUSP_WINDOWS_SOURCE_REPAIR_REPO:-$SOURCE_ROOT}" "$BUILD_ROOT" \
+    "$BUILD_COMMIT_SHA" "$BUILD_SUPERPROJECT_COMMIT_SHA" >"$SOURCE_REPAIR_APPLIED" \
+    || fail "source repair failed exact committed-source validation"
+  echo "==> DERIVED Windows GUI source; buildSha identifies the unchanged paired operator, not the repaired native source"
+fi
 
 # A release cut intentionally edits its version manifests before the build and
 # generates the seed/sidecar outside Git. Copy those inputs once into the pinned
@@ -453,6 +479,9 @@ echo "==> isolated Windows build source: commit=${BUILD_COMMIT_SHORT} root=$BUIL
 # target/release/ just before each pack.
 STAGE="$(mktemp -d /tmp/win-cross-stage-XXXX)"
 OUT_DIR="$OUTPUT_SRC_TAURI/target/windows-vm/bundle/inno"   # the dir release-local.sh collects from
+if [[ -n "${PAPERCUSP_WINDOWS_OUTPUT_DIR:-}" ]]; then
+  OUT_DIR="$PAPERCUSP_WINDOWS_OUTPUT_DIR"
+fi
 mkdir -p "$STAGE/target/release" "$OUT_DIR"
 for d in sidecar resources seed env-sidecars icons windows; do
   [[ -e "$SRC_TAURI/$d" ]] && ln -sfn "$SRC_TAURI/$d" "$STAGE/$d"
@@ -702,10 +731,16 @@ done
 shopt -s nullglob
 PROV_ARTIFACTS=("$OUT_DIR"/*-setup.exe "$OUT_DIR"/*-setup-*.bin)
 shopt -u nullglob
+if [[ -n "$SOURCE_REPAIR_APPLIED" ]]; then
+  node "$HERE/lib/windows-source-repair.js" verify "$SOURCE_REPAIR_APPLIED" "$ROOT" >/dev/null \
+    || fail "native source changed after repair materialization"
+  cp "$SOURCE_REPAIR_APPLIED" "$OUT_DIR/source-repair.json"
+fi
 PROVENANCE_GIT_ROOT="$ROOT" \
 PROVENANCE_SIGNED="$([[ -n "$AUTHENTICODE_PFX" ]] && echo true || echo false)" \
 PROVENANCE_SIDECAR_DIR="$SRC_TAURI/sidecar" \
-  bash "$ROOT/bin/emit-build-provenance.sh" \
+PROVENANCE_SOURCE_REPAIR_MANIFEST="$SOURCE_REPAIR_APPLIED" \
+  bash "$HERE/emit-build-provenance.sh" \
     "$OUT_DIR" \
     "$VERSION" \
     "${PAPERCUSP_BUILD_SHA:-}" \
