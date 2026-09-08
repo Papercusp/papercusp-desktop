@@ -3640,10 +3640,14 @@ fn run_wsl_exec_with_timeout(
     args: &[String],
     timeout: Duration,
 ) -> std::io::Result<std::process::ExitStatus> {
-    let mut cmd = wsl_sidecar_staging::wsl_command(timeout);
+    let mut cmd = wsl_sidecar_staging::wsl_command();
     cmd.args(args);
     no_console_window(&mut cmd);
-    wsl_sidecar_staging::run_bounded(&mut cmd, timeout)
+    // A cold WSL boot is not a slow ten-second file operation. The SAME
+    // invocation proves readiness before we arm the Linux operation deadline.
+    wsl_sidecar_staging::run_wsl_bounded(
+        &mut cmd, timeout, wsl_sidecar_staging::WSL_STARTUP_TIMEOUT + timeout,
+    )
 }
 
 /// Materialize the hot Windows sidecar tree on WSL ext4 and return its native
@@ -3684,8 +3688,8 @@ fn prepare_wsl_sidecar_runtime(
     producer.arg("-C").arg(sidecar_dir).args(wsl_sidecar_staging::ARCHIVE_ARGS)
         .arg("-cf").arg(archive.path()).arg(".");
     no_console_window(&mut producer);
-    wsl_sidecar_staging::stage_archive(&mut producer, |remaining| {
-        let mut consumer = wsl_sidecar_staging::wsl_command(remaining);
+    wsl_sidecar_staging::stage_archive(&mut producer, |_remaining| {
+        let mut consumer = wsl_sidecar_staging::wsl_command();
         consumer.args(["/bin/bash", "-c"])
             .arg(wsl_sidecar_staging::EXTRACT_SCRIPT)
             .arg("papercusp-extract-sidecar")

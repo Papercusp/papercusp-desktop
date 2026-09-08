@@ -2,21 +2,113 @@
 //! Keep archive production/extraction separate from publication: a successful
 //! extractor cannot attest that the producer supplied its entire source tree.
 
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
+
+pub const WSL_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+const READY_PREFIX: &[u8] = b"papercusp-wsl-ready-v1\n";
+// The parent supplies the REMAINING budget after readiness, not before cold
+// boot. Until that reply arrives the operation cannot start; EOF fails closed.
+pub const WSL_READY_SCRIPT: &str = r#"printf 'papercusp-wsl-ready-v1\n'
+IFS= read -r seconds || exit 125
+exec /usr/bin/timeout --kill-after=5s "$seconds" "$@"
+"#;
 
 /// Linux owns a matching deadline too: killing wsl.exe alone can disconnect
 /// its Linux descendants. GNU timeout targets only this extraction process
 /// group; it cannot reset the distro or signal another operator.
-pub fn wsl_command(timeout: Duration) -> Command {
+/// Readiness and operation run in the SAME invocation: a separate prewarm may
+/// cool down before the file probe even starts.
+pub fn wsl_command() -> Command {
     let mut command = Command::new("wsl.exe");
     command.args([
         "--distribution", "papercup-runtime", "--exec",
-        "/usr/bin/timeout", "--kill-after=5s",
-    ]).arg(format!("{:.3}s", timeout.as_secs_f64().max(0.001)));
+        "/bin/sh", "-c", WSL_READY_SCRIPT, "papercusp-wsl-ready",
+    ]);
     command
+}
+
+/// Startup gets its own bound, but never extends the caller's total deadline.
+/// A marker probe allows startup + its unchanged ten-second operation budget;
+/// extraction passes only what remains of the shared archive deadline.
+pub fn run_wsl_bounded(
+    command: &mut Command,
+    operation_timeout: Duration,
+    total_timeout: Duration,
+) -> io::Result<ExitStatus> {
+    run_ready_bounded(command, WSL_STARTUP_TIMEOUT, operation_timeout, total_timeout)
+}
+
+fn run_ready_bounded(
+    command: &mut Command,
+    startup_timeout: Duration,
+    operation_timeout: Duration,
+    total_timeout: Duration,
+) -> io::Result<ExitStatus> {
+    let start = Instant::now();
+    let total_deadline = start + total_timeout;
+    let startup_deadline = (start + startup_timeout).min(total_deadline);
+    let mut child = OwnedChild(command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?);
+    let mut stdout = child.0.stdout.take().expect("stdout was piped");
+    let (tx, rx) = mpsc::channel();
+    // A cold WSL stdout must never block the supervising thread. Read a fixed
+    // prefix, not an unbounded line; strip only protocol bytes from normal logs.
+    std::thread::Builder::new().name("wsl-readiness".into()).spawn(move || {
+        let mut prefix = [0; READY_PREFIX.len()];
+        let ready = stdout.read_exact(&mut prefix).and_then(|()| {
+            if prefix == READY_PREFIX {
+                Ok(Instant::now())
+            } else {
+                Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid WSL readiness prefix"))
+            }
+        });
+        let valid = ready.is_ok();
+        let _ = tx.send(ready);
+        if valid {
+            let _ = io::copy(&mut stdout, &mut io::stdout());
+        }
+    })?;
+    let ready_at = loop {
+        let remaining = startup_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(io::ErrorKind::TimedOut,
+                "WSL startup timed out before readiness; only the owned child was stopped"));
+        }
+        match rx.recv_timeout(remaining.min(Duration::from_millis(20))) {
+            Ok(Ok(at)) if at <= startup_deadline => break at,
+            Ok(Ok(_)) => return Err(io::Error::new(io::ErrorKind::TimedOut,
+                "WSL readiness arrived after the startup deadline")),
+            Ok(Err(error)) => return Err(io::Error::new(error.kind(),
+                format!("WSL exited before valid readiness: {error}"))),
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(io::Error::other(
+                "WSL readiness reader disconnected")),
+        }
+    };
+    let operation_deadline = (ready_at + operation_timeout).min(total_deadline);
+    let remaining = operation_deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(io::Error::new(io::ErrorKind::TimedOut,
+            "WSL operation deadline expired before launch"));
+    }
+    // Tiny control message only, never the binary archive. The Linux timer is
+    // armed AFTER startup, with the shared deadline's actual remaining budget.
+    let mut stdin = child.0.stdin.take().expect("stdin was piped");
+    writeln!(stdin, "{:.6}s", remaining.as_secs_f64())?;
+    drop(stdin);
+    loop {
+        if let Some(status) = child.0.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= operation_deadline {
+            return Err(io::Error::new(io::ErrorKind::TimedOut,
+                "WSL operation timed out after readiness; only the owned child was stopped"));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 pub const ARCHIVE_ARGS: &[&str] = &[
@@ -150,7 +242,8 @@ where
     // entire producer duration beyond that deadline.
     let mut consumer = make_consumer(remaining);
     eprintln!("[wsl-staging] WSL archive extractor starting");
-    let status = run_bounded(&mut consumer, timeout.saturating_sub(start.elapsed()))?;
+    let remaining = timeout.saturating_sub(start.elapsed());
+    let status = run_wsl_bounded(&mut consumer, remaining, remaining)?;
     if !status.success() {
         return Err(io::Error::other(format!("WSL archive extractor exited with {status}")));
     }
@@ -189,7 +282,7 @@ mod tests {
         }
         fn consumer(&self) -> Command {
             let mut c = Command::new("bash");
-            c.args(["-c", EXTRACT_SCRIPT, "extract"])
+            c.args(["-c", WSL_READY_SCRIPT, "ready", "/bin/bash", "-c", EXTRACT_SCRIPT, "extract"])
                 .arg(self.0.join("archive.tar")).arg(self.0.join("stage"));
             c
         }
@@ -331,12 +424,11 @@ mod tests {
 
     #[test]
     fn wsl_timeout_is_anchored_inside_linux_not_only_the_client() {
-        let c = wsl_command(Duration::from_secs(12));
+        let c = wsl_command();
         let args: Vec<_> = c.get_args().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(args, ["--distribution", "papercup-runtime", "--exec",
-            "/usr/bin/timeout", "--kill-after=5s", "12.000s"]);
-        let short = wsl_command(Duration::from_millis(125));
-        assert_eq!(short.get_args().last().unwrap(), "0.125s");
+            "/bin/sh", "-c", WSL_READY_SCRIPT, "papercusp-wsl-ready"]);
+        assert!(WSL_READY_SCRIPT.contains("/usr/bin/timeout --kill-after=5s"));
     }
 
     #[test]
@@ -351,12 +443,91 @@ mod tests {
             assert!(remaining <= budget - Duration::from_millis(50),
                 "Linux must not receive the producer's already-spent budget");
             assert!(!remaining.is_zero());
-            let linux = wsl_command(remaining);
-            let seconds = linux.get_args().last().unwrap().to_str().unwrap()
-                .trim_end_matches('s').parse::<f64>().unwrap();
-            assert!(seconds <= remaining.as_secs_f64() + 0.001);
             f.consumer()
         }, budget).unwrap();
         assert!(!f.0.join("runtime").exists(), "diagnostic extraction is not publication");
+    }
+
+    fn delayed_ready(delay: &str, args: &[&str]) -> Command {
+        let mut command = Command::new("bash");
+        command.args(["-c", "sleep \"$1\"; shift; exec /bin/sh -c \"$@\"", "boot", delay,
+            WSL_READY_SCRIPT, "ready"]).args(args);
+        command
+    }
+
+    #[test]
+    fn cold_start_does_not_spend_the_operation_budget() {
+        let mut command = delayed_ready("0.3", &["/bin/true"]);
+        let start = Instant::now();
+        let status = run_ready_bounded(&mut command, Duration::from_secs(3),
+            Duration::from_millis(100), Duration::from_secs(4)).unwrap();
+        assert!(status.success());
+        assert!(start.elapsed() >= Duration::from_millis(300),
+            "startup must actually exceed the operation budget");
+    }
+
+    #[test]
+    fn readiness_preserves_the_real_operation_exit_code() {
+        let mut command = delayed_ready("0", &["/bin/sh", "-c", "exit 19"]);
+        let status = run_ready_bounded(&mut command, Duration::from_secs(3),
+            Duration::from_secs(1), Duration::from_secs(4)).unwrap();
+        assert_eq!(status.code(), Some(19), "a missing cache is not a startup failure");
+    }
+
+    #[test]
+    fn zero_exit_without_readiness_is_not_a_success() {
+        let mut command = Command::new("true");
+        assert_eq!(run_ready_bounded(&mut command, Duration::from_secs(3),
+            Duration::from_secs(1), Duration::from_secs(4)).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn invalid_readiness_is_not_an_operation_result() {
+        let mut command = Command::new("bash");
+        command.args(["-c", "printf 'not-a-readiness-marker\\n'"]);
+        assert_eq!(run_ready_bounded(&mut command, Duration::from_secs(3),
+            Duration::from_secs(1), Duration::from_secs(4)).unwrap_err().kind(),
+            io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn startup_timeout_reaps_only_the_owned_process() {
+        let f = Fixture::new();
+        let mut unrelated = OwnedChild(Command::new("sleep").arg("20").spawn().unwrap());
+        let mut command = Command::new("bash");
+        command.args(["-c", "echo $$ > \"$1\"; exec sleep 20", "startup"])
+            .arg(f.0.join("startup.pid"));
+        let error = run_ready_bounded(&mut command, Duration::from_millis(300),
+            Duration::from_secs(3), Duration::from_secs(4)).unwrap_err();
+        assert!(error.to_string().contains("before readiness"));
+        let pid = fs::read_to_string(f.0.join("startup.pid")).unwrap();
+        assert!(!PathBuf::from(format!("/proc/{}", pid.trim())).exists());
+        assert!(unrelated.0.try_wait().unwrap().is_none());
+    }
+
+    #[test]
+    fn execution_timeout_begins_after_readiness() {
+        let mut command = delayed_ready("0.1", &["/bin/sleep", "20"]);
+        let result = run_ready_bounded(&mut command, Duration::from_secs(3),
+            Duration::from_millis(100), Duration::from_secs(4));
+        match result {
+            // The real Linux timeout may beat the parent watchdog to the exit.
+            Ok(status) => assert_eq!(status.code(), Some(124)),
+            Err(error) => assert!(error.to_string().contains("after readiness")),
+        }
+    }
+
+    #[test]
+    fn readiness_cannot_extend_the_archive_total_deadline() {
+        let mut command = delayed_ready("0.3", &["/bin/sleep", "20"]);
+        let start = Instant::now();
+        let result = run_ready_bounded(&mut command, Duration::from_secs(20),
+            Duration::from_secs(20), Duration::from_millis(600));
+        match result {
+            Ok(status) => assert_eq!(status.code(), Some(124)),
+            Err(error) => assert!(error.to_string().contains("after readiness")),
+        }
+        assert!(start.elapsed() < Duration::from_secs(3));
     }
 }
