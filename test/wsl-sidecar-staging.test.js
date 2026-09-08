@@ -19,7 +19,7 @@ test('production staging executes archive, corruption, failure and timeout contr
     assert.equal(compile.status, 0, String(compile.error || compile.stderr));
     const run = spawnSync(binary, ['--nocapture'], { encoding: 'utf8', timeout: 30000 });
     assert.equal(run.status, 0, String(run.error || run.stderr || run.stdout));
-    assert.match(run.stdout, /10 passed; 0 failed; 0 ignored/);
+    assert.match(run.stdout, /11 passed; 0 failed; 0 ignored/);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }

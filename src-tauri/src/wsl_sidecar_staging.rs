@@ -7,6 +7,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 use std::time::{Duration, Instant};
 
+/// Linux owns a matching deadline too: killing wsl.exe alone can disconnect
+/// its Linux descendants. GNU timeout targets only this extraction process
+/// group; it cannot reset the distro or signal another operator.
+pub fn wsl_command(timeout: Duration) -> Command {
+    let mut command = Command::new("wsl.exe");
+    command.args([
+        "--distribution", "papercup-runtime", "--exec",
+        "/usr/bin/timeout", "--kill-after=5s",
+    ]).arg(format!("{}s", timeout.as_secs().max(1)));
+    command
+}
+
 pub const ARCHIVE_ARGS: &[&str] = &[
     "--exclude=./source.tar.zst",
     "--exclude=./db-seed.dump",
@@ -302,5 +314,13 @@ mod tests {
         fs::write(&path, b"archive").unwrap();
         drop(archive);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn wsl_timeout_is_anchored_inside_linux_not_only_the_client() {
+        let c = wsl_command(Duration::from_secs(12));
+        let args: Vec<_> = c.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(args, ["--distribution", "papercup-runtime", "--exec",
+            "/usr/bin/timeout", "--kill-after=5s", "12s"]);
     }
 }

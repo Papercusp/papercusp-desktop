@@ -16,8 +16,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !source.join("serve.mjs").is_file() || !source.join("sidecar-preload.js").is_file() {
         return Err("Source is not a sidecar".into());
     }
-    let mut probe = Command::new("wsl.exe");
-    probe.args(["-d", "papercup-runtime", "--exec", "/usr/bin/test", "!", "-e", &args[2]]);
+    let mut probe = staging::wsl_command(Duration::from_secs(10));
+    probe.args(["/usr/bin/test", "!", "-e", &args[2]]);
     if !staging::run_bounded(&mut probe, Duration::from_secs(10))?.success() {
         return Err("Diagnostic target already exists; inspect it instead of rerunning".into());
     }
@@ -31,8 +31,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let archive_wsl = format!("/mnt/{}{}", &archive_windows[..1].to_lowercase(), &archive_windows[2..]);
     producer.arg("-C").arg(source).args(staging::ARCHIVE_ARGS)
         .arg("-cf").arg(archive.path()).arg(".");
-    let mut consumer = Command::new("wsl.exe");
-    consumer.args(["-d", "papercup-runtime", "--exec", "/bin/bash", "-c"])
+    let mut consumer = staging::wsl_command(Duration::from_secs(1_200));
+    consumer.args(["/bin/bash", "-c"])
         .arg(staging::EXTRACT_SCRIPT).arg("diagnostic-extract").arg(&archive_wsl).arg(&args[2]);
     let start = Instant::now();
     staging::stage_archive(&mut producer, &mut consumer, Duration::from_secs(1_200))?;

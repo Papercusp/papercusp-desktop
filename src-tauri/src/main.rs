@@ -3640,9 +3640,8 @@ fn run_wsl_exec_with_timeout(
     args: &[String],
     timeout: Duration,
 ) -> std::io::Result<std::process::ExitStatus> {
-    let mut cmd = Command::new("wsl.exe");
-    cmd.args(["--distribution", wsl_setup::DISTRO_NAME_PUB, "--exec"])
-        .args(args);
+    let mut cmd = wsl_sidecar_staging::wsl_command(timeout);
+    cmd.args(args);
     no_console_window(&mut cmd);
     wsl_sidecar_staging::run_bounded(&mut cmd, timeout)
 }
@@ -3677,14 +3676,16 @@ fn prepare_wsl_sidecar_runtime(
     // NTFS into a local archive; WSL reads ONE file sequentially. The native
     // stdin pipe was also measured too slow for the multi-GB model payload.
     let archive = wsl_sidecar_staging::TemporaryArchive::create(
-        std::env::temp_dir().join(format!("papercusp-sidecar-{generation}-{}.tar", std::process::id()))
+        std::env::temp_dir().join(format!("papercusp-sidecar-{generation}-{}-{}.tar",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()))
     )?;
     let mut producer = Command::new("tar.exe");
     producer.arg("-C").arg(sidecar_dir).args(wsl_sidecar_staging::ARCHIVE_ARGS)
         .arg("-cf").arg(archive.path()).arg(".");
     no_console_window(&mut producer);
-    let mut consumer = Command::new("wsl.exe");
-    consumer.args(["--distribution", wsl_setup::DISTRO_NAME_PUB, "--exec", "/bin/bash", "-c"])
+    let mut consumer = wsl_sidecar_staging::wsl_command(Duration::from_secs(1_200));
+    consumer.args(["/bin/bash", "-c"])
         .arg(wsl_sidecar_staging::EXTRACT_SCRIPT)
         .arg("papercusp-extract-sidecar")
         .arg(windows_path_to_wsl(archive.path()))
