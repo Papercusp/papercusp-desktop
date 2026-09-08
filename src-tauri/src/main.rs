@@ -3684,14 +3684,16 @@ fn prepare_wsl_sidecar_runtime(
     producer.arg("-C").arg(sidecar_dir).args(wsl_sidecar_staging::ARCHIVE_ARGS)
         .arg("-cf").arg(archive.path()).arg(".");
     no_console_window(&mut producer);
-    let mut consumer = wsl_sidecar_staging::wsl_command(Duration::from_secs(1_200));
-    consumer.args(["/bin/bash", "-c"])
-        .arg(wsl_sidecar_staging::EXTRACT_SCRIPT)
-        .arg("papercusp-extract-sidecar")
-        .arg(windows_path_to_wsl(archive.path()))
-        .arg(&temporary);
-    no_console_window(&mut consumer);
-    wsl_sidecar_staging::stage_archive(&mut producer, &mut consumer, Duration::from_secs(1_200))?;
+    wsl_sidecar_staging::stage_archive(&mut producer, |remaining| {
+        let mut consumer = wsl_sidecar_staging::wsl_command(remaining);
+        consumer.args(["/bin/bash", "-c"])
+            .arg(wsl_sidecar_staging::EXTRACT_SCRIPT)
+            .arg("papercusp-extract-sidecar")
+            .arg(windows_path_to_wsl(archive.path()))
+            .arg(&temporary);
+        no_console_window(&mut consumer);
+        consumer
+    }, Duration::from_secs(1_200))?;
     let publish_args = vec![
         "/bin/bash".to_string(),
         "-c".to_string(),

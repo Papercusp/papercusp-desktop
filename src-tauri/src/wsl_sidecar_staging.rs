@@ -15,7 +15,7 @@ pub fn wsl_command(timeout: Duration) -> Command {
     command.args([
         "--distribution", "papercup-runtime", "--exec",
         "/usr/bin/timeout", "--kill-after=5s",
-    ]).arg(format!("{}s", timeout.as_secs().max(1)));
+    ]).arg(format!("{:.3}s", timeout.as_secs_f64().max(0.001)));
     command
 }
 
@@ -122,25 +122,40 @@ pub fn run_bounded(command: &mut Command, timeout: Duration) -> io::Result<ExitS
 /// sequentially. Native→WSL stdin was measured at ~2 MB/s on the real guest,
 /// insufficient for the shipped multi-GB models. Do not use a text/binary
 /// interop pipe, reintroduce per-file DrvFs reads, or increase the deadline.
-pub fn stage_archive(
+pub fn stage_archive<F>(
     producer: &mut Command,
-    consumer: &mut Command,
+    make_consumer: F,
     timeout: Duration,
-) -> io::Result<()> {
-    let deadline = Instant::now() + timeout;
-    for (command, label) in [(producer, "archive producer"), (consumer, "WSL archive extractor")] {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Windows sidecar archive deadline expired; no distro reset",
-            ));
-        }
-        let status = run_bounded(command, remaining)?;
-        if !status.success() {
-            return Err(io::Error::other(format!("{label} exited with {status}")));
-        }
+) -> io::Result<()>
+where
+    F: FnOnce(Duration) -> Command,
+{
+    let start = Instant::now();
+    eprintln!("[wsl-staging] archive producer starting");
+    let status = run_bounded(producer, timeout)?;
+    if !status.success() {
+        return Err(io::Error::other(format!("archive producer exited with {status}")));
     }
+    let remaining = timeout.saturating_sub(start.elapsed());
+    eprintln!("[wsl-staging] archive producer complete elapsed_ms={} remaining_ms={}",
+        start.elapsed().as_millis(), remaining.as_millis());
+    if remaining.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Windows sidecar archive deadline expired; no distro reset",
+        ));
+    }
+    // Construct the Linux deadline NOW, not before archive creation. Otherwise
+    // killing wsl.exe at the shared deadline leaves its extractor alive for the
+    // entire producer duration beyond that deadline.
+    let mut consumer = make_consumer(remaining);
+    eprintln!("[wsl-staging] WSL archive extractor starting");
+    let status = run_bounded(&mut consumer, timeout.saturating_sub(start.elapsed()))?;
+    if !status.success() {
+        return Err(io::Error::other(format!("WSL archive extractor exited with {status}")));
+    }
+    eprintln!("[wsl-staging] WSL archive extractor complete elapsed_ms={}",
+        start.elapsed().as_millis());
     Ok(())
 }
 
@@ -194,7 +209,7 @@ mod tests {
         let f = Fixture::new();
         fs::write(f.0.join("source/file with spaces"), [255, 0, 128]).unwrap();
         std::os::unix::fs::symlink("serve.mjs", f.0.join("source/link")).unwrap();
-        stage_archive(&mut f.producer(), &mut f.consumer(), Duration::from_secs(5)).unwrap();
+        stage_archive(&mut f.producer(), |_| f.consumer(), Duration::from_secs(5)).unwrap();
         assert!(!f.0.join("runtime").exists());
         assert!(!f.0.join("stage/.papercusp-runtime-complete").exists());
         assert!(f.publish().success());
@@ -215,7 +230,7 @@ mod tests {
         let mut c = Command::new("bash");
         c.args(["-c", "tar -C \"$1\" -cf \"$2\" .; exit 19", "producer"])
             .arg(f.0.join("source")).arg(f.0.join("archive.tar"));
-        let err = stage_archive(&mut c, &mut f.consumer(), Duration::from_secs(5)).unwrap_err();
+        let err = stage_archive(&mut c, |_| panic!("consumer must not be constructed"), Duration::from_secs(5)).unwrap_err();
         assert!(err.to_string().contains("archive producer"));
         assert!(!f.0.join("stage").exists(), "extractor must not start on failed production");
         assert!(!f.0.join("runtime").exists());
@@ -227,7 +242,7 @@ mod tests {
         let f = Fixture::new();
         fs::write(f.0.join("archive.tar"), b"this is not a tar archive").unwrap();
         let mut c = Command::new("true");
-        assert!(stage_archive(&mut c, &mut f.consumer(), Duration::from_secs(5)).is_err());
+        assert!(stage_archive(&mut c, |_| f.consumer(), Duration::from_secs(5)).is_err());
         assert!(!f.0.join("runtime").exists());
     }
 
@@ -235,7 +250,7 @@ mod tests {
     fn missing_required_runtime_file_is_not_published() {
         let f = Fixture::new();
         fs::remove_file(f.0.join("source/serve.mjs")).unwrap();
-        assert!(stage_archive(&mut f.producer(), &mut f.consumer(), Duration::from_secs(5)).is_err());
+        assert!(stage_archive(&mut f.producer(), |_| f.consumer(), Duration::from_secs(5)).is_err());
         assert!(!f.publish().success());
         assert!(!f.0.join("runtime").exists());
     }
@@ -247,9 +262,8 @@ mod tests {
         let pid_file = f.0.join("producer.pid");
         let mut c = Command::new("bash");
         c.args(["-c", "echo $$ > \"$1\"; exec sleep 20", "producer"]).arg(&pid_file);
-        let mut sink = f.consumer();
         let start = Instant::now();
-        assert_eq!(stage_archive(&mut c, &mut sink, Duration::from_millis(300))
+        assert_eq!(stage_archive(&mut c, |_| panic!("consumer must not be constructed"), Duration::from_millis(300))
             .unwrap_err().kind(), io::ErrorKind::TimedOut);
         assert!(start.elapsed() < Duration::from_secs(3));
         assert!(unrelated.0.try_wait().unwrap().is_none());
@@ -261,9 +275,8 @@ mod tests {
     #[test]
     fn failed_consumer_spawn_returns_error_without_publishing() {
         let mut c = Command::new("true");
-        let mut sink = Command::new("/nonexistent-staging-extractor");
         let start = Instant::now();
-        assert_eq!(stage_archive(&mut c, &mut sink, Duration::from_secs(5))
+        assert_eq!(stage_archive(&mut c, |_| Command::new("/nonexistent-staging-extractor"), Duration::from_secs(5))
             .unwrap_err().kind(), io::ErrorKind::NotFound);
         assert!(start.elapsed() < Duration::from_secs(3));
     }
@@ -281,7 +294,7 @@ mod tests {
     #[test]
     fn an_existing_incomplete_generation_is_not_treated_as_complete() {
         let f = Fixture::new();
-        stage_archive(&mut f.producer(), &mut f.consumer(), Duration::from_secs(5)).unwrap();
+        stage_archive(&mut f.producer(), |_| f.consumer(), Duration::from_secs(5)).unwrap();
         fs::create_dir(f.0.join("runtime")).unwrap();
         assert!(!f.publish().success());
         assert!(!f.0.join("runtime/.papercusp-runtime-complete").exists());
@@ -297,7 +310,7 @@ mod tests {
             fs::write(&file, bytes).unwrap();
             fs::set_permissions(file, fs::Permissions::from_mode(0o644)).unwrap();
         }
-        stage_archive(&mut f.producer(), &mut f.consumer(), Duration::from_secs(5)).unwrap();
+        stage_archive(&mut f.producer(), |_| f.consumer(), Duration::from_secs(5)).unwrap();
         for name in ["elf", "script"] {
             assert_ne!(fs::metadata(f.0.join("stage").join(name)).unwrap().permissions().mode() & 0o100, 0);
         }
@@ -321,6 +334,29 @@ mod tests {
         let c = wsl_command(Duration::from_secs(12));
         let args: Vec<_> = c.get_args().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(args, ["--distribution", "papercup-runtime", "--exec",
-            "/usr/bin/timeout", "--kill-after=5s", "12s"]);
+            "/usr/bin/timeout", "--kill-after=5s", "12.000s"]);
+        let short = wsl_command(Duration::from_millis(125));
+        assert_eq!(short.get_args().last().unwrap(), "0.125s");
+    }
+
+    #[test]
+    fn linux_consumer_is_constructed_after_producer_with_only_remaining_budget() {
+        let f = Fixture::new();
+        let mut producer = Command::new("bash");
+        producer.args(["-c", "sleep 0.05; tar -C \"$1\" -cf \"$2\" .", "producer"])
+            .arg(f.0.join("source")).arg(f.0.join("archive.tar"));
+        let budget = Duration::from_secs(5);
+        stage_archive(&mut producer, |remaining| {
+            assert!(f.0.join("archive.tar").is_file(), "producer must have run first");
+            assert!(remaining <= budget - Duration::from_millis(50),
+                "Linux must not receive the producer's already-spent budget");
+            assert!(!remaining.is_zero());
+            let linux = wsl_command(remaining);
+            let seconds = linux.get_args().last().unwrap().to_str().unwrap()
+                .trim_end_matches('s').parse::<f64>().unwrap();
+            assert!(seconds <= remaining.as_secs_f64() + 0.001);
+            f.consumer()
+        }, budget).unwrap();
+        assert!(!f.0.join("runtime").exists(), "diagnostic extraction is not publication");
     }
 }

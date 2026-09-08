@@ -31,11 +31,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let archive_wsl = format!("/mnt/{}{}", &archive_windows[..1].to_lowercase(), &archive_windows[2..]);
     producer.arg("-C").arg(source).args(staging::ARCHIVE_ARGS)
         .arg("-cf").arg(archive.path()).arg(".");
-    let mut consumer = staging::wsl_command(Duration::from_secs(1_200));
-    consumer.args(["/bin/bash", "-c"])
-        .arg(staging::EXTRACT_SCRIPT).arg("diagnostic-extract").arg(&archive_wsl).arg(&args[2]);
     let start = Instant::now();
-    staging::stage_archive(&mut producer, &mut consumer, Duration::from_secs(1_200))?;
+    staging::stage_archive(&mut producer, |remaining| {
+        let mut consumer = staging::wsl_command(remaining);
+        consumer.args(["/bin/bash", "-c"])
+            .arg(staging::EXTRACT_SCRIPT).arg("diagnostic-extract").arg(&archive_wsl).arg(&args[2]);
+        consumer
+    }, Duration::from_secs(1_200))?;
     println!("NATIVE_ARCHIVE_PASS elapsed_ms={} acceptance=false published=false",
         start.elapsed().as_millis());
     Ok(())

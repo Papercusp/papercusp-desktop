@@ -19,7 +19,7 @@ test('production staging executes archive, corruption, failure and timeout contr
     assert.equal(compile.status, 0, String(compile.error || compile.stderr));
     const run = spawnSync(binary, ['--nocapture'], { encoding: 'utf8', timeout: 30000 });
     assert.equal(run.status, 0, String(run.error || run.stderr || run.stdout));
-    assert.match(run.stdout, /11 passed; 0 failed; 0 ignored/);
+    assert.match(run.stdout, /12 passed; 0 failed; 0 ignored/);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
@@ -32,6 +32,7 @@ test('Windows startup uses native NTFS archive, single-file extraction, then gat
   assert.match(staging, /arg\(sidecar_dir\)/);
   assert.match(staging, /wsl_sidecar_staging::EXTRACT_SCRIPT/);
   assert.match(staging, /stage_archive\([\s\S]*?\)\?;[\s\S]*?PUBLISH_SCRIPT/);
+  assert.match(staging, /stage_archive\(&mut producer, \|remaining\| \{[\s\S]*?wsl_command\(remaining\)/);
   assert.match(staging, /windows_path_to_wsl\(archive\.path\(\)\)/);
   assert.doesNotMatch(staging, /windows_path_to_wsl\(sidecar_dir\)|source_wsl|tar -C "\$source_dir"/);
   const bounded = source.slice(source.indexOf('fn run_wsl_exec_with_timeout('),
