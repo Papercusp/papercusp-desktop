@@ -202,8 +202,47 @@ if ! [[ "$NODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 2
 fi
 NODE_TARBALL="node-v${NODE_VERSION}-linux-x64.tar.xz"
-curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" \
-  | tar -xJ -C /usr/local --strip-components=1
+install_node_runtime() (
+  set -euo pipefail
+  local prefix="$1" stage previous_npm=0
+  stage="$(mktemp -d "$prefix/.papercusp-node.XXXXXX")"
+  cleanup_node_stage() {
+    local status="$?"
+    trap - EXIT
+    if [[ "$previous_npm" == 1 && ! -e "$prefix/lib/node_modules/npm" ]]; then
+      mv "$stage/previous-npm" "$prefix/lib/node_modules/npm" || {
+        echo "ERROR: previous npm retained at $stage/previous-npm" >&2
+        exit 1
+      }
+    fi
+    rm -rf -- "$stage"
+    exit "$status"
+  }
+  trap cleanup_node_stage EXIT
+
+  # Download/extract/validate before changing the installed runtime. Overlaying
+  # npm preserves dependencies removed by a newer release; Node can then load
+  # an obsolete nested module instead of the new hoisted one (minipass 3/7).
+  curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" \
+    | tar -xJ -C "$stage" --strip-components=1
+  "$stage/bin/node" --version
+  "$stage/bin/node" "$stage/lib/node_modules/npm/bin/npm-cli.js" --version
+  mkdir -p "$prefix/bin" "$prefix/lib/node_modules"
+  if [[ -e "$prefix/lib/node_modules/npm" || -L "$prefix/lib/node_modules/npm" ]]; then
+    mv "$prefix/lib/node_modules/npm" "$stage/previous-npm"
+    previous_npm=1
+  fi
+  mv "$stage/lib/node_modules/npm" "$prefix/lib/node_modules/npm"
+  # Rename on the same filesystem also permits replacing Node while the old
+  # operator is running; do not truncate its mapped executable inode.
+  mv -f "$stage/bin/node" "$prefix/bin/node"
+  # Copy the remaining upstream links, headers and share files. Other global
+  # packages (pnpm, user tools) remain in place.
+  rm -rf -- "$stage/previous-npm"
+  previous_npm=0
+  cp -a "$stage/." "$prefix/"
+)
+install_node_runtime /usr/local
 node --version
 
 # pnpm
