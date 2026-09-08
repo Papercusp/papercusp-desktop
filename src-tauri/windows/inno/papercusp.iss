@@ -113,7 +113,12 @@ Source: "{#BuildRoot}\sidecar\spa\*"; DestDir: "{app}\sidecar\spa"; Flags: recur
 #if AppId == "com.papercusp.server"
 ; The Server owns the full operator/runtime closure, Windows WSL runtime, seed,
 ; environment sidecars and optional dev-source archive.
-Source: "{#BuildRoot}\sidecar\*"; DestDir: "{app}\sidecar"; Excludes: "source.tar.zst"; Flags: recursesubdirs createallsubdirs
+; EI-22656004539777797: the Windows launcher requires this content identity
+; before staging the runtime into WSL. Name it explicitly: wildcard enumeration
+; under the Wine producer can omit dotfiles while still packing serve.mjs.
+; No skipifsourcedoesntexist: a missing runtime stamp must fail compilation.
+Source: "{#BuildRoot}\sidecar\.sidecar-build-stamp"; DestDir: "{app}\sidecar"; Flags: ignoreversion
+Source: "{#BuildRoot}\sidecar\*"; DestDir: "{app}\sidecar"; Excludes: "source.tar.zst,.sidecar-build-stamp"; Flags: recursesubdirs createallsubdirs
 Source: "{#BuildRoot}\resources\*"; DestDir: "{app}\resources"; Flags: recursesubdirs createallsubdirs nocompression
 Source: "{#BuildRoot}\seed\*"; DestDir: "{app}\seed"; Flags: recursesubdirs createallsubdirs nocompression
 ; Bundled env sidecars (WI-3285; pinned contract, plan
