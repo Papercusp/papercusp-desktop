@@ -547,6 +547,8 @@ esac
       ['fixture', 'available', 'loaded', '', '', 2],
       ['fixture', 'available', 'absent', '/Applications/Papercusp Server.app/Contents/MacOS/papercusp-desktop', '', 2],
       ['fixture', 'available', 'absent', '/Applications/Papercusp Server.app.pre-old/Contents/MacOS/papercusp-desktop', '', 2],
+      ['fixture', 'available', 'absent', '/Applications/Papercusp Server.app.pre-old/Contents/MacOS/papercusp-desktop --headless-service', '', 0],
+      ['fixture', 'available', 'absent', '/Applications/Papercusp Server.app.pre-old/Contents/MacOS/papercusp-desktop --headless-service-other', '', 2],
       ['fixture', 'available', 'absent', '/Applications/Papercusp GUI.app/Contents/MacOS/papercusp-desktop', '', 2],
       ['fixture', 'available', 'absent', '/Applications/Papercusp Server.app.pre-old/Contents/Resources/sidecar/bin/node', '', 0],
       ['fixture', 'available', 'absent', '', '1', 2],

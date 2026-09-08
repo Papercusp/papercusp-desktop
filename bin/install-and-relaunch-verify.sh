@@ -555,13 +555,18 @@ fi
 # quit that Server here: normal quit tears down its owned operator, fabricating
 # the stale-operator replacement this test is meant to prove. Prepare a genuine
 # older bundled runtime via the supported detached/headless launch first.
-native_shells="$(ps -axo comm=)" || {
+native_shells="$(ps -axo args=)" || {
   echo "macOS native preflight: cannot inspect native single-instance shells" >&2
   exit 2
 }
 while IFS= read -r executable; do
   case "$executable" in
-    */Papercusp\ Server.app*/Contents/MacOS/papercusp-desktop|*/Papercusp\ GUI.app*/Contents/MacOS/papercusp-desktop)
+    */Papercusp\ Server.app*/Contents/MacOS/papercusp-desktop\ --headless-service)
+      # The supported native service branch runs BEFORE Tauri's singleton
+      # plugin, so it is a valid older-runtime baseline, not a competing shell.
+      continue
+      ;;
+    */Papercusp\ Server.app*/Contents/MacOS/papercusp-desktop*|*/Papercusp\ GUI.app*/Contents/MacOS/papercusp-desktop*)
       echo "macOS native preflight: a native Papercusp shell holds the single-instance lock; prepare a headless older bundled-runtime baseline before retrying (no operator termination inside acceptance)" >&2
       exit 2
       ;;
