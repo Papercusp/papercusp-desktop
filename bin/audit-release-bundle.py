@@ -3414,6 +3414,39 @@ def _looks_like_installer_stub(name):
     return low.endswith("-setup.exe") or low.endswith("setup.exe")
 
 
+def _windows_server_runtime_violations(expanded):
+    """Check the inputs the native Server reads BEFORE staging its WSL runtime.
+
+    Reuse the existing finished-container expansion: a source-tree check cannot
+    catch Wine/Inno wildcard omission of .sidecar-build-stamp. Bind the stamp to
+    the actual extracted serve.mjs, not merely a well-formed claimed hash.
+    """
+    runtimes = []
+    for directory, _dirs, files in os.walk(expanded, followlinks=False):
+        if os.path.basename(directory) == "sidecar" and os.path.basename(os.path.dirname(directory)) == "app":
+            runtimes.append(directory)
+    if len(runtimes) != 1:
+        return [f"expected one extracted app/sidecar runtime, found {len(runtimes)}"]
+    runtime = runtimes[0]
+    stamp_path = os.path.join(runtime, ".sidecar-build-stamp")
+    serve_path = os.path.join(runtime, "serve.mjs")
+    if not os.path.isfile(stamp_path) or os.path.islink(stamp_path):
+        return ["required Windows Server .sidecar-build-stamp is absent or not a regular file"]
+    if not os.path.isfile(serve_path) or os.path.islink(serve_path):
+        return ["required Windows Server serve.mjs is absent or not a regular file"]
+    try:
+        with open(stamp_path, encoding="utf-8") as source:
+            stamp = json.load(source)
+    except (OSError, ValueError, UnicodeError):
+        return ["Windows Server .sidecar-build-stamp is unreadable or invalid JSON"]
+    claimed = stamp.get("serveSha256") if isinstance(stamp, dict) else None
+    if not isinstance(claimed, str) or re.fullmatch(r"[0-9a-fA-F]{64}", claimed) is None:
+        return ["Windows Server .sidecar-build-stamp has no valid 64-hex serveSha256"]
+    if _sha256_file(serve_path) != claimed.lower():
+        return ["Windows Server .sidecar-build-stamp does not match extracted serve.mjs"]
+    return []
+
+
 def scan_artifact(paths):
     """Identity-scan FINISHED installer artifacts — the bytes we actually publish.
 
@@ -3439,6 +3472,8 @@ def scan_artifact(paths):
     tree is handed to `scan_dir` — the same literal set, coverage assertion, nested
     archive pass and acceptances — so there is no second scanner to drift.
     """
+    require_windows_runtime = "--require-windows-server-runtime" in paths
+    paths = [path for path in paths if path != "--require-windows-server-runtime"]
     if not paths:
         print("AUDIT ERROR: --scan-artifact needs at least one artifact", file=sys.stderr)
         return 2
@@ -3469,6 +3504,7 @@ def scan_artifact(paths):
     with tempfile.TemporaryDirectory(prefix="papercusp-audit-artifact-") as tmp:
         dests = []
         uninspectable = []
+        runtime_violations = []
         for idx, art in enumerate(paths):
             dest = os.path.join(tmp, f"art{idx}")
             size = os.path.getsize(art)
@@ -3487,6 +3523,11 @@ def scan_artifact(paths):
                 continue
             print(f"    {os.path.basename(art)}: expanded via {method} — "
                   f"{got:,} B from a {size:,} B container ({ratio:.0%})")
+            if require_windows_runtime:
+                runtime_violations.extend(
+                    (art, violation)
+                    for violation in _windows_server_runtime_violations(dest)
+                )
             dests.append(dest)
 
         if uninspectable:
@@ -3500,6 +3541,13 @@ def scan_artifact(paths):
                   file=sys.stderr)
             return 2
 
+        if runtime_violations:
+            for artifact, violation in runtime_violations:
+                print(
+                    f"RUNTIME CLOSURE VIOLATION [{os.path.basename(artifact)}]: {violation}",
+                    file=sys.stderr,
+                )
+            return 1
         return scan_dir(dests)
 
 

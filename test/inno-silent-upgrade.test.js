@@ -73,6 +73,11 @@ test('Windows packaging explicitly requires the stamp consumed before WSL runtim
   assert.doesNotMatch(stampEntry, /skipifsourcedoesntexist/);
   const launcher = fs.readFileSync(path.join(root, 'src-tauri/src/main.rs'), 'utf8');
   assert.match(launcher, /sidecar_dir\.join\("\.sidecar-build-stamp"\)/);
+  const builder = fs.readFileSync(path.join(root, 'bin/build-windows-cross.sh'), 'utf8');
+  const closure = builder.indexOf('_runtime_scan_args+=(--require-windows-server-runtime)');
+  const signing = builder.indexOf('echo "==> signing installers"');
+  assert.ok(closure >= 0 && closure < signing, 'finished runtime closure must gate updater signing');
+  assert.match(builder, /--scan-artifact "\$\{_runtime_scan_args\[@\]\}" "\$_finished_installer"/);
 });
 
 // Explicit native-producer leg: ordinary unit runs do not start Wine, but a
@@ -96,6 +101,7 @@ test('real Inno packages the mandatory stamp and refuses a missing input', {
   const env = {
     ...process.env, WINEPREFIX: prefix, WINEDEBUG: '-all',
     WINEDLLOVERRIDES: 'mscoree=d;mshtml=d;winemenubuilder.exe=d',
+    PAPERCUSP_RELEASE_OWNER_NAME: 'Zzsynthetic Gateowner',
   };
   const run = (command, args) => {
     const result = spawnSync(command, args, { encoding: 'utf8', env, timeout: 120000 });
@@ -108,10 +114,14 @@ test('real Inno packages the mandatory stamp and refuses a missing input', {
     return result.stdout.trim();
   };
   fs.mkdirSync(path.join(dir, 'sidecar'));
-  const stamp = JSON.stringify({ serveSha256: 'a'.repeat(64) });
+  const serve = 'visible-runtime-control\n';
+  const stamp = JSON.stringify({
+    serveSha256: require('node:crypto').createHash('sha256').update(serve).digest('hex'),
+  });
   const input = path.join(dir, 'sidecar/.sidecar-build-stamp');
   fs.writeFileSync(input, stamp);
-  fs.writeFileSync(path.join(dir, 'sidecar/serve.mjs'), 'visible-runtime-control\n');
+  fs.writeFileSync(path.join(dir, 'sidecar/serve.mjs'), serve);
+  fs.writeFileSync(path.join(dir, 'sidecar/coverage.bin'), Buffer.alloc(2 * 1024 * 1024));
   const wildcard = serverFiles.split('\n').find(
     (line) => line.startsWith('Source: "{#BuildRoot}\\sidecar\\*"'),
   );
@@ -135,6 +145,12 @@ test('real Inno packages the mandatory stamp and refuses a missing input', {
   assert.equal(unpacked.status, 0, unpacked.stdout + unpacked.stderr);
   assert.equal(fs.readFileSync(path.join(destination, 'app/sidecar/.sidecar-build-stamp'), 'utf8'), stamp);
   assert.equal(fs.readFileSync(path.join(destination, 'app/sidecar/serve.mjs'), 'utf8'), 'visible-runtime-control\n');
+  const closure = run('python3', [
+    path.join(root, 'bin/audit-release-bundle.py'), '--scan-artifact',
+    '--require-windows-server-runtime', path.join(dir, 'out/stamp.exe'),
+  ]);
+  assert.equal(closure.status, 0, closure.stdout + closure.stderr);
+  assert.match(closure.stdout, /expanded via innoextract/);
   fs.unlinkSync(input);
   const missing = compile();
   assert.notEqual(missing.status, 0, 'the real producer accepted a missing mandatory runtime stamp');

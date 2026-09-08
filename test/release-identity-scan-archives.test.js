@@ -82,6 +82,36 @@ function scanArtifact(artifact, env = {}) {
   });
 }
 
+for (const state of ['valid', 'missing', 'invalid-json', 'invalid-hash', 'mismatch', 'missing-serve']) {
+  test(`finished Windows Server runtime closure: ${state}`, (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'windows-runtime-closure-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const payload = path.join(dir, 'payload');
+    const runtime = path.join(payload, 'app/sidecar');
+    fs.mkdirSync(runtime, { recursive: true });
+    const serve = 'console.log("packaged-runtime");\n';
+    if (state !== 'missing-serve') fs.writeFileSync(path.join(runtime, 'serve.mjs'), serve);
+    if (state !== 'missing') {
+      const stamp = state === 'invalid-json' ? '{broken' : JSON.stringify({
+        serveSha256: state === 'invalid-hash' ? '../invalid'
+          : state === 'mismatch' ? '0'.repeat(64)
+            : crypto.createHash('sha256').update(serve).digest('hex'),
+      });
+      fs.writeFileSync(path.join(runtime, '.sidecar-build-stamp'), stamp);
+    }
+    // Real container expansion, not a mocked verdict. Padding makes the
+    // expansion coverage guard meaningful even for the missing-input cases.
+    fs.writeFileSync(path.join(runtime, 'padding.txt'), 'runtime-data\n'.repeat(1024));
+    const archive = path.join(dir, 'runtime.tar.gz');
+    execFileSync('tar', ['--owner=0', '--group=0', '--numeric-owner', '-czf', archive, '-C', payload, '.']);
+    const result = spawnSync('python3', [AUDIT, '--scan-artifact', '--require-windows-server-runtime', archive], {
+      encoding: 'utf8', env: AUDIT_ENV,
+    });
+    assert.equal(result.status, state === 'valid' ? 0 : 1, result.stdout + result.stderr);
+    if (state !== 'valid') assert.match(result.stderr, /RUNTIME CLOSURE VIOLATION/);
+  });
+}
+
 function fakeAppImage(dir) {
   const artifact = path.join(dir, 'fixture.AppImage');
   fs.writeFileSync(
