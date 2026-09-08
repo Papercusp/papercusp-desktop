@@ -550,6 +550,23 @@ if launchctl print system/com.papercusp.server >/dev/null 2>&1; then
   echo "macOS native preflight: competing system/com.papercusp.server is loaded; repair test supervision and establish a genuine native pre-update baseline before retrying" >&2
   exit 2
 fi
+# `open -n` bypasses LaunchServices reuse, NOT Tauri's per-role singleton.
+# A live old shell rejects the candidate before its --ensure can run. Do not
+# quit that Server here: normal quit tears down its owned operator, fabricating
+# the stale-operator replacement this test is meant to prove. Prepare a genuine
+# older bundled runtime via the supported detached/headless launch first.
+native_shells="$(ps -axo comm=)" || {
+  echo "macOS native preflight: cannot inspect native single-instance shells" >&2
+  exit 2
+}
+while IFS= read -r executable; do
+  case "$executable" in
+    */Papercusp\ Server.app*/Contents/MacOS/papercusp-desktop|*/Papercusp\ GUI.app*/Contents/MacOS/papercusp-desktop)
+      echo "macOS native preflight: a native Papercusp shell holds the single-instance lock; prepare a headless older bundled-runtime baseline before retrying (no operator termination inside acceptance)" >&2
+      exit 2
+      ;;
+  esac
+done <<< "$native_shells"
 printf 'PAPERCUSP_NATIVE_MAC_PREFLIGHT_OK\n'
 MAC_PREFLIGHT
 )"

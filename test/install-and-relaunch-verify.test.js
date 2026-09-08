@@ -266,6 +266,7 @@ case "$*" in
       no-console) printf 'macOS native preflight: SSH user must own the logged-in GUI console\\n' >&2; exit 2 ;;
       no-domain) printf 'macOS native preflight: logged-in GUI launch domain is unavailable\\n' >&2; exit 2 ;;
       competing-supervisor) printf 'macOS native preflight: competing system/com.papercusp.server is loaded\\n' >&2; exit 2 ;;
+      native-shell) printf 'macOS native preflight: native shell holds the single-instance lock\\n' >&2; exit 2 ;;
       empty) exit 0 ;;
       *) printf 'PAPERCUSP_NATIVE_MAC_PREFLIGHT_OK\\n' ;;
     esac
@@ -521,7 +522,7 @@ test('Linux resolves missing WebKit dependencies before relaunching the installe
   }
 });
 
-test('macOS native preflight executes the real console/domain/supervisor predicates', () => {
+test('macOS native preflight executes console/domain/supervisor/single-instance predicates', () => {
   const source = readFileSync(SCRIPT, 'utf8');
   const command = source.match(/cat <<'MAC_PREFLIGHT'\n([\s\S]*?)\nMAC_PREFLIGHT\n/);
   assert.ok(command, 'the real remote preflight command must be discoverable');
@@ -529,6 +530,7 @@ test('macOS native preflight executes the real console/domain/supervisor predica
   try {
     executable(root, 'stat', '#!/bin/sh\nprintf "%s\\n" "$TEST_CONSOLE"\n');
     executable(root, 'id', '#!/bin/sh\ncase "$1" in -un) echo fixture ;; -u) echo 501 ;; *) exit 99 ;; esac\n');
+    executable(root, 'ps', '#!/bin/sh\n[ "$TEST_PS_FAIL" != 1 ] || exit 1\nprintf "%s\\n" "$TEST_NATIVE_PROCESS"\n');
     executable(root, 'launchctl', `#!/bin/sh
 case "$*" in
   "print gui/501") [ "$TEST_DOMAIN" = available ] ;;
@@ -536,19 +538,25 @@ case "$*" in
   *) exit 99 ;;
 esac
 `);
-    for (const [consoleUser, domain, supervisor, expected] of [
-      ['fixture', 'available', 'absent', 0],
-      ['root', 'available', 'absent', 2],
-      ['loginwindow', 'available', 'absent', 2],
-      ['other-user', 'available', 'absent', 2],
-      ['fixture', 'absent', 'absent', 2],
-      ['fixture', 'available', 'loaded', 2],
+    for (const [consoleUser, domain, supervisor, nativeProcess, psFail, expected] of [
+      ['fixture', 'available', 'absent', '/usr/bin/other', '', 0],
+      ['root', 'available', 'absent', '', '', 2],
+      ['loginwindow', 'available', 'absent', '', '', 2],
+      ['other-user', 'available', 'absent', '', '', 2],
+      ['fixture', 'absent', 'absent', '', '', 2],
+      ['fixture', 'available', 'loaded', '', '', 2],
+      ['fixture', 'available', 'absent', '/Applications/Papercusp Server.app/Contents/MacOS/papercusp-desktop', '', 2],
+      ['fixture', 'available', 'absent', '/Applications/Papercusp Server.app.pre-old/Contents/MacOS/papercusp-desktop', '', 2],
+      ['fixture', 'available', 'absent', '/Applications/Papercusp GUI.app/Contents/MacOS/papercusp-desktop', '', 2],
+      ['fixture', 'available', 'absent', '/Applications/Papercusp Server.app.pre-old/Contents/Resources/sidecar/bin/node', '', 0],
+      ['fixture', 'available', 'absent', '', '1', 2],
     ]) {
       const result = spawnSync('bash', ['-c', command[1]], {
         encoding: 'utf8',
         env: {
           ...process.env, PATH: `${root}:${process.env.PATH}`,
           TEST_CONSOLE: consoleUser, TEST_DOMAIN: domain, TEST_SUPERVISOR: supervisor,
+          TEST_NATIVE_PROCESS: nativeProcess, TEST_PS_FAIL: psFail,
         },
       });
       assert.equal(result.status, expected, `${consoleUser}/${domain}/${supervisor}: ${result.stderr}`);
@@ -617,7 +625,7 @@ for (const installedMismatch of [false, true]) {
   });
 }
 
-for (const nativePreflight of ['no-console', 'no-domain', 'competing-supervisor', 'empty']) {
+for (const nativePreflight of ['no-console', 'no-domain', 'competing-supervisor', 'native-shell', 'empty']) {
   test(`macOS refuses ${nativePreflight} before reading baseline or changing installed apps`, () => {
     const f = macFixture({ nativePreflight });
     try {
@@ -627,7 +635,10 @@ for (const nativePreflight of ['no-console', 'no-domain', 'competing-supervisor'
       const log = readFileSync(f.log, 'utf8');
       assert.match(log, /PAPERCUSP_NATIVE_MAC_PREFLIGHT/);
       assert.doesNotMatch(log, /^SCP /m);
-      assert.doesNotMatch(log, /operator\.json|codesign --verify|open -n/);
+      // Multiline SSH payloads include comments describing commands that must
+      // NOT run. Assert dispatched command headers, not words in that prose.
+      const calls = log.split('\n').filter((line) => line.startsWith('SSH '));
+      for (const call of calls) assert.doesNotMatch(call, /operator\.json|codesign --verify|open -n/);
       assert.equal(existsSync(f.flipped), false);
     } finally {
       rmSync(f.root, { recursive: true, force: true });
