@@ -103,18 +103,10 @@ tpm_socket_listening || {
 # terminates the continuation, so qemu silently launches with every later arg DROPPED
 # — valid syntax, `bash -n` clean, and the exact way -spice/-monitor/-display were
 # lost from the linux-test-vm rig on 2026-07-09 (memory 53dba680).
-#
-# Nested Hyper-V / WSL2: bare "host" does NOT enable Hyper-V enlightenments.
-# QEMU's system/i386/hyperv.html specifies direct synthetic timers for nested
-# Hyper-V, with vpindex/synic/time/stimer dependencies. Expose those and the
-# paravirtualized APIC/TLB/IPI paths on this AMD host. Do NOT add hv-relaxed:
-# disabling the guest watchdog would hide, not fix, a stalled acceptance run.
-# Likewise hv-evmcs is Intel-only. EI-22689667926628326 tracks native validation;
-# this profile is a compatibility treatment, not proof of the crash root cause.
 exec qemu-system-x86_64 \
   -name papercusp-win11 \
   -machine q35,smm=on,accel=kvm \
-  -cpu host,hv-vpindex,hv-vapic,hv-time,hv-synic,hv-stimer,hv-stimer-direct,hv-tlbflush,hv-ipi \
+  -cpu host \
   -smp 8 -m 16384 \
   -global driver=cfi.pflash01,property=secure,value=on \
   -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.ms.fd \
