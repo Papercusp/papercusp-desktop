@@ -103,15 +103,19 @@ test('cleans bridge credentials from the runtime temp directory used for discove
 
 test('pins the operator source graph before Tauri launch and cleans it on both exits', () => {
   const snapshot = source.indexOf('snapshot_operator_source()');
-  const snapshotCall = source.indexOf('snapshot_operator_source || exit $?');
+  const snapshotCall = source.indexOf(
+    'snapshot_operator_source || { cleanup_operator_source_snapshot; exit 1; }',
+  );
   const work = source.indexOf('WORK="$(mktemp -d');
   const launch = source.indexOf('cat > "$WORK/launch.sh" <<LAUNCH');
   const sourceEnv = source.indexOf('$OPERATOR_SOURCE_ENV_LINE', launch);
   const teardown = source.indexOf('teardown() {');
-  const stop = source.indexOf('OPERATOR_SOURCE_ROOT"');
+  const stop = source.indexOf(
+    '[ -n "$OPERATOR_SOURCE_WORK" ] && rm -rf -- "$OPERATOR_SOURCE_WORK"',
+  );
 
   assert.ok(snapshot > work, 'the operator snapshot must live under the per-run WORK dir');
-  assert.ok(snapshotCall > snapshot, 'the operator source snapshot helper must run');
+  assert.ok(snapshotCall > snapshot, 'the operator source snapshot helper must run with failure cleanup');
   assert.ok(launch > snapshotCall, 'the operator source must be frozen before Tauri launch');
   assert.ok(sourceEnv > launch, 'generated launch.sh must export the frozen operator source root');
   assert.ok(source.indexOf('papercusp_pinned_deps_snapshot_locked', snapshot) > snapshot);
@@ -121,7 +125,7 @@ test('pins the operator source graph before Tauri launch and cleans it on both e
     "--exclude='node_modules'",
     "--exclude='papercusp-desktop'",
     "--exclude='.git'",
-    "--exclude='dist'",
+    "--exclude='/dist'",
     "--exclude='coverage'",
   ]) {
     assert.ok(source.includes(excluded), `source snapshot must retain exclusion ${excluded}`);
