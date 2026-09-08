@@ -193,7 +193,7 @@ printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
   return { root, deb, server, log, flipped, configured, updated, ssh, scp, emitDpkgWarning };
 }
 
-function macFixture({ executeInstall = false, freeGb = 20 } = {}) {
+function macFixture({ executeInstall = false, freeGb = 20, nativePreflight = 'healthy' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'install-relaunch-mac-'));
   const artifacts = join(root, 'artifacts');
   const shims = join(root, 'shims');
@@ -259,6 +259,15 @@ cp -R "\${@: -2:1}" "\${@: -1}"
 printf 'SSH %s\\n' "$*" >> "$MOCK_LOG"
 case "$*" in
   *"echo VM-OK"*) printf 'VM-OK\\n' ;;
+  *"PAPERCUSP_NATIVE_MAC_PREFLIGHT"*)
+    case "$MOCK_NATIVE_PREFLIGHT" in
+      no-console) printf 'macOS native preflight: SSH user must own the logged-in GUI console\\n' >&2; exit 2 ;;
+      no-domain) printf 'macOS native preflight: logged-in GUI launch domain is unavailable\\n' >&2; exit 2 ;;
+      competing-supervisor) printf 'macOS native preflight: competing system/com.papercusp.server is loaded\\n' >&2; exit 2 ;;
+      empty) exit 0 ;;
+      *) printf 'PAPERCUSP_NATIVE_MAC_PREFLIGHT_OK\\n' ;;
+    esac
+    ;;
   *"operator.json"*) printf '{"port":3070}\\n' ;;
   *"api/health"*)
     if [[ -f "$MOCK_FLIPPED" ]]; then
@@ -289,7 +298,7 @@ esac
 printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
 `);
 
-  return { root, dmg, server, log, flipped, ssh, scp, shims, applications, executeInstall, freeGb };
+  return { root, dmg, server, log, flipped, ssh, scp, shims, applications, executeInstall, freeGb, nativePreflight };
 }
 
 function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
@@ -306,6 +315,7 @@ function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
   if (f.updated) env.MOCK_UPDATED = f.updated;
   if (f.emitDpkgWarning) env.MOCK_EMIT_DPKG_WARNING = '1';
   if (f.requireHostKeyOptions) env.MOCK_REQUIRE_HOST_KEY_OPTIONS = '1';
+  if (f.nativePreflight) env.MOCK_NATIVE_PREFLIGHT = f.nativePreflight;
   if (f.executeInstall) {
     env.PATH = `${f.shims}:${process.env.PATH}`;
     env.MOCK_EXECUTE_INSTALL = '1';
@@ -500,6 +510,63 @@ test('Linux resolves missing WebKit dependencies before relaunching the installe
     rmSync(f.root, { recursive: true, force: true });
   }
 });
+
+test('macOS native preflight executes the real console/domain/supervisor predicates', () => {
+  const source = readFileSync(SCRIPT, 'utf8');
+  const command = source.match(/cat <<'MAC_PREFLIGHT'\n([\s\S]*?)\nMAC_PREFLIGHT\n/);
+  assert.ok(command, 'the real remote preflight command must be discoverable');
+  const root = mkdtempSync(join(tmpdir(), 'native-mac-preflight-'));
+  try {
+    executable(root, 'stat', '#!/bin/sh\nprintf "%s\\n" "$TEST_CONSOLE"\n');
+    executable(root, 'id', '#!/bin/sh\ncase "$1" in -un) echo fixture ;; -u) echo 501 ;; *) exit 99 ;; esac\n');
+    executable(root, 'launchctl', `#!/bin/sh
+case "$*" in
+  "print gui/501") [ "$TEST_DOMAIN" = available ] ;;
+  "print system/com.papercusp.server") [ "$TEST_SUPERVISOR" = loaded ] ;;
+  *) exit 99 ;;
+esac
+`);
+    for (const [consoleUser, domain, supervisor, expected] of [
+      ['fixture', 'available', 'absent', 0],
+      ['root', 'available', 'absent', 2],
+      ['loginwindow', 'available', 'absent', 2],
+      ['other-user', 'available', 'absent', 2],
+      ['fixture', 'absent', 'absent', 2],
+      ['fixture', 'available', 'loaded', 2],
+    ]) {
+      const result = spawnSync('bash', ['-c', command[1]], {
+        encoding: 'utf8',
+        env: {
+          ...process.env, PATH: `${root}:${process.env.PATH}`,
+          TEST_CONSOLE: consoleUser, TEST_DOMAIN: domain, TEST_SUPERVISOR: supervisor,
+        },
+      });
+      assert.equal(result.status, expected, `${consoleUser}/${domain}/${supervisor}: ${result.stderr}`);
+      if (expected === 0) assert.match(result.stdout, /^PAPERCUSP_NATIVE_MAC_PREFLIGHT_OK$/m);
+      else assert.doesNotMatch(result.stdout, /PAPERCUSP_NATIVE_MAC_PREFLIGHT_OK/);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const nativePreflight of ['no-console', 'no-domain', 'competing-supervisor', 'empty']) {
+  test(`macOS refuses ${nativePreflight} before reading baseline or changing installed apps`, () => {
+    const f = macFixture({ nativePreflight });
+    try {
+      const result = runVerify(f, [], 'mac', f.dmg);
+      assert.equal(result.status, 2, result.stderr);
+      assert.match(result.stderr, /macOS native preflight failed/);
+      const log = readFileSync(f.log, 'utf8');
+      assert.match(log, /PAPERCUSP_NATIVE_MAC_PREFLIGHT/);
+      assert.doesNotMatch(log, /^SCP /m);
+      assert.doesNotMatch(log, /operator\.json|codesign --verify|open -n/);
+      assert.equal(existsSync(f.flipped), false);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+}
 
 test('macOS DMG install verifies matching GUI and Server apps before split-role relaunch', () => {
   const f = macFixture();

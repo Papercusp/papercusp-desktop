@@ -486,6 +486,42 @@ if [[ "$REACH_RC" -ne 0 || "$REACH_OUT" != *VM-OK* ]]; then
   exit 2
 fi
 
+# Native application acceptance needs a GUI login, unlike the rig's headless
+# health preflight. A test-only LaunchDaemon can also keep restarting an old
+# operator (or inject stale BUILD_SHA/VERSION into newly installed code). Never
+# alter that supervisor here: fixture repair must precede a NEW honest baseline,
+# and this verifier must not stop an operator to manufacture the update flip.
+if [[ "$PLATFORM" == "mac" ]]; then
+  MAC_PREFLIGHT_CMD="$(cat <<'MAC_PREFLIGHT'
+set -eu
+# PAPERCUSP_NATIVE_MAC_PREFLIGHT
+console_user="$(stat -f %Su /dev/console)"
+login_user="$(id -un)"
+login_uid="$(id -u)"
+if [ "$console_user" = root ] || [ "$console_user" = loginwindow ] || [ "$console_user" != "$login_user" ]; then
+  echo "macOS native preflight: SSH user must own the logged-in GUI console" >&2
+  exit 2
+fi
+if ! launchctl print "gui/$login_uid" >/dev/null 2>&1; then
+  echo "macOS native preflight: logged-in GUI launch domain is unavailable" >&2
+  exit 2
+fi
+if launchctl print system/com.papercusp.server >/dev/null 2>&1; then
+  echo "macOS native preflight: competing system/com.papercusp.server is loaded; repair test supervision and establish a genuine native pre-update baseline before retrying" >&2
+  exit 2
+fi
+printf 'PAPERCUSP_NATIVE_MAC_PREFLIGHT_OK\n'
+MAC_PREFLIGHT
+)"
+  MAC_PREFLIGHT_OUT=""
+  MAC_PREFLIGHT_RC=0
+  MAC_PREFLIGHT_OUT="$(timeout 30 "${SSH[@]}" "$MAC_PREFLIGHT_CMD" 2>&1 | tr -d '\r\0')" || MAC_PREFLIGHT_RC=$?
+  if [[ "$MAC_PREFLIGHT_RC" -ne 0 || "$MAC_PREFLIGHT_OUT" != *PAPERCUSP_NATIVE_MAC_PREFLIGHT_OK* ]]; then
+    echo "macOS native preflight failed (exit $MAC_PREFLIGHT_RC): ${MAC_PREFLIGHT_OUT:0:600} — no artifact push, install, or relaunch attempted" >&2
+    exit 2
+  fi
+fi
+
 # ── 1. BEFORE snapshot ──────────────────────────────────────────────────────
 PORT_BEFORE="$(discover_port)"
 SHA_BEFORE=""; VERSION_BEFORE=""
