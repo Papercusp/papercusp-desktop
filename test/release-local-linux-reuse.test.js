@@ -25,6 +25,10 @@ function sliceBetween(start, end) {
 // the shell logic: if the production branch changes, the behavior under test
 // changes with it.
 const linuxReuseHarness = sliceBetween('_prov_version()', '# ── Mobile');
+const releaseTaskJournalHarness = sliceBetween(
+  '# ── P-005: restart-safe release stages',
+  '# ── end P-005 release-task journal helpers',
+);
 const cutStartHarness = sliceBetween(
   '# EI-20551860898590077: bind every artifact',
   'echo "==> bumping version in manifests"',
@@ -191,11 +195,18 @@ function runReuse({
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-linux-reuse-'));
   const bundle = path.join(temp, 'target', 'release', 'bundle');
   const appimageDir = path.join(bundle, 'appimage');
+  const debDir = path.join(bundle, 'deb');
   fs.mkdirSync(appimageDir, { recursive: true });
+  fs.mkdirSync(debDir, { recursive: true });
   if (includeArtifact) {
     const artifact = path.join(appimageDir, 'Papercusp_GUI_0.0.18_amd64.AppImage');
     fs.writeFileSync(artifact, 'finished-linux-bytes');
     fs.writeFileSync(`${artifact}.sig`, 'finished-linux-signature');
+    for (const role of ['GUI', 'Server']) {
+      const deb = path.join(debDir, `Papercusp_${role}_0.0.18_amd64.deb`);
+      fs.writeFileSync(deb, `finished-linux-${role}-deb`);
+      fs.writeFileSync(`${deb}.sig`, `finished-linux-${role}-deb-signature`);
+    }
   }
   if (extraArtifact) {
     const stale = path.join(appimageDir, 'Papercusp GUI_0.0.18_amd64.AppImage');
@@ -295,3 +306,245 @@ for (const [leg, reuse] of [
     assert.match(result.stdout, /preserving original cut-start/);
   });
 }
+
+function runJournalLinuxResume({ action, absent = false, verify = 0 }) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-linux-journal-'));
+  const bundle = path.join(temp, 'bundle');
+  const calls = path.join(temp, 'calls.log');
+  fs.mkdirSync(bundle, { recursive: true });
+  fs.writeFileSync(path.join(bundle, 'build-provenance.json'), '{}');
+  const command = [
+    'set -euo pipefail',
+    'ORCHESTRATOR_HERE=/unused',
+    'MONOREPO=/unused',
+    'EXPECTED_SOURCE_SHA=' + 'a'.repeat(40),
+    'VERSION=0.0.18',
+    'CHANNEL=nightly',
+    'TAG=desktop-v0.0.18-nightly',
+    "PAPERCUSP_BUILD_ROLES='gui'",
+    'PAPERCUSP_REUSE_LINUX=0',
+    'PROVENANCE_SOURCE_GIT_HEAD=' + 'b'.repeat(40),
+    'RELEASE_TASK_JOURNAL_ENABLED=0',
+    releaseTaskJournalHarness,
+    'RELEASE_TASK_JOURNAL_ENABLED=1',
+    `RELEASE_TASK_BUILD_ACTION=${action}`,
+    'RELEASE_TASK_BUILD_REQUEST_ID=old-request',
+    'RELEASE_TASK_BUILD_IDENTITY=linux-input',
+    `release_task_linux_outputs_absent() { return ${absent ? 0 : 1}; }`,
+    `release_task_verify_linux_artifacts() { printf 'verify:%s:%s\\n' "$1" "$2" >> ${JSON.stringify(calls)}; return ${verify}; }`,
+    `release_task_journal_call() { printf '%s\\n' "$*" >> ${JSON.stringify(calls)}; [[ "$1" != commit ]] || printf '%s\\n' '{"state":"committed"}'; }`,
+    'release_task_begin_stage() { RELEASE_TASK_LAST_ACTION=run; RELEASE_TASK_LAST_REQUEST_ID=new-request; printf "begin:%s:%s\\n" "$1" "$2" >> ' + JSON.stringify(calls) + '; }',
+    "release_artifacts_cut_start_write() { printf '222\\n'; }",
+    `release_task_prepare_linux_stage ${JSON.stringify(bundle)}`,
+    'printf "RESULT action=%s request=%s reuse=%s cut=%s\\n" "$RELEASE_TASK_BUILD_ACTION" "$RELEASE_TASK_BUILD_REQUEST_ID" "$PAPERCUSP_REUSE_LINUX" "${PAPERCUSP_RELEASE_CUT_START_NS:-}"',
+  ].join('\n');
+  const result = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
+  const log = fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : '';
+  fs.rmSync(temp, { recursive: true, force: true });
+  return { result, log };
+}
+
+test('journal restart reconciles verified Linux bytes and activates canonical reuse', () => {
+  const { result, log } = runJournalLinuxResume({ action: 'reconcile' });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /RESULT action=reuse request=old-request reuse=1/);
+  assert.match(log, /commit release\.build\.linux linux-input old-request/);
+  assert.doesNotMatch(log, /refuse release\.build\.linux/);
+});
+
+test('lost Linux outcome is refused before a fresh one-use attempt', () => {
+  const { result, log } = runJournalLinuxResume({ action: 'reconcile', absent: true });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /RESULT action=run request=new-request reuse=0 cut=222/);
+  assert.match(log, /refuse release\.build\.linux linux-input old-request artifact-set:confirmed-absent/);
+  assert.match(log, /begin:release\.build\.linux:linux-input/);
+});
+
+test('committed Linux receipt with lost bytes fails closed instead of rebuilding', () => {
+  const { result, log } = runJournalLinuxResume({ action: 'reuse', absent: true });
+  assert.notEqual(result.status, 0, 'a spent committed receipt unexpectedly rebuilt');
+  assert.match(result.stderr, /committed but its artifact\/provenance set is absent/);
+  assert.doesNotMatch(log, /begin:release\.build\.linux/);
+});
+
+test('present but tampered Linux bytes are not rewritten as confirmed absence', () => {
+  const { result, log } = runJournalLinuxResume({ action: 'reconcile', verify: 1 });
+  assert.notEqual(result.status, 0, 'tampered artifacts unexpectedly entered a fresh attempt');
+  assert.match(result.stderr, /not treating corruption as absence/);
+  assert.doesNotMatch(log, /refuse release\.build\.linux/);
+  assert.doesNotMatch(log, /begin:release\.build\.linux/);
+});
+
+function runJournalManifestResume({ action, absent = false, verify = 0 }) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-manifest-journal-'));
+  const artifact = path.join(temp, 'Papercusp_GUI_0.0.18_amd64.AppImage');
+  const calls = path.join(temp, 'calls.log');
+  fs.writeFileSync(artifact, 'immutable-appimage');
+  const command = [
+    'set -euo pipefail',
+    'ORCHESTRATOR_HERE=/unused',
+    'MONOREPO=/unused',
+    'EXPECTED_SOURCE_SHA=' + 'a'.repeat(40),
+    'VERSION=0.0.18',
+    'CHANNEL=nightly',
+    'TAG=desktop-v0.0.18-nightly',
+    "PAPERCUSP_BUILD_ROLES='gui'",
+    'RELEASE_TASK_JOURNAL_ENABLED=0',
+    releaseTaskJournalHarness,
+    'RELEASE_TASK_JOURNAL_ENABLED=1',
+    `INITIAL_ACTION=${action}`,
+    'begin_count=0',
+    'release_task_begin_stage() { begin_count=$((begin_count + 1)); if (( begin_count == 1 )); then RELEASE_TASK_LAST_ACTION="$INITIAL_ACTION"; RELEASE_TASK_LAST_REQUEST_ID=old-request; else RELEASE_TASK_LAST_ACTION=run; RELEASE_TASK_LAST_REQUEST_ID=new-request; fi; printf "begin:%s:%s:%s\\n" "$1" "$2" "$RELEASE_TASK_LAST_ACTION" >> ' + JSON.stringify(calls) + '; }',
+    `release_task_manifest_outputs_absent() { return ${absent ? 0 : 1}; }`,
+    `release_task_verify_manifest_outputs() { printf 'verify\\n' >> ${JSON.stringify(calls)}; return ${verify}; }`,
+    `release_task_commit_manifest_stage() { printf 'commit\\n' >> ${JSON.stringify(calls)}; RELEASE_TASK_MANIFEST_ACTION=reuse; }`,
+    `release_task_journal_call() { printf '%s\\n' "$*" >> ${JSON.stringify(calls)}; }`,
+    `release_task_prepare_manifest_stage ${JSON.stringify(artifact)}`,
+    'printf "RESULT action=%s request=%s skip=%s\\n" "$RELEASE_TASK_MANIFEST_ACTION" "$RELEASE_TASK_MANIFEST_REQUEST_ID" "$RELEASE_TASK_MANIFEST_SKIP"',
+  ].join('\n');
+  const result = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
+  const log = fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : '';
+  fs.rmSync(temp, { recursive: true, force: true });
+  return { result, log };
+}
+
+test('lost manifest response reconciles verified outputs without regenerating', () => {
+  const { result, log } = runJournalManifestResume({ action: 'reconcile' });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /RESULT action=reuse request=old-request skip=1/);
+  assert.match(log, /verify\ncommit/);
+});
+
+test('absent manifest outputs refuse the spent request before regeneration', () => {
+  const { result, log } = runJournalManifestResume({ action: 'reconcile', absent: true });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /RESULT action=run request=new-request skip=0/);
+  assert.match(log, /refuse release\.manifest .* old-request manifest-outputs:confirmed-absent/);
+  assert.match(log, /begin:release\.manifest:.*:run/);
+});
+
+test('committed manifest receipt never bypasses missing or tampered outputs', () => {
+  const missing = runJournalManifestResume({ action: 'reuse', absent: true });
+  assert.notEqual(missing.result.status, 0);
+  assert.match(missing.result.stderr, /committed but its manifest\/artifact-ledger outputs are absent/);
+
+  const tampered = runJournalManifestResume({ action: 'reuse', verify: 1 });
+  assert.notEqual(tampered.result.status, 0);
+  assert.match(tampered.result.stderr, /not treating corruption as absence/);
+  assert.doesNotMatch(tampered.log, /refuse release\.manifest/);
+});
+
+test('journal byte gate composes exact health, hash, and signature verification', () => {
+  assert.match(releaseTaskJournalHarness, /verify-provenance\.sh" "\$bundle"/);
+  assert.match(releaseTaskJournalHarness, /--health-sha "\$BUILD_SHA"/);
+  assert.match(releaseTaskJournalHarness, /--require-signed/);
+  assert.match(releaseTaskJournalHarness, /assert_linux_artifact_cardinality "\$bundle"/);
+  assert.match(releaseTaskJournalHarness, /does not match source gitlink/);
+});
+
+test('journal manifest verifier reuses the canonical generator and exact artifact ledger', () => {
+  assert.match(releaseTaskJournalHarness, /gen_latest_manifest "\$VERSION" "\$CHANNEL" "\$TAG"/);
+  assert.match(releaseTaskJournalHarness, /release artifact ledger does not name the exact current artifact set/);
+  assert.match(releaseTaskJournalHarness, /normalized_manifest\(actual\) != normalized_manifest\(expected\)/);
+  assert.match(releaseTaskJournalHarness, /release_artifacts_assert_signatures_present/);
+});
+
+function journalLinuxOutputShape(files) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-linux-shape-'));
+  for (const [relative, value] of Object.entries(files)) {
+    const target = path.join(temp, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, value);
+  }
+  const command = [
+    'set -euo pipefail',
+    'ORCHESTRATOR_HERE=/unused',
+    'MONOREPO=/unused',
+    'VERSION=0.0.18',
+    'CHANNEL=nightly',
+    'TAG=desktop-v0.0.18-nightly',
+    "PAPERCUSP_BUILD_ROLES='gui'",
+    'RELEASE_TASK_JOURNAL_ENABLED=0',
+    releaseTaskJournalHarness,
+    `if release_task_linux_outputs_absent ${JSON.stringify(temp)}; then printf 'absent\\n'; else printf 'present\\n'; fi`,
+  ].join('\n');
+  const result = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
+  fs.rmSync(temp, { recursive: true, force: true });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return result.stdout.trim();
+}
+
+test('partial Linux output is retryable, while complete or surplus shape reaches verification', () => {
+  const complete = {
+    'build-provenance.json': '{}',
+    'deb/Papercusp_GUI_0.0.18_amd64.deb': 'deb',
+    'deb/Papercusp_GUI_0.0.18_amd64.deb.sig': 'deb-sig',
+    'appimage/Papercusp_GUI_0.0.18_amd64.AppImage': 'appimage',
+    'appimage/Papercusp_GUI_0.0.18_amd64.AppImage.sig': 'appimage-sig',
+  };
+  const partial = { ...complete };
+  delete partial['deb/Papercusp_GUI_0.0.18_amd64.deb.sig'];
+  assert.equal(journalLinuxOutputShape(partial), 'absent');
+  assert.equal(journalLinuxOutputShape(complete), 'present');
+  assert.equal(
+    journalLinuxOutputShape({ ...complete, 'appimage/Papercusp GUI_0.0.18_amd64.AppImage': 'surplus' }),
+    'present',
+    'surplus output must reach the strict verifier rather than be rewritten as absent',
+  );
+  const surplusWithoutProvenance = { ...complete, 'appimage/Papercusp GUI_0.0.18_amd64.AppImage': 'surplus' };
+  delete surplusWithoutProvenance['build-provenance.json'];
+  assert.equal(
+    journalLinuxOutputShape(surplusWithoutProvenance),
+    'present',
+    'missing provenance cannot make a surplus same-version set retryable',
+  );
+});
+
+function runRealManifestReceiptVerification({ tamper = false } = {}) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-manifest-receipt-'));
+  const artifact = path.join(temp, 'Papercusp_GUI_0.0.18_amd64.AppImage');
+  const signature = `${artifact}.sig`;
+  fs.writeFileSync(artifact, 'immutable-appimage');
+  fs.writeFileSync(signature, 'immutable-signature');
+  const command = [
+    'set -euo pipefail',
+    `ORCHESTRATOR_HERE=${JSON.stringify(path.join(root, 'bin'))}`,
+    `ROOT=${JSON.stringify(root)}`,
+    'MONOREPO=/unused',
+    'VERSION=0.0.18',
+    'CHANNEL=nightly',
+    'TAG=desktop-v0.0.18-nightly',
+    "PAPERCUSP_BUILD_ROLES='gui'",
+    'PAPERCUSP_UPDATE_BASE_URL=https://updates.example.test/releases',
+    'RELEASE_TASK_JOURNAL_ENABLED=0',
+    'source "$ORCHESTRATOR_HERE/lib/gen-latest-manifest.sh"',
+    'source "$ORCHESTRATOR_HERE/lib/release-artifacts.sh"',
+    releaseTaskJournalHarness,
+    `gen_latest_manifest_json_path() { printf '%s\\n' ${JSON.stringify(path.join(temp, 'latest.json'))}; }`,
+    `gen_latest_manifest_server_json_path() { printf '%s\\n' ${JSON.stringify(path.join(temp, 'latest-server.json'))}; }`,
+    `gen_latest_manifest_notes_path() { printf '%s\\n' ${JSON.stringify(path.join(temp, 'release-notes.md'))}; }`,
+    `release_artifacts_manifest_path() { printf '%s\\n' ${JSON.stringify(path.join(temp, 'artifacts.txt'))}; }`,
+    'LATEST_JSON="$(gen_latest_manifest_json_path "$TAG")"',
+    'LATEST_SERVER_JSON="$(gen_latest_manifest_server_json_path "$TAG")"',
+    'NOTES_FILE="$(gen_latest_manifest_notes_path "$TAG")"',
+    'ARTIFACTS_MANIFEST="$(release_artifacts_manifest_path "$TAG")"',
+    `ARTIFACTS=(${JSON.stringify(artifact)} ${JSON.stringify(signature)})`,
+    'gen_latest_manifest "$VERSION" "$CHANNEL" "$TAG" "${ARTIFACTS[@]}" >/dev/null',
+    'printf "%s\\n" "${ARTIFACTS[@]}" | LC_ALL=C sort -u > "$ARTIFACTS_MANIFEST"',
+    ...(tamper
+      ? ["python3 - \"$LATEST_JSON\" <<'PY'\nimport json, sys\np=sys.argv[1]\nv=json.load(open(p))\nv['platforms']['linux-x86_64']['url'] += '.tampered'\nopen(p, 'w').write(json.dumps(v) + '\\n')\nPY"]
+      : []),
+    'release_task_verify_manifest_outputs "${ARTIFACTS[@]}"',
+  ].join('\n');
+  const result = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
+  fs.rmSync(temp, { recursive: true, force: true });
+  return result;
+}
+
+test('real manifest receipt matches the canonical generator and rejects changed output', () => {
+  const valid = runRealManifestReceiptVerification();
+  assert.equal(valid.status, 0, valid.stderr || valid.stdout);
+  const changed = runRealManifestReceiptVerification({ tamper: true });
+  assert.notEqual(changed.status, 0, 'changed manifest unexpectedly matched its receipt inputs');
+  assert.match(changed.stderr, /does not match the canonical generator/);
+});

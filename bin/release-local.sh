@@ -679,7 +679,17 @@ release_task_begin_stage() { # <stage> <identity>; writes RELEASE_TASK_LAST_*
 
 release_task_start_linux_stage() {
   [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
-  local host_fp roles
+  local host_fp roles expected_desktop_sha
+  expected_desktop_sha="$(git -C "$MONOREPO" ls-tree "$EXPECTED_SOURCE_SHA" -- papercusp-desktop \
+    | awk '$1 == "160000" && $2 == "commit" && $4 == "papercusp-desktop" { print $3 }')"
+  if [[ -z "$expected_desktop_sha" || "$PROVENANCE_SOURCE_GIT_HEAD" != "$expected_desktop_sha" ]]; then
+    echo "ERROR: managed release desktop checkout $PROVENANCE_SOURCE_GIT_HEAD does not match source gitlink ${expected_desktop_sha:-<absent>}." >&2
+    return 1
+  fi
+  if [[ "$PROVENANCE_SOURCE_GIT_DIRTY" != "false" ]]; then
+    echo "ERROR: managed release source is dirty; task-journal reuse requires the exact clean source/gitlink tuple." >&2
+    return 1
+  fi
   host_fp="$(printf '%s' "${PAPERCUSP_RELEASE_HOST%/}" | sha256sum | cut -d' ' -f1)"
   roles="${PAPERCUSP_BUILD_ROLES// /,}"
   RELEASE_TASK_BUILD_IDENTITY="platform=linux-x86_64;roles=$roles;tauri=$TAURI_CLI_VERSION;releaseHostSha256=$host_fp"
@@ -703,13 +713,24 @@ release_task_start_linux_stage() {
 }
 
 release_task_linux_outputs_absent() { # <bundle-dir>
-  local bundle="$1" f
-  [[ ! -f "$bundle/build-provenance.json" ]] || return 1
-  for f in "$bundle"/deb/*_"$VERSION"_*.deb "$bundle"/deb/*_"$VERSION"_*.deb.sig \
-           "$bundle"/appimage/*_"$VERSION"_*.AppImage "$bundle"/appimage/*_"$VERSION"_*.AppImage.sig; do
-    [[ ! -f "$f" ]] || return 1
+  local bundle="$1" expected_appimages=0 expected_debs=0 appimages appimage_sigs debs deb_sigs role
+  [[ " $PAPERCUSP_BUILD_ROLES " == *" gui "* ]] && expected_appimages=1
+  for role in $PAPERCUSP_BUILD_ROLES; do
+    case "$role" in gui|server) expected_debs=$((expected_debs + 1)) ;; esac
   done
-  return 0
+  appimages="$(find "$bundle/appimage" -maxdepth 1 -type f -name "*_${VERSION}_*.AppImage" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  appimage_sigs="$(find "$bundle/appimage" -maxdepth 1 -type f -name "*_${VERSION}_*.AppImage.sig" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  debs="$(find "$bundle/deb" -maxdepth 1 -type f -name "*_${VERSION}_*.deb" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  deb_sigs="$(find "$bundle/deb" -maxdepth 1 -type f -name "*_${VERSION}_*.deb.sig" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  # Surplus candidates are contamination, never "no completed result".  Send
+  # them to the strict verifier so they fail closed even when provenance itself
+  # is missing.  Missing provenance with no surplus proves only an incomplete
+  # local stage, which is retryable under a fresh one-use journal request.
+  (( appimages <= expected_appimages && appimage_sigs <= expected_appimages \
+     && debs <= expected_debs && deb_sigs <= expected_debs )) || return 1
+  [[ -f "$bundle/build-provenance.json" ]] || return 0
+  (( appimages < expected_appimages || appimage_sigs < expected_appimages \
+     || debs < expected_debs || deb_sigs < expected_debs ))
 }
 
 release_task_target_pubkey() {
@@ -732,6 +753,10 @@ release_task_verify_linux_artifacts() { # <bundle-dir> <reused:0|1>
     PAPERCUSP_ALLOW_REUSE_UNVERIFIED=0 \
     PAPERCUSP_ALLOW_REUSE_VERSION_MISMATCH=0 \
       assert_reused_provenance "$bundle" linux || return $?
+    if [[ "$LINUX_REUSE_GIT_HEAD" != "$PROVENANCE_SOURCE_GIT_HEAD" || "$LINUX_REUSE_GIT_DIRTY" != "false" ]]; then
+      echo "ERROR: reused Linux provenance does not match the managed release's exact clean desktop gitlink." >&2
+      return 1
+    fi
   fi
   pubkey="$(release_task_target_pubkey)" || return $?
   bash "$ORCHESTRATOR_HERE/verify-provenance.sh" "$bundle" \
@@ -743,7 +768,13 @@ release_task_commit_linux_stage() { # <bundle-dir> <reused:0|1>
   [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
   case "$RELEASE_TASK_BUILD_ACTION" in
     run|reconcile) ;;
-    reuse) return 0 ;;
+    reuse)
+      # A committed receipt authorizes no mutation, but it also grants no trust:
+      # recheck after collection/provenance re-emit before downstream consumers
+      # use these bytes.
+      release_task_verify_linux_artifacts "$bundle" "$reused"
+      return $?
+      ;;
     *) echo "ERROR: cannot commit release.build.linux from action '$RELEASE_TASK_BUILD_ACTION'." >&2; return 2 ;;
   esac
   release_task_verify_linux_artifacts "$bundle" "$reused" || {
@@ -846,7 +877,11 @@ PY
 }
 
 release_task_manifest_outputs_absent() {
-  [[ ! -e "$LATEST_JSON" && ! -e "$LATEST_SERVER_JSON" && ! -e "$NOTES_FILE" && ! -e "$ARTIFACTS_MANIFEST" ]]
+  # These three are written in order by the canonical generator + artifact
+  # ledger writer.  Any missing member proves the local stage never reached its
+  # complete output boundary and is safe to classify as absent/retryable.  A
+  # complete set with bad content is handled separately as corruption.
+  [[ ! -f "$LATEST_JSON" || ! -f "$NOTES_FILE" || ! -f "$ARTIFACTS_MANIFEST" ]]
 }
 
 release_task_verify_manifest_outputs() { # <artifact>...
@@ -892,7 +927,10 @@ ledger = pathlib.Path(os.environ["PAPERCUSP_MANIFEST_ACTUAL_LEDGER"])
 if not ledger.is_file():
     raise SystemExit(f"release artifact ledger is missing: {ledger}")
 recorded = sorted(line.strip() for line in ledger.read_text().splitlines() if line.strip())
-expected_paths = sorted({str(path.resolve()) for path in artifacts})
+# release_artifacts_write preserves absolute input spellings (including a
+# deliberate symlinked target root); compare the same lexical absolute paths,
+# not realpath-resolved aliases.
+expected_paths = sorted({os.path.abspath(str(path)) for path in artifacts})
 if recorded != expected_paths:
     raise SystemExit("release artifact ledger does not name the exact current artifact set")
 
@@ -1992,7 +2030,9 @@ emit_linux_build_provenance() {
 
 LINUX_LEG_LOG="/tmp/papercusp-linuxleg-${TAG}.log"
 LINUX_PID=""; LINUX_REUSE=0
-release_task_prepare_linux_stage "$CARGO_TARGET_ROOT/release/bundle" || exit $?
+if [[ "${RELEASE_TASK_JOURNAL_ENABLED:-0}" == "1" ]]; then
+  release_task_prepare_linux_stage "$CARGO_TARGET_ROOT/release/bundle" || exit $?
+fi
 if [[ "${PAPERCUSP_REUSE_LINUX:-0}" == "1" ]]; then
   # EI-21024313639787521: Linux is just as salvageable as Windows/macOS. A late
   # post-package gate must not force a multi-hour rebuild (or clobber repaired,
@@ -2048,7 +2088,9 @@ else
     # Commit inside the successful child, before a failed sibling can prevent
     # the parent collector from running.  If this response is lost, the next
     # process reconciles the exact provenance bytes and the same request ID.
-    release_task_commit_linux_stage "$CARGO_TARGET_ROOT/release/bundle" 0
+    if [[ "${RELEASE_TASK_JOURNAL_ENABLED:-0}" == "1" ]]; then
+      release_task_commit_linux_stage "$CARGO_TARGET_ROOT/release/bundle" 0
+    fi
   ) >"$LINUX_LEG_LOG" 2>&1 &
   LINUX_PID=$!
 fi
@@ -2485,7 +2527,9 @@ fi
 # The child records fresh success early; this idempotent parent settle covers a
 # manual reuse path and proves the collected bytes did not change before the
 # all-platform join continued.
-release_task_commit_linux_stage "$LINUX_BUNDLE" "$LINUX_REUSE" || exit $?
+if [[ "${RELEASE_TASK_JOURNAL_ENABLED:-0}" == "1" ]]; then
+  release_task_commit_linux_stage "$LINUX_BUNDLE" "$LINUX_REUSE" || exit $?
+fi
 if [[ "$WITH_ARM64" == "1" ]]; then
   for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*_"$VERSION"_*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f")
