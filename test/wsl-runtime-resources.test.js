@@ -35,3 +35,28 @@ test('detect, bootstrap installation and import consume the same runtime resolve
   assert.match(source, /st\.rootfs_recipe = Some\(recipe\)/);
   assert.doesNotMatch(source, /running the distro's existing bootstrap/);
 });
+
+test('filesystem controls reject restoring the thin-GUI-own-resource mistake', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'wsl-runtime-resources-mutant-'));
+  try {
+    const original = fs.readFileSync(
+      path.join(root, 'src-tauri/src/wsl_runtime_resources.rs'), 'utf8',
+    );
+    const mutant = original.replace('let root = if installed_gui {', 'let root = if false {');
+    assert.notEqual(mutant, original, 'negative control must change the actual selection branch');
+    const mutantSource = path.join(temp, 'mutant.rs');
+    const binary = path.join(temp, process.platform === 'win32' ? 'mutant.exe' : 'mutant');
+    fs.writeFileSync(mutantSource, mutant);
+    const compile = spawnSync(process.env.RUSTC || 'rustc', [
+      '--edition=2021', '--test', mutantSource, '-o', binary,
+    ], { encoding: 'utf8', timeout: 60000 });
+    assert.equal(compile.status, 0, String(compile.error || compile.stderr));
+    const run = spawnSync(binary, ['--nocapture'], { encoding: 'utf8', timeout: 30000 });
+    assert.notEqual(run.status, 0, 'the original wrong resource root must fail');
+    assert.equal(run.error, undefined);
+    assert.match(run.stdout, /thin_gui_uses_the_server_for_all_three_runtime_inputs.*FAILED/);
+    assert.match(run.stdout, /absent_server_never_falls_back_to_old_gui_recipe.*FAILED/);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
