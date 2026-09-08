@@ -535,6 +535,16 @@ process.stdout.write(JSON.stringify(value));
 NODE
 )" || { echo "ERROR: invalid dirty-source manifest: $_dirty_source_manifest" >&2; exit 2; }
 
+SOURCE_REPAIR_JSON=""
+if [[ -n "${PROVENANCE_SOURCE_REPAIR_MANIFEST:-}" ]]; then
+  SOURCE_REPAIR_JSON="$(node "$(dirname "${BASH_SOURCE[0]}")/lib/windows-source-repair.js" \
+    attestation "$PROVENANCE_SOURCE_REPAIR_MANIFEST" "$GIT_ROOT" "$BUILD_SHA" "$GIT_HEAD")" \
+    || { echo "ERROR: source repair does not describe the native source" >&2; exit 2; }
+  # A base+patch is never attested as a clean original commit, even if a caller
+  # inherited a clean-source override from its original all-platform cut.
+  GIT_DIRTY=true
+fi
+
 # A compare-and-swap repair is intentionally NOT a re-emit. The existing record
 # describes when/where the bytes were built; recomputing gitHeadAtEmit,
 # gitDirtyAtEmit, builtAtUtc, host, or sidecar state now would replace history
@@ -581,6 +591,9 @@ fi
   printf '  "gitHead": "%s",\n'   "$GIT_HEAD"
   printf '  "gitDirty": %s,\n'    "$GIT_DIRTY"
   printf '  "dirtySource": %s,\n' "$DIRTY_SOURCE_JSON"
+  if [[ -n "$SOURCE_REPAIR_JSON" ]]; then
+    printf '  "sourceRepair": %s,\n' "$SOURCE_REPAIR_JSON"
+  fi
   printf '  "gitHeadAtEmit": "%s",\n' "$GIT_HEAD_AT_EMIT"
   printf '  "gitDirtyAtEmit": %s,\n' "$GIT_DIRTY_AT_EMIT"
   # Optional leg-specific fields (P-002 consolidation) — emitted only when the
