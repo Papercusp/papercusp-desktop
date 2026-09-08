@@ -556,6 +556,479 @@ fi
 # tag from the same version+channel — one implementation, no drift.)
 TAG="$(desktop_release_tag "$VERSION" "$CHANNEL")"
 
+# ── P-005: restart-safe release stages in the existing managed-task journal ──
+# The nightly routine already creates one task_ledger.detail.release journal and
+# passes its task/operation IDs through this process.  Keep the shell cutter a
+# thin consumer of that journal: it asks the shared TypeScript adapter for the
+# stage decision, then proves the local bytes through the release script's
+# existing provenance/artifact surfaces before it accepts a receipt.
+#
+# An unmanaged/manual cut remains byte-for-byte on the historical path.  A
+# half-configured managed cut fails closed; silently dropping one ID would turn
+# a restartable operation back into an unjournaled mutation.
+RELEASE_TASK_JOURNAL_ENABLED=0
+RELEASE_TASK_BUILD_ACTION=""
+RELEASE_TASK_BUILD_REQUEST_ID=""
+RELEASE_TASK_BUILD_IDENTITY=""
+RELEASE_TASK_MANIFEST_ACTION=""
+RELEASE_TASK_MANIFEST_REQUEST_ID=""
+RELEASE_TASK_MANIFEST_IDENTITY=""
+RELEASE_TASK_MANIFEST_SKIP=0
+
+release_task_journal_configure() {
+  local task_id="${PAPERCUSP_RELEASE_TASK_ID:-}"
+  local operation_id="${PAPERCUSP_RELEASE_OPERATION_ID:-}"
+  if [[ -z "$task_id" && -z "$operation_id" ]]; then return 0; fi
+  if [[ -z "$task_id" || -z "$operation_id" ]]; then
+    echo "ERROR: managed release resume requires BOTH PAPERCUSP_RELEASE_TASK_ID and PAPERCUSP_RELEASE_OPERATION_ID." >&2
+    return 2
+  fi
+
+  RELEASE_TASK_JOURNAL_CLI="${PAPERCUSP_RELEASE_TASK_JOURNAL_CLI:-$ORCHESTRATOR_HERE/../../scripts/lib/release-task-journal.ts}"
+  RELEASE_TASK_JOURNAL_ROOT="$(cd "$ORCHESTRATOR_HERE/../.." && pwd)"
+  if [[ -z "${PAPERCUSP_RELEASE_TASK_JOURNAL_RUNNER:-}" && ! -f "$RELEASE_TASK_JOURNAL_CLI" ]]; then
+    echo "ERROR: managed release journal adapter is missing at $RELEASE_TASK_JOURNAL_CLI." >&2
+    return 2
+  fi
+  RELEASE_TASK_JOURNAL_ENABLED=1
+}
+
+release_task_assert_credential_fresh() {
+  [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
+  local expires_at="${PAPERCUSP_RELEASE_CREDENTIAL_EXPIRES_AT:-}"
+  [[ -n "$expires_at" ]] || return 0
+  node - "$expires_at" <<'NODE'
+const expiresAt = process.argv[2];
+const epoch = Date.parse(expiresAt);
+if (!Number.isFinite(epoch)) {
+  console.error('ERROR: PAPERCUSP_RELEASE_CREDENTIAL_EXPIRES_AT must be an ISO timestamp.');
+  process.exit(2);
+}
+if (epoch <= Date.now()) {
+  console.error(`ERROR: release credential expired at ${expiresAt}; refusing the next release stage.`);
+  process.exit(1);
+}
+NODE
+}
+
+# release_task_journal_call <command> <stage> <identity> <request-id-or-empty> [evidence...]
+release_task_journal_call() {
+  local command="$1" stage="$2" identity="$3" request_id="${4:-}"
+  shift 4
+  local -a argv=(
+    "$command"
+    --task-id "$PAPERCUSP_RELEASE_TASK_ID"
+    --operation-id "$PAPERCUSP_RELEASE_OPERATION_ID"
+    --source-root "$MONOREPO"
+    --source-sha "$EXPECTED_SOURCE_SHA"
+    --version "$VERSION"
+    --channel "$CHANNEL"
+    --stage "$stage"
+    --identity "$identity"
+  )
+  [[ -z "$request_id" ]] || argv+=(--request-id "$request_id")
+  local evidence
+  for evidence in "$@"; do argv+=(--evidence "$evidence"); done
+
+  if [[ -n "${PAPERCUSP_RELEASE_TASK_JOURNAL_RUNNER:-}" ]]; then
+    "$PAPERCUSP_RELEASE_TASK_JOURNAL_RUNNER" "${argv[@]}"
+  else
+    (cd "$RELEASE_TASK_JOURNAL_ROOT" && npx tsx "$RELEASE_TASK_JOURNAL_CLI" "${argv[@]}")
+  fi
+}
+
+release_task_json_field() { # <json> <field> [optional=0]
+  local json="$1" field="$2" optional="${3:-0}"
+  RELEASE_TASK_RESULT_JSON="$json" node - "$field" "$optional" <<'NODE'
+const field = process.argv[2];
+const optional = process.argv[3] === '1';
+let value;
+try {
+  value = JSON.parse(process.env.RELEASE_TASK_RESULT_JSON || '')[field];
+} catch (error) {
+  console.error(`ERROR: release journal returned invalid JSON: ${error.message}`);
+  process.exit(2);
+}
+if (value == null && optional) process.exit(0);
+if (typeof value !== 'string' || value.length === 0) {
+  console.error(`ERROR: release journal response has no string field '${field}'.`);
+  process.exit(2);
+}
+process.stdout.write(value);
+NODE
+}
+
+release_task_begin_stage() { # <stage> <identity>; writes RELEASE_TASK_LAST_*
+  local stage="$1" identity="$2" result
+  release_task_assert_credential_fresh || return $?
+  if ! result="$(release_task_journal_call begin "$stage" "$identity" "")"; then
+    echo "ERROR: could not begin managed release stage $stage." >&2
+    return 1
+  fi
+  RELEASE_TASK_LAST_ACTION="$(release_task_json_field "$result" action)" || return $?
+  RELEASE_TASK_LAST_REQUEST_ID="$(release_task_json_field "$result" requestIdentity 1)" || return $?
+  case "$RELEASE_TASK_LAST_ACTION" in
+    run|reuse|reconcile|refused) ;;
+    *) echo "ERROR: release journal returned unknown action '$RELEASE_TASK_LAST_ACTION' for $stage." >&2; return 2 ;;
+  esac
+  if [[ -z "$RELEASE_TASK_LAST_REQUEST_ID" ]]; then
+    echo "ERROR: release journal returned no request identity for $stage/$RELEASE_TASK_LAST_ACTION." >&2
+    return 2
+  fi
+}
+
+release_task_start_linux_stage() {
+  [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
+  local host_fp roles
+  host_fp="$(printf '%s' "${PAPERCUSP_RELEASE_HOST%/}" | sha256sum | cut -d' ' -f1)"
+  roles="${PAPERCUSP_BUILD_ROLES// /,}"
+  RELEASE_TASK_BUILD_IDENTITY="platform=linux-x86_64;roles=$roles;tauri=$TAURI_CLI_VERSION;releaseHostSha256=$host_fp"
+  release_task_begin_stage release.build.linux "$RELEASE_TASK_BUILD_IDENTITY" || return $?
+  RELEASE_TASK_BUILD_ACTION="$RELEASE_TASK_LAST_ACTION"
+  RELEASE_TASK_BUILD_REQUEST_ID="$RELEASE_TASK_LAST_REQUEST_ID"
+  case "$RELEASE_TASK_BUILD_ACTION" in
+    run) ;;
+    reuse|reconcile)
+      # This happens before the cut-start stamp is selected: a valid resumed
+      # artifact must preserve the original boundary, not be made stale by a
+      # newly-written timestamp and then rejected for the wrong reason.
+      PAPERCUSP_REUSE_LINUX=1
+      echo "==> [journal] release.build.linux is $RELEASE_TASK_BUILD_ACTION; existing bytes require reconciliation before reuse"
+      ;;
+    refused)
+      echo "ERROR: release.build.linux has an unresolved refused receipt; start a new release operation after resolving it." >&2
+      return 1
+      ;;
+  esac
+}
+
+release_task_linux_outputs_absent() { # <bundle-dir>
+  local bundle="$1" f
+  [[ ! -f "$bundle/build-provenance.json" ]] || return 1
+  for f in "$bundle"/deb/*_"$VERSION"_*.deb "$bundle"/deb/*_"$VERSION"_*.deb.sig \
+           "$bundle"/appimage/*_"$VERSION"_*.AppImage "$bundle"/appimage/*_"$VERSION"_*.AppImage.sig; do
+    [[ ! -f "$f" ]] || return 1
+  done
+  return 0
+}
+
+release_task_target_pubkey() {
+  python3 - "$ROOT/src-tauri/tauri.conf.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1]))["plugins"]["updater"]["pubkey"]
+if not isinstance(value, str) or not value.strip():
+    raise SystemExit("target tauri.conf.json has no updater public key")
+print(value)
+PY
+}
+
+release_task_verify_linux_artifacts() { # <bundle-dir> <reused:0|1>
+  local bundle="$1" reused="$2" pubkey
+  assert_linux_artifact_cardinality "$bundle" || return $?
+  if [[ "$reused" == "1" ]]; then
+    # A journal-controlled resume never inherits the two manual salvage
+    # bypasses.  Its source/gitlink identity is exact, so mismatched or missing
+    # provenance is a hard contradiction, not permission to relabel bytes.
+    PAPERCUSP_ALLOW_REUSE_UNVERIFIED=0 \
+    PAPERCUSP_ALLOW_REUSE_VERSION_MISMATCH=0 \
+      assert_reused_provenance "$bundle" linux || return $?
+  fi
+  pubkey="$(release_task_target_pubkey)" || return $?
+  bash "$ORCHESTRATOR_HERE/verify-provenance.sh" "$bundle" \
+    --health-sha "$BUILD_SHA" --pubkey "$pubkey" --require-signed
+}
+
+release_task_commit_linux_stage() { # <bundle-dir> <reused:0|1>
+  local bundle="$1" reused="$2" provenance_sha result
+  [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
+  case "$RELEASE_TASK_BUILD_ACTION" in
+    run|reconcile) ;;
+    reuse) return 0 ;;
+    *) echo "ERROR: cannot commit release.build.linux from action '$RELEASE_TASK_BUILD_ACTION'." >&2; return 2 ;;
+  esac
+  release_task_verify_linux_artifacts "$bundle" "$reused" || {
+    echo "ERROR: release.build.linux bytes failed verification; receipt remains $RELEASE_TASK_BUILD_ACTION (fail closed)." >&2
+    return 1
+  }
+  provenance_sha="$(sha256sum "$bundle/build-provenance.json" | cut -d' ' -f1)"
+  if ! result="$(release_task_journal_call commit release.build.linux "$RELEASE_TASK_BUILD_IDENTITY" \
+      "$RELEASE_TASK_BUILD_REQUEST_ID" \
+      "build-provenance:sha256:$provenance_sha" \
+      "source-gitlink:$PROVENANCE_SOURCE_GIT_HEAD" \
+      "artifact-set:hash-signature-verified")"; then
+    echo "ERROR: verified Linux bytes could not be committed to the release journal." >&2
+    return 1
+  fi
+  [[ "$(release_task_json_field "$result" state)" == "committed" ]] || {
+    echo "ERROR: release journal did not confirm release.build.linux committed." >&2
+    return 1
+  }
+  RELEASE_TASK_BUILD_ACTION=reuse
+}
+
+release_task_prepare_linux_stage() { # <bundle-dir>
+  local bundle="$1" result
+  [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
+  case "$RELEASE_TASK_BUILD_ACTION" in
+    run) return 0 ;;
+    reuse|reconcile) ;;
+    *) echo "ERROR: invalid release.build.linux action '$RELEASE_TASK_BUILD_ACTION'." >&2; return 2 ;;
+  esac
+
+  if release_task_linux_outputs_absent "$bundle"; then
+    if [[ "$RELEASE_TASK_BUILD_ACTION" == "reuse" ]]; then
+      echo "ERROR: release.build.linux is committed but its artifact/provenance set is absent; refusing to rebuild under the spent receipt." >&2
+      return 1
+    fi
+    echo "==> [journal] prior release.build.linux outcome is confirmed absent; refusing its spent request before retry"
+    release_task_journal_call refuse release.build.linux "$RELEASE_TASK_BUILD_IDENTITY" \
+      "$RELEASE_TASK_BUILD_REQUEST_ID" "artifact-set:confirmed-absent" >/dev/null || return $?
+    release_task_begin_stage release.build.linux "$RELEASE_TASK_BUILD_IDENTITY" || return $?
+    [[ "$RELEASE_TASK_LAST_ACTION" == "run" ]] || {
+      echo "ERROR: release.build.linux did not mint a fresh attempt after confirmed absence." >&2
+      return 1
+    }
+    RELEASE_TASK_BUILD_ACTION=run
+    RELEASE_TASK_BUILD_REQUEST_ID="$RELEASE_TASK_LAST_REQUEST_ID"
+    PAPERCUSP_REUSE_LINUX=0
+    PAPERCUSP_RELEASE_CUT_START_NS="$(release_artifacts_cut_start_write "$TAG")" || return $?
+    export PAPERCUSP_RELEASE_CUT_START_NS
+    echo "==> [journal] release.build.linux retry=$RELEASE_TASK_BUILD_REQUEST_ID; refreshed cut-start=$PAPERCUSP_RELEASE_CUT_START_NS"
+    return 0
+  fi
+
+  release_task_verify_linux_artifacts "$bundle" 1 || {
+    echo "ERROR: release.build.linux receipt has present but mismatched/partial bytes; not treating corruption as absence." >&2
+    return 1
+  }
+  if [[ "$RELEASE_TASK_BUILD_ACTION" == "reconcile" ]]; then
+    release_task_commit_linux_stage "$bundle" 1 || return $?
+  fi
+  PAPERCUSP_REUSE_LINUX=1
+  RELEASE_TASK_BUILD_ACTION=reuse
+  echo "==> [journal] release.build.linux verified; activating the existing PAPERCUSP_REUSE_LINUX path"
+}
+
+release_task_manifest_input_identity() { # <artifact>...
+  PAPERCUSP_MANIFEST_VERSION="$VERSION" \
+  PAPERCUSP_MANIFEST_CHANNEL="$CHANNEL" \
+  PAPERCUSP_MANIFEST_TAG="$TAG" \
+  PAPERCUSP_MANIFEST_UPDATE_BASE="${PAPERCUSP_UPDATE_BASE_URL:-}" \
+  PAPERCUSP_MANIFEST_ROLES="$PAPERCUSP_BUILD_ROLES" \
+    python3 - "$@" <<'PY'
+import hashlib, json, os, pathlib, sys
+
+rows = []
+names = set()
+for raw in sys.argv[1:]:
+    path = pathlib.Path(raw)
+    if not path.is_file():
+        raise SystemExit(f"release manifest input is missing: {path}")
+    if path.name in names:
+        raise SystemExit(f"release manifest input has duplicate artifact basename: {path.name}")
+    names.add(path.name)
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    rows.append({"name": path.name, "bytes": path.stat().st_size, "sha256": digest.hexdigest()})
+payload = {
+    "version": os.environ["PAPERCUSP_MANIFEST_VERSION"],
+    "channel": os.environ["PAPERCUSP_MANIFEST_CHANNEL"],
+    "tag": os.environ["PAPERCUSP_MANIFEST_TAG"],
+    "updateBaseSha256": hashlib.sha256(os.environ["PAPERCUSP_MANIFEST_UPDATE_BASE"].rstrip("/").encode()).hexdigest(),
+    "roles": os.environ["PAPERCUSP_MANIFEST_ROLES"].split(),
+    "artifacts": sorted(rows, key=lambda row: row["name"]),
+}
+encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+print("manifest-input-sha256:" + hashlib.sha256(encoded).hexdigest())
+PY
+}
+
+release_task_manifest_outputs_absent() {
+  [[ ! -e "$LATEST_JSON" && ! -e "$LATEST_SERVER_JSON" && ! -e "$NOTES_FILE" && ! -e "$ARTIFACTS_MANIFEST" ]]
+}
+
+release_task_verify_manifest_outputs() { # <artifact>...
+  local expected_dir expected_gui expected_server expected_notes
+  expected_dir="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-manifest-verify.XXXXXX")" || return 1
+  expected_gui="$expected_dir/latest.json"
+  expected_server="$expected_dir/latest-server.json"
+  expected_notes="$expected_dir/release-notes.md"
+
+  # Re-run the SAME generator into an isolated output namespace.  Function
+  # overrides change only its pure path helpers; classification, URL encoding,
+  # product separation, signature selection, and notes stay single-sourced.
+  if ! (
+    gen_latest_manifest_json_path() { printf '%s\n' "$expected_gui"; }
+    gen_latest_manifest_server_json_path() { printf '%s\n' "$expected_server"; }
+    gen_latest_manifest_notes_path() { printf '%s\n' "$expected_notes"; }
+    unset GEN_LATEST_MANIFEST_MERGE_GUI_JSON GEN_LATEST_MANIFEST_MERGE_SERVER_JSON
+    gen_latest_manifest "$VERSION" "$CHANNEL" "$TAG" "$@" >/dev/null
+  ); then
+    rm -rf -- "$expected_dir"
+    echo "ERROR: could not reproduce the canonical release manifest for verification." >&2
+    return 1
+  fi
+
+  PAPERCUSP_MANIFEST_ACTUAL_GUI="$LATEST_JSON" \
+  PAPERCUSP_MANIFEST_ACTUAL_SERVER="$LATEST_SERVER_JSON" \
+  PAPERCUSP_MANIFEST_ACTUAL_NOTES="$NOTES_FILE" \
+  PAPERCUSP_MANIFEST_ACTUAL_LEDGER="$ARTIFACTS_MANIFEST" \
+  PAPERCUSP_MANIFEST_EXPECTED_GUI="$expected_gui" \
+  PAPERCUSP_MANIFEST_EXPECTED_SERVER="$expected_server" \
+  PAPERCUSP_MANIFEST_EXPECTED_NOTES="$expected_notes" \
+    python3 - "$@" <<'PY'
+import datetime, json, os, pathlib, sys
+
+artifacts = [pathlib.Path(raw) for raw in sys.argv[1:]]
+if not artifacts or any(not path.is_file() for path in artifacts):
+    raise SystemExit("release manifest receipt has a missing/empty artifact set")
+names = [path.name for path in artifacts]
+if len(names) != len(set(names)):
+    raise SystemExit("release manifest receipt has duplicate artifact basenames")
+
+ledger = pathlib.Path(os.environ["PAPERCUSP_MANIFEST_ACTUAL_LEDGER"])
+if not ledger.is_file():
+    raise SystemExit(f"release artifact ledger is missing: {ledger}")
+recorded = sorted(line.strip() for line in ledger.read_text().splitlines() if line.strip())
+expected_paths = sorted({str(path.resolve()) for path in artifacts})
+if recorded != expected_paths:
+    raise SystemExit("release artifact ledger does not name the exact current artifact set")
+
+def normalized_manifest(raw):
+    path = pathlib.Path(raw)
+    if not path.is_file():
+        raise SystemExit(f"release manifest is missing: {path}")
+    try:
+        value = json.loads(path.read_text())
+    except Exception as error:
+        raise SystemExit(f"release manifest is invalid JSON ({path}): {error}")
+    try:
+        datetime.datetime.fromisoformat(str(value["pub_date"]).replace("Z", "+00:00"))
+    except Exception:
+        raise SystemExit(f"release manifest has no valid pub_date: {path}")
+    value["pub_date"] = "<verified-timestamp>"
+    return value
+
+pairs = [
+    (os.environ["PAPERCUSP_MANIFEST_ACTUAL_GUI"], os.environ["PAPERCUSP_MANIFEST_EXPECTED_GUI"]),
+]
+actual_server = pathlib.Path(os.environ["PAPERCUSP_MANIFEST_ACTUAL_SERVER"])
+expected_server = pathlib.Path(os.environ["PAPERCUSP_MANIFEST_EXPECTED_SERVER"])
+if actual_server.is_file() != expected_server.is_file():
+    raise SystemExit("latest-server.json presence does not match the canonical generator")
+if expected_server.is_file():
+    pairs.append((str(actual_server), str(expected_server)))
+for actual, expected in pairs:
+    if normalized_manifest(actual) != normalized_manifest(expected):
+        raise SystemExit(f"release manifest does not match the canonical generator: {actual}")
+
+actual_notes = pathlib.Path(os.environ["PAPERCUSP_MANIFEST_ACTUAL_NOTES"])
+expected_notes = pathlib.Path(os.environ["PAPERCUSP_MANIFEST_EXPECTED_NOTES"])
+if not actual_notes.is_file() or actual_notes.read_bytes() != expected_notes.read_bytes():
+    raise SystemExit("release notes do not match the canonical generator")
+PY
+  local verify_rc=$?
+  rm -rf -- "$expected_dir"
+  (( verify_rc == 0 )) || return "$verify_rc"
+  RELEASE_ARTIFACTS_NO_REACHABILITY=1 \
+    release_artifacts_assert_urls_covered "$TAG" "$LATEST_JSON" "$LATEST_SERVER_JSON" || return $?
+  RELEASE_ARTIFACTS_NO_SIGNATURE_CHECK= \
+    release_artifacts_assert_signatures_present "$TAG"
+}
+
+release_task_manifest_output_digest() {
+  python3 - "$LATEST_JSON" "$LATEST_SERVER_JSON" "$NOTES_FILE" "$ARTIFACTS_MANIFEST" <<'PY'
+import hashlib, pathlib, sys
+outer = hashlib.sha256()
+for raw in sys.argv[1:]:
+    path = pathlib.Path(raw)
+    if not path.is_file():
+        continue
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    outer.update(path.name.encode() + b"\0" + digest.encode() + b"\0")
+print(outer.hexdigest())
+PY
+}
+
+release_task_commit_manifest_stage() { # <artifact>...
+  local output_digest result
+  [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
+  case "$RELEASE_TASK_MANIFEST_ACTION" in
+    run|reconcile) ;;
+    reuse) return 0 ;;
+    *) echo "ERROR: cannot commit release.manifest from action '$RELEASE_TASK_MANIFEST_ACTION'." >&2; return 2 ;;
+  esac
+  release_task_verify_manifest_outputs "$@" || {
+    echo "ERROR: release.manifest outputs failed verification; receipt remains $RELEASE_TASK_MANIFEST_ACTION (fail closed)." >&2
+    return 1
+  }
+  output_digest="$(release_task_manifest_output_digest)" || return $?
+  if ! result="$(release_task_journal_call commit release.manifest "$RELEASE_TASK_MANIFEST_IDENTITY" \
+      "$RELEASE_TASK_MANIFEST_REQUEST_ID" \
+      "manifest-receipt:sha256:$output_digest" \
+      "artifact-ledger:exact-set-verified")"; then
+    echo "ERROR: verified manifest outputs could not be committed to the release journal." >&2
+    return 1
+  fi
+  [[ "$(release_task_json_field "$result" state)" == "committed" ]] || {
+    echo "ERROR: release journal did not confirm release.manifest committed." >&2
+    return 1
+  }
+  RELEASE_TASK_MANIFEST_ACTION=reuse
+}
+
+release_task_prepare_manifest_stage() { # <artifact>...
+  local result
+  RELEASE_TASK_MANIFEST_SKIP=0
+  [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
+  RELEASE_TASK_MANIFEST_IDENTITY="$(release_task_manifest_input_identity "$@")" || return $?
+  release_task_begin_stage release.manifest "$RELEASE_TASK_MANIFEST_IDENTITY" || return $?
+  RELEASE_TASK_MANIFEST_ACTION="$RELEASE_TASK_LAST_ACTION"
+  RELEASE_TASK_MANIFEST_REQUEST_ID="$RELEASE_TASK_LAST_REQUEST_ID"
+  case "$RELEASE_TASK_MANIFEST_ACTION" in
+    run) return 0 ;;
+    reuse|reconcile) ;;
+    refused)
+      echo "ERROR: release.manifest has an unresolved refused receipt; start a new release operation after resolving it." >&2
+      return 1
+      ;;
+  esac
+
+  if release_task_manifest_outputs_absent; then
+    if [[ "$RELEASE_TASK_MANIFEST_ACTION" == "reuse" ]]; then
+      echo "ERROR: release.manifest is committed but its manifest/artifact-ledger outputs are absent; refusing to regenerate under the spent receipt." >&2
+      return 1
+    fi
+    echo "==> [journal] prior release.manifest outcome is confirmed absent; refusing its spent request before retry"
+    release_task_journal_call refuse release.manifest "$RELEASE_TASK_MANIFEST_IDENTITY" \
+      "$RELEASE_TASK_MANIFEST_REQUEST_ID" "manifest-outputs:confirmed-absent" >/dev/null || return $?
+    release_task_begin_stage release.manifest "$RELEASE_TASK_MANIFEST_IDENTITY" || return $?
+    [[ "$RELEASE_TASK_LAST_ACTION" == "run" ]] || {
+      echo "ERROR: release.manifest did not mint a fresh attempt after confirmed absence." >&2
+      return 1
+    }
+    RELEASE_TASK_MANIFEST_ACTION=run
+    RELEASE_TASK_MANIFEST_REQUEST_ID="$RELEASE_TASK_LAST_REQUEST_ID"
+    return 0
+  fi
+
+  release_task_verify_manifest_outputs "$@" || {
+    echo "ERROR: release.manifest receipt has present but mismatched/partial outputs; not treating corruption as absence." >&2
+    return 1
+  }
+  if [[ "$RELEASE_TASK_MANIFEST_ACTION" == "reconcile" ]]; then
+    release_task_commit_manifest_stage "$@" || return $?
+  fi
+  RELEASE_TASK_MANIFEST_ACTION=reuse
+  RELEASE_TASK_MANIFEST_SKIP=1
+  echo "==> [journal] release.manifest verified; reusing the immutable manifest/artifact-ledger outputs"
+}
+
+release_task_journal_configure || exit $?
+# ── end P-005 release-task journal helpers ──────────────────────────────────
+
 echo "==> version=$VERSION channel=$CHANNEL tag=$TAG"
 
 # P-016: parity regression gate — fail FAST (before the ~35-min build) if any leg
@@ -941,6 +1414,13 @@ if [[ "${PAPERCUSP_RELEASE_PRECHECK_ONLY:-0}" == "1" ]]; then
   echo "    src-tauri/tauri.conf.json and src-tauri/Cargo.lock. Nothing has been modified."
   exit 0
 fi
+
+# The task-ledger intent is the managed cut's first mutation boundary.  It runs
+# only after every precheck (and after PRECHECK_ONLY returned), but before the
+# cut-start decision and the first release-tree write.  A restart therefore has
+# an authoritative spent request to reconcile even if the shell dies during the
+# version/seed/build sequence below.
+release_task_start_linux_stage || exit $?
 
 # EI-20551860898590077: bind every artifact to THIS cut before the first tree
 # write. A failed cut may leave correctly named/signed same-version bytes behind;
@@ -1469,12 +1949,18 @@ assert_reused_provenance() {  # $1 = artifact dir, $2 = leg label
 
 assert_linux_artifact_cardinality() {  # $1 = Linux bundle dir
   local dir="$1"
-  local expected_appimages=0 appimages appimage_sigs
+  local expected_appimages=0 expected_debs=0 appimages appimage_sigs debs deb_sigs role
   [[ " $PAPERCUSP_BUILD_ROLES " == *" gui "* ]] && expected_appimages=1
+  for role in $PAPERCUSP_BUILD_ROLES; do
+    case "$role" in gui|server) expected_debs=$((expected_debs + 1)) ;; esac
+  done
   appimages="$(find "$dir/appimage" -maxdepth 1 -type f -name "*_${VERSION}_*.AppImage" -printf x 2>/dev/null | wc -c | tr -d ' ')"
   appimage_sigs="$(find "$dir/appimage" -maxdepth 1 -type f -name "*_${VERSION}_*.AppImage.sig" -printf x 2>/dev/null | wc -c | tr -d ' ')"
-  if [[ "$appimages" != "$expected_appimages" || "$appimage_sigs" != "$expected_appimages" ]]; then
-    echo "ERROR: Linux $VERSION bundle is ambiguous/incomplete: expected $expected_appimages AppImage + signature for roles '$PAPERCUSP_BUILD_ROLES', found appimages=$appimages signatures=$appimage_sigs in $dir/appimage. Quarantine stale/failed same-version bytes before collection (EI-21025181491857558)." >&2
+  debs="$(find "$dir/deb" -maxdepth 1 -type f -name "*_${VERSION}_*.deb" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  deb_sigs="$(find "$dir/deb" -maxdepth 1 -type f -name "*_${VERSION}_*.deb.sig" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  if [[ "$appimages" != "$expected_appimages" || "$appimage_sigs" != "$expected_appimages" \
+        || "$debs" != "$expected_debs" || "$deb_sigs" != "$expected_debs" ]]; then
+    echo "ERROR: Linux $VERSION bundle is ambiguous/incomplete for roles '$PAPERCUSP_BUILD_ROLES': expected appimages=$expected_appimages signatures=$expected_appimages debs=$expected_debs deb-signatures=$expected_debs; found appimages=$appimages signatures=$appimage_sigs debs=$debs deb-signatures=$deb_sigs. Quarantine stale/failed same-version bytes before collection (EI-21025181491857558)." >&2
     exit 1
   fi
 }
@@ -1506,6 +1992,7 @@ emit_linux_build_provenance() {
 
 LINUX_LEG_LOG="/tmp/papercusp-linuxleg-${TAG}.log"
 LINUX_PID=""; LINUX_REUSE=0
+release_task_prepare_linux_stage "$CARGO_TARGET_ROOT/release/bundle" || exit $?
 if [[ "${PAPERCUSP_REUSE_LINUX:-0}" == "1" ]]; then
   # EI-21024313639787521: Linux is just as salvageable as Windows/macOS. A late
   # post-package gate must not force a multi-hour rebuild (or clobber repaired,
@@ -1558,6 +2045,10 @@ else
     # Required for honest salvage: failure must fail this leg, not be swallowed
     # by the later all-platform collector or reported as Linux success.
     emit_linux_build_provenance
+    # Commit inside the successful child, before a failed sibling can prevent
+    # the parent collector from running.  If this response is lost, the next
+    # process reconciles the exact provenance bytes and the same request ID.
+    release_task_commit_linux_stage "$CARGO_TARGET_ROOT/release/bundle" 0
   ) >"$LINUX_LEG_LOG" 2>&1 &
   LINUX_PID=$!
 fi
@@ -1991,6 +2482,10 @@ assert_linux_artifact_cardinality "$LINUX_BUNDLE"
 if [[ "$LINUX_REUSE" == "1" ]]; then
   emit_linux_build_provenance
 fi
+# The child records fresh success early; this idempotent parent settle covers a
+# manual reuse path and proves the collected bytes did not change before the
+# all-platform join continued.
+release_task_commit_linux_stage "$LINUX_BUNDLE" "$LINUX_REUSE" || exit $?
 if [[ "$WITH_ARM64" == "1" ]]; then
   for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*_"$VERSION"_*; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f")
@@ -2091,25 +2586,37 @@ papercusp_retain_release_paths \
   "${ARTIFACTS[@]}" \
   || { echo "ERROR: could not retain final release target/artifact paths" >&2; exit 1; }
 
-echo "==> generating latest.json + latest-server.json"
 # EI-18101626616739029: the manifest-generation logic itself now lives in
 # lib/gen-latest-manifest.sh (sourced above) so a single-leg cut
 # (bin/gen-latest-manifest.sh) can produce the identical manifest — one
 # implementation, no drift between "the real multi-leg release" and a
 # manual/single-platform publish.
-gen_latest_manifest "$VERSION" "$CHANNEL" "$TAG" "${ARTIFACTS[@]}"
 LATEST_JSON="$(gen_latest_manifest_json_path "$TAG")"
 LATEST_SERVER_JSON="$(gen_latest_manifest_server_json_path "$TAG")"
 NOTES_FILE="$(gen_latest_manifest_notes_path "$TAG")"
+ARTIFACTS_MANIFEST="$(release_artifacts_manifest_path "$TAG")"
 
-# EI-12913: record the EXACT artifact set (inno .exe + .sig + every DiskSpanning
-# .bin slice, all mac + linux bundles) that this cut produced, so upload-release.sh
-# publishes THIS list instead of re-deriving its own (which drifted: it scanned the
-# wrong tree and excluded .bin, dropping the Server payload). ARTIFACTS[] here is
-# authoritative — it already caught the inno dir + .bin slices via the version-scoped
-# globs above. Written next to latest.json in /tmp (same TAG-scoped lifecycle).
-ARTIFACTS_MANIFEST="$(release_artifacts_write "$TAG" "${ARTIFACTS[@]}")"
-echo "==> artifact manifest: $ARTIFACTS_MANIFEST (${#ARTIFACTS[@]} files — upload-release.sh reads this)"
+# A committed manifest receipt never bypasses the bytes: the prepare call
+# hashes the exact artifact inputs, reproduces the canonical generator in an
+# isolated namespace, and compares its normalized outputs plus the exact
+# artifact ledger.  Only a fully verified match skips regeneration.
+release_task_prepare_manifest_stage "${ARTIFACTS[@]}" || exit $?
+if [[ "$RELEASE_TASK_MANIFEST_SKIP" != "1" ]]; then
+  echo "==> generating latest.json + latest-server.json"
+  gen_latest_manifest "$VERSION" "$CHANNEL" "$TAG" "${ARTIFACTS[@]}"
+
+  # EI-12913: record the EXACT artifact set (inno .exe + .sig + every DiskSpanning
+  # .bin slice, all mac + linux bundles) that this cut produced, so upload-release.sh
+  # publishes THIS list instead of re-deriving its own (which drifted: it scanned the
+  # wrong tree and excluded .bin, dropping the Server payload). ARTIFACTS[] here is
+  # authoritative — it already caught the inno dir + .bin slices via the version-scoped
+  # globs above. Written next to latest.json in /tmp (same TAG-scoped lifecycle).
+  ARTIFACTS_MANIFEST="$(release_artifacts_write "$TAG" "${ARTIFACTS[@]}")"
+  echo "==> artifact manifest: $ARTIFACTS_MANIFEST (${#ARTIFACTS[@]} files — upload-release.sh reads this)"
+  release_task_commit_manifest_stage "${ARTIFACTS[@]}" || exit $?
+else
+  echo "==> artifact manifest: $ARTIFACTS_MANIFEST (${#ARTIFACTS[@]} verified files — journal reuse)"
+fi
 
 echo "==> committing version bump"
 git -C "$ROOT" add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
