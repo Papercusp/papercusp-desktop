@@ -62,7 +62,9 @@ fn run_ready_bounded(
             if prefix == READY_PREFIX {
                 Ok(Instant::now())
             } else {
-                Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid WSL readiness prefix"))
+                Err(io::Error::new(io::ErrorKind::InvalidData,
+                    format!("Invalid WSL readiness prefix (first {} bytes): {:02x?}",
+                        prefix.len(), prefix)))
             }
         });
         let valid = ready.is_ok();
