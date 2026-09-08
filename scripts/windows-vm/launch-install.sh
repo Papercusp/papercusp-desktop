@@ -103,11 +103,16 @@ tpm_socket_listening || {
 # terminates the continuation, so qemu silently launches with every later arg DROPPED
 # — valid syntax, `bash -n` clean, and the exact way -spice/-monitor/-display were
 # lost from the linux-test-vm rig on 2026-07-09 (memory 53dba680).
+# EI-22689667926628326: memory-residency experiment, not yet release acceptance.
+# The Hyper-V IPI-timeout rig had guest memory swapped out and continuing major
+# faults in its vCPU threads. Keep CPU features unchanged while testing QEMU's
+# existing memory-lock option; verify VmLck/VmSwap on the actual new process.
 exec qemu-system-x86_64 \
   -name papercusp-win11 \
   -machine q35,smm=on,accel=kvm \
   -cpu host \
   -smp 8 -m 16384 \
+  -overcommit mem-lock=on \
   -global driver=cfi.pflash01,property=secure,value=on \
   -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.ms.fd \
   -drive if=pflash,format=raw,unit=1,file="$PWD/OVMF_VARS.fd" \
