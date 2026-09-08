@@ -9,17 +9,27 @@ use std::time::{Duration, Instant};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 || !args[2].starts_with("/tmp/papercusp-staging-diagnostic-") {
-        return Err("Expected source directory and /tmp/papercusp-staging-diagnostic-* target".into());
+    if !(args.len() == 3 || (args.len() == 4 && args[3] == "--probe-only"))
+        || !args[2].starts_with("/tmp/papercusp-staging-diagnostic-")
+    {
+        return Err("Expected source directory, /tmp/papercusp-staging-diagnostic-* target, optional --probe-only".into());
     }
     let source = std::path::Path::new(&args[1]);
     if !source.join("serve.mjs").is_file() || !source.join("sidecar-preload.js").is_file() {
         return Err("Source is not a sidecar".into());
     }
-    let mut probe = staging::wsl_command(Duration::from_secs(10));
+    let probe_start = Instant::now();
+    let mut probe = staging::wsl_command();
     probe.args(["/usr/bin/test", "!", "-e", &args[2]]);
-    if !staging::run_bounded(&mut probe, Duration::from_secs(10))?.success() {
+    if !staging::run_wsl_bounded(&mut probe, Duration::from_secs(10),
+        staging::WSL_STARTUP_TIMEOUT + Duration::from_secs(10))?.success()
+    {
         return Err("Diagnostic target already exists; inspect it instead of rerunning".into());
+    }
+    if args.len() == 4 {
+        println!("NATIVE_READINESS_PASS elapsed_ms={} archive=false acceptance=false published=false",
+            probe_start.elapsed().as_millis());
+        return Ok(());
     }
     let mut producer = Command::new("tar.exe");
     let archive = staging::TemporaryArchive::create(std::env::temp_dir()
@@ -32,8 +42,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     producer.arg("-C").arg(source).args(staging::ARCHIVE_ARGS)
         .arg("-cf").arg(archive.path()).arg(".");
     let start = Instant::now();
-    staging::stage_archive(&mut producer, |remaining| {
-        let mut consumer = staging::wsl_command(remaining);
+    staging::stage_archive(&mut producer, |_remaining| {
+        let mut consumer = staging::wsl_command();
         consumer.args(["/bin/bash", "-c"])
             .arg(staging::EXTRACT_SCRIPT).arg("diagnostic-extract").arg(&archive_wsl).arg(&args[2]);
         consumer

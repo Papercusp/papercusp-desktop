@@ -457,12 +457,12 @@ mod tests {
 
     #[test]
     fn cold_start_does_not_spend_the_operation_budget() {
-        let mut command = delayed_ready("0.3", &["/bin/true"]);
+        let mut command = delayed_ready("3", &["/bin/true"]);
         let start = Instant::now();
-        let status = run_ready_bounded(&mut command, Duration::from_secs(3),
-            Duration::from_millis(100), Duration::from_secs(4)).unwrap();
+        let status = run_ready_bounded(&mut command, Duration::from_secs(10),
+            Duration::from_secs(2), Duration::from_secs(12)).unwrap();
         assert!(status.success());
-        assert!(start.elapsed() >= Duration::from_millis(300),
+        assert!(start.elapsed() >= Duration::from_secs(3),
             "startup must actually exceed the operation budget");
     }
 
@@ -508,9 +508,9 @@ mod tests {
 
     #[test]
     fn execution_timeout_begins_after_readiness() {
-        let mut command = delayed_ready("0.1", &["/bin/sleep", "20"]);
-        let result = run_ready_bounded(&mut command, Duration::from_secs(3),
-            Duration::from_millis(100), Duration::from_secs(4));
+        let mut command = delayed_ready("0", &["/bin/sleep", "20"]);
+        let result = run_ready_bounded(&mut command, Duration::from_secs(10),
+            Duration::from_secs(1), Duration::from_secs(12));
         match result {
             // The real Linux timeout may beat the parent watchdog to the exit.
             Ok(status) => assert_eq!(status.code(), Some(124)),
@@ -520,14 +520,40 @@ mod tests {
 
     #[test]
     fn readiness_cannot_extend_the_archive_total_deadline() {
-        let mut command = delayed_ready("0.3", &["/bin/sleep", "20"]);
+        let mut command = delayed_ready("0", &["/bin/sleep", "20"]);
         let start = Instant::now();
         let result = run_ready_bounded(&mut command, Duration::from_secs(20),
-            Duration::from_secs(20), Duration::from_millis(600));
+            Duration::from_secs(20), Duration::from_secs(3));
         match result {
             Ok(status) => assert_eq!(status.code(), Some(124)),
-            Err(error) => assert!(error.to_string().contains("after readiness")),
+            Err(error) => assert_eq!(error.kind(), io::ErrorKind::TimedOut),
         }
-        assert!(start.elapsed() < Duration::from_secs(3));
+        assert!(start.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn linux_budget_reply_subtracts_startup_from_total() {
+        let f = Fixture::new();
+        let mut command = Command::new("bash");
+        command.args(["-c",
+            "sleep 0.3; printf 'papercusp-wsl-ready-v1\\n'; IFS= read -r seconds; printf '%s' \"$seconds\" > \"$1\"",
+            "record-budget"]).arg(f.0.join("budget"));
+        assert!(run_ready_bounded(&mut command, Duration::from_secs(10),
+            Duration::from_secs(20), Duration::from_secs(10)).unwrap().success());
+        let seconds = fs::read_to_string(f.0.join("budget")).unwrap()
+            .trim_end_matches('s').parse::<f64>().unwrap();
+        assert!(seconds > 0.0 && seconds <= 9.7,
+            "Linux received {seconds}s; startup must not be added back to its deadline");
+    }
+
+    #[test]
+    fn missing_parent_budget_never_starts_linux_operation() {
+        let f = Fixture::new();
+        let mut command = Command::new("bash");
+        command.args(["-c", WSL_READY_SCRIPT, "ready", "/usr/bin/touch"])
+            .arg(f.0.join("must-not-run"))
+            .stdin(Stdio::null()).stdout(Stdio::null());
+        assert_eq!(run_bounded(&mut command, Duration::from_secs(5)).unwrap().code(), Some(125));
+        assert!(!f.0.join("must-not-run").exists());
     }
 }
