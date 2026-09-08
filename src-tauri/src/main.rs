@@ -26,6 +26,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app_role;
+#[cfg(any(target_os = "windows", test))]
+mod wsl_sidecar_staging;
 mod custom_protocol;
 mod dev_bridge;
 // Global-hotkey docs-search palette (WI-2648, feature #5): an opt-in global
@@ -3630,9 +3632,9 @@ fn terminate_distro() -> bool {
 }
 
 /// Run one argument-safe command inside the packaged WSL distro with a hard
-/// deadline. The sidecar snapshot's source is DrvFs, so a 9P stall can block a
-/// plain `Command::status()` forever; on timeout, terminate the distro (the
-/// existing WI-3360 recovery, no unregister/data loss) before returning.
+/// deadline. WSL itself can stall, so `Command::status()` must not wait forever.
+/// Staging timeouts must not reset the distro: an older operator can still be
+/// serving there. Reap only the child this invocation owns.
 #[cfg(target_os = "windows")]
 fn run_wsl_exec_with_timeout(
     args: &[String],
@@ -3642,28 +3644,7 @@ fn run_wsl_exec_with_timeout(
     cmd.args(["--distribution", wsl_setup::DISTRO_NAME_PUB, "--exec"])
         .args(args);
     no_console_window(&mut cmd);
-    let mut child = cmd.spawn()?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait()? {
-            Some(status) => return Ok(status),
-            None if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            None => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = terminate_distro();
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!(
-                        "WSL sidecar staging command exceeded {}s and the distro was reset",
-                        timeout.as_secs()
-                    ),
-                ));
-            }
-        }
-    }
+    wsl_sidecar_staging::run_bounded(&mut cmd, timeout)
 }
 
 /// Materialize the hot Windows sidecar tree on WSL ext4 and return its native
@@ -3690,39 +3671,29 @@ fn prepare_wsl_sidecar_runtime(
         return Ok(runtime_dir);
     }
 
-    let source_wsl = windows_path_to_wsl(sidecar_dir);
     let temporary = format!("{}.tmp.{}", runtime_dir.display(), std::process::id());
-    let script = r#"set -euo pipefail
-source_dir=$1
-temporary_dir=$2
-runtime_dir=$3
-runtime_parent=${runtime_dir%/*}
-rm -rf -- "$temporary_dir"
-mkdir -p -- "$temporary_dir" "$runtime_parent"
-tar -C "$source_dir" \
-  --exclude='./source.tar.zst' \
-  --exclude='./db-seed.dump' \
-  --exclude='./db-seed.tar.gz' \
-  -cf - . | tar -C "$temporary_dir" -xf -
-test -f "$temporary_dir/serve.mjs"
-test -f "$temporary_dir/sidecar-preload.js"
-touch "$temporary_dir/.papercusp-runtime-complete"
-if test -e "$runtime_dir"; then
-  rm -rf -- "$temporary_dir"
-else
-  mv -- "$temporary_dir" "$runtime_dir"
-fi
-"#;
-    let stage_args = vec![
+    // EI-22686884542583537: the old Linux tar -C /mnt/c reintroduced the
+    // per-file P9 reads this ext4 cache was meant to remove. Native tar reads
+    // NTFS; only archive bytes cross stdin into the WSL ext4 extractor.
+    let mut producer = Command::new("tar.exe");
+    producer.arg("-C").arg(sidecar_dir).args(wsl_sidecar_staging::ARCHIVE_ARGS);
+    no_console_window(&mut producer);
+    let mut consumer = Command::new("wsl.exe");
+    consumer.args(["--distribution", wsl_setup::DISTRO_NAME_PUB, "--exec", "/bin/bash", "-c"])
+        .arg(wsl_sidecar_staging::EXTRACT_SCRIPT)
+        .arg("papercusp-extract-sidecar")
+        .arg(&temporary);
+    no_console_window(&mut consumer);
+    wsl_sidecar_staging::stream_archive(&mut producer, &mut consumer, Duration::from_secs(1_200))?;
+    let publish_args = vec![
         "/bin/bash".to_string(),
         "-c".to_string(),
-        script.to_string(),
-        "papercusp-stage-sidecar".to_string(),
-        source_wsl,
+        wsl_sidecar_staging::PUBLISH_SCRIPT.to_string(),
+        "papercusp-publish-sidecar".to_string(),
         temporary,
         runtime_dir.to_string_lossy().to_string(),
     ];
-    let status = run_wsl_exec_with_timeout(&stage_args, Duration::from_secs(1_200))?;
+    let status = run_wsl_exec_with_timeout(&publish_args, Duration::from_secs(10))?;
     if !status.success() {
         return Err(std::io::Error::other(format!(
             "WSL sidecar staging exited with {status}"
