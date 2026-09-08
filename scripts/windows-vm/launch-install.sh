@@ -103,17 +103,10 @@ tpm_socket_listening || {
 # terminates the continuation, so qemu silently launches with every later arg DROPPED
 # — valid syntax, `bash -n` clean, and the exact way -spice/-monitor/-display were
 # lost from the linux-test-vm rig on 2026-07-09 (memory 53dba680).
-#
-# EI-22689667926628326: validate nested Hyper-V TLB flush routing on this rig.
-# The captured 0x20001/0x32 dump has a vCPU in HvlFlushRangeListTb while the
-# hypervisor reports an IPI timeout. hv-tlbflush alone does not route nested
-# flushes to KVM: hv-tlbflush-direct enables that separate L0 handling path.
-# Native validation is required; accepting these flags is not a crash fix.
-# Keep watchdogs enabled (no hv-relaxed) and omit Intel-only hv-evmcs.
 exec qemu-system-x86_64 \
   -name papercusp-win11 \
   -machine q35,smm=on,accel=kvm \
-  -cpu host,hv-vpindex,hv-vapic,hv-time,hv-synic,hv-stimer,hv-stimer-direct,hv-tlbflush,hv-ipi,hv-tlbflush-direct \
+  -cpu host \
   -smp 8 -m 16384 \
   -global driver=cfi.pflash01,property=secure,value=on \
   -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.ms.fd \
