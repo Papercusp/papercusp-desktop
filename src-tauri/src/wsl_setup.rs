@@ -31,6 +31,10 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+#[cfg(any(target_os = "windows", test))]
+#[path = "wsl_runtime_resources.rs"]
+mod runtime_resources;
+
 // Distro name we register via `wsl --import`. Custom name avoids
 // colliding with a user's existing Ubuntu distro and lets us cleanly
 // uninstall on user request. (`test` included so the pure shim-content
@@ -619,12 +623,22 @@ mod imp {
         // Re-import is the wrong hammer — it destroys the user's workspaces inside
         // the distro. The bootstrap is idempotent, so re-run the CURRENT one and
         // record which recipe it was.
-        let shipped = shipped_rootfs_recipe(app);
-        if super::distro_needs_reprovision(shipped.as_deref(), persisted.rootfs_recipe.as_deref()) {
+        let shipped = match shipped_rootfs_recipe(app) {
+            Ok(recipe) => recipe,
+            Err(message) => {
+                return WslStatus {
+                    state: WslState::Error { message },
+                    wsl_exe_available: true,
+                    distros,
+                    default_version,
+                };
+            }
+        };
+        if super::distro_needs_reprovision(Some(&shipped), persisted.rootfs_recipe.as_deref()) {
             eprintln!(
                 "[wsl_setup] detect: `{DISTRO_NAME}` was provisioned by recipe {:?} but this build ships {:?} — re-running the bootstrap so the distro matches the app",
                 persisted.rootfs_recipe.as_deref().unwrap_or("<unknown>"),
-                shipped.as_deref().unwrap_or("<unknown>"),
+                shipped,
             );
             return WslStatus {
                 state: WslState::PendingBootstrap,
@@ -642,7 +656,20 @@ mod imp {
         }
     }
 
-    /// Copy the bootstrap THIS BUILD ships into the distro, replacing the one
+    /// One Server-owned resource source for detection, bootstrap, and import.
+    pub(super) fn runtime_resource(
+        app: &tauri::AppHandle,
+        filename: &str,
+    ) -> Result<PathBuf, String> {
+        use tauri::Manager;
+        let root = app.path().resource_dir().map_err(|e| e.to_string())?;
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        let installed_gui =
+            !cfg!(debug_assertions) && crate::app_role::detect(&app.config().identifier).is_gui();
+        super::runtime_resources::resolve(&root, local.as_deref(), installed_gui, filename)
+    }
+
+    /// Copy the Server's shipped bootstrap into the distro, replacing the one
     /// baked in when the distro was first imported.
     ///
     /// Feeding it over stdin (`bash -c 'cat > …'`) rather than a `/mnt/c/...`
@@ -651,38 +678,16 @@ mod imp {
     /// ("Papercusp GUI"), which is exactly the kind of thing that works on the
     /// dev box and breaks in the field.
     ///
-    /// Best-effort by design: a failure here leaves the previous bootstrap in
-    /// place and the recipe marker unwritten, so the distro stays marked stale
-    /// and we retry next launch. It must never block bootstrap outright.
-    fn install_shipped_bootstrap(app: &tauri::AppHandle) {
+    /// Never run an old bootstrap and then record the new recipe as completed.
+    fn install_shipped_bootstrap(app: &tauri::AppHandle) -> Result<(), String> {
         use std::io::Write;
-        use tauri::Manager;
-
-        let Ok(path) = app
-            .path()
-            .resolve(
-                format!("resources/{}", super::ROOTFS_BOOTSTRAP_FILENAME),
-                tauri::path::BaseDirectory::Resource,
-            )
-            .or_else(|_| {
-                app.path().resolve(
-                    super::ROOTFS_BOOTSTRAP_FILENAME,
-                    tauri::path::BaseDirectory::Resource,
-                )
-            })
-        else {
-            eprintln!("[wsl_setup] install_shipped_bootstrap: resource path unresolved — running the distro's existing bootstrap");
-            return;
-        };
-        let Ok(script) = std::fs::read(&path) else {
-            eprintln!(
-                "[wsl_setup] install_shipped_bootstrap: cannot read {} — running the distro's existing bootstrap",
-                path.display()
-            );
-            return;
-        };
-
-        let mut child = match wsl_command()
+        let path = runtime_resource(app, super::ROOTFS_BOOTSTRAP_FILENAME)?;
+        let script = std::fs::read(&path)
+            .map_err(|e| format!("Read shipped WSL bootstrap {}: {e}", path.display()))?;
+        if script.is_empty() {
+            return Err(format!("Shipped WSL bootstrap {} is empty", path.display()));
+        }
+        let mut child = wsl_command()
             .args([
                 "--distribution",
                 DISTRO_NAME,
@@ -697,59 +702,32 @@ mod imp {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[wsl_setup] install_shipped_bootstrap: spawn failed ({e}) — running the distro's existing bootstrap");
-                return;
-            }
-        };
+            .map_err(|e| format!("Install shipped WSL bootstrap: {e}"))?;
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(e) = stdin.write_all(&script) {
-                eprintln!("[wsl_setup] install_shipped_bootstrap: write failed ({e})");
-                return;
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Write shipped WSL bootstrap: {e}"));
             }
         }
         match child.wait_with_output() {
             Ok(out) if out.status.success() => {
                 eprintln!("[wsl_setup] install_shipped_bootstrap: refreshed /opt/papercup/bootstrap from the shipped resource");
+                Ok(())
             }
-            Ok(out) => {
-                eprintln!(
-                    "[wsl_setup] install_shipped_bootstrap: exit={:?} stderr={} — running the distro's existing bootstrap",
-                    out.status.code(),
-                    super::decode_wsl_output(&out.stderr)
-                );
-            }
-            Err(e) => {
-                eprintln!("[wsl_setup] install_shipped_bootstrap: wait failed ({e})");
-            }
+            Ok(out) => Err(format!(
+                "Install shipped WSL bootstrap: exit={:?} stderr={}",
+                out.status.code(),
+                super::decode_wsl_output(&out.stderr)
+            )),
+            Err(e) => Err(format!("Wait for shipped WSL bootstrap install: {e}")),
         }
     }
 
-    /// The recipe fingerprint of the rootfs shipped in THIS build.
-    fn shipped_rootfs_recipe(app: &tauri::AppHandle) -> Option<String> {
-        use tauri::Manager;
-        let path = app
-            .path()
-            .resolve(
-                format!("resources/{}", super::ROOTFS_RECIPE_FILENAME),
-                tauri::path::BaseDirectory::Resource,
-            )
-            .or_else(|_| {
-                app.path().resolve(
-                    super::ROOTFS_RECIPE_FILENAME,
-                    tauri::path::BaseDirectory::Resource,
-                )
-            })
-            .ok()?;
-        let s = std::fs::read_to_string(path).ok()?;
-        let s = s.trim().to_string();
-        if s.is_empty() {
-            None
-        } else {
-            Some(s)
-        }
+    /// Read the Server-owned recipe, never treating absence as Ready.
+    fn shipped_rootfs_recipe(app: &tauri::AppHandle) -> Result<String, String> {
+        let path = runtime_resource(app, super::ROOTFS_RECIPE_FILENAME)?;
+        super::runtime_resources::read_recipe(&path)
     }
 
     /// Kick off `wsl --install --no-launch --no-distribution`. Requires
@@ -883,10 +861,10 @@ mod imp {
         // before running it. The copy already inside the distro was baked in at
         // image-build time, so on an existing install it is the OLD one — re-running
         // it would faithfully re-apply the old recipe and change nothing, which is
-        // the entire failure we are here to fix. Best-effort: if the resource is
-        // missing (a build predating it), fall through and run whatever is in the
-        // distro rather than bricking bootstrap.
-        install_shipped_bootstrap(app);
+        // the entire failure we are here to fix. Read both required inputs before
+        // provisioning; failures must not falsely stamp the new recipe Ready.
+        let recipe = shipped_rootfs_recipe(app)?;
+        install_shipped_bootstrap(app)?;
 
         // --user root: the rootfs bakes /etc/wsl.conf default=papercup, so a
         // bare `wsl -d` runs as that user — and bootstrap writes /etc/* and
@@ -919,7 +897,7 @@ mod imp {
         // bootstrap — a failed run must leave the distro marked stale so the next
         // launch tries again, rather than recording a provisioning that never
         // happened.
-        st.rootfs_recipe = shipped_rootfs_recipe(app);
+        st.rootfs_recipe = Some(recipe);
         // A fresh bootstrap is a fresh onboarding: re-allow BOTH roles' single
         // post-onboarding finalize RESTART (see the per-role flags above).
         st.gui_finalize_restart_done = false;
@@ -1045,27 +1023,7 @@ pub fn wsl_relaunch_elevated(_app: tauri::AppHandle) -> Result<(), String> {
 pub fn wsl_import(_app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        use tauri::Manager;
-        // The conf's `resources: ["resources/*"]` glob PRESERVES the
-        // directory, so the tarball installs at <resource-root>/resources/…
-        // — resolving the bare filename pointed one level too high (found
-        // live 2026-06-11, run 10: "rootfs tarball not found"). Try the
-        // real layout first, keep the bare name as a fallback for any
-        // future flat layout.
-        let tarball = _app
-            .path()
-            .resolve(
-                format!("resources/{}", ROOTFS_FILENAME),
-                tauri::path::BaseDirectory::Resource,
-            )
-            .ok()
-            .filter(|p| p.exists())
-            .or_else(|| {
-                _app.path()
-                    .resolve(ROOTFS_FILENAME, tauri::path::BaseDirectory::Resource)
-                    .ok()
-            })
-            .ok_or_else(|| "resolve rootfs: no resource dir".to_string())?;
+        let tarball = imp::runtime_resource(&_app, ROOTFS_FILENAME)?;
         return imp::import_rootfs(&_app, &tarball);
     }
     #[cfg(not(target_os = "windows"))]
