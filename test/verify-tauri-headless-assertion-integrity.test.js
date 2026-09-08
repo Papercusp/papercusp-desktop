@@ -133,8 +133,8 @@ test('explicit verifier source roots are marker-checked and cannot fall back to 
   assert.match(devOperatorSource, /apps\/operator\/package\.json/);
   assert.match(devOperatorSource, /libs\/papercusp\/package\.json/);
   assert.match(devOperatorSource, /PAPERCUSP_DEV_SOURCE_ROOT.*readable directory/);
+  assert.match(devOperatorSource, /DEV_OPERATOR_DIR="\.\.\/apps\/operator"/);
   assert.match(devOperatorSource, /DEFAULT_DEV_CMD=.*cd \$DEV_OPERATOR_DIR_Q/);
-  assert.match(devOperatorSource, /DEFAULT_DEV_CMD=.*cd \.\.\/apps\/operator/);
 });
 
 test('a mutation after the simulated launch cannot change the captured operator source', () => {
