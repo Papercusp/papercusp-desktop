@@ -13,12 +13,14 @@ const { spawnSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
 const {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } = require('node:fs');
@@ -193,7 +195,7 @@ printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
   return { root, deb, server, log, flipped, configured, updated, ssh, scp, emitDpkgWarning };
 }
 
-function macFixture({ executeInstall = false, freeGb = 20, nativePreflight = 'healthy' } = {}) {
+function macFixture({ executeInstall = false, freeGb = 20, nativePreflight = 'healthy', installedMismatch = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'install-relaunch-mac-'));
   const artifacts = join(root, 'artifacts');
   const shims = join(root, 'shims');
@@ -276,6 +278,13 @@ case "$*" in
       printf '{"sha":null,"version":"0.0.0"}\\n'
     fi
     ;;
+  *"PAPERCUSP_VERIFY_INSTALLED_MAC"*)
+    if [[ "$MOCK_INSTALLED_MISMATCH" == 1 ]]; then
+      echo 'installed macOS bundle differs from the supplied DMG' >&2
+      exit 2
+    fi
+    printf 'PAPERCUSP_VERIFY_INSTALLED_MAC_OK\\n'
+    ;;
   *"codesign --verify --deep --strict"*)
     if [[ "$*" != *"ditto --noextattr --noqtn"* || "$*" != *"xattr -cr"* ]]; then
       printf 'resource fork, Finder information, or similar detritus not allowed\\n' >&2
@@ -298,7 +307,7 @@ esac
 printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
 `);
 
-  return { root, dmg, server, log, flipped, ssh, scp, shims, applications, executeInstall, freeGb, nativePreflight };
+  return { root, dmg, server, log, flipped, ssh, scp, shims, applications, executeInstall, freeGb, nativePreflight, installedMismatch };
 }
 
 function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
@@ -316,6 +325,7 @@ function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
   if (f.emitDpkgWarning) env.MOCK_EMIT_DPKG_WARNING = '1';
   if (f.requireHostKeyOptions) env.MOCK_REQUIRE_HOST_KEY_OPTIONS = '1';
   if (f.nativePreflight) env.MOCK_NATIVE_PREFLIGHT = f.nativePreflight;
+  if (f.installedMismatch) env.MOCK_INSTALLED_MISMATCH = '1';
   if (f.executeInstall) {
     env.PATH = `${f.shims}:${process.env.PATH}`;
     env.MOCK_EXECUTE_INSTALL = '1';
@@ -549,6 +559,63 @@ esac
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('installed-DMG resume compares real file content, inventory, permissions and symlink targets', () => {
+  const source = readFileSync(SCRIPT, 'utf8');
+  const command = source.match(/cat <<'VERIFY_INSTALLED'\n([\s\S]*?)\nVERIFY_INSTALLED\n/);
+  assert.ok(command, 'exercise the actual remote comparison body');
+  const root = mkdtempSync(join(tmpdir(), 'native-mac-installed-tree-'));
+  try {
+    const shims = join(root, 'shims');
+    mkdirSync(shims);
+    executable(shims, 'codesign', '#!/bin/sh\nexit 0\n');
+    const app = join(root, 'source');
+    mkdirSync(app);
+    writeFileSync(join(app, 'payload'), 'same-size-content-A');
+    chmodSync(join(app, 'payload'), 0o755);
+    symlinkSync('payload', join(app, 'link'));
+    for (const mutation of ['none', 'content', 'missing', 'extra', 'permissions', 'symlink']) {
+      const target = join(root, mutation);
+      cpSync(app, target, { recursive: true, verbatimSymlinks: true });
+      if (mutation === 'content') writeFileSync(join(target, 'payload'), 'same-size-content-B');
+      if (mutation === 'missing') unlinkSync(join(target, 'payload'));
+      if (mutation === 'extra') writeFileSync(join(target, 'extra'), 'unexpected');
+      if (mutation === 'permissions') chmodSync(join(target, 'payload'), 0o644);
+      if (mutation === 'symlink') {
+        unlinkSync(join(target, 'link'));
+        symlinkSync('elsewhere', join(target, 'link'));
+      }
+      const result = spawnSync('bash', ['-euc', command[1]], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${shims}:${process.env.PATH}`, app_src: app, target },
+      });
+      assert.equal(result.status, mutation === 'none' ? 0 : 2, `${mutation}: ${result.stderr}`);
+      if (mutation !== 'none') assert.match(result.stderr, /differs from the supplied DMG/);
+      assert.equal(readFileSync(join(app, 'payload'), 'utf8'), 'same-size-content-A');
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const installedMismatch of [false, true]) {
+  test(`macOS installed-DMG resume ${installedMismatch ? 'rejects changed bytes' : 'attests both roles without copying'}`, () => {
+    const f = macFixture({ installedMismatch });
+    try {
+      const result = runVerify(f, ['--verify-installed-mac'], 'mac', f.dmg);
+      assert.equal(result.status, installedMismatch ? 1 : 0, result.stdout + result.stderr);
+      const verdict = JSON.parse(result.stdout);
+      assert.equal(verdict.installationMode, 'verify-existing-dmg');
+      const log = readFileSync(f.log, 'utf8');
+      assert.match(log, /PAPERCUSP_VERIFY_INSTALLED_MAC/);
+      assert.doesNotMatch(log, /ditto --noextattr|rm -rf/);
+      assert.equal(existsSync(f.flipped), !installedMismatch);
+      if (!installedMismatch) assert.match(verdict.notes.join(' '), /both installed apps match/);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+}
 
 for (const nativePreflight of ['no-console', 'no-domain', 'competing-supervisor', 'empty']) {
   test(`macOS refuses ${nativePreflight} before reading baseline or changing installed apps`, () => {

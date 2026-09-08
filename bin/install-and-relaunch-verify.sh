@@ -55,6 +55,10 @@
 #   --install-cmd CMD              installer command; `__ARTIFACT__` -> remote path
 #   --server-install-cmd CMD       Server installer command;
 #                                  `__SERVER_ARTIFACT__` -> remote stub path
+#   --verify-installed-mac         resume a prior completed DMG install: require
+#                                  exact mounted-DMG/installed tree equality and
+#                                  strict codesign for BOTH roles, then relaunch.
+#                                  Does not copy/replace apps; reported explicitly.
 #   --relaunch-cmd CMD             relaunch command (must NOT terminate the operator)
 #   --flip-timeout SEC             how long to wait for the flip (default 180)
 #   --install-timeout SEC          budget for the installer step (default 900);
@@ -100,6 +104,7 @@ INSTALL_TIMEOUT="${INSTALL_TIMEOUT:-900}"
 JSON=0
 SMOKE_RECEIPT_TAG="${PAPERCUSP_SMOKE_RECEIPT_TAG:-}"
 SMOKE_PROVENANCE=""
+VERIFY_INSTALLED_MAC=0
 SSH_OPTIONS=()
 SCP_OPTIONS=()
 
@@ -124,6 +129,7 @@ while [[ $# -gt 0 ]]; do
     --remote-dir) REMOTE_DIR="${2:-}"; shift 2 ;;
     --install-cmd) INSTALL_CMD="${2:-}"; shift 2 ;;
     --server-install-cmd) SERVER_INSTALL_CMD="${2:-}"; shift 2 ;;
+    --verify-installed-mac) VERIFY_INSTALLED_MAC=1; shift ;;
     --relaunch-cmd) RELAUNCH_CMD="${2:-}"; shift 2 ;;
     --flip-timeout) FLIP_TIMEOUT="${2:-}"; shift 2 ;;
     --install-timeout) INSTALL_TIMEOUT="${2:-}"; shift 2 ;;
@@ -139,6 +145,12 @@ done
 [[ -n "$ARTIFACT" ]] || { echo "need --artifact PATH (the new installer to push+install)" >&2; exit 2; }
 [[ -f "$ARTIFACT" ]] || { echo "artifact not found: $ARTIFACT" >&2; exit 2; }
 REMOTE_BASENAME="$(basename "$ARTIFACT")"
+if [[ "$VERIFY_INSTALLED_MAC" == 1 ]]; then
+  [[ "$PLATFORM" == mac && "$REMOTE_BASENAME" == *.dmg && -z "$INSTALL_CMD" && -z "$SERVER_INSTALL_CMD" ]] || {
+    echo "--verify-installed-mac requires macOS DMGs and forbids custom install commands" >&2
+    exit 2
+  }
+fi
 
 # ── JSON field extractors (health body + provenance) ────────────────────────
 json_str() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1; }
@@ -172,6 +184,30 @@ mv "$stage" "$target"
 INSTALL
   )"
   # %q keeps the helper and paths intact across SSH's remote-shell boundary.
+  printf 'bash -c %q' "$script"
+}
+
+mac_dmg_verify_installed_command() { # $1=product, $2=artifact placeholder
+  local product="$1" artifact_placeholder="$2" script
+  script="$(
+    printf 'set -eu; set -o pipefail; mount_dir=$(mktemp -d /tmp/papercusp-dmg.XXXXXX); target="/Applications/%s.app"; cleanup() { hdiutil detach "$mount_dir" >/dev/null 2>&1 || true; rmdir "$mount_dir" >/dev/null 2>&1 || true; }; trap cleanup EXIT HUP INT TERM; hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" %s >/dev/null; app_src="$mount_dir/%s.app"; ' \
+      "$product" "$artifact_placeholder" "$product"
+    cat <<'VERIFY_INSTALLED'
+# PAPERCUSP_VERIFY_INSTALLED_MAC
+test -d "$app_src"
+test -d "$target"
+# Check content, executable modes, symlink targets, missing files AND extra
+# files. A successful rsync exit alone is not equality: dry-run differences
+# are returned on stdout and must also be empty. Never mutate the installed app.
+changes=$(rsync -rclpn --delete --itemize-changes "$app_src/" "$target/")
+if [ -n "$changes" ]; then
+  echo "installed macOS bundle differs from the supplied DMG: $target" >&2
+  exit 2
+fi
+codesign --verify --deep --strict "$target"
+printf 'PAPERCUSP_VERIFY_INSTALLED_MAC_OK\n'
+VERIFY_INSTALLED
+  )"
   printf 'bash -c %q' "$script"
 }
 
@@ -217,6 +253,10 @@ case "$PLATFORM" in
       # green (EI-21177389547731632).
       INSTALL_CMD="${INSTALL_CMD:-$(mac_dmg_install_command "Papercusp GUI" "__ARTIFACT__")}"
       SERVER_INSTALL_CMD="${SERVER_INSTALL_CMD:-$(mac_dmg_install_command "Papercusp Server" "__SERVER_ARTIFACT__")}"
+      if [[ "$VERIFY_INSTALLED_MAC" == 1 ]]; then
+        INSTALL_CMD="$(mac_dmg_verify_installed_command "Papercusp GUI" "__ARTIFACT__")"
+        SERVER_INSTALL_CMD="$(mac_dmg_verify_installed_command "Papercusp Server" "__SERVER_ARTIFACT__")"
+      fi
     else
       INSTALL_CMD="${INSTALL_CMD:-installer -pkg __ARTIFACT__ -target CurrentUserHomeDirectory}"
     fi
@@ -594,6 +634,8 @@ run_installer() {
     # WebKit dependency look like a silent no-op update and discarded the
     # causal installer error behind a later polling failure.
     fail_check "$label install failed with exit $install_rc${install_out:+ — output: ${install_out:0:400}}"
+  elif [[ "$VERIFY_INSTALLED_MAC" == 1 && "$install_out" != *PAPERCUSP_VERIFY_INSTALLED_MAC_OK* ]]; then
+    fail_check "$label installed-tree verification returned no success attestation — NOT relaunching"
   fi
 }
 
@@ -636,6 +678,9 @@ fi
 if [[ ${#FAILURES[@]} -eq 0 && ${#SERVER_ARTIFACTS[@]} -gt 0 ]]; then
   SERVER_INSTALL_RUN="${SERVER_INSTALL_CMD//__SERVER_ARTIFACT__/$SERVER_REMOTE_Q}"
   run_installer "Server" "$SERVER_INSTALL_RUN"
+fi
+if [[ ${#FAILURES[@]} -eq 0 && "$VERIFY_INSTALLED_MAC" == 1 ]]; then
+  note "resumed prior installation: both installed apps match their mounted DMGs byte-for-byte and pass strict codesign; no app copy or replacement performed in this run"
 fi
 if [[ ${#FAILURES[@]} -eq 0 && "$PLATFORM" == "linux" ]]; then
   verify_linux_package_configured "$REMOTE_Q" "GUI"
@@ -718,6 +763,7 @@ if [[ "$JSON" == "1" ]]; then
   printf '  "platform": %s,\n' "$(jstr "$PLATFORM")"
   printf '  "expectedSha": %s,\n' "$(jstr "$EXPECTED_SHA")"
   printf '  "expectedVersion": %s,\n' "$(jstr "$EXPECTED_VERSION")"
+  printf '  "installationMode": %s,\n' "$(jstr "$([[ "$VERIFY_INSTALLED_MAC" == 1 ]] && echo verify-existing-dmg || echo install)")"
   printf '  "serverArtifact": %s,\n' "$(jstr "${SERVER_ARTIFACTS[0]:-}")"
   printf '  "serverCompanionCount": %s,\n' "$(( ${#SERVER_ARTIFACTS[@]} > 0 ? ${#SERVER_ARTIFACTS[@]} - 1 : 0 ))"
   printf '  "shaBefore": %s,\n' "$(jstr "$SHA_BEFORE")"
