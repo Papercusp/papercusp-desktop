@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
@@ -50,8 +51,33 @@ function fixture(t, { invalidNpm = false } = {}) {
     stageDirs: () => fs.readdirSync(prefix).filter(n => n.startsWith('.papercusp-node.')) };
 }
 
-test('rootfs producer and shipped bootstrap use the same Node installation logic', () => {
-  assert.equal(section(producer), section(shipped));
+test('rootfs producer fingerprints the complete shipped bootstrap, including network preflight', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rootfs recipe '));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, 'scripts'));
+  fs.mkdirSync(path.join(dir, 'src-tauri/resources'), { recursive: true });
+  const build = path.join(dir, 'scripts/build-rootfs.sh');
+  const resource = path.join(dir, 'src-tauri/resources/papercup-bootstrap.sh');
+  const artifact = path.join(dir, 'src-tauri/resources/papercup-runtime.tar.gz');
+  fs.writeFileSync(build, producer);
+  fs.writeFileSync(resource, shipped);
+  fs.writeFileSync(artifact, 'existing rootfs must survive a read');
+  const env = { ...process.env, UBUNTU_IMAGE: 'ubuntu:24.04', NODE_VERSION: '24.18.1', PNPM_VERSION: '9.15.0' };
+  const fingerprint = () => run('bash', [build, '--print-recipe-fingerprint'], { env });
+  const expected = text => createHash('sha256').update(`ubuntu:24.04\n24.18.1\n9.15.0\n${text.replace(/\n+$/, '')}\n`).digest('hex');
+  assert.match(shipped, /preflight_unreachable/);
+  const first = fingerprint();
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(first.stdout.trim(), expected(shipped));
+  const changed = shipped.replace('preflight_unreachable=()', 'preflight_unreachable=() # changed guard');
+  fs.writeFileSync(resource, changed);
+  const second = fingerprint();
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(second.stdout.trim(), expected(changed));
+  assert.notEqual(first.stdout, second.stdout);
+  assert.equal(fs.readFileSync(artifact, 'utf8'), 'existing rootfs must survive a read');
+  fs.unlinkSync(resource);
+  assert.notEqual(fingerprint().status, 0, 'a missing source must not fingerprint an empty recipe');
 });
 
 test('upgrade eliminates obsolete nested npm dependencies, keeps other tools, and is idempotent', t => {
@@ -61,7 +87,11 @@ test('upgrade eliminates obsolete nested npm dependencies, keeps other tools, an
   const broken = f.probe();
   assert.notEqual(broken.status, 0);
   assert.match(broken.stderr, /Class extends value undefined/);
-  const oldNodeInode = fs.statSync(path.join(f.prefix, 'bin/node')).ino;
+  // Hold the original inode like a running process does, so an inode-number
+  // reuse on a later install cannot make this assertion flaky.
+  const oldNode = fs.openSync(path.join(f.prefix, 'bin/node'), 'r');
+  t.after(() => fs.closeSync(oldNode));
+  const oldNodeInode = fs.fstatSync(oldNode).ino;
   for (let attempt = 0; attempt < 2; attempt++) {
     const result = f.install();
     assert.equal(result.status, 0, result.stderr);

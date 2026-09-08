@@ -35,6 +35,7 @@ _innoextract_candidate_paths() {
   local -a managed_candidates=()
 
   if [[ -n "$configured" ]]; then
+    # assert-integrity-ok: $resolved is functional stdout after the configured path is validated; the failure branch already reports $configured.
     resolved="$(_innoextract_absolute_executable "$configured")" || {
       echo "ERROR: configured Inno extractor is missing or not executable: $configured" >&2
       return 1
