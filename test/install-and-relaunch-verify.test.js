@@ -530,7 +530,14 @@ test('macOS native preflight executes console/domain/supervisor/single-instance 
   try {
     executable(root, 'stat', '#!/bin/sh\nprintf "%s\\n" "$TEST_CONSOLE"\n');
     executable(root, 'id', '#!/bin/sh\ncase "$1" in -un) echo fixture ;; -u) echo 501 ;; *) exit 99 ;; esac\n');
-    executable(root, 'ps', '#!/bin/sh\n[ "$TEST_PS_FAIL" != 1 ] || exit 1\nprintf "%s\\n" "$TEST_NATIVE_PROCESS"\n');
+    executable(root, 'ps', `#!/bin/sh
+[ "$TEST_PS_FAIL" != 1 ] || exit 1
+case "$*" in
+  "-axo pid=,comm=") printf '99 %s\\n' "\${TEST_NATIVE_PROCESS%% --*}" ;;
+  "-p 99 -o args=") printf '%s\\n' "$TEST_NATIVE_PROCESS" ;;
+  *) exit 99 ;;
+esac
+`);
     executable(root, 'launchctl', `#!/bin/sh
 case "$*" in
   "print gui/501") [ "$TEST_DOMAIN" = available ] ;;
