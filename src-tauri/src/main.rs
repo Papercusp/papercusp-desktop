@@ -3674,17 +3674,23 @@ fn prepare_wsl_sidecar_runtime(
     let temporary = format!("{}.tmp.{}", runtime_dir.display(), std::process::id());
     // EI-22686884542583537: the old Linux tar -C /mnt/c reintroduced the
     // per-file P9 reads this ext4 cache was meant to remove. Native tar reads
-    // NTFS; only archive bytes cross stdin into the WSL ext4 extractor.
+    // NTFS into a local archive; WSL reads ONE file sequentially. The native
+    // stdin pipe was also measured too slow for the multi-GB model payload.
+    let archive = wsl_sidecar_staging::TemporaryArchive::create(
+        std::env::temp_dir().join(format!("papercusp-sidecar-{generation}-{}.tar", std::process::id()))
+    )?;
     let mut producer = Command::new("tar.exe");
-    producer.arg("-C").arg(sidecar_dir).args(wsl_sidecar_staging::ARCHIVE_ARGS);
+    producer.arg("-C").arg(sidecar_dir).args(wsl_sidecar_staging::ARCHIVE_ARGS)
+        .arg("-cf").arg(archive.path()).arg(".");
     no_console_window(&mut producer);
     let mut consumer = Command::new("wsl.exe");
     consumer.args(["--distribution", wsl_setup::DISTRO_NAME_PUB, "--exec", "/bin/bash", "-c"])
         .arg(wsl_sidecar_staging::EXTRACT_SCRIPT)
         .arg("papercusp-extract-sidecar")
+        .arg(windows_path_to_wsl(archive.path()))
         .arg(&temporary);
     no_console_window(&mut consumer);
-    wsl_sidecar_staging::stream_archive(&mut producer, &mut consumer, Duration::from_secs(1_200))?;
+    wsl_sidecar_staging::stage_archive(&mut producer, &mut consumer, Duration::from_secs(1_200))?;
     let publish_args = vec![
         "/bin/bash".to_string(),
         "-c".to_string(),

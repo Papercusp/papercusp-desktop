@@ -3,25 +3,48 @@
 //! extractor cannot attest that the producer supplied its entire source tree.
 
 use std::io;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 pub const ARCHIVE_ARGS: &[&str] = &[
     "--exclude=./source.tar.zst",
     "--exclude=./db-seed.dump",
     "--exclude=./db-seed.tar.gz",
-    "-cf",
-    "-",
-    ".",
 ];
 
 pub const EXTRACT_SCRIPT: &str = r#"set -euo pipefail
-temporary_dir=$1
+archive=$1
+temporary_dir=$2
 rm -rf -- "$temporary_dir"
 mkdir -p -- "$temporary_dir"
-tar -C "$temporary_dir" -xf -
+tar -C "$temporary_dir" -xf "$archive"
 test -f "$temporary_dir/serve.mjs"
 test -f "$temporary_dir/sidecar-preload.js"
+# NTFS archives have no Linux executable metadata. Restore the owner execute
+# bit only for ELF binaries and shebang scripts, not arbitrary data files.
+# Node is already required/installed before WslState::Ready permits staging.
+node - "$temporary_dir" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const magic = Buffer.alloc(4);
+function visit(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) { visit(file); continue; }
+    if (!entry.isFile()) continue;
+    const fd = fs.openSync(file, 'r');
+    let n;
+    try { n = fs.readSync(fd, magic, 0, 4, 0); } finally { fs.closeSync(fd); }
+    if ((n >= 2 && magic[0] === 35 && magic[1] === 33) ||
+        (n === 4 && magic[0] === 127 && magic[1] === 69 &&
+         magic[2] === 76 && magic[3] === 70)) {
+      fs.chmodSync(file, fs.statSync(file).mode | 0o100);
+    }
+  }
+}
+visit(process.argv[2]);
+NODE
 "#;
 
 // Called ONLY after both archive processes have exited successfully.
@@ -52,6 +75,20 @@ impl Drop for OwnedChild {
     }
 }
 
+/// Reserve a new native archive pathname. Never overwrite someone else's temp
+/// file, and remove our large archive on every success/error return.
+pub struct TemporaryArchive(PathBuf);
+impl TemporaryArchive {
+    pub fn create(path: PathBuf) -> io::Result<Self> {
+        std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
+        Ok(Self(path))
+    }
+    pub fn path(&self) -> &Path { &self.0 }
+}
+impl Drop for TemporaryArchive {
+    fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+}
+
 pub fn run_bounded(command: &mut Command, timeout: Duration) -> io::Result<ExitStatus> {
     let mut child = OwnedChild(command.spawn()?);
     let deadline = Instant::now() + timeout;
@@ -69,44 +106,30 @@ pub fn run_bounded(command: &mut Command, timeout: Duration) -> io::Result<ExitS
     }
 }
 
-/// Connect OS pipe handles directly. A PowerShell text pipeline would corrupt
-/// binary archive bytes. Inherit stderr so native errors reach server-app.log.
-pub fn stream_archive(
+/// Native tar enumerates NTFS into one local file, then WSL reads that file
+/// sequentially. Native→WSL stdin was measured at ~2 MB/s on the real guest,
+/// insufficient for the shipped multi-GB models. Do not use a text/binary
+/// interop pipe, reintroduce per-file DrvFs reads, or increase the deadline.
+pub fn stage_archive(
     producer: &mut Command,
     consumer: &mut Command,
     timeout: Duration,
 ) -> io::Result<()> {
-    let mut producer = OwnedChild(producer.stdin(Stdio::null()).stdout(Stdio::piped()).spawn()?);
-    let pipe = producer.0.stdout.take().expect("piped archive stdout");
-    let mut consumer = OwnedChild(consumer.stdin(Stdio::from(pipe)).spawn()?);
     let deadline = Instant::now() + timeout;
-    let mut producer_done = false;
-    let mut consumer_done = false;
-    loop {
-        for (child, done, label) in [
-            (&mut producer.0, &mut producer_done, "archive producer"),
-            (&mut consumer.0, &mut consumer_done, "WSL archive extractor"),
-        ] {
-            if !*done {
-                if let Some(status) = child.try_wait()? {
-                    if !status.success() {
-                        return Err(io::Error::other(format!("{label} exited with {status}")));
-                    }
-                    *done = true;
-                }
-            }
-        }
-        if producer_done && consumer_done {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
+    for (command, label) in [(producer, "archive producer"), (consumer, "WSL archive extractor")] {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "Windows sidecar stream timed out; only the owned copy children were stopped",
+                "Windows sidecar archive deadline expired; no distro reset",
             ));
         }
-        std::thread::sleep(Duration::from_millis(20));
+        let status = run_bounded(command, remaining)?;
+        if !status.success() {
+            return Err(io::Error::other(format!("{label} exited with {status}")));
+        }
     }
+    Ok(())
 }
 
 #[cfg(all(test, unix))]
@@ -133,12 +156,14 @@ mod tests {
         }
         fn producer(&self) -> Command {
             let mut c = Command::new("tar");
-            c.arg("-C").arg(self.0.join("source")).args(ARCHIVE_ARGS);
+            c.arg("-C").arg(self.0.join("source")).args(ARCHIVE_ARGS)
+                .arg("-cf").arg(self.0.join("archive.tar")).arg(".");
             c
         }
         fn consumer(&self) -> Command {
             let mut c = Command::new("bash");
-            c.args(["-c", EXTRACT_SCRIPT, "extract"]).arg(self.0.join("stage"));
+            c.args(["-c", EXTRACT_SCRIPT, "extract"])
+                .arg(self.0.join("archive.tar")).arg(self.0.join("stage"));
             c
         }
         fn publish(&self) -> ExitStatus {
@@ -157,7 +182,7 @@ mod tests {
         let f = Fixture::new();
         fs::write(f.0.join("source/file with spaces"), [255, 0, 128]).unwrap();
         std::os::unix::fs::symlink("serve.mjs", f.0.join("source/link")).unwrap();
-        stream_archive(&mut f.producer(), &mut f.consumer(), Duration::from_secs(5)).unwrap();
+        stage_archive(&mut f.producer(), &mut f.consumer(), Duration::from_secs(5)).unwrap();
         assert!(!f.0.join("runtime").exists());
         assert!(!f.0.join("stage/.papercusp-runtime-complete").exists());
         assert!(f.publish().success());
@@ -176,10 +201,11 @@ mod tests {
     fn producer_failure_after_valid_archive_does_not_publish() {
         let f = Fixture::new();
         let mut c = Command::new("bash");
-        c.args(["-c", "tar -C \"$1\" -cf - .; exit 19", "producer"])
-            .arg(f.0.join("source"));
-        let err = stream_archive(&mut c, &mut f.consumer(), Duration::from_secs(5)).unwrap_err();
+        c.args(["-c", "tar -C \"$1\" -cf \"$2\" .; exit 19", "producer"])
+            .arg(f.0.join("source")).arg(f.0.join("archive.tar"));
+        let err = stage_archive(&mut c, &mut f.consumer(), Duration::from_secs(5)).unwrap_err();
         assert!(err.to_string().contains("archive producer"));
+        assert!(!f.0.join("stage").exists(), "extractor must not start on failed production");
         assert!(!f.0.join("runtime").exists());
         assert!(!f.0.join("stage/.papercusp-runtime-complete").exists());
     }
@@ -187,9 +213,9 @@ mod tests {
     #[test]
     fn corrupt_archive_is_rejected_by_real_extractor() {
         let f = Fixture::new();
-        let mut c = Command::new("printf");
-        c.arg("this is not a tar archive");
-        assert!(stream_archive(&mut c, &mut f.consumer(), Duration::from_secs(5)).is_err());
+        fs::write(f.0.join("archive.tar"), b"this is not a tar archive").unwrap();
+        let mut c = Command::new("true");
+        assert!(stage_archive(&mut c, &mut f.consumer(), Duration::from_secs(5)).is_err());
         assert!(!f.0.join("runtime").exists());
     }
 
@@ -197,7 +223,7 @@ mod tests {
     fn missing_required_runtime_file_is_not_published() {
         let f = Fixture::new();
         fs::remove_file(f.0.join("source/serve.mjs")).unwrap();
-        assert!(stream_archive(&mut f.producer(), &mut f.consumer(), Duration::from_secs(5)).is_err());
+        assert!(stage_archive(&mut f.producer(), &mut f.consumer(), Duration::from_secs(5)).is_err());
         assert!(!f.publish().success());
         assert!(!f.0.join("runtime").exists());
     }
@@ -209,10 +235,9 @@ mod tests {
         let pid_file = f.0.join("producer.pid");
         let mut c = Command::new("bash");
         c.args(["-c", "echo $$ > \"$1\"; exec sleep 20", "producer"]).arg(&pid_file);
-        let mut sink = Command::new("cat");
-        sink.stdout(Stdio::null());
+        let mut sink = f.consumer();
         let start = Instant::now();
-        assert_eq!(stream_archive(&mut c, &mut sink, Duration::from_millis(300))
+        assert_eq!(stage_archive(&mut c, &mut sink, Duration::from_millis(300))
             .unwrap_err().kind(), io::ErrorKind::TimedOut);
         assert!(start.elapsed() < Duration::from_secs(3));
         assert!(unrelated.0.try_wait().unwrap().is_none());
@@ -222,12 +247,11 @@ mod tests {
     }
 
     #[test]
-    fn failed_consumer_spawn_reaps_producer() {
-        let mut c = Command::new("sleep");
-        c.arg("20");
+    fn failed_consumer_spawn_returns_error_without_publishing() {
+        let mut c = Command::new("true");
         let mut sink = Command::new("/nonexistent-staging-extractor");
         let start = Instant::now();
-        assert_eq!(stream_archive(&mut c, &mut sink, Duration::from_secs(5))
+        assert_eq!(stage_archive(&mut c, &mut sink, Duration::from_secs(5))
             .unwrap_err().kind(), io::ErrorKind::NotFound);
         assert!(start.elapsed() < Duration::from_secs(3));
     }
@@ -245,9 +269,38 @@ mod tests {
     #[test]
     fn an_existing_incomplete_generation_is_not_treated_as_complete() {
         let f = Fixture::new();
-        stream_archive(&mut f.producer(), &mut f.consumer(), Duration::from_secs(5)).unwrap();
+        stage_archive(&mut f.producer(), &mut f.consumer(), Duration::from_secs(5)).unwrap();
         fs::create_dir(f.0.join("runtime")).unwrap();
         assert!(!f.publish().success());
         assert!(!f.0.join("runtime/.papercusp-runtime-complete").exists());
+    }
+
+    #[test]
+    fn native_archive_modes_restore_only_elf_and_shebang_execution() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        for (name, bytes) in [("elf", b"\x7fELFxxx".as_slice()),
+            ("script", b"#!/bin/sh\nexit 0".as_slice()), ("data", b"ordinary data".as_slice())] {
+            let file = f.0.join("source").join(name);
+            fs::write(&file, bytes).unwrap();
+            fs::set_permissions(file, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        stage_archive(&mut f.producer(), &mut f.consumer(), Duration::from_secs(5)).unwrap();
+        for name in ["elf", "script"] {
+            assert_ne!(fs::metadata(f.0.join("stage").join(name)).unwrap().permissions().mode() & 0o100, 0);
+        }
+        assert_eq!(fs::metadata(f.0.join("stage/data")).unwrap().permissions().mode() & 0o111, 0);
+    }
+
+    #[test]
+    fn archive_custody_refuses_existing_file_and_cleans_up_own_file() {
+        let f = Fixture::new();
+        let path = f.0.join("owned.tar");
+        let archive = TemporaryArchive::create(path.clone()).unwrap();
+        assert!(TemporaryArchive::create(path.clone()).is_err());
+        assert_eq!(archive.path(), path);
+        fs::write(&path, b"archive").unwrap();
+        drop(archive);
+        assert!(!path.exists());
     }
 }
