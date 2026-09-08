@@ -660,16 +660,25 @@ shopt -u nullglob
 if (( ${#_FINISHED_INSTALLERS[@]} == 0 )); then
   fail "no *-setup.exe in $OUT_DIR to scan — packing produced nothing, or OUT_DIR is wrong"
 fi
-set +e
-PAPERCUSP_INNOEXTRACT="$PAPERCUSP_INNOEXTRACT" \
-  python3 "$HERE/audit-release-bundle.py" --scan-artifact "${_FINISHED_INSTALLERS[@]}"
-_artifact_rc=$?
-set -e
-if [[ $_artifact_rc -eq 2 ]]; then
-  fail "finished-installer identity audit COULD NOT CHECK — it did NOT find a leak. Either no owner-name literal resolved (export PAPERCUSP_RELEASE_OWNER_NAME), or the installer could not be expanded (innoextract missing, or Inno emitted a format it cannot read). Refusing to publish bytes nobody read."
-elif [[ $_artifact_rc -ne 0 ]]; then
-  fail "finished Windows installer carries sensitive identity (see scan above) — refusing to sign or publish it"
-fi
+for _finished_installer in "${_FINISHED_INSTALLERS[@]}"; do
+  _runtime_scan_args=()
+  # EI-22656004539777797: the native Server reads this stamp before WSL
+  # staging. Check FINISHED bytes during the existing expansion, before they
+  # gain a signature. The GUI deliberately has no Server runtime.
+  if [[ "$(basename "$_finished_installer")" == "Papercusp Server_${VERSION}_x64-setup.exe" ]]; then
+    _runtime_scan_args+=(--require-windows-server-runtime)
+  fi
+  set +e
+  PAPERCUSP_INNOEXTRACT="$PAPERCUSP_INNOEXTRACT" \
+    python3 "$HERE/audit-release-bundle.py" --scan-artifact "${_runtime_scan_args[@]}" "$_finished_installer"
+  _artifact_rc=$?
+  set -e
+  if [[ $_artifact_rc -eq 2 ]]; then
+    fail "finished-installer audit COULD NOT CHECK — no owner-name literal or readable complete container; refusing to publish bytes nobody read"
+  elif [[ $_artifact_rc -ne 0 ]]; then
+    fail "finished Windows installer failed identity or required runtime closure audit (see above) — refusing to sign or publish it"
+  fi
+done
 
 # ── Sign the setup.exe(s): Authenticode (cert-conditional) THEN the host-side
 # updater .sig (ed25519/minisign) that the shipped auto-updater verifies.
