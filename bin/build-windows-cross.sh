@@ -98,6 +98,38 @@ BUILD_WORKTREE=0
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
+# The outer script is self-read, but a late child script is not. Capture the
+# exact provenance emitter and its only local dependency before cargo/Inno can
+# yield to a peer edit. Copy (never hardlink), validate, and attest those bytes.
+snapshot_provenance_tools() {
+  local dest="$1" source="$2" rel supplied="${PROVENANCE_TOOLCHAIN:-}"
+  [[ -n "$supplied" ]] || supplied='{}'
+  [[ ! -e "$dest" ]] || fail "provenance producer snapshot already exists"
+  mkdir -p "$dest/lib"
+  for rel in emit-build-provenance.sh lib/windows-source-repair.js; do
+    cp -- "$source/$rel" "$dest/$rel"
+  done
+  bash -n "$dest/emit-build-provenance.sh" || fail "invalid snapshotted provenance emitter"
+  node --check "$dest/lib/windows-source-repair.js" || fail "invalid snapshotted repair helper"
+  node - "$dest" "$supplied" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const [root, supplied] = process.argv.slice(2);
+const toolchain = JSON.parse(supplied);
+if (!toolchain || Array.isArray(toolchain) || typeof toolchain !== 'object') {
+  throw new Error('provenance toolchain must be a JSON object');
+}
+const files = ['emit-build-provenance.sh', 'lib/windows-source-repair.js'].map(relative => ({
+  path: relative,
+  sha256: crypto.createHash('sha256').update(fs.readFileSync(path.join(root, relative))).digest('hex'),
+}));
+const producer = { schemaVersion: 1, files };
+fs.writeFileSync(path.join(root, 'producer-inputs.json'), `${JSON.stringify(producer)}\n`);
+process.stdout.write(JSON.stringify({ ...toolchain, windowsProvenanceProducer: producer }));
+NODE
+}
+
 # Update source baked at compile (WI-4389/WI-3875): main.rs resolves it with
 # option_env!("PAPERCUSP_RELEASE_HOST"). Load it here so a direct run of this
 # script (not just via release-local.sh) still bakes a real host — omit it and
@@ -398,10 +430,13 @@ if ! git -C "$SOURCE_ROOT" worktree add --detach "$BUILD_ROOT" "$BUILD_COMMIT_SH
   fail "could not create the isolated Windows build source at $BUILD_ROOT"
 fi
 BUILD_WORKTREE=1
+PROVENANCE_TOOLS_ROOT="$BUILD_CONTAINER/provenance-tools"
+WINDOWS_PROVENANCE_TOOLCHAIN="$(snapshot_provenance_tools "$PROVENANCE_TOOLS_ROOT" "$HERE")" \
+  || fail "could not snapshot the Windows provenance producer"
 SOURCE_REPAIR_APPLIED=""
 if [[ -n "$SOURCE_REPAIR" ]]; then
   SOURCE_REPAIR_APPLIED="$BUILD_CONTAINER/source-repair.json"
-  node "$HERE/lib/windows-source-repair.js" apply "$SOURCE_REPAIR" \
+  node "$PROVENANCE_TOOLS_ROOT/lib/windows-source-repair.js" apply "$SOURCE_REPAIR" \
     "${PAPERCUSP_WINDOWS_SOURCE_REPAIR_REPO:-$SOURCE_ROOT}" "$BUILD_ROOT" \
     "$BUILD_COMMIT_SHA" "$BUILD_SUPERPROJECT_COMMIT_SHA" "$ROLES" >"$SOURCE_REPAIR_APPLIED" \
     || fail "source repair failed exact committed-source validation"
@@ -567,7 +602,7 @@ for role in $ROLES; do
   cfg_env=(TAURI_CONFIG='{}')
   [[ -n "$tauri_cfg" ]] && cfg_env=(TAURI_CONFIG="$(cat "$tauri_cfg")")
   if [[ -n "$SOURCE_REPAIR_APPLIED" ]]; then
-    repair_cfg="$(node "$HERE/lib/windows-source-repair.js" config \
+    repair_cfg="$(node "$PROVENANCE_TOOLS_ROOT/lib/windows-source-repair.js" config \
       "$SOURCE_REPAIR_APPLIED" "$ROOT" "$role")" \
       || fail "source repair compile configuration does not identify $role"
     cfg_env=(TAURI_CONFIG="$repair_cfg")
@@ -756,16 +791,18 @@ shopt -s nullglob
 PROV_ARTIFACTS=("$OUT_DIR"/*-setup.exe "$OUT_DIR"/*-setup-*.bin)
 shopt -u nullglob
 if [[ -n "$SOURCE_REPAIR_APPLIED" ]]; then
-  node "$HERE/lib/windows-source-repair.js" verify "$SOURCE_REPAIR_APPLIED" "$ROOT" "$ROLES" >/dev/null \
+  node "$PROVENANCE_TOOLS_ROOT/lib/windows-source-repair.js" verify "$SOURCE_REPAIR_APPLIED" "$ROOT" "$ROLES" >/dev/null \
     || fail "native source changed after repair materialization"
   cp "$SOURCE_REPAIR_APPLIED" "$OUT_DIR/source-repair.json"
 fi
+cp "$PROVENANCE_TOOLS_ROOT/producer-inputs.json" "$OUT_DIR/producer-inputs.json"
 PROVENANCE_GIT_ROOT="$ROOT" \
 PROVENANCE_SIGNED="$([[ -n "$AUTHENTICODE_PFX" ]] && echo true || echo false)" \
 PROVENANCE_SIDECAR_DIR="$SRC_TAURI/sidecar" \
 PROVENANCE_SOURCE_REPAIR_MANIFEST="$SOURCE_REPAIR_APPLIED" \
 PROVENANCE_SOURCE_REPAIR_ROLES="$ROLES" \
-  bash "$HERE/emit-build-provenance.sh" \
+PROVENANCE_TOOLCHAIN="$WINDOWS_PROVENANCE_TOOLCHAIN" \
+  bash "$PROVENANCE_TOOLS_ROOT/emit-build-provenance.sh" \
     "$OUT_DIR" \
     "$VERSION" \
     "${PAPERCUSP_BUILD_SHA:-}" \

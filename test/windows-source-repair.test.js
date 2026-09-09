@@ -294,6 +294,7 @@ test('real producer compile invocation binds both roles and overrides inherited 
       ...process.env, PATH: `${bin}:${process.env.PATH}`, CONFIG_RECEIPT: receipt,
       ROOT: f.snapshot, SRC_TAURI: path.join(f.snapshot, 'src-tauri'),
       HERE: path.join(root, 'bin'), SOURCE_REPAIR_APPLIED: input,
+      PROVENANCE_TOOLS_ROOT: path.join(root, 'bin'),
       ROLES: 'gui server', TARGET: 'x86_64-pc-windows-msvc',
       _WIN_REMAP: '', _WIN_CRT_STATIC: '', TAURI_CONFIG: '{"identifier":"wrong.inherited.role"}',
     },
@@ -313,5 +314,60 @@ test('Windows producer applies/verifies repair around compile and keeps output s
   assert.match(script, /OUT_DIR="\$PAPERCUSP_WINDOWS_OUTPUT_DIR"/);
   assert.match(script, /PROVENANCE_SOURCE_REPAIR_MANIFEST="\$SOURCE_REPAIR_APPLIED"/);
   assert.match(script, /PROVENANCE_SOURCE_REPAIR_ROLES="\$ROLES"/);
-  assert.match(script, /bash "\$HERE\/emit-build-provenance\.sh"/);
+  assert.match(script, /bash "\$PROVENANCE_TOOLS_ROOT\/emit-build-provenance\.sh"/);
+});
+
+test('late provenance emission uses immutable helper copies after source producers change', (t) => {
+  const f = fixture(t);
+  const source = path.join(f.dir, 'producer-source');
+  fs.mkdirSync(path.join(source, 'lib'), { recursive: true });
+  for (const relative of ['emit-build-provenance.sh', 'lib/windows-source-repair.js']) {
+    fs.copyFileSync(path.join(root, 'bin', relative), path.join(source, relative));
+  }
+  const script = fs.readFileSync(path.join(root, 'bin/build-windows-cross.sh'), 'utf8');
+  const start = script.indexOf('snapshot_provenance_tools() {');
+  const end = script.indexOf('\n# Update source baked', start);
+  assert.ok(start > 0 && end > start);
+  const snapshot = path.join(f.dir, 'producer-snapshot');
+  const capture = spawnSync('bash', ['-c',
+    `set -euo pipefail\nfail() { echo "$*" >&2; exit 1; }\n${script.slice(start, end)}\n` +
+    'snapshot_provenance_tools "$1" "$2"', 'snapshot-test', snapshot, source], {
+    encoding: 'utf8', env: { ...process.env, PROVENANCE_TOOLCHAIN: '{"fixture":"preserved"}' },
+  });
+  assert.equal(capture.status, 0, capture.stderr);
+  const toolchain = JSON.parse(capture.stdout);
+  assert.equal(toolchain.fixture, 'preserved');
+  const producer = JSON.parse(fs.readFileSync(path.join(snapshot, 'producer-inputs.json')));
+  assert.deepEqual(toolchain.windowsProvenanceProducer, producer);
+  for (const file of producer.files) {
+    assert.equal(hash(fs.readFileSync(path.join(source, file.path))), file.sha256);
+    assert.notEqual(fs.statSync(path.join(source, file.path)).ino,
+      fs.statSync(path.join(snapshot, file.path)).ino, 'must copy, never hardlink mutable helpers');
+  }
+  fs.writeFileSync(path.join(source, 'emit-build-provenance.sh'), 'exit 97\n');
+  fs.writeFileSync(path.join(source, 'lib/windows-source-repair.js'), 'throw Error("moving helper")\n');
+  Object.assign(f.value, { kind: 'windows-native-source-repair', roles: ['server'] });
+  const applied = f.apply('server');
+  const input = path.join(f.dir, 'repair.json'); fs.writeFileSync(input, JSON.stringify(applied));
+  const out = path.join(f.dir, 'out'); fs.mkdirSync(out);
+  const artifact = path.join(out, 'Server.exe'); fs.writeFileSync(artifact, 'new Server');
+  const emitted = spawnSync('bash', [path.join(snapshot, 'emit-build-provenance.sh'),
+    out, '0.0.19', f.value.operatorBuildSha, 'false', artifact], {
+    encoding: 'utf8', env: {
+      ...process.env, PROVENANCE_GIT_ROOT: f.snapshot,
+      PROVENANCE_SOURCE_GIT_HEAD: f.base, PROVENANCE_SOURCE_GIT_DIRTY: 'false',
+      PROVENANCE_SOURCE_REPAIR_MANIFEST: input, PROVENANCE_SOURCE_REPAIR_ROLES: 'server',
+      PROVENANCE_TOOLCHAIN: JSON.stringify(toolchain),
+    },
+  });
+  assert.equal(emitted.status, 0, emitted.stderr);
+  const provenance = JSON.parse(fs.readFileSync(path.join(out, 'build-provenance.json')));
+  assert.deepEqual(provenance.sourceRepair, applied);
+  assert.deepEqual(provenance.toolchain.windowsProvenanceProducer, producer);
+  for (const file of producer.files) {
+    assert.equal(hash(fs.readFileSync(path.join(snapshot, file.path))), file.sha256);
+  }
+  assert.ok(script.indexOf('snapshot_provenance_tools "$PROVENANCE_TOOLS_ROOT"') <
+    script.indexOf('cargo xwin build --release'));
+  assert.match(script, /PROVENANCE_TOOLCHAIN="\$WINDOWS_PROVENANCE_TOOLCHAIN"/);
 });
