@@ -178,6 +178,7 @@ const
 
 var
   PayloadUpgradeStarted: Boolean;
+  PayloadUpgradeCommitted: Boolean;
 
 function UninstallTargetExists(const UninstallString: String): Boolean;
 var
@@ -415,6 +416,16 @@ var
   Pending, Name, Current, Marker: String;
   Index: Integer;
 begin
+  Result := '';
+  { Let Inno create a genuinely new app root itself so it records directory
+    ownership for uninstall. Creating it early via ForceDirectories would
+    leave an otherwise empty root after uninstall. There is no old payload
+    and no crash journal to preserve when that directory does not exist. }
+  if not DirExists(ExpandConstant('{app}')) then
+  begin
+    PayloadUpgradeCommitted := True;
+    Exit;
+  end;
   PayloadUpgradeStarted := True;
   Result := RestorePayloadUpgrade;
   if Result <> '' then
@@ -495,11 +506,29 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
+  begin
     ReapLegacyUninstallEntries;
-  { ssDone is reached only after successful installation, including Run
-    entries. Before then the pending journal must remain recoverable. }
-  if (CurStep = ssDone) and PayloadUpgradeStarted then
-    CommitPayloadUpgrade;
+    if PayloadUpgradeStarted then
+    begin
+      { Script exceptions in most Inno callbacks are reported and swallowed.
+        An exception alone is NOT a failing installer exit code. Keep the
+        journal recoverable, suppress updater relaunch, and return an explicit
+        failure from GetCustomSetupExitCode if the commit cannot finish. }
+      try
+        CommitPayloadUpgrade;
+        PayloadUpgradeCommitted := True;
+      except
+        Log('windows-payload-commit-failed: ' + GetExceptionMessage);
+      end;
+    end;
+  end;
+end;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  Result := 0;
+  if PayloadUpgradeStarted and (not PayloadUpgradeCommitted) then
+    Result := 74;
 end;
 
 procedure DeinitializeSetup;
@@ -518,7 +547,7 @@ end;
 
 function IsUpdaterLaunch(): Boolean;
 begin
-  Result := Pos('/UPDATE', UpperCase(GetCmdTail())) > 0;
+  Result := PayloadUpgradeCommitted and (Pos('/UPDATE', UpperCase(GetCmdTail())) > 0);
 end;
 
 { ── Uninstall cleanup (WI-39403) ──────────────────────────────────────────

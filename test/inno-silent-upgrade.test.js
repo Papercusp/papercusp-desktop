@@ -281,4 +281,25 @@ test('real Inno upgrade replaces owned payload, preserves data, and rolls back a
   assert.equal(fs.readFileSync(path.join(app, 'user-config.json'), 'utf8'), 'preserve-app-data');
   assert.equal(fs.readFileSync(path.join(sibling, 'serve.mjs'), 'utf8'), 'preserve-sibling');
   assert.equal(fs.existsSync(pending), false);
+
+  // Even a successful file copy must not report success or relaunch if the
+  // preservation commit fails. A blocked backup path is a real filesystem
+  // failure, not another script-exception simulation. Original data remains
+  // recoverable in the pending journal while that obstruction exists.
+  const savedBackups = path.join(dir, 'saved-backups');
+  fs.renameSync(backupRoot, savedBackups);
+  fs.writeFileSync(backupRoot, 'obstruction-control');
+  const commitRefused = install('5.0.0', ['sidecar/serve.mjs', 'sidecar/new.js']);
+  assert.equal(commitRefused.status, 74, commitRefused.log.slice(-5000));
+  assert.match(commitRefused.log, /windows-payload-commit-failed/);
+  assert.equal(fs.readFileSync(path.join(pending, 'sidecar/serve.mjs'), 'utf8'), 'payload-2.0.0');
+  fs.unlinkSync(backupRoot);
+  fs.renameSync(savedBackups, backupRoot);
+  const retry = install('6.0.0', ['sidecar/serve.mjs', 'sidecar/never.txt'], true);
+  assert.notEqual(retry.status, 0, retry.log.slice(-5000));
+  assert.match(retry.log, /intentional-copy-failure/);
+  assert.equal(fs.readFileSync(path.join(app, 'sidecar/serve.mjs'), 'utf8'), 'payload-2.0.0');
+  assert.equal(fs.readFileSync(path.join(app, 'user-config.json'), 'utf8'), 'preserve-app-data');
+  assert.equal(fs.readFileSync(path.join(sibling, 'serve.mjs'), 'utf8'), 'preserve-sibling');
+  assert.equal(fs.existsSync(pending), false);
 });

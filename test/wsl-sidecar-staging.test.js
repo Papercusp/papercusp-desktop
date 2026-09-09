@@ -12,18 +12,40 @@ test('complete hot-payload identity changes for non-serve repairs and removed fi
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'wsl-runtime-identity-'));
   try {
     const manifest = path.join(temp, 'Cargo.toml');
+    const start = source.indexOf('fn sidecar_runtime_generation(');
+    const end = source.indexOf('\n}\n', start);
+    assert.ok(start >= 0 && end > start, 'production generation function missing');
+    const driver = path.join(temp, 'identity.rs');
+    fs.writeFileSync(driver, [
+      `#[path = ${JSON.stringify(path.join(root, 'src-tauri/src/sidecar_runtime_identity.rs'))}]`,
+      'mod sidecar_runtime_identity;',
+      source.slice(start, end + 3),
+      '#[test]', 'fn actual_stamp_gate_and_non_serve_change() {',
+      'let dir = std::env::temp_dir().join(format!("pc-stamp-wiring-{}", std::process::id()));',
+      'std::fs::create_dir(&dir).unwrap();',
+      'assert!(sidecar_runtime_generation(&dir).is_err());',
+      'let stamp = dir.join(".sidecar-build-stamp");',
+      'std::fs::write(&stamp, "{}").unwrap();',
+      'assert!(sidecar_runtime_generation(&dir).is_err());',
+      String.raw`std::fs::write(&stamp, format!(r#"{{"serveSha256":"{}"}}"#, "a".repeat(64))).unwrap();`,
+      'let original = sidecar_runtime_generation(&dir).unwrap();',
+      'std::fs::write(dir.join("repaired-preload.js"), "new dependency").unwrap();',
+      'assert_ne!(original, sidecar_runtime_generation(&dir).unwrap());',
+      'std::fs::remove_dir_all(&dir).unwrap();',
+      '}',
+    ].join('\n'));
     fs.writeFileSync(manifest, [
       '[package]', 'name = "runtime-identity-regression"', 'version = "0.0.0"', 'edition = "2021"',
-      '[workspace]', '[lib]',
-      `path = ${JSON.stringify(path.join(root, 'src-tauri/src/sidecar_runtime_identity.rs'))}`,
-      '[dependencies]', 'sha2 = "=0.10.9"',
+      '[workspace]', '[lib]', `path = ${JSON.stringify(driver)}`,
+      '[dependencies]', 'sha2 = "=0.10.9"', 'serde_json = "1"',
     ].join('\n'));
     const result = spawnSync(process.env.CARGO || 'cargo', [
       'test', '--offline', '--manifest-path', manifest,
     ], { encoding: 'utf8', timeout: 120000,
       env: { ...process.env, CARGO_TARGET_DIR: path.join(temp, 'target') } });
     assert.equal(result.status, 0, String(result.error || result.stderr || result.stdout));
-    assert.match(result.stdout, /4 passed; 0 failed; 0 ignored/);
+    assert.ok(result.stdout.includes(`${process.platform === 'win32' ? 4 : 5} passed; 0 failed; 0 ignored`),
+      result.stdout);
     const generation = source.slice(source.indexOf('fn sidecar_runtime_generation('),
       source.indexOf('fn wsl_runtime_sidecar_path('));
     assert.match(generation, /sidecar_runtime_identity::generation\(sidecar_dir\)/);
