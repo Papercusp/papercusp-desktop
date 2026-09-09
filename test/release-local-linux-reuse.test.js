@@ -307,6 +307,65 @@ for (const [leg, reuse] of [
   });
 }
 
+function canonicalAuditStamp(passedAtUtc) {
+  return {
+    releaseIdentityAudit: {
+      schemaVersion: 1,
+      passed: true,
+      scanner: 'audit-release-bundle.py --scan-dir',
+      passedAtUtc,
+    },
+  };
+}
+
+function runAuditReuseExpiry({ stamp, maxAgeSec = 86_400 } = {}) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-release-audit-expiry-'));
+  const sidecar = path.join(temp, 'src-tauri', 'sidecar');
+  fs.mkdirSync(sidecar, { recursive: true });
+  if (stamp !== undefined) {
+    fs.writeFileSync(path.join(sidecar, '.sidecar-build-stamp'), JSON.stringify(stamp));
+  }
+  try {
+    const command = [
+      'set -euo pipefail',
+      `ROOT=${JSON.stringify(temp)}`,
+      `PAPERCUSP_RELEASE_REUSE_MAX_AGE_SEC=${JSON.stringify(String(maxAgeSec))}`,
+      releaseTaskJournalHarness,
+      'release_task_audit_reuse_expiry',
+    ].join('\n');
+    return spawnSync('bash', ['-c', command], { encoding: 'utf8' });
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+}
+
+test('fresh identity-scan evidence derives the exact reuse expiry', () => {
+  const passedAtUtc = new Date(Date.now() - 60_000).toISOString();
+  const result = runAuditReuseExpiry({ stamp: canonicalAuditStamp(passedAtUtc) });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(result.stdout, new Date(Date.parse(passedAtUtc) + 86_400_000).toISOString());
+});
+
+test('missing identity-scan stamp cannot authorize reuse', () => {
+  const result = runAuditReuseExpiry();
+  assert.notEqual(result.status, 0, 'missing scan evidence unexpectedly produced an expiry');
+  assert.match(result.stderr, /ENOENT|no such file/i);
+});
+
+test('expired identity-scan evidence cannot authorize reuse', () => {
+  const passedAtUtc = new Date(Date.now() - 2 * 86_400_000).toISOString();
+  const result = runAuditReuseExpiry({ stamp: canonicalAuditStamp(passedAtUtc) });
+  assert.notEqual(result.status, 0, 'expired scan evidence unexpectedly produced an expiry');
+  assert.match(result.stderr, /identity scan expired/);
+});
+
+test('future-dated identity-scan evidence cannot authorize reuse', () => {
+  const passedAtUtc = new Date(Date.now() + 86_400_000).toISOString();
+  const result = runAuditReuseExpiry({ stamp: canonicalAuditStamp(passedAtUtc) });
+  assert.notEqual(result.status, 0, 'future scan evidence unexpectedly produced an expiry');
+  assert.match(result.stderr, /invalid or future-dated/);
+});
+
 function runJournalLinuxResume({ action, absent = false, verify = 0 }) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-linux-journal-'));
   const bundle = path.join(temp, 'bundle');
