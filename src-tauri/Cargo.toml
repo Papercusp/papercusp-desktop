@@ -61,6 +61,9 @@ tauri-specta = { version = "=2.0.0-rc.24", features = ["derive", "typescript"] }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Already pinned transitively; use the maintained implementation for complete
+# Windows runtime payload identity, not a hand-written or serve-only hash.
+sha2 = "=0.10.9"
 
 # Boot-time WebKitGTK localStorage WAL reclaim (EI-14135): the webview's
 # localStorage is a SQLite DB in WAL mode whose `-wal` never resets (a

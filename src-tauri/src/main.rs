@@ -28,6 +28,8 @@
 mod app_role;
 #[cfg(any(target_os = "windows", test))]
 mod wsl_sidecar_staging;
+#[cfg(any(target_os = "windows", test))]
+mod sidecar_runtime_identity;
 mod custom_protocol;
 mod dev_bridge;
 // Global-hotkey docs-search palette (WI-2648, feature #5): an opt-in global
@@ -825,10 +827,9 @@ fn windows_path_to_wsl(path: &std::path::Path) -> String {
 
 /// Content generation used for the distro-local Windows sidecar snapshot.
 ///
-/// The sidecar build already writes this SHA into `.sidecar-build-stamp`; reuse
-/// that canonical content identity instead of inventing a second fingerprint.
-/// A generation is deliberately the full lowercase SHA so the destination path
-/// is collision-resistant and contains no caller-controlled separators.
+/// The stamp still gates readiness, but serveSha256 identifies only ONE file.
+/// Hash the entire hot payload so a repaired install cannot reuse an older
+/// completed snapshot with the same serve.mjs and obsolete SPA/dependency files.
 #[cfg(any(target_os = "windows", test))]
 fn sidecar_runtime_generation(sidecar_dir: &std::path::Path) -> std::io::Result<String> {
     let stamp_path = sidecar_dir.join(".sidecar-build-stamp");
@@ -839,7 +840,7 @@ fn sidecar_runtime_generation(sidecar_dir: &std::path::Path) -> std::io::Result<
             format!("invalid {}: {error}", stamp_path.display()),
         )
     })?;
-    let generation = stamp
+    let _serve_sha = stamp
         .get("serveSha256")
         .and_then(serde_json::Value::as_str)
         .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
@@ -850,7 +851,7 @@ fn sidecar_runtime_generation(sidecar_dir: &std::path::Path) -> std::io::Result<
                 format!("{} has no valid 64-hex serveSha256", stamp_path.display()),
             )
         })?;
-    Ok(generation)
+    sidecar_runtime_identity::generation(sidecar_dir)
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -984,7 +985,10 @@ mod tests {
         .unwrap();
 
         let generation = sidecar_runtime_generation(&dir).unwrap();
-        assert_eq!(generation, sha.to_ascii_lowercase());
+        assert_eq!(generation.len(), 64);
+        assert_eq!(generation, sidecar_runtime_generation(&dir).unwrap());
+        std::fs::write(dir.join("non-serve-repair.js"), "new dependency").unwrap();
+        assert_ne!(generation, sidecar_runtime_generation(&dir).unwrap());
         assert_eq!(
             wsl_runtime_sidecar_path("/home/papercup/.papercusp/", &generation).unwrap(),
             std::path::PathBuf::from(format!(
@@ -3669,7 +3673,7 @@ fn prepare_wsl_sidecar_runtime(
     let marker_args = vec![
         "/usr/bin/test".to_string(),
         "-f".to_string(),
-        marker.to_string_lossy().to_string(),
+        windows_path_to_wsl(&marker),
     ];
     if run_wsl_exec_with_timeout(&marker_args, Duration::from_secs(10))?.success() {
         return Ok(runtime_dir);
