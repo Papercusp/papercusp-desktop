@@ -37,6 +37,9 @@
 #     as PROVENANCE_SOURCE_GIT_HEAD / _DIRTY. It records the porcelain status set
 #     and a sha256 for every dirty working-tree path, so a dirty build can answer
 #     "did it contain these exact source bytes?" without pickaxe/mtime folklore.
+#   PROVENANCE_SOURCE_REPAIR_ROLES    — actual Windows native build roles.
+#     Must exactly match an explicit-role source repair; omission is GUI-only
+#     compatibility for the legacy manifest, never inferred Server permission.
 #
 # Usage:
 #   emit-build-provenance.sh OUT_DIR VERSION BUILD_SHA REUSED ARTIFACT...
@@ -538,7 +541,8 @@ NODE
 SOURCE_REPAIR_JSON=""
 if [[ -n "${PROVENANCE_SOURCE_REPAIR_MANIFEST:-}" ]]; then
   SOURCE_REPAIR_JSON="$(node "$(dirname "${BASH_SOURCE[0]}")/lib/windows-source-repair.js" \
-    attestation "$PROVENANCE_SOURCE_REPAIR_MANIFEST" "$GIT_ROOT" "$BUILD_SHA" "$GIT_HEAD")" \
+    attestation "$PROVENANCE_SOURCE_REPAIR_MANIFEST" "$GIT_ROOT" "$BUILD_SHA" "$GIT_HEAD" \
+    "${PROVENANCE_SOURCE_REPAIR_ROLES:-}")" \
     || { echo "ERROR: source repair does not describe the native source" >&2; exit 2; }
   # A base+patch is never attested as a clean original commit, even if a caller
   # inherited a clean-source override from its original all-platform cut.

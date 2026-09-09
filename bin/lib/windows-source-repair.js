@@ -1,4 +1,4 @@
-// Exact, committed-path repairs to a frozen Windows GUI source snapshot.
+// Exact, committed-path repairs to a frozen Windows native source snapshot.
 // This is a derived source, NOT a clean build of the base commit. The existing
 // buildSha remains the paired Server/operator identity; sourceRepair identifies
 // the changed native code independently. Publication still needs acceptance.
@@ -15,9 +15,22 @@ const git = (root, ...args) => execFileSync('git', ['-C', root, ...args], {
 const commit = (value) => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
 const digest = (value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 
+function roles(value) {
+  assert.ok(Array.isArray(value) && value.length > 0 && value.length <= 2,
+    'repair roles must explicitly name gui and/or server');
+  assert.ok(value.every((role) => role === 'gui' || role === 'server'), 'invalid repair role');
+  assert.equal(new Set(value).size, value.length, 'duplicate repair role');
+  return [...value].sort();
+}
+
 function manifest(value) {
   assert.equal(value.schemaVersion, 1, 'unsupported source repair schema');
-  assert.equal(value.kind, 'windows-gui-source-repair');
+  const legacy = value.kind === 'windows-gui-source-repair';
+  assert.ok(legacy || value.kind === 'windows-native-source-repair', 'unsupported repair kind');
+  // Preserve the legacy GUI manifest's exact serialized shape and hash. Never
+  // silently discard a roles field that could look like Server authorization.
+  if (legacy) assert.equal(value.roles, undefined, 'legacy repair is GUI-only; use native kind for explicit roles');
+  const scopedRoles = legacy ? null : roles(value.roles);
   assert.ok(commit(value.baseDesktopCommit) && commit(value.baseWorkspaceCommit));
   assert.match(value.operatorBuildSha, /^[a-f0-9]{8,40}$/);
   assert.ok(value.baseDesktopCommit.startsWith(value.operatorBuildSha),
@@ -43,8 +56,31 @@ function manifest(value) {
     baseDesktopCommit: value.baseDesktopCommit,
     baseWorkspaceCommit: value.baseWorkspaceCommit,
     operatorBuildSha: value.operatorBuildSha, files,
+    ...(legacy ? {} : { roles: scopedRoles }),
   };
   return { ...result, manifestSha256: hash(Buffer.from(JSON.stringify(result))) };
+}
+
+function forRoles(input, requested) {
+  const repair = manifest(input);
+  // Old callers remain GUI-only. New native manifests ALWAYS require the
+  // actual requested build roles, including on post-build attestation.
+  const fallback = repair.kind === 'windows-gui-source-repair' ? ['gui'] : [];
+  const requestedRoles = requested === undefined || requested === ''
+    ? roles(fallback) : roles(typeof requested === 'string' ? requested.trim().split(/\s+/) : requested);
+  assert.deepEqual(requestedRoles, repair.roles || ['gui'], 'source repair/build roles mismatch');
+  return repair;
+}
+
+function compileConfig(input, snapshot, role) {
+  const repair = manifest(input);
+  assert.ok((repair.roles || ['gui']).includes(role), 'compile role outside source repair');
+  const base = JSON.parse(fs.readFileSync(regularPath(snapshot, 'src-tauri/tauri.conf.json')));
+  const override = role === 'server'
+    ? JSON.parse(fs.readFileSync(regularPath(snapshot, 'src-tauri/tauri.server.conf.json'))) : {};
+  assert.equal(override.identifier ?? base.identifier, `com.papercusp.${role}`,
+    'source repair compile identifier mismatch');
+  return override;
 }
 
 function regularPath(root, relative, missing = false) {
@@ -64,8 +100,8 @@ function regularPath(root, relative, missing = false) {
   return current;
 }
 
-function apply(input, sourceRepo, snapshot, baseDesktopCommit, baseWorkspaceCommit) {
-  const repair = manifest(input);
+function apply(input, sourceRepo, snapshot, baseDesktopCommit, baseWorkspaceCommit, requestedRoles) {
+  const repair = forRoles(input, requestedRoles);
   assert.equal(repair.baseDesktopCommit, baseDesktopCommit, 'wrong desktop base');
   assert.equal(repair.baseWorkspaceCommit, baseWorkspaceCommit, 'wrong workspace base');
   assert.equal(git(snapshot, 'rev-parse', 'HEAD').toString().trim(), baseDesktopCommit);
@@ -88,12 +124,12 @@ function apply(input, sourceRepo, snapshot, baseDesktopCommit, baseWorkspaceComm
     return { target, bytes };
   });
   for (const { target, bytes } of prepared) fs.writeFileSync(target, bytes);
-  verify(repair, snapshot);
+  verify(repair, snapshot, requestedRoles);
   return repair;
 }
 
-function verify(input, snapshot) {
-  const repair = manifest(input);
+function verify(input, snapshot, requestedRoles) {
+  const repair = forRoles(input, requestedRoles);
   assert.equal(input.manifestSha256, repair.manifestSha256, 'repair manifest changed');
   assert.equal(git(snapshot, 'rev-parse', 'HEAD').toString().trim(), repair.baseDesktopCommit);
   const changed = new Set([
@@ -110,10 +146,11 @@ function verify(input, snapshot) {
   return repair;
 }
 
-function attestation(input, snapshot, buildSha, gitHead) {
-  const repair = verify(input, snapshot);
+function attestation(input, snapshot, buildSha, gitHead, requestedRoles) {
+  const repair = verify(input, snapshot, requestedRoles);
   assert.equal(buildSha, repair.operatorBuildSha, 'repair paired operator identity mismatch');
   assert.equal(gitHead, repair.baseDesktopCommit, 'repair base provenance mismatch');
+  for (const role of repair.roles || ['gui']) compileConfig(repair, snapshot, role);
   return repair;
 }
 
@@ -123,8 +160,10 @@ if (require.main === module) {
   const result = action === 'apply' ? apply(input, ...args)
     : action === 'verify' ? verify(input, ...args)
       : action === 'attestation' ? attestation(input, ...args)
+        : action === 'roles' ? forRoles(input, ...args)
+          : action === 'config' ? compileConfig(input, ...args)
       : (() => { throw new Error(`unknown action: ${action}`); })();
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
-module.exports = { apply, verify, attestation, manifest, hash };
+module.exports = { apply, verify, attestation, manifest, hash, forRoles, compileConfig };

@@ -35,7 +35,8 @@
 # either with the same env):
 #   PAPERCUSP_BUILD_ROLES     roles to build (default "gui server")
 #   PAPERCUSP_BUILD_SHA       baked into the exe (option_env!, /api/health)
-#   PAPERCUSP_WINDOWS_SOURCE_REPAIR   exact committed-path GUI repair manifest
+#   PAPERCUSP_WINDOWS_SOURCE_REPAIR   exact committed-path native repair manifest;
+#                                    legacy GUI-only, or explicit matching roles
 #   PAPERCUSP_WINDOWS_SOURCE_REPAIR_REPO  repo containing its repair commits
 #   PAPERCUSP_WINDOWS_OUTPUT_DIR      separate, empty output directory (required
 #                                    for a repair; original cut stays immutable)
@@ -161,8 +162,9 @@ _WIN_CRT_STATIC="-C target-feature=+crt-static"
 ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
 SOURCE_REPAIR="${PAPERCUSP_WINDOWS_SOURCE_REPAIR:-}"
 if [[ -n "$SOURCE_REPAIR" ]]; then
-  [[ "$ROLES" == "gui" ]] || fail "source repair is GUI-only; preserve the frozen Server"
   [[ -f "$SOURCE_REPAIR" ]] || fail "source repair manifest missing"
+  node "$HERE/lib/windows-source-repair.js" roles "$SOURCE_REPAIR" "$ROLES" >/dev/null \
+    || fail "source repair roles must exactly match requested build roles"
   [[ -n "${PAPERCUSP_WINDOWS_OUTPUT_DIR:-}" ]] \
     || fail "source repair requires a separate PAPERCUSP_WINDOWS_OUTPUT_DIR"
   if [[ -e "$PAPERCUSP_WINDOWS_OUTPUT_DIR" ]]; then
@@ -387,9 +389,9 @@ if [[ -n "$SOURCE_REPAIR" ]]; then
   SOURCE_REPAIR_APPLIED="$BUILD_CONTAINER/source-repair.json"
   node "$HERE/lib/windows-source-repair.js" apply "$SOURCE_REPAIR" \
     "${PAPERCUSP_WINDOWS_SOURCE_REPAIR_REPO:-$SOURCE_ROOT}" "$BUILD_ROOT" \
-    "$BUILD_COMMIT_SHA" "$BUILD_SUPERPROJECT_COMMIT_SHA" >"$SOURCE_REPAIR_APPLIED" \
+    "$BUILD_COMMIT_SHA" "$BUILD_SUPERPROJECT_COMMIT_SHA" "$ROLES" >"$SOURCE_REPAIR_APPLIED" \
     || fail "source repair failed exact committed-source validation"
-  echo "==> DERIVED Windows GUI source; buildSha identifies the unchanged paired operator, not the repaired native source"
+  echo "==> DERIVED Windows native source ($ROLES); buildSha identifies the paired operator base, not the repaired native source"
 fi
 
 # A release cut intentionally edits its version manifests before the build and
@@ -546,8 +548,16 @@ for role in $ROLES; do
   # identifier/productName — the mechanism `tauri build --config` uses.
   # tauri_build emits rerun-if-env-changed=TAURI_CONFIG, so switching roles
   # re-runs generate_context! (final-crate relink only, deps stay warm).
-  cfg_env=()
+  # Explicit GUI override prevents an inherited TAURI_CONFIG from compiling a
+  # Server binary while the requested role/provenance says GUI.
+  cfg_env=(TAURI_CONFIG='{}')
   [[ -n "$tauri_cfg" ]] && cfg_env=(TAURI_CONFIG="$(cat "$tauri_cfg")")
+  if [[ -n "$SOURCE_REPAIR_APPLIED" ]]; then
+    repair_cfg="$(node "$HERE/lib/windows-source-repair.js" config \
+      "$SOURCE_REPAIR_APPLIED" "$ROOT" "$role")" \
+      || fail "source repair compile configuration does not identify $role"
+    cfg_env=(TAURI_CONFIG="$repair_cfg")
+  fi
   ( cd "$SRC_TAURI" && env \
       "PAPERCUSP_BUILD_SHA=${PAPERCUSP_BUILD_SHA:-}" \
       "PAPERCUSP_BUILD_VERSION=${PAPERCUSP_BUILD_VERSION:-}" \
@@ -732,7 +742,7 @@ shopt -s nullglob
 PROV_ARTIFACTS=("$OUT_DIR"/*-setup.exe "$OUT_DIR"/*-setup-*.bin)
 shopt -u nullglob
 if [[ -n "$SOURCE_REPAIR_APPLIED" ]]; then
-  node "$HERE/lib/windows-source-repair.js" verify "$SOURCE_REPAIR_APPLIED" "$ROOT" >/dev/null \
+  node "$HERE/lib/windows-source-repair.js" verify "$SOURCE_REPAIR_APPLIED" "$ROOT" "$ROLES" >/dev/null \
     || fail "native source changed after repair materialization"
   cp "$SOURCE_REPAIR_APPLIED" "$OUT_DIR/source-repair.json"
 fi
@@ -740,6 +750,7 @@ PROVENANCE_GIT_ROOT="$ROOT" \
 PROVENANCE_SIGNED="$([[ -n "$AUTHENTICODE_PFX" ]] && echo true || echo false)" \
 PROVENANCE_SIDECAR_DIR="$SRC_TAURI/sidecar" \
 PROVENANCE_SOURCE_REPAIR_MANIFEST="$SOURCE_REPAIR_APPLIED" \
+PROVENANCE_SOURCE_REPAIR_ROLES="$ROLES" \
   bash "$HERE/emit-build-provenance.sh" \
     "$OUT_DIR" \
     "$VERSION" \
