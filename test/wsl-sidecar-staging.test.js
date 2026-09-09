@@ -48,3 +48,57 @@ test('Windows startup uses native NTFS archive, single-file extraction, then gat
   assert.match(bounded, /WSL_STARTUP_TIMEOUT \+ timeout/);
   assert.doesNotMatch(bounded, /terminate_distro/);
 });
+
+test('independent native audit rejects corrupt, missing, extra, linked and incorrectly executable files', () => {
+  const { snapshot, verify } = require('./fixtures/wsl-sidecar-staging-audit.cjs');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'wsl-staging-audit-'));
+  const sourceDir = path.join(temp, 'source');
+  const target = path.join(temp, 'target');
+  fs.mkdirSync(sourceDir);
+  fs.mkdirSync(target);
+  const payload = {
+    'serve.mjs': Buffer.from('#!/usr/bin/env node\n'),
+    'sidecar-preload.js': Buffer.from('module.exports = {};\n'),
+    'binary with spaces': Buffer.from([127, 69, 76, 70, 0, 255, 128]),
+    'plain.bin': Buffer.from([0, 255, 128]),
+  };
+  try {
+    for (const [name, bytes] of Object.entries(payload)) {
+      fs.writeFileSync(path.join(sourceDir, name), bytes, { mode: 0o644 });
+      fs.writeFileSync(path.join(target, name), bytes, { mode: 0o644 });
+    }
+    fs.mkdirSync(path.join(sourceDir, 'empty'));
+    fs.mkdirSync(path.join(target, 'empty'));
+    fs.symlinkSync('plain.bin', path.join(sourceDir, 'link'));
+    fs.symlinkSync('plain.bin', path.join(target, 'link'));
+    fs.writeFileSync(path.join(sourceDir, 'source.tar.zst'), 'excluded archive');
+    fs.chmodSync(path.join(target, 'serve.mjs'), 0o744);
+    fs.chmodSync(path.join(target, 'binary with spaces'), 0o744);
+    const manifest = snapshot(sourceDir);
+    assert.equal(manifest.entries.some(e => e.path === 'source.tar.zst'), false);
+    assert.equal(manifest.entries.find(e => e.path === 'plain.bin').sha256,
+      require('node:crypto').createHash('sha256').update(payload['plain.bin']).digest('hex'));
+    assert.equal(verify(target, manifest).files, 4);
+    fs.writeFileSync(path.join(target, 'plain.bin'), Buffer.from([0, 254, 128]));
+    assert.throws(() => verify(target, manifest), /changed: plain.bin/);
+    fs.writeFileSync(path.join(target, 'plain.bin'), payload['plain.bin']);
+    fs.chmodSync(path.join(target, 'plain.bin'), 0o744);
+    assert.throws(() => verify(target, manifest), /changed: plain.bin/);
+    fs.chmodSync(path.join(target, 'plain.bin'), 0o644);
+    fs.chmodSync(path.join(target, 'binary with spaces'), 0o644);
+    assert.throws(() => verify(target, manifest), /changed: binary with spaces/);
+    fs.chmodSync(path.join(target, 'binary with spaces'), 0o744);
+    fs.unlinkSync(path.join(target, 'link'));
+    fs.symlinkSync('serve.mjs', path.join(target, 'link'));
+    assert.throws(() => verify(target, manifest), /changed: link/);
+    fs.unlinkSync(path.join(target, 'link'));
+    fs.symlinkSync('plain.bin', path.join(target, 'link'));
+    fs.writeFileSync(path.join(target, 'source.tar.zst'), 'unexpected extraction');
+    assert.throws(() => verify(target, manifest), /extra: source.tar.zst/);
+    fs.unlinkSync(path.join(target, 'source.tar.zst'));
+    fs.unlinkSync(path.join(target, 'plain.bin'));
+    assert.throws(() => verify(target, manifest), /missing: plain.bin/);
+    assert.throws(() => verify(target, { ...manifest, entries: [...manifest.entries, manifest.entries[0]] }),
+      /duplicate path/);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
