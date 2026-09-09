@@ -3677,27 +3677,18 @@ fn prepare_wsl_sidecar_runtime(
     let temporary = format!("{}.tmp.{}", runtime_dir.display(), std::process::id());
     // EI-22686884542583537: the old Linux tar -C /mnt/c reintroduced the
     // per-file P9 reads this ext4 cache was meant to remove. Native tar reads
-    // NTFS into a local archive; WSL reads ONE file sequentially. The native
-    // stdin pipe was also measured too slow for the multi-GB model payload.
-    let archive = wsl_sidecar_staging::TemporaryArchive::create(
-        std::env::temp_dir().join(format!("papercusp-sidecar-{generation}-{}-{}.tar",
-            std::process::id(), std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()))
-    )?;
+    // NTFS into the ready WSL child's binary stdin handle. D019's full native
+    // witness distinguishes this from a user-space/text interop relay.
     let mut producer = Command::new("tar.exe");
     producer.arg("-C").arg(sidecar_dir).args(wsl_sidecar_staging::ARCHIVE_ARGS)
-        .arg("-cf").arg(archive.path()).arg(".");
+        .args(["-b", "2048", "-cf", "-", "."]);
     no_console_window(&mut producer);
-    wsl_sidecar_staging::stage_archive(&mut producer, |_remaining| {
-        let mut consumer = wsl_sidecar_staging::wsl_command();
-        consumer.args(["/bin/bash", "-c"])
-            .arg(wsl_sidecar_staging::EXTRACT_SCRIPT)
-            .arg("papercusp-extract-sidecar")
-            .arg(windows_path_to_wsl(archive.path()))
-            .arg(&temporary);
-        no_console_window(&mut consumer);
-        consumer
-    }, Duration::from_secs(1_200))?;
+    let mut consumer = wsl_sidecar_staging::wsl_command();
+    consumer.args(["/bin/bash", "-c"])
+        .arg(wsl_sidecar_staging::EXTRACT_SCRIPT)
+        .arg("papercusp-extract-sidecar").arg("-").arg(&temporary);
+    no_console_window(&mut consumer);
+    wsl_sidecar_staging::stage_archive(producer, consumer, Duration::from_secs(1_200))?;
     let publish_args = vec![
         "/bin/bash".to_string(),
         "-c".to_string(),

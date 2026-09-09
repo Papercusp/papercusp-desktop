@@ -32,22 +32,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let mut producer = Command::new("tar.exe");
-    let archive = staging::TemporaryArchive::create(std::env::temp_dir()
-        .join(format!("papercusp-diagnostic-{}.tar", std::process::id())))?;
-    let archive_windows = archive.path().to_string_lossy().replace('\\', "/");
-    if archive_windows.as_bytes().get(1) != Some(&b':') {
-        return Err("Native fixture requires a drive-letter temp path".into());
-    }
-    let archive_wsl = format!("/mnt/{}{}", &archive_windows[..1].to_lowercase(), &archive_windows[2..]);
     producer.arg("-C").arg(source).args(staging::ARCHIVE_ARGS)
-        .arg("-cf").arg(archive.path()).arg(".");
+        .args(["-b", "2048", "-cf", "-", "."]);
+    let mut consumer = staging::wsl_command();
+    consumer.args(["/bin/bash", "-c"])
+        .arg(staging::EXTRACT_SCRIPT).arg("diagnostic-extract").arg("-").arg(&args[2]);
     let start = Instant::now();
-    staging::stage_archive(&mut producer, |_remaining| {
-        let mut consumer = staging::wsl_command();
-        consumer.args(["/bin/bash", "-c"])
-            .arg(staging::EXTRACT_SCRIPT).arg("diagnostic-extract").arg(&archive_wsl).arg(&args[2]);
-        consumer
-    }, Duration::from_secs(1_200))?;
+    staging::stage_archive(producer, consumer, Duration::from_secs(1_200))?;
     println!("NATIVE_ARCHIVE_PASS elapsed_ms={} acceptance=false published=false",
         start.elapsed().as_millis());
     Ok(())

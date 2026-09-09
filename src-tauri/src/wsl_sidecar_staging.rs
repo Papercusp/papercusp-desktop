@@ -3,7 +3,6 @@
 //! extractor cannot attest that the producer supplied its entire source tree.
 
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -48,6 +47,31 @@ fn run_ready_bounded(
     operation_timeout: Duration,
     total_timeout: Duration,
 ) -> io::Result<ExitStatus> {
+    let (mut child, operation_deadline) = start_ready(
+        command, startup_timeout, operation_timeout, total_timeout,
+    )?;
+    // Non-streaming commands have only the control message on stdin.
+    drop(child.0.stdin.take());
+    loop {
+        if let Some(status) = child.0.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= operation_deadline {
+            return Err(io::Error::new(io::ErrorKind::TimedOut,
+                "WSL operation timed out after readiness; only the owned child was stopped"));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Return the ready child with its stdin still open AFTER writing the budget.
+/// The same handshake governs marker probes and binary archive streaming.
+fn start_ready(
+    command: &mut Command,
+    startup_timeout: Duration,
+    operation_timeout: Duration,
+    total_timeout: Duration,
+) -> io::Result<(OwnedChild, Instant)> {
     let start = Instant::now();
     let total_deadline = start + total_timeout;
     let startup_deadline = (start + startup_timeout).min(total_deadline);
@@ -96,21 +120,11 @@ fn run_ready_bounded(
         return Err(io::Error::new(io::ErrorKind::TimedOut,
             "WSL operation deadline expired before launch"));
     }
-    // Tiny control message only, never the binary archive. The Linux timer is
-    // armed AFTER startup, with the shared deadline's actual remaining budget.
-    let mut stdin = child.0.stdin.take().expect("stdin was piped");
+    // The tiny control message precedes binary bytes on this same pipe. No
+    // buffered reader may consume beyond its newline on the Linux side.
+    let stdin = child.0.stdin.as_mut().expect("stdin was piped");
     writeln!(stdin, "{:.6}s", remaining.as_secs_f64())?;
-    drop(stdin);
-    loop {
-        if let Some(status) = child.0.try_wait()? {
-            return Ok(status);
-        }
-        if Instant::now() >= operation_deadline {
-            return Err(io::Error::new(io::ErrorKind::TimedOut,
-                "WSL operation timed out after readiness; only the owned child was stopped"));
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    Ok((child, operation_deadline))
 }
 
 pub const ARCHIVE_ARGS: &[&str] = &[
@@ -124,11 +138,9 @@ archive=$1
 temporary_dir=$2
 rm -rf -- "$temporary_dir"
 mkdir -p -- "$temporary_dir"
-# One DrvFs file still pays a crossing per read. GNU tar's default 10 KiB
-# records made the native 306 MB control take 57 s; 1 MiB records took 13 s
-# with identical hashes (default/large/default). This changes reads only,
-# not the archive format, payload, publication rules or total deadline.
-tar --blocking-factor=2048 -C "$temporary_dir" -xf "$archive"
+# Producer stdout is this process's binary stdin, not a text relay or DrvFs
+# archive read. Pipes may return partial records; assemble the full record.
+tar --blocking-factor=2048 --read-full-records -C "$temporary_dir" -xf "$archive"
 test -f "$temporary_dir/serve.mjs"
 test -f "$temporary_dir/sidecar-preload.js"
 # NTFS archives synthesize execute bits (including for PE/BAT files). Discard
@@ -186,20 +198,6 @@ impl Drop for OwnedChild {
     }
 }
 
-/// Reserve a new native archive pathname. Never overwrite someone else's temp
-/// file, and remove our large archive on every success/error return.
-pub struct TemporaryArchive(PathBuf);
-impl TemporaryArchive {
-    pub fn create(path: PathBuf) -> io::Result<Self> {
-        std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
-        Ok(Self(path))
-    }
-    pub fn path(&self) -> &Path { &self.0 }
-}
-impl Drop for TemporaryArchive {
-    fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
-}
-
 pub fn run_bounded(command: &mut Command, timeout: Duration) -> io::Result<ExitStatus> {
     let mut child = OwnedChild(command.spawn()?);
     let deadline = Instant::now() + timeout;
@@ -217,46 +215,53 @@ pub fn run_bounded(command: &mut Command, timeout: Duration) -> io::Result<ExitS
     }
 }
 
-/// Native tar enumerates NTFS into one local file, then WSL reads that file
-/// sequentially. Native→WSL stdin was measured at ~2 MB/s on the real guest,
-/// insufficient for the shipped multi-GB models. Do not use a text/binary
-/// interop pipe, reintroduce per-file DrvFs reads, or increase the deadline.
-pub fn stage_archive<F>(
-    producer: &mut Command,
-    make_consumer: F,
+/// Native tar enumerates NTFS and writes DIRECTLY to the ready WSL child's
+/// stdin handle. No user-space copy thread, text relay or temporary archive.
+/// Own both Commands: a retained producer Command also retains its configured
+/// writer handle, preventing EOF even after the producer exits.
+pub fn stage_archive(
+    mut producer: Command,
+    mut consumer: Command,
     timeout: Duration,
-) -> io::Result<()>
-where
-    F: FnOnce(Duration) -> Command,
-{
+) -> io::Result<()> {
     let start = Instant::now();
-    eprintln!("[wsl-staging] archive producer starting");
-    let status = run_bounded(producer, timeout)?;
-    if !status.success() {
-        return Err(io::Error::other(format!("archive producer exited with {status}")));
-    }
+    eprintln!("[wsl-staging] awaiting WSL archive extractor readiness");
     let remaining = timeout.saturating_sub(start.elapsed());
-    eprintln!("[wsl-staging] archive producer complete elapsed_ms={} remaining_ms={}",
-        start.elapsed().as_millis(), remaining.as_millis());
-    if remaining.is_zero() {
-        return Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "Windows sidecar archive deadline expired; no distro reset",
-        ));
-    }
-    // Construct the Linux deadline NOW, not before archive creation. Otherwise
-    // killing wsl.exe at the shared deadline leaves its extractor alive for the
-    // entire producer duration beyond that deadline.
-    let mut consumer = make_consumer(remaining);
-    eprintln!("[wsl-staging] WSL archive extractor starting");
-    let remaining = timeout.saturating_sub(start.elapsed());
-    let status = run_wsl_bounded(&mut consumer, remaining, remaining)?;
-    if !status.success() {
-        return Err(io::Error::other(format!("WSL archive extractor exited with {status}")));
-    }
-    eprintln!("[wsl-staging] WSL archive extractor complete elapsed_ms={}",
+    let (mut consumer_child, deadline) = start_ready(
+        &mut consumer, WSL_STARTUP_TIMEOUT, remaining, remaining,
+    )?;
+    let writer = consumer_child.0.stdin.take().expect("ready stdin was piped");
+    producer.stdin(Stdio::null()).stdout(Stdio::from(writer));
+    let mut producer_child = OwnedChild(producer.spawn()?);
+    drop(producer); // Close the parent's configured writer, not only the child's.
+    eprintln!("[wsl-staging] binary archive stream starting elapsed_ms={}",
         start.elapsed().as_millis());
-    Ok(())
+    let (mut producer_done, mut consumer_done) = (false, false);
+    loop {
+        for (child, done, label) in [
+            (&mut producer_child.0, &mut producer_done, "archive producer"),
+            (&mut consumer_child.0, &mut consumer_done, "WSL archive extractor"),
+        ] {
+            if !*done {
+                if let Some(status) = child.try_wait()? {
+                    eprintln!("[wsl-staging] {label} exited with {status} elapsed_ms={}",
+                        start.elapsed().as_millis());
+                    if !status.success() {
+                        return Err(io::Error::other(format!("{label} exited with {status}")));
+                    }
+                    *done = true;
+                }
+            }
+        }
+        if producer_done && consumer_done {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(io::ErrorKind::TimedOut,
+                "Windows sidecar stream deadline expired; only owned children were stopped"));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -284,13 +289,13 @@ mod tests {
         fn producer(&self) -> Command {
             let mut c = Command::new("tar");
             c.arg("-C").arg(self.0.join("source")).args(ARCHIVE_ARGS)
-                .arg("-cf").arg(self.0.join("archive.tar")).arg(".");
+                .args(["-b", "2048", "-cf", "-", "."]);
             c
         }
         fn consumer(&self) -> Command {
             let mut c = Command::new("bash");
             c.args(["-c", WSL_READY_SCRIPT, "ready", "/bin/bash", "-c", EXTRACT_SCRIPT, "extract"])
-                .arg(self.0.join("archive.tar")).arg(self.0.join("stage"));
+                .arg("-").arg(self.0.join("stage"));
             c
         }
         fn publish(&self) -> ExitStatus {
@@ -309,7 +314,7 @@ mod tests {
         let f = Fixture::new();
         fs::write(f.0.join("source/file with spaces"), [255, 0, 128]).unwrap();
         std::os::unix::fs::symlink("serve.mjs", f.0.join("source/link")).unwrap();
-        stage_archive(&mut f.producer(), |_| f.consumer(), Duration::from_secs(5)).unwrap();
+        stage_archive(f.producer(), f.consumer(), Duration::from_secs(5)).unwrap();
         assert!(!f.0.join("runtime").exists());
         assert!(!f.0.join("stage/.papercusp-runtime-complete").exists());
         assert!(f.publish().success());
@@ -331,7 +336,7 @@ mod tests {
             let f = Fixture::new();
             let bytes: Vec<u8> = (0..length).map(|n| (n % 251) as u8).collect();
             fs::write(f.0.join("source/partial record.bin"), &bytes).unwrap();
-            stage_archive(&mut f.producer(), |_| f.consumer(), Duration::from_secs(5)).unwrap();
+            stage_archive(f.producer(), f.consumer(), Duration::from_secs(5)).unwrap();
             assert_eq!(fs::read(f.0.join("stage/partial record.bin")).unwrap(), bytes);
             assert!(!f.0.join("stage/.papercusp-runtime-complete").exists());
         }
@@ -341,11 +346,10 @@ mod tests {
     fn producer_failure_after_valid_archive_does_not_publish() {
         let f = Fixture::new();
         let mut c = Command::new("bash");
-        c.args(["-c", "tar -C \"$1\" -cf \"$2\" .; exit 19", "producer"])
-            .arg(f.0.join("source")).arg(f.0.join("archive.tar"));
-        let err = stage_archive(&mut c, |_| panic!("consumer must not be constructed"), Duration::from_secs(5)).unwrap_err();
+        c.args(["-c", "tar -C \"$1\" -cf - .; exit 19", "producer"])
+            .arg(f.0.join("source"));
+        let err = stage_archive(c, f.consumer(), Duration::from_secs(5)).unwrap_err();
         assert!(err.to_string().contains("archive producer"));
-        assert!(!f.0.join("stage").exists(), "extractor must not start on failed production");
         assert!(!f.0.join("runtime").exists());
         assert!(!f.0.join("stage/.papercusp-runtime-complete").exists());
     }
@@ -353,9 +357,9 @@ mod tests {
     #[test]
     fn corrupt_archive_is_rejected_by_real_extractor() {
         let f = Fixture::new();
-        fs::write(f.0.join("archive.tar"), b"this is not a tar archive").unwrap();
-        let mut c = Command::new("true");
-        assert!(stage_archive(&mut c, |_| f.consumer(), Duration::from_secs(5)).is_err());
+        let mut c = Command::new("printf");
+        c.arg("this is not a tar archive");
+        assert!(stage_archive(c, f.consumer(), Duration::from_secs(5)).is_err());
         assert!(!f.0.join("runtime").exists());
     }
 
@@ -363,7 +367,7 @@ mod tests {
     fn missing_required_runtime_file_is_not_published() {
         let f = Fixture::new();
         fs::remove_file(f.0.join("source/serve.mjs")).unwrap();
-        assert!(stage_archive(&mut f.producer(), |_| f.consumer(), Duration::from_secs(5)).is_err());
+        assert!(stage_archive(f.producer(), f.consumer(), Duration::from_secs(5)).is_err());
         assert!(!f.publish().success());
         assert!(!f.0.join("runtime").exists());
     }
@@ -376,7 +380,7 @@ mod tests {
         let mut c = Command::new("bash");
         c.args(["-c", "echo $$ > \"$1\"; exec sleep 20", "producer"]).arg(&pid_file);
         let start = Instant::now();
-        assert_eq!(stage_archive(&mut c, |_| panic!("consumer must not be constructed"), Duration::from_millis(300))
+        assert_eq!(stage_archive(c, f.consumer(), Duration::from_millis(300))
             .unwrap_err().kind(), io::ErrorKind::TimedOut);
         assert!(start.elapsed() < Duration::from_secs(3));
         assert!(unrelated.0.try_wait().unwrap().is_none());
@@ -387,11 +391,88 @@ mod tests {
 
     #[test]
     fn failed_consumer_spawn_returns_error_without_publishing() {
-        let mut c = Command::new("true");
+        let c = Command::new("true");
         let start = Instant::now();
-        assert_eq!(stage_archive(&mut c, |_| Command::new("/nonexistent-staging-extractor"), Duration::from_secs(5))
+        assert_eq!(stage_archive(c, Command::new("/nonexistent-staging-extractor"), Duration::from_secs(5))
             .unwrap_err().kind(), io::ErrorKind::NotFound);
         assert!(start.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn failed_producer_spawn_reaps_the_ready_consumer() {
+        let f = Fixture::new();
+        let mut consumer = Command::new("bash");
+        consumer.args(["-c",
+            "echo $$ > \"$1\"; printf 'papercusp-wsl-ready-v1\\n'; IFS= read -r seconds; exec sleep 20",
+            "consumer"]).arg(f.0.join("consumer.pid"));
+        assert_eq!(stage_archive(Command::new("/nonexistent-staging-producer"), consumer,
+            Duration::from_secs(5)).unwrap_err().kind(), io::ErrorKind::NotFound);
+        let pid = fs::read_to_string(f.0.join("consumer.pid")).unwrap();
+        assert!(!PathBuf::from(format!("/proc/{}", pid.trim())).exists());
+    }
+
+    #[test]
+    fn invalid_consumer_readiness_never_starts_producer() {
+        let f = Fixture::new();
+        let mut producer = Command::new("touch");
+        producer.arg(f.0.join("producer-started"));
+        let err = stage_archive(producer, Command::new("true"),
+            Duration::from_secs(3)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(!f.0.join("producer-started").exists());
+    }
+
+    #[test]
+    fn successful_consumer_cannot_hide_later_producer_failure() {
+        let mut producer = Command::new("bash");
+        producer.args(["-c", "sleep 0.1; exit 19"]);
+        let consumer = delayed_ready("0", &["/bin/true"]);
+        let err = stage_archive(producer, consumer, Duration::from_secs(3)).unwrap_err();
+        assert!(err.to_string().contains("archive producer"));
+    }
+
+    #[test]
+    fn consumer_failure_reaps_owned_producer_not_unrelated_process() {
+        let f = Fixture::new();
+        let mut unrelated = OwnedChild(Command::new("sleep").arg("20").spawn().unwrap());
+        let mut producer = Command::new("bash");
+        producer.args(["-c", "echo $$ > \"$1\"; exec sleep 20", "producer"])
+            .arg(f.0.join("producer.pid"));
+        let mut consumer = Command::new("bash");
+        consumer.args(["-c", WSL_READY_SCRIPT, "ready", "/bin/bash", "-c",
+            "while ! test -f \"$1\"; do sleep 0.01; done; exit 23", "consumer"])
+            .arg(f.0.join("producer.pid"));
+        let error = stage_archive(producer, consumer, Duration::from_secs(3)).unwrap_err();
+        assert!(error.to_string().contains("WSL archive extractor"));
+        let pid = fs::read_to_string(f.0.join("producer.pid")).unwrap();
+        assert!(!PathBuf::from(format!("/proc/{}", pid.trim())).exists());
+        assert!(unrelated.0.try_wait().unwrap().is_none());
+    }
+
+    #[test]
+    fn one_successful_child_cannot_hide_the_other_timing_out() {
+        for producer_stalls in [true, false] {
+            let mut producer = Command::new(if producer_stalls { "sleep" } else { "true" });
+            if producer_stalls { producer.arg("20"); }
+            let consumer = if producer_stalls {
+                delayed_ready("0", &["/bin/true"])
+            } else {
+                delayed_ready("0", &["/bin/sleep", "20"])
+            };
+            assert!(stage_archive(producer, consumer, Duration::from_millis(300)).is_err());
+        }
+    }
+
+    #[test]
+    fn streamed_archive_handles_fragmented_binary_pipe_reads() {
+        let f = Fixture::new();
+        let mut producer = Command::new("bash");
+        producer.args(["-o", "pipefail", "-c",
+            "tar -C \"$1\" -cf - . | node -e 'process.stdin.on(\"data\", b => { for (let i=0; i<b.length; i+=17) process.stdout.write(b.subarray(i,i+17)); });'",
+            "producer"]).arg(f.0.join("source"));
+        stage_archive(producer, f.consumer(), Duration::from_secs(5)).unwrap();
+        assert_eq!(fs::read(f.0.join("stage/serve.mjs")).unwrap(), [0, 255, 13, 10, 128, 42]);
+        assert!(!f.0.join("stage/.papercusp-runtime-complete").exists());
     }
 
     #[test]
@@ -407,7 +488,7 @@ mod tests {
     #[test]
     fn an_existing_incomplete_generation_is_not_treated_as_complete() {
         let f = Fixture::new();
-        stage_archive(&mut f.producer(), |_| f.consumer(), Duration::from_secs(5)).unwrap();
+        stage_archive(f.producer(), f.consumer(), Duration::from_secs(5)).unwrap();
         fs::create_dir(f.0.join("runtime")).unwrap();
         assert!(!f.publish().success());
         assert!(!f.0.join("runtime/.papercusp-runtime-complete").exists());
@@ -426,7 +507,7 @@ mod tests {
             // Linux-only fixture whose data files already have correct bits.
             fs::set_permissions(file, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        stage_archive(&mut f.producer(), |_| f.consumer(), Duration::from_secs(5)).unwrap();
+        stage_archive(f.producer(), f.consumer(), Duration::from_secs(5)).unwrap();
         for name in ["elf", "script"] {
             assert_eq!(fs::metadata(f.0.join("stage").join(name)).unwrap().permissions().mode() & 0o111, 0o100);
         }
@@ -436,15 +517,15 @@ mod tests {
     }
 
     #[test]
-    fn archive_custody_refuses_existing_file_and_cleans_up_own_file() {
+    fn parent_writer_is_closed_so_consumer_observes_eof() {
         let f = Fixture::new();
-        let path = f.0.join("owned.tar");
-        let archive = TemporaryArchive::create(path.clone()).unwrap();
-        assert!(TemporaryArchive::create(path.clone()).is_err());
-        assert_eq!(archive.path(), path);
-        fs::write(&path, b"archive").unwrap();
-        drop(archive);
-        assert!(!path.exists());
+        let mut producer = Command::new("printf");
+        producer.arg("binary\\000\\377\\015\\012");
+        let mut consumer = Command::new("bash");
+        consumer.args(["-c", WSL_READY_SCRIPT, "ready", "/bin/bash", "-c",
+            "cat > \"$1\"", "consume"]).arg(f.0.join("pipe-output"));
+        stage_archive(producer, consumer, Duration::from_secs(3)).unwrap();
+        assert_eq!(fs::read(f.0.join("pipe-output")).unwrap(), b"binary\0\xff\r\n");
     }
 
     #[test]
@@ -457,19 +538,21 @@ mod tests {
     }
 
     #[test]
-    fn linux_consumer_is_constructed_after_producer_with_only_remaining_budget() {
+    fn producer_starts_only_after_readiness_and_remaining_budget_reply() {
         let f = Fixture::new();
         let mut producer = Command::new("bash");
-        producer.args(["-c", "sleep 0.05; tar -C \"$1\" -cf \"$2\" .", "producer"])
-            .arg(f.0.join("source")).arg(f.0.join("archive.tar"));
+        producer.args(["-c", "test -f \"$1/ready\" || exit 19; tar -C \"$1/source\" -cf - .", "producer"])
+            .arg(&f.0);
+        let mut consumer = Command::new("bash");
+        consumer.args(["-c",
+            "sleep 0.3; touch \"$1/ready\"; printf 'papercusp-wsl-ready-v1\\n'; IFS= read -r seconds; printf '%s' \"$seconds\" > \"$1/budget\"; cat > \"$1/received.tar\"",
+            "consumer"]).arg(&f.0);
         let budget = Duration::from_secs(5);
-        stage_archive(&mut producer, |remaining| {
-            assert!(f.0.join("archive.tar").is_file(), "producer must have run first");
-            assert!(remaining <= budget - Duration::from_millis(50),
-                "Linux must not receive the producer's already-spent budget");
-            assert!(!remaining.is_zero());
-            f.consumer()
-        }, budget).unwrap();
+        stage_archive(producer, consumer, budget).unwrap();
+        let seconds = fs::read_to_string(f.0.join("budget")).unwrap()
+            .trim_end_matches('s').parse::<f64>().unwrap();
+        assert!(seconds > 0.0 && seconds <= 4.7, "startup spent budget: {seconds}");
+        assert!(fs::metadata(f.0.join("received.tar")).unwrap().len() > 0);
         assert!(!f.0.join("runtime").exists(), "diagnostic extraction is not publication");
     }
 
