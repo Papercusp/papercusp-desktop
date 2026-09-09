@@ -769,9 +769,10 @@ fn recovery_page_html(failing_uri: &str) -> String {
 #[cfg(any(target_os = "windows", test))]
 fn windows_path_to_wsl(path: &std::path::Path) -> String {
     let s = path.to_string_lossy().to_string();
-    // Already a posix-style path? Leave it alone.
+    // Windows PathBuf::join appends backslashes even to a POSIX runtime root.
+    // This boundary receives Windows-authored paths, not literal Linux names.
     if s.starts_with('/') && !s.starts_with("//") {
-        return s;
+        return s.replace('\\', "/");
     }
 
     // Strip the long-path prefix (`\\?\` or `\\?\UNC\`). Beyond
@@ -6492,22 +6493,23 @@ const SIDECAR_WSLENV: &str = "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCU
 /// from the variables whose values now point into that tree. Seed/source
 /// archives and Windows-owned identity/state paths deliberately remain on the
 /// installed Windows tree and must retain translation.
+const WSL_NATIVE_RUNTIME_PATHS: [&str; 10] = [
+    "PAPERCUSP_HARNESS_DIR",
+    "PAPERCUSP_TEMPLATES_DIR",
+    "PAPERCUSP_RUBRICS_DIR",
+    "PAPERCUSP_GOAL_PACKAGES_DIR",
+    "PAPERCUSP_PG_SQL_DIR",
+    "PAPERCUSP_PG_RESTORE_BIN",
+    "PAPERCUSP_SPA_DIST",
+    "PAPERCUSP_DOCS_ROOT",
+    "PAPERCUSP_PROMPTS_DIR",
+    "PAPERCUSP_SIDECAR_BIN",
+];
+
 fn sidecar_wslenv(runtime_sidecar_is_wsl_native: bool) -> String {
     if !runtime_sidecar_is_wsl_native {
         return SIDECAR_WSLENV.to_string();
     }
-    const WSL_NATIVE_RUNTIME_PATHS: [&str; 10] = [
-        "PAPERCUSP_HARNESS_DIR",
-        "PAPERCUSP_TEMPLATES_DIR",
-        "PAPERCUSP_RUBRICS_DIR",
-        "PAPERCUSP_GOAL_PACKAGES_DIR",
-        "PAPERCUSP_PG_SQL_DIR",
-        "PAPERCUSP_PG_RESTORE_BIN",
-        "PAPERCUSP_SPA_DIST",
-        "PAPERCUSP_DOCS_ROOT",
-        "PAPERCUSP_PROMPTS_DIR",
-        "PAPERCUSP_SIDECAR_BIN",
-    ];
     SIDECAR_WSLENV
         .split(':')
         .map(|entry| {
@@ -6520,6 +6522,28 @@ fn sidecar_wslenv(runtime_sidecar_is_wsl_native: bool) -> String {
         })
         .collect::<Vec<_>>()
         .join(":")
+}
+
+/// The same paths whose `/p` translation is disabled must reach Linux with
+/// POSIX separators. Windows PathBuf joins otherwise leave `root\spa` etc.
+/// Do not touch Windows-owned seed/source/state paths: WSLENV still translates
+/// those, and their native values remain meaningful to Windows callers.
+#[cfg(any(target_os = "windows", test))]
+fn normalize_wsl_runtime_env(cmd: &mut Command) {
+    let normalized: Vec<_> = cmd
+        .get_envs()
+        .filter_map(|(name, value)| {
+            let name = name.to_str()?;
+            if !WSL_NATIVE_RUNTIME_PATHS.contains(&name) {
+                return None;
+            }
+            Some((
+                name.to_owned(),
+                windows_path_to_wsl(std::path::Path::new(value?)),
+            ))
+        })
+        .collect();
+    cmd.envs(normalized);
 }
 
 fn baked_distribution_profile() -> &'static str {
@@ -6977,6 +7001,10 @@ fn spawn_serve(
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     }
 
+    #[cfg(target_os = "windows")]
+    if via_wsl && runtime_sidecar_dir != sidecar_dir {
+        normalize_wsl_runtime_env(&mut cmd);
+    }
     cmd.spawn()
 }
 
