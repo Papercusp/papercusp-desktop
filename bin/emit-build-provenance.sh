@@ -542,7 +542,7 @@ SOURCE_REPAIR_JSON=""
 if [[ -n "${PROVENANCE_SOURCE_REPAIR_MANIFEST:-}" ]]; then
   SOURCE_REPAIR_JSON="$(node "$(dirname "${BASH_SOURCE[0]}")/lib/windows-source-repair.js" \
     attestation "$PROVENANCE_SOURCE_REPAIR_MANIFEST" "$GIT_ROOT" "$BUILD_SHA" "$GIT_HEAD" \
-    "${PROVENANCE_SOURCE_REPAIR_ROLES:-}")" \
+    "${PROVENANCE_SOURCE_REPAIR_ROLES:-}" "$VERSION")" \
     || { echo "ERROR: source repair does not describe the native source" >&2; exit 2; }
   # A base+patch is never attested as a clean original commit, even if a caller
   # inherited a clean-source override from its original all-platform cut.

@@ -434,14 +434,6 @@ PROVENANCE_TOOLS_ROOT="$BUILD_CONTAINER/provenance-tools"
 WINDOWS_PROVENANCE_TOOLCHAIN="$(snapshot_provenance_tools "$PROVENANCE_TOOLS_ROOT" "$HERE")" \
   || fail "could not snapshot the Windows provenance producer"
 SOURCE_REPAIR_APPLIED=""
-if [[ -n "$SOURCE_REPAIR" ]]; then
-  SOURCE_REPAIR_APPLIED="$BUILD_CONTAINER/source-repair.json"
-  node "$PROVENANCE_TOOLS_ROOT/lib/windows-source-repair.js" apply "$SOURCE_REPAIR" \
-    "${PAPERCUSP_WINDOWS_SOURCE_REPAIR_REPO:-$SOURCE_ROOT}" "$BUILD_ROOT" \
-    "$BUILD_COMMIT_SHA" "$BUILD_SUPERPROJECT_COMMIT_SHA" "$ROLES" >"$SOURCE_REPAIR_APPLIED" \
-    || fail "source repair failed exact committed-source validation"
-  echo "==> DERIVED Windows native source ($ROLES); buildSha identifies the paired operator base, not the repaired native source"
-fi
 
 # A release cut intentionally edits its version manifests before the build and
 # generates the seed/sidecar outside Git. Copy those inputs once into the pinned
@@ -500,6 +492,17 @@ copy_superproject_snapshot_blob() {
 for _release_input in package.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json; do
   copy_snapshot_input "$_release_input"
 done
+# Compose only AFTER the frozen release-version inputs arrive. Otherwise this
+# copy silently overwrites an admitted direct dependency with the old manifest.
+# The v2 helper validates that version stamping is the ONLY baseline difference.
+if [[ -n "$SOURCE_REPAIR" ]]; then
+  SOURCE_REPAIR_APPLIED="$BUILD_CONTAINER/source-repair.json"
+  node "$PROVENANCE_TOOLS_ROOT/lib/windows-source-repair.js" apply "$SOURCE_REPAIR" \
+    "${PAPERCUSP_WINDOWS_SOURCE_REPAIR_REPO:-$SOURCE_ROOT}" "$BUILD_ROOT" \
+    "$BUILD_COMMIT_SHA" "$BUILD_SUPERPROJECT_COMMIT_SHA" "$ROLES" >"$SOURCE_REPAIR_APPLIED" \
+    || fail "source repair failed exact committed-source validation"
+  echo "==> DERIVED Windows native source ($ROLES); buildSha identifies the paired operator base, not the repaired native source"
+fi
 copy_superproject_snapshot_blob "$WINDOWS_CSP_POLICY_REL"
 if [[ " $ROLES " == *" server "* ]]; then
   for _generated_input in src-tauri/sidecar src-tauri/env-sidecars src-tauri/seed src-tauri/resources; do
@@ -613,7 +616,7 @@ for role in $ROLES; do
       "PAPERCUSP_RELEASE_HOST=${PAPERCUSP_RELEASE_HOST:-}" \
       "${cfg_env[@]}" \
       "RUSTFLAGS=${RUSTFLAGS:-} $_WIN_REMAP $_WIN_CRT_STATIC" \
-      cargo xwin build --release --target "$TARGET" -p papercusp-desktop )
+      cargo xwin build --release --locked --target "$TARGET" -p papercusp-desktop )
   EXE="$CROSS_EXE"
   [[ -f "$EXE" ]] || fail "cross-compile produced no papercusp-desktop.exe for role '$role' at $EXE"
 
