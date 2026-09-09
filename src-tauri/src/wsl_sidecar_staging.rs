@@ -131,8 +131,8 @@ mkdir -p -- "$temporary_dir"
 tar --blocking-factor=2048 -C "$temporary_dir" -xf "$archive"
 test -f "$temporary_dir/serve.mjs"
 test -f "$temporary_dir/sidecar-preload.js"
-# NTFS archives have no Linux executable metadata. Restore the owner execute
-# bit only for ELF binaries and shebang scripts, not arbitrary data files.
+# NTFS archives synthesize execute bits (including for PE/BAT files). Discard
+# those bits, then grant only owner execute for ELF binaries/shebang scripts.
 # Node is already required/installed before WslState::Ready permits staging.
 node - "$temporary_dir" <<'NODE'
 const fs = require('node:fs');
@@ -146,11 +146,12 @@ function visit(dir) {
     const fd = fs.openSync(file, 'r');
     let n;
     try { n = fs.readSync(fd, magic, 0, 4, 0); } finally { fs.closeSync(fd); }
-    if ((n >= 2 && magic[0] === 35 && magic[1] === 33) ||
+    const executable = (n >= 2 && magic[0] === 35 && magic[1] === 33) ||
         (n === 4 && magic[0] === 127 && magic[1] === 69 &&
-         magic[2] === 76 && magic[3] === 70)) {
-      fs.chmodSync(file, fs.statSync(file).mode | 0o100);
-    }
+         magic[2] === 76 && magic[3] === 70);
+    const mode = fs.statSync(file).mode;
+    const normalized = (mode & ~0o111) | (executable ? 0o100 : 0);
+    if (normalized !== mode) fs.chmodSync(file, normalized);
   }
 }
 visit(process.argv[2]);
@@ -417,16 +418,21 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let f = Fixture::new();
         for (name, bytes) in [("elf", b"\x7fELFxxx".as_slice()),
-            ("script", b"#!/bin/sh\nexit 0".as_slice()), ("data", b"ordinary data".as_slice())] {
+            ("script", b"#!/bin/sh\nexit 0".as_slice()), ("data", b"ordinary data".as_slice()),
+            ("windows.exe", b"MZ\x90\0".as_slice()), ("windows.bat", b"@echo off".as_slice())] {
             let file = f.0.join("source").join(name);
             fs::write(&file, bytes).unwrap();
-            fs::set_permissions(file, fs::Permissions::from_mode(0o644)).unwrap();
+            // Match native tar's synthetic executable metadata, not a
+            // Linux-only fixture whose data files already have correct bits.
+            fs::set_permissions(file, fs::Permissions::from_mode(0o755)).unwrap();
         }
         stage_archive(&mut f.producer(), |_| f.consumer(), Duration::from_secs(5)).unwrap();
         for name in ["elf", "script"] {
-            assert_ne!(fs::metadata(f.0.join("stage").join(name)).unwrap().permissions().mode() & 0o100, 0);
+            assert_eq!(fs::metadata(f.0.join("stage").join(name)).unwrap().permissions().mode() & 0o111, 0o100);
         }
-        assert_eq!(fs::metadata(f.0.join("stage/data")).unwrap().permissions().mode() & 0o111, 0);
+        for name in ["data", "windows.exe", "windows.bat"] {
+            assert_eq!(fs::metadata(f.0.join("stage").join(name)).unwrap().permissions().mode() & 0o111, 0);
+        }
     }
 
     #[test]

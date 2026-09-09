@@ -50,7 +50,10 @@ test('Windows startup uses native NTFS archive, single-file extraction, then gat
 });
 
 test('independent native audit rejects corrupt, missing, extra, linked and incorrectly executable files', () => {
-  const { snapshot, verify } = require('./fixtures/wsl-sidecar-staging-audit.cjs');
+  const { snapshot, verify, portableLinkTarget } = require('./fixtures/wsl-sidecar-staging-audit.cjs');
+  assert.equal(portableLinkTarget('..\\lib\\claude.exe', 'win32'), '../lib/claude.exe');
+  assert.equal(portableLinkTarget('..\\lib\\claude.exe', 'linux'), '..\\lib\\claude.exe');
+  assert.notEqual(portableLinkTarget('..\\other\\claude.exe', 'win32'), '../lib/claude.exe');
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'wsl-staging-audit-'));
   const sourceDir = path.join(temp, 'source');
   const target = path.join(temp, 'target');
