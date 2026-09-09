@@ -89,6 +89,11 @@ test('independent native audit rejects corrupt, missing, extra, linked and incor
     fs.chmodSync(path.join(target, 'plain.bin'), 0o744);
     assert.throws(() => verify(target, manifest), /changed: plain.bin/);
     fs.chmodSync(path.join(target, 'plain.bin'), 0o644);
+    fs.chmodSync(path.join(target, 'plain.bin'), 0o655);
+    assert.throws(() => verify(target, manifest), /changed: plain.bin/);
+    fs.chmodSync(path.join(target, 'plain.bin'), 0o644);
+    fs.chmodSync(path.join(target, 'binary with spaces'), 0o755);
+    assert.throws(() => verify(target, manifest), /changed: binary with spaces/);
     fs.chmodSync(path.join(target, 'binary with spaces'), 0o644);
     assert.throws(() => verify(target, manifest), /changed: binary with spaces/);
     fs.chmodSync(path.join(target, 'binary with spaces'), 0o744);

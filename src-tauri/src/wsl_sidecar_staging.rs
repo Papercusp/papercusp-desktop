@@ -247,7 +247,14 @@ pub fn stage_archive(
                     eprintln!("[wsl-staging] {label} exited with {status} elapsed_ms={}",
                         start.elapsed().as_millis());
                     if !status.success() {
-                        return Err(io::Error::other(format!("{label} exited with {status}")));
+                        // GNU timeout may beat the parent watchdog to this
+                        // observation. Keep both deadline paths classifiable.
+                        let kind = if label == "WSL archive extractor" && status.code() == Some(124) {
+                            io::ErrorKind::TimedOut
+                        } else {
+                            io::ErrorKind::Other
+                        };
+                        return Err(io::Error::new(kind, format!("{label} exited with {status}")));
                     }
                     *done = true;
                 }
