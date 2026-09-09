@@ -185,11 +185,18 @@ function scanForUnstamped(files) {
   const bad = [];
   for (const { name, text } of files) {
     for (const l of logicalLines(text)) {
+      // A leading environment value can record the overlay for a content hash
+      // without APPLYING it as a build argument. Strip only simple assignment
+      // prefixes, not arbitrary text or later arguments; an unstamped build
+      // after the assignments must still be rejected.
+      let command = l.text;
+      const assignment = /^[A-Za-z_][A-Za-z0-9_]*=(?:[^'"\s]|"[^"]*"|'[^']*')*\s+/;
+      while (assignment.test(command)) command = command.replace(assignment, '');
       // An ASSIGNMENT (`FOO=()`) defines the array; only an EXPANSION
       // (`"${FOO[@]}"`) applies it to a build. Distinguishing them is what lets
       // the chokepoint declare the arrays separately without tripping this.
-      if (!new RegExp(`\\$\\{${CFG_ARRAY}\\[`).test(l.text)) continue;
-      if (new RegExp(`\\$\\{${ENV_ARRAY}\\[`).test(l.text)) continue;
+      if (!new RegExp(`\\$\\{${CFG_ARRAY}\\[`).test(command)) continue;
+      if (new RegExp(`\\$\\{${ENV_ARRAY}\\[`).test(command)) continue;
       bad.push({ name, line: l.line, text: l.text });
     }
   }
@@ -213,6 +220,14 @@ test('the scans are falsifiable (permanent controls, never mutate the tree)', ()
   const cfgOnly = `tauri build "\${${CFG_ARRAY}[@]}"`;
   const envOnly = `env "\${${ENV_ARRAY}[@]}" tauri build`;
   const declaration = `${CFG_ARRAY}=()`;
+
+  const identityPrefix = `SIGNER="public key" CONFIG="\${${CFG_ARRAY}[*]:-}" `;
+  assert.deepEqual(scanForUnstamped([{ name: 'identity', text: `${identityPrefix}node - "$ROOT"` }]), []);
+  assert.equal(scanForUnstamped([{ name: 'prefixed-build', text: `${identityPrefix}${cfgOnly}` }]).length, 1);
+  assert.deepEqual(scanForUnstamped([{ name: 'prefixed-build', text: `${identityPrefix}${joined}` }]), []);
+  // Recording the stamp array as data does not apply its environment entries.
+  const recordedStamps = `STAMP_COPY="\${${ENV_ARRAY}[*]}" ${cfgOnly}`;
+  assert.equal(scanForUnstamped([{ name: 'recorded-stamps', text: recordedStamps }]).length, 1);
 
   assert.deepEqual(scanForUnstamped([{ name: 'ctl', text: joined }]), []);
   // The overlay applied with no stamps: a separate installed application
