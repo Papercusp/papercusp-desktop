@@ -1655,6 +1655,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shipped_bootstrap_provisions_live_voice_e2e_dependencies() {
+        // Regression: the live voice E2E documents and invokes these host
+        // commands, but a fresh WSL runtime omitted the packages and failed
+        // with an opaque spawnSync ENOENT before connecting. Keep the
+        // shipped apt batch, the script's command declarations, and its
+        // actionable preflight tied together from the Rust test suite that
+        // runs on Linux as well as Windows.
+        let bootstrap = include_str!("../resources/papercup-bootstrap.sh");
+        let voice = include_str!("../../../apps/tui/scripts/live-operator-voice-e2e.mjs");
+        let marker = "apt-get install -y --no-install-recommends \\\n";
+        let (_, after_install) = bootstrap
+            .split_once(marker)
+            .expect("the bootstrap base-package install block must exist");
+        let package_block = after_install
+            .split_once("\n\n")
+            .map(|(block, _)| block)
+            .expect("the bootstrap package block must be terminated");
+
+        for package in ["espeak-ng", "ffmpeg"] {
+            assert!(
+                package_block.lines().any(|line| {
+                    line.trim().trim_end_matches('\\').trim() == package
+                }),
+                "{package} must stay in the shipped bootstrap apt batch"
+            );
+            assert!(
+                voice.contains(&format!("command: '{package}'")),
+                "live voice E2E must declare {package} for its preflight"
+            );
+        }
+        assert!(
+            voice.contains("preflightHostDependencies();"),
+            "live voice E2E must preflight before socket discovery"
+        );
+        assert!(
+            voice.contains("sudo apt-get update && sudo apt-get install -y"),
+            "missing voice tools must include an actionable Ubuntu/WSL install path"
+        );
+    }
+
     // ── wslconfig_with_mirrored (WI-3360) ──
 
     #[test]

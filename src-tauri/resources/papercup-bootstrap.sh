@@ -148,10 +148,14 @@ WSLCONF
 # (Ubuntu 24.04 renamed libasound2 → libasound2t64 in the t64 transition.)
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
+# Live voice E2E host tools (EI-22457146314869603); the live script
+# preflights these commands before connecting to the operator voice host.
 apt-get install -y --no-install-recommends \
   build-essential \
   ca-certificates \
   curl \
+  espeak-ng \
+  ffmpeg \
   git \
   jq \
   unzip \

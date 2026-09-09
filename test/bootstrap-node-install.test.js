@@ -9,6 +9,10 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const producer = fs.readFileSync(path.join(root, 'scripts/build-rootfs.sh'), 'utf8');
 const shipped = fs.readFileSync(path.join(root, 'src-tauri/resources/papercup-bootstrap.sh'), 'utf8');
+const voiceE2e = fs.readFileSync(
+  path.join(root, '..', 'apps/tui/scripts/live-operator-voice-e2e.mjs'),
+  'utf8',
+);
 const section = text => text.slice(text.indexOf('NODE_TARBALL='), text.indexOf('\n# pnpm'));
 const quote = s => `'${s.replaceAll("'", "'\\''")}'`;
 const run = (command, args, options = {}) => spawnSync(command, args, {
@@ -78,6 +82,29 @@ test('rootfs producer fingerprints the complete shipped bootstrap, including net
   assert.equal(fs.readFileSync(artifact, 'utf8'), 'existing rootfs must survive a read');
   fs.unlinkSync(resource);
   assert.notEqual(fingerprint().status, 0, 'a missing source must not fingerprint an empty recipe');
+});
+
+test('voice live E2E dependencies are provisioned and preflighted before host discovery', () => {
+  const marker = 'apt-get install -y --no-install-recommends \\\n';
+  const start = shipped.indexOf(marker);
+  assert.notEqual(start, -1, 'shipped bootstrap base-package install block is required');
+  const packageBlock = shipped.slice(start + marker.length).split('\n\n', 1)[0];
+  for (const packageName of ['espeak-ng', 'ffmpeg']) {
+    assert.ok(
+      packageBlock.split('\n').some(line => line.trim().replace(/\\$/, '').trim() === packageName),
+      packageName + ' must be installed in the shipped WSL runtime',
+    );
+    assert.ok(
+      voiceE2e.includes("command: '" + packageName + "'"),
+      packageName + ' must be declared by the live E2E preflight',
+    );
+  }
+  assert.match(voiceE2e, /preflightHostDependencies\(\);/);
+  assert.match(voiceE2e, /sudo apt-get update && sudo apt-get install -y/);
+  assert.ok(
+    voiceE2e.indexOf('preflightHostDependencies();') < voiceE2e.indexOf('VOICE_SOCK'),
+    'dependency preflight must run before socket discovery',
+  );
 });
 
 test('upgrade eliminates obsolete nested npm dependencies, keeps other tools, and is idempotent', t => {
