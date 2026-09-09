@@ -138,6 +138,50 @@ function sidecarWithProvenance() {
   return dir;
 }
 
+test('emitting into a hard-linked sidecar clone cannot rewrite the source manifest inode', () => {
+  const source = sidecarWithProvenance();
+  const sourceManifest = path.join(source, 'build-provenance.json');
+  const sourceBytes = fs.readFileSync(sourceManifest);
+  const clone = tmp();
+  const cloneManifest = path.join(clone, 'build-provenance.json');
+  const cloneServe = path.join(clone, 'serve.mjs');
+  fs.linkSync(sourceManifest, cloneManifest);
+  fs.linkSync(path.join(source, 'serve.mjs'), cloneServe);
+  assert.equal(
+    fs.statSync(sourceManifest).ino,
+    fs.statSync(cloneManifest).ino,
+    'fixture must begin with one shared manifest inode',
+  );
+
+  // Model a private acceptance snapshot replacing just its freshly built
+  // serve.mjs before re-emitting provenance. The source still owns the old
+  // artifact and therefore must retain the old attestation byte-for-byte.
+  fs.renameSync(cloneServe, path.join(clone, 'serve.previous.mjs'));
+  fs.writeFileSync(cloneServe, 'new-sidecar-bytes');
+  const emitted = spawnSync('bash', [EMITTER, clone, '0.0.0', 'new-sidecar-sha', 'false', cloneServe], {
+    encoding: 'utf8',
+    env: { ...process.env, PROVENANCE_GIT_ROOT: path.join(BIN, '..') },
+  });
+  assert.equal(emitted.status, 0, `clone provenance emit failed: ${emitted.stderr}`);
+
+  assert.deepEqual(
+    fs.readFileSync(sourceManifest),
+    sourceBytes,
+    'publishing clone provenance must not mutate its hard-linked source peer',
+  );
+  assert.notEqual(
+    fs.statSync(sourceManifest).ino,
+    fs.statSync(cloneManifest).ino,
+    'atomic publication must give the clone its own manifest inode',
+  );
+  const cloneDoc = JSON.parse(fs.readFileSync(cloneManifest, 'utf8'));
+  assert.equal(cloneDoc.buildSha, 'new-sidecar-sha');
+  assert.equal(
+    cloneDoc.artifacts[0].sha256,
+    crypto.createHash('sha256').update('new-sidecar-bytes').digest('hex'),
+  );
+});
+
 test('a leg that names no sidecar records null — present, not missing', () => {
   const doc = emit();
   assert.ok(

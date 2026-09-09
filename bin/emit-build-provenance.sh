@@ -587,6 +587,17 @@ if [[ "$_identity_only_repair" == "1" ]]; then
   exit 0
 fi
 
+# Publish through a fresh inode in the destination directory. Acceptance and
+# release workflows deliberately hard-link large sidecar trees into private
+# snapshots (`cp -al`) so they can replace one artifact without copying several
+# GiB. Writing straight to `$PROV` would mutate every hard-linked peer's
+# manifest in place, leaving the peer's old artifacts paired with our new
+# hashes. A same-directory rename is atomic for readers and breaks that inode
+# alias before the new record becomes visible.
+_prov_tmp="$PROV.tmp.$$.$RANDOM"
+[[ ! -e "$_prov_tmp" ]] \
+  || { echo "ERROR: provenance staging path already exists: $_prov_tmp" >&2; exit 1; }
+trap 'rm -f "$_prov_tmp"; [[ -z "$_dirty_source_tmp" ]] || rm -f "$_dirty_source_tmp"' EXIT
 {
   printf '{\n'
   printf '  "version": "%s",\n'   "$VERSION"
@@ -637,7 +648,9 @@ fi
       "$([[ -f "$f.sig" ]] && echo true || echo false)" "$(_mtime_epoch "$f")" "$(_mtime_utc "$f")" "$(_mtime_utc "$f")"
   done
   printf '\n  ]\n}\n'
-} > "$PROV"
+} > "$_prov_tmp"
+mv "$_prov_tmp" "$PROV"
 [[ -z "$_dirty_source_tmp" ]] || rm -f "$_dirty_source_tmp"
+trap - EXIT
 echo "==> build provenance written: $PROV"
 cat "$PROV"
