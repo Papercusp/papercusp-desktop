@@ -5,7 +5,9 @@
 # `dev:dogfood_substrate_status`, which wraps the in-process substrate read
 # directly — same reason the probes need the bg-host SUBSTRATE PRIMARY port,
 # not the request-only cluster tier (see PAPERCUSP_HONO_PORT below).
-# Rescued/parameterized from /tmp/p059-diag.sh. Deploy the driver first:
+# Rescued/parameterized from /tmp/p059-diag.sh. Deploy the driver once (and
+# again when the checked-in helpers change); its persistent copy survives VM
+# reboots:
 #   bin/vm-rig/deploy.sh
 # Usage:  bin/vm-rig/diag.sh
 # Env:    PCUSP_VM_SSH, PAPERCUSP_HONO_PORT (tower, default 3270 — the
@@ -36,7 +38,15 @@ echo "=== VM dev:dogfood_substrate_status ==="
 # login-shell boundary, and bash receives each vmcall argument as written.
 if ! ssh -o ConnectTimeout=10 "$VM" /bin/bash -s >"$VM_DIAG_OUT" 2>&1 <<'REMOTE'
 set -e
-exec /tmp/vmcall.sh dev:dogfood_substrate_status '{}' \
+VMCALL="$HOME/.papercusp/vm-rig/vmcall.sh"
+if [ ! -x "$VMCALL" ] && [ -x /tmp/vmcall.sh ]; then
+  VMCALL=/tmp/vmcall.sh
+fi
+if [ ! -x "$VMCALL" ]; then
+  echo "FATAL: vm-rig driver missing; run bin/vm-rig/deploy.sh from the tower" >&2
+  exit 1
+fi
+exec "$VMCALL" dev:dogfood_substrate_status '{}' \
   --client su-live1-imac-probe \
   --workspace papercusp-workspace \
   --harness papercusp

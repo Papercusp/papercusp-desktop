@@ -430,7 +430,8 @@ if [ "$#" -ne 5 ] ||
   printf 'unexpected ssh argv: %s\\n' "$*" >&2
   exit 90
 fi
-grep -Fq "exec /tmp/vmcall.sh dev:dogfood_substrate_status '{}'" "$DIAG_SSH_STDIN"
+grep -Fq 'VMCALL="$HOME/.papercusp/vm-rig/vmcall.sh"' "$DIAG_SSH_STDIN"
+grep -Fq 'exec "$VMCALL" dev:dogfood_substrate_status' "$DIAG_SSH_STDIN"
 printf '{"vm":true}\\n'
 `,
   );
@@ -454,7 +455,7 @@ printf '{"vm":true}\\n'
   };
 }
 
-test('vm-rig diagnostics cross the macOS zsh boundary with a quoted stdin script', async () => {
+test('vm-rig diagnostics prefer the reboot-persistent helper across the macOS zsh boundary', async () => {
   const { dir, env, paths } = await diagFixture();
   try {
     const result = spawnSync('bash', [diag], { env, encoding: 'utf8' });
@@ -472,11 +473,14 @@ test('vm-rig diagnostics cross the macOS zsh boundary with a quoted stdin script
       '-s',
     ]);
     const remoteScript = await readFile(paths.sshStdin, 'utf8');
-    assert.match(remoteScript, /set -e\nexec \/tmp\/vmcall\.sh dev:dogfood_substrate_status '\{\}' \\/);
+    assert.match(remoteScript, /set -e\nVMCALL="\$HOME\/\.papercusp\/vm-rig\/vmcall\.sh"\n/);
+    assert.match(remoteScript, /if \[ ! -x "\$VMCALL" \] && \[ -x \/tmp\/vmcall\.sh \]; then\n  VMCALL=\/tmp\/vmcall\.sh\nfi\n/);
+    assert.match(remoteScript, /if \[ ! -x "\$VMCALL" \]; then\n  echo "FATAL: vm-rig driver missing; run bin\/vm-rig\/deploy\.sh from the tower" >&2\n  exit 1\nfi\n/);
+    assert.match(remoteScript, /exec "\$VMCALL" dev:dogfood_substrate_status '\{\}' \\/);
     assert.match(remoteScript, /\n  --client su-live1-imac-probe \\\n/);
     assert.match(remoteScript, /\n  --workspace papercusp-workspace \\\n/);
     assert.match(remoteScript, /\n  --harness papercusp\n/);
-    assert.doesNotMatch(remoteScript, /\$CLI_VM|\$VM/);
+    assert.doesNotMatch(remoteScript, /\$CLI_VM\b|\$VM\b/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

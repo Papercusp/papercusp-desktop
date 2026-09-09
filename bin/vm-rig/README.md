@@ -41,7 +41,8 @@ VM reboot deletes — exactly how the original `vmcall.sh` got lost).
 # 1. VM up + reachable?
 ssh -o ConnectTimeout=5 aviweiss@172.31.44.2 true || echo "VM down — boot-sonoma-durable.sh (coordinate with the mac-VM lane first)"
 
-# 2. deploy the driver (RE-RUN AFTER EVERY VM REBOOT — the VM's /tmp is wiped)
+# 2. deploy the driver once (and again when its checked-in helpers change).
+#    The primary copy is persistent; diag.sh falls back to the /tmp compatibility copy.
 bin/vm-rig/deploy.sh
 
 # 3. side-by-side diagnosis (roster, admittedLogCount, watermarks, swarm log)
