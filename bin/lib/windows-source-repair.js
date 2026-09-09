@@ -66,14 +66,17 @@ function forRoles(input, requested) {
   // Old callers remain GUI-only. New native manifests ALWAYS require the
   // actual requested build roles, including on post-build attestation.
   const fallback = repair.kind === 'windows-gui-source-repair' ? ['gui'] : [];
+  // The producer's payload guards use space-delimited membership. Reject
+  // alternate whitespace rather than accepting roles those guards could miss.
   const requestedRoles = requested === undefined || requested === ''
-    ? roles(fallback) : roles(typeof requested === 'string' ? requested.trim().split(/\s+/) : requested);
+    ? roles(fallback) : roles(typeof requested === 'string' ? requested.split(' ') : requested);
   assert.deepEqual(requestedRoles, repair.roles || ['gui'], 'source repair/build roles mismatch');
   return repair;
 }
 
 function compileConfig(input, snapshot, role) {
   const repair = manifest(input);
+  assert.equal(input.manifestSha256, repair.manifestSha256, 'repair manifest changed');
   assert.ok((repair.roles || ['gui']).includes(role), 'compile role outside source repair');
   const base = JSON.parse(fs.readFileSync(regularPath(snapshot, 'src-tauri/tauri.conf.json')));
   const override = role === 'server'
@@ -162,7 +165,7 @@ if (require.main === module) {
       : action === 'attestation' ? attestation(input, ...args)
         : action === 'roles' ? forRoles(input, ...args)
           : action === 'config' ? compileConfig(input, ...args)
-      : (() => { throw new Error(`unknown action: ${action}`); })();
+            : (() => { throw new Error(`unknown action: ${action}`); })();
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 

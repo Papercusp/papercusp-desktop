@@ -331,7 +331,21 @@ winpath() { printf 'Z:%s' "$(printf '%s' "$1" | sed 's:/:\\:g')"; }
 # same flock on src-tauri/sidecar.lock. The shared helper first grants a short
 # startup grace, then asks only tauri-guarded readers to yield, and finally
 # bounds the remaining wait with holder diagnostics.
-if [[ " $ROLES " == *" server "* ]]; then
+if [[ " $ROLES " == *" server "* && -n "$SOURCE_REPAIR" ]]; then
+  # A native repair consumes the frozen cut's existing generated payload.
+  # The ordinary staging block below REWRITES source.tar.zst/env-sidecars;
+  # that would mutate our baseline before the isolated source is even made.
+  # Fail closed on missing inputs instead of reconstructing or shrinking them.
+  if [[ "${PAPERCUSP_STAGE_SOURCE:-1}" == "1" ]]; then
+    [[ -s "$SRC_TAURI/sidecar/source.tar.zst" ]] \
+      || fail "source repair requires the frozen source.tar.zst"
+  fi
+  for _frozen_env_input in serve.mjs spa/index.html; do
+    [[ -s "$SRC_TAURI/env-sidecars/staging/$_frozen_env_input" ]] \
+      || fail "source repair requires frozen env-sidecars/staging/$_frozen_env_input"
+  done
+  echo "    native repair: retaining frozen source archive and environment sidecar inputs"
+elif [[ " $ROLES " == *" server "* ]]; then
   (
     __pc_acquire_sidecar_flock "$SRC_TAURI/sidecar.lock" || exit $?
     PAPERCUSP_SIDECAR_LOCK_HELD=1 bash "$ROOT/bin/stage-source-tree.sh"

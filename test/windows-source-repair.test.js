@@ -91,7 +91,8 @@ test('explicit roles reject missing, unknown, duplicate and mismatched scopes be
   for (const invalid of [undefined, [], ['desktop'], ['gui', 'gui'], 'server']) {
     assert.throws(() => manifest({ ...f.value, roles: invalid }), /role/);
   }
-  for (const requested of [undefined, '', 'gui', 'gui server', 'server server', 'unknown']) {
+  for (const requested of [undefined, '', 'gui', 'gui server', 'server server', 'unknown',
+    ' server', 'server ', 'server\t', 'server\ngui', 'gui  server']) {
     assert.throws(() => f.apply(requested), /role/);
     assert.equal(fs.readFileSync(path.join(f.snapshot, 'src-tauri/src/wsl_setup.rs'), 'utf8'), 'old\n');
   }
@@ -101,6 +102,39 @@ test('explicit roles reject missing, unknown, duplicate and mismatched scopes be
   assert.notEqual(normalized.manifestSha256, manifest(f.value).manifestSha256);
   f.value.files[0].afterSha256 = '0'.repeat(64);
   assert.throws(() => f.apply('server'), /committed repair hash mismatch/);
+});
+
+test('producer preflight refuses wrong roles and nonempty quarantine before toolchain execution', (t) => {
+  const f = fixture(t);
+  const input = path.join(f.dir, 'input.json');
+  const script = fs.readFileSync(path.join(root, 'bin/build-windows-cross.sh'), 'utf8');
+  const start = script.indexOf('ROLES="${PAPERCUSP_BUILD_ROLES');
+  const end = script.indexOf('# Resolve the cargo target dir', start);
+  assert.ok(start > 0 && end > start);
+  const output = path.join(f.dir, 'quarantine'); fs.mkdirSync(output);
+  const sentinel = path.join(output, 'prior-installer.exe'); fs.writeFileSync(sentinel, 'immutable');
+  const run = (value, requestedRoles) => {
+    fs.writeFileSync(input, JSON.stringify(value));
+    return spawnSync('bash', ['-c',
+      `set -euo pipefail\nfail() { echo "$*" >&2; exit 1; }\n${script.slice(start, end)}`], {
+      encoding: 'utf8', env: {
+        ...process.env, HERE: path.join(root, 'bin'),
+        PAPERCUSP_BUILD_ROLES: requestedRoles, PAPERCUSP_WINDOWS_SOURCE_REPAIR: input,
+        PAPERCUSP_WINDOWS_OUTPUT_DIR: output,
+      },
+    });
+  };
+  const wrongRole = run(f.value, 'server');
+  assert.notEqual(wrongRole.status, 0);
+  assert.match(wrongRole.stderr, /roles must exactly match/);
+  const native = { ...f.value, kind: 'windows-native-source-repair', roles: ['server'] };
+  const nonempty = run(native, 'server');
+  assert.notEqual(nonempty.status, 0);
+  assert.match(nonempty.stderr, /source repair output must be empty/);
+  assert.equal(fs.readFileSync(sentinel, 'utf8'), 'immutable');
+  fs.unlinkSync(sentinel);
+  const valid = run(native, 'server');
+  assert.equal(valid.status, 0, valid.stderr);
 });
 
 test('role configuration and attestation refuse a Server build configured as GUI', (t) => {
@@ -113,6 +147,39 @@ test('role configuration and attestation refuse a Server build configured as GUI
   assert.throws(() => compileConfig(applied, f.snapshot, 'server'), /compile identifier mismatch/);
   assert.throws(() => attestation(applied, f.snapshot, f.value.operatorBuildSha, f.base, 'server'),
     /compile identifier mismatch/);
+});
+
+test('Server repair never restages frozen payloads and refuses missing generated inputs', (t) => {
+  const f = fixture(t);
+  const script = fs.readFileSync(path.join(root, 'bin/build-windows-cross.sh'), 'utf8');
+  const start = script.indexOf('# ── Server-only source-tree + env-sidecar staging.');
+  const end = script.indexOf('# ── Immutable build-source snapshot', start);
+  assert.ok(start > 0 && end > start);
+  const src = path.join(f.snapshot, 'src-tauri');
+  const frozen = ['sidecar/source.tar.zst', 'env-sidecars/staging/serve.mjs',
+    'env-sidecars/staging/spa/index.html'];
+  for (const relative of frozen) {
+    const dest = path.join(src, relative);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, `frozen:${relative}`);
+  }
+  const run = () => spawnSync('bash', ['-c',
+    `set -euo pipefail\nfail() { echo "$*" >&2; exit 1; }\n` +
+    `__pc_acquire_sidecar_flock() { fail 'must not restage a frozen source'; }\n${script.slice(start, end)}`], {
+    encoding: 'utf8', env: {
+      ...process.env, ROOT: f.snapshot, SRC_TAURI: src, SOURCE_REPAIR: 'manifest-present',
+      ROLES: 'gui server', PAPERCUSP_STAGE_SOURCE: '1',
+    },
+  });
+  assert.equal(run().status, 0);
+  for (const relative of frozen) {
+    assert.equal(fs.readFileSync(path.join(src, relative), 'utf8'), `frozen:${relative}`);
+  }
+  assert.equal(fs.existsSync(path.join(src, 'sidecar.lock')), false);
+  fs.unlinkSync(path.join(src, frozen[0]));
+  const missing = run();
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /requires the frozen source.tar.zst/);
 });
 
 test('materializes only exact committed repair bytes and attests a stable source identity', (t) => {
