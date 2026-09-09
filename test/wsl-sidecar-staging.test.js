@@ -123,6 +123,7 @@ test('independent native audit rejects corrupt, missing, extra, linked and incor
     }
     fs.mkdirSync(path.join(sourceDir, 'empty'));
     fs.mkdirSync(path.join(target, 'empty'));
+    fs.chmodSync(path.join(target, 'empty'), 0o755);
     fs.symlinkSync('plain.bin', path.join(sourceDir, 'link'));
     fs.symlinkSync('plain.bin', path.join(target, 'link'));
     fs.writeFileSync(path.join(sourceDir, 'source.tar.zst'), 'excluded archive');
@@ -133,6 +134,17 @@ test('independent native audit rejects corrupt, missing, extra, linked and incor
     assert.equal(manifest.entries.find(e => e.path === 'plain.bin').sha256,
       require('node:crypto').createHash('sha256').update(payload['plain.bin']).digest('hex'));
     assert.equal(verify(target, manifest).files, 4);
+    assert.equal(verify(target, manifest, { fullModes: true }).fullModes, true);
+    for (const [name, mode, restored] of [
+      ['plain.bin', 0o666, 0o644],
+      ['plain.bin', 0o4644, 0o644],
+      ['empty', 0o777, 0o755],
+      ['binary with spaces', 0o700, 0o744],
+    ]) {
+      fs.chmodSync(path.join(target, name), mode);
+      assert.throws(() => verify(target, manifest, { fullModes: true }), /permissions:/);
+      fs.chmodSync(path.join(target, name), restored);
+    }
     fs.writeFileSync(path.join(target, 'plain.bin'), Buffer.from([0, 254, 128]));
     assert.throws(() => verify(target, manifest), /changed: plain.bin/);
     fs.writeFileSync(path.join(target, 'plain.bin'), payload['plain.bin']);
@@ -160,4 +172,44 @@ test('independent native audit rejects corrupt, missing, extra, linked and incor
     assert.throws(() => verify(target, { ...manifest, entries: [...manifest.entries, manifest.entries[0]] }),
       /duplicate path/);
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test('post-start policy is phase-explicit, immutable and pinned to both exact payload files', () => {
+  const { postStartManifest, POST_START_POSTGRES: pins, verifyPostStart } =
+    require('./fixtures/wsl-sidecar-staging-audit.cjs');
+  // These are inventory-row controls, not a claim to possess native binaries.
+  // Actual-byte verification is separately exercised on the installed payload.
+  const manifest = { schema: 'wsl-staging-byte-mode-v2', entries: [
+    { ...pins.binary, type: 'file', executable: true, executeBits: 0o100 },
+    { ...pins.writer, type: 'file', executable: false, executeBits: 0 },
+    { path: 'other-postgres', type: 'file', bytes: pins.binary.bytes,
+      sha256: pins.binary.sha256, executable: true, executeBits: 0o100 },
+  ] };
+  const before = JSON.stringify(manifest);
+  const adjusted = postStartManifest(manifest);
+  assert.equal(JSON.stringify(manifest), before);
+  assert.equal(adjusted.entries[0].executeBits, 0o111);
+  assert.deepEqual(adjusted.entries.slice(1), manifest.entries.slice(1));
+  assert.deepEqual({ ...adjusted.entries[0], executeBits: 0o100 }, manifest.entries[0]);
+  assert.throws(() => postStartManifest(adjusted), /binary pin mismatch/);
+  for (const index of [0, 1]) {
+    for (const change of [
+      { path: 'other/path/postgres' }, { type: 'link' }, { bytes: 1 },
+      { sha256: '0'.repeat(64) }, { executeBits: 0o111 },
+      { executable: !manifest.entries[index].executable },
+    ]) {
+      const changed = structuredClone(manifest);
+      Object.assign(changed.entries[index], change);
+      assert.throws(() => postStartManifest(changed), /pin mismatch/);
+    }
+    const missing = structuredClone(manifest);
+    missing.entries.splice(index, 1);
+    assert.throws(() => postStartManifest(missing), /pin mismatch/);
+    const duplicate = structuredClone(manifest);
+    duplicate.entries.push({ ...duplicate.entries[index] });
+    assert.throws(() => postStartManifest(duplicate), /pin mismatch/);
+  }
+  assert.throws(() => postStartManifest({ ...manifest, schema: 'unknown' }), /Invalid source manifest/);
+  assert.throws(() => verifyPostStart('/not-used', { schema: manifest.schema, entries: [] }),
+    /binary pin mismatch/);
 });

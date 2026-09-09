@@ -5,6 +5,23 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const excludedInputs = new Set(['source.tar.zst', 'db-seed.dump', 'db-seed.tar.gz']);
 
+// Frozen D021 payload, independently measured in fire165. The packaged
+// embedded-postgres start() calls its executable helper (mode | 0555).
+// This is NOT a generic postgres/path exemption and never changes extraction's
+// owner-only execute contract. Different bytes require new reviewed evidence.
+const POST_START_POSTGRES = Object.freeze({
+  binary: Object.freeze({
+    path: 'node_modules/@papercusp/embedded-postgres-server/node_modules/@embedded-postgres/linux-x64/native/bin/postgres',
+    bytes: 9778536,
+    sha256: 'b5b859cfd5fcff4c3f20c161ca57a1056c96994b24b68589cc51ad6dc860a92e',
+  }),
+  writer: Object.freeze({
+    path: 'node_modules/@papercusp/embedded-postgres-server/node_modules/embedded-postgres/dist/index.js',
+    bytes: 17665,
+    sha256: 'bf0e5908e56276c31d4e588785d5349427ba076dcd1e0d8ed4945c8ce3576c4e',
+  }),
+});
+
 // Windows readlink reports native separators; tar stores portable separators.
 // Never normalize Unix link text: a backslash there is a literal filename byte.
 function portableLinkTarget(target, platform = process.platform) {
@@ -69,7 +86,7 @@ function snapshot(root) {
   return { schema: 'wsl-staging-byte-mode-v2', entries: inventory(root, true) };
 }
 
-function verify(root, manifest) {
+function verify(root, manifest, { fullModes = false } = {}) {
   if (manifest.schema !== 'wsl-staging-byte-mode-v2' || !Array.isArray(manifest.entries)) {
     throw new Error('Invalid source manifest');
   }
@@ -88,6 +105,11 @@ function verify(root, manifest) {
     const want = expected.get(entry.path);
     if (!want) failures.push(`extra: ${entry.path}`);
     else if (JSON.stringify(entry) !== JSON.stringify(want)) failures.push(`changed: ${entry.path}`);
+    if (fullModes && want && want.type !== 'link') {
+      const mode = fs.lstatSync(path.join(root, entry.path)).mode & 0o7777;
+      const wantedMode = want.type === 'directory' ? 0o755 : 0o644 | want.executeBits;
+      if (mode !== wantedMode) failures.push(`permissions: ${entry.path}`);
+    }
     expected.delete(entry.path);
   }
   for (const missing of expected.keys()) failures.push(`missing: ${missing}`);
@@ -97,20 +119,55 @@ function verify(root, manifest) {
     bytes: actual.reduce((sum, e) => sum + (e.bytes || 0), 0),
     executableFiles: actual.filter(e => e.type === 'file' && e.executable).length,
     manifestSha256: crypto.createHash('sha256').update(JSON.stringify(manifest)).digest('hex'),
+    fullModes, acceptance: false, published: false };
+}
+
+function postStartManifest(manifest) {
+  if (manifest?.schema !== 'wsl-staging-byte-mode-v2' || !Array.isArray(manifest.entries)) {
+    throw new Error('Invalid source manifest');
+  }
+  for (const [role, pin] of Object.entries(POST_START_POSTGRES)) {
+    const matches = manifest.entries.filter(e => e.path === pin.path);
+    const entry = matches[0];
+    const executable = role === 'binary';
+    if (matches.length !== 1 || entry.type !== 'file'
+        || entry.bytes !== pin.bytes || entry.sha256 !== pin.sha256
+        || entry.executable !== executable || entry.executeBits !== (executable ? 0o100 : 0)) {
+      throw new Error(`Post-start ${role} pin mismatch`);
+    }
+  }
+  // Preserve the strict manifest byte-for-byte; all hashes, lengths, entry
+  // types, paths, and every other execute permission stay unchanged.
+  return { ...manifest, entries: manifest.entries.map(entry => ({
+    ...entry,
+    ...(entry.path === POST_START_POSTGRES.binary.path ? { executeBits: 0o111 } : {}),
+  })) };
+}
+
+function verifyPostStart(root, manifest) {
+  const adjusted = postStartManifest(manifest);
+  const result = verify(root, adjusted, { fullModes: true });
+  return { ...result, phase: 'post-start',
+    strictManifestSha256: crypto.createHash('sha256').update(JSON.stringify(manifest)).digest('hex'),
+    adjustments: [{ path: POST_START_POSTGRES.binary.path, before: '0744', after: '0755',
+      binarySha256: POST_START_POSTGRES.binary.sha256, writerSha256: POST_START_POSTGRES.writer.sha256 }],
+    // A successful phase witness is not native/UI/stability/source acceptance.
     acceptance: false, published: false };
 }
 
-module.exports = { snapshot, verify, portableLinkTarget };
+module.exports = { snapshot, verify, portableLinkTarget, postStartManifest,
+  verifyPostStart, POST_START_POSTGRES };
 if (require.main === module) {
   const [mode, root, output] = process.argv.slice(2);
-  if (!root || !output || !['snapshot', 'verify'].includes(mode)) {
-    throw new Error('Usage: snapshot SOURCE MANIFEST | verify DESTINATION MANIFEST');
+  if (!root || !output || !['snapshot', 'verify', 'verify-post-start'].includes(mode)) {
+    throw new Error('Usage: snapshot SOURCE MANIFEST | verify DESTINATION MANIFEST | verify-post-start DESTINATION MANIFEST');
   }
   if (mode === 'snapshot') {
     const manifest = snapshot(root);
     fs.writeFileSync(output, JSON.stringify(manifest), { flag: 'wx' });
     console.log(JSON.stringify({ snapshot: true, entries: manifest.entries.length }));
   } else {
-    console.log(JSON.stringify(verify(root, JSON.parse(fs.readFileSync(output, 'utf8')))));
+    const verifier = mode === 'verify-post-start' ? verifyPostStart : verify;
+    console.log(JSON.stringify(verifier(root, JSON.parse(fs.readFileSync(output, 'utf8')))));
   }
 }
