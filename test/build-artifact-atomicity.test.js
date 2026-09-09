@@ -82,20 +82,23 @@ test('Windows rootfs atomic temporary archive is gitignored while it streams', (
   );
 });
 
-test('Windows WSL bootstrap installs iproute2 for ss listener inspection', () => {
-  for (const [name, source] of [
-    ['build-rootfs.sh', buildRootfs],
-    ['papercup-bootstrap.sh', bootstrapResource],
-  ]) {
-    assert.match(
-      executableLines(source),
-      /\n  iproute2 \\\n/,
-      `${name} must install iproute2, which provides the ss listener-inspection command`,
-    );
-  }
+test('Windows rootfs producer uses the canonical bootstrap that installs iproute2', () => {
+  const producer = executableLines(buildRootfs);
+  assert.match(producer, /BOOTSTRAP_FILE="\$\{OUT_DIR\}\/papercup-bootstrap\.sh"/);
+  assert.match(producer, /BOOTSTRAP_SH="\$\(cat "\$BOOTSTRAP_FILE"\)"/);
+  assert.doesNotMatch(
+    producer,
+    /\napt-get install /,
+    'build-rootfs.sh must not restore a second embedded bootstrap recipe',
+  );
+  assert.match(
+    executableLines(bootstrapResource),
+    /\n  iproute2 \\\n/,
+    'the canonical bootstrap must install iproute2 for ss listener inspection',
+  );
 });
 
-test('Windows WSL bootstrap pins the sidecar Node runtime and ABI', () => {
+test('Windows rootfs producer pins and forwards the canonical bootstrap Node runtime', () => {
   const sidecarMatch = sidecarBuilder.match(
     /^NODE_VERSION="\$\{NODE_VERSION:-v([0-9]+\.[0-9]+\.[0-9]+)\}"$/m,
   );
@@ -108,12 +111,17 @@ test('Windows WSL bootstrap pins the sidecar Node runtime and ABI', () => {
     ['papercup-bootstrap.sh', bootstrapResource],
   ]) {
     assert.ok(source.includes(expectedDefault), `${name} must default to sidecar Node ${sidecarVersion}`);
-    assert.match(
-      source,
-      /https:\/\/nodejs\.org\/dist\/v\$\{NODE_VERSION\}\/\$\{NODE_TARBALL\}/,
-      `${name} must fetch the exact Node release, not a moving major alias`,
-    );
     assert.doesNotMatch(source, /latest-v[0-9$]/, `${name} must not use latest-v*`);
     assert.doesNotMatch(source, /NODE_MAJOR/, `${name} must not reduce the runtime to a major only`);
   }
+  assert.match(
+    buildRootfs,
+    /-e NODE_VERSION="\$NODE_VERSION" \\/,
+    'the producer must forward the exact pin into the canonical bootstrap',
+  );
+  assert.match(
+    bootstrapResource,
+    /https:\/\/nodejs\.org\/dist\/v\$\{NODE_VERSION\}\/\$\{NODE_TARBALL\}/,
+    'the canonical bootstrap must fetch the exact Node release, not a moving major alias',
+  );
 });
