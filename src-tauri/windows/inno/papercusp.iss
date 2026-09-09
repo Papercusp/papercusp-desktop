@@ -176,6 +176,9 @@ const
     'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run';
   SharedWslDistro = 'papercup-runtime';
 
+var
+  PayloadUpgradeStarted: Boolean;
+
 function UninstallTargetExists(const UninstallString: String): Boolean;
 var
   Target: String;
@@ -412,6 +415,7 @@ var
   Pending, Name, Current, Marker: String;
   Index: Integer;
 begin
+  PayloadUpgradeStarted := True;
   Result := RestorePayloadUpgrade;
   if Result <> '' then
     Exit;
@@ -450,11 +454,33 @@ end;
 
 procedure CommitPayloadUpgrade;
 var
-  Backup: String;
+  Backup, Pending, Name: String;
+  Index: Integer;
+  HasPrevious: Boolean;
 begin
+  Pending := PayloadRollbackDir;
+  HasPrevious := False;
+  for Index := 0 to 2 do
+    if DirExists(Pending + '\' + PayloadRootName(Index)) then
+      HasPrevious := True;
+  { Fresh installs have no prior payload to preserve. Remove only our own
+    empty journal markers so an ordinary uninstall can still remove an empty
+    role root. Never recursively remove an unknown or locally-added entry. }
+  if not HasPrevious then
+  begin
+    for Index := 0 to 2 do
+    begin
+      Name := Pending + '\' + PayloadRootName(Index);
+      DeleteFile(Name + '.present');
+      DeleteFile(Name + '.absent');
+    end;
+    if not RemoveDir(Pending) then
+      RaiseException('windows-payload-commit-failed: cannot clear empty journal ' + Pending);
+    Exit;
+  end;
   Backup := NewPayloadBackupDir;
   if (not ForceDirectories(ExtractFileDir(Backup))) or
-    (not RenameFile(PayloadRollbackDir, Backup)) then
+    (not RenameFile(Pending, Backup)) then
     RaiseException('windows-payload-commit-failed: cannot retain prior payload at ' + Backup);
   Log('windows-payload-commit: prior payload retained at ' + Backup);
 end;
@@ -469,19 +495,25 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
-  begin
     ReapLegacyUninstallEntries;
+  { ssDone is reached only after successful installation, including Run
+    entries. Before then the pending journal must remain recoverable. }
+  if (CurStep = ssDone) and PayloadUpgradeStarted then
     CommitPayloadUpgrade;
-  end;
 end;
 
 procedure DeinitializeSetup;
 var
   Error: String;
 begin
-  Error := RestorePayloadUpgrade;
-  if Error <> '' then
-    Log(Error);
+  { Deinitialize also runs when the wizard is cancelled before PrepareToInstall.
+    Do not touch a previous crash journal until the role close guard has run. }
+  if PayloadUpgradeStarted then
+  begin
+    Error := RestorePayloadUpgrade;
+    if Error <> '' then
+      Log(Error);
+  end;
 end;
 
 function IsUpdaterLaunch(): Boolean;

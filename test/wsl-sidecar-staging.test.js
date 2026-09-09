@@ -8,6 +8,34 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'src-tauri/src/main.rs'), 'utf8');
 
+test('complete hot-payload identity changes for non-serve repairs and removed files', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'wsl-runtime-identity-'));
+  try {
+    const manifest = path.join(temp, 'Cargo.toml');
+    fs.writeFileSync(manifest, [
+      '[package]', 'name = "runtime-identity-regression"', 'version = "0.0.0"', 'edition = "2021"',
+      '[workspace]', '[lib]',
+      `path = ${JSON.stringify(path.join(root, 'src-tauri/src/sidecar_runtime_identity.rs'))}`,
+      '[dependencies]', 'sha2 = "=0.10.9"',
+    ].join('\n'));
+    const result = spawnSync(process.env.CARGO || 'cargo', [
+      'test', '--offline', '--manifest-path', manifest,
+    ], { encoding: 'utf8', timeout: 120000,
+      env: { ...process.env, CARGO_TARGET_DIR: path.join(temp, 'target') } });
+    assert.equal(result.status, 0, String(result.error || result.stderr || result.stdout));
+    assert.match(result.stdout, /4 passed; 0 failed; 0 ignored/);
+    const generation = source.slice(source.indexOf('fn sidecar_runtime_generation('),
+      source.indexOf('fn wsl_runtime_sidecar_path('));
+    assert.match(generation, /sidecar_runtime_identity::generation\(sidecar_dir\)/);
+    const prepare = source.slice(source.indexOf('fn prepare_wsl_sidecar_runtime('),
+      source.indexOf('/// Unified operator discovery'));
+    assert.match(prepare, /windows_path_to_wsl\(&marker\)/,
+      'native Windows PathBuf::join must not leak backslashes into a WSL marker probe');
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test('production staging executes archive, corruption, failure and timeout controls', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'wsl-sidecar-staging-'));
   try {

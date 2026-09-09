@@ -213,7 +213,7 @@ test('real Inno upgrade replaces owned payload, preserves data, and rolls back a
       ...entries.map((entry, index) => `Source: "${winpath(input)}"; `
         + `DestDir: "{app}\\${path.posix.dirname(entry).replaceAll('/', '\\')}"; `
         + `DestName: "${path.posix.basename(entry)}"; Flags: ignoreversion`
-        + (failCopy && index === entries.length - 1 ? '; BeforeInstall: InjectCopyFailure' : '')),
+        + (failCopy && index === entries.length - 1 ? ' external; BeforeInstall: InjectCopyFailure' : '')),
       code,
       ...(failCopy ? [
         'procedure InjectCopyFailure;',
@@ -221,7 +221,9 @@ test('real Inno upgrade replaces owned payload, preserves data, and rolls back a
         'begin',
         "  if (not LoadStringFromFile(ExpandConstant('{app}\\sidecar\\serve.mjs'), Copied)) or",
         `    (Copied <> 'payload-${version}') then RaiseException('copy-not-observed');`,
-        "  RaiseException('intentional-copy-failure');", 'end;',
+        "  Log('intentional-copy-failure: remove external source after first file was copied');",
+        `  if not DeleteFile('${winpath(input).replaceAll("'", "''")}') then`,
+        "    RaiseException('external-source-delete-failed');", 'end;',
       ] : []),
     ].join('\n');
     const source = path.join(dir, 'upgrade.iss');
@@ -250,7 +252,7 @@ test('real Inno upgrade replaces owned payload, preserves data, and rolls back a
   'unknown data inside the old payload must be retained, never recursively deleted');
 
   const failed = install('3.0.0', ['sidecar/serve.mjs', 'sidecar/never.txt'], true);
-  assert.notEqual(failed.status, 0, 'injected copy failure was not exercised');
+  assert.notEqual(failed.status, 0, `injected copy failure was not exercised: ${failed.log.slice(-5000)}`);
   assert.match(failed.log, /intentional-copy-failure/);
   assert.equal(fs.readFileSync(path.join(app, 'sidecar/serve.mjs'), 'utf8'), 'payload-2.0.0');
   assert.equal(fs.readFileSync(path.join(app, 'sidecar/new.js'), 'utf8'), 'payload-2.0.0');
@@ -272,7 +274,7 @@ test('real Inno upgrade replaces owned payload, preserves data, and rolls back a
   fs.writeFileSync(path.join(pending, 'resources.present'), '');
   fs.writeFileSync(path.join(pending, 'seed.absent'), '');
   const recovered = install('4.0.0', ['sidecar/serve.mjs', 'sidecar/never.txt'], true);
-  assert.notEqual(recovered.status, 0, 'retry failure injection was not exercised');
+  assert.notEqual(recovered.status, 0, `retry failure injection was not exercised: ${recovered.log.slice(-5000)}`);
   assert.match(recovered.log, /intentional-copy-failure/);
   assert.equal(fs.readFileSync(path.join(app, 'sidecar/serve.mjs'), 'utf8'), 'payload-2.0.0');
   assert.equal(fs.readFileSync(path.join(app, 'resources/new.bin'), 'utf8'), 'payload-2.0.0');

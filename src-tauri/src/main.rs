@@ -3694,6 +3694,13 @@ fn prepare_wsl_sidecar_runtime(
         .arg("papercusp-extract-sidecar").arg("-").arg(&temporary);
     no_console_window(&mut consumer);
     wsl_sidecar_staging::stage_archive(producer, consumer, Duration::from_secs(1_200))?;
+    // Never mark a transfer complete under a key computed from a different
+    // source generation (for example an installer replacing files mid-copy).
+    if sidecar_runtime_generation(sidecar_dir)? != generation {
+        return Err(std::io::Error::other(
+            "Windows sidecar payload changed during WSL staging; refusing publication"
+        ));
+    }
     let publish_args = vec![
         "/bin/bash".to_string(),
         "-c".to_string(),
