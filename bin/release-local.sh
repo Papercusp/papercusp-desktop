@@ -574,6 +574,11 @@ RELEASE_TASK_MANIFEST_ACTION=""
 RELEASE_TASK_MANIFEST_REQUEST_ID=""
 RELEASE_TASK_MANIFEST_IDENTITY=""
 RELEASE_TASK_MANIFEST_SKIP=0
+RELEASE_TASK_LAST_LOOKUP_MS=0
+RELEASE_TASK_BUILD_PREPARATION_START_MS=""
+RELEASE_TASK_MANIFEST_PREPARATION_START_MS=""
+RELEASE_TASK_PREPARATION_MS=""
+RELEASE_TASK_REUSE_EXPIRES_AT=""
 
 release_task_journal_configure() {
   local task_id="${PAPERCUSP_RELEASE_TASK_ID:-}"
@@ -626,7 +631,14 @@ release_task_journal_call() {
     --stage "$stage"
     --identity "$identity"
   )
+  [[ "$stage" != "release.manifest" ]] || argv+=(--source-scope stage)
   [[ -z "$request_id" ]] || argv+=(--request-id "$request_id")
+  if [[ "$command" == "commit" && -n "${RELEASE_TASK_PREPARATION_MS:-}" ]]; then
+    argv+=(--preparation-ms "$RELEASE_TASK_PREPARATION_MS")
+  fi
+  if [[ "$command" == "commit" && -n "${RELEASE_TASK_REUSE_EXPIRES_AT:-}" ]]; then
+    argv+=(--reuse-expires-at "$RELEASE_TASK_REUSE_EXPIRES_AT")
+  fi
   local evidence
   for evidence in "$@"; do argv+=(--evidence "$evidence"); done
 
@@ -635,6 +647,58 @@ release_task_journal_call() {
   else
     (cd "$RELEASE_TASK_JOURNAL_ROOT" && npx tsx "$RELEASE_TASK_JOURNAL_CLI" "${argv[@]}")
   fi
+}
+
+release_task_now_ms() {
+  node -e 'process.stdout.write(String(Date.now()))'
+}
+
+release_task_elapsed_ms() { # <start-ms>
+  local start="$1" now
+  now="$(release_task_now_ms)" || return $?
+  # Older/manual harnesses may not carry the managed-task start stamp. Keep the
+  # timing explicitly unavailable rather than manufacturing zero or blocking
+  # the release; the nightly managed path always supplies a valid boundary.
+  [[ "$start" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ && "$now" -ge "$start" ]] || return 0
+  printf '%s\n' "$((now - start))"
+}
+
+release_task_emit_timing() { # <stage> <decision> <verification-ms>
+  local stage="$1" decision="$2" verification_ms="$3"
+  local queue_wait_ms=unavailable
+  if [[ "${PAPERCUSP_RELEASE_ENQUEUED_AT_MS:-}" =~ ^[0-9]+$ \
+     && "${PAPERCUSP_RELEASE_CHILD_STARTED_AT_MS:-}" =~ ^[0-9]+$ \
+     && "$PAPERCUSP_RELEASE_CHILD_STARTED_AT_MS" -ge "$PAPERCUSP_RELEASE_ENQUEUED_AT_MS" ]]; then
+    queue_wait_ms="$((PAPERCUSP_RELEASE_CHILD_STARTED_AT_MS - PAPERCUSP_RELEASE_ENQUEUED_AT_MS))"
+  fi
+  printf 'RELEASE_STAGE_TIMING schema=1 stage=%s decision=%s queue_wait_ms=%s lookup_ms=%s verification_ms=%s preparation_ms=%s\n' \
+    "$stage" "$decision" "$queue_wait_ms" "${RELEASE_TASK_LAST_LOOKUP_MS:-0}" \
+    "$verification_ms" "${RELEASE_TASK_PREPARATION_MS:-unavailable}"
+}
+
+release_task_audit_reuse_expiry() {
+  local stamp="$ROOT/src-tauri/sidecar/.sidecar-build-stamp"
+  node - "$stamp" "${PAPERCUSP_RELEASE_REUSE_MAX_AGE_SEC:-0}" <<'NODE'
+const fs = require('node:fs');
+const [stampPath, rawMaxAge] = process.argv.slice(2);
+const maxAgeSec = Number(rawMaxAge);
+if (!Number.isSafeInteger(maxAgeSec) || maxAgeSec <= 0 || maxAgeSec > 7 * 24 * 60 * 60) {
+  throw new Error('release reuse max age must be an integer in 1..604800 seconds');
+}
+const stamp = JSON.parse(fs.readFileSync(stampPath, 'utf8'));
+const audit = stamp?.releaseIdentityAudit;
+if (audit?.schemaVersion !== 1 || audit.passed !== true
+    || audit.scanner !== 'audit-release-bundle.py --scan-dir') {
+  throw new Error('release reuse requires the canonical successful identity-scan attestation');
+}
+const passedAt = Date.parse(audit.passedAtUtc);
+if (!Number.isFinite(passedAt) || passedAt > Date.now()) {
+  throw new Error('release reuse identity-scan timestamp is invalid or future-dated');
+}
+const expiresAt = passedAt + maxAgeSec * 1000;
+if (expiresAt <= Date.now()) throw new Error(`release reuse identity scan expired at ${new Date(expiresAt).toISOString()}`);
+process.stdout.write(new Date(expiresAt).toISOString());
+NODE
 }
 
 release_task_json_field() { # <json> <field> [optional=0]
@@ -658,6 +722,21 @@ process.stdout.write(value);
 NODE
 }
 
+release_task_json_number_field() { # <json> <field> [fallback=0]
+  local json="$1" field="$2" fallback="${3:-0}"
+  RELEASE_TASK_RESULT_JSON="$json" node - "$field" "$fallback" <<'NODE'
+const field = process.argv[2];
+const fallback = Number(process.argv[3]);
+const value = JSON.parse(process.env.RELEASE_TASK_RESULT_JSON || '')[field];
+if (value == null && Number.isFinite(fallback)) process.stdout.write(String(fallback));
+else if (typeof value === 'number' && Number.isFinite(value) && value >= 0) process.stdout.write(String(value));
+else {
+  console.error(`ERROR: release journal response field '${field}' is not a finite non-negative number.`);
+  process.exit(2);
+}
+NODE
+}
+
 release_task_begin_stage() { # <stage> <identity>; writes RELEASE_TASK_LAST_*
   local stage="$1" identity="$2" result
   release_task_assert_credential_fresh || return $?
@@ -667,6 +746,7 @@ release_task_begin_stage() { # <stage> <identity>; writes RELEASE_TASK_LAST_*
   fi
   RELEASE_TASK_LAST_ACTION="$(release_task_json_field "$result" action)" || return $?
   RELEASE_TASK_LAST_REQUEST_ID="$(release_task_json_field "$result" requestIdentity 1)" || return $?
+  RELEASE_TASK_LAST_LOOKUP_MS="$(release_task_json_number_field "$result" lookupElapsedMs 0)" || return $?
   case "$RELEASE_TASK_LAST_ACTION" in
     run|reuse|reconcile|refused) ;;
     *) echo "ERROR: release journal returned unknown action '$RELEASE_TASK_LAST_ACTION' for $stage." >&2; return 2 ;;
@@ -677,9 +757,115 @@ release_task_begin_stage() { # <stage> <identity>; writes RELEASE_TASK_LAST_*
   fi
 }
 
+# Canonical, reviewable Linux-stage identity. Source SHA + the complete gitlink
+# tuple are added by release-task-journal.ts; this object binds every remaining
+# input that can change produced/trusted bytes. No secret material enters it:
+# signing is represented only by the public updater-key digest.
+release_task_linux_content_identity() {
+  local signer_pubkey
+  signer_pubkey="$(release_task_target_pubkey)" || return $?
+  PAPERCUSP_REUSE_SIGNER_PUBKEY="$signer_pubkey" \
+  PAPERCUSP_REUSE_BUILD_ROLES="$PAPERCUSP_BUILD_ROLES" \
+  PAPERCUSP_REUSE_TAURI_CLI="$TAURI_CLI_VERSION" \
+  PAPERCUSP_REUSE_RELEASE_HOST="${PAPERCUSP_RELEASE_HOST%/}" \
+  PAPERCUSP_REUSE_CHANNEL="$CHANNEL" \
+  PAPERCUSP_REUSE_RUSTFLAGS="${RUSTFLAGS:-}" \
+  PAPERCUSP_REUSE_CHANNEL_CONFIG="${DESKTOP_CHANNEL_BUILD_CFG[*]:-}" \
+  PAPERCUSP_REUSE_ALLOW_INCOMPLETE="${PAPERCUSP_ALLOW_INCOMPLETE_ROLES:-0}" \
+  PAPERCUSP_REUSE_SKIP_PROVENANCE="${PAPERCUSP_SKIP_PROVENANCE_PARITY_CHECK:-0}" \
+  PAPERCUSP_REUSE_SKIP_MIGRATION_LINT="${PAPERCUSP_SKIP_MIGRATION_LINT:-0}" \
+  PAPERCUSP_REUSE_SKIP_MIGRATION_BOOTSMOKE="${PAPERCUSP_SKIP_MIGRATION_BOOTSMOKE:-0}" \
+  PAPERCUSP_REUSE_SKIP_BUILDSET="${PAPERCUSP_SKIP_BUILDSET_CHECK:-0}" \
+  PAPERCUSP_REUSE_ALLOW_UNVERIFIED_SUBMODULE="${PAPERCUSP_ALLOW_UNVERIFIED_SUBMODULE:-0}" \
+  PAPERCUSP_RELEASE_REUSE_MAX_AGE_SEC="${PAPERCUSP_RELEASE_REUSE_MAX_AGE_SEC:-0}" \
+    node - "$MONOREPO" "$ROOT" <<'NODE'
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const cp = require('node:child_process');
+const [workspace, desktop] = process.argv.slice(2);
+const sha = (value) => crypto.createHash('sha256').update(value).digest('hex');
+const fileSha = (file, label) => {
+  if (!fs.statSync(file, { throwIfNoEntry: false })?.isFile()) throw new Error(`release reuse identity is missing ${label}: ${file}`);
+  return sha(fs.readFileSync(file));
+};
+const command = (name, args = ['--version']) => {
+  try { return cp.execFileSync(name, args, { encoding: 'utf8' }).trim(); }
+  catch { throw new Error(`release reuse identity cannot resolve ${name} ${args.join(' ')}`); }
+};
+const markerPath = path.join(workspace, 'node_modules', '.papercusp-dependency-generation');
+const marker = fs.readFileSync(markerPath, 'utf8').split(/\r?\n/).filter(Boolean);
+const markerField = (key) => {
+  const matches = marker.filter((line) => line.startsWith(`${key}=`));
+  if (matches.length !== 1) throw new Error(`release dependency marker requires exactly one ${key}`);
+  return matches[0].slice(key.length + 1);
+};
+const dependencyIdentity = markerField('identity');
+const dependencySource = markerField('source');
+if (!/^v1-[0-9a-f]{64}$/.test(dependencyIdentity) || !/^[0-9a-f]{64}$/.test(dependencySource)
+    || dependencyIdentity !== `v1-${dependencySource}`) {
+  throw new Error('release dependency generation marker has an incoherent immutable identity');
+}
+const policyFiles = {
+  distributionContract: path.join(desktop, 'src-tauri', 'distribution-contract.json'),
+  tauriBase: path.join(desktop, 'src-tauri', 'tauri.conf.json'),
+  cupboardBundle: path.join(workspace, 'content-bundles', 'workspace-host', 'bundle.yaml'),
+  modelBoundary: path.join(desktop, 'bin', 'lib', 'transformers-models.sh'),
+  identityScanner: path.join(desktop, 'bin', 'audit-release-bundle.py'),
+  provenanceVerifier: path.join(desktop, 'bin', 'verify-provenance.sh'),
+  freshnessVerifier: path.join(desktop, 'bin', 'check-sidecar-freshness.js'),
+};
+const channelConfig = String(process.env.PAPERCUSP_REUSE_CHANNEL_CONFIG || '').match(/tauri\.[a-z0-9.-]+\.conf\.json/i)?.[0];
+if (channelConfig) policyFiles.channel = path.join(desktop, 'src-tauri', channelConfig);
+const policies = Object.fromEntries(Object.entries(policyFiles).map(([key, file]) => [key, fileSha(file, key)]));
+const identity = {
+  schemaVersion: 2,
+  platform: 'linux-x86_64',
+  dependencies: {
+    generation: dependencyIdentity,
+    source: dependencySource,
+    packageLock: fileSha(path.join(workspace, 'package-lock.json'), 'workspace package lock'),
+    installedLock: fileSha(path.join(workspace, 'node_modules', '.package-lock.json'), 'installed dependency lock'),
+    cargoLock: fileSha(path.join(desktop, 'src-tauri', 'Cargo.lock'), 'Cargo lock'),
+  },
+  toolchain: {
+    rustc: command('rustc'),
+    cargo: command('cargo'),
+    node: command('node'),
+    npm: command('npm'),
+    tauriCli: process.env.PAPERCUSP_REUSE_TAURI_CLI,
+  },
+  profile: {
+    channel: process.env.PAPERCUSP_REUSE_CHANNEL,
+    roles: String(process.env.PAPERCUSP_REUSE_BUILD_ROLES || '').trim().split(/\s+/).filter(Boolean).sort(),
+    rustflags: process.env.PAPERCUSP_REUSE_RUSTFLAGS || '',
+    channelConfig: process.env.PAPERCUSP_REUSE_CHANNEL_CONFIG || '',
+    releaseHostSha256: sha(process.env.PAPERCUSP_REUSE_RELEASE_HOST || ''),
+  },
+  policy: {
+    files: policies,
+    allowIncompleteRoles: process.env.PAPERCUSP_REUSE_ALLOW_INCOMPLETE,
+    skipProvenanceParity: process.env.PAPERCUSP_REUSE_SKIP_PROVENANCE,
+    skipMigrationLint: process.env.PAPERCUSP_REUSE_SKIP_MIGRATION_LINT,
+    skipMigrationBootsmoke: process.env.PAPERCUSP_REUSE_SKIP_MIGRATION_BOOTSMOKE,
+    skipBuildset: process.env.PAPERCUSP_REUSE_SKIP_BUILDSET,
+    allowUnverifiedSubmodule: process.env.PAPERCUSP_REUSE_ALLOW_UNVERIFIED_SUBMODULE,
+  },
+  signing: { updaterPublicKeySha256: sha(process.env.PAPERCUSP_REUSE_SIGNER_PUBKEY || '') },
+  audit: {
+    releaseIdentityAudit: true,
+    requiredArtifactVerification: ['cardinality', 'provenance', 'health-sha', 'updater-signature'],
+    reuseMaxAgeSec: Number(process.env.PAPERCUSP_RELEASE_REUSE_MAX_AGE_SEC || 0),
+  },
+};
+process.stdout.write(JSON.stringify(identity));
+NODE
+}
+
 release_task_start_linux_stage() {
   [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
-  local host_fp roles expected_desktop_sha
+  local expected_desktop_sha
+  RELEASE_TASK_BUILD_PREPARATION_START_MS="$(release_task_now_ms)" || return $?
   expected_desktop_sha="$(git -C "$MONOREPO" ls-tree "$EXPECTED_SOURCE_SHA" -- papercusp-desktop \
     | awk '$1 == "160000" && $2 == "commit" && $4 == "papercusp-desktop" { print $3 }')"
   if [[ -z "$expected_desktop_sha" || "$PROVENANCE_SOURCE_GIT_HEAD" != "$expected_desktop_sha" ]]; then
@@ -690,9 +876,10 @@ release_task_start_linux_stage() {
     echo "ERROR: managed release source is dirty; task-journal reuse requires the exact clean source/gitlink tuple." >&2
     return 1
   fi
-  host_fp="$(printf '%s' "${PAPERCUSP_RELEASE_HOST%/}" | sha256sum | cut -d' ' -f1)"
-  roles="${PAPERCUSP_BUILD_ROLES// /,}"
-  RELEASE_TASK_BUILD_IDENTITY="platform=linux-x86_64;roles=$roles;tauri=$TAURI_CLI_VERSION;releaseHostSha256=$host_fp"
+  RELEASE_TASK_BUILD_IDENTITY="$(release_task_linux_content_identity)" || {
+    echo "ERROR: could not construct the complete Linux release reuse identity." >&2
+    return 1
+  }
   release_task_begin_stage release.build.linux "$RELEASE_TASK_BUILD_IDENTITY" || return $?
   RELEASE_TASK_BUILD_ACTION="$RELEASE_TASK_LAST_ACTION"
   RELEASE_TASK_BUILD_REQUEST_ID="$RELEASE_TASK_LAST_REQUEST_ID"
@@ -764,7 +951,7 @@ release_task_verify_linux_artifacts() { # <bundle-dir> <reused:0|1>
 }
 
 release_task_commit_linux_stage() { # <bundle-dir> <reused:0|1>
-  local bundle="$1" reused="$2" provenance_sha result
+  local bundle="$1" reused="$2" provenance_sha result verify_started verification_ms decision
   [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
   case "$RELEASE_TASK_BUILD_ACTION" in
     run|reconcile) ;;
@@ -772,13 +959,24 @@ release_task_commit_linux_stage() { # <bundle-dir> <reused:0|1>
       # A committed receipt authorizes no mutation, but it also grants no trust:
       # recheck after collection/provenance re-emit before downstream consumers
       # use these bytes.
-      release_task_verify_linux_artifacts "$bundle" "$reused"
-      return $?
+      verify_started="$(release_task_now_ms)" || return $?
+      release_task_verify_linux_artifacts "$bundle" "$reused" || return $?
+      verification_ms="$(release_task_elapsed_ms "$verify_started")" || return $?
+      RELEASE_TASK_PREPARATION_MS="$(release_task_elapsed_ms "$RELEASE_TASK_BUILD_PREPARATION_START_MS")" || return $?
+      release_task_emit_timing release.build.linux verified-reuse "$verification_ms"
+      return 0
       ;;
     *) echo "ERROR: cannot commit release.build.linux from action '$RELEASE_TASK_BUILD_ACTION'." >&2; return 2 ;;
   esac
+  verify_started="$(release_task_now_ms)" || return $?
   release_task_verify_linux_artifacts "$bundle" "$reused" || {
     echo "ERROR: release.build.linux bytes failed verification; receipt remains $RELEASE_TASK_BUILD_ACTION (fail closed)." >&2
+    return 1
+  }
+  verification_ms="$(release_task_elapsed_ms "$verify_started")" || return $?
+  RELEASE_TASK_PREPARATION_MS="$(release_task_elapsed_ms "$RELEASE_TASK_BUILD_PREPARATION_START_MS")" || return $?
+  RELEASE_TASK_REUSE_EXPIRES_AT="$(release_task_audit_reuse_expiry)" || {
+    echo "ERROR: verified Linux bytes have no fresh release identity-scan evidence." >&2
     return 1
   }
   provenance_sha="$(sha256sum "$bundle/build-provenance.json" | cut -d' ' -f1)"
@@ -786,7 +984,8 @@ release_task_commit_linux_stage() { # <bundle-dir> <reused:0|1>
       "$RELEASE_TASK_BUILD_REQUEST_ID" \
       "build-provenance:sha256:$provenance_sha" \
       "source-gitlink:$PROVENANCE_SOURCE_GIT_HEAD" \
-      "artifact-set:hash-signature-verified")"; then
+      "artifact-set:hash-signature-verified" \
+      "audit-reuse-expires:$RELEASE_TASK_REUSE_EXPIRES_AT")"; then
     echo "ERROR: verified Linux bytes could not be committed to the release journal." >&2
     return 1
   fi
@@ -795,6 +994,8 @@ release_task_commit_linux_stage() { # <bundle-dir> <reused:0|1>
     return 1
   }
   RELEASE_TASK_BUILD_ACTION=reuse
+  decision="$([[ "$reused" == "1" ]] && printf cache-hit || printf built)"
+  release_task_emit_timing release.build.linux "$decision" "$verification_ms"
 }
 
 release_task_prepare_linux_stage() { # <bundle-dir>
@@ -991,22 +1192,30 @@ PY
 }
 
 release_task_commit_manifest_stage() { # <artifact>...
-  local output_digest result
+  local output_digest result verify_started verification_ms decision
   [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
   case "$RELEASE_TASK_MANIFEST_ACTION" in
     run|reconcile) ;;
     reuse) return 0 ;;
     *) echo "ERROR: cannot commit release.manifest from action '$RELEASE_TASK_MANIFEST_ACTION'." >&2; return 2 ;;
   esac
+  verify_started="$(release_task_now_ms)" || return $?
   release_task_verify_manifest_outputs "$@" || {
     echo "ERROR: release.manifest outputs failed verification; receipt remains $RELEASE_TASK_MANIFEST_ACTION (fail closed)." >&2
+    return 1
+  }
+  verification_ms="$(release_task_elapsed_ms "$verify_started")" || return $?
+  RELEASE_TASK_PREPARATION_MS="$(release_task_elapsed_ms "$RELEASE_TASK_MANIFEST_PREPARATION_START_MS")" || return $?
+  RELEASE_TASK_REUSE_EXPIRES_AT="$(release_task_audit_reuse_expiry)" || {
+    echo "ERROR: verified manifest inputs have no fresh release identity-scan evidence." >&2
     return 1
   }
   output_digest="$(release_task_manifest_output_digest)" || return $?
   if ! result="$(release_task_journal_call commit release.manifest "$RELEASE_TASK_MANIFEST_IDENTITY" \
       "$RELEASE_TASK_MANIFEST_REQUEST_ID" \
       "manifest-receipt:sha256:$output_digest" \
-      "artifact-ledger:exact-set-verified")"; then
+      "artifact-ledger:exact-set-verified" \
+      "audit-reuse-expires:$RELEASE_TASK_REUSE_EXPIRES_AT")"; then
     echo "ERROR: verified manifest outputs could not be committed to the release journal." >&2
     return 1
   fi
@@ -1014,13 +1223,16 @@ release_task_commit_manifest_stage() { # <artifact>...
     echo "ERROR: release journal did not confirm release.manifest committed." >&2
     return 1
   }
+  decision="$([[ "$RELEASE_TASK_MANIFEST_ACTION" == "reconcile" ]] && printf cache-hit || printf built)"
   RELEASE_TASK_MANIFEST_ACTION=reuse
+  release_task_emit_timing release.manifest "$decision" "$verification_ms"
 }
 
 release_task_prepare_manifest_stage() { # <artifact>...
   local result
   RELEASE_TASK_MANIFEST_SKIP=0
   [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
+  RELEASE_TASK_MANIFEST_PREPARATION_START_MS="$(release_task_now_ms)" || return $?
   RELEASE_TASK_MANIFEST_IDENTITY="$(release_task_manifest_input_identity "$@")" || return $?
   release_task_begin_stage release.manifest "$RELEASE_TASK_MANIFEST_IDENTITY" || return $?
   RELEASE_TASK_MANIFEST_ACTION="$RELEASE_TASK_LAST_ACTION"
@@ -1052,12 +1264,18 @@ release_task_prepare_manifest_stage() { # <artifact>...
     return 0
   fi
 
+  local verify_started verification_ms
+  verify_started="$(release_task_now_ms)" || return $?
   release_task_verify_manifest_outputs "$@" || {
     echo "ERROR: release.manifest receipt has present but mismatched/partial outputs; not treating corruption as absence." >&2
     return 1
   }
+  verification_ms="$(release_task_elapsed_ms "$verify_started")" || return $?
   if [[ "$RELEASE_TASK_MANIFEST_ACTION" == "reconcile" ]]; then
     release_task_commit_manifest_stage "$@" || return $?
+  else
+    RELEASE_TASK_PREPARATION_MS="$(release_task_elapsed_ms "$RELEASE_TASK_MANIFEST_PREPARATION_START_MS")" || return $?
+    release_task_emit_timing release.manifest verified-reuse "$verification_ms"
   fi
   RELEASE_TASK_MANIFEST_ACTION=reuse
   RELEASE_TASK_MANIFEST_SKIP=1
@@ -1458,6 +1676,8 @@ fi
 # cut-start decision and the first release-tree write.  A restart therefore has
 # an authoritative spent request to reconcile even if the shell dies during the
 # version/seed/build sequence below.
+papercusp_export_rust_path_remap
+PAPERCUSP_LINUX_RUSTFLAGS="$(papercusp_rustflags_with_lld linux "${RUSTFLAGS:-}")"
 release_task_start_linux_stage || exit $?
 
 # EI-20551860898590077: bind every artifact to THIS cut before the first tree

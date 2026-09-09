@@ -327,6 +327,7 @@ function runJournalLinuxResume({ action, absent = false, verify = 0 }) {
     'RELEASE_TASK_JOURNAL_ENABLED=0',
     releaseTaskJournalHarness,
     'RELEASE_TASK_JOURNAL_ENABLED=1',
+    "release_task_audit_reuse_expiry() { printf '2099-01-01T00:00:00.000Z\\n'; }",
     `RELEASE_TASK_BUILD_ACTION=${action}`,
     'RELEASE_TASK_BUILD_REQUEST_ID=old-request',
     'RELEASE_TASK_BUILD_IDENTITY=linux-input',
@@ -350,6 +351,7 @@ test('journal restart reconciles verified Linux bytes and activates canonical re
   assert.match(result.stdout, /RESULT action=reuse request=old-request reuse=1/);
   assert.match(log, /commit release\.build\.linux linux-input old-request/);
   assert.doesNotMatch(log, /refuse release\.build\.linux/);
+  assert.match(result.stdout, /RELEASE_STAGE_TIMING schema=1 stage=release\.build\.linux decision=cache-hit/);
 });
 
 test('lost Linux outcome is refused before a fresh one-use attempt', () => {
@@ -392,6 +394,7 @@ function runJournalManifestResume({ action, absent = false, verify = 0 }) {
     'RELEASE_TASK_JOURNAL_ENABLED=0',
     releaseTaskJournalHarness,
     'RELEASE_TASK_JOURNAL_ENABLED=1',
+    "release_task_audit_reuse_expiry() { printf '2099-01-01T00:00:00.000Z\\n'; }",
     `INITIAL_ACTION=${action}`,
     'begin_count=0',
     'release_task_begin_stage() { begin_count=$((begin_count + 1)); if (( begin_count == 1 )); then RELEASE_TASK_LAST_ACTION="$INITIAL_ACTION"; RELEASE_TASK_LAST_REQUEST_ID=old-request; else RELEASE_TASK_LAST_ACTION=run; RELEASE_TASK_LAST_REQUEST_ID=new-request; fi; printf "begin:%s:%s:%s\\n" "$1" "$2" "$RELEASE_TASK_LAST_ACTION" >> ' + JSON.stringify(calls) + '; }',
@@ -447,6 +450,79 @@ test('journal manifest verifier reuses the canonical generator and exact artifac
   assert.match(releaseTaskJournalHarness, /release artifact ledger does not name the exact current artifact set/);
   assert.match(releaseTaskJournalHarness, /normalized_manifest\(actual\) != normalized_manifest\(expected\)/);
   assert.match(releaseTaskJournalHarness, /release_artifacts_assert_signatures_present/);
+  assert.match(releaseTaskJournalHarness, /--source-scope stage/);
+});
+
+function runLinuxContentIdentity(mutator = () => {}) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-release-content-identity-'));
+  const workspace = path.join(temp, 'workspace');
+  const desktop = path.join(temp, 'desktop');
+  const files = {
+    dependencyMarker: path.join(workspace, 'node_modules', '.papercusp-dependency-generation'),
+    installedLock: path.join(workspace, 'node_modules', '.package-lock.json'),
+    packageLock: path.join(workspace, 'package-lock.json'),
+    cupboardBundle: path.join(workspace, 'content-bundles', 'workspace-host', 'bundle.yaml'),
+    distributionContract: path.join(desktop, 'src-tauri', 'distribution-contract.json'),
+    tauriBase: path.join(desktop, 'src-tauri', 'tauri.conf.json'),
+    tauriChannel: path.join(desktop, 'src-tauri', 'tauri.nightly.conf.json'),
+    cargoLock: path.join(desktop, 'src-tauri', 'Cargo.lock'),
+    modelBoundary: path.join(desktop, 'bin', 'lib', 'transformers-models.sh'),
+    identityScanner: path.join(desktop, 'bin', 'audit-release-bundle.py'),
+    provenanceVerifier: path.join(desktop, 'bin', 'verify-provenance.sh'),
+    freshnessVerifier: path.join(desktop, 'bin', 'check-sidecar-freshness.js'),
+  };
+  for (const file of Object.values(files)) fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(files.dependencyMarker, `identity=v1-${'a'.repeat(64)}\nsource=${'a'.repeat(64)}\n`);
+  fs.writeFileSync(files.installedLock, '{"lockfileVersion":3}\n');
+  fs.writeFileSync(files.packageLock, '{"lockfileVersion":3,"name":"workspace"}\n');
+  fs.writeFileSync(files.cupboardBundle, 'schema: 1\ncontent: local\n');
+  fs.writeFileSync(files.distributionContract, '{"schemaVersion":1,"optionalPacks":["local-models"]}\n');
+  fs.writeFileSync(files.tauriBase, '{"plugins":{"updater":{"pubkey":"signer-a"}}}\n');
+  fs.writeFileSync(files.tauriChannel, '{"identifier":"nightly"}\n');
+  fs.writeFileSync(files.cargoLock, 'version = 4\n');
+  for (const file of [files.modelBoundary, files.identityScanner, files.provenanceVerifier, files.freshnessVerifier]) {
+    fs.writeFileSync(file, `${path.basename(file)}:v1\n`);
+  }
+  mutator({ files, workspace, desktop });
+  const command = [
+    'set -euo pipefail',
+    `MONOREPO=${JSON.stringify(workspace)}`,
+    `ROOT=${JSON.stringify(desktop)}`,
+    'PAPERCUSP_BUILD_ROLES=gui',
+    'TAURI_CLI_VERSION=2.11.0',
+    'PAPERCUSP_RELEASE_HOST=https://updates.invalid/release-key',
+    'CHANNEL=nightly',
+    'RUSTFLAGS=',
+    'DESKTOP_CHANNEL_BUILD_CFG=(--config src-tauri/tauri.nightly.conf.json)',
+    'PAPERCUSP_RELEASE_REUSE_MAX_AGE_SEC=86400',
+    releaseTaskJournalHarness,
+    'release_task_linux_content_identity',
+  ].join('\n');
+  const result = spawnSync('bash', ['-c', command], { encoding: 'utf8', timeout: 30_000 });
+  fs.rmSync(temp, { recursive: true, force: true });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return JSON.parse(result.stdout);
+}
+
+test('Linux reuse identity binds dependency, toolchain, profile, policy/content/model, signer and audit inputs', () => {
+  const baseline = runLinuxContentIdentity();
+  assert.match(baseline.dependencies.generation, /^v1-[0-9a-f]{64}$/);
+  assert.deepEqual(baseline.profile.roles, ['gui']);
+  assert.match(baseline.signing.updaterPublicKeySha256, /^[0-9a-f]{64}$/);
+  assert.equal(baseline.audit.reuseMaxAgeSec, 86400);
+  assert.deepEqual(baseline.audit.requiredArtifactVerification, [
+    'cardinality', 'provenance', 'health-sha', 'updater-signature',
+  ]);
+
+  const mutations = [
+    ({ files }) => fs.writeFileSync(files.dependencyMarker, `identity=v1-${'b'.repeat(64)}\nsource=${'b'.repeat(64)}\n`),
+    ({ files }) => fs.appendFileSync(files.distributionContract, '{"policy":"changed"}\n'),
+    ({ files }) => fs.appendFileSync(files.cupboardBundle, 'content: changed\n'),
+    ({ files }) => fs.appendFileSync(files.modelBoundary, 'model-revision=v2\n'),
+    ({ files }) => fs.writeFileSync(files.tauriBase, '{"plugins":{"updater":{"pubkey":"signer-b"}}}\n'),
+    ({ files }) => fs.appendFileSync(files.identityScanner, 'scanner-v2\n'),
+  ];
+  for (const mutate of mutations) assert.notDeepEqual(runLinuxContentIdentity(mutate), baseline);
 });
 
 function journalLinuxOutputShape(files) {
