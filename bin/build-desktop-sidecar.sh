@@ -4213,30 +4213,60 @@ if [[ -n "$gh_archive" ]]; then
   fi
 fi
 
-# ── better-sqlite3 darwin native (WI-5651 cross) ────────────────────────────
-# Unlike the holepunch/bare *-native stack (prebuildify — ships ALL platforms in
-# the npm package, so prune_foreign_prebuilds just keeps the target's), and
-# unlike sharp/node-pty (sibling per-platform packages, cross-fetched above),
-# better-sqlite3 is a node-gyp package: npm only produced THIS host's
-# build/Release/better_sqlite3.node (a linux ELF). A darwin bundle needs the
-# darwin binary or it dies at boot (it's in verify's REQUIRED_NATIVE_MODULES).
-# Fetch the matching prebuilt with prebuild-install, which derives the node ABI
-# from --target=$NODE_VERSION (available here, after the node bundle above).
-# (Windows cross runs the sidecar under WSL with the LINUX node — its better-
-# sqlite3 is correctly the linux binary — so this is darwin-only.)
-if [[ "$_cross_darwin" == "1" ]]; then
-  _bsq_dir="$SIDECAR_DIR/node_modules/better-sqlite3"
-  if [[ -d "$_bsq_dir" ]]; then
-    echo "→ WI-5651 cross-fetching better-sqlite3 darwin-${TARGET_ARCH} prebuilt (node ${NODE_VERSION}, ABI via prebuild-install)"
-    rm -f "$_bsq_dir"/build/Release/*.node
-    ( cd "$_bsq_dir" && npx --yes prebuild-install --platform="$TARGET_OS" --arch="$TARGET_ARCH" --target="${NODE_VERSION#v}" --runtime=node --tag-prefix=v ) \
-      || { echo "ERROR: better-sqlite3 ${TARGET_OS}-${TARGET_ARCH} prebuilt fetch failed (prebuild-install). The bundle would die at boot ('Could not locate the bindings file')."; exit 1; }
-    _bsq_node="$(find "$_bsq_dir" -name '*.node' 2>/dev/null | head -1)"
-    [[ -n "$_bsq_node" ]] || { echo "ERROR: better-sqlite3: no *.node present after prebuild-install"; exit 1; }
-    echo "  ✓ better-sqlite3 ${TARGET_OS} binding → ${_bsq_node#"$SIDECAR_DIR"/}"
-  else
-    echo "  ⚠ better-sqlite3 not in the sidecar closure — nothing to cross-fetch"
+# ── better-sqlite3 target-Node ABI alignment (EI-22764638031916839) ─────────
+# npm install/build runs under the host Node, but the finished sidecar runs the
+# separately vendored NODE_VERSION above. For node-gyp addons that is a real ABI
+# boundary: the host can leave better_sqlite3.node at ABI 141 while bundled
+# Node 24.18.1 requires ABI 137. A JS-only require() does not dlopen that addon,
+# so the mismatch can survive assembly and only fail when a database is opened.
+#
+# Refresh the addon AFTER the bundled Node version is known, and pass the target
+# explicitly. This is also the cross-darwin path that previously lived here;
+# keeping one helper makes native Linux and cross-darwin builds obey the same
+# target-ABI contract. If a matching prebuild is unavailable, npm's normal
+# node-gyp fallback is attempted with the same target before failing closed.
+align_better_sqlite3_native() {
+  local bsq_dir="$SIDECAR_DIR/node_modules/better-sqlite3"
+  local target_version="${NODE_VERSION#v}"
+  [[ -d "$bsq_dir" ]] || {
+    echo "  ⚠ better-sqlite3 not in the sidecar closure — no ABI alignment needed"
+    return 0
+  }
+
+  echo "→ aligning better-sqlite3 native addon for ${TARGET_OS}-${TARGET_ARCH}, Node ${NODE_VERSION} (target ABI)"
+  rm -f "$bsq_dir"/build/Release/*.node
+  if ! (
+    cd "$bsq_dir" &&
+    npx --yes prebuild-install \
+      --platform="$TARGET_OS" \
+      --arch="$TARGET_ARCH" \
+      --target="$target_version" \
+      --runtime=node \
+      --tag-prefix=v
+  ); then
+    echo "  ⚠ no better-sqlite3 prebuild for Node ${NODE_VERSION}; rebuilding from source for that target"
+    ( cd "$bsq_dir" && npm rebuild --runtime=node --target="$target_version" --build-from-source better-sqlite3 ) \
+      || {
+        echo "ERROR: better-sqlite3 could not be aligned with bundled Node ${NODE_VERSION} (prebuild-install + target rebuild failed)." >&2
+        return 1
+      }
   fi
+
+  local bsq_node
+  bsq_node="$(find "$bsq_dir" -type f -name '*.node' 2>/dev/null | head -1)"
+  [[ -n "$bsq_node" ]] || {
+    echo "ERROR: better-sqlite3: no *.node present after target-ABI alignment" >&2
+    return 1
+  }
+  echo "  ✓ better-sqlite3 target binding → ${bsq_node#"$SIDECAR_DIR"/}"
+}
+
+# Windows packaging consumes the Linux sidecar through WSL, so its native
+# addon remains the Linux target and the Windows package is not repaired here.
+# Native Linux, native macOS, and cross-darwin builds all need the explicit
+# alignment above.
+if [[ "$TARGET_OS" == "linux" || "$TARGET_OS" == "darwin" ]]; then
+  align_better_sqlite3_native || exit 1
 fi
 
 # EI-3620 (darwin, cross-build only): vendor a relocatable git for the macOS

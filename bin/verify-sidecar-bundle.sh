@@ -517,7 +517,14 @@ Module._resolveFilename = function (request, parent, ...rest) {
 };
 // Resolve AS THE SIDECAR DOES — from inside the bundle. A bare `require()` here
 // would resolve relative to THIS guard file (it lives in TMPDIR), not the cwd.
-Module.createRequire(path.join(ROOT, 'serve.mjs'))(process.argv[2]);
+const loaded = Module.createRequire(path.join(ROOT, 'serve.mjs'))(process.argv[2]);
+// better-sqlite3's package entry only exports JavaScript. Its ABI-sensitive
+// .node addon is dlopened lazily by the constructor, so requiring the entry
+// point alone can report green for an addon that will fail on first DB access.
+if (process.argv[2] === 'better-sqlite3') {
+  const database = new loaded(':memory:');
+  database.close();
+}
 GUARD_EOF
   _nat_ok=0
   for _m in $REQUIRED_NATIVE_MODULES; do
