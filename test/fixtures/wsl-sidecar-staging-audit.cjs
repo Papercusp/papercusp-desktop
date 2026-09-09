@@ -49,7 +49,10 @@ function inventory(root, source = false) {
           }
         } finally { fs.closeSync(fd); }
         entries.push({ path: rel, type: 'file', bytes: length, sha256: hash.digest('hex'),
-          executable: source ? executable : Boolean(stat.mode & 0o100) });
+          executable: source ? executable : Boolean(stat.mode & 0o100),
+          // Owner-only execute is the contract: checking just the owner bit
+          // cannot detect unwanted group/other execute permissions.
+          executeBits: source ? (executable ? 0o100 : 0) : stat.mode & 0o111 });
       } else {
         throw new Error(`Unsupported entry type: ${rel}`);
       }
@@ -63,11 +66,11 @@ function snapshot(root) {
   for (const required of ['serve.mjs', 'sidecar-preload.js']) {
     if (!fs.statSync(path.join(root, required)).isFile()) throw new Error(`Missing ${required}`);
   }
-  return { schema: 'wsl-staging-byte-mode-v1', entries: inventory(root, true) };
+  return { schema: 'wsl-staging-byte-mode-v2', entries: inventory(root, true) };
 }
 
 function verify(root, manifest) {
-  if (manifest.schema !== 'wsl-staging-byte-mode-v1' || !Array.isArray(manifest.entries)) {
+  if (manifest.schema !== 'wsl-staging-byte-mode-v2' || !Array.isArray(manifest.entries)) {
     throw new Error('Invalid source manifest');
   }
   const expected = new Map();
