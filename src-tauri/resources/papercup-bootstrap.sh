@@ -249,6 +249,9 @@ install_node_runtime() (
   if ((${#remaining[@]})); then
     cp -a -- "${remaining[@]}" "$prefix/"
   fi
+  # Recover a shared prefix already made private by the old copy operation.
+  # This installer serves non-root WSL users; never add write permission.
+  chmod a+rx "$prefix"
 )
 install_node_runtime /usr/local
 node --version

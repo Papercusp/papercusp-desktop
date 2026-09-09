@@ -125,6 +125,16 @@ test('private install staging never changes the shared prefix permissions', t =>
   }
 });
 
+test('upgrade repairs a prefix made private by the old bootstrap', t => {
+  const f = fixture(t);
+  fs.chmodSync(f.prefix, 0o700);
+  const result = f.install();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.statSync(f.prefix).mode & 0o7777, 0o755);
+  assert.equal(f.probe().status, 0);
+  assert.deepEqual(f.stageDirs(), []);
+});
+
 for (const failure of ['download', 'corrupt archive', 'invalid npm']) {
   test(`${failure} leaves the installed runtime intact`, t => {
     const f = fixture(t, { invalidNpm: failure === 'invalid npm' });
