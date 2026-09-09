@@ -727,6 +727,38 @@ if [[ "${PAPERCUSP_STAGE_SOURCE:-1}" == "1" && "${PAPERCUSP_SINGLE_FILE:-0}" != 
 fi
 shopt -u nullglob
 
+# Retain verified native-source evidence BEFORE the finished-container gates.
+# A later packaging refusal must remain a refusal, but must not erase which
+# native bytes were compiled when cleanup removes the disposable source tree.
+# This is unsigned evidence, not a successful build or release acceptance.
+emit_windows_provenance() {
+  local phase="$1" signed="$2" toolchain
+  local -a artifacts
+  shopt -s nullglob
+  artifacts=("$OUT_DIR"/*-setup.exe "$OUT_DIR"/*-setup-*.bin)
+  shopt -u nullglob
+  [[ ${#artifacts[@]} -gt 0 ]] || fail "no Windows artifacts for source evidence"
+  if [[ -n "$SOURCE_REPAIR_APPLIED" ]]; then
+    node "$PROVENANCE_TOOLS_ROOT/lib/windows-source-repair.js" verify "$SOURCE_REPAIR_APPLIED" "$ROOT" "$ROLES" >/dev/null \
+      || fail "native source changed after repair materialization"
+    cp "$SOURCE_REPAIR_APPLIED" "$OUT_DIR/source-repair.json"
+  fi
+  cp "$PROVENANCE_TOOLS_ROOT/producer-inputs.json" "$OUT_DIR/producer-inputs.json"
+  toolchain="$(node -e 'process.stdout.write(JSON.stringify({...JSON.parse(process.argv[1]), windowsBuildPhase:process.argv[2]}))' \
+    "$WINDOWS_PROVENANCE_TOOLCHAIN" "$phase")" || fail "invalid Windows source-evidence toolchain"
+  PROVENANCE_GIT_ROOT="$ROOT" \
+  PROVENANCE_SIGNED="$signed" \
+  PROVENANCE_SIDECAR_DIR="$SRC_TAURI/sidecar" \
+  PROVENANCE_SOURCE_REPAIR_MANIFEST="$SOURCE_REPAIR_APPLIED" \
+  PROVENANCE_SOURCE_REPAIR_ROLES="$ROLES" \
+  PROVENANCE_TOOLCHAIN="$toolchain" \
+    bash "$PROVENANCE_TOOLS_ROOT/emit-build-provenance.sh" \
+      "$OUT_DIR" "$VERSION" "${PAPERCUSP_BUILD_SHA:-}" false "${artifacts[@]}"
+}
+if [[ -n "$SOURCE_REPAIR_APPLIED" ]]; then
+  emit_windows_provenance native-built-awaiting-artifact-audit false
+fi
+
 # ── Identity-scan the FINISHED installers (WI-39458) ─────────────────────────
 # The --scan-dir pass above runs BEFORE Inno packs, so it can only ever see the
 # pre-package tree. Two things then escape it, and both shipped in 0.0.17:
@@ -785,29 +817,8 @@ for SETUP_EXE in "${SETUP_EXES[@]}"; do
   [[ -f "$SETUP_EXE.sig" ]] || fail "tauri signer produced no .sig for $SETUP_EXE"
 done
 
-# ── Provenance (shared emitter, one schema across all legs). Enumerate every
-# distributable: the setup.exe stubs AND the DiskSpanning *-setup-*.bin slices.
-shopt -s nullglob
-PROV_ARTIFACTS=("$OUT_DIR"/*-setup.exe "$OUT_DIR"/*-setup-*.bin)
-shopt -u nullglob
-if [[ -n "$SOURCE_REPAIR_APPLIED" ]]; then
-  node "$PROVENANCE_TOOLS_ROOT/lib/windows-source-repair.js" verify "$SOURCE_REPAIR_APPLIED" "$ROOT" "$ROLES" >/dev/null \
-    || fail "native source changed after repair materialization"
-  cp "$SOURCE_REPAIR_APPLIED" "$OUT_DIR/source-repair.json"
-fi
-cp "$PROVENANCE_TOOLS_ROOT/producer-inputs.json" "$OUT_DIR/producer-inputs.json"
-PROVENANCE_GIT_ROOT="$ROOT" \
-PROVENANCE_SIGNED="$([[ -n "$AUTHENTICODE_PFX" ]] && echo true || echo false)" \
-PROVENANCE_SIDECAR_DIR="$SRC_TAURI/sidecar" \
-PROVENANCE_SOURCE_REPAIR_MANIFEST="$SOURCE_REPAIR_APPLIED" \
-PROVENANCE_SOURCE_REPAIR_ROLES="$ROLES" \
-PROVENANCE_TOOLCHAIN="$WINDOWS_PROVENANCE_TOOLCHAIN" \
-  bash "$PROVENANCE_TOOLS_ROOT/emit-build-provenance.sh" \
-    "$OUT_DIR" \
-    "$VERSION" \
-    "${PAPERCUSP_BUILD_SHA:-}" \
-    false \
-    "${PROV_ARTIFACTS[@]}"
+# Replace unsigned evidence only after all gates and signatures succeeded.
+emit_windows_provenance artifact-audited-and-signed "$([[ -n "$AUTHENTICODE_PFX" ]] && echo true || echo false)"
 
 # A direct/windows-only build does not pass through release-local.sh's
 # collection step, so it must normalize its own Server span before returning.

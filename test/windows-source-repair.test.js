@@ -369,5 +369,48 @@ test('late provenance emission uses immutable helper copies after source produce
   }
   assert.ok(script.indexOf('snapshot_provenance_tools "$PROVENANCE_TOOLS_ROOT"') <
     script.indexOf('cargo xwin build --release'));
-  assert.match(script, /PROVENANCE_TOOLCHAIN="\$WINDOWS_PROVENANCE_TOOLCHAIN"/);
+  assert.match(script, /"\$WINDOWS_PROVENANCE_TOOLCHAIN" "\$phase"/);
+});
+
+test('a failed finished-artifact gate retains explicitly unsigned native-source evidence', (t) => {
+  const f = fixture(t);
+  Object.assign(f.value, { kind: 'windows-native-source-repair', roles: ['server'] });
+  const applied = f.apply('server');
+  const input = path.join(f.dir, 'repair.json'); fs.writeFileSync(input, JSON.stringify(applied));
+  const tools = path.join(f.dir, 'tools'); fs.mkdirSync(path.join(tools, 'lib'), { recursive: true });
+  for (const relative of ['emit-build-provenance.sh', 'lib/windows-source-repair.js']) {
+    fs.copyFileSync(path.join(root, 'bin', relative), path.join(tools, relative));
+  }
+  fs.writeFileSync(path.join(tools, 'producer-inputs.json'), '{"schemaVersion":1,"files":[]}');
+  const out = path.join(f.dir, 'out'); fs.mkdirSync(out);
+  const artifact = path.join(out, 'Papercusp Server_0.0.19_x64-setup.exe');
+  fs.writeFileSync(artifact, 'unsigned native candidate');
+  const script = fs.readFileSync(path.join(root, 'bin/build-windows-cross.sh'), 'utf8');
+  const start = script.indexOf('emit_windows_provenance() {');
+  const end = script.indexOf('# ── Identity-scan the FINISHED installers', start);
+  assert.ok(start > 0 && end > start);
+  const result = spawnSync('bash', ['-c',
+    `set -euo pipefail\nfail() { echo "$*" >&2; exit 1; }\n${script.slice(start, end)}\n` +
+    'fail "fixture finished artifact rejected"'], {
+    encoding: 'utf8', env: {
+      ...process.env, ROOT: f.snapshot, SRC_TAURI: path.join(f.snapshot, 'src-tauri'),
+      OUT_DIR: out, VERSION: '0.0.19', PAPERCUSP_BUILD_SHA: f.value.operatorBuildSha,
+      SOURCE_REPAIR_APPLIED: input, ROLES: 'server',
+      PROVENANCE_TOOLS_ROOT: tools, WINDOWS_PROVENANCE_TOOLCHAIN: '{}',
+    },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /fixture finished artifact rejected/);
+  const evidence = JSON.parse(fs.readFileSync(path.join(out, 'build-provenance.json')));
+  assert.deepEqual(evidence.sourceRepair, applied);
+  assert.equal(evidence.toolchain.windowsBuildPhase, 'native-built-awaiting-artifact-audit');
+  assert.equal(evidence.signed, false);
+  assert.equal(evidence.artifacts[0].sig, false);
+  assert.equal(evidence.artifacts[0].sha256, hash(Buffer.from('unsigned native candidate')));
+  assert.equal(fs.existsSync(`${artifact}.sig`), false);
+  assert.ok(script.indexOf('emit_windows_provenance native-built-awaiting-artifact-audit') <
+    script.indexOf('echo "==> identity-scan of the finished installer(s)"'));
+  assert.ok(script.indexOf('emit_windows_provenance artifact-audited-and-signed') >
+    script.indexOf('echo "==> signing installers"'));
+  assert.match(script, /refusing to sign or publish it/);
 });
