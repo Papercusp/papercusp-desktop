@@ -205,6 +205,7 @@ NODE_TARBALL="node-v${NODE_VERSION}-linux-x64.tar.xz"
 install_node_runtime() (
   set -euo pipefail
   local prefix="$1" stage previous_npm=0
+  local -a remaining
   stage="$(mktemp -d "$prefix/.papercusp-node.XXXXXX")"
   cleanup_node_stage() {
     local status="$?"
@@ -240,7 +241,14 @@ install_node_runtime() (
   # packages (pnpm, user tools) remain in place.
   rm -rf -- "$stage/previous-npm"
   previous_npm=0
-  cp -a "$stage/." "$prefix/"
+  # Copy the contents, never the private mktemp directory's own metadata:
+  # cp -a "$stage/." "$prefix/" changes /usr/local to 0700, hiding Node
+  # from the non-root runtime user while root-run bootstrap checks pass.
+  shopt -s dotglob nullglob
+  remaining=("$stage"/*)
+  if ((${#remaining[@]})); then
+    cp -a -- "${remaining[@]}" "$prefix/"
+  fi
 )
 install_node_runtime /usr/local
 node --version
