@@ -6,7 +6,8 @@ const path = require('node:path');
 const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
-const iss = fs.readFileSync(path.join(root, 'src-tauri', 'windows', 'inno', 'papercusp.iss'), 'utf8');
+const iss = fs.readFileSync(process.env.PAPERCUSP_ISS
+  || path.join(root, 'src-tauri', 'windows', 'inno', 'papercusp.iss'), 'utf8');
 const code = iss.slice(iss.indexOf('[Code]'));
 
 // EI-20984135666314897 / real Windows :2223 acceptance (2026-08-20):
@@ -155,4 +156,98 @@ test('real Inno packages the mandatory stamp and refuses a missing input', {
   const missing = compile();
   assert.notEqual(missing.status, 0, 'the real producer accepted a missing mandatory runtime stamp');
   assert.match(missing.stdout + missing.stderr, /\.sidecar-build-stamp/);
+});
+
+// Execute the shipping [Code], not a JS model of its directory operations.
+// The prefix and install root are disposable; no installed GUI/Server or WSL
+// baseline is stopped, edited, or used as the fixture.
+test('real Inno upgrade replaces owned payload, preserves data, and rolls back a failed copy', {
+  skip: process.env.PAPERCUSP_TEST_REAL_INNO !== '1'
+    ? 'native producer leg: set PAPERCUSP_TEST_REAL_INNO=1'
+    : false,
+}, (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-inno-payload-upgrade-'));
+  const prefix = fs.mkdtempSync(path.join(os.homedir(), '.cache/inno-upgrade-prefix-'));
+  const compiler = process.env.PAPERCUSP_ISCC_EXE
+    || path.join(os.homedir(), '.papercusp/wine-inno/drive_c/InnoSetup6/ISCC.exe');
+  assert.ok(fs.existsSync(compiler), `missing ISCC: ${compiler}`);
+  const env = { ...process.env, WINEPREFIX: prefix, WINEDEBUG: '-all',
+    WINEDLLOVERRIDES: 'mscoree,mshtml,winemenubuilder.exe=' };
+  const run = (command, args) => {
+    const result = spawnSync(command, args, { encoding: 'utf8', env, timeout: 120000 });
+    assert.ifError(result.error);
+    return result;
+  };
+  t.after(() => {
+    run('wineserver', ['-k']);
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(prefix, { recursive: true, force: true });
+  });
+  const winpath = (file) => {
+    const r = run('winepath', ['-w', file]);
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  const boot = run('xvfb-run', ['-a', 'wineboot', '-i']);
+  assert.equal(boot.status, 0, boot.stderr);
+  const app = path.join(dir, 'installed-role');
+  const sibling = path.join(dir, 'sibling-role');
+  fs.mkdirSync(app);
+  fs.mkdirSync(sibling);
+  fs.writeFileSync(path.join(app, 'user-config.json'), 'preserve-app-data');
+  fs.writeFileSync(path.join(sibling, 'serve.mjs'), 'preserve-sibling');
+  const input = path.join(dir, 'input.txt');
+  const install = (version, entries, failCopy = false) => {
+    fs.writeFileSync(input, `payload-${version}`);
+    const setup = [
+      '#define AppName "Papercusp GUI"', '#define AppId "com.papercusp.gui"',
+      '[Setup]', 'AppId=PapercuspPayloadSelftest', 'AppName=Papercusp Payload Selftest',
+      `AppVersion=${version}`, `DefaultDirName=${winpath(app)}`,
+      'PrivilegesRequired=lowest', 'DisableDirPage=yes', 'DisableProgramGroupPage=yes',
+      'Uninstallable=no', 'Compression=none', 'OutputDir=out', 'OutputBaseFilename=upgrade',
+      '[Files]',
+      ...entries.map((entry, index) => `Source: "${winpath(input)}"; `
+        + `DestDir: "{app}\\${path.posix.dirname(entry).replaceAll('/', '\\')}"; `
+        + `DestName: "${path.posix.basename(entry)}"; Flags: ignoreversion`
+        + (failCopy && index === entries.length - 1 ? '; Check: InjectCopyFailure' : '')),
+      code,
+      ...(failCopy ? [
+        'function InjectCopyFailure: Boolean;',
+        'begin', "  RaiseException('intentional-copy-failure');", '  Result := False;', 'end;',
+      ] : []),
+    ].join('\n');
+    const source = path.join(dir, 'upgrade.iss');
+    fs.writeFileSync(source, setup);
+    const built = run('xvfb-run', ['-a', 'wine', compiler, winpath(source)]);
+    assert.equal(built.status, 0, (built.stdout + built.stderr).slice(-5000));
+    const result = run('xvfb-run', ['-a', 'wine', winpath(path.join(dir, 'out/upgrade.exe')),
+      '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', `/LOG=${winpath(path.join(dir, 'install.log'))}`]);
+    return { status: result.status, log: fs.readFileSync(path.join(dir, 'install.log'), 'utf8') };
+  };
+  const first = install('1.0.0', ['sidecar/serve.mjs', 'sidecar/obsolete.js',
+    'sidecar/nested/old.json', 'resources/old.bin', 'seed/old.bin']);
+  assert.equal(first.status, 0, first.log.slice(-5000));
+  fs.writeFileSync(path.join(app, 'sidecar/private-local-config.json'), 'preserve-nested-data');
+  const second = install('2.0.0', ['sidecar/serve.mjs', 'sidecar/new.js', 'resources/new.bin']);
+  assert.equal(second.status, 0, second.log.slice(-5000));
+  for (const removed of ['sidecar/obsolete.js', 'sidecar/nested/old.json',
+    'sidecar/private-local-config.json', 'resources/old.bin', 'seed/old.bin']) {
+    assert.equal(fs.existsSync(path.join(app, removed)), false, `obsolete active payload: ${removed}`);
+  }
+  assert.equal(fs.readFileSync(path.join(app, 'sidecar/serve.mjs'), 'utf8'), 'payload-2.0.0');
+  const backupRoot = path.join(app, '.papercusp-upgrade-backups');
+  const preserved = fs.readdirSync(backupRoot).map((name) => path.join(backupRoot, name));
+  assert.ok(preserved.some((backup) => fs.existsSync(path.join(backup, 'sidecar/private-local-config.json'))
+    && fs.readFileSync(path.join(backup, 'sidecar/private-local-config.json'), 'utf8') === 'preserve-nested-data'),
+  'unknown data inside the old payload must be retained, never recursively deleted');
+
+  const failed = install('3.0.0', ['sidecar/serve.mjs', 'sidecar/never.txt'], true);
+  assert.notEqual(failed.status, 0, 'injected copy failure was not exercised');
+  assert.match(failed.log, /intentional-copy-failure/);
+  assert.equal(fs.readFileSync(path.join(app, 'sidecar/serve.mjs'), 'utf8'), 'payload-2.0.0');
+  assert.equal(fs.readFileSync(path.join(app, 'sidecar/new.js'), 'utf8'), 'payload-2.0.0');
+  assert.equal(fs.readFileSync(path.join(app, 'resources/new.bin'), 'utf8'), 'payload-2.0.0');
+  assert.equal(fs.readFileSync(path.join(app, 'user-config.json'), 'utf8'), 'preserve-app-data');
+  assert.equal(fs.readFileSync(path.join(sibling, 'serve.mjs'), 'utf8'), 'preserve-sibling');
+  assert.equal(fs.existsSync(path.join(app, '.papercusp-payload-rollback')), false);
 });

@@ -315,15 +315,173 @@ begin
   end;
 end;
 
+{ D021 / EI-22789249437927838: Files entries overlay, rather than mirror, a
+  destination directory. Retire ONLY our three payload roots before copying.
+  Never delete the old tree: it may contain locally-added files. Retain it
+  outside the active payload and restore it if installation fails.
+
+  A fixed pending directory is also the crash journal. Each root has an intent
+  marker written BEFORE its rename, so a retry can distinguish an untouched
+  original directory from newly-copied files. Success archives the journal;
+  failure restores it. No path from journal contents is ever executed. }
+function PayloadRootName(Index: Integer): String;
+begin
+  case Index of
+    0: Result := 'sidecar';
+    1: Result := 'resources';
+    2: Result := 'seed';
+  end;
+end;
+
+function PayloadRollbackDir: String;
+begin
+  Result := ExpandConstant('{app}\.papercusp-payload-rollback');
+end;
+
+function NewPayloadBackupDir: String;
+var
+  Base: String;
+  Index: Integer;
+begin
+  Base := ExpandConstant('{app}\.papercusp-upgrade-backups\') +
+    GetDateTimeString('yyyymmddhhnnss', '-', ':');
+  Index := 0;
+  Result := Base;
+  while DirExists(Result) or FileExists(Result) do
+  begin
+    Index := Index + 1;
+    Result := Base + '-' + IntToStr(Index);
+  end;
+end;
+
+function RestorePayloadUpgrade: String;
+var
+  Pending, Archive, Name, Current, Previous, Present, Absent: String;
+  Index: Integer;
+begin
+  Result := '';
+  Pending := PayloadRollbackDir;
+  if not DirExists(Pending) then
+    Exit;
+  Archive := NewPayloadBackupDir;
+  for Index := 0 to 2 do
+  begin
+    Name := PayloadRootName(Index);
+    Current := ExpandConstant('{app}\') + Name;
+    Previous := Pending + '\' + Name;
+    Present := Pending + '\' + Name + '.present';
+    Absent := Pending + '\' + Name + '.absent';
+    { Previous present proves the original rename finished. If the intent
+      marker exists but Previous does not, Current is the untouched original
+      (or it has already been restored by an interrupted recovery). }
+    if DirExists(Previous) or FileExists(Absent) then
+    begin
+      if DirExists(Current) or FileExists(Current) then
+      begin
+        if (not ForceDirectories(Archive + '\incomplete')) or
+          (not RenameFile(Current, Archive + '\incomplete\' + Name)) then
+        begin
+          Result := 'windows-payload-rollback-failed: cannot preserve incomplete ' + Current;
+          Exit;
+        end;
+      end;
+      if DirExists(Previous) and (not RenameFile(Previous, Current)) then
+      begin
+        Result := 'windows-payload-rollback-failed: cannot restore ' + Current;
+        Exit;
+      end;
+    end;
+    if FileExists(Present) and (not DeleteFile(Present)) then
+    begin
+      Result := 'windows-payload-rollback-failed: cannot clear ' + Present;
+      Exit;
+    end;
+    if FileExists(Absent) and (not DeleteFile(Absent)) then
+    begin
+      Result := 'windows-payload-rollback-failed: cannot clear ' + Absent;
+      Exit;
+    end;
+  end;
+  if not RemoveDir(Pending) then
+    Result := 'windows-payload-rollback-failed: pending directory is not empty: ' + Pending;
+  Log('windows-payload-rollback: ' + Result);
+end;
+
+function BeginPayloadUpgrade: String;
+var
+  Pending, Name, Current, Marker: String;
+  Index: Integer;
+begin
+  Result := RestorePayloadUpgrade;
+  if Result <> '' then
+    Exit;
+  Pending := PayloadRollbackDir;
+  if not ForceDirectories(Pending) then
+  begin
+    Result := 'windows-payload-prepare-failed: cannot create ' + Pending;
+    Exit;
+  end;
+  for Index := 0 to 2 do
+  begin
+    Name := PayloadRootName(Index);
+    Current := ExpandConstant('{app}\') + Name;
+    if FileExists(Current) then
+    begin
+      Result := 'windows-payload-prepare-failed: expected directory at ' + Current;
+      Exit;
+    end;
+    if DirExists(Current) then
+      Marker := Pending + '\' + Name + '.present'
+    else
+      Marker := Pending + '\' + Name + '.absent';
+    if not SaveStringToFile(Marker, '', False) then
+    begin
+      Result := 'windows-payload-prepare-failed: cannot record ' + Marker;
+      Exit;
+    end;
+    if DirExists(Current) and (not RenameFile(Current, Pending + '\' + Name)) then
+    begin
+      Result := 'windows-payload-prepare-failed: cannot retain ' + Current;
+      Exit;
+    end;
+  end;
+  Log('windows-payload-prepare: retained old payload at ' + Pending);
+end;
+
+procedure CommitPayloadUpgrade;
+var
+  Backup: String;
+begin
+  Backup := NewPayloadBackupDir;
+  if (not ForceDirectories(ExtractFileDir(Backup))) or
+    (not RenameFile(PayloadRollbackDir, Backup)) then
+    RaiseException('windows-payload-commit-failed: cannot retain prior payload at ' + Backup);
+  Log('windows-payload-commit: prior payload retained at ' + Backup);
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := CloseRoleScopedRunningApplication;
+  if Result = '' then
+    Result := BeginPayloadUpgrade;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
+  begin
     ReapLegacyUninstallEntries;
+    CommitPayloadUpgrade;
+  end;
+end;
+
+procedure DeinitializeSetup;
+var
+  Error: String;
+begin
+  Error := RestorePayloadUpgrade;
+  if Error <> '' then
+    Log(Error);
 end;
 
 function IsUpdaterLaunch(): Boolean;
