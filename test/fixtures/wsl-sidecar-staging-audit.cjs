@@ -5,6 +5,12 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const excludedInputs = new Set(['source.tar.zst', 'db-seed.dump', 'db-seed.tar.gz']);
 
+// Windows readlink reports native separators; tar stores portable separators.
+// Never normalize Unix link text: a backslash there is a literal filename byte.
+function portableLinkTarget(target, platform = process.platform) {
+  return platform === 'win32' ? target.replace(/\\/g, '/') : target;
+}
+
 function inventory(root, source = false) {
   const entries = [];
   function walk(relative) {
@@ -14,7 +20,9 @@ function inventory(root, source = false) {
       const file = path.join(root, rel);
       const stat = fs.lstatSync(file);
       if (stat.isSymbolicLink()) {
-        entries.push({ path: rel, type: 'link', target: fs.readlinkSync(file) });
+        const target = fs.readlinkSync(file);
+        entries.push({ path: rel, type: 'link',
+          target: source ? portableLinkTarget(target) : target });
       } else if (stat.isDirectory()) {
         entries.push({ path: rel, type: 'directory' });
         walk(rel);
@@ -89,7 +97,7 @@ function verify(root, manifest) {
     acceptance: false, published: false };
 }
 
-module.exports = { snapshot, verify };
+module.exports = { snapshot, verify, portableLinkTarget };
 if (require.main === module) {
   const [mode, root, output] = process.argv.slice(2);
   if (!root || !output || !['snapshot', 'verify'].includes(mode)) {
