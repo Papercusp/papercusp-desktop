@@ -135,7 +135,7 @@ _is_target_format() {
 WORKSPACE_HOST_TOOLS=""
 if [[ "${PAPERCUSP_DISTRIBUTION_PROFILE:-}" == "vm-release" \
    || -f "$SIDECAR/apps/operator/runtime/vm-release-threat-boundary.json" ]]; then
-  WORKSPACE_HOST_TOOLS="papercusp-install papercusp-rollback papercusp-migrate papercusp-server papercusp-health psu claude codex omp"
+  WORKSPACE_HOST_TOOLS="papercusp-install papercusp-rollback papercusp-migrate papercusp-server papercusp-health papercusp-content-bootstrap psu claude codex omp"
 fi
 REQUIRED_TOOLS="pg_dump psql pg_dumpall pg_restore kopia node gh zellij pui papercup $WORKSPACE_HOST_TOOLS papercusp-remote-initializer papercusp-deliver-material"
 # Probe args per tool; blank = existence/exec check only (TUIs and agent CLIs
@@ -143,6 +143,7 @@ REQUIRED_TOOLS="pg_dump psql pg_dumpall pg_restore kopia node gh zellij pui pape
 probe_args() {
   case "$1" in
     pg_dump|psql|pg_dumpall|pg_restore|kopia|node|gh|zellij) echo "--version" ;;
+    papercusp-content-bootstrap) echo "--help" ;;
     *) echo "" ;;
   esac
 }
@@ -213,7 +214,7 @@ for f in "$BIN"/*; do
   case "$b" in
     papercup|papercup-status.mjs)
       ok "$b (allowlisted script)" ;;
-    papercusp-install|papercusp-rollback|papercusp-migrate|papercusp-server|papercusp-health|psu|claude|codex|omp)
+    papercusp-install|papercusp-rollback|papercusp-migrate|papercusp-server|papercusp-health|papercusp-content-bootstrap|psu|claude|codex|omp)
       # Maintained release entrypoints emitted by
       # install-workspace-host-entrypoints.sh. They delegate only to bundled
       # Node + serve.mjs/scripts/psu.mjs (or curl for bounded loopback health),

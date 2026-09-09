@@ -104,6 +104,27 @@ test('upgrade eliminates obsolete nested npm dependencies, keeps other tools, an
   assert.notEqual(fs.statSync(path.join(f.prefix, 'bin/node')).ino, oldNodeInode);
 });
 
+test('private install staging never changes the shared prefix permissions', t => {
+  const f = fixture(t);
+  // The real bootstrap runs as root, but node is used by papercup. Copying
+  // mktemp's 0700 directory metadata to /usr/local locks that user out even
+  // though every root-run node/npm validation remains green.
+  fs.chmodSync(f.prefix, 0o755);
+  const before = fs.statSync(f.prefix);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = f.install();
+    assert.equal(result.status, 0, result.stderr);
+    const after = fs.statSync(f.prefix);
+    assert.equal(after.mode & 0o7777, before.mode & 0o7777,
+      'the prefix must not inherit the private staging directory mode');
+    assert.equal(after.uid, before.uid);
+    assert.equal(after.gid, before.gid);
+    assert.equal(after.ino, before.ino);
+    assert.equal(fs.statSync(path.join(f.prefix, 'bin/node')).mode & 0o111, 0o111);
+    assert.deepEqual(f.stageDirs(), []);
+  }
+});
+
 for (const failure of ['download', 'corrupt archive', 'invalid npm']) {
   test(`${failure} leaves the installed runtime intact`, t => {
     const f = fixture(t, { invalidNpm: failure === 'invalid npm' });

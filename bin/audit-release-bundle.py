@@ -1501,15 +1501,17 @@ VM_RELEASE_BOUNDARY_PATH = os.path.join(
 )
 VM_RELEASE_ASSET_ALLOWLIST = (
     "db-sql/",                   # ordered runtime migrations; names may contain test/spec
-    "templates/",                 # materialized app/template product assets
-    "prompts/",                   # runtime agent prompt assets
-    "rubrics/",                   # runtime evaluation assets
     "internal-docs/",             # rendered/served product documentation
-    "harness/blueprints/",        # runtime harness definitions
     "harness/hooks/",             # runtime harness hooks
     "harness/identity/",          # runtime role prompt assets
     "harness/knowledge-packs/",   # runtime knowledge assets
-    "harness/templates/",         # runtime harness templates
+)
+VM_RELEASE_CUPBOARD_CONTENT_ROOTS = (
+    "prompts",
+    "templates",
+    "rubrics",
+    "harness/blueprints",
+    "harness/templates",
 )
 VM_RELEASE_FORBIDDEN_ROOTS = (
     "source.tar.zst",
@@ -1554,6 +1556,13 @@ def _vm_release_residue_class(rel, is_dir=False):
     for root in VM_RELEASE_FORBIDDEN_ROOTS:
         if rel == root or rel.startswith(root + "/"):
             return "dogfood-or-docs-source"
+    # P-309: these trees are installed into persistent machine-local state by
+    # the existing Cupboard bundle before service start. They are forbidden as
+    # WHOLE roots here — merely removing them from the asset allowlist would
+    # still let yaml/json files slip through the generic source classifier.
+    for root in VM_RELEASE_CUPBOARD_CONTENT_ROOTS:
+        if rel == root or rel.startswith(root + "/"):
+            return "cupboard-content"
 
     allowed_asset = _vm_release_asset_allowed(rel)
     parts = rel.split("/")
@@ -1590,8 +1599,6 @@ def _vm_release_residue_class(rel, is_dir=False):
         if part == ".bin" and "node_modules" in parts[:index]:
             return "build-tool-residue"
 
-    # Templates intentionally carry source/tests/config: they are the bytes the
-    # runtime materializes into a NEW app, not editable Papercusp implementation.
     if allowed_asset:
         return None
     if is_dir and base.lower() in VM_RELEASE_TEST_DIRS:

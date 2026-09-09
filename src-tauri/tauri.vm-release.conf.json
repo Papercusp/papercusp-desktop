@@ -26,16 +26,13 @@
       "sidecar/node_modules/**/*",
       "sidecar/opusscript_native_wasm.wasm",
       "sidecar/orchestrator/**/*",
-      "sidecar/prompts/**/*",
       "sidecar/pui-companion.wasm",
       "sidecar/pui-install.json",
-      "sidecar/rubrics/**/*",
       "sidecar/scripts/**/*",
       "sidecar/serve.mjs",
       "sidecar/sidecar-preload.js",
       "sidecar/spa/**/*",
-      "sidecar/sql/**/*",
-      "sidecar/templates/**/*"
+      "sidecar/sql/**/*"
     ],
     "linux": {
       "deb": {

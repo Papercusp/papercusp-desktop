@@ -101,6 +101,19 @@ done
 [[ -s "$ROOT/serve.mjs" ]] || die "serve.mjs is missing or empty"
 [[ -s "$ROOT/scripts/psu.mjs" ]] || die "scripts/psu.mjs is missing or empty"
 [[ -d "$ROOT/db-sql" ]] || die "db-sql migration payload is missing"
+[[ -x "$BIN/papercusp-content-bootstrap" ]] \
+  || die "content bootstrap entrypoint is missing or not executable"
+"$BIN/papercusp-content-bootstrap" --state-root "$state_root"
+ENTRYPOINT
+
+cat > "$stage/papercusp-content-bootstrap" <<'ENTRYPOINT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT="$(cd "$BIN/.." && pwd -P)"
+[[ -x "$BIN/node" && -s "$ROOT/serve.mjs" ]] \
+  || { echo "papercusp-content-bootstrap: bundled Server runtime is incomplete" >&2; exit 1; }
+exec "$BIN/node" "$ROOT/serve.mjs" --content-bootstrap "$@"
 ENTRYPOINT
 
 cat > "$stage/papercusp-rollback" <<'ENTRYPOINT'
@@ -196,21 +209,21 @@ export PAPERCUSP_PG_SQL_DIR="$ROOT/db-sql"
 export PAPERCUSP_SIDECAR_BIN="$BIN"
 export PUI_COMPANION_WASM="$ROOT/pui-companion.wasm"
 export PUI_INSTALL_MANIFEST="$ROOT/pui-install.json"
-# CONTENT ROOTS. Every one of these resolvers falls back to a cwd-relative probe, and the
-# vm-release systemd unit sets WorkingDirectory=<state root> — NOT the release root — so a
-# cwd-relative probe can never find them here. The bundle lays these directories out at its
-# OWN root, which only $ROOT knows; without these exports promptsDir() walks
-# cwd/apps/operator/prompts -> cwd/prompts -> a module walk-up for apps/operator/prompts and
-# misses on all three, and the server dies at boot with
-#   "prompt-assembly: oracle.persona.md not found at <state root>/apps/operator/prompts/..."
-# The packaged desktop already sets PAPERCUSP_PROMPTS_DIR for exactly this reason; the
-# vm-release profile never got the equivalent (P-046, 2026-08-29). Prompts is merely the first
-# to THROW — the others degrade silently, which is worse.
-export PAPERCUSP_PROMPTS_DIR="$ROOT/prompts"
+# P-309 CONTENT ROOTS. papercusp-install materializes the official Cupboard
+# bundle into the persistent machine-local home before this process starts.
+# Only code/static UI/docs remain release-pinned; prompts, blueprints,
+# templates and rubrics survive release replacement and offline restart here.
+STATE_ROOT="$(cd "$(dirname "$PAPERCUSP_EMBEDDED_PG_ROOT")" && pwd -P)"
+export PAPERCUSP_HOME="${PAPERCUSP_HOME:-$STATE_ROOT/.papercusp}"
+export PAPERCUSP_PROMPTS_DIR="$PAPERCUSP_HOME/blueprints/base/prompts"
 export PAPERCUSP_SPA_DIST="$ROOT/spa"
 export PAPERCUSP_DOCS_ROOT="$ROOT/internal-docs"
-export PAPERCUSP_TEMPLATES_DIR="$ROOT/templates"
-export PAPERCUSP_RUBRICS_DIR="$ROOT/rubrics"
+export PAPERCUSP_TEMPLATES_DIR="$PAPERCUSP_HOME/templates"
+export PAPERCUSP_RUBRICS_DIR="$PAPERCUSP_HOME/rubrics"
+for content_dir in "$PAPERCUSP_PROMPTS_DIR" "$PAPERCUSP_HOME/blueprints" \
+  "$PAPERCUSP_TEMPLATES_DIR" "$PAPERCUSP_RUBRICS_DIR"; do
+  [[ -d "$content_dir" ]] || die "installed Cupboard content is missing: $content_dir"
+done
 export PAPERCUSP_BUILD_VERSION PAPERCUSP_BUILD_SHA
 export PAPERCUSP_DISTRIBUTION_PROFILE=vm-release
 export PAPERCUSP_PROVISION_ENV_OPERATORS=0
@@ -275,16 +288,16 @@ exec "$BIN/node" "$ROOT/scripts/psu.mjs" "--agent=$BACKEND" "$@"
 ENTRYPOINT
 done
 
-for entrypoint in papercusp-install papercusp-rollback papercusp-migrate \
+for entrypoint in papercusp-install papercusp-content-bootstrap papercusp-rollback papercusp-migrate \
   papercusp-server papercusp-health psu claude codex omp; do
   chmod 755 "$stage/$entrypoint"
   mv -f "$stage/$entrypoint" "$bin_dir/$entrypoint"
 done
 
-for entrypoint in papercusp-install papercusp-rollback node papercusp-migrate \
+for entrypoint in papercusp-install papercusp-content-bootstrap papercusp-rollback node papercusp-migrate \
   papercusp-server papercusp-health psu pui claude codex omp papercusp-remote-initializer \
   papercusp-deliver-material; do
   [[ -x "$bin_dir/$entrypoint" ]] || die "failed to emit executable bin/$entrypoint"
 done
 
-printf 'install-workspace-host-entrypoints: emitted 9 wrappers; all 13 bootstrap entrypoints executable; pui companion + generation manifest present; normalized %s PostgreSQL link(s)\n' "$normalized_pg_links"
+printf 'install-workspace-host-entrypoints: emitted 10 wrappers (including Cupboard content bootstrap); all 13 bootstrap entrypoints executable; pui companion + generation manifest present; normalized %s PostgreSQL link(s)\n' "$normalized_pg_links"

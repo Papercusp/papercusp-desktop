@@ -31,16 +31,13 @@ const expectedVmResources = [
   'sidecar/node_modules/**/*',
   'sidecar/opusscript_native_wasm.wasm',
   'sidecar/orchestrator/**/*',
-  'sidecar/prompts/**/*',
   'sidecar/pui-companion.wasm',
   'sidecar/pui-install.json',
-  'sidecar/rubrics/**/*',
   'sidecar/scripts/**/*',
   'sidecar/serve.mjs',
   'sidecar/sidecar-preload.js',
   'sidecar/spa/**/*',
   'sidecar/sql/**/*',
-  'sidecar/templates/**/*',
 ];
 
 test('Hetzner .deb federation defaults to the Ubuntu 24.04 ABI while retaining an explicit image override', () => {

@@ -100,10 +100,15 @@ test('vm-release prune removes non-runtime residue, preserves allowlisted assets
     write('db-sql/851-first-class-plan-spec-clauses.sql', 'select 1;\n');
     write('apps/operator/scripts/hooks/omp/coord-hook.mjs', 'export {};\n');
     write('internal-docs/guide.html', '<h1>runtime docs</h1>\n');
-    // Product templates are runtime CONTENT; their own source/tests are copied
-    // into newly materialized apps and are therefore intentionally allowlisted.
+    write('harness/hooks/preflight.sh', '#!/bin/sh\n');
+    // P-309 content is supplied through the Cupboard into persistent state,
+    // never duplicated in the immutable vm-release payload.
+    write('prompts/operator.persona.md', 'prompt\n');
     write('templates/papercusp-webapp/src/main.ts', 'export {};\n');
     write('templates/papercusp-webapp/tests/template.test.ts', 'export {};\n');
+    write('rubrics/quality/rubric.json', '{}\n');
+    write('harness/blueprints/base/blueprint.yaml', 'id: base\n');
+    write('harness/templates/legacy/template.yaml', 'id: legacy\n');
     write('node_modules/lost-pixel/dist/compare/compare.js', 'module.exports = {};\n');
 
     // Dogfood/source/build residue that must not survive a vm-release.
@@ -133,6 +138,11 @@ test('vm-release prune removes non-runtime residue, preserves allowlisted assets
       'env-sidecars',
       'seed',
       'apps/operator-docs/src/content/docs',
+      'prompts',
+      'templates',
+      'rubrics',
+      'harness/blueprints',
+      'harness/templates',
       'packages/operator-core/lib/runtime.ts',
       'packages/operator-core/lib/runtime.js.map',
       'packages/operator-core/test',
@@ -152,8 +162,7 @@ test('vm-release prune removes non-runtime residue, preserves allowlisted assets
       'db-sql/851-first-class-plan-spec-clauses.sql',
       'apps/operator/scripts/hooks/omp/coord-hook.mjs',
       'internal-docs/guide.html',
-      'templates/papercusp-webapp/src/main.ts',
-      'templates/papercusp-webapp/tests/template.test.ts',
+      'harness/hooks/preflight.sh',
       'node_modules/lost-pixel/dist/compare/compare.js',
       'bin/esbuild',
     ]) {
