@@ -124,7 +124,11 @@ archive=$1
 temporary_dir=$2
 rm -rf -- "$temporary_dir"
 mkdir -p -- "$temporary_dir"
-tar -C "$temporary_dir" -xf "$archive"
+# One DrvFs file still pays a crossing per read. GNU tar's default 10 KiB
+# records made the native 306 MB control take 57 s; 1 MiB records took 13 s
+# with identical hashes (default/large/default). This changes reads only,
+# not the archive format, payload, publication rules or total deadline.
+tar --blocking-factor=2048 -C "$temporary_dir" -xf "$archive"
 test -f "$temporary_dir/serve.mjs"
 test -f "$temporary_dir/sidecar-preload.js"
 # NTFS archives have no Linux executable metadata. Restore the owner execute
@@ -316,6 +320,19 @@ mod tests {
         assert_eq!(fs::read_link(f.0.join("runtime/link")).unwrap(), PathBuf::from("serve.mjs"));
         for file in ["source.tar.zst", "db-seed.dump", "db-seed.tar.gz"] {
             assert!(!f.0.join("runtime").join(file).exists());
+        }
+    }
+
+    #[test]
+    fn large_reads_accept_small_archives_and_partial_final_records() {
+        assert!(EXTRACT_SCRIPT.contains("tar --blocking-factor=2048 "));
+        for length in [17usize, 1_048_576 + 777] {
+            let f = Fixture::new();
+            let bytes: Vec<u8> = (0..length).map(|n| (n % 251) as u8).collect();
+            fs::write(f.0.join("source/partial record.bin"), &bytes).unwrap();
+            stage_archive(&mut f.producer(), |_| f.consumer(), Duration::from_secs(5)).unwrap();
+            assert_eq!(fs::read(f.0.join("stage/partial record.bin")).unwrap(), bytes);
+            assert!(!f.0.join("stage/.papercusp-runtime-complete").exists());
         }
     }
 

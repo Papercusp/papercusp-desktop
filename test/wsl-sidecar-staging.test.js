@@ -19,7 +19,7 @@ test('production staging executes archive, corruption, failure and timeout contr
     assert.equal(compile.status, 0, String(compile.error || compile.stderr));
     const run = spawnSync(binary, ['--nocapture'], { encoding: 'utf8', timeout: 30000 });
     assert.equal(run.status, 0, String(run.error || run.stderr || run.stdout));
-    assert.match(run.stdout, /21 passed; 0 failed; 0 ignored/);
+    assert.match(run.stdout, /22 passed; 0 failed; 0 ignored/);
     // The native fixture imports the real module, so compile it on the host too:
     // a changed protocol must not leave the only Windows witness using old APIs.
     const fixture = spawnSync(process.env.RUSTC || 'rustc', [
