@@ -183,10 +183,14 @@ test('real Inno upgrade replaces owned payload, preserves data, and rolls back a
     fs.rmSync(dir, { recursive: true, force: true });
     fs.rmSync(prefix, { recursive: true, force: true });
   });
+  const windowsPaths = new Map();
   const winpath = (file) => {
+    if (windowsPaths.has(file)) return windowsPaths.get(file);
     const r = run('winepath', ['-w', file]);
     assert.equal(r.status, 0, r.stderr);
-    return r.stdout.trim();
+    const mapped = r.stdout.trim();
+    windowsPaths.set(file, mapped);
+    return mapped;
   };
   const boot = run('xvfb-run', ['-a', 'wineboot', '-i']);
   assert.equal(boot.status, 0, boot.stderr);
@@ -209,11 +213,15 @@ test('real Inno upgrade replaces owned payload, preserves data, and rolls back a
       ...entries.map((entry, index) => `Source: "${winpath(input)}"; `
         + `DestDir: "{app}\\${path.posix.dirname(entry).replaceAll('/', '\\')}"; `
         + `DestName: "${path.posix.basename(entry)}"; Flags: ignoreversion`
-        + (failCopy && index === entries.length - 1 ? '; Check: InjectCopyFailure' : '')),
+        + (failCopy && index === entries.length - 1 ? '; BeforeInstall: InjectCopyFailure' : '')),
       code,
       ...(failCopy ? [
-        'function InjectCopyFailure: Boolean;',
-        'begin', "  RaiseException('intentional-copy-failure');", '  Result := False;', 'end;',
+        'procedure InjectCopyFailure;',
+        'var Copied: AnsiString;',
+        'begin',
+        "  if (not LoadStringFromFile(ExpandConstant('{app}\\sidecar\\serve.mjs'), Copied)) or",
+        `    (Copied <> 'payload-${version}') then RaiseException('copy-not-observed');`,
+        "  RaiseException('intentional-copy-failure');", 'end;',
       ] : []),
     ].join('\n');
     const source = path.join(dir, 'upgrade.iss');
@@ -250,4 +258,25 @@ test('real Inno upgrade replaces owned payload, preserves data, and rolls back a
   assert.equal(fs.readFileSync(path.join(app, 'user-config.json'), 'utf8'), 'preserve-app-data');
   assert.equal(fs.readFileSync(path.join(sibling, 'serve.mjs'), 'utf8'), 'preserve-sibling');
   assert.equal(fs.existsSync(path.join(app, '.papercusp-payload-rollback')), false);
+
+  // Simulate a power loss at two distinct rename boundaries: sidecar's move
+  // finished, while resources' present-intent was persisted but its move did
+  // not start. A subsequent failing install must restore the genuine v2
+  // payload, not archive the still-original resources as incomplete data.
+  const pending = path.join(app, '.papercusp-payload-rollback');
+  fs.mkdirSync(pending);
+  fs.writeFileSync(path.join(pending, 'sidecar.present'), '');
+  fs.renameSync(path.join(app, 'sidecar'), path.join(pending, 'sidecar'));
+  fs.mkdirSync(path.join(app, 'sidecar'));
+  fs.writeFileSync(path.join(app, 'sidecar/serve.mjs'), 'interrupted-partial-payload');
+  fs.writeFileSync(path.join(pending, 'resources.present'), '');
+  fs.writeFileSync(path.join(pending, 'seed.absent'), '');
+  const recovered = install('4.0.0', ['sidecar/serve.mjs', 'sidecar/never.txt'], true);
+  assert.notEqual(recovered.status, 0, 'retry failure injection was not exercised');
+  assert.match(recovered.log, /intentional-copy-failure/);
+  assert.equal(fs.readFileSync(path.join(app, 'sidecar/serve.mjs'), 'utf8'), 'payload-2.0.0');
+  assert.equal(fs.readFileSync(path.join(app, 'resources/new.bin'), 'utf8'), 'payload-2.0.0');
+  assert.equal(fs.readFileSync(path.join(app, 'user-config.json'), 'utf8'), 'preserve-app-data');
+  assert.equal(fs.readFileSync(path.join(sibling, 'serve.mjs'), 'utf8'), 'preserve-sibling');
+  assert.equal(fs.existsSync(pending), false);
 });
