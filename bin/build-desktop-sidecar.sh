@@ -1705,10 +1705,56 @@ load_sidecar_tree_excludes() {
 # This is the THIRD time in this release that a correct blanket rule turned out to
 # be wrong for one deliberate case (the other two: the transformers `.cache/`
 # models, D-177/D-178). Hence the drift guard below rather than a bare comment.
+# ⚠ THE GUARD BELOW FIRED FOR REAL, AND ITS ORIGINAL PRESCRIPTION WAS THE WRONG
+# REPAIR (WI-2147397). Recording why, because the next drift will look identical.
+#
+# P-309 moved `templates/` and `rubrics/` OUT of VM_RELEASE_ASSET_ALLOWLIST and INTO
+# VM_RELEASE_CUPBOARD_CONTENT_ROOTS — those trees are now installed into persistent
+# machine-local state by the Cupboard bundle before service start. The guard saw the
+# allowlist miss, hard-exited, and told the reader to "drop keep_product_tests". That
+# is a no-op for the audit and a regression for the product:
+#
+#   * A cupboard-content root is forbidden in the vm-release as a WHOLE root —
+#     `_vm_release_residue_class()` returns "cupboard-content" BEFORE the test-files
+#     rule is ever consulted. Dropping the exemption changes that verdict not at all.
+#   * It deletes 26 real product files: every `templates/*/checks/*.test.ts`, i.e.
+#     exactly the checks a materialized app is supposed to arrive with. (Measured
+#     2026-09-11: 26 matches under templates/, 0 under rubrics/.)
+#
+# So a root in EITHER list keeps its tests. The drift actually worth failing on is a
+# root that leaves BOTH — only then does the test-files rule judge its members, and
+# only then must `keep_product_tests` go.
+#
+# Membership is read from the auditor's real tuples via `ast`, not grepped as text: a
+# bare `grep -F '"templates",'` cannot tell the two lists apart (the allowlist spells
+# roots WITH a trailing slash, the cupboard list WITHOUT), and would happily match any
+# unrelated tuple that mentions the same word.
 assert_vm_release_asset_allowed() {
   local root="$1"
-  if ! grep -qF "\"$root\"," "$HERE/audit-release-bundle.py"; then
-    echo "ERROR: '$root' is no longer in the auditor's VM_RELEASE_ASSET_ALLOWLIST, so its tests are no longer exempt — drop keep_product_tests for this tree (D-178)" >&2
+  local known
+  known="$(python3 - "$HERE/audit-release-bundle.py" <<'PY'
+import ast, sys
+
+tree = ast.parse(open(sys.argv[1], encoding="utf-8").read())
+want = {"VM_RELEASE_ASSET_ALLOWLIST", "VM_RELEASE_CUPBOARD_CONTENT_ROOTS"}
+out = []
+for node in tree.body:
+    if isinstance(node, ast.Assign) and any(
+        isinstance(t, ast.Name) and t.id in want for t in node.targets
+    ):
+        out += [str(v).rstrip("/") for v in ast.literal_eval(node.value)]
+print("\n".join(out))
+PY
+)"
+  # An unreadable auditor must FAIL, never silently exempt: an empty answer here is
+  # "I could not tell", and treating it as a pass is how the test/spec excludes would
+  # get suppressed for a tree that genuinely needs them.
+  if [[ -z "$known" ]]; then
+    echo "ERROR: could not read VM_RELEASE_ASSET_ALLOWLIST / VM_RELEASE_CUPBOARD_CONTENT_ROOTS from $HERE/audit-release-bundle.py — refusing to guess whether '$root' is still test-exempt (D-178)" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "$known" | grep -qxF "${root%/}"; then
+    echo "ERROR: '$root' is in NEITHER the auditor's VM_RELEASE_ASSET_ALLOWLIST nor its VM_RELEASE_CUPBOARD_CONTENT_ROOTS, so the test-files rule now judges its members — drop keep_product_tests for this tree (D-178)" >&2
     exit 1
   fi
 }
