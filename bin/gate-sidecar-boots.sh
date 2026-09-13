@@ -194,6 +194,11 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
     PAPERCUSP_SEED_DIR="$B/../seed" \
     PAPERCUSP_HARNESS_DIR="$B/harness" \
     PAPERCUSP_RUBRICS_DIR="$B/rubrics" \
+    PAPERCUSP_TEMPLATES_DIR="$B/templates" \
+    PAPERCUSP_GOAL_PACKAGES_DIR="$B/goal-packages" \
+    PAPERCUSP_SIDECAR_DIR="$B" \
+    PAPERCUSP_IDENTITY_DIR="$STATE/home/.papercusp-workspaces/.shared/.papercusp/identity" \
+    PAPERCUSP_WORKSPACES_ROOT="$STATE/home/.papercusp-workspaces" \
     PAPERCUSP_PROMPTS_DIR="$B/prompts" \
     PAPERCUSP_DOCS_ROOT="$B/internal-docs" \
     PAPERCUSP_SOURCE_ARCHIVE="$B/source.tar.zst" \

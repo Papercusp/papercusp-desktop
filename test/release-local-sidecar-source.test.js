@@ -91,6 +91,35 @@ test('packed-sidecar boot gate keeps mutable database state off the bundle-isola
   assert.doesNotMatch(bootGate, /> "\$ISO\/boot\.log" 2>&1/);
 });
 
+test('packed-sidecar boot gate passes every product resource path into the isolated sidecar', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'main.rs'), 'utf8');
+  const productResourceNames = [
+    ...new Set(
+      [...main.matchAll(/"(PAPERCUSP_[A-Z_]*(?:DIR|PATH|ROOT|ARCHIVE))"/g)].map(
+        (match) => match[1],
+      ),
+    ),
+  ];
+
+  // Keep this assertion derived from the production source: adding a path to
+  // spawn_serve or the headless service must fail this test until the hermetic
+  // packed gate forwards it too.
+  const gateLaunch = bootGate.slice(
+    bootGate.indexOf('  env -i \\\n'),
+    bootGate.indexOf('    "$B_NODE" "$B/serve.mjs"', bootGate.indexOf('  env -i \\\n')),
+  );
+  assert.ok(gateLaunch.length > 0, 'could not isolate the gate launch environment');
+  for (const name of productResourceNames) {
+    assert.match(gateLaunch, new RegExp(`${name}=`), `${name} is omitted from the gate env`);
+  }
+
+  assert.match(gateLaunch, /PAPERCUSP_GOAL_PACKAGES_DIR="\$B\/goal-packages"/);
+  assert.match(gateLaunch, /PAPERCUSP_IDENTITY_DIR="\$STATE\/home\/\.papercusp-workspaces\/\.shared\/\.papercusp\/identity"/);
+  assert.match(gateLaunch, /PAPERCUSP_SIDECAR_DIR="\$B"/);
+  assert.match(gateLaunch, /PAPERCUSP_TEMPLATES_DIR="\$B\/templates"/);
+  assert.match(gateLaunch, /PAPERCUSP_WORKSPACES_ROOT="\$STATE\/home\/\.papercusp-workspaces"/);
+});
+
 test('Windows immutable source contains the superproject CSP policy at Rust include_str path', () => {
   const worktreeDir = windows.match(/BUILD_ROOT=\"\$BUILD_CONTAINER\/([^\"]+)\"/)?.[1];
   const policyRel = windows.match(/WINDOWS_CSP_POLICY_REL=\"([^\"]+)\"/)?.[1];
