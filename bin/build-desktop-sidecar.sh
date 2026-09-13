@@ -790,9 +790,10 @@ echo "→ installing operator + operator-vite deps (ONE combined workspace insta
 #
 # Rebuild from THIS REPO_ROOT after the install, never by copying an integration
 # tree's dist/. The registry is intentionally explicit and is checked against
-# every workspace with a gitignored main/require/default target by
+# every workspace with a gitignored bin/main/require/default target by
 # setup-release-checkout-workspace-builds.test.ts.
 RUNTIME_BUILD_WORKSPACES=(
+  "@papercusp/omp"
   "@papercusp/sse"
 )
 
@@ -811,6 +812,13 @@ build_runtime_workspace_outputs_after_install() {
 const manifest = require("./package.json");
 const expectedApi = manifest.devDependencies?.typescript ?? "";
 const expectedNative = manifest.devDependencies?.["@typescript/native"] ?? "";
+if (!expectedApi && !expectedNative) {
+  console.log(
+    "  ✓ " + (process.env.npm_package_name ?? "runtime workspace") +
+      ": no package-local TypeScript aliases declared; build command owns toolchain validation",
+  );
+  process.exit(0);
+}
 let actualApi = { name: "<unresolved>", version: "<unresolved>" };
 let actualNative = { name: "<unresolved>", version: "<unresolved>" };
 try {
