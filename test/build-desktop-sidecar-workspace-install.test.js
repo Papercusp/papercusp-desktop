@@ -17,6 +17,10 @@ const builder = fs.readFileSync(
   path.join(desktopRoot, 'bin/build-desktop-sidecar.sh'),
   'utf8',
 );
+const sidecarVerifier = fs.readFileSync(
+  path.join(desktopRoot, 'bin/verify-sidecar-bundle.sh'),
+  'utf8',
+);
 
 /** Extract a top-level shell helper from the real builder for behavioral tests. */
 function extractFunction(name) {
@@ -788,6 +792,38 @@ test('sidecar ships the standalone project-history generator with the shared ESM
   assert.match(
     postinstall,
     /project-history\) shift; exec "\$SC\/bin\/node" "\$SC\/scripts\/project-history\.mjs"/, 
+  );
+});
+
+test('sidecar ships and verifies the complete packaged OMP native MCP asset pair', () => {
+  const pairLoop = 'for native_mcp_asset in native-client.cjs native-extension.mjs; do';
+  assert.ok(
+    builder.includes(pairLoop),
+    'the producer must stage native-client.cjs and native-extension.mjs as one named pair',
+  );
+  assert.ok(
+    builder.includes('NATIVE_MCP_DIST="$REPO_ROOT/packages/omp-plugin/dist"'),
+    'the producer must copy the post-install build outputs from the pinned source tree',
+  );
+  assert.ok(
+    builder.includes('cp -a "$NATIVE_MCP_DIST/$native_mcp_asset" "$SIDECAR_DIR/scripts/$native_mcp_asset"'),
+    'the runtime file-URL assets must remain adjacent to packaged scripts/psu.mjs',
+  );
+  assert.ok(
+    builder.includes('[[ -s "$NATIVE_MCP_DIST/$native_mcp_asset" ]]'),
+    'the producer must fail closed when either built source asset is absent or empty',
+  );
+  assert.ok(
+    sidecarVerifier.includes(pairLoop),
+    'the finished-sidecar verifier must independently require the same complete asset pair',
+  );
+  assert.ok(
+    sidecarVerifier.includes('native_mcp_path="$SIDECAR/scripts/$native_mcp_asset"'),
+    'the verifier must inspect the packaged-adjacent layout the launcher actually resolves',
+  );
+  assert.ok(
+    sidecarVerifier.includes('[[ -s "$native_mcp_path" ]]'),
+    'the verifier must reject an absent or empty packaged asset',
   );
 });
 
