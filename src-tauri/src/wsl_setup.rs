@@ -114,7 +114,11 @@ fn distro_needs_reprovision(shipped: Option<&str>, provisioned: Option<&str>) ->
 const BOOTSTRAP_NETWORK_HOSTS: &[(&str, u16, &str)] = &[
     ("github.com", 443, "the overmind process supervisor"),
     ("kopia.io", 443, "the kopia signing key"),
-    ("packages.kopia.io", 80, "the kopia apt repository (backup engine)"),
+    (
+        "packages.kopia.io",
+        80,
+        "the kopia apt repository (backup engine)",
+    ),
     ("nodejs.org", 443, "the pinned Node runtime"),
 ];
 
@@ -762,9 +766,9 @@ mod imp {
     fn host_reachable(host: &str, port: u16, timeout: std::time::Duration) -> bool {
         use std::net::ToSocketAddrs;
         match (host, port).to_socket_addrs() {
-            Ok(addrs) => {
-                addrs.into_iter().any(|addr| std::net::TcpStream::connect_timeout(&addr, timeout).is_ok())
-            }
+            Ok(addrs) => addrs
+                .into_iter()
+                .any(|addr| std::net::TcpStream::connect_timeout(&addr, timeout).is_ok()),
             Err(_) => false,
         }
     }
@@ -1676,9 +1680,9 @@ mod tests {
 
         for package in ["espeak-ng", "ffmpeg"] {
             assert!(
-                package_block.lines().any(|line| {
-                    line.trim().trim_end_matches('\\').trim() == package
-                }),
+                package_block
+                    .lines()
+                    .any(|line| { line.trim().trim_end_matches('\\').trim() == package }),
                 "{package} must stay in the shipped bootstrap apt batch"
             );
             assert!(

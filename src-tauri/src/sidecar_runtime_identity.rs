@@ -27,26 +27,41 @@ pub fn generation(root: &Path) -> io::Result<String> {
 fn walk(root: &Path, relative: &str, hash: &mut Sha256, buffer: &mut [u8]) -> io::Result<()> {
     let mut names = fs::read_dir(root.join(relative))?
         .map(|entry| {
-            entry?.file_name().into_string().map_err(|_| invalid("Non-Unicode runtime filename"))
+            entry?
+                .file_name()
+                .into_string()
+                .map_err(|_| invalid("Non-Unicode runtime filename"))
         })
         .collect::<io::Result<Vec<_>>>()?;
     names.sort();
     for name in names {
         // Exactly the cold inputs excluded by the production tar invocation.
         // The completion marker is generated AFTER extraction, not payload.
-        if relative.is_empty() && matches!(name.as_str(),
-            "source.tar.zst" | "db-seed.dump" | "db-seed.tar.gz" | ".papercusp-runtime-complete")
+        if relative.is_empty()
+            && matches!(
+                name.as_str(),
+                "source.tar.zst"
+                    | "db-seed.dump"
+                    | "db-seed.tar.gz"
+                    | ".papercusp-runtime-complete"
+            )
         {
             continue;
         }
-        let rel = if relative.is_empty() { name } else { format!("{relative}/{name}") };
+        let rel = if relative.is_empty() {
+            name
+        } else {
+            format!("{relative}/{name}")
+        };
         let file = root.join(&rel);
         let metadata = fs::symlink_metadata(&file)?;
         frame(hash, rel.as_bytes());
         if metadata.is_symlink() {
             frame(hash, b"link");
             let target = fs::read_link(&file)?;
-            let target = target.to_str().ok_or_else(|| invalid("Non-Unicode runtime symlink"))?;
+            let target = target
+                .to_str()
+                .ok_or_else(|| invalid("Non-Unicode runtime symlink"))?;
             #[cfg(windows)]
             let target = target.replace('\\', "/");
             frame(hash, target.as_bytes());
@@ -59,13 +74,17 @@ fn walk(root: &Path, relative: &str, hash: &mut Sha256, buffer: &mut [u8]) -> io
             let mut input = fs::File::open(&file)?;
             let before = input.metadata()?;
             if before.len() != metadata.len() || before.modified()? != metadata.modified()? {
-                return Err(invalid(format!("Runtime file changed before hashing: {rel}")));
+                return Err(invalid(format!(
+                    "Runtime file changed before hashing: {rel}"
+                )));
             }
             let mut bytes = 0u64;
             let mut magic = Vec::with_capacity(4);
             loop {
                 let n = input.read(buffer)?;
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 let remaining = 4 - magic.len();
                 magic.extend_from_slice(&buffer[..n.min(remaining)]);
                 hash.update(&buffer[..n]);
@@ -73,12 +92,16 @@ fn walk(root: &Path, relative: &str, hash: &mut Sha256, buffer: &mut [u8]) -> io
             }
             let after = input.metadata()?;
             let path_after = fs::symlink_metadata(&file)?;
-            if bytes != before.len() || after.len() != before.len()
+            if bytes != before.len()
+                || after.len() != before.len()
                 || after.modified()? != before.modified()?
-                || !path_after.is_file() || path_after.len() != before.len()
+                || !path_after.is_file()
+                || path_after.len() != before.len()
                 || path_after.modified()? != before.modified()?
             {
-                return Err(invalid(format!("Runtime file changed while hashing: {rel}")));
+                return Err(invalid(format!(
+                    "Runtime file changed while hashing: {rel}"
+                )));
             }
             // EXTRACT_SCRIPT derives owner execute from these same magic bytes.
             // NTFS's synthesized Unix mode is deliberately not an identity input.
@@ -97,17 +120,24 @@ mod tests {
     struct Fixture(std::path::PathBuf);
     impl Fixture {
         fn new() -> Self {
-            let p = std::env::temp_dir().join(format!("pc-runtime-identity-{}-{:?}",
-                std::process::id(), std::thread::current().id()));
+            let p = std::env::temp_dir().join(format!(
+                "pc-runtime-identity-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
             fs::create_dir(&p).unwrap();
             fs::write(p.join("serve.mjs"), "same serve bytes").unwrap();
             fs::write(p.join(".sidecar-build-stamp"), "same stamp bytes").unwrap();
             Self(p)
         }
-        fn key(&self) -> String { generation(&self.0).unwrap() }
+        fn key(&self) -> String {
+            generation(&self.0).unwrap()
+        }
     }
     impl Drop for Fixture {
-        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
@@ -140,7 +170,12 @@ mod tests {
     fn excludes_only_root_cold_inputs_and_generated_completion_marker() {
         let f = Fixture::new();
         let a = f.key();
-        for name in ["source.tar.zst", "db-seed.dump", "db-seed.tar.gz", ".papercusp-runtime-complete"] {
+        for name in [
+            "source.tar.zst",
+            "db-seed.dump",
+            "db-seed.tar.gz",
+            ".papercusp-runtime-complete",
+        ] {
             fs::write(f.0.join(name), "not hot payload").unwrap();
         }
         assert_eq!(a, f.key());

@@ -26,12 +26,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app_role;
-#[cfg(any(target_os = "windows", test))]
-mod wsl_sidecar_staging;
-#[cfg(any(target_os = "windows", test))]
-mod sidecar_runtime_identity;
 mod custom_protocol;
 mod dev_bridge;
+#[cfg(any(target_os = "windows", test))]
+mod sidecar_runtime_identity;
+#[cfg(any(target_os = "windows", test))]
+mod wsl_sidecar_staging;
 // Global-hotkey docs-search palette (WI-2648, feature #5): an opt-in global
 // shortcut opens a small always-on-top window loading Pagefind's own default UI
 // against the already-built operator-docs search index. OFF BY DEFAULT (owner
@@ -3651,7 +3651,9 @@ fn run_wsl_exec_with_timeout(
     // A cold WSL boot is not a slow ten-second file operation. The SAME
     // invocation proves readiness before we arm the Linux operation deadline.
     wsl_sidecar_staging::run_wsl_bounded(
-        &mut cmd, timeout, wsl_sidecar_staging::WSL_STARTUP_TIMEOUT + timeout,
+        &mut cmd,
+        timeout,
+        wsl_sidecar_staging::WSL_STARTUP_TIMEOUT + timeout,
     )
 }
 
@@ -3685,20 +3687,26 @@ fn prepare_wsl_sidecar_runtime(
     // NTFS into the ready WSL child's binary stdin handle. D019's full native
     // witness distinguishes this from a user-space/text interop relay.
     let mut producer = Command::new("tar.exe");
-    producer.arg("-C").arg(sidecar_dir).args(wsl_sidecar_staging::ARCHIVE_ARGS)
+    producer
+        .arg("-C")
+        .arg(sidecar_dir)
+        .args(wsl_sidecar_staging::ARCHIVE_ARGS)
         .args(["-b", "2048", "-cf", "-", "."]);
     no_console_window(&mut producer);
     let mut consumer = wsl_sidecar_staging::wsl_command();
-    consumer.args(["/bin/bash", "-c"])
+    consumer
+        .args(["/bin/bash", "-c"])
         .arg(wsl_sidecar_staging::EXTRACT_SCRIPT)
-        .arg("papercusp-extract-sidecar").arg("-").arg(&temporary);
+        .arg("papercusp-extract-sidecar")
+        .arg("-")
+        .arg(&temporary);
     no_console_window(&mut consumer);
     wsl_sidecar_staging::stage_archive(producer, consumer, Duration::from_secs(1_200))?;
     // Never mark a transfer complete under a key computed from a different
     // source generation (for example an installer replacing files mid-copy).
     if sidecar_runtime_generation(sidecar_dir)? != generation {
         return Err(std::io::Error::other(
-            "Windows sidecar payload changed during WSL staging; refusing publication"
+            "Windows sidecar payload changed during WSL staging; refusing publication",
         ));
     }
     let publish_args = vec![
@@ -4350,14 +4358,7 @@ fn point_window_at_operator<R: tauri::Runtime>(
 /// never floods the webview. `reason` distinguishes which supervisor gave up,
 /// since the two watchers cover different roles (GUI-side Server-bundle
 /// respawn vs. the Server's own in-process serve.mjs child respawn).
-#[derive(
-    Debug,
-    serde::Serialize,
-    serde::Deserialize,
-    Clone,
-    specta::Type,
-    tauri_specta::Event,
-)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, specta::Type, tauri_specta::Event)]
 #[tauri_specta(event_name = "operator-dead")]
 pub struct OperatorDeadPayload {
     reason: String,
