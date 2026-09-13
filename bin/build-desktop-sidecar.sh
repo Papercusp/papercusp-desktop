@@ -1383,6 +1383,23 @@ for _psu_cli in psu:psu-launcher ptool:ptool onboard:onboard-launcher tutorial-r
   fi
 done
 
+# The bundled psu entrypoint loads these as runtime file URLs (not static
+# imports), so esbuild cannot inline or trace them. Keep them adjacent to
+# scripts/psu.mjs: resolveNativeMcpAssets() prefers this relocatable packaged
+# layout and falls back to packages/omp-plugin/dist only in a source checkout.
+NATIVE_MCP_DIST="$REPO_ROOT/packages/omp-plugin/dist"
+for native_mcp_asset in native-client.cjs native-extension.mjs; do
+  [[ -s "$NATIVE_MCP_DIST/$native_mcp_asset" ]] || {
+    echo "ERROR: required OMP native MCP asset missing after runtime build: $NATIVE_MCP_DIST/$native_mcp_asset" >&2
+    exit 1
+  }
+  cp -a "$NATIVE_MCP_DIST/$native_mcp_asset" "$SIDECAR_DIR/scripts/$native_mcp_asset"
+  [[ -s "$SIDECAR_DIR/scripts/$native_mcp_asset" ]] || {
+    echo "ERROR: failed to stage OMP native MCP asset: $SIDECAR_DIR/scripts/$native_mcp_asset" >&2
+    exit 1
+  }
+done
+
 # Project History is a Papercusp platform CLI, not an operator-host concern.
 # Bundle its narrow entry directly from @papercusp/cli so installed projects can
 # generate the versioned read model without a monorepo checkout or tsx. The
@@ -1402,7 +1419,7 @@ if [[ ! -f "$SIDECAR_DIR/scripts/project-history.mjs" ]]; then
   echo "ERROR: esbuild did not produce $SIDECAR_DIR/scripts/project-history.mjs"
   exit 1
 fi
-echo "  bundled psu.mjs + ptool.mjs + onboard.mjs + tutorial-runner.mjs + project-history.mjs"
+echo "  bundled psu.mjs + ptool.mjs + OMP native MCP assets + onboard.mjs + tutorial-runner.mjs + project-history.mjs"
 
 # Copy the externalized native deps. esbuild inlined everything else, so
 # this is a tiny tree — node-pty + its platform-binary sub-package(s).

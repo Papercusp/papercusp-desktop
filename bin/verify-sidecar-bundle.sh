@@ -181,6 +181,19 @@ for t in $REQUIRED_TOOLS; do
   fi
 done
 
+# psu.mjs resolves the owned OMP direct-MCP adapter from adjacent runtime
+# assets in packaged builds. Presence is required even though HTTP remains the
+# default: without these files the documented uds/auto rollback selector fails
+# only after an installed user launches OMP.
+for native_mcp_asset in native-client.cjs native-extension.mjs; do
+  native_mcp_path="$SIDECAR/scripts/$native_mcp_asset"
+  if [[ -s "$native_mcp_path" ]]; then
+    ok "scripts/$native_mcp_asset (OMP native MCP runtime asset)"
+  else
+    fail "scripts/$native_mcp_asset: MISSING or empty — packaged psu uds/auto cannot load"
+  fi
+done
+
 # PUI is a two-artifact generation, not merely a binary. The signed vm-release
 # must carry the companion and the same P-021 manifest that `pui doctor` reads;
 # otherwise a present bin/pui can still open a blank dock or report an
