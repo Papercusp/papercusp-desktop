@@ -17,8 +17,27 @@ const loginPreflight = new URL('../bin/vm-rig/preflight-login.sh', import.meta.u
 const currentBoot = new URL('../bin/vm-rig/boot-headless-current.sh', import.meta.url).pathname;
 const currentComposer = new URL('../bin/vm-rig/compose-rig-sidecar-current.sh', import.meta.url).pathname;
 
+const fixtureDirs = new Set();
+
+async function cleanupFixtureDirs() {
+  const dirs = [...fixtureDirs];
+  await Promise.all(dirs.map(async (dir) => {
+    try {
+      await rm(dir, { recursive: true, force: true });
+    } finally {
+      fixtureDirs.delete(dir);
+    }
+  }));
+  assert.equal(fixtureDirs.size, 0, 'all mac-vm-health fixtures must be removed');
+}
+
+test.afterEach(cleanupFixtureDirs);
+
+let cleanupGuardDir;
+
 async function fixture({ ssh = true, qmp = true, qmpExit = qmp ? 0 : 1, operatorProbe = '' } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'mac-vm-health-'));
+  fixtureDirs.add(dir);
   const bin = path.join(dir, 'bin');
   execFileSync('mkdir', ['-p', bin]);
   for (const [name, body] of Object.entries({
@@ -47,6 +66,16 @@ async function fixture({ ssh = true, qmp = true, qmpExit = qmp ? 0 : 1, operator
     },
   };
 }
+
+test('fixture cleanup guard removes temporary directories', async () => {
+  ({ dir: cleanupGuardDir } = await fixture());
+  assert.equal(fixtureDirs.has(cleanupGuardDir), true);
+});
+
+test('fixture cleanup guard runs after each test', async () => {
+  assert.equal(fixtureDirs.size, 0);
+  await assert.rejects(stat(cleanupGuardDir), { code: 'ENOENT' });
+});
 
 test('reports healthy when guest SSH answers', async () => {
   const { env } = await fixture();
