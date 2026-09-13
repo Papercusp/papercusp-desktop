@@ -91,7 +91,7 @@ test('Windows startup uses native binary streaming and production readiness befo
   assert.match(staging, /stage_archive\([\s\S]*?\)\?;[\s\S]*?PUBLISH_SCRIPT/);
   assert.match(staging, /wsl_command\(\)[\s\S]*?stage_archive\(producer, consumer, Duration::from_secs\(1_200\)\)/);
   assert.match(staging, /\.args\(\["-b", "2048", "-cf", "-", "\."\]\)/);
-  assert.match(staging, /\.arg\("-"\)\.arg\(&temporary\)/);
+  assert.match(staging, /\.arg\("-"\)\s*\.arg\(&temporary\)/);
   assert.doesNotMatch(staging, /TemporaryArchive|windows_path_to_wsl\(archive|windows_path_to_wsl\(sidecar_dir\)|source_wsl|tar -C "\$source_dir"/);
   const bounded = source.slice(source.indexOf('fn run_wsl_exec_with_timeout('),
     source.indexOf('/// Materialize the hot Windows sidecar tree'));
