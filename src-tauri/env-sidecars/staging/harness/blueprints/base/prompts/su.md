@@ -152,13 +152,19 @@ kickoff adds mission specifics, never this:
   fifth partition bucket.
   `assumptions` is required on a terminal close (`'none'` or fact keys). A bare "done"
   assertion is re-opened by the leader's completion-integrity audit.
-- **Resume and report by reference.** Start already-started work with
-  `work_items:get { id, resume:true }`; follow its `readRef`s instead of paging history
-  or recreating proof. For an exactly current checkpoint, use
-  `work_items:checkpoint { id, unchanged:true, contentHash }`; on refusal write a fresh
-  one. Let tool, state, and event results carry machine-known commands, outcomes, SHAs,
-  IDs, status, and counts. Explicitly preserve decisions, blockers, rationale, and
-  successor context.
+- **Resume and report by reference.** For an already-started item, use
+  `work_items:get { id, resume:true }` before paging history or reconstructing proof. Its
+  bounded resume packet carries the authoritative next action, checkpoint freshness,
+  execution walls/checks and durable evidence references; follow its `readRef`s for
+  omitted detail. Do not retype machine-known commands, outcomes, SHAs or IDs, and do
+  not rerun a test matrix solely to reconstruct saved proof. If the stored checkpoint
+  is exactly current, attest it with
+  `work_items:checkpoint { id, unchanged:true, contentHash }` instead of writing fresh
+  prose; a refused attestation means state moved or the bounded attestation budget
+  expired, so write a genuine new checkpoint. Mechanical status, counts, next actions
+  and completion notifications come from authoritative write responses, state reads
+  and event payloads — not hand-written copies. Preserve non-derivable decisions,
+  blockers, rationale and successor context explicitly.
 - **Persist with `loop:arm`; each wake pull + advance one unit. Lane drained? Register
   the standing wake watch
   `watch:create { pattern:'work-item:claimable', wake:true, once:false,
@@ -850,9 +856,11 @@ AUTO you skip the ask and still register per the tiers.
   semantic recall → the shared memory store (`memory:remember`), the one store every
   client recalls from — not a client-local silo. A scoped CONCLUSION future turns must
   see DETERMINISTICALLY ("X is owner-residue — exclude it") → the standing-facts ledger
-  (`facts:assert`, upsert-by-key + TTL, folded verbatim into every relevant orient;
-  `facts:list` what already stands before asserting; `facts:retract` when it stops being
-  true — a stale fact delivered verbatim is worse than none). In-flight progress your
+  (`facts:assert`, upsert-by-key with an explicitly declared lifetime — `ttlSec` for a
+  bounded claim, or the applicable `kind:'convention'` / typed-slot / confidence rule;
+  an ordinary assert with neither is refused — folded verbatim into every relevant
+  orient; `facts:list` what already stands before asserting; `facts:retract` when it
+  stops being true — a stale fact delivered verbatim is worse than none). In-flight progress your
   next wake or a successor resumes from → `work_items:checkpoint` / `loop:checkpoint`
   (the carry-note a cold resume reads), never a prose message that scrolls away. Live
   ephemera (intents, handoffs, presence) → coord. Long-form runbooks → the insights docs.
