@@ -137,11 +137,13 @@ kickoff adds mission specifics, never this:
   Pick `kind` by what the unit IS: `change` for a code edit (the default for coding
   work), `bug` for broken code, `task` ONLY for non-code work.
 - **Finish with `work_items:complete { id, completion, state:'done', assumptions:'none' }`
-  — `completion` is a structured OBJECT, never a bare prose string** (a string is rejected
-  `invalid_args`): at minimum `{ summary, testsRun, testResult, verifiedHow, filesChanged }`.
-  Successful `bug` or `capability-gap` closes also require
-  `rootCauseVerification: { hypothesis, alternativeHypothesis, distinguishingTest: "if H1 then observable A; if H2 then observable B", testResult }`
-  inside `completion`; the server rejects the close without this contrastive record.
+  using a structured `completion` object containing at least
+  `{ summary, testsRun, testResult, verifiedHow, filesChanged }`. Successful `bug` or
+  `capability-gap` closes also need `rootCauseVerification: { hypothesis,
+  alternativeHypothesis, distinguishingTest, testResult, testProcedure,
+  predictedObservations: { hypothesis, alternativeHypothesis }, actualObservation,
+  evidenceRefs }`. The predictions must differ; `distinguishingTest` is the procedure,
+  not a prose template.
   Verification-shaped items whose completion makes a universal claim ("every" / "all" /
   "nothing") also require canonical `completion.verification.coverage: { population,
   checked, notChecked, notApplicable, residue }`. Enumerate the population, place each entry
@@ -150,19 +152,13 @@ kickoff adds mission specifics, never this:
   fifth partition bucket.
   `assumptions` is required on a terminal close (`'none'` or fact keys). A bare "done"
   assertion is re-opened by the leader's completion-integrity audit.
-- **Resume and report by reference.** For an already-started item, use
-  `work_items:get { id, resume:true }` before paging history or reconstructing proof. Its
-  bounded resume packet carries the authoritative next action, checkpoint freshness,
-  execution walls/checks and durable evidence references; follow its `readRef`s for
-  omitted detail. Do not retype machine-known commands, outcomes, SHAs or IDs, and do
-  not rerun a test matrix solely to reconstruct saved proof. If the stored checkpoint
-  is exactly current, attest it with
-  `work_items:checkpoint { id, unchanged:true, contentHash }` instead of writing fresh
-  prose; a refused attestation means state moved or the bounded attestation budget
-  expired, so write a genuine new checkpoint. Mechanical status, counts, next actions
-  and completion notifications come from authoritative write responses, state reads
-  and event payloads — not hand-written copies. Preserve non-derivable decisions,
-  blockers, rationale and successor context explicitly.
+- **Resume and report by reference.** Start already-started work with
+  `work_items:get { id, resume:true }`; follow its `readRef`s instead of paging history
+  or recreating proof. For an exactly current checkpoint, use
+  `work_items:checkpoint { id, unchanged:true, contentHash }`; on refusal write a fresh
+  one. Let tool, state, and event results carry machine-known commands, outcomes, SHAs,
+  IDs, status, and counts. Explicitly preserve decisions, blockers, rationale, and
+  successor context.
 - **Persist with `loop:arm`; each wake pull + advance one unit. Lane drained? Register
   the standing wake watch
   `watch:create { pattern:'work-item:claimable', wake:true, once:false,
