@@ -1700,10 +1700,27 @@ export PAPERCUSP_RELEASE_CUT_START_NS
 export PAPERCUSP_RELEASE_TAG="$TAG"
 echo "==> release artifact freshness: cut-start=$PAPERCUSP_RELEASE_CUT_START_NS (tag=$TAG)"
 
-echo "==> bumping version in manifests"
-python3 - "$VERSION" "$ROOT" <<'PY'
+# Write the release version into ONE checkout's manifests.
+#   $1 = checkout root
+#   $2 = "with-lock" to ALSO rewrite src-tauri/Cargo.lock's own package entry.
+#
+# Factored out of the single inline bump so the canonical writeback below gets
+# byte-identical treatment to the cut worktree. Keep it that way: release:cut's
+# reuseSeed residue validator (expectedVersionFile / RELEASE_RESUME_VERSION_PATHS
+# in packages/operator-core/lib/agent-tools/release/cut.ts) re-derives these exact
+# rewrites to decide whether a dirty root is cutter-owned, so a divergence here
+# makes every retry refuse the root it is meant to resume.
+#
+# ⚠ The worktree call deliberately does NOT pass with-lock: cargo regenerates the
+# lock during the build, and RELEASE_RESUME_VERSION_PATHS lists only the three
+# paths below as cutter-owned dirt — writing a fourth would make that validator
+# report "non-cutter path: src-tauri/Cargo.lock" and refuse the resume. The
+# canonical call DOES pass it, because nothing regenerates the lock over there.
+bump_version_manifests() {
+  python3 - "$VERSION" "$1" "${2:-}" <<'PY'
 import json, sys, re, pathlib
 version, root = sys.argv[1], pathlib.Path(sys.argv[2])
+with_lock = len(sys.argv) > 3 and sys.argv[3] == "with-lock"
 
 pkg = root / "package.json"
 if pkg.exists():
@@ -1723,7 +1740,31 @@ text = cargo.read_text()
 text = re.sub(r'(?m)^version = "[^"]+"', f'version = "{version}"', text, count=1)
 cargo.write_text(text)
 print(f"  Cargo.toml → {version}")
+
+if with_lock:
+    lock = root / "src-tauri" / "Cargo.lock"
+    if lock.exists():
+        text = lock.read_text()
+        # Anchor on the package NAME so a dependency that merely shares a version
+        # string is never touched. Requiring exactly one hit is the point: a 0 means
+        # the lock format moved under us and the bump silently did nothing.
+        pattern = re.compile(
+            r'(?m)^(\[\[package\]\]\nname = "papercusp-desktop"\nversion = )"[^"]+"'
+        )
+        new_text, n = pattern.subn(lambda m: f'{m.group(1)}"{version}"', text)
+        if n != 1:
+            print(
+                f"  !! Cargo.lock: expected exactly 1 papercusp-desktop package entry, found {n}",
+                file=sys.stderr,
+            )
+            sys.exit(3)
+        lock.write_text(new_text)
+        print(f"  Cargo.lock → {version}")
 PY
+}
+
+echo "==> bumping version in manifests"
+bump_version_manifests "$ROOT"
 
 # ── Dogfood version pin (clone-progress + version-pin) ──────────────────────
 # The shipped app clones the `papercusp` dogfood hive from the MONOREPO
@@ -2894,6 +2935,75 @@ git -C "$ROOT" commit -m "release: $TAG" 2>&1 | tail -3 || echo "(nothing to com
 echo "==> tagging $TAG (local)"
 git -C "$ROOT" tag -f "$TAG"
 
+# ── Canonical version writeback (WI-10001570) ───────────────────────────────
+# $ROOT is derived from where THIS script lives, so a cut launched against an
+# isolated worktree (release:cut { root }) bumps ONLY that throwaway checkout.
+# That worktree's papercusp-desktop/.git is an INDEPENDENT clone, not a linked
+# worktree sharing an object store, and the GitHub publish/push leg below is
+# DELETED under LOCAL-only — so the commit and tag just made reach the canonical
+# repo by NO route at all and die with the worktree. That is how 0.0.18 shipped
+# while every canonical manifest still read 0.0.17, and why the desktop app kept
+# reporting a version that was never cut.
+#
+# Write the same fields into the canonical checkout and STOP. Deliberately NO
+# commit and NO push: git-sync owns commit+push for the shared tree and sweeps
+# the submodule on its own schedule.
+CANONICAL_WRITEBACK_STATUS=0
+if [[ -z "${PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT:-}" ]]; then
+  echo "==> canonical writeback: skipped (PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT unset)"
+elif ! _canon="$(cd "${PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT}" 2>/dev/null && pwd)"; then
+  echo "⛔ canonical writeback: PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT=${PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT} is not a readable directory" >&2
+  CANONICAL_WRITEBACK_STATUS=1
+elif [[ "$_canon" == "$ROOT" ]]; then
+  echo "==> canonical writeback: not needed (cut ran in the canonical checkout)"
+elif [[ ! -f "$_canon/src-tauri/tauri.conf.json" ]]; then
+  echo "⛔ canonical writeback: $_canon is not a papercusp-desktop checkout (no src-tauri/tauri.conf.json)" >&2
+  CANONICAL_WRITEBACK_STATUS=1
+else
+  echo "==> canonical writeback: $VERSION → $_canon (files only; git-sync commits)"
+  if ! bump_version_manifests "$_canon" with-lock; then
+    echo "⛔ canonical writeback: rewriting manifests FAILED" >&2
+    CANONICAL_WRITEBACK_STATUS=1
+  # Re-read what is actually on disk. A rewrite reporting success is not proof the
+  # canonical repo received it, and a silent miss here is invisible until a release
+  # later, when every source build still reports the previous version.
+  elif ! python3 - "$VERSION" "$_canon" <<'PY'
+import json, re, sys, pathlib
+version, root = sys.argv[1], pathlib.Path(sys.argv[2])
+bad = []
+
+pkg = root / "package.json"
+if pkg.exists() and json.loads(pkg.read_text()).get("version") != version:
+    bad.append("package.json")
+
+tauri_conf = root / "src-tauri" / "tauri.conf.json"
+if json.loads(tauri_conf.read_text()).get("version") != version:
+    bad.append("src-tauri/tauri.conf.json")
+
+m = re.search(r'(?m)^version = "([^"]+)"', (root / "src-tauri" / "Cargo.toml").read_text())
+if not m or m.group(1) != version:
+    bad.append("src-tauri/Cargo.toml")
+
+lock = root / "src-tauri" / "Cargo.lock"
+if lock.exists():
+    m = re.search(
+        r'(?m)^\[\[package\]\]\nname = "papercusp-desktop"\nversion = "([^"]+)"',
+        lock.read_text(),
+    )
+    if not m or m.group(1) != version:
+        bad.append("src-tauri/Cargo.lock")
+
+if bad:
+    print("  !! not at " + version + ": " + ", ".join(bad), file=sys.stderr)
+    sys.exit(1)
+print(f"  verified: canonical checkout reads {version}")
+PY
+  then
+    echo "⛔ canonical writeback: verification FAILED — the canonical checkout is NOT at $VERSION" >&2
+    CANONICAL_WRITEBACK_STATUS=1
+  fi
+fi
+
 # ── ⛔ LOCAL-only. The GitHub publish leg was REMOVED (2026-07-12, WI-desktop-release-0-0-8).
 # Owner directive (2026-07-08, restated 2026-07-12): "We are no longer using github for our
 # releases so just build the installer locally and I will upload it to the right spot."
@@ -2916,3 +3026,16 @@ echo "    hand-off:  give the owner the paths + sha256 below."
 for f in "${ARTIFACTS[@]}"; do
   [[ -f "$f" ]] && echo "      $f  sha256:$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)"
 done
+
+# Reported AFTER the handoff above so a writeback failure can never cost the
+# operator the artifact paths + sha256s — but it still FAILS the cut, because the
+# whole point is that this loss is otherwise silent until a release later.
+if [[ "${CANONICAL_WRITEBACK_STATUS:-0}" -ne 0 ]]; then
+  echo
+  echo "⛔ FAILED: the canonical version writeback did not land (see the error above)."
+  echo "   The artifacts listed above are valid and signed — nothing about them is in doubt."
+  echo "   What is wrong: the canonical papercusp-desktop checkout is NOT at $VERSION, so a"
+  echo "   source build there will keep reporting the previous version. Fix that, then"
+  echo "   leave the files for git-sync (do NOT commit or push them yourself)."
+  exit 1
+fi
