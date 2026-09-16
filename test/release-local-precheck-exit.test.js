@@ -113,8 +113,48 @@ test('the release-owned prepare-tag operation exits before the first build write
 test('the version bump really is the first write, and it writes what we think', () => {
   const text = src();
   const bump = firstLine(text, /^echo "==> bumping version in manifests"/);
-  // The python heredoc immediately below the banner is what performs the write.
-  const block = text.split('\n').slice(bump - 1, bump + 40).join('\n');
+  // The write USED to be a python heredoc inline below the banner. It is now
+  // DELEGATED to a shell function, so a literal window below the banner contains
+  // the CALL and none of the writes — which red-pinned this guard on 2026-09-16
+  // against a script whose safety property was entirely intact.
+  //
+  // Follow the indirection rather than widening the window. Widening is the
+  // tempting one-character fix and it is the wrong one: it would keep passing if
+  // a manifest write genuinely migrated above the precheck exit, which is the one
+  // thing this test exists to catch.
+  const lines = text.split('\n');
+  const window = lines.slice(bump - 1, bump + 40);
+  const isDefined = (name) => new RegExp(`^${name}\\(\\) \\{`, 'm').test(text);
+  const calledIdx = window.findIndex((l) => {
+    const name = /^\s*([A-Za-z_][A-Za-z0-9_]*)(?:\s|$)/.exec(l)?.[1];
+    return Boolean(name) && isDefined(name);
+  });
+
+  let block;
+  if (calledIdx >= 0) {
+    const called = /^\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(window[calledIdx])[1];
+    const defLine = firstLine(text, new RegExp(`^${called}\\(\\) \\{`));
+    const endIdx = lines.findIndex((l, i) => i >= defLine && /^\}/.test(l));
+    assert(
+      endIdx > 0,
+      `could not find the closing brace of ${called}() — this guard can no longer read the write block, ` +
+        `which is a broken instrument and must not be read as a pass`,
+    );
+    block = lines.slice(defLine - 1, endIdx + 1).join('\n');
+
+    // Defining a function writes nothing; the write happens at the CALL. So the
+    // ordering property is about the invocation line, and it is asserted here
+    // explicitly rather than inferred from the banner sitting beside it.
+    const precheck = firstLine(text, PRECHECK_BRANCH);
+    const callLine = bump + calledIdx;
+    assert(
+      precheck > 0 && precheck < callLine,
+      `${called} is invoked at line ${callLine}, at or above the precheck exit (${precheck}) — a manifest ` +
+        `write can now run before the precheck-only exit`,
+    );
+  } else {
+    block = window.join('\n');
+  }
   for (const f of WRITTEN_MANIFESTS) {
     const leaf = f.split('/').pop();
     assert(
