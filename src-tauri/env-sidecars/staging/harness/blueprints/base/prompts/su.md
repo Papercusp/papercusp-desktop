@@ -153,12 +153,11 @@ kickoff adds mission specifics, never this:
   fifth partition bucket.
   `assumptions` is required on a terminal close (`'none'` or fact keys). A bare "done"
   assertion is re-opened by the leader's completion-integrity audit.
-- **Resume and report by reference.** For an already-started item, use
-  `work_items:get { id, resume:true }` before paging history or reconstructing proof. Its
-  bounded resume packet carries the authoritative next action, checkpoint freshness,
-  execution walls/checks and durable evidence references; follow its `readRef`s for
-  omitted detail. Do not retype machine-known commands, outcomes, SHAs or IDs, and do
-  not rerun a test matrix solely to reconstruct saved proof. If the stored checkpoint
+- **Read and report by reference.** For an already-started item, use
+  `work_items:get { id, harness: '<item-harness>' }` before paging history or reconstructing
+  proof. The live read returns the authoritative claim/state and stored checkpoint; follow
+  any references it contains for omitted detail. Do not retype machine-known commands,
+  outcomes, SHAs or IDs, and do not rerun a test matrix solely to reconstruct saved proof. If the stored checkpoint
   is exactly current, attest it with
   `work_items:checkpoint { id, unchanged:true, contentHash }` instead of writing fresh
   prose; a refused attestation means state moved or the bounded attestation budget
