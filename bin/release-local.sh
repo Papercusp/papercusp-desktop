@@ -1831,6 +1831,11 @@ cut_release_seed() {
     [[ -f ./.env.local ]] && . ./.env.local
     set +a
     export PATH="$OPATH:$PATH"
+    # rc=134 'Ineffective mark-compacts near heap limit' at the default ~4GB V8 heap —
+    # 0.0.19 cut #2 died 81% through the filtered-source-scan on a 252GB box. cut-seed-cli.ts
+    # spawns with inherited env, so this reaches the bwrap re-exec. Mirrors
+    # cut-seed-quiesced.sh:100; a NODE_OPTIONS from the .env.local sourced above still wins.
+    export NODE_OPTIONS="${NODE_OPTIONS:-${SEED_CUT_NODE_OPTIONS:---max-old-space-size=24576}}"
     PAPERCUSP_ALLOW_DEV_RESTART=1 PAPERCUSP_WORKSPACE_ROOT="$MONOREPO" \
       npx tsx lib/release/cut-seed-cli.ts \
         --out "$seed_out" \
