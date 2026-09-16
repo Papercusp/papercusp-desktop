@@ -10,7 +10,7 @@
 # ~4 min, and the single-primary alarm kept luring agents into restarting it
 # (WI-2140796 / EI-22090984621328730). This wrapper closes that hole:
 #
-#   1. stop bg-host, then `systemctl --user mask --runtime` it for the cut's
+#   1. stop bg-host, then runtime-mask it (via user.control) for the cut's
 #      duration — a peer `systemctl start` / dev:restart now FAILS LOUDLY with
 #      "Unit papercusp-bg-host.service is masked" instead of silently
 #      un-quiescing (the mask lives in /run, so it cannot outlive a reboot);
@@ -21,7 +21,9 @@
 #
 # ⚠ If this wrapper is SIGKILLed the trap never runs and the runtime mask
 #   persists until reboot. Recovery (one line):
-#     systemctl --user unmask --runtime papercusp-bg-host.service && systemctl --user start papercusp-bg-host.service
+#     rm -f "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/systemd/user.control/papercusp-bg-host.service" && systemctl --user daemon-reload && systemctl --user start papercusp-bg-host.service
+#   (`systemctl --user unmask --runtime` does NOT clear this mask — it looks in a
+#    different directory. See the precedence note at the mask step.)
 #
 # ⚠ Never edit this file (or the /tmp copy) WHILE a cut is running — bash reads
 #   scripts incrementally, so an in-place edit corrupts the running instance.
@@ -42,6 +44,10 @@ HIVE="${SEED_CUT_HIVE:-papercusp}"
 ORIGIN="${SEED_CUT_ORIGIN:-https://github.com/Papercusp/papercup}"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 MARKER="$RUNTIME_DIR/papercusp-seed-cut.quiesce"
+# Runtime mask location. MUST be user.control, not $XDG_RUNTIME_DIR/systemd/user —
+# see the precedence note at the mask step below.
+CONTROL_DIR="$RUNTIME_DIR/systemd/user.control"
+CONTROL_MASK="$CONTROL_DIR/$UNIT"
 
 exec >>"$LOG" 2>&1
 echo "=== seed cut start $(date -u +%FT%TZ) (wrapper pid $$) ==="
@@ -51,7 +57,8 @@ release_quiesce() {
   local rc=$?
   trap - EXIT TERM INT HUP
   if [ "$MASKED" = 1 ]; then
-    systemctl --user unmask --runtime "$UNIT"
+    rm -f "$CONTROL_MASK"
+    systemctl --user daemon-reload
     echo "=== $UNIT unmask rc=$? at $(date -u +%FT%TZ) ==="
   fi
   rm -f "$MARKER"
@@ -69,7 +76,19 @@ if [ "$ACT" = "active" ]; then
   echo "FATAL: $UNIT still active after stop — aborting (no cut attempted)"
   exit 7
 fi
-systemctl --user mask --runtime "$UNIT" || { echo "FATAL: could not mask $UNIT"; exit 8; }
+# ⚠ `systemctl --user mask --runtime` is NOT sufficient for this unit and NEVER WAS.
+# It symlinks into $XDG_RUNTIME_DIR/systemd/user (search-path precedence 8), but the
+# real fragment lives in ~/.config/systemd/user (precedence 5) and SHADOWS it — so the
+# symlink is created, `mask` exits 0, and the unit stays startable. Measured
+# 2026-09-16 on the 0.0.20 cut: "Created symlink …/systemd/user/…→ /dev/null" followed
+# immediately by is-enabled=enabled, which tripped the guard below and aborted the cut.
+# user.control (precedence 2) OUTRANKS ~/.config, is still under /run (so it cannot
+# outlive a reboot — the property --runtime was chosen for), and makes a peer's
+# `systemctl start` / dev:restart fail loudly with "Unit … is masked".
+# daemon-reload is REQUIRED: without it the manager does not register the new symlink.
+mkdir -p "$CONTROL_DIR" || { echo "FATAL: could not create $CONTROL_DIR"; exit 8; }
+ln -sf /dev/null "$CONTROL_MASK" || { echo "FATAL: could not mask $UNIT"; exit 8; }
+systemctl --user daemon-reload
 MASKED=1
 EN="$(systemctl --user is-enabled "$UNIT" 2>/dev/null || true)"
 case "$EN" in
