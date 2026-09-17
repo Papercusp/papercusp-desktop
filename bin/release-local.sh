@@ -1499,7 +1499,15 @@ fi
 # release-readiness-preflight-gate-2026-07-19 P-001.
 if [[ "${PAPERCUSP_SKIP_MIGRATION_BOOTSMOKE:-0}" != "1" ]]; then
   echo "==> checking migration boot-smoke (from-scratch replay of all migrations)"
-  ( cd "$ROOT/.." && npm run test:file -- packages/operator-core/lib/release-preflight-migration-boot-smoke.integration.test.ts ) \
+  # This file's `afterAll` takes no explicit timeout, so it alone falls back to the integration
+  # hookTimeout (90s default, libs/test-config/src/vitest-config.ts). Several green-checkpoint gate
+  # runs share ONE `.withReuse()` Postgres container with this preflight, so a 90s CLEANUP budget
+  # can expire on load rather than on any defect. The gate already granted itself exactly this
+  # headroom for the same reason (green-checkpoint.ts buildGreenCheckpointEnv, EI-21863578695350444
+  # after the 2026-08-29 timeout); the cut's preflight ran the same file at the bare default and
+  # died on it during the 0.0.20 cut (2026-09-17). A pre-set value still wins.
+  # NOTE: this does NOT widen the per-test budgets — those are `}, 300_000);` in the test file.
+  ( cd "$ROOT/.." && VITEST_INTEGRATION_HOOK_TIMEOUT_MS="${VITEST_INTEGRATION_HOOK_TIMEOUT_MS:-180000}" npm run test:file -- packages/operator-core/lib/release-preflight-migration-boot-smoke.integration.test.ts ) \
     || { echo "ERROR: migration boot-smoke failed (above) — a migration crashes on a from-scratch replay, so a packaged install would crash-loop its seed on first boot. Fix the offending migration, or PAPERCUSP_SKIP_MIGRATION_BOOTSMOKE=1 to override (Docker-less box only)."; exit 1; }
 fi
 
