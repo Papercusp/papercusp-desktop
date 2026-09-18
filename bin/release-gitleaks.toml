@@ -125,6 +125,26 @@ regexes = [
     '''(?i)\btoken[0-9]+,consumed=await\b''',
 ]
 
+# The jws package's SignStream constructor assigns a stream object to a field
+# named `secretStream`; minification removes the separator before the next
+# assignment, so the generic detector reads `secretStream,this.signature=` as a
+# key/value pair. The captured bytes are a JavaScript identifier followed by an
+# assignment, never a credential — the unminified source is
+# node_modules/jws/lib/sign-stream.js. Matched against the detector's exact
+# finding rather than the (multi-megabyte) generated line, so any other
+# credential-like value on that same line still fails the release.
+[[rules.allowlists]]
+description = "jws stream-constructor assignment in assembled serve.mjs"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = [
+    '''(?:^|/)serve\.mjs$''',
+]
+regexTarget = "match"
+regexes = [
+    '''(?i)\bsecretStream,this\.signature=new\b''',
+]
+
 # Gitleaks also recursively decodes base64-looking substrings before applying
 # the generic detector. Those findings target the decoded match rather than
 # the original (multi-megabyte) source line, so the line markers above cannot
