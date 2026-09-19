@@ -36,6 +36,66 @@ function extractVerifierGuard() {
   return match[1];
 }
 
+test('desktop worker builds before Node staging and is executed by the finished-bundle verifier', () => {
+  const buildStart = builder.indexOf('DESKTOP_SESSION_BIN=');
+  const buildEnd = builder.indexOf('# Bundle the embedded-postgres-server', buildStart);
+  const verifyStart = verifier.indexOf('_desktop_session=');
+  const verifyEnd = verifier.indexOf('_ri=', verifyStart);
+  assert.ok(buildStart >= 0 && buildEnd > buildStart, 'desktop worker build phase is missing');
+  assert.ok(verifyStart >= 0 && verifyEnd > verifyStart, 'packaged worker check is missing');
+
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-desktop-worker-staging-'));
+  const fakeBin = path.join(fixture, 'tools');
+  const sidecar = path.join(fixture, 'sidecar');
+  const bin = path.join(sidecar, 'bin');
+  try {
+    fs.mkdirSync(fakeBin, { recursive: true });
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(fakeBin, 'npx'), [
+      '#!/bin/sh',
+      'for arg in "$@"; do',
+      '  case "$arg" in --outfile=*) printf "process.exit(0);\\n" > "${arg#--outfile=}";; esac',
+      'done',
+      '',
+    ].join('\n'), { mode: 0o755 });
+    const env = {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      SIDECAR_DIR: sidecar,
+      REPO_ROOT: fixture,
+      WEB_DIR: fixture,
+      BIN: bin,
+      NODE_BIN: path.join(bin, 'node'),
+    };
+    const built = spawnSync('bash', ['-c', [
+      'set -euo pipefail',
+      'MINIFY_ARGS=()',
+      builder.slice(buildStart, buildEnd),
+    ].join('\n')], { env, encoding: 'utf8', timeout: 10_000 });
+    assert.equal(built.status, 0, `${built.stdout}${built.stderr}`);
+    assert.equal(fs.existsSync(env.NODE_BIN), false, 'this phase must not require the later Node copy');
+    const worker = path.join(bin, 'papercusp-desktop-session.cjs');
+    assert.ok(fs.statSync(worker).mode & 0o111, 'the worker must be executable');
+
+    // The final verifier must exercise the packaged runtime and reject a broken worker.
+    fs.symlinkSync(process.execPath, env.NODE_BIN);
+    const verify = () => spawnSync('bash', ['-c', [
+      'set -euo pipefail',
+      'fail() { printf "%s\\n" "$*" >&2; exit 1; }',
+      'ok() { :; }',
+      verifier.slice(verifyStart, verifyEnd),
+    ].join('\n')], { env, encoding: 'utf8', timeout: 10_000 });
+    const good = verify();
+    assert.equal(good.status, 0, `${good.stdout}${good.stderr}`);
+    fs.writeFileSync(worker, 'process.exit(23);\n');
+    const broken = verify();
+    assert.equal(broken.status, 1);
+    assert.match(broken.stderr, /desktop session worker failed packaged execution/);
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test('builder refreshes better-sqlite3 for the bundled Node target ABI', () => {
   const align = extractAlignmentFunction(builder);
   const nodeSelection = builder.indexOf('NODE_VERSION="${NODE_VERSION:-v24.18.1}"');

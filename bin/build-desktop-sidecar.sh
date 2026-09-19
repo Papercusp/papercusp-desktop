@@ -2928,7 +2928,8 @@ DESKTOP_SESSION_BIN="$SIDECAR_DIR/bin/papercusp-desktop-session.cjs"
   --bundle --platform=node --format=cjs --target=node22 \
   "${MINIFY_ARGS[@]}" --outfile="$DESKTOP_SESSION_BIN")
 chmod 755 "$DESKTOP_SESSION_BIN"
-"$SIDECAR_DIR/bin/node" "$DESKTOP_SESSION_BIN" --help >/dev/null
+# Bundled Node is installed later. The finished-bundle verifier below executes
+# this worker with that exact runtime and refuses a missing or broken bundle.
 
 # Bundle the embedded-postgres-server package (real PG with logical
 # replication enabled). This is the ONLY desktop DB — the legacy
