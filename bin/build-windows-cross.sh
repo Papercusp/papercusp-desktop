@@ -376,6 +376,12 @@ if [[ " $ROLES " == *" server "* && -n "$SOURCE_REPAIR" ]]; then
     [[ -s "$SRC_TAURI/env-sidecars/staging/$_frozen_env_input" ]] \
       || fail "source repair requires frozen env-sidecars/staging/$_frozen_env_input"
   done
+  _frozen_env_serve="$SRC_TAURI/env-sidecars/staging/serve.mjs"
+  grep -Fq 'ensureOAuthStateKeyFile' "$_frozen_env_serve" \
+    || fail "source repair requires the OAuth state key-file fix in frozen env-sidecars/staging/serve.mjs"
+  if grep -Fq 'env2&&env2.length>=32?secretKey=Buffer.from(env2,"utf8"):secretKey=randomBytes' "$_frozen_env_serve"; then
+    fail "source repair refuses the legacy per-process OAuth state random fallback in frozen env-sidecars/staging/serve.mjs"
+  fi
   echo "    native repair: retaining frozen source archive and environment sidecar inputs"
 elif [[ " $ROLES " == *" server "* ]]; then
   (

@@ -322,7 +322,9 @@ test('Server repair never restages frozen payloads and refuses missing generated
   for (const relative of frozen) {
     const dest = path.join(src, relative);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.writeFileSync(dest, `frozen:${relative}`);
+    fs.writeFileSync(dest, relative === 'env-sidecars/staging/serve.mjs'
+      ? 'frozen:ensureOAuthStateKeyFile'
+      : `frozen:${relative}`);
   }
   const run = () => spawnSync('bash', ['-c',
     `set -euo pipefail\nfail() { echo "$*" >&2; exit 1; }\n` +
@@ -334,13 +336,44 @@ test('Server repair never restages frozen payloads and refuses missing generated
   });
   assert.equal(run().status, 0);
   for (const relative of frozen) {
-    assert.equal(fs.readFileSync(path.join(src, relative), 'utf8'), `frozen:${relative}`);
+    const expected = relative === 'env-sidecars/staging/serve.mjs'
+      ? 'frozen:ensureOAuthStateKeyFile'
+      : `frozen:${relative}`;
+    assert.equal(fs.readFileSync(path.join(src, relative), 'utf8'), expected);
   }
   assert.equal(fs.existsSync(path.join(src, 'sidecar.lock')), false);
   fs.unlinkSync(path.join(src, frozen[0]));
   const missing = run();
   assert.notEqual(missing.status, 0);
   assert.match(missing.stderr, /requires the frozen source.tar.zst/);
+
+  fs.writeFileSync(path.join(src, frozen[0]), 'frozen:sidecar/source.tar.zst');
+  fs.writeFileSync(path.join(src, frozen[1]), 'frozen:serve-without-oauth-key-fix');
+  const missingOAuthFix = run();
+  assert.notEqual(missingOAuthFix.status, 0);
+  assert.match(missingOAuthFix.stderr, /requires the OAuth state key-file fix/);
+
+  fs.writeFileSync(path.join(src, frozen[1]),
+    'ensureOAuthStateKeyFile;env2&&env2.length>=32?secretKey=Buffer.from(env2,"utf8"):secretKey=randomBytes');
+  const legacyOAuthFallback = run();
+  assert.notEqual(legacyOAuthFallback.status, 0);
+  assert.match(legacyOAuthFallback.stderr, /refuses the legacy per-process OAuth state random fallback/);
+});
+
+test('tracked Windows source-repair env-sidecar carries the OAuth state key-file fix', () => {
+  const tracked = path.join(root, 'src-tauri/env-sidecars/staging/serve.mjs');
+  const source = fs.readFileSync(tracked, 'utf8');
+  assert.match(source, /ensureOAuthStateKeyFile/);
+  assert.doesNotMatch(source,
+    /env2&&env2\.length>=32\?secretKey=Buffer\.from\(env2,"utf8"\):secretKey=randomBytes/);
+
+  const script = fs.readFileSync(path.join(root, 'bin/build-windows-cross.sh'), 'utf8');
+  const start = script.indexOf('# ── Server-only source-tree + env-sidecar staging.');
+  const end = script.indexOf('# ── Immutable build-source snapshot', start);
+  assert.ok(start > 0 && end > start);
+  const sourceRepair = script.slice(start, end);
+  assert.match(sourceRepair, /requires the OAuth state key-file fix in frozen env-sidecars\/staging\/serve\.mjs/);
+  assert.match(sourceRepair, /refuses the legacy per-process OAuth state random fallback/);
 });
 
 test('materializes only exact committed repair bytes and attests a stable source identity', (t) => {

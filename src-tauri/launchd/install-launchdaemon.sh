@@ -125,7 +125,7 @@ if [ -n "$CURRENT_PAYLOAD" ] || [ -n "$CURRENT_LAUNCHER" ]; then
   # Never accept an empty/unknown stamp: /api/health sha:null would make a
   # healthy process indistinguishable from the wrong bytes (EI-22368205971185543).
   if [ -z "$CURRENT_BUILD_SHA" ] && [ -f "${CURRENT_PAYLOAD}/BUILD-STAMP.txt" ]; then
-    CURRENT_BUILD_SHA="$(sed -n 's/^sha=//p' "${CURRENT_PAYLOAD}/BUILD-STAMP.txt" | head -1)"
+    CURRENT_BUILD_SHA="$(sed -n 's/^sha=\([^[:space:]]*\).*/\1/p' "${CURRENT_PAYLOAD}/BUILD-STAMP.txt" | head -1)"
   fi
   case "$CURRENT_BUILD_SHA" in
     ''|unknown|*[!A-Za-z0-9._-]*)
@@ -201,8 +201,10 @@ if [ "$SERVICE_KIND" = "current" ]; then
   fi
 fi
 install -m 644 -o root -g wheel "$TMP_PLIST" "$PLIST_DEST"
-launchctl bootstrap system "$PLIST_DEST"
+# A persisted disabled override makes bootstrap fail with error 5. Enable the
+# named job first; enabling after bootstrap is unreachable on that path.
 launchctl enable "system/${LABEL}"
+launchctl bootstrap system "$PLIST_DEST"
 
 verify_current_service() {
   local i service_pid operator_pid command health health_sha discovery="${SERVICE_HOME}/.papercusp/operator.json"

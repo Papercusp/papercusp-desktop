@@ -92,7 +92,7 @@ trap cleanup_control EXIT
 
 validate_payload() {
   local root="$1" require_stamp="${2:-0}" f expected_max expected_count actual_max actual_count
-  for f in "$root/serve.mjs" "$root/db-sql" "$root/node_modules" "$root/sql" "$root/prompts"; do
+  for f in "$root/serve.mjs" "$root/db-sql" "$root/node_modules" "$root/node_modules/@papercusp/embedded-postgres-server/src/migration-runner.js" "$root/sql" "$root/prompts"; do
     [ -e "$f" ] || { echo "FATAL: staged payload is missing $f" >&2; return 1; }
   done
   if [ "$require_stamp" = "1" ]; then
@@ -129,6 +129,25 @@ validate_payload() {
   fi
 }
 
+# cp -a preserves the rig's absolute namespace symlinks into the installed app.
+# Replace each linked container in the PRIVATE candidate with a shallow directory
+# of links before writing below it. Native dependencies keep resolving in place;
+# package source replacement can no longer mutate the installed app or backup.
+detach_linked_directory() {
+  local directory="$1" source entry
+  if [ -L "$directory" ]; then
+    source="$(cd "$directory" && pwd -P)" || return 1
+    rm -f "$directory" || return 1
+    mkdir "$directory" || return 1
+    for entry in "$source"/* "$source"/.[!.]* "$source"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      ln -s "$entry" "$directory/$(basename "$entry")" || return 1
+    done
+  else
+    mkdir -p "$directory" || return 1
+  fi
+}
+
 overlay_payload() {
   local candidate="$1" stage="$2" subtree
   cp -a "$stage/serve.mjs" "$candidate/serve.mjs.new"
@@ -137,6 +156,22 @@ overlay_payload() {
     rm -rf "$candidate/$subtree"
     cp -a "$stage/$subtree" "$candidate/$subtree"
   done
+  # Refresh the externalized package's JS sources without deleting the
+  # candidate's nested darwin native dependency tree.
+  for subtree in node_modules node_modules/@papercusp node_modules/@papercusp/embedded-postgres-server; do
+    detach_linked_directory "$candidate/$subtree" || return 1
+  done
+  rm -f "$candidate/node_modules/@papercusp/embedded-postgres-server/package.json"
+  cp "$stage/node_modules/@papercusp/embedded-postgres-server/package.json" \
+    "$candidate/node_modules/@papercusp/embedded-postgres-server/package.json"
+  rm -rf "$candidate/node_modules/@papercusp/embedded-postgres-server/src"
+  cp -a "$stage/node_modules/@papercusp/embedded-postgres-server/src" \
+    "$candidate/node_modules/@papercusp/embedded-postgres-server/src"
+  if [ -d "$stage/node_modules/@papercusp/embedded-postgres-server/bin" ]; then
+    rm -rf "$candidate/node_modules/@papercusp/embedded-postgres-server/bin"
+    cp -a "$stage/node_modules/@papercusp/embedded-postgres-server/bin" \
+      "$candidate/node_modules/@papercusp/embedded-postgres-server/bin"
+  fi
   cp -a "$stage/BUILD-STAMP.txt" "$candidate/BUILD-STAMP.txt"
   cp -a "$stage/PAYLOAD-MANIFEST.sha256" "$candidate/PAYLOAD-MANIFEST.sha256"
 }
@@ -146,11 +181,17 @@ write_self_test_manifest() {
   (
     cd "$root" || exit 1
     if command -v shasum >/dev/null 2>&1; then
-      find serve.mjs BUILD-STAMP.txt db-sql sql prompts -type f -print0 \
+      find serve.mjs BUILD-STAMP.txt db-sql sql prompts \
+        node_modules/@papercusp/embedded-postgres-server/package.json \
+        node_modules/@papercusp/embedded-postgres-server/src \
+        -type f -print0 \
         | LC_ALL=C sort -z \
         | xargs -0 shasum -a 256 > PAYLOAD-MANIFEST.sha256
     else
-      find serve.mjs BUILD-STAMP.txt db-sql sql prompts -type f -print0 \
+      find serve.mjs BUILD-STAMP.txt db-sql sql prompts \
+        node_modules/@papercusp/embedded-postgres-server/package.json \
+        node_modules/@papercusp/embedded-postgres-server/src \
+        -type f -print0 \
         | LC_ALL=C sort -z \
         | xargs -0 sha256sum > PAYLOAD-MANIFEST.sha256
     fi
@@ -161,7 +202,7 @@ prepare_candidate() {
   local current="$1" stage="$2" candidate="$3"
   rm -rf "$candidate"
   cp -a "$current" "$candidate"
-  overlay_payload "$candidate" "$stage"
+  overlay_payload "$candidate" "$stage" || return 1
   validate_payload "$candidate" 1
 }
 
@@ -183,17 +224,30 @@ rollback_payload() {
 }
 
 run_filesystem_self_test() {
-  local root current stage candidate backup failed
+  local root current stage candidate backup failed external
   root="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-sidecar-selftest.XXXXXX")" || return 1
   current="$root/current"
   stage="$root/stage"
   candidate="$root/candidate"
   backup="$root/backup"
   failed="$root/failed"
-  mkdir -p "$current/db-sql" "$current/sql" "$current/prompts" "$current/node_modules"
-  mkdir -p "$stage/db-sql" "$stage/sql" "$stage/prompts" "$stage/node_modules"
+  external="$root/external-papercusp"
+  mkdir -p "$current/db-sql" "$current/sql" "$current/prompts" \
+    "$current/node_modules/@papercusp/embedded-postgres-server/src"
+  mkdir -p "$stage/db-sql" "$stage/sql" "$stage/prompts" \
+    "$stage/node_modules/@papercusp/embedded-postgres-server/src"
+  mkdir -p "$external/embedded-postgres-server/src"
+  printf '%s\n' '{"name":"embedded-postgres-server"}' \
+    > "$external/embedded-postgres-server/package.json"
+  printf '%s\n' old > "$external/embedded-postgres-server/src/migration-runner.js"
+  rm -rf "$current/node_modules/@papercusp"
+  ln -s "$external" "$current/node_modules/@papercusp"
   printf '%s\n' old > "$current/serve.mjs"
   printf '%s\n' new > "$stage/serve.mjs"
+  printf '%s\n' '{"name":"embedded-postgres-server"}' \
+    > "$stage/node_modules/@papercusp/embedded-postgres-server/package.json"
+  printf '%s\n' 'export function migrationTransactionChunks(ddl) { return [ddl]; }' \
+    > "$stage/node_modules/@papercusp/embedded-postgres-server/src/migration-runner.js"
   printf 'stamp\ndbSqlHighest=000\ndbSqlCount=1\n' > "$stage/BUILD-STAMP.txt"
   : > "$current/sql/001-bootstrap.sql"
   : > "$stage/sql/001-bootstrap.sql"
@@ -222,6 +276,10 @@ run_filesystem_self_test() {
 
   prepare_candidate "$current" "$stage" "$candidate" || { rm -rf "$root"; return 1; }
   [ "$(cat "$candidate/serve.mjs")" = new ] || { rm -rf "$root"; return 1; }
+  [ "$(cat "$candidate/node_modules/@papercusp/embedded-postgres-server/src/migration-runner.js")" != old ] \
+    || { echo "SELF-TEST FAIL: candidate package source was not refreshed" >&2; rm -rf "$root"; return 1; }
+  [ "$(cat "$external/embedded-postgres-server/src/migration-runner.js")" = old ] \
+    || { echo "SELF-TEST FAIL: linked installed package was mutated" >&2; rm -rf "$root"; return 1; }
   swap_payload "$current" "$candidate" "$backup" || { rm -rf "$root"; return 1; }
   [ "$(cat "$current/serve.mjs")" = new ] || { rm -rf "$root"; return 1; }
   rollback_payload "$current" "$backup" "$failed" || { rm -rf "$root"; return 1; }
@@ -563,8 +621,19 @@ shopt -u nullglob
 # is owned by the launcher and is checked against the command line before it is
 # ever used for a stop.
 LAUNCHED_PID=""
+payload_build_sha() {
+  local sha
+  sha="$(sed -n 's/^sha=\([^[:space:]]*\).*/\1/p' "$CUR/BUILD-STAMP.txt" 2>/dev/null | head -1)"
+  case "$sha" in
+    ''|unknown|*[!A-Za-z0-9._-]*) echo "FATAL: missing/invalid current payload build SHA" >&2; return 1 ;;
+  esac
+  printf '%s\n' "$sha"
+}
+
 launch_operator() {
-  local i pid=""
+  local i pid="" build_sha
+  build_sha="$(payload_build_sha)" || return 1
+  export PAPERCUSP_BUILD_SHA="$build_sha"
   rm -f "$PIDFILE"
   PAPERCUSP_LAUNCH_PIDFILE="$PIDFILE" perl -e \
     '$SIG{HUP}="IGNORE"; exit 0 if fork; use POSIX; POSIX::setsid(); open(STDIN,"<","/dev/null"); open(my $fh, ">", $ENV{PAPERCUSP_LAUNCH_PIDFILE}) or die "pidfile: $!"; print $fh "$$\n"; close $fh; exec @ARGV or die "exec: $!"' -- \
@@ -584,6 +653,9 @@ launch_operator() {
 }
 
 launch_operator_under_launchd() {
+  local build_sha
+  build_sha="$(payload_build_sha)" || return 1
+  export PAPERCUSP_BUILD_SHA="$build_sha"
   rm -f "$PIDFILE"
   printf '%s\n' "$$" > "$PIDFILE"
   echo "LAUNCHED (launchd-supervised, current) serve.mjs --ensure pid=$$ log=$LOG"
@@ -591,13 +663,28 @@ launch_operator_under_launchd() {
 }
 
 wait_for_health() {
-  local timeout="${PAPERCUSP_RESTART_HEALTH_TIMEOUT_SEC:-180}" i
+  local timeout="${PAPERCUSP_RESTART_HEALTH_TIMEOUT_SEC:-180}" i expected_sha command discovery_pid health health_sha
+  expected_sha="$(payload_build_sha)" || return 1
+  case "$LAUNCHED_PID" in ''|*[!0-9]*) return 1 ;; esac
   case "$timeout" in ''|*[!0-9]*) timeout=180 ;; esac
   [ "$timeout" -gt 0 ] || return 1
   for i in $(seq 1 "$timeout"); do
-    if curl -fsS -m 2 "http://127.0.0.1:${HONO_PORT}/api/health" >/dev/null 2>&1; then
-      return 0
-    fi
+    # An old app can win the singleton race while the staged process exits.
+    # A healthy stranger must never discard the rollback payload.
+    kill -0 "$LAUNCHED_PID" 2>/dev/null || return 1
+    command="$(process_cmdline "$LAUNCHED_PID")"
+    case "$command" in
+      *"$SERVE"*--ensure*)
+        discovery_pid="$(sed -nE 's/.*"pid"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$REAL_HOME/.papercusp/operator.json" 2>/dev/null | head -1)"
+        if [ "$discovery_pid" = "$LAUNCHED_PID" ] \
+          && [ "$(process_executable "$LAUNCHED_PID")" = "$NODE" ] \
+          && lsof -nP -a -p "$LAUNCHED_PID" -iTCP:"$HONO_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+          health="$(curl -fsS -m 2 "http://127.0.0.1:${HONO_PORT}/api/health" 2>/dev/null)" || health=""
+          health_sha="$(printf '%s' "$health" | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+          [ "$health_sha" = "$expected_sha" ] && return 0
+        fi
+        ;;
+    esac
     sleep 1
   done
   return 1

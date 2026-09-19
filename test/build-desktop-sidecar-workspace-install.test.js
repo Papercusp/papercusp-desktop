@@ -529,8 +529,12 @@ test('macOS Server starts without a console login (LaunchDaemon, not a gui-domai
 
   const unload = installer.indexOf('unload_if_present\nif [ "$SERVICE_KIND" = "current" ]');
   const exactStop = installer.indexOf('"$CURRENT_LAUNCHER" --stop-only');
+  const enable = installer.indexOf('launchctl enable "system/${LABEL}"');
   const bootstrap = installer.indexOf('launchctl bootstrap system "$PLIST_DEST"');
-  assert.ok(unload >= 0 && exactStop > unload && bootstrap > exactStop, 'bootout + exact stop must precede bootstrap');
+  assert.ok(
+    unload >= 0 && exactStop > unload && enable > exactStop && bootstrap > enable,
+    'bootout + exact stop + enable must precede bootstrap',
+  );
   assert.match(installer, /operator_pid" = "\$service_pid"/);
   assert.match(installer, /lsof -nP -a -p "\$service_pid" -iTCP:"\$CURRENT_PORT" -sTCP:LISTEN/);
   assert.match(installer, /curl -fsS -m 2 "http:\/\/127\.0\.0\.1:\$\{CURRENT_PORT\}\/api\/health"/);

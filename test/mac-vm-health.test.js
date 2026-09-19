@@ -643,6 +643,9 @@ test('current mac rig launcher validates staged integrity and deployment preserv
   const launcher = await readFile(currentBoot, 'utf8');
   assert.match(composer, /\[ -x "\$HERE\/boot-headless-current\.sh" \]/);
   assert.match(composer, /rsync -a --chmod=F755 "\$HERE\/boot-headless-current\.sh"/);
+  assert.match(composer, /EMBEDDED_PG_SRC="\$REPO_ROOT\/libs\/papercusp\/packages\/embedded-postgres-server"/);
+  assert.match(composer, /embedded-postgres-server JS sources/);
+  assert.match(composer, /rsync -a --delete "\$OUT\/node_modules\/@papercusp\/embedded-postgres-server\//);
   assert.match(composer, /PAYLOAD-MANIFEST\.sha256/);
 
   // D-104: launchd owns the foreground Node PID. The PID recorded before exec
@@ -656,6 +659,9 @@ test('current mac rig launcher validates staged integrity and deployment preserv
     /if \[ "\$STOP_ONLY" = "1" \]; then\s*\n\s*rm -f "\$PIDFILE"\s*\n\s*echo "STOPPED: exact current-payload operator is offline[^\n]+"\s*\n\s*exit 0\s*\nfi/,
     'an intentional stop must clear the exact PID record and exit before either launch path',
   );
+  assert.match(launcher, /detach_linked_directory\(\)/);
+  assert.match(launcher, /PAPERCUSP_BUILD_SHA="\$build_sha"/);
+  assert.match(launcher, /health_sha=.*\n\s*\[ "\$health_sha" = "\$expected_sha" \]/);
 
   const launchdBranch = launcher.indexOf('if [ "$LAUNCHD_RUN" = "1" ]');
   const supervisedLaunch = launcher.indexOf('launch_operator_under_launchd', launchdBranch);

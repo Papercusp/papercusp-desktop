@@ -45,9 +45,9 @@
 #   bin/vm-rig/compose-rig-sidecar-current.sh --no-push  # build locally only
 #   PCUSP_VM_SSH=user@host bin/vm-rig/compose-rig-sidecar-current.sh
 #
-# NOTE: node_modules/ in the composed dir is a set of per-entry symlinks into
-# the VM app bundle's own darwin natives. This script never touches it — it is
-# composed once on the VM and survives these refreshes.
+# Native dependencies remain links into the installed app. The externalized
+# embedded-postgres-server JS package is refreshed as part of each payload;
+# the launcher first detaches linked containers in its private candidate.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,9 +79,10 @@ PUSH=1
 
 MAIN_SQL_SRC="$REPO_ROOT/libs/papercusp/libs/db/sql"
 LOCKS_SQL_SRC="$REPO_ROOT/libs/papercusp/packages/locks/src/sql"
+EMBEDDED_PG_SRC="$REPO_ROOT/libs/papercusp/packages/embedded-postgres-server"
 PROMPTS_SRC="$WEB_DIR/prompts"
 
-for d in "$MAIN_SQL_SRC" "$LOCKS_SQL_SRC" "$PROMPTS_SRC" "$WEB_DIR/bin/bundle-host-common.sh"; do
+for d in "$MAIN_SQL_SRC" "$LOCKS_SQL_SRC" "$EMBEDDED_PG_SRC/src" "$EMBEDDED_PG_SRC/bin" "$EMBEDDED_PG_SRC/package.json" "$PROMPTS_SRC" "$WEB_DIR/bin/bundle-host-common.sh"; do
   [ -e "$d" ] || { echo "FATAL: missing $d" >&2; exit 1; }
 done
 [ -x "$HERE/boot-headless-current.sh" ] || {
@@ -177,6 +178,17 @@ rm -rf "$OUT/sql";    mkdir -p "$OUT/sql";    cp -a "$LOCKS_SQL_SRC"/. "$OUT/sql
 echo "→ prompts/"
 rm -rf "$OUT/prompts"; cp -a "$PROMPTS_SRC" "$OUT/prompts"
 
+# The serve bundle externalizes @papercusp/embedded-postgres-server so its
+# platform-native binaries resolve from the installed app's node_modules. The
+# JS package itself remains part of the runtime contract: the current
+# operator imports migration-runner.js directly. Refresh its source in the
+# staged payload while leaving the VM's native dependency tree intact.
+echo "→ embedded-postgres-server JS sources"
+rm -rf "$OUT/node_modules/@papercusp/embedded-postgres-server"
+mkdir -p "$OUT/node_modules/@papercusp/embedded-postgres-server"
+cp "$EMBEDDED_PG_SRC/package.json" "$OUT/node_modules/@papercusp/embedded-postgres-server/"
+cp -a "$EMBEDDED_PG_SRC/src" "$OUT/node_modules/@papercusp/embedded-postgres-server/src"
+cp -a "$EMBEDDED_PG_SRC/bin" "$OUT/node_modules/@papercusp/embedded-postgres-server/bin"
 # ── 4. post-conditions: the exact two failures this script exists to prevent ─
 [ -e "$OUT/sql/001-bootstrap.sql" ] && [ ! -e "$OUT/sql/000-baseline.sql" ] \
   || { echo "FATAL: composed sql/ is not the locks set" >&2; exit 1; }
@@ -197,7 +209,11 @@ printf 'dbSqlHighest=%s\ndbSqlCount=%s\n' "$out_max" "$out_count" >> "$OUT/BUILD
 (
   cd "$OUT"
   manifest_tmp="PAYLOAD-MANIFEST.sha256.tmp.$$"
-  find serve.mjs BUILD-STAMP.txt db-sql sql prompts -type f -print0 \
+  find serve.mjs BUILD-STAMP.txt db-sql sql prompts \
+    node_modules/@papercusp/embedded-postgres-server/package.json \
+    node_modules/@papercusp/embedded-postgres-server/src \
+    node_modules/@papercusp/embedded-postgres-server/bin \
+    -type f -print0 \
     | LC_ALL=C sort -z \
     | xargs -0 sha256sum > "$manifest_tmp"
   mv -f "$manifest_tmp" PAYLOAD-MANIFEST.sha256
@@ -216,7 +232,7 @@ if [ "$PUSH" = "1" ]; then
   REMOTE_LAUNCHD_DIR_Q="$(printf '%q' "$REMOTE_LAUNCHD_DIR")"
   REMOTE_SERVICE_USER_Q="$(printf '%q' "$REMOTE_SERVICE_USER")"
   REMOTE_INSTALLER_Q="${REMOTE_LAUNCHD_DIR_Q}/install-launchdaemon.sh"
-  echo "→ staging payload on $VM:$REMOTE_STAGE (node_modules/ untouched)"
+  echo "→ staging payload on $VM:$REMOTE_STAGE (native node_modules/ untouched)"
   # The active directory is not written in place. boot-headless-current.sh
   # validates the complete stage, stops the exact recorded owner PID, swaps the
   # sibling directories atomically, and restores the backup if health fails.
@@ -227,6 +243,9 @@ if [ "$PUSH" = "1" ]; then
   rsync -a --delete "$OUT/db-sql/"  "$VM:$REMOTE_STAGE/db-sql/"
   rsync -a --delete "$OUT/sql/"     "$VM:$REMOTE_STAGE/sql/"
   rsync -a --delete "$OUT/prompts/" "$VM:$REMOTE_STAGE/prompts/"
+  ssh "$VM" "mkdir -p $REMOTE_STAGE_Q/node_modules/@papercusp/embedded-postgres-server"
+  rsync -a --delete "$OUT/node_modules/@papercusp/embedded-postgres-server/" \
+    "$VM:$REMOTE_STAGE/node_modules/@papercusp/embedded-postgres-server/"
   rsync -a --chmod=F755 "$HERE/boot-headless-current.sh" "$VM:$REMOTE_LAUNCHER"
   # The launcher sources this sibling at runtime. Keep the helper in the same
   # install transaction; omitting it makes the launcher continue without the
