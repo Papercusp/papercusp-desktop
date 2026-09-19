@@ -273,7 +273,14 @@ cleanup_release_local() {
   fi
   [[ -z "${_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST:-}" ]] \
     || rm -f "$_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST"
+  # The gitleaks report contains redacted matches and is kept only for the
+  # duration of this cut. The directory is private (mktemp -d) and is removed
+  # on every ordinary exit so a failed cut leaves no diagnostic bundle behind.
+  [[ -z "${_GITLEAKS_REPORT_DIR:-}" ]] || rm -rf -- "$_GITLEAKS_REPORT_DIR"
 }
+# Override any inherited value before the EXIT trap can observe it. The report
+# directory is assigned only by the gate below after a successful mktemp -d.
+_GITLEAKS_REPORT_DIR=""
 trap cleanup_release_local EXIT
 
 # ── Release host (plan desktop-release-hosting-r2-2026-07-12) ────────────────
@@ -2107,23 +2114,36 @@ fi
 # supplementary credential detector: run it after every staging step, over the
 # same two resource roots, with a release-local config whose generated-byte
 # exceptions require BOTH a known path and a known line marker. Keep values
-# fully redacted in release logs; a finding still fails the cut.
+# fully redacted in release logs; a finding still fails the cut. The report is
+# retained in a private run-scoped directory long enough to print only its
+# non-secret locator fields on refusal.
 if ! command -v gitleaks >/dev/null 2>&1; then
   echo "ERROR: gitleaks is required for the assembled-bundle release gate (EI-21546652106775901)." >&2
   exit 1
 fi
+_GITLEAKS_REPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-release-gitleaks.XXXXXX")"
 _GITLEAKS_STATUS=0
-for _gitleaks_root in "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/resources"; do
-  if ! gitleaks dir "$_gitleaks_root" \
+_GITLEAKS_FAILED_ROOTS=()
+for _gitleaks_root in "src-tauri/sidecar" "src-tauri/resources"; do
+  _gitleaks_report_path="$_GITLEAKS_REPORT_DIR/$(basename "$_gitleaks_root").json"
+  if ! ( cd "$ROOT" && gitleaks dir "$_gitleaks_root" \
       --config "$ORCHESTRATOR_HERE/release-gitleaks.toml" \
       --no-banner --log-level=error --redact=100 \
-      --report-format=json --report-path=/dev/null; then
+      --report-format=json --report-path="$_gitleaks_report_path" ); then
     _GITLEAKS_STATUS=1
+    _GITLEAKS_FAILED_ROOTS+=("$_gitleaks_root")
   fi
 done
 if [[ "$_GITLEAKS_STATUS" != "0" ]]; then
   echo "ERROR: gitleaks found an unallowlisted credential pattern in the fully-assembled bundle — refusing to launch the platform legs (EI-21546652106775901)." >&2
-  echo "       Findings are redacted. Fix the source or add a narrowly path+line-constrained allowlist only after verifying the bytes are public/generated." >&2
+  echo "       Findings are redacted. Safe locator fields follow; fix the source or add a narrowly path+line-constrained allowlist only after verifying the bytes are public/generated." >&2
+  for _gitleaks_root in "${_GITLEAKS_FAILED_ROOTS[@]}"; do
+    _gitleaks_report_path="$_GITLEAKS_REPORT_DIR/$(basename "$_gitleaks_root").json"
+    echo "       Scan root: $_gitleaks_root" >&2
+    python3 "$ORCHESTRATOR_HERE/lib/print-gitleaks-findings.py" \
+      "$_gitleaks_report_path" "$_gitleaks_root" >&2 \
+      || echo "       Could not read the redacted gitleaks report; the gate remains failed." >&2
+  done
   exit 1
 fi
 
