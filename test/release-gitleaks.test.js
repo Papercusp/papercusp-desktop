@@ -10,6 +10,7 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const configPath = path.join(root, 'bin', 'release-gitleaks.toml');
 const scriptPath = path.join(root, 'bin', 'release-local.sh');
+const reportFormatterPath = path.join(root, 'bin', 'lib', 'print-gitleaks-findings.py');
 const gitleaksBin = process.env.GITLEAKS_BIN || 'gitleaks';
 
 function scan(entries, { config = true } = {}) {
@@ -225,7 +226,39 @@ test('an unrelated raw token remains a release-gate finding', () => {
   );
 });
 
-test('release-local runs gitleaks after the Python assembled-bundle audit and before the boot gate', () => {
+test('redacted gitleaks diagnostics expose locators but never matched values or host paths', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-gitleaks-report-'));
+  try {
+    const secret = ['A9f3Kx7L', 'm2Qp8Rz4', 'V6nC1wH7'].join('');
+    const reportPath = path.join(temp, 'report.json');
+    fs.writeFileSync(reportPath, JSON.stringify([{
+      RuleID: 'generic-api-key',
+      Description: 'Detected a Generic API Key.',
+      File: '/build-box/src-tauri/sidecar/serve.mjs',
+      StartLine: 54,
+      EndLine: 54,
+      Match: 'token = "' + secret + '"',
+      Secret: secret,
+    }]));
+    const result = spawnSync(
+      'python3',
+      [reportFormatterPath, reportPath, 'src-tauri/sidecar'],
+      { encoding: 'utf8' },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /RuleID=generic-api-key/);
+    assert.match(result.stderr, /File=serve\.mjs/);
+    assert.match(result.stderr, /Lines=54-54/);
+    assert.match(result.stderr, /Description=Detected a Generic API Key\./);
+    assert.doesNotMatch(result.stderr, new RegExp(secret));
+    assert.doesNotMatch(result.stderr, /build-box/);
+    assert.doesNotMatch(result.stderr, /Match|Secret/);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('release-local runs redacted gitleaks diagnostics after the Python assembled-bundle audit and before the boot gate', () => {
   const source = fs.readFileSync(scriptPath, 'utf8');
   const pythonGate = source.indexOf('python3 "$ROOT/bin/audit-release-bundle.py"');
   const gitleaksGate = source.indexOf('release-gitleaks.toml');
@@ -234,6 +267,13 @@ test('release-local runs gitleaks after the Python assembled-bundle audit and be
   assert.ok(gitleaksGate > pythonGate, 'gitleaks must run after the Python assembled-bundle audit');
   assert.ok(gitleaksGate < bootGate, 'gitleaks must run before the boot/platform-leg gates');
   assert.match(source, /"\$ROOT\/src-tauri\/sidecar" "\$ROOT\/src-tauri\/resources"/);
+  assert.match(source, /for _gitleaks_root in "src-tauri\/sidecar" "src-tauri\/resources"/);
+  assert.match(source, /\( cd "\$ROOT" && gitleaks dir "\$_gitleaks_root"/);
   assert.match(source, /--redact=100/);
-  assert.match(source, /--report-path=\/dev\/null/);
+  assert.match(source, /--report-format=json/);
+  assert.match(source, /--report-path="\$_gitleaks_report_path"/);
+  assert.doesNotMatch(source, /--report-path=\/dev\/null/);
+  assert.match(source, /print-gitleaks-findings\.py/);
+  assert.match(source, /_GITLEAKS_REPORT_DIR=.*mktemp -d/);
+  assert.match(source, /rm -rf -- "\$_GITLEAKS_REPORT_DIR"/);
 });
