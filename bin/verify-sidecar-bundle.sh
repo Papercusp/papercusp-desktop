@@ -584,6 +584,14 @@ fi
 # A SUCCESS-path step is deliberately not attempted: every step kind mutates the host or spawns
 # agent CLIs, so it belongs in the on-target initialization test, not a bundle gate.
 echo "[7/7] workspace-host remote initializer answers a real protocol cycle"
+_desktop_session="$BIN/papercusp-desktop-session.cjs"
+if [[ ! -x "$_desktop_session" ]]; then
+  fail "isolated desktop session worker missing or not executable"
+elif [[ -n "$NODE_BIN" ]] && "$NODE_BIN" "$_desktop_session" --help >/dev/null 2>&1; then
+  ok "isolated desktop session worker executes from the packaged bundle"
+else
+  fail "isolated desktop session worker failed packaged execution"
+fi
 _ri="$BIN/papercusp-remote-initializer"
 # WI-42161: DERIVED from the source constant, never hardcoded here. r5c burned ~48 minutes
 # and failed at line 22,607 of a 22,612-line log because this literal still said v1 while the

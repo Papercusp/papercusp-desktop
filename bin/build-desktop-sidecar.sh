@@ -2920,6 +2920,16 @@ for _wh_entrypoint in papercusp-remote-initializer papercusp-deliver-material; d
 done
 REMOTE_INIT_BIN="$SIDECAR_DIR/bin/papercusp-remote-initializer"
 
+# D-363: self-contained worker; the optional pack copies only it and Node across
+# the Unix identity boundary. No operator store, environment or node_modules grant.
+DESKTOP_SESSION_BIN="$SIDECAR_DIR/bin/papercusp-desktop-session.cjs"
+(cd "$WEB_DIR" && npx --yes esbuild@0.25.0 \
+  "$REPO_ROOT/packages/operator-core/bin/workspace-desktop-session.ts" \
+  --bundle --platform=node --format=cjs --target=node22 \
+  "${MINIFY_ARGS[@]}" --outfile="$DESKTOP_SESSION_BIN")
+chmod 755 "$DESKTOP_SESSION_BIN"
+"$SIDECAR_DIR/bin/node" "$DESKTOP_SESSION_BIN" --help >/dev/null
+
 # Bundle the embedded-postgres-server package (real PG with logical
 # replication enabled). This is the ONLY desktop DB — the legacy
 # pglite-server fallback was removed 2026-06-01 (a failed embedded-PG must
