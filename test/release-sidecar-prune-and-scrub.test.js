@@ -251,7 +251,7 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
     '"linuxX64": ["x86_64-unknown-linux-gnu"]',
     '"macOS": ["x86_64-apple-darwin", "aarch64-apple-darwin"]',
     '"windowsX64": ["x86_64-pc-windows-msvc"]',
-    'PAPERCUSP_VM_TRUST_REVISION="2026-09-05-r1"',
+    'PAPERCUSP_VM_TRUST_REVISION="2026-09-19-r1"',
     'PAPERCUSP_VM_NODE_VERSION="v24.18.1"',
     'license": "MIT"',
     'd6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0',
@@ -275,14 +275,11 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
     'PAPERCUSP_VM_KOPIA_X_MOD_VERSION="v0.40.0"',
     'PAPERCUSP_VM_KOPIA_X_NET_VERSION="v0.58.0"',
     'PAPERCUSP_VM_KOPIA_X_TEXT_VERSION="v0.41.0"',
-    // Both grpc pins moved to v1.83.1 together for GHSA-vp52-pcj8-j9qc / CVE-2026-84304
-    // (High, gRPC-Go heap exhaustion via HTTP/2 DATA frame fragmentation; affected
-    // <= 1.83.0, fixed 1.83.1). The gh pin is NEW rather than a bump: gh previously had
-    // no grpc override and floated on MVS to v1.83.0, which is inside the affected range.
-    // No co-pin moved with them — v1.83.1 wants x/net v0.55.0, x/text v0.37.0 and
-    // x/crypto v0.51.0, all below the versions pinned above.
-    'PAPERCUSP_VM_GH_GRPC_VERSION="v1.83.1"',
-    'PAPERCUSP_VM_KOPIA_GRPC_VERSION="v1.83.1"',
+    // GHSA-2v4p-qf9q-27wj affects both previously pinned v1.83.1 binaries.
+    // The patched v1.83.2 requires x/net v0.58.0, already pinned above.
+    // Both explicit pins, binary assertions and cache invalidation must agree.
+    'PAPERCUSP_VM_GH_GRPC_VERSION="v1.83.2"',
+    'PAPERCUSP_VM_KOPIA_GRPC_VERSION="v1.83.2"',
     'PAPERCUSP_VM_POSTGRES_VERSION="18.6"',
     '555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f',
     'PAPERCUSP_VM_OPENSSL_VERSION="3.5.8"',

@@ -56,7 +56,12 @@
 # v0.56.0's go.mod requires Go 1.26, x/net v0.57.0 and x/text v0.41.0. This recipe
 # already builds with Go 1.26.6 and pins x/net v0.58.0 plus x/text v0.41.0, so no
 # co-pin moves. Resolved from the canonical module proxy before the rebuild.
-PAPERCUSP_VM_TRUST_REVISION="2026-09-05-r1"
+# 2026-09-19-r1 — both grpc pins move to v1.83.2 for
+# GHSA-2v4p-qf9q-27wj / CVE-2026-84445 (xDS missing-authority panic).
+# The official vm-release scan rejected both v1.83.1 binaries. The upstream
+# advisory identifies v1.83.2 as patched; its Go 1.25 and x/net v0.58.0
+# requirements fit this recipe. Keep the binary assertions and cache-pin check.
+PAPERCUSP_VM_TRUST_REVISION="2026-09-19-r1"
 
 PAPERCUSP_VM_NODE_VERSION="v24.18.1"
 PAPERCUSP_VM_NODE_LINUX_X64_SHA256="d6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0"
@@ -76,7 +81,7 @@ PAPERCUSP_VM_GH_X_TOOLS_VERSION="v0.49.0"
 # GHSA-vp52-pcj8-j9qc affected range `<= 1.83.0`. Pinning it makes the version a
 # declared, asserted fact instead of a resolution artifact, which is the only reason
 # the kopia leg's exposure was already visible while this one was not.
-PAPERCUSP_VM_GH_GRPC_VERSION="v1.83.1"
+PAPERCUSP_VM_GH_GRPC_VERSION="v1.83.2"
 
 PAPERCUSP_VM_KOPIA_VERSION="0.23.1"
 PAPERCUSP_VM_KOPIA_COMMIT="72ec08fd8edb86c67ed27099bf1b955e1f308ffa"
@@ -106,7 +111,7 @@ PAPERCUSP_VM_KOPIA_X_NET_VERSION="v0.58.0"
 # own vulnerability status, and it read like one. grpc moved to v1.83.1 for
 # GHSA-vp52-pcj8-j9qc; see the trust-revision block at the top.)
 PAPERCUSP_VM_KOPIA_X_TEXT_VERSION="v0.41.0"
-PAPERCUSP_VM_KOPIA_GRPC_VERSION="v1.83.1"
+PAPERCUSP_VM_KOPIA_GRPC_VERSION="v1.83.2"
 
 PAPERCUSP_VM_POSTGRES_VERSION="18.6"
 PAPERCUSP_VM_POSTGRES_SOURCE_SHA256="555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f"
