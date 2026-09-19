@@ -246,7 +246,13 @@ if [ "$PUSH" = "1" ]; then
     exit 1
   fi
 
-  if ! ssh "$VM" "sudo -n $REMOTE_INSTALLER_Q --user $REMOTE_SERVICE_USER_Q --current-payload $REMOTE_DIR_Q --current-launcher $REMOTE_LAUNCHER_Q"; then
+  # Bind LaunchDaemon identity to the exact source SHA stamped into the payload.
+  # Without this explicit handoff, current-payload install re-reads the short
+  # `sha=` stamp only after the atomic swap, but the installer invocation that
+  # follows the deploy has no build identity in its command envelope and refuses
+  # to supervise the fresh payload (leaving the detached fallback alive but the
+  # persistent service uninstalled).
+  if ! ssh "$VM" "sudo -n $REMOTE_INSTALLER_Q --user $REMOTE_SERVICE_USER_Q --current-payload $REMOTE_DIR_Q --current-launcher $REMOTE_LAUNCHER_Q --build-sha $BUILD_SHA --build-version 0.0.0"; then
     echo "FATAL: LaunchDaemon install/identity verification failed; restoring bounded detached service" >&2
     ssh "$VM" "PAPERCUSP_RIG_HOME=$REMOTE_HOME_Q PAPERCUSP_RIG_SIDECAR_DIR=$REMOTE_DIR_Q bash $REMOTE_LAUNCHER_Q" || true
     exit 1
