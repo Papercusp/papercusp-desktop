@@ -216,6 +216,14 @@ FORBIDDEN_PATH = [
     # a leak class we delete rather than scrub.
     ("build-cache", re.compile(r"(^|/)\.cache/"),
      [".cache"]),
+    # verdict-cli keeps live per-agent daemon/session state inside its installed
+    # package. It is mutable runtime residue, not a dependency needed to run the
+    # shipped source bundle; leaving it in node_modules leaks session identities
+    # (and can include bearer state). Keep this rule here, alongside the dependency
+    # generation prune, so tar staging and the fail-closed audit share one source
+    # of truth (WI-871887 / WI-10001909).
+    ("verdict-cli-runtime-state", re.compile(r"(^|/)\.verdict-data/"),
+     [".verdict-data"]),
     # Pagefind search-index shards (apps/*/dist/**/pagefind/index/*.pf_index,
     # apps/operator/public/**/pagefind/**, apps/operator-docs/dist/pagefind/**).
     # Pagefind TOKENISES the docs it indexes into these binary shards — the
