@@ -41,8 +41,12 @@ test('desktop worker builds before Node staging and is executed by the finished-
   const buildEnd = builder.indexOf('# Bundle the embedded-postgres-server', buildStart);
   const verifyStart = verifier.indexOf('_desktop_session=');
   const verifyEnd = verifier.indexOf('_ri=', verifyStart);
+  const scanStart = verifier.indexOf('echo "[2/7] script-shim scan');
+  const scanEnd = verifier.indexOf('# ── [3]', scanStart);
+  const isScript = verifier.match(/^_is_script\(\).*$/m)?.[0];
   assert.ok(buildStart >= 0 && buildEnd > buildStart, 'desktop worker build phase is missing');
   assert.ok(verifyStart >= 0 && verifyEnd > verifyStart, 'packaged worker check is missing');
+  assert.ok(scanStart >= 0 && scanEnd > scanStart && isScript, 'script-shim check is missing');
 
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-desktop-worker-staging-'));
   const fakeBin = path.join(fixture, 'tools');
@@ -54,7 +58,7 @@ test('desktop worker builds before Node staging and is executed by the finished-
     fs.writeFileSync(path.join(fakeBin, 'npx'), [
       '#!/bin/sh',
       'for arg in "$@"; do',
-      '  case "$arg" in --outfile=*) printf "process.exit(0);\\n" > "${arg#--outfile=}";; esac',
+      '  case "$arg" in --outfile=*) printf "#!/usr/bin/env node\\nprocess.exit(0);\\n" > "${arg#--outfile=}";; esac',
       'done',
       '',
     ].join('\n'), { mode: 0o755 });
@@ -66,6 +70,7 @@ test('desktop worker builds before Node staging and is executed by the finished-
       WEB_DIR: fixture,
       BIN: bin,
       NODE_BIN: path.join(bin, 'node'),
+      OS: 'Linux',
     };
     const built = spawnSync('bash', ['-c', [
       'set -euo pipefail',
@@ -76,6 +81,24 @@ test('desktop worker builds before Node staging and is executed by the finished-
     assert.equal(fs.existsSync(env.NODE_BIN), false, 'this phase must not require the later Node copy');
     const worker = path.join(bin, 'papercusp-desktop-session.cjs');
     assert.ok(fs.statSync(worker).mode & 0o111, 'the worker must be executable');
+
+    const scan = () => spawnSync('bash', ['-c', [
+      'set -euo pipefail',
+      'FAIL=0',
+      'fail() { printf "%s\\n" "$*" >&2; FAIL=1; }',
+      'ok() { :; }',
+      isScript,
+      verifier.slice(scanStart, scanEnd),
+      'exit "$FAIL"',
+    ].join('\n')], { env, encoding: 'utf8', timeout: 10_000 });
+    const productScript = scan();
+    assert.equal(productScript.status, 0, `${productScript.stdout}${productScript.stderr}`);
+    const unknownShim = path.join(bin, 'host-only-shim');
+    fs.writeFileSync(unknownShim, '#!/bin/sh\nexec /build-host-only/tool\n', { mode: 0o755 });
+    const unknown = scan();
+    assert.equal(unknown.status, 1);
+    assert.match(unknown.stderr, /host-only-shim: unexpected #!-script/);
+    fs.unlinkSync(unknownShim);
 
     // The final verifier must exercise the packaged runtime and reject a broken worker.
     fs.symlinkSync(process.execPath, env.NODE_BIN);

@@ -233,11 +233,11 @@ for f in "$BIN"/*; do
       # Node + serve.mjs/scripts/psu.mjs (or curl for bounded loopback health),
       # and the focused producer test executes their success/reject paths.
       ok "$b (allowlisted workspace-host release entrypoint)" ;;
-    papercusp-remote-initializer|papercusp-deliver-material)
+    papercusp-remote-initializer|papercusp-deliver-material|papercusp-desktop-session.cjs)
       # Allowlisted for the OPPOSITE reason to the pg wrappers: these are not shims fronting a
       # build-host binary, they are self-contained esbuild bundles whose only external dependency
-      # is `node`, which this same manifest requires in sidecar/bin. Section [6] proves the
-      # initializer runs a real protocol cycle; delivery's own cycle needs a credential-material
+      # is `node`, which this same manifest requires in sidecar/bin. Section [7] executes the
+      # desktop worker and initializer protocol cycle; delivery's own cycle needs a credential-material
       # payload, so it is proven by its unit suite rather than executed here.
       ok "$b (allowlisted self-contained bundle)" ;;
     psql|pg_dump|pg_dumpall|pg_restore)
