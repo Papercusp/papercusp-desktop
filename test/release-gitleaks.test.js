@@ -89,7 +89,7 @@ test('release gitleaks config keeps default detectors and uses conjunctive gener
   const config = fs.readFileSync(configPath, 'utf8');
   assert.match(config, /minVersion = "v8\.30\.1"/);
   assert.match(config, /\[extend\]\s+useDefault = true/);
-  assert.equal((config.match(/condition = "AND"/g) || []).length, 8);
+  assert.equal((config.match(/condition = "AND"/g) || []).length, 9);
   assert.match(config, /targetRules = \["gcp-api-key"\]/);
   assert.match(config, /targetRules = \["generic-api-key"\]/);
   assert.match(config, /regexTarget = "line"/);
@@ -107,6 +107,7 @@ test('release gitleaks config keeps default detectors and uses conjunctive gener
   assert.match(config, /\\.ContainsKey IGNvbGxhcHNlZA==/);
   assert.match(config, /\\.signWithDeviceKey,verdictFns=await/);
   assert.match(config, /token\[0-9\]\+,consumed=await/);
+  assert.match(config, /SESSION_PORT_TOKEN_ESTIMATOR=\"utf8-byte-upper-bound-v1\"/);
   assert.match(config, /personal-vault/);
 });
 
@@ -212,6 +213,21 @@ test('minified first-party expression exceptions survive symbol renumbering but 
 
   const wrongPath = scan({ 'other.mjs': knownLines.join('\n') + '\n' });
   assert.equal(wrongPath.status, 1, 'serve.mjs exceptions escaped their path constraint');
+});
+
+test('session-port estimator marker is allowed only in generated serve.mjs', () => {
+  const marker = 'SESSION_PORT_TOKEN_ESTIMATOR="utf8-byte-upper-bound-v1"';
+  const allowed = scan({ 'serve.mjs': marker + '\n' });
+  assert.equal(allowed.status, 0, 'the public session-port estimator marker should be allowlisted');
+  assert.deepEqual(allowed.report, []);
+
+  const wrongPath = scan({ 'other.mjs': marker + '\n' });
+  assert.equal(wrongPath.status, 1, 'the estimator exception must remain serve.mjs scoped');
+  assert.ok(wrongPath.report.some((finding) => finding.RuleID === 'generic-api-key'));
+
+  const nearMiss = scan({ 'serve.mjs': 'SESSION_PORT_TOKEN_ESTIMATOR="utf8-byte-upper-bound-v2"\n' });
+  assert.equal(nearMiss.status, 1, 'a changed estimator value must remain a finding');
+  assert.ok(nearMiss.report.some((finding) => finding.RuleID === 'generic-api-key'));
 });
 
 test('an unrelated raw token remains a release-gate finding', () => {
