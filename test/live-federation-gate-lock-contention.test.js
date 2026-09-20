@@ -462,6 +462,7 @@ test('the real FAIL_BUILD branch bank a typed SKIPPED verdict and exits before R
       'BUILD_LOCK_CONTENTION="pid 3892704 (running 2419s): bash bin/repack-deb-xz.sh Papercusp_Server.deb"',
       'BUILD_DEPENDENCY_CONTENTION=""',
       'BUILD_SOURCE_LOCK_CONTENTION=""',
+      'BUILD_DISK_CAPACITY=""',
       'log() { :; }', // real log() writes to stderr only — irrelevant here
       'now_s() { echo 1700000000; }',
       'check_staleness() { echo CHECK_STALENESS_CALLED; }',
@@ -491,6 +492,86 @@ test('the real FAIL_BUILD branch bank a typed SKIPPED verdict and exits before R
   }
 });
 
+// WI-10000053: the staging disk preflight refuses admission with rc28 (ENOSPC) BEFORE any
+// compilation, so the window measured nothing about the sidecar or federation. It must take the
+// same typed-SKIP shape as its three contention siblings rather than banking a product RED that
+// arms the 6h code-red backoff and files a bug for a binary that was never built.
+test('the real FAIL_BUILD branch banks a typed disk-capacity SKIP and exits before RED (behavioral)', () => {
+  assert(FAIL_BUILD_BLOCK, 'extraction failed');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-gate-diskcap-failbuild-'));
+  try {
+    const stateDir = path.join(tmp, 'state');
+    fs.mkdirSync(stateDir);
+    fs.writeFileSync(path.join(stateDir, 'last-red'), '111'); // must be cleared by the capacity branch
+    const workDir = path.join(tmp, 'work');
+    fs.mkdirSync(workDir);
+
+    const script = [
+      'set -uo pipefail',
+      `STATE_DIR=${JSON.stringify(stateDir)}`,
+      `WORK=${JSON.stringify(workDir)}`,
+      'FAIL_BUILD=1',
+      'SKIP_MATRIX=0',
+      'SKIP_FROMREPO=0',
+      'BUILD_LOCK_CONTENTION=""',
+      'BUILD_DEPENDENCY_CONTENTION=""',
+      'BUILD_SOURCE_LOCK_CONTENTION=""',
+      'BUILD_DISK_CAPACITY="insufficient disk for sidecar staging: 5GB effectively free, need ~8GB."',
+      'log() { :; }',
+      'now_s() { echo 1700000000; }',
+      'check_staleness() { echo CHECK_STALENESS_CALLED; }',
+      'verdict() { echo "$1"; }',
+      FAIL_BUILD_BLOCK,
+      'echo UNREACHABLE_AFTER_DISK_CAPACITY_EXIT',
+    ].join('\n');
+    const result = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+
+    assert.equal(result.status, 0, `expected a clean exit 0, got ${result.status}: ${result.stderr}`);
+    assert.match(
+      result.stdout,
+      /GATE: SKIPPED-BUILD-DISK-CAPACITY/,
+      'must bank the typed capacity verdict',
+    );
+    assert.match(
+      result.stdout,
+      /5GB effectively free, need ~8GB/,
+      'the verdict must carry the measured headroom detail forward',
+    );
+    assert.doesNotMatch(
+      result.stdout,
+      /GATE: RED/,
+      'an admission refusal must never also read as a product RED verdict',
+    );
+    assert.doesNotMatch(
+      result.stdout,
+      /UNREACHABLE_AFTER_DISK_CAPACITY_EXIT/,
+      'the capacity branch must exit before falling through to the smoke/verdict section below it',
+    );
+    assert.match(
+      result.stdout,
+      /CHECK_STALENESS_CALLED/,
+      'must still run check_staleness — silence must never look like green',
+    );
+    assert.equal(
+      fs.existsSync(path.join(stateDir, 'last-downgrade')),
+      true,
+      'must record the SHORT-retry downgrade backoff, not the long code-red one',
+    );
+    assert.equal(
+      fs.existsSync(path.join(stateDir, 'last-red')),
+      false,
+      'must clear last-red — a preflight refusal confirmed nothing red',
+    );
+    assert.equal(
+      fs.existsSync(path.join(stateDir, 'last-green')),
+      false,
+      'a skipped window must never look like a pass',
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('the real FAIL_BUILD branch banks a typed dependency-contention SKIP and exits before RED (behavioral)', () => {
   assert(FAIL_BUILD_BLOCK, 'extraction failed');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-gate-dependency-failbuild-'));
@@ -511,6 +592,7 @@ test('the real FAIL_BUILD branch banks a typed dependency-contention SKIP and ex
       'BUILD_LOCK_CONTENTION=""',
       'BUILD_DEPENDENCY_CONTENTION="apps/operator/node_modules (metadata fingerprint changed)"',
       'BUILD_SOURCE_LOCK_CONTENTION=""',
+      'BUILD_DISK_CAPACITY=""',
       'log() { :; }',
       'now_s() { echo 1700000000; }',
       'check_staleness() { echo CHECK_STALENESS_CALLED; }',
@@ -552,6 +634,7 @@ test('the real FAIL_BUILD branch banks a typed source-lock SKIP and exits before
       'BUILD_LOCK_CONTENTION=""',
       'BUILD_DEPENDENCY_CONTENTION=""',
       'BUILD_SOURCE_LOCK_CONTENTION="path=packages/operator-core/lib/agent-tools/work_items/complete.ts owner=su-f83cc intent=atomic edit"',
+      'BUILD_DISK_CAPACITY=""',
       'log() { :; }',
       'now_s() { echo 1700000000; }',
       'check_staleness() { echo CHECK_STALENESS_CALLED; }',
@@ -592,6 +675,7 @@ test('the real FAIL_BUILD branch falls through to the ordinary RED path when con
       'BUILD_LOCK_CONTENTION=""', // unconfirmed — e.g. a genuine build defect
       'BUILD_DEPENDENCY_CONTENTION=""',
       'BUILD_SOURCE_LOCK_CONTENTION=""',
+      'BUILD_DISK_CAPACITY=""',
       'log() { :; }',
       'now_s() { echo 1700000000; }',
       'check_staleness() { echo CHECK_STALENESS_CALLED; }',

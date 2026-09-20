@@ -1903,9 +1903,38 @@ PY
   [ -n "$match" ] && BUILD_SOURCE_LOCK_CONTENTION="$match"
 }
 
+# ── disk-CAPACITY classifier (WI-10000053) ───────────────────────────────────
+# lib/disk-preflight.sh is an ADMISSION control, not a build step: when the staging
+# target lacks headroom it refuses with the dedicated rc28 (ENOSPC) and its own
+# contract is "callers `|| exit $?` to preserve it" — which build-desktop-sidecar.sh
+# honours at its `papercusp_require_free_gb ... || exit $?` call. That refusal happens
+# BEFORE any compilation, so a window that hits it measured NOTHING about the sidecar
+# or the federation product. It is an evidence-PRODUCER capacity failure of exactly the
+# same family as the sidecar.lock / dependency-generation / source-lock contentions
+# above, NOT a product verdict — and unlike a code red it CLEARS ON ITS OWN the moment
+# the concurrent builds holding the reservation finish.
+#
+# Measured 2026-09-20 (the filing evidence): runs 04:21:23Z and 04:34:57Z banked
+# `build=FAIL` -> `GATE: RED (sidecar-build)` on "5GB effectively free, need ~8GB"
+# while every other leg read SKIPPED. That armed the 6h code-red backoff (GATE_RED_TTL_H)
+# and filed WI-10000053 "sidecar-build failed on the packaged binary" — a product bug for
+# a binary that was never built. Require BOTH the dedicated rc AND the canonical emitter
+# line, so an unrelated build failure that merely happens to exit 28 stays fail-closed
+# on RED (same discipline as the three classifiers above).
+BUILD_DISK_CAPACITY=""
+build_disk_capacity_check() {  # <build-rc> <build-log-path> — sets BUILD_DISK_CAPACITY when confirmed
+  local rc="$1" log="$2" detail
+  [ "$rc" = 28 ] || return 0
+  [ -f "$log" ] || return 0
+  detail="$(grep -aE '^ERROR: insufficient disk for ' "$log" 2>/dev/null | head -1 | sed 's/^ERROR: //')"
+  [ -n "$detail" ] || return 0
+  BUILD_DISK_CAPACITY="$detail"
+}
+
 # ── 2. fresh artifact: rebuild sidecar from HEAD, then REPACK a .deb (content-matrix needs a .deb;
 #       from-repo uses the sidecar directly). $GATE_DEB short-circuits to a prebuilt .deb. ───────
 FAIL_BUILD=0
+BUILD_RC=0
 GATE_SOURCE_MODE=prebuilt
 GATE_SOURCE_HEAD="$(cd "$DESKTOP_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 GATE_SOURCE_DESKTOP_HEAD="$(cd "$DESKTOP_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -1961,9 +1990,12 @@ if [ -z "${GATE_DEB:-}" ]; then
     capture_source_lock_snapshot "$WORK/source-locks-before-build.json"
     ( cd "$DESKTOP_DIR" && \
       PAPERCUSP_SIDECAR_LOCK_WAIT_SEC="${PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-3600}" \
-        bash bin/build-desktop-sidecar.sh ) >"$WORK/build.log" 2>&1 || { FAIL_BUILD=1; log "BUILD FAILED — $WORK/build.log"; }
+        bash bin/build-desktop-sidecar.sh ) >"$WORK/build.log" 2>&1 || { BUILD_RC=$?; FAIL_BUILD=1; log "BUILD FAILED (rc=$BUILD_RC) — $WORK/build.log"; }
     if (( FAIL_BUILD == 1 )); then
       capture_source_lock_snapshot "$WORK/source-locks-after-build-failure.json"
+      # BUILD_RC=$? must stay the FIRST command of the `||` group above: any command in
+      # front of it (including an assignment) overwrites $? with its own success.
+      build_disk_capacity_check "$BUILD_RC" "$WORK/build.log"
       build_lock_contention_check "$WORK/build.log"
       build_dependency_contention_check "$WORK/build.log"
       source_lock_contention_check "$WORK/build.log" \
@@ -2138,6 +2170,19 @@ if [ "$FAIL_BUILD" = 1 ]; then
   # untouched), short last-downgrade retry TTL, last-red cleared (this run
   # confirmed nothing red), and no EI filed — there is nothing actionable to
   # file, the holder is a legitimate concurrent build the log already names.
+  # WI-10000053: the staging disk preflight refused ADMISSION (rc28/ENOSPC) before any
+  # compilation ran, so this window proved nothing about the sidecar or federation. It is
+  # environmental and self-clearing — precisely what the short last-downgrade retry exists
+  # for — whereas the RED path arms the long code-red backoff on the premise that
+  # "re-running unchanged code reproduces it", which is false when no code was run at all.
+  if [ -n "$BUILD_DISK_CAPACITY" ]; then
+    log "BUILD DISK CAPACITY (not a federation/product verdict): $BUILD_DISK_CAPACITY"
+    echo "$(now_s)" >"$STATE_DIR/last-downgrade"
+    rm -f "$STATE_DIR/last-red"
+    check_staleness
+    verdict "GATE: SKIPPED-BUILD-DISK-CAPACITY ($BUILD_DISK_CAPACITY) — the staging preflight refused admission before any build ran; not a federation verdict; logs in $WORK"
+    exit 0
+  fi
   if [ -n "$BUILD_LOCK_CONTENTION" ]; then
     log "BUILD LOCK CONTENTION (not a federation/product verdict): $BUILD_LOCK_CONTENTION"
     echo "$(now_s)" >"$STATE_DIR/last-downgrade"
