@@ -452,6 +452,10 @@ OPTIONAL_NATIVE_MODULES="
 onnxruntime-node
 "
 echo "[6/7] native modules load under the bundled node"
+ # Cross-target bundles cannot execute their foreign bundled node on this host. Initialize the
+ # variable before the branch so the later platform-independent workspace-host probe can safely
+ # fall back to the build host's node instead of tripping `set -u` on an unset variable.
+ NODE_BIN="${NODE_BIN:-}"
 if [[ "$CROSS" == "1" ]]; then
   # WI-5651: can't exec the target's node here — assert STATICALLY that every
   # required native ships a TARGET-format *.node in the bundle. This catches the
@@ -565,6 +569,13 @@ GUARD_EOF
   [[ "$_nat_ok" -gt 0 ]] || fail "not one native module loaded — the check itself is broken"
   [[ "$FAIL" == 0 ]] && ok "all $_nat_ok required native modules load from INSIDE the bundle under $(basename "$NODE_BIN")"
 fi
+fi
+
+# The workspace-host session worker and remote initializer are JavaScript, so a cross-target
+# verifier may execute them with the build host's node. Native bundle modules remain covered by
+# the static cross-target checks above; never pretend the foreign bundled node was executed.
+if [[ -z "$NODE_BIN" ]]; then
+  NODE_BIN="$(command -v node 2>/dev/null || true)"
 fi
 
 # ── [7] remote initializer answers a real protocol cycle ────────────────────
