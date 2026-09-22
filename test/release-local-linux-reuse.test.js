@@ -763,6 +763,64 @@ function runJournalManifestResume({ action, absent = false, verify = 0 }) {
   return { result, log };
 }
 
+// ── P-004 / R-4 demand 4: a reused manifest receipt must re-check its outputs ─
+// runJournalManifestResume above STUBS release_task_commit_manifest_stage, so it
+// proves things about prepare and nothing about commit. This drives the real
+// commit verb on the reuse path — the one the publish step consumes.
+function runManifestCommitReuse({ storedDigest = 'match', observedDigest = 'match', verify = 0 } = {}) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-manifest-commit-'));
+  const calls = path.join(temp, 'calls.log');
+  const command = [
+    'set -euo pipefail',
+    'ORCHESTRATOR_HERE=/unused',
+    'MONOREPO=/unused',
+    'VERSION=0.0.18',
+    'CHANNEL=nightly',
+    'RELEASE_TASK_JOURNAL_ENABLED=0',
+    releaseTaskJournalHarness,
+    'RELEASE_TASK_JOURNAL_ENABLED=1',
+    'RELEASE_TASK_MANIFEST_ACTION=reuse',
+    'RELEASE_TASK_MANIFEST_REQUEST_ID=old-request',
+    'RELEASE_TASK_MANIFEST_IDENTITY=manifest-input',
+    'RELEASE_TASK_MANIFEST_PREPARATION_START_MS=0',
+    `RELEASE_TASK_MANIFEST_OUTPUT_DIGEST=${JSON.stringify(storedDigest)}`,
+    `release_task_verify_manifest_outputs() { printf 'verify\\n' >> ${JSON.stringify(calls)}; return ${verify}; }`,
+    `release_task_manifest_output_digest() { printf '%s\\n' ${JSON.stringify(observedDigest)}; }`,
+    `release_task_journal_call() { printf 'journal:%s\\n' "$*" >> ${JSON.stringify(calls)}; }`,
+    'release_task_commit_manifest_stage /unused/artifact',
+  ].join('\n');
+  const result = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
+  const log = fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : '';
+  fs.rmSync(temp, { recursive: true, force: true });
+  return { result, log };
+}
+
+test('a reused manifest receipt re-verifies its outputs instead of publishing on trust', () => {
+  const { result, log } = runManifestCommitReuse();
+  assert.equal(result.status, 0, `matching manifest outputs were refused: ${result.stderr}`);
+  // The whole point: verification must actually RUN on the reuse path. Before
+  // this it returned immediately, so the absence of this line was the defect.
+  assert.match(log, /verify/, 'the reuse path skipped output verification entirely');
+});
+
+test('a reused manifest receipt refuses outputs it did not commit', () => {
+  const { result } = runManifestCommitReuse({ storedDigest: 'committed-abc', observedDigest: 'on-disk-xyz' });
+  assert.notEqual(result.status, 0, 'manifest outputs the receipt never committed were published');
+  assert.match(result.stderr, /NOT the ones its receipt committed/);
+});
+
+test('a reused manifest receipt with no output digest cannot authorize publication', () => {
+  const { result } = runManifestCommitReuse({ storedDigest: '' });
+  assert.notEqual(result.status, 0, 'a legacy manifest receipt authorized publication unverifiably');
+  assert.match(result.stderr, /no output digest/);
+});
+
+test('a reused manifest whose outputs fail verification is never published', () => {
+  const { result } = runManifestCommitReuse({ verify: 1 });
+  assert.notEqual(result.status, 0, 'manifest outputs failing verification were still published');
+  assert.match(result.stderr, /failed verification; refusing to publish/);
+});
+
 test('lost manifest response reconciles verified outputs without regenerating', () => {
   const { result, log } = runJournalManifestResume({ action: 'reconcile' });
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -1230,6 +1288,116 @@ test('real manifest receipt matches the canonical generator and rejects changed 
   const changed = runRealManifestReceiptVerification({ tamper: true });
   assert.notEqual(changed.status, 0, 'changed manifest unexpectedly matched its receipt inputs');
   assert.match(changed.stderr, /does not match the canonical generator/);
+});
+
+// ── P-004 / R-4: DOWNSTREAM INVALIDATION ─────────────────────────────────────
+// R-4 requires a retry to reject stale receipts and never republish an
+// unverified artifact. For the manifest stage that property is STRUCTURAL
+// rather than enforced by a dependency graph: release_task_manifest_input_identity
+// hashes each artifact's (name, bytes, sha256), so rebuilding any upstream leg
+// changes the manifest's input hash, its prior receipt no longer matches, and
+// reuse is unreachable. Structural is the strongest form of this guarantee —
+// but nothing proved it held, and an unproven invariant is one refactor from
+// being an assumption. These are that proof.
+function runManifestInputIdentity(artifacts, overrides = {}) {
+  const env = {
+    VERSION: '0.0.18',
+    CHANNEL: 'nightly',
+    TAG: 'desktop-v0.0.18-nightly',
+    PAPERCUSP_UPDATE_BASE_URL: 'https://updates.invalid/base',
+    PAPERCUSP_BUILD_ROLES: 'gui server',
+    ...overrides,
+  };
+  const command = [
+    'set -euo pipefail',
+    ...Object.entries(env).map(([k, v]) => `${k}=${JSON.stringify(v)}`),
+    'RELEASE_TASK_JOURNAL_ENABLED=0',
+    releaseTaskJournalHarness,
+    `release_task_manifest_input_identity ${artifacts.map((a) => JSON.stringify(a)).join(' ')}`,
+  ].join('\n');
+  return spawnSync('bash', ['-c', command], { encoding: 'utf8' });
+}
+
+function withManifestArtifacts(run) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-manifest-identity-'));
+  try {
+    return run(tmp, (name, body) => {
+      const p = path.join(tmp, name);
+      fs.writeFileSync(p, body);
+      return p;
+    });
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+test('a rebuilt upstream artifact invalidates the manifest receipt, and identical bytes stay reusable', () => {
+  withManifestArtifacts((_tmp, write) => {
+    const a = write('App_0.0.18_amd64.deb', 'upstream-bytes-v1');
+    const b = write('App_0.0.18_amd64.AppImage', 'appimage-bytes');
+
+    const first = runManifestInputIdentity([a, b]);
+    assert.equal(first.status, 0, `manifest identity failed to build: ${first.stderr}`);
+    assert.match(first.stdout, /^manifest-input-sha256:[0-9a-f]{64}$/m);
+
+    // CONTROL, and it is load-bearing: without it "the hash changed" proves
+    // nothing, because a nondeterministic identity would also change and would
+    // make every assertion below pass while making reuse permanently unreachable.
+    const again = runManifestInputIdentity([a, b]);
+    assert.equal(again.stdout, first.stdout, 'the manifest identity is UNSTABLE — nothing would ever reuse');
+
+    // The actual downstream-invalidation property: same path, same name, new bytes.
+    fs.writeFileSync(a, 'upstream-bytes-v2-REBUILT');
+    const rebuilt = runManifestInputIdentity([a, b]);
+    assert.equal(rebuilt.status, 0, `manifest identity failed after rebuild: ${rebuilt.stderr}`);
+    assert.notEqual(
+      rebuilt.stdout,
+      first.stdout,
+      'a REBUILT upstream artifact left the manifest identity unchanged — the manifest would reuse a receipt covering bytes that no longer exist',
+    );
+  });
+});
+
+test('every non-artifact manifest input is bound into its identity', () => {
+  withManifestArtifacts((_tmp, write) => {
+    const a = write('App_0.0.18_amd64.deb', 'stable-bytes');
+    const base = runManifestInputIdentity([a]).stdout;
+    assert.match(base, /^manifest-input-sha256:/, 'baseline identity did not build');
+
+    // Each of these changes what the manifest MEANS while leaving every artifact
+    // byte identical, so none of them can be caught by the artifact digests above.
+    for (const [key, value] of [
+      ['VERSION', '0.0.19'],
+      ['CHANNEL', 'stable'],
+      ['TAG', 'desktop-v0.0.19-stable'],
+      ['PAPERCUSP_UPDATE_BASE_URL', 'https://updates.invalid/OTHER'],
+      ['PAPERCUSP_BUILD_ROLES', 'gui'],
+    ]) {
+      const varied = runManifestInputIdentity([a], { [key]: value });
+      assert.equal(varied.status, 0, `identity failed with ${key}=${value}: ${varied.stderr}`);
+      assert.notEqual(varied.stdout, base, `${key} is NOT bound into the manifest identity`);
+    }
+  });
+});
+
+test('the manifest stage refuses inputs it cannot identify rather than hashing around them', () => {
+  withManifestArtifacts((tmp, write) => {
+    const a = write('App_0.0.18_amd64.deb', 'bytes');
+    // A missing input must fail closed: hashing only what happens to exist would
+    // mint a receipt that silently covers a SMALLER artifact set than the release.
+    const missing = runManifestInputIdentity([a, path.join(tmp, 'never-written.AppImage')]);
+    assert.notEqual(missing.status, 0, 'a missing manifest input was hashed around instead of refused');
+    assert.match(missing.stderr, /release manifest input is missing/);
+
+    // Duplicate basenames collapse in the artifact ledger, so they are refused too.
+    const dupDir = path.join(tmp, 'nested');
+    fs.mkdirSync(dupDir, { recursive: true });
+    const dup = path.join(dupDir, 'App_0.0.18_amd64.deb');
+    fs.writeFileSync(dup, 'different bytes, same basename');
+    const duplicated = runManifestInputIdentity([a, dup]);
+    assert.notEqual(duplicated.status, 0, 'a duplicate artifact basename was accepted');
+    assert.match(duplicated.stderr, /duplicate artifact basename/);
+  });
 });
 
 function runLegVerb(verb) {

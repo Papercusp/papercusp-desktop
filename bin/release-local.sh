@@ -600,6 +600,10 @@ RELEASE_TASK_LAST_ARTIFACT_SET=""
 RELEASE_TASK_BUILD_ARTIFACT_SET=""
 RELEASE_TASK_WIN_ARTIFACT_SET=""
 RELEASE_TASK_MAC_ARTIFACT_SET=""
+# P-004 / R-4 demand 4: the manifest stage's equivalent, read back at begin so a
+# reused manifest receipt can be checked against the bytes it actually committed.
+RELEASE_TASK_LAST_MANIFEST_RECEIPT=""
+RELEASE_TASK_MANIFEST_OUTPUT_DIGEST=""
 RELEASE_TASK_BUILD_PREPARATION_START_MS=""
 RELEASE_TASK_WIN_PREPARATION_START_MS=""
 RELEASE_TASK_MAC_PREPARATION_START_MS=""
@@ -837,6 +841,10 @@ release_task_begin_stage() { # <stage> <identity>; writes RELEASE_TASK_LAST_*
   RELEASE_TASK_LAST_LOOKUP_MS="$(release_task_json_number_field "$result" lookupElapsedMs 0)" || return $?
   RELEASE_TASK_LAST_ARTIFACT_SET="$(release_task_json_evidence_ref "$result" 'artifact-set:sha256:')" || {
     echo "ERROR: could not read the prior artifact-set digest for $stage." >&2
+    return 1
+  }
+  RELEASE_TASK_LAST_MANIFEST_RECEIPT="$(release_task_json_evidence_ref "$result" 'manifest-receipt:sha256:')" || {
+    echo "ERROR: could not read the prior manifest-receipt digest for $stage." >&2
     return 1
   }
   case "$RELEASE_TASK_LAST_ACTION" in
@@ -1450,7 +1458,35 @@ release_task_commit_manifest_stage() { # <artifact>...
   [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
   case "$RELEASE_TASK_MANIFEST_ACTION" in
     run|reconcile) ;;
-    reuse) return 0 ;;
+    reuse)
+      # P-004 / R-4 demand 4 ("never silently republishes an unverified artifact").
+      # This used to `return 0` outright, which made the manifest the ONE stage
+      # whose reuse path trusted its receipt without re-reading the bytes -- while
+      # linux, windows and mac all re-verify. Since the manifest is what the
+      # publish step consumes, that gap is the exact shape R-4 names: a committed
+      # receipt authorizing publication of outputs nobody re-checked.
+      #
+      # Parity fix, not new policy. The prepare path already proves the outputs are
+      # PRESENT; presence is not integrity, so re-run the canonical-generator check
+      # and compare the digest the receipt actually committed.
+      verify_started="$(release_task_now_ms)" || return $?
+      release_task_verify_manifest_outputs "$@" || {
+        echo "ERROR: reused release.manifest outputs failed verification; refusing to publish them." >&2
+        return 1
+      }
+      if [[ -z "$RELEASE_TASK_MANIFEST_OUTPUT_DIGEST" ]]; then
+        echo "ERROR: release.manifest has a committed receipt with no output digest; it cannot prove these outputs are the ones it accepted. Start a new release operation." >&2
+        return 1
+      fi
+      output_digest="$(release_task_manifest_output_digest)" || return $?
+      if [[ "$output_digest" != "$RELEASE_TASK_MANIFEST_OUTPUT_DIGEST" ]]; then
+        echo "ERROR: release.manifest outputs are NOT the ones its receipt committed (receipt $RELEASE_TASK_MANIFEST_OUTPUT_DIGEST, on disk $output_digest); refusing to publish them." >&2
+        return 1
+      fi
+      verification_ms="$(release_task_elapsed_ms "$verify_started")" || return $?
+      release_task_emit_timing release.manifest verified-reuse "$verification_ms"
+      return 0
+      ;;
     *) echo "ERROR: cannot commit release.manifest from action '$RELEASE_TASK_MANIFEST_ACTION'." >&2; return 2 ;;
   esac
   verify_started="$(release_task_now_ms)" || return $?
@@ -1491,6 +1527,7 @@ release_task_prepare_manifest_stage() { # <artifact>...
   release_task_begin_stage release.manifest "$RELEASE_TASK_MANIFEST_IDENTITY" || return $?
   RELEASE_TASK_MANIFEST_ACTION="$RELEASE_TASK_LAST_ACTION"
   RELEASE_TASK_MANIFEST_REQUEST_ID="$RELEASE_TASK_LAST_REQUEST_ID"
+  RELEASE_TASK_MANIFEST_OUTPUT_DIGEST="$RELEASE_TASK_LAST_MANIFEST_RECEIPT"
   case "$RELEASE_TASK_MANIFEST_ACTION" in
     run) return 0 ;;
     reuse|reconcile) ;;
