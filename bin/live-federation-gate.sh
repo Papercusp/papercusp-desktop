@@ -380,6 +380,11 @@ GATE_SOURCE_DIRTY_FILES="${GATE_SOURCE_DIRTY_FILES:--1}"
 GATE_TERMINAL_HEAD="${GATE_TERMINAL_HEAD:-unknown}"
 GATE_TERMINAL_DESKTOP_HEAD="${GATE_TERMINAL_DESKTOP_HEAD:-unknown}"
 GATE_TERMINAL_DIRTY_FILES="${GATE_TERMINAL_DIRTY_FILES:--1}"
+# WI-10002288: verdict-time (post-smoke-leg) measurements. DIAGNOSTIC ONLY — never a
+# certification condition. See §2z for why the certified-source window closes at build end.
+GATE_POSTLEGS_HEAD="${GATE_POSTLEGS_HEAD:-unknown}"
+GATE_POSTLEGS_DESKTOP_HEAD="${GATE_POSTLEGS_DESKTOP_HEAD:-unknown}"
+GATE_POSTLEGS_DIRTY_FILES="${GATE_POSTLEGS_DIRTY_FILES:--1}"
 GATE_CERTIFICATION_TARGET_SHA="${GATE_CERTIFICATION_TARGET_SHA:-}"
 # The protection marker is published before the ordinary gate configuration below is
 # initialized. Keep the clock helper beside the verdict writer so every early refusal can
@@ -397,7 +402,7 @@ __json_str() {  # stdin → a JSON string BODY (caller supplies the quotes)
 }
 bank_verdict() {  # <the full "GATE: …" line>
   [ "${GATE_NO_VERDICT_LOG:-0}" = 1 ] && return 0
-  local line="$1" token esc head desktop_head invoker source_dirty terminal_dirty expires_epoch target_esc mode_esc
+  local line="$1" token esc head desktop_head invoker source_dirty terminal_dirty expires_epoch target_esc mode_esc postlegs_head postlegs_desktop_head postlegs_dirty
   # The verdict TOKEN (GREEN / RED / FRESH-RED / SKIPPED-STARVATION / TERMINATED / …) is what a
   # reader greps on; the full line is kept beside it so nothing is lost to the extraction.
   token="$(printf '%s' "$line" | sed -n 's/^GATE: \([A-Za-z-]*\).*/\1/p')"
@@ -420,6 +425,20 @@ bank_verdict() {  # <the full "GATE: …" line>
   source_dirty="$GATE_SOURCE_DIRTY_FILES"
   case "$source_dirty" in ''|*[!0-9-]*) source_dirty=-1 ;; esac
   case "$terminal_dirty" in ''|*[!0-9-]*) terminal_dirty=-1 ;; esac
+  # WI-10002288: postlegs_* are DIAGNOSTIC (verdict-time) counterparts to the certified
+  # build-end terminal_* above. Defaulted AT THE POINT OF USE, not only at the top-level
+  # defaults block (~:385), because bank_verdict is sourced STANDALONE by its guard harness
+  # (live-federation-gate-verdict-bank.test.ts) which sets only the vars it knows about —
+  # and the script runs `set -uo pipefail`, so a bare "$GATE_POSTLEGS_HEAD" aborts that
+  # harness with `unbound variable` before printf ever runs. Keeping the defaults here makes
+  # bank_verdict self-contained for every caller, including early-exit paths that never
+  # reach §2z/§4.
+  postlegs_head="${GATE_POSTLEGS_HEAD:-unknown}"
+  postlegs_desktop_head="${GATE_POSTLEGS_DESKTOP_HEAD:-unknown}"
+  postlegs_dirty="${GATE_POSTLEGS_DIRTY_FILES:--1}"
+  # Unquoted %s in the format string ⇒ a non-numeric value would emit bare JSON and
+  # invalidate the whole record, exactly as source_dirty/terminal_dirty guard above.
+  case "$postlegs_dirty" in ''|*[!0-9-]*) postlegs_dirty=-1 ;; esac
   expires_epoch=$(( $(now_s) + ${GATE_SUCCESS_TTL_H:-22} * 3600 ))
   target_esc="$(printf '%s' "$GATE_CERTIFICATION_TARGET_SHA" | __json_str)"
   mode_esc="$(printf '%s' "$GATE_SOURCE_MODE" | __json_str)"
@@ -427,14 +446,16 @@ bank_verdict() {  # <the full "GATE: …" line>
   # records whether the run was journald-observable, which is the distinction that made the
   # 08-12 green unrecoverable in the first place.
   if [ -n "${INVOCATION_ID:-}" ]; then invoker=systemd; else invoker=hand; fi
-  if ! printf '{"schema_version":%s,"ts":"%s","epoch":%s,"verdict":"%s","legs":{"content_matrix":"%s","from_repo":"%s","from_repo_witness":"%s","local_matrix":"%s","build":"%s"},"summary":"%s","matrix_skip":"%s","head":"%s","desktop_head":"%s","source_mode":"%s","source_head":"%s","source_desktop_head":"%s","source_dirty_files":%s,"terminal_dirty_files":%s,"certification_target_sha":"%s","certification_expires_epoch":%s,"invoker":"%s","pid":%s,"work":"%s","line":"%s"}\n' \
+  if ! printf '{"schema_version":%s,"ts":"%s","epoch":%s,"verdict":"%s","legs":{"content_matrix":"%s","from_repo":"%s","from_repo_witness":"%s","local_matrix":"%s","build":"%s"},"summary":"%s","matrix_skip":"%s","head":"%s","desktop_head":"%s","source_mode":"%s","source_head":"%s","source_desktop_head":"%s","source_dirty_files":%s,"terminal_dirty_files":%s,"postlegs_head":"%s","postlegs_desktop_head":"%s","postlegs_dirty_files":%s,"certification_target_sha":"%s","certification_expires_epoch":%s,"invoker":"%s","pid":%s,"work":"%s","line":"%s"}\n' \
       "$GATE_VERDICT_SCHEMA_VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" "$(now_s)" "$token" \
       "${MATRIX_RES:-?}" "${FROMREPO_RES:-?}" "${WITNESS_RES:-?}" "${MATRIXFULL_RES:-?}" \
       "$([ "${FAIL_BUILD:-0}" = 1 ] && echo FAIL || echo OK)" \
       "$(printf '%s' "${SUMMARY:-}" | __json_str)" \
       "$(printf '%s' "${MATRIX_SKIP_REASON:-}" | __json_str)" \
       "$head" "$desktop_head" "$mode_esc" "$GATE_SOURCE_HEAD" "$GATE_SOURCE_DESKTOP_HEAD" \
-      "$source_dirty" "$terminal_dirty" "$target_esc" "$expires_epoch" \
+      "$source_dirty" "$terminal_dirty" \
+      "$postlegs_head" "$postlegs_desktop_head" "$postlegs_dirty" \
+      "$target_esc" "$expires_epoch" \
       "$invoker" "$$" "${WORK:-}" "$esc" >>"$GATE_VERDICT_LOG" 2>/dev/null; then
     log "bank_verdict: could not append to $GATE_VERDICT_LOG — verdict still emitted on stdout"
     return 0
@@ -2220,6 +2241,41 @@ if [ "$FAIL_BUILD" = 1 ]; then
   fi
 fi
 
+# ── 2z. close the CERTIFIED-SOURCE WINDOW (WI-10002288) ────────────────────────
+# The exact-SHA certification claim is precisely: "the build consumed the bytes of
+# $GATE_CERTIFICATION_TARGET_SHA and nothing else". That is proven by bracketing the
+# window in which the build actually READS the working tree:
+#   • build START (§2 :1959-1971) — already enforced, and it `exit 1`s (never REDs)
+#     when the source is off-target or dirty, so every run that gets here began clean.
+#   • build END  — HERE. §2 (build + repack) has closed on the line above; from this
+#     point on nothing re-reads the source tree, so no later edit can alter the bytes
+#     already baked into the sidecar and the repacked .deb.
+# Clean + on-target at BOTH ends is the complete torn-tree proof. It is also the
+# WHOLE proof: anything measured after this line is evidence about the clock, not
+# about the certified artifact.
+#
+# WI-10002288 — why this moved. These three were measured in §4 at VERDICT time until
+# 2026-09-21: hours later, on the far side of the content-matrix / from-repo /
+# local-matrix legs. This checkout is shared by ~100 continuously-editing agents and
+# swept by git-sync on a schedule, so P(clean AND HEAD unmoved at an arbitrary instant
+# hours after the build) → 0, and exact-SHA certification became impossible by
+# construction rather than by any regression. Type specimen: of the 6 banked verdicts
+# for green pin 844e9d43f5f2, three carried ONLY `certification-source-dirty-at-verdict`
+# while every real leg PASSED (content-matrix=PASS-971, from-repo=PASS). A permanent
+# deploy wall manufactured by a peer's unrelated edit landing during the test tail.
+# The verdict-time measurements are NOT lost — §4 still takes them and banks them as
+# postlegs_* purely for forensics (torn-tree diagnosis, sweep correlation).
+GATE_TERMINAL_HEAD="$(cd "$DESKTOP_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+GATE_TERMINAL_DESKTOP_HEAD="$(cd "$DESKTOP_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+GATE_TERMINAL_DIRTY_FILES="$(cd "$DESKTOP_DIR/.." && git status --porcelain 2>/dev/null | wc -l || echo -1)"
+case "$GATE_TERMINAL_DIRTY_FILES" in ''|*[!0-9-]*) GATE_TERMINAL_DIRTY_FILES=-1 ;; esac
+if [ -n "$GATE_CERTIFICATION_TARGET_SHA" ]; then
+  log "certified-source window CLOSED at build end: head=$GATE_TERMINAL_HEAD desktop_head=$GATE_TERMINAL_DESKTOP_HEAD dirty-files=$GATE_TERMINAL_DIRTY_FILES"
+  if [ "$GATE_TERMINAL_DIRTY_FILES" != 0 ]; then
+    ( cd "$DESKTOP_DIR/.." && git status --porcelain ) >"$WORK/dirty-files-build-end.txt" 2>/dev/null || true
+  fi
+fi
+
 # ── 3. run the smokes ─────────────────────────────────────────────────────────
 # PASS iff an `OVERALL: PASS` line exists in the smoke output.
 # DISCOVERY-RETRY: the from-repo flow discovers via cupboard-off DHT gossip, which lands
@@ -2748,18 +2804,30 @@ storm_downgrade_eligible() {
 
 # ── 4. verdict ────────────────────────────────────────────────────────────────
 REDS=()
-GATE_TERMINAL_HEAD="$(cd "$DESKTOP_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-GATE_TERMINAL_DESKTOP_HEAD="$(cd "$DESKTOP_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-GATE_TERMINAL_DIRTY_FILES="$(cd "$DESKTOP_DIR/.." && git status --porcelain 2>/dev/null | wc -l || echo -1)"
+# WI-10002288: GATE_TERMINAL_* is the close of the CERTIFIED-SOURCE window and is set in
+# §2z at BUILD END — deliberately NOT re-measured here. The measurements below are taken
+# at verdict time, on the far side of the multi-hour smoke legs, and are DIAGNOSTIC ONLY
+# (banked as postlegs_*): by this point nothing has re-read the source tree for hours, so
+# a nonzero count here describes fleet activity, never the certified artifact. Re-pointing
+# any certification RED back at these is the exact defect WI-10002288 fixed — it red-pinned
+# three otherwise-passing certifications of green pin 844e9d43f5f2 and walled the deploy.
+GATE_POSTLEGS_HEAD="$(cd "$DESKTOP_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+GATE_POSTLEGS_DESKTOP_HEAD="$(cd "$DESKTOP_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+GATE_POSTLEGS_DIRTY_FILES="$(cd "$DESKTOP_DIR/.." && git status --porcelain 2>/dev/null | wc -l || echo -1)"
+case "$GATE_POSTLEGS_DIRTY_FILES" in ''|*[!0-9-]*) GATE_POSTLEGS_DIRTY_FILES=-1 ;; esac
 if [ -n "$GATE_CERTIFICATION_TARGET_SHA" ]; then
   [ "$GATE_SOURCE_MODE" = rebuilt ] || REDS+=("certification-source-not-rebuilt")
   case "$GATE_CERTIFICATION_TARGET_SHA" in
     "$GATE_TERMINAL_HEAD"*) ;;
     *) REDS+=("certification-source-head-moved") ;;
   esac
-  [ "$GATE_TERMINAL_DIRTY_FILES" = 0 ] || REDS+=("certification-source-dirty-at-verdict")
+  [ "$GATE_TERMINAL_DIRTY_FILES" = 0 ] || REDS+=("certification-source-dirty-at-build-end")
   [ "$GATE_SOURCE_DESKTOP_HEAD" = "$GATE_TERMINAL_DESKTOP_HEAD" ] \
     || REDS+=("certification-desktop-head-moved")
+  if [ "$GATE_POSTLEGS_DIRTY_FILES" != "$GATE_TERMINAL_DIRTY_FILES" ] \
+     || [ "$GATE_POSTLEGS_HEAD" != "$GATE_TERMINAL_HEAD" ]; then
+    log "note: shared tree moved during the smoke legs (build-end head=$GATE_TERMINAL_HEAD dirty=$GATE_TERMINAL_DIRTY_FILES → post-legs head=$GATE_POSTLEGS_HEAD dirty=$GATE_POSTLEGS_DIRTY_FILES) — expected on a shared checkout, NOT a certification defect (WI-10002288)"
+  fi
 fi
 [ "$FAIL_BUILD" = 1 ] && REDS+=("sidecar-build")
 [ "$MATRIX_RES" = FAIL ] && REDS+=("content-matrix")
