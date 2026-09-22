@@ -1609,6 +1609,85 @@ if missing:
 PY
 }
 
+# The published, user-facing artifact suffixes that MUST carry a minisign sibling.
+# Longest suffix first so ".app.tar.gz" is never read as a bare archive.
+# DiskSpanning ".bin" slices are absent on purpose (D-019): they are normalized into
+# the zip and never published on their own.
+#
+# SINGLE SOURCE for both signature guards below. It is one list precisely because the
+# two guards defend the same property at different moments — collection and publish —
+# and an extension added to one but not the other reopens a blind spot at whichever
+# moment was missed.
+RELEASE_ARTIFACTS_SIGNABLE_SUFFIXES=".app.tar.gz .AppImage .deb .dmg .msi .exe .zip"
+
+# release_artifacts_assert_collected_sigs_complete <label> <artifact path...> — RECURRENCE GUARD.
+# The property being defended: a COLLECTOR that gathers artifacts off disk must not
+# DROP a signature that is sitting right next to an artifact it did collect.
+#
+# THE BUG THIS FIXES (EI-23962107353168459): the mac collector in
+# publish-platform-incremental.sh globbed `dmg/*.dmg` but never `dmg/*.dmg.sig`, so an
+# incremental mac publish recorded the DMGs and silently left their signatures out of
+# the set. Both .sig files were on disk and independently verified the whole time.
+#
+# WHY THIS IS A SEPARATE GUARD FROM THE ONE BELOW, AND NOT A DUPLICATE OF IT:
+# release_artifacts_assert_signatures_present reads the RECORDED SET, so a signature
+# that was never COLLECTED is indistinguishable there from one that was never SIGNED.
+# It therefore reports the true symptom in the most misleading available words —
+# "would publish an unsigned download" — about an artifact that is, in fact, signed.
+# That misdirection is the danger: it points the reader at the signing pipeline, or at
+# the guard itself, and whoever hits it mid-release is one step from adding a bypass
+# flag to a signature check. This guard fires FIRST and names the actual fault:
+# the signature exists at <path>.sig and your glob did not pick it up.
+#
+# Only a .sig that EXISTS ON DISK but was not collected is an offence. A genuinely
+# unsigned artifact is the other guard's business, so a keyless cut never trips this.
+#
+# Returns 0 when the collected set dropped nothing, 1 (offenders on stderr) otherwise.
+release_artifacts_assert_collected_sigs_complete() {
+  local label="$1"; shift
+  [[ $# -gt 0 ]] || return 0
+  if [[ -n "${RELEASE_ARTIFACTS_NO_SIGNATURE_CHECK:-}" ]]; then
+    echo "release-artifacts: collected-signature check SKIPPED (RELEASE_ARTIFACTS_NO_SIGNATURE_CHECK)." >&2
+    return 0
+  fi
+  RELEASE_ARTIFACTS_SIGNABLE="$RELEASE_ARTIFACTS_SIGNABLE_SUFFIXES" \
+  RELEASE_ARTIFACTS_LABEL="$label" \
+  python3 - "$@" <<'PY'
+import os, sys
+
+paths = sys.argv[1:]
+signable = tuple(s for s in os.environ["RELEASE_ARTIFACTS_SIGNABLE"].split() if s)
+label = os.environ.get("RELEASE_ARTIFACTS_LABEL") or "collected"
+
+collected = {os.path.abspath(p) for p in paths}
+
+dropped = []
+for path in sorted(collected):
+    name = os.path.basename(path)
+    if name.endswith(".sig"):
+        continue
+    if not any(name.endswith(s) for s in signable):
+        continue
+    sig = path + ".sig"
+    if sig in collected:
+        continue
+    # The distinction that makes this guard precise: only a signature that is
+    # demonstrably ON DISK and absent from the set is a collector fault.
+    if os.path.isfile(sig):
+        dropped.append((name, sig))
+
+if dropped:
+    print(f"release-artifacts: the {label} collector DROPPED {len(dropped)} signature(s) that "
+          "EXIST ON DISK (EI-23962107353168459). These artifacts ARE signed — the glob that "
+          "gathered them simply did not pick up the .sig sibling:", file=sys.stderr)
+    for name, sig in dropped:
+        print(f"  {name} -> uncollected signature at {sig}", file=sys.stderr)
+    print("Fix the collector's glob list. Do NOT relax the publish-time signature check: "
+          "it is reporting this fault correctly, just in the wrong words.", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 # release_artifacts_assert_signatures_present <tag> — RECURRENCE GUARD.
 # The property being defended: every user-facing artifact this cut publishes ships
 # with its minisign (.sig) sibling, so a download can be verified against the
@@ -1645,6 +1724,7 @@ release_artifacts_assert_signatures_present() {
   fi
   local manifest; manifest="$(release_artifacts_manifest_path "$tag")"
   [[ -f "$manifest" ]] || { echo "release-artifacts: no manifest at $manifest to check signatures against." >&2; return 1; }
+  RELEASE_ARTIFACTS_SIGNABLE="$RELEASE_ARTIFACTS_SIGNABLE_SUFFIXES" \
   python3 - "$manifest" <<'PY'
 import os, sys
 manifest = sys.argv[1]
@@ -1655,10 +1735,10 @@ with open(manifest) as fh:
         if line:
             names.add(os.path.basename(line))
 
-# A published, user-facing artifact. Longest suffix first so ".app.tar.gz" is not
-# read as a bare archive. DiskSpanning ".bin" slices are absent on purpose: they are
-# normalized into the zip and never published on their own.
-SIGNABLE = (".app.tar.gz", ".AppImage", ".deb", ".dmg", ".msi", ".exe", ".zip")
+# The published, user-facing artifact suffixes — read from the single shell-level
+# source (RELEASE_ARTIFACTS_SIGNABLE_SUFFIXES) shared with the collector-side guard,
+# so a newly published extension cannot be taught to one guard and not the other.
+SIGNABLE = tuple(s for s in os.environ["RELEASE_ARTIFACTS_SIGNABLE"].split() if s)
 
 missing = []
 for name in sorted(names):

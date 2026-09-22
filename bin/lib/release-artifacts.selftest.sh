@@ -889,6 +889,56 @@ else
 fi
 rm -f "$(release_artifacts_manifest_path "$TAG_SIG")"
 
+# ---------------------------------------------------------------------------
+# COLLECTOR-side signature completeness (release_artifacts_assert_collected_sigs_complete).
+# The guard above reads the RECORDED SET and therefore cannot distinguish "never
+# signed" from "signed, but the collector's glob dropped it" — it reports both as
+# "would publish an unsigned download". These cases cover the other half.
+# ---------------------------------------------------------------------------
+
+# 16) CONTROL — a collected set that includes every sibling .sig passes. Without
+# this, case 17 cannot tell a working guard from one that rejects everything.
+if release_artifacts_assert_collected_sigs_complete "control" \
+     "$S_DEB" "$S_DEB_SIG" "$S_DMG" "$S_DMG_SIG" 2>/dev/null; then
+  ok "collected-sig guard passes a set that collected every .sig"
+else
+  bad "collected-sig guard rejected a complete collected set (false positive)"
+fi
+
+# 17) FALSIFIABILITY — the guard must FAIL the exact shape that actually happened on
+# 0.0.21-alpha: the .dmg collected, its .sig present ON DISK but absent from the set.
+COLL_ERR="$(release_artifacts_assert_collected_sigs_complete "mac" \
+              "$S_DEB" "$S_DEB_SIG" "$S_DMG" 2>&1 >/dev/null)"
+COLL_RC=$?
+[[ "$COLL_RC" -ne 0 ]] \
+  && ok "collected-sig guard fails a dropped .dmg.sig that exists on disk" \
+  || bad "collected-sig guard PASSED a dropped .dmg.sig — the 0.0.21-alpha shape"
+# Naming the uncollected signature's PATH is the whole point: it is what redirects the
+# reader from the signing pipeline (and from weakening the publish-time guard) to the glob.
+case "$COLL_ERR" in
+  *"$S_DMG_SIG"*) ok "the uncollected signature's path is named on stderr" ;;
+  *)              bad "the uncollected signature's path was not named on stderr" ;;
+esac
+
+# 18) NON-OVERLAP — an artifact with NO .sig anywhere on disk is the OTHER guard's
+# business (it is genuinely unsigned), so this one must stay silent. Without this case
+# the two guards could be collapsed into one, which would re-bury the distinction that
+# makes case 17's error message useful — and would make a keyless cut unpublishable.
+S_UNSIGNED="$(mk_sig_artifact "Papercusp Keyless_${VER}_amd64.deb")"
+if release_artifacts_assert_collected_sigs_complete "keyless" "$S_UNSIGNED" 2>/dev/null; then
+  ok "collected-sig guard stays silent on a genuinely unsigned artifact (no .sig on disk)"
+else
+  bad "collected-sig guard fired on a genuinely unsigned artifact — it is duplicating the publish-time guard"
+fi
+
+# 19) The documented escape is honoured here too, so a keyless cut is never hard-blocked.
+if RELEASE_ARTIFACTS_NO_SIGNATURE_CHECK=1 \
+   release_artifacts_assert_collected_sigs_complete "mac" "$S_DMG" 2>/dev/null; then
+  ok "RELEASE_ARTIFACTS_NO_SIGNATURE_CHECK=1 skips the collected-sig check too"
+else
+  bad "the documented signature-check escape did not skip the collected-sig check"
+fi
+
 echo
 if [[ "$FAILS" -eq 0 ]]; then
   echo "release-artifacts self-test: ALL PASS"

@@ -162,6 +162,14 @@ fi
 echo "==> found ${#NEW_ARTIFACTS[@]} $PLATFORM artifact(s):"
 for f in "${NEW_ARTIFACTS[@]}"; do echo "      $(basename "$f")"; done
 
+# Catch a dropped signature HERE, where the fault actually is, rather than three steps
+# later as "would publish an unsigned download" about an artifact that is in fact signed
+# (EI-23962107353168459 — the mac collector globbed *.dmg but not *.dmg.sig).
+if ! release_artifacts_assert_collected_sigs_complete "$PLATFORM" "${NEW_ARTIFACTS[@]}"; then
+  echo "ERROR: the $PLATFORM collector above did not pick up signature(s) that exist on disk — refusing to merge an incomplete set." >&2
+  exit 1
+fi
+
 if ! release_artifacts_assert_fresh "$TAG" "${NEW_ARTIFACTS[@]}"; then
   echo "ERROR: one or more $PLATFORM artifacts predate this cut's freshness stamp — refusing to merge/publish stale same-version bytes (EI-20551860898590077)." >&2
   exit 1
