@@ -84,9 +84,15 @@
 # do NOT flip the release default — keep BOTH roles in a real cut. The
 # gui-only speed win stays available on demand:
 # PAPERCUSP_BUILD_ROLES="gui" bin/release-local.sh builds gui-only for fast
-# local iteration (documented in the release-upload runbook). Only the
-# WINDOWS leg still defaults gui-only server-side (see build-windows-on-vm.sh)
-# — its Server installer is a hard Inno-spanning limitation, not a disk/scope
+# local iteration (documented in the release-upload runbook). ⚠ CORRECTED
+# 2026-09-22: this used to say the WINDOWS leg "still defaults gui-only
+# server-side (see build-windows-on-vm.sh)". That producer NO LONGER EXISTS —
+# the leg is bin/build-windows-cross.sh (native cargo-xwin + Inno-under-wine),
+# which takes ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}" and so defaults to
+# BOTH roles, matching the note further down this file. The stale wording cost
+# a wrong "windows cannot be journalled" conclusion (WI-10002471); leaving the
+# rest of the claim as-is because it is NOT re-verified here: the Server
+# installer is a hard Inno-spanning limitation, not a disk/scope
 # issue, so record-release-cli never publishes it regardless of whether it's
 # built (WI-5028 checkpoint); building it today wastes a ~40min ISCC pack for
 # an artifact nobody ships. Revisit the mac/linux default ONLY if the owner
@@ -816,14 +822,18 @@ release_task_content_identity() { # <platform>
 #   4. a way to know its EXPECTED artifact set, so `outputs_absent` can tell
 #      "incomplete" from "complete" instead of guessing.
 #
-# arm64 and android have none of 1-3. WINDOWS has 1-3 but fails 4: the roles it
-# actually builds are decided inside build-windows-on-vm.sh (gui-only
-# server-side — a hard Inno-spanning limit, not a scope choice), that decision
-# is never surfaced back here, and there is no inno expected-count logic
-# anywhere — only the binary `win_found` check at collection. A cardinality
-# predicate written from this file would therefore be a GUESS, failing either
-# toward refusing good receipts or toward accepting partial installers. Wiring
-# windows starts by having its leg report the role set it built.
+# arm64 and android have none of 1-3, so they are not listed (WI-10002472).
+#
+# WINDOWS has all four and is the next leg to wire (WI-10002471); it is absent
+# only because its two predicates are not written yet, NOT because it lacks a
+# prerequisite. Its expected set derives from PAPERCUSP_BUILD_ROLES exactly as
+# the linux counts do: bin/build-windows-cross.sh takes
+# ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}" and hard-fails a role that
+# yields no "<AppName>_<version>_x64-setup.exe" or no .sig, so the contract is
+# one signed setup.exe per role. Count those; do NOT count the
+# "*-setup-N.bin" DiskSpan slices (variable per role, and
+# papercusp_normalize_spanned_server replaces stub+slices with one zip at
+# collection time).
 declare -A RELEASE_TASK_LEG_PLATFORM=(
   [linux]=linux-x86_64
 )
