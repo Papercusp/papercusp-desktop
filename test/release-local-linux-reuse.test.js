@@ -382,7 +382,32 @@ const JOURNAL_LEG_FIXTURES = {
   mac: { prefix: 'RELEASE_TASK_MAC', reuseVar: 'PAPERCUSP_REUSE_MAC', identity: 'mac-input' },
 };
 
-function runJournalLegResume({ leg, action, absent = false, verify = 0 }) {
+// A journalled leg's provenance ALWAYS names its artifacts — build-provenance.json
+// is the completeness oracle every leg's receipt reads, and P-003 clause 1 (D-008)
+// now digests (name, bytes, sha256) out of it. A fixture writing a bare `{}`
+// describes a bundle no real cut can produce, so it is not a lighter fixture — it
+// is a different, impossible one.
+const JOURNAL_FIXTURE_PROVENANCE = {
+  version: '0.0.18',
+  artifacts: [
+    { name: 'deb/App_0.0.18_amd64.deb', bytes: 1024, sha256: 'a'.repeat(64) },
+    { name: 'appimage/App_0.0.18_amd64.AppImage', bytes: 2048, sha256: 'b'.repeat(64) },
+  ],
+};
+
+// Mirrors release_task_leg_output_digest. Deliberately ignores every field the
+// shell ignores (builtAtUtc, mtime, sig) — that exclusion is the property under
+// test: a provenance re-emit must not change the digest.
+function fixtureArtifactSetDigest(provenance = JOURNAL_FIXTURE_PROVENANCE) {
+  const rows = provenance.artifacts
+    .map((a) => [String(a.name), String(a.sha256), String(a.bytes)])
+    .sort((l, r) => (l.join('\0') < r.join('\0') ? -1 : l.join('\0') > r.join('\0') ? 1 : 0));
+  const outer = require('node:crypto').createHash('sha256');
+  for (const [name, digest, size] of rows) outer.update(`${name}\0${digest}\0${size}\0`);
+  return outer.digest('hex');
+}
+
+function runJournalLegResume({ leg, action, absent = false, verify = 0, provenance, artifactSet, entry }) {
   const fixture = JOURNAL_LEG_FIXTURES[leg];
   assert(fixture, `no journal fixture for leg ${leg}`);
   const { prefix, reuseVar, identity } = fixture;
@@ -390,7 +415,10 @@ function runJournalLegResume({ leg, action, absent = false, verify = 0 }) {
   const bundle = path.join(temp, 'bundle');
   const calls = path.join(temp, 'calls.log');
   fs.mkdirSync(bundle, { recursive: true });
-  fs.writeFileSync(path.join(bundle, 'build-provenance.json'), '{}');
+  fs.writeFileSync(
+    path.join(bundle, 'build-provenance.json'),
+    JSON.stringify(provenance ?? JOURNAL_FIXTURE_PROVENANCE),
+  );
   const command = [
     'set -euo pipefail',
     'ORCHESTRATOR_HERE=/unused',
@@ -409,12 +437,18 @@ function runJournalLegResume({ leg, action, absent = false, verify = 0 }) {
     `${prefix}_ACTION=${action}`,
     `${prefix}_REQUEST_ID=old-request`,
     `${prefix}_IDENTITY=${identity}`,
+    // P-003 clause 1 (D-008): the digest the prior receipt committed. Defaults to
+    // the fixture's own artifacts, so a `reuse` action agrees unless a test
+    // deliberately supplies a different one.
+    `${prefix}_ARTIFACT_SET=${artifactSet ?? fixtureArtifactSetDigest(provenance ?? JOURNAL_FIXTURE_PROVENANCE)}`,
     `release_task_${leg}_outputs_absent() { return ${absent ? 0 : 1}; }`,
     `release_task_verify_${leg}_artifacts() { printf 'verify:%s:%s\\n' "$1" "$2" >> ${JSON.stringify(calls)}; return ${verify}; }`,
     `release_task_journal_call() { printf '%s\\n' "$*" >> ${JSON.stringify(calls)}; [[ "$1" != commit ]] || printf '%s\\n' '{"state":"committed"}'; }`,
     'release_task_begin_stage() { RELEASE_TASK_LAST_ACTION=run; RELEASE_TASK_LAST_REQUEST_ID=new-request; printf "begin:%s:%s\\n" "$1" "$2" >> ' + JSON.stringify(calls) + '; }',
     "release_artifacts_cut_start_write() { printf '222\\n'; }",
-    `release_task_leg_prepare ${leg} ${JSON.stringify(bundle)}`,
+    entry === 'commit'
+      ? `release_task_leg_commit ${leg} ${JSON.stringify(bundle)} 1`
+      : `release_task_leg_prepare ${leg} ${JSON.stringify(bundle)}`,
     `printf "RESULT action=%s request=%s reuse=%s cut=%s\\n" "$${prefix}_ACTION" "$${prefix}_REQUEST_ID" "$${reuseVar}" "\${PAPERCUSP_RELEASE_CUT_START_NS:-}"`,
   ].join('\n');
   const result = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
@@ -534,6 +568,74 @@ test('present but tampered mac artifacts are not rewritten as confirmed absence'
 // item delivers silently covers a subset. Derived from the registry itself rather
 // than from a hand-kept list, so adding a leg without wiring its lifecycle fails
 // here instead of at 2am on a real cut.
+// ── P-003 clause 1 (D-008): a reuse must CHECK the bytes against its receipt ──
+// The pre-existing reuse checks (cardinality, provenance, signature) all re-derive
+// trust from the current tree, so they pass on any internally-consistent artifact
+// set. These cover the one question that distinguishes "these bytes" from "some
+// valid bytes". Every leg is exercised: the hole P-002 left in
+// requiredReuseEvidenceRefs was exactly a per-leg one that linux-only tests hid.
+for (const leg of ['linux', 'windows', 'mac']) {
+  test(`${leg} reuse accepts bytes whose artifact set matches its receipt`, () => {
+    const { result } = runJournalLegResume({ leg, action: 'reuse', entry: 'commit' });
+    assert.equal(result.status, 0, `matching ${leg} artifact set was refused: ${result.stderr}`);
+  });
+
+  test(`${leg} reuse refuses bytes whose artifact set differs from its receipt`, () => {
+    const { result } = runJournalLegResume({
+      leg,
+      action: 'reuse',
+      entry: 'commit',
+      artifactSet: 'c'.repeat(64),
+    });
+    assert.notEqual(result.status, 0, `a ${leg} artifact set the receipt never committed was reused`);
+    assert.match(result.stderr, /NOT the ones its receipt committed/);
+  });
+
+  test(`${leg} reuse refuses a legacy receipt that carries no artifact-set digest`, () => {
+    const { result } = runJournalLegResume({ leg, action: 'reuse', entry: 'commit', artifactSet: '' });
+    assert.notEqual(result.status, 0, `a ${leg} receipt with no digest still authorized reuse`);
+    assert.match(result.stderr, /no artifact-set digest/);
+  });
+}
+
+test('the artifact-set digest survives a provenance re-emit of identical bytes', () => {
+  // A reuse RE-EMITS provenance, so any digest that moved with the envelope could
+  // never verify anything — it would refuse every genuine resume. Same artifacts,
+  // a later capture: the digest must be unchanged.
+  const reEmitted = {
+    ...JOURNAL_FIXTURE_PROVENANCE,
+    builtAtUtc: '2099-12-31T23:59:59Z',
+    artifacts: JOURNAL_FIXTURE_PROVENANCE.artifacts.map((a) => ({
+      ...a,
+      sig: true,
+      mtimeEpochSec: 4102444799,
+      mtimeUtc: '2099-12-31T23:59:59Z',
+      completedAtUtc: '2099-12-31T23:59:59Z',
+    })),
+  };
+  const { result } = runJournalLegResume({
+    leg: 'linux',
+    action: 'reuse',
+    entry: 'commit',
+    provenance: reEmitted,
+    artifactSet: fixtureArtifactSetDigest(JOURNAL_FIXTURE_PROVENANCE),
+  });
+  assert.equal(result.status, 0, `a provenance re-emit changed the artifact-set digest: ${result.stderr}`);
+});
+
+test('a bundle whose provenance names no artifacts cannot mint a receipt', () => {
+  // The digest is the receipt's only later-verifiable claim about its outputs, so
+  // a provenance that cannot supply one must fail closed rather than commit a
+  // receipt nothing can check.
+  const { result } = runJournalLegResume({
+    leg: 'linux',
+    action: 'reconcile',
+    provenance: { version: '0.0.18', artifacts: [] },
+  });
+  assert.notEqual(result.status, 0, 'a receipt was committed for artifacts that cannot be digested');
+  assert.match(result.stderr, /names no artifacts/);
+});
+
 test('every registered release leg has a full journal lifecycle wired into the cutter', () => {
   const registry = sliceBetween('declare -A RELEASE_TASK_LEG_PLATFORM=(', ')');
   const registered = [...registry.matchAll(/^\s*\[([a-z0-9-]+)\]=\S+$/gm)].map((match) => match[1]);
@@ -649,6 +751,10 @@ function runLinuxContentIdentity(mutator = () => {}) {
     identityScanner: path.join(desktop, 'bin', 'audit-release-bundle.py'),
     provenanceVerifier: path.join(desktop, 'bin', 'verify-provenance.sh'),
     freshnessVerifier: path.join(desktop, 'bin', 'check-sidecar-freshness.js'),
+    // P-003 clause 4 (D-008): the compression producers are policy inputs because
+    // their presets (`zstd --long=27`, `xz -9`) are hardcoded in their own text.
+    sourcePackager: path.join(desktop, 'bin', 'stage-source-tree.sh'),
+    debCompressor: path.join(desktop, 'bin', 'repack-deb-xz.sh'),
   };
   for (const file of Object.values(files)) fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(files.dependencyMarker, `identity=v1-${'a'.repeat(64)}\nsource=${'a'.repeat(64)}\n`);
@@ -659,7 +765,14 @@ function runLinuxContentIdentity(mutator = () => {}) {
   fs.writeFileSync(files.tauriBase, '{"plugins":{"updater":{"pubkey":"signer-a"}}}\n');
   fs.writeFileSync(files.tauriChannel, '{"identifier":"nightly"}\n');
   fs.writeFileSync(files.cargoLock, 'version = 4\n');
-  for (const file of [files.modelBoundary, files.identityScanner, files.provenanceVerifier, files.freshnessVerifier]) {
+  for (const file of [
+    files.modelBoundary,
+    files.identityScanner,
+    files.provenanceVerifier,
+    files.freshnessVerifier,
+    files.sourcePackager,
+    files.debCompressor,
+  ]) {
     fs.writeFileSync(file, `${path.basename(file)}:v1\n`);
   }
   mutator({ files, workspace, desktop });
