@@ -318,6 +318,36 @@ if grep -Fq "decision=allow" "$PAPERCUSP_RELEASE_DELETION_AUDIT_PATH"; then
 else
   bad "allowed deletion was not audited"
 fi
+# 1c) A cut must not be refused its OWN lease (EI-23946118243608426). The legs of one cut run
+# CONCURRENTLY against a shared target slot: the windows leg finished first, took a lease over
+# that slot, and the still-running linux sibling was then denied the stale-AppDir purge that
+# WI-4736 REQUIRES it to perform — killing the leg ~90min in. The guard exists to stop one cut
+# destroying ANOTHER cut's artifacts, so all three tag states are pinned here: own tag allows,
+# foreign tag denies, absent tag fails closed.
+OWNED="$WORK/own-lease-target"; FOREIGN="$WORK/foreign-lease-target"
+mkdir -p "$OWNED" "$FOREIGN"; : > "$OWNED/stale.AppDir"; : > "$FOREIGN/other.AppDir"
+release_artifacts_retention_lease_acquire "$TAG_GUARD" "$OWNED" "$FOREIGN" >/dev/null
+
+if (unset PAPERCUSP_RELEASE_TAG; release_artifacts_guarded_delete "$OWNED" >/dev/null 2>&1); then
+  bad "guarded deletion allowed a leased path with no cut tag in scope"
+else
+  ok "guarded deletion still fails closed when no cut tag is set"
+fi
+
+if (export PAPERCUSP_RELEASE_TAG="$TAG_GUARD"; release_artifacts_guarded_delete "$OWNED" >/dev/null 2>&1); then
+  ok "guarded deletion allows a path leased by this cut's OWN tag"
+else
+  bad "guarded deletion refused this cut its own leased path (EI-23946118243608426)"
+fi
+[[ ! -e "$OWNED" ]] && ok "own-leased path is actually removed" || bad "own-leased path survived an allowed delete"
+
+if (export PAPERCUSP_RELEASE_TAG="desktop-v0.0.0-some-other-cut"; release_artifacts_guarded_delete "$FOREIGN" >/dev/null 2>&1); then
+  bad "guarded deletion allowed a path leased by ANOTHER cut's tag"
+else
+  ok "guarded deletion still denies a path leased by another cut"
+fi
+[[ -d "$FOREIGN" ]] && ok "foreign-leased path remains intact" || bad "foreign-leased path was removed"
+
 release_artifacts_retention_lease_release "$TAG_GUARD" >/dev/null
 
 # 2) read drops a vanished file and de-duplicates a repeated path.

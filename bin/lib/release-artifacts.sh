@@ -1026,18 +1026,48 @@ release_artifacts_deletion_audit() {
 # denied and missing paths. A denied path returns non-zero and is never handed
 # to rm; callers should propagate that failure rather than routing around it.
 release_artifacts_guarded_delete() {
-  local candidate matches status rc=0
+  local candidate matches status rc=0 own_lease matched_tag allow_reason
   for candidate in "$@"; do
     [[ -n "$candidate" ]] || continue
+    matches=""
+    allow_reason="guard passed"
     if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
       release_artifacts_deletion_audit skip-missing "$candidate" "" "path absent" || rc=1
       continue
     fi
     if matches="$(release_artifacts_retention_path_is_leased "$candidate" 2>/dev/null)"; then
-      release_artifacts_deletion_audit deny "$candidate" "$matches" "active retention lease" || rc=1
-      echo "release-artifacts: refusing to delete leased path $candidate ($matches)." >&2
-      rc=1
-      continue
+      # A cut must never be refused its OWN lease. release_artifacts_retention_path_is_leased
+      # answers "is this path leased?" and ALREADY reports which tag(s) hold it — refusing on
+      # any match at all locks a cut out of the very paths it leased for itself.
+      #
+      # Measured twice in the 0.0.21-alpha cut (EI-23946118243608426). Second, worse face:
+      # the three legs run CONCURRENTLY against one shared target slot; the windows leg
+      # finished first, took a lease covering that slot, and the still-running linux sibling
+      # was then refused the stale-AppDir purge it is REQUIRED to perform (WI-4736) — so the
+      # leg died ~90min in. The first face was cross-cut (the slot picker skipping a leased
+      # dir); this one is intra-cut, between parallel legs of a single run.
+      #
+      # Allow ONLY when every matching lease is this cut's own tag. An unset tag, any foreign
+      # tag, or an `invalid:` marker still fails closed — the guard's whole purpose is to stop
+      # one cut destroying ANOTHER cut's artifacts, and that is left fully intact.
+      own_lease=0
+      if [[ -n "${PAPERCUSP_RELEASE_TAG:-}" ]]; then
+        own_lease=1
+        while IFS= read -r matched_tag; do
+          [[ -n "$matched_tag" ]] || continue
+          if [[ "$matched_tag" != "$PAPERCUSP_RELEASE_TAG" ]]; then
+            own_lease=0
+            break
+          fi
+        done <<< "$matches"
+      fi
+      if [[ "$own_lease" -ne 1 ]]; then
+        release_artifacts_deletion_audit deny "$candidate" "$matches" "active retention lease" || rc=1
+        echo "release-artifacts: refusing to delete leased path $candidate ($matches)." >&2
+        rc=1
+        continue
+      fi
+      allow_reason="own-cut lease ${PAPERCUSP_RELEASE_TAG}"
     else
       status=$?
       if [[ "$status" -eq 2 ]]; then
@@ -1048,7 +1078,7 @@ release_artifacts_guarded_delete() {
         continue
       fi
     fi
-    release_artifacts_deletion_audit allow "$candidate" "" "guard passed" || rc=1
+    release_artifacts_deletion_audit allow "$candidate" "$matches" "$allow_reason" || rc=1
     if [[ -d "$candidate" && ! -L "$candidate" ]]; then
       rm -rf -- "$candidate" || rc=1
     else
