@@ -764,12 +764,22 @@ release_task_begin_stage() { # <stage> <identity>; writes RELEASE_TASK_LAST_*
   fi
 }
 
-# Canonical, reviewable Linux-stage identity. Source SHA + the complete gitlink
-# tuple are added by release-task-journal.ts; this object binds every remaining
-# input that can change produced/trusted bytes. No secret material enters it:
-# signing is represented only by the public updater-key digest.
-release_task_linux_content_identity() {
-  local signer_pubkey
+# Canonical, reviewable PER-PLATFORM stage identity. Source SHA + the complete
+# gitlink tuple are added by release-task-journal.ts; bin/lib/release-content-identity.js
+# binds every remaining input that can change produced/trusted bytes. No secret
+# material enters it: signing is represented only by the public updater-key digest.
+#
+# The builder used to be a heredoc right here with `platform` written as the
+# literal 'linux-x86_64', which is precisely why only the Linux leg could be
+# journalled — there was no way to ask for another platform's identity, and no
+# way to test the builder at all. It now lives in bin/lib/release-content-identity.js
+# (covered by release-content-identity.selftest.sh).
+release_task_content_identity() { # <platform>
+  local platform="${1:-}" signer_pubkey
+  [[ -n "$platform" ]] || {
+    echo "ERROR: release_task_content_identity requires a platform (e.g. linux-x86_64)." >&2
+    return 2
+  }
   signer_pubkey="$(release_task_target_pubkey)" || return $?
   PAPERCUSP_REUSE_SIGNER_PUBKEY="$signer_pubkey" \
   PAPERCUSP_REUSE_BUILD_ROLES="$PAPERCUSP_BUILD_ROLES" \
@@ -785,88 +795,7 @@ release_task_linux_content_identity() {
   PAPERCUSP_REUSE_SKIP_BUILDSET="${PAPERCUSP_SKIP_BUILDSET_CHECK:-0}" \
   PAPERCUSP_REUSE_ALLOW_UNVERIFIED_SUBMODULE="${PAPERCUSP_ALLOW_UNVERIFIED_SUBMODULE:-0}" \
   PAPERCUSP_RELEASE_REUSE_MAX_AGE_SEC="${PAPERCUSP_RELEASE_REUSE_MAX_AGE_SEC:-0}" \
-    node - "$MONOREPO" "$ROOT" <<'NODE'
-const crypto = require('node:crypto');
-const fs = require('node:fs');
-const path = require('node:path');
-const cp = require('node:child_process');
-const [workspace, desktop] = process.argv.slice(2);
-const sha = (value) => crypto.createHash('sha256').update(value).digest('hex');
-const fileSha = (file, label) => {
-  if (!fs.statSync(file, { throwIfNoEntry: false })?.isFile()) throw new Error(`release reuse identity is missing ${label}: ${file}`);
-  return sha(fs.readFileSync(file));
-};
-const command = (name, args = ['--version']) => {
-  try { return cp.execFileSync(name, args, { encoding: 'utf8' }).trim(); }
-  catch { throw new Error(`release reuse identity cannot resolve ${name} ${args.join(' ')}`); }
-};
-const markerPath = path.join(workspace, 'node_modules', '.papercusp-dependency-generation');
-const marker = fs.readFileSync(markerPath, 'utf8').split(/\r?\n/).filter(Boolean);
-const markerField = (key) => {
-  const matches = marker.filter((line) => line.startsWith(`${key}=`));
-  if (matches.length !== 1) throw new Error(`release dependency marker requires exactly one ${key}`);
-  return matches[0].slice(key.length + 1);
-};
-const dependencyIdentity = markerField('identity');
-const dependencySource = markerField('source');
-if (!/^v1-[0-9a-f]{64}$/.test(dependencyIdentity) || !/^[0-9a-f]{64}$/.test(dependencySource)
-    || dependencyIdentity !== `v1-${dependencySource}`) {
-  throw new Error('release dependency generation marker has an incoherent immutable identity');
-}
-const policyFiles = {
-  distributionContract: path.join(desktop, 'src-tauri', 'distribution-contract.json'),
-  tauriBase: path.join(desktop, 'src-tauri', 'tauri.conf.json'),
-  cupboardBundle: path.join(workspace, 'content-bundles', 'workspace-host', 'bundle.yaml'),
-  modelBoundary: path.join(desktop, 'bin', 'lib', 'transformers-models.sh'),
-  identityScanner: path.join(desktop, 'bin', 'audit-release-bundle.py'),
-  provenanceVerifier: path.join(desktop, 'bin', 'verify-provenance.sh'),
-  freshnessVerifier: path.join(desktop, 'bin', 'check-sidecar-freshness.js'),
-};
-const channelConfig = String(process.env.PAPERCUSP_REUSE_CHANNEL_CONFIG || '').match(/tauri\.[a-z0-9.-]+\.conf\.json/i)?.[0];
-if (channelConfig) policyFiles.channel = path.join(desktop, 'src-tauri', channelConfig);
-const policies = Object.fromEntries(Object.entries(policyFiles).map(([key, file]) => [key, fileSha(file, key)]));
-const identity = {
-  schemaVersion: 2,
-  platform: 'linux-x86_64',
-  dependencies: {
-    generation: dependencyIdentity,
-    source: dependencySource,
-    packageLock: fileSha(path.join(workspace, 'package-lock.json'), 'workspace package lock'),
-    installedLock: fileSha(path.join(workspace, 'node_modules', '.package-lock.json'), 'installed dependency lock'),
-    cargoLock: fileSha(path.join(desktop, 'src-tauri', 'Cargo.lock'), 'Cargo lock'),
-  },
-  toolchain: {
-    rustc: command('rustc'),
-    cargo: command('cargo'),
-    node: command('node'),
-    npm: command('npm'),
-    tauriCli: process.env.PAPERCUSP_REUSE_TAURI_CLI,
-  },
-  profile: {
-    channel: process.env.PAPERCUSP_REUSE_CHANNEL,
-    roles: String(process.env.PAPERCUSP_REUSE_BUILD_ROLES || '').trim().split(/\s+/).filter(Boolean).sort(),
-    rustflags: process.env.PAPERCUSP_REUSE_RUSTFLAGS || '',
-    channelConfig: process.env.PAPERCUSP_REUSE_CHANNEL_CONFIG || '',
-    releaseHostSha256: sha(process.env.PAPERCUSP_REUSE_RELEASE_HOST || ''),
-  },
-  policy: {
-    files: policies,
-    allowIncompleteRoles: process.env.PAPERCUSP_REUSE_ALLOW_INCOMPLETE,
-    skipProvenanceParity: process.env.PAPERCUSP_REUSE_SKIP_PROVENANCE,
-    skipMigrationLint: process.env.PAPERCUSP_REUSE_SKIP_MIGRATION_LINT,
-    skipMigrationBootsmoke: process.env.PAPERCUSP_REUSE_SKIP_MIGRATION_BOOTSMOKE,
-    skipBuildset: process.env.PAPERCUSP_REUSE_SKIP_BUILDSET,
-    allowUnverifiedSubmodule: process.env.PAPERCUSP_REUSE_ALLOW_UNVERIFIED_SUBMODULE,
-  },
-  signing: { updaterPublicKeySha256: sha(process.env.PAPERCUSP_REUSE_SIGNER_PUBKEY || '') },
-  audit: {
-    releaseIdentityAudit: true,
-    requiredArtifactVerification: ['cardinality', 'provenance', 'health-sha', 'updater-signature'],
-    reuseMaxAgeSec: Number(process.env.PAPERCUSP_RELEASE_REUSE_MAX_AGE_SEC || 0),
-  },
-};
-process.stdout.write(JSON.stringify(identity));
-NODE
+    node "$ORCHESTRATOR_HERE/lib/release-content-identity.js" "$MONOREPO" "$ROOT" "$platform"
 }
 
 release_task_start_linux_stage() {
@@ -883,7 +812,7 @@ release_task_start_linux_stage() {
     echo "ERROR: managed release source is dirty; task-journal reuse requires the exact clean source/gitlink tuple." >&2
     return 1
   fi
-  RELEASE_TASK_BUILD_IDENTITY="$(release_task_linux_content_identity)" || {
+  RELEASE_TASK_BUILD_IDENTITY="$(release_task_content_identity linux-x86_64)" || {
     echo "ERROR: could not construct the complete Linux release reuse identity." >&2
     return 1
   }
