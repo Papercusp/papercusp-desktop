@@ -81,6 +81,13 @@ echo "==> version=$VERSION channel=$CHANNEL platform=$PLATFORM tag=$TAG"
 # publish with no prior cut creates the stamp and then checks only NEW_ARTIFACTS.
 PAPERCUSP_RELEASE_CUT_START_NS="$(release_artifacts_cut_start_ensure "$TAG")"
 export PAPERCUSP_RELEASE_CUT_START_NS PAPERCUSP_RELEASE_TAG="$TAG"
+# Bound this publish's retention lease -- same contract and same reason as
+# release-local.sh (WI-10002441). Any entry point that exports
+# PAPERCUSP_RELEASE_TAG will cause a lease to be acquired, so it must also state a
+# retention window or it writes expires_ns=0 and pins its paths forever. Kept in
+# sync by the release-artifacts selftest, which fails if an entry point sets the
+# tag without a TTL.
+export PAPERCUSP_RELEASE_RETENTION_TTL_SEC="${PAPERCUSP_RELEASE_RETENTION_TTL_SEC:-604800}"
 echo "==> release artifact freshness: cut-start=$PAPERCUSP_RELEASE_CUT_START_NS"
 
 load_release_host

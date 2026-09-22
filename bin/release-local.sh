@@ -1713,6 +1713,20 @@ else
 fi
 export PAPERCUSP_RELEASE_CUT_START_NS
 export PAPERCUSP_RELEASE_TAG="$TAG"
+# Bound this cut's retention lease. release_artifacts_retention_lease_acquire
+# documents exactly two ways to keep a lease from becoming permanent -- a TTL, or
+# an explicit release -- and the release workflow used NEITHER, so every cut wrote
+# expires_ns=0 and pinned its target slot forever. Measured 2026-09-22:
+# lease-desktop-v0.0.19-alpha.tsv had held the whole dev2 slot since 2026-09-07,
+# and because its tag is foreign to any later cut the (correctly) tag-aware slot
+# picker refuses it permanently -- pushing each new cut toward the private per-pid
+# cold-build fallback that accumulated ~99GB of orphaned slots (WI-10002441).
+#
+# A TTL is the fail-safe half of that contract: too long only delays reclaim, it
+# never deletes early. Seven days is far beyond any build->upload->verify cycle
+# (hours) while guaranteeing no slot is pinned indefinitely. An explicit override
+# is honoured, so a workflow needing a longer window can still set one.
+export PAPERCUSP_RELEASE_RETENTION_TTL_SEC="${PAPERCUSP_RELEASE_RETENTION_TTL_SEC:-604800}"
 echo "==> release artifact freshness: cut-start=$PAPERCUSP_RELEASE_CUT_START_NS (tag=$TAG)"
 
 # Write the release version into ONE checkout's manifests.
