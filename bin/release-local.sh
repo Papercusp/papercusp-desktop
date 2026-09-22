@@ -1756,6 +1756,16 @@ fi
 papercusp_export_rust_path_remap
 PAPERCUSP_LINUX_RUSTFLAGS="$(papercusp_rustflags_with_lld linux "${RUSTFLAGS:-}")"
 release_task_leg_start linux || exit $?
+# The Windows receipt opens at the same mutation boundary, but only for a cut that
+# actually builds Windows — minting release.build.windows for a Linux-only cut would
+# leave a receipt no leg can ever settle. Note the ordering consequence: the rootfs
+# and ISCC preflights above are keyed on PAPERCUSP_REUSE_WIN, which the journal may
+# only set HERE, so a journal-driven Windows resume still pays those (seconds) and
+# fails closed if the wine/Inno toolchain is gone. That is deliberate — the intent
+# boundary must stay after every precheck.
+if [[ "$WITH_WINDOWS" == "1" ]]; then
+  release_task_leg_start windows || exit $?
+fi
 
 # EI-20551860898590077: bind every artifact to THIS cut before the first tree
 # write. A failed cut may leave correctly named/signed same-version bytes behind;
@@ -2373,6 +2383,27 @@ assert_linux_artifact_cardinality() {  # $1 = Linux bundle dir
   fi
 }
 
+# The Windows sibling of the check above. It is reached only from the JOURNALLED
+# path (release_task_verify_windows_artifacts); the unjournalled collection block
+# keeps its historical "at least one artifact" gate, exactly as Linux's did before
+# its receipt landed. This is the check verify-provenance.sh cannot stand in for:
+# that script verifies the artifacts build-provenance.json NAMES, so a surplus
+# installer left by another lane is invisible to it while the version-scoped
+# collection glob would still sweep the bytes into the release.
+assert_windows_artifact_cardinality() {  # $1 = inno output dir
+  local dir="$1"
+  local expected=0 setups setup_sigs role
+  for role in $PAPERCUSP_BUILD_ROLES; do
+    case "$role" in gui|server) expected=$((expected + 1)) ;; esac
+  done
+  setups="$(find "$dir" -maxdepth 1 -type f -name "*_${VERSION}_x64-setup.exe" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  setup_sigs="$(find "$dir" -maxdepth 1 -type f -name "*_${VERSION}_x64-setup.exe.sig" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  if [[ "$setups" != "$expected" || "$setup_sigs" != "$expected" ]]; then
+    echo "ERROR: Windows $VERSION installer set is ambiguous/incomplete for roles '$PAPERCUSP_BUILD_ROLES': expected setups=$expected signatures=$expected; found setups=$setups signatures=$setup_sigs. Quarantine stale/failed same-version bytes in $dir before collection." >&2
+    exit 1
+  fi
+}
+
 # A completed Linux child must leave its receipt alongside its final bytes,
 # BEFORE a failed sibling can stop the parent collector (EI-22598852936937011).
 # Reuse keeps the original baked identity; the shared emitter preserves its
@@ -2491,6 +2522,12 @@ fi
 WIN_LEG_LOG="/tmp/papercusp-winleg-${TAG}.log"
 MAC_LEG_LOG="/tmp/papercusp-macleg-${TAG}.log"
 WIN_PID=""; MAC_PID=""; MAC_REUSE=0; WIN_REUSE=0
+# Must precede the reuse branch below: prepare is what resolves a committed or
+# reconcilable receipt into PAPERCUSP_REUSE_WIN=1 (or refuses a spent request and
+# mints a fresh attempt), and that branch reads the flag.
+if [[ "${RELEASE_TASK_JOURNAL_ENABLED:-0}" == "1" && "$WITH_WINDOWS" == "1" ]]; then
+  release_task_leg_prepare windows "$ROOT/src-tauri/target/windows-vm/bundle/inno" || exit $?
+fi
 if [[ "$WITH_WINDOWS" == "1" && "${PAPERCUSP_REUSE_WIN:-0}" == "1" ]]; then
   # SALVAGE PATH (2026-07-09, mirror of PAPERCUSP_REUSE_MAC below): the Windows VM
   # + target/windows-vm/bundle/inno are SHARED across lanes and clobber each other
@@ -2941,6 +2978,12 @@ if [[ -n "$WIN_PID" || "$WIN_REUSE" == "1" ]]; then
     echo "==> [win] spanned Server normalized → $(basename "$PAPERCUSP_SPANNED_SERVER_ZIP") ($(du -h "$PAPERCUSP_SPANNED_SERVER_ZIP" | cut -f1); stub + ${#PAPERCUSP_SPANNED_SERVER_SLICES[@]} slice(s)) — the single download the release page offers"
   elif [[ -n "$PAPERCUSP_SPANNED_SERVER_STUB" && ${#PAPERCUSP_SPANNED_SERVER_SLICES[@]} -gt 0 ]]; then
     echo "WARNING: [win] could not zip the spanned Server set (zip missing or failed) — leaving the raw stub+slices; record-release-cli will SKIP the stub, so publish the Windows Server manually (WI-5600)" >&2
+  fi
+  # Settled AFTER normalization, so the receipt is taken over the bytes this cut
+  # will actually publish. Both paths verify: a fresh build proves its own output,
+  # and a reuse re-proves provenance/identity before the receipt is honoured.
+  if [[ "${RELEASE_TASK_JOURNAL_ENABLED:-0}" == "1" ]]; then
+    release_task_leg_commit windows "$_win_inno_dir" "$WIN_REUSE" || exit $?
   fi
 fi
 if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then

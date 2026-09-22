@@ -371,8 +371,21 @@ test('future-dated identity-scan evidence cannot authorize reuse', () => {
   assert.match(result.stderr, /invalid or future-dated/);
 });
 
-function runJournalLinuxResume({ action, absent = false, verify = 0 }) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-linux-journal-'));
+// The receipt state machine is leg-GENERIC — one registry row plus two predicates
+// per leg — so this driver is too: it runs the REAL release-local functions over
+// whichever leg's registry row, state-slot prefix and reuse variable are named.
+// A leg added here must not change what the Linux assertions below observe; they
+// are deliberately unchanged from when linux was the only journalled leg.
+const JOURNAL_LEG_FIXTURES = {
+  linux: { prefix: 'RELEASE_TASK_BUILD', reuseVar: 'PAPERCUSP_REUSE_LINUX', identity: 'linux-input' },
+  windows: { prefix: 'RELEASE_TASK_WIN', reuseVar: 'PAPERCUSP_REUSE_WIN', identity: 'windows-input' },
+};
+
+function runJournalLegResume({ leg, action, absent = false, verify = 0 }) {
+  const fixture = JOURNAL_LEG_FIXTURES[leg];
+  assert(fixture, `no journal fixture for leg ${leg}`);
+  const { prefix, reuseVar, identity } = fixture;
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), `papercusp-${leg}-journal-`));
   const bundle = path.join(temp, 'bundle');
   const calls = path.join(temp, 'calls.log');
   fs.mkdirSync(bundle, { recursive: true });
@@ -386,27 +399,31 @@ function runJournalLinuxResume({ action, absent = false, verify = 0 }) {
     'CHANNEL=nightly',
     'TAG=desktop-v0.0.18-nightly',
     "PAPERCUSP_BUILD_ROLES='gui'",
-    'PAPERCUSP_REUSE_LINUX=0',
+    `${reuseVar}=0`,
     'PROVENANCE_SOURCE_GIT_HEAD=' + 'b'.repeat(40),
     'RELEASE_TASK_JOURNAL_ENABLED=0',
     releaseTaskJournalHarness,
     'RELEASE_TASK_JOURNAL_ENABLED=1',
     "release_task_audit_reuse_expiry() { printf '2099-01-01T00:00:00.000Z\\n'; }",
-    `RELEASE_TASK_BUILD_ACTION=${action}`,
-    'RELEASE_TASK_BUILD_REQUEST_ID=old-request',
-    'RELEASE_TASK_BUILD_IDENTITY=linux-input',
-    `release_task_linux_outputs_absent() { return ${absent ? 0 : 1}; }`,
-    `release_task_verify_linux_artifacts() { printf 'verify:%s:%s\\n' "$1" "$2" >> ${JSON.stringify(calls)}; return ${verify}; }`,
+    `${prefix}_ACTION=${action}`,
+    `${prefix}_REQUEST_ID=old-request`,
+    `${prefix}_IDENTITY=${identity}`,
+    `release_task_${leg}_outputs_absent() { return ${absent ? 0 : 1}; }`,
+    `release_task_verify_${leg}_artifacts() { printf 'verify:%s:%s\\n' "$1" "$2" >> ${JSON.stringify(calls)}; return ${verify}; }`,
     `release_task_journal_call() { printf '%s\\n' "$*" >> ${JSON.stringify(calls)}; [[ "$1" != commit ]] || printf '%s\\n' '{"state":"committed"}'; }`,
     'release_task_begin_stage() { RELEASE_TASK_LAST_ACTION=run; RELEASE_TASK_LAST_REQUEST_ID=new-request; printf "begin:%s:%s\\n" "$1" "$2" >> ' + JSON.stringify(calls) + '; }',
     "release_artifacts_cut_start_write() { printf '222\\n'; }",
-    `release_task_leg_prepare linux ${JSON.stringify(bundle)}`,
-    'printf "RESULT action=%s request=%s reuse=%s cut=%s\\n" "$RELEASE_TASK_BUILD_ACTION" "$RELEASE_TASK_BUILD_REQUEST_ID" "$PAPERCUSP_REUSE_LINUX" "${PAPERCUSP_RELEASE_CUT_START_NS:-}"',
+    `release_task_leg_prepare ${leg} ${JSON.stringify(bundle)}`,
+    `printf "RESULT action=%s request=%s reuse=%s cut=%s\\n" "$${prefix}_ACTION" "$${prefix}_REQUEST_ID" "$${reuseVar}" "\${PAPERCUSP_RELEASE_CUT_START_NS:-}"`,
   ].join('\n');
   const result = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
   const log = fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : '';
   fs.rmSync(temp, { recursive: true, force: true });
   return { result, log };
+}
+
+function runJournalLinuxResume(options) {
+  return runJournalLegResume({ ...options, leg: 'linux' });
 }
 
 test('journal restart reconciles verified Linux bytes and activates canonical reuse', () => {
@@ -439,6 +456,41 @@ test('present but tampered Linux bytes are not rewritten as confirmed absence', 
   assert.match(result.stderr, /not treating corruption as absence/);
   assert.doesNotMatch(log, /refuse release\.build\.linux/);
   assert.doesNotMatch(log, /begin:release\.build\.linux/);
+});
+
+// The same four transitions over the WINDOWS registry row. Without these, an
+// interrupted cut resumes the Linux leg from its receipt and silently rebuilds
+// Windows from scratch — the coverage gap, not the mechanism, is what P-002 closes.
+test('journal restart reconciles verified Windows bytes and activates canonical reuse', () => {
+  const { result, log } = runJournalLegResume({ leg: 'windows', action: 'reconcile' });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /RESULT action=reuse request=old-request reuse=1/);
+  assert.match(log, /commit release\.build\.windows windows-input old-request/);
+  assert.doesNotMatch(log, /refuse release\.build\.windows/);
+  assert.match(result.stdout, /RELEASE_STAGE_TIMING schema=1 stage=release\.build\.windows decision=cache-hit/);
+});
+
+test('lost Windows outcome is refused before a fresh one-use attempt', () => {
+  const { result, log } = runJournalLegResume({ leg: 'windows', action: 'reconcile', absent: true });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /RESULT action=run request=new-request reuse=0 cut=222/);
+  assert.match(log, /refuse release\.build\.windows windows-input old-request artifact-set:confirmed-absent/);
+  assert.match(log, /begin:release\.build\.windows:windows-input/);
+});
+
+test('committed Windows receipt with lost installers fails closed instead of rebuilding', () => {
+  const { result, log } = runJournalLegResume({ leg: 'windows', action: 'reuse', absent: true });
+  assert.notEqual(result.status, 0, 'a spent committed receipt unexpectedly rebuilt');
+  assert.match(result.stderr, /committed but its artifact\/provenance set is absent/);
+  assert.doesNotMatch(log, /begin:release\.build\.windows/);
+});
+
+test('present but tampered Windows installers are not rewritten as confirmed absence', () => {
+  const { result, log } = runJournalLegResume({ leg: 'windows', action: 'reconcile', verify: 1 });
+  assert.notEqual(result.status, 0, 'tampered installers unexpectedly entered a fresh attempt');
+  assert.match(result.stderr, /not treating corruption as absence/);
+  assert.doesNotMatch(log, /refuse release\.build\.windows/);
+  assert.doesNotMatch(log, /begin:release\.build\.windows/);
 });
 
 function runJournalManifestResume({ action, absent = false, verify = 0 }) {
