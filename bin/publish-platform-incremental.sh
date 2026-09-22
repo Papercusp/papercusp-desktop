@@ -140,7 +140,16 @@ case "$PLATFORM" in
   mac)
     OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
     RETENTION_PATHS=("$ROOT/src-tauri/target/universal-apple-darwin" "$OUT")
-    for f in "$OUT"/dmg/*_"$VERSION"_*.dmg "$OUT"/macos/*.app.tar.gz "$OUT"/macos/*.app.tar.gz.sig; do
+    # The .dmg.sig glob is load-bearing, not decorative. DMGs became part of the
+    # SIGNED published set under D-019 + WI-39600 (the producer now emits a minisign
+    # sibling for every user-facing download), but this collector was never updated to
+    # PICK UP those signatures — so an incremental mac publish recorded the .dmg while
+    # silently leaving its .sig out of the artifact set. release_artifacts_assert_signatures_present
+    # then correctly refused the whole merge ("would publish an unsigned download",
+    # EI-20595279927716716), because the guard reads the RECORDED SET, not the filesystem:
+    # the signature existed on disk the entire time and was simply never collected.
+    # Measured on 0.0.21-alpha: both dmg sigs present on disk, neither in the 6 globbed paths.
+    for f in "$OUT"/dmg/*_"$VERSION"_*.dmg "$OUT"/dmg/*_"$VERSION"_*.dmg.sig "$OUT"/macos/*.app.tar.gz "$OUT"/macos/*.app.tar.gz.sig; do
       [[ -f "$f" ]] && NEW_ARTIFACTS+=("$f")
     done
     ;;
