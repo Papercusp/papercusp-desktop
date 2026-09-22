@@ -131,6 +131,42 @@ s3api_head_etag() {
   printf '%s\n' "$etag"
 }
 
+# The sha256 WE recorded on the object at upload time, or empty.
+#
+# This is the fix for the one gap the ETag cannot close. Above 8 MiB an ETag is
+# "<md5-of-part-md5s>-<n>", which is not comparable to any local hash, so a
+# multi-GB artifact had no content proof at all and fell back to SIZE. A rebuilt
+# artifact is very often byte-different at an IDENTICAL size (same inputs, same
+# compression settings), so that fallback skipped real changes — see the verdict
+# table below. User metadata sidesteps multipart entirely: we put the hash there
+# ourselves, so it stays comparable no matter how the object was chunked.
+s3api_head_sha256() {
+  local v
+  v="$(aws s3api head-object --endpoint-url "$ENDPOINT" \
+    --bucket "$R2_BUCKET" --key "$1" \
+    --query 'Metadata.sha256' --output text 2>/dev/null)" || return 1
+  [[ -n "$v" && "$v" != "None" ]] || return 1
+  printf '%s\n' "$v"
+}
+
+# LastModified of the published object as a unix epoch, or empty.
+#
+# Only used for objects predating the sha256 metadata above: for those there is
+# still no content proof, but "the local file was rebuilt AFTER this object was
+# published" is a strong, cheap staleness signal, and it fails in the safe
+# direction (an unnecessary re-upload, never a skipped stale artifact).
+s3api_head_mtime_epoch() {
+  local v
+  v="$(aws s3api head-object --endpoint-url "$ENDPOINT" \
+    --bucket "$R2_BUCKET" --key "$1" \
+    --query 'LastModified' --output text 2>/dev/null)" || return 1
+  [[ -n "$v" && "$v" != "None" ]] || return 1
+  date -u -d "$v" +%s 2>/dev/null || return 1
+}
+
+# The local content hash, in the exact form recorded as object metadata.
+local_sha256() { sha256sum "$1" | cut -d' ' -f1; }
+
 # Anything at or below this is never worth a size-only guess: re-pushing it
 # costs nothing, and the skip exists solely to avoid re-pushing GIGABYTES.
 # Matches the aws multipart threshold, i.e. exactly the boundary at which an
@@ -141,10 +177,18 @@ SMALL_ARTIFACT_BYTES=$((8 * 1024 * 1024))
 # known about them. Echoes exactly one of:
 #
 #   absent          — nothing published at that key
-#   identical       — content PROVEN equal (ETag was a real MD5 and matched)
-#   differs         — content PROVEN different (size differs, or MD5 differs)
+#   identical       — content PROVEN equal (recorded sha256 matched, or the
+#                            ETag was a real MD5 and matched)
+#   differs         — content PROVEN different (size differs, or a recorded
+#                            sha256 / real-MD5 ETag mismatched)
+#   local-newer     — sizes agree, NO content proof is available (a legacy
+#                            object with no recorded sha256), and the local file
+#                            was modified AFTER the object was published. Not
+#                            proof of difference, but the exact shape of a stale
+#                            upload: re-push rather than guess.
 #   size-only-match       — sizes agree and a valid multipart ETag is present,
-#                            but its content hash is not comparable
+#                            but its content hash is not comparable AND the
+#                            object is at least as new as the local file
 #   metadata-unavailable  — the remote object exists at this size, but its
 #                            authenticated ETag metadata could not be read;
 #                            this is NEVER evidence of byte identity
@@ -170,6 +214,20 @@ remote_state() {
   if [[ "$remote_size" != "$local_size" ]]; then
     echo differs; return
   fi
+  # The sha256 WE recorded beats every other signal, because it is the only one
+  # that stays comparable across multipart chunking. Checked BEFORE the ETag so a
+  # multi-GB artifact gets a real content verdict instead of the size guess that
+  # let a stale AppImage ship under a fresh signature (EI-23963309971611146).
+  local recorded_sha
+  if recorded_sha="$(s3api_head_sha256 "$key")"; then
+    if [[ "$recorded_sha" == "$(local_sha256 "$file")" ]]; then
+      echo identical
+    else
+      echo differs
+    fi
+    return
+  fi
+
   if ! etag="$(s3api_head_etag "$key")"; then
     echo metadata-unavailable
     return
@@ -186,6 +244,19 @@ remote_state() {
   # opaque/malformed ETag (or a provider-specific response) is unknown, not
   # proof that the same-size bytes are safe to skip.
   if [[ "$etag" =~ ^[0-9a-fA-F]{32}-[0-9]+$ ]]; then
+    # A legacy multipart object with no recorded sha256: still no content proof.
+    # Before falling back to the size guess, ask the one cheap question that
+    # actually distinguishes the stale case — was the local file rebuilt AFTER
+    # this object was published? If so it is very likely the object is stale, and
+    # the safe direction is an unnecessary re-upload rather than a skipped one.
+    local remote_epoch local_epoch
+    if remote_epoch="$(s3api_head_mtime_epoch "$key")" \
+       && local_epoch="$(stat -c%Y "$file" 2>/dev/null)" \
+       && [[ -n "$remote_epoch" && -n "$local_epoch" ]] \
+       && (( local_epoch > remote_epoch )); then
+      echo local-newer
+      return
+    fi
     echo size-only-match
   else
     echo metadata-unavailable
@@ -527,23 +598,40 @@ for f in "${ARTIFACTS[@]}"; do
       echo "==> already uploaded, content verified identical — skipping $name"
       continue
       ;;
+    local-newer)
+      # Same size, no content proof, but the local file is NEWER than the
+      # published object. That is the exact fingerprint of the stale-artifact
+      # bug: a rebuilt artifact is routinely byte-different at an identical size,
+      # so a size match here is worth nothing. Re-push (EI-23963309971611146).
+      echo "==> re-uploading $name (same size, but the local file is NEWER than the published object — size is not evidence)"
+      ;;
     size-only-match)
-      # Sizes agree but nothing proved the bytes do. For a big multipart artifact
-      # that is the fast path we want. For a small file it is a guess we have no
-      # reason to make — re-uploading a few hundred bytes is free, and this is
-      # precisely where a stale companion file hides.
+      # Sizes agree and nothing proved the bytes do. This is now reachable ONLY
+      # for a legacy object with no recorded sha256 that is also at least as new
+      # as the local file. Every object this script uploads from now on carries a
+      # sha256, so this branch shrinks to nothing as old releases age out.
       if (( local_size > SMALL_ARTIFACT_BYTES )); then
-        echo "==> already uploaded, size matches (multipart — content not verifiable), skipping $name"
-        continue
+        echo "==> $name: size matches but content is NOT verifiable (legacy multipart object, no recorded sha256) — skipping" >&2
+        echo "    If this artifact was rebuilt, re-run with PAPERCUSP_FORCE_REUPLOAD=1; size alone cannot tell." >&2
+        if [[ "${PAPERCUSP_FORCE_REUPLOAD:-0}" == "1" ]]; then
+          echo "==> PAPERCUSP_FORCE_REUPLOAD=1 — uploading $name anyway"
+        else
+          continue
+        fi
+      else
+        echo "==> re-uploading $name (same size, but content could not be verified and it is small)"
       fi
-      echo "==> re-uploading $name (same size, but content could not be verified and it is small)"
       ;;
     metadata-unavailable)
       echo "==> remote content metadata unavailable — uploading $name instead of trusting its size"
       ;;
   esac
   echo "==> uploading $name"
-  s3 cp "$f" "s3://${R2_BUCKET}/${KEY_PREFIX}/${TAG}/${name}" --only-show-errors
+  # Record the content hash AS OBJECT METADATA. This is what makes the next run's
+  # comparison exact: an ETag stops being a content hash above 8 MiB, but this
+  # value is ours and survives multipart chunking untouched.
+  s3 cp "$f" "s3://${R2_BUCKET}/${KEY_PREFIX}/${TAG}/${name}" --only-show-errors \
+    --metadata "sha256=$(local_sha256 "$f")"
 done
 
 # The manifest goes to EVERY feed path this channel publishes:
@@ -605,14 +693,28 @@ for f in "${ARTIFACTS[@]}"; do
     identical)
       printf '  ✓ %s (%.2f GB, content verified)\n' "$name" "$(echo "scale=4; $local_size/1000000000" | bc)"
       ;;
+    local-newer)
+      echo "  ✗ $name — published object is OLDER than the local file at the same size." >&2
+      echo "    That is the stale-artifact fingerprint: a rebuilt artifact is routinely" >&2
+      echo "    byte-different at an identical size. (EI-23963309971611146)" >&2
+      STORAGE_BAD=1
+      ;;
     size-only-match)
+      # This used to print a green tick for any artifact over 8 MiB, which is how
+      # a STALE AppImage was reported as "verified" on 0.0.21: the check could not
+      # see content, so it reported the only thing it could see — the size — and
+      # rendered that as success. A verification step that cannot verify must not
+      # emit a ✓; "I could not check" and "I checked and it was fine" are
+      # different facts and must never share a symbol. (EI-23963309971611146)
+      echo "  ✗ $name — published at the right size but its content could NOT be verified." >&2
       if (( local_size > SMALL_ARTIFACT_BYTES )); then
-        printf '  ✓ %s (%.2f GB, size only — multipart object)\n' "$name" "$(echo "scale=4; $local_size/1000000000" | bc)"
+        echo "    Multipart object with no recorded sha256 metadata. Every upload this script" >&2
+        echo "    performs now records one, so this means the object predates that or was" >&2
+        echo "    written by something else. Size is not evidence of identity." >&2
       else
-        echo "  ✗ $name — published at the right size but its content could NOT be verified," >&2
-        echo "    and it is small enough that there is no excuse for not knowing. Treating as bad." >&2
-        STORAGE_BAD=1
+        echo "    It is small enough that there is no excuse for not knowing." >&2
       fi
+      STORAGE_BAD=1
       ;;
     metadata-unavailable)
       echo "  ✗ $name — authenticated remote ETag metadata was unavailable; cannot verify stored bytes." >&2
