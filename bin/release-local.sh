@@ -3007,8 +3007,12 @@ if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
     echo "ERROR: mac collection has ${_mac_tgz_n} .app.tar.gz updater bundle(s) but only ${_mac_dmg_n} ${VERSION} .dmg — the UNVERSIONED .app.tar.gz set is contaminated by a prior cut (P-009). Clean $MAC_OUT/macos/ and re-cut, or use PAPERCUSP_REUSE_MAC=1 (provenance-verified salvage)."; exit 1
   fi
   bash "$ROOT/bin/audit-bundle.sh" "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg
-  # EI-8914 parity: the Windows leg records build-provenance.json (inline in
-  # build-windows-on-vm.sh); the Mac leg never did, so a mac installer was
+  # EI-8914 parity: the Windows leg records build-provenance.json (⚠ CORRECTED
+  # 2026-09-22: via the shared bin/emit-build-provenance.sh called from
+  # bin/build-windows-cross.sh — the build-windows-on-vm.sh this line used to name
+  # NO LONGER EXISTS, and believing that stale reference is what produced the wrong
+  # "windows cannot be journalled" conclusion retracted as plan D-005); the Mac leg
+  # never did, so a mac installer was
   # untraceable to its source and — worst on the PAPERCUSP_REUSE_MAC salvage
   # path — a SALVAGED artifact inherited THIS cut's version/sha label with no
   # record of what was actually inside (the LABELED!=PACKED class). Emit the
