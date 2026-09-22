@@ -201,9 +201,13 @@ if [[ $_gate_rc -eq 2 ]]; then
   echo "   Almost always: no owner-name literal resolved, because git user.name is" >&2
   echo "   unset or belongs to an automation. A CLEAN verdict would have been" >&2
   echo "   meaningless, so it refused instead of certifying." >&2
-  echo "   Fix: export PAPERCUSP_RELEASE_OWNER_NAME='<the owner's name>' and re-run" >&2
-  echo "   (PAPERCUSP_RELEASE_OWNER_EMAIL too, for email coverage; both accept a" >&2
-  echo "   comma-separated list). Read at run time — never write either into a file." >&2
+  echo "   Fix: put PAPERCUSP_RELEASE_OWNER_NAME=<the owner's name> in" >&2
+  echo "        ~/.papercusp/release-identity.env — the gate reads that file itself, so" >&2
+  echo "        this is a one-time setup, not a per-run incantation. Exporting the" >&2
+  echo "        variable for a single run still takes precedence over it." >&2
+  echo "        (PAPERCUSP_RELEASE_OWNER_EMAIL too, for email coverage; both accept a" >&2
+  echo "        comma-separated list.) Never write either into a SOURCE file — that" >&2
+  echo "        commits the owner's name to git forever, and would BE the leak." >&2
   exit 2
 elif [[ $_gate_rc -ne 0 ]]; then
   echo >&2
