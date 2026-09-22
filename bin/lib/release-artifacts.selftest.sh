@@ -940,6 +940,91 @@ else
 fi
 
 echo
+echo "own-cut retention lease (EI-23946118243608426)"
+# A cut must never be refused its OWN lease. The lease is tag-scoped and spans the
+# whole cut (it pre-registers the mac/windows paths), so leg N+1 carries the SAME
+# tag as the lease leg N took — refusing on any match at all drove the mac leg to a
+# private per-pid slot where PAPERCUSP_REUSE_LINUX found no linux artifacts and the
+# leg died after ~35min of redone work. Every not-ours case must still fail CLOSED.
+__pc_saved_tag="${PAPERCUSP_RELEASE_TAG:-}"
+
+PAPERCUSP_RELEASE_TAG="desktop-v0.0.22-alpha"
+
+if release_artifacts_retention_matches_are_own_cut "desktop-v0.0.22-alpha"; then
+  ok "own tag is recognised as this cut's own lease"
+else
+  bad "own tag was refused — a cut is locked out of its own slot (the 35min bug)"
+fi
+
+# The real three-leg shape: one lease, several matching path lines, all same tag.
+if release_artifacts_retention_matches_are_own_cut "$(printf 'desktop-v0.0.22-alpha\ndesktop-v0.0.22-alpha\n')"; then
+  ok "several matches all bearing this cut's tag are still its own lease"
+else
+  bad "a multi-line all-own match was refused"
+fi
+
+if release_artifacts_retention_matches_are_own_cut "desktop-v0.0.21-alpha"; then
+  bad "a FOREIGN cut's lease was treated as ours — cross-cut protection is broken"
+else
+  ok "a foreign cut's lease is still refused"
+fi
+
+if release_artifacts_retention_matches_are_own_cut "$(printf 'desktop-v0.0.22-alpha\ndesktop-v0.0.21-alpha\n')"; then
+  bad "a mixed own+foreign match was allowed — it must fail closed on the foreign tag"
+else
+  ok "a mixed own+foreign match fails closed"
+fi
+
+if release_artifacts_retention_matches_are_own_cut "invalid:/tmp/lease-broken.tsv"; then
+  bad "an unreadable retention marker was treated as our own lease"
+else
+  ok "an invalid: retention marker fails closed"
+fi
+
+if release_artifacts_retention_matches_are_own_cut ""; then
+  bad "an empty match set was treated as our own lease"
+else
+  ok "an empty match set fails closed"
+fi
+
+unset PAPERCUSP_RELEASE_TAG
+if release_artifacts_retention_matches_are_own_cut "desktop-v0.0.22-alpha"; then
+  bad "an UNSET PAPERCUSP_RELEASE_TAG claimed someone else's lease as ours"
+else
+  ok "an unset release tag fails closed"
+fi
+if [[ -n "$__pc_saved_tag" ]]; then PAPERCUSP_RELEASE_TAG="$__pc_saved_tag"; fi
+
+# The predicate above is only half the fix: the SLOT PICKER has to consult it. The
+# original bug was claim-target-dir.sh discarding the tags the predicate prints
+# (`>/dev/null`), which leaves it unable to tell its own cut from a foreign one.
+# Subject is a DIFFERENT file than this test, so these greps cannot self-match.
+# Subject path is overridable so falsifiability can be proven against a mutated COPY
+# outside the tree — never by mutating the shared checkout, which the git-sync sweep
+# can commit mid-probe.
+__pc_picker="${PAPERCUSP_SELFTEST_PICKER:-$DIR/claim-target-dir.sh}"
+if [[ -s "$__pc_picker" ]]; then
+  ok "control: the slot picker is present and non-empty (these checks measured something)"
+
+  # Match a STDOUT discard only. `2>/dev/null` merely silences stderr and is correct;
+  # it is discarding stdout that throws away the tags, so the char before `>` must
+  # not be a digit (which would make it an fd redirect like 2> or 1>).
+  if grep -qE 'release_artifacts_retention_path_is_leased[^|&]*[^0-9]>/dev/null' "$__pc_picker"; then
+    bad "the slot picker discards lease tags again (>/dev/null) — it cannot tell its OWN cut from a foreign one"
+  else
+    ok "the slot picker keeps the lease tags instead of discarding them"
+  fi
+
+  if grep -q 'release_artifacts_retention_matches_are_own_cut' "$__pc_picker"; then
+    ok "the slot picker defers to the shared own-cut rule"
+  else
+    bad "the slot picker no longer consults release_artifacts_retention_matches_are_own_cut"
+  fi
+else
+  bad "control FAILED: $__pc_picker missing or empty — the slot-picker checks measured nothing"
+fi
+
+echo
 if [[ "$FAILS" -eq 0 ]]; then
   echo "release-artifacts self-test: ALL PASS"
   exit 0

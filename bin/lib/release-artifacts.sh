@@ -1007,6 +1007,32 @@ release_artifacts_retention_path_is_leased() {
   return "$found"
 }
 
+# release_artifacts_retention_matches_are_own_cut <matches> — 0 when every lease
+# tag in <matches> belongs to THIS cut, 1 otherwise.
+#
+# <matches> is the stdout of release_artifacts_retention_path_is_leased: one lease
+# tag per line, or an `invalid:<lease>` marker for a malformed one. That predicate
+# answers "is this path leased?" and ALREADY reports WHICH tag(s) hold it, but a
+# caller that discards the tags can only refuse on any match at all — which locks a
+# cut out of the very paths it leased for itself (EI-23946118243608426). This is the
+# single place that rule is expressed, so the slot picker and the deletion guard
+# cannot drift apart on it.
+#
+# Fails CLOSED on purpose: an unset PAPERCUSP_RELEASE_TAG, any foreign tag, an
+# `invalid:` marker, or a match that names no tag at all all answer 1 (not ours), so
+# the caller keeps its protective behaviour. The guard's whole purpose is to stop one
+# cut destroying or stealing ANOTHER cut's artifacts, and that is left fully intact.
+release_artifacts_retention_matches_are_own_cut() {
+  local matches="${1:-}" matched_tag
+  [[ -n "${PAPERCUSP_RELEASE_TAG:-}" ]] || return 1
+  [[ -n "$matches" ]] || return 1
+  while IFS= read -r matched_tag; do
+    [[ -n "$matched_tag" ]] || continue
+    [[ "$matched_tag" == "$PAPERCUSP_RELEASE_TAG" ]] || return 1
+  done <<< "$matches"
+  return 0
+}
+
 release_artifacts_deletion_audit() {
   local decision="${1:-}" path="${2:-}" leases="${3:-}" reason="${4:-}"
   local audit actor timestamp
@@ -1050,16 +1076,11 @@ release_artifacts_guarded_delete() {
       # Allow ONLY when every matching lease is this cut's own tag. An unset tag, any foreign
       # tag, or an `invalid:` marker still fails closed — the guard's whole purpose is to stop
       # one cut destroying ANOTHER cut's artifacts, and that is left fully intact.
+      # The rule itself lives in release_artifacts_retention_matches_are_own_cut so the slot
+      # picker (bin/lib/claim-target-dir.sh) enforces the identical test.
       own_lease=0
-      if [[ -n "${PAPERCUSP_RELEASE_TAG:-}" ]]; then
+      if release_artifacts_retention_matches_are_own_cut "$matches"; then
         own_lease=1
-        while IFS= read -r matched_tag; do
-          [[ -n "$matched_tag" ]] || continue
-          if [[ "$matched_tag" != "$PAPERCUSP_RELEASE_TAG" ]]; then
-            own_lease=0
-            break
-          fi
-        done <<< "$matches"
       fi
       if [[ "$own_lease" -ne 1 ]]; then
         release_artifacts_deletion_audit deny "$candidate" "$matches" "active retention lease" || rc=1

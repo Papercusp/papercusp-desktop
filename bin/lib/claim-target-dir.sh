@@ -312,7 +312,7 @@ __pc_claim_target_dir() {
   fi
   mkdir -p "$__pc_slot_lockdir"
 
-  local i dir lockfile preferred_dir
+  local i dir lockfile preferred_dir lease_tags
   for ((i = 0; i < slots; i++)); do
     # Slot 0 IS Cargo's configured shared dir. Keep its existing warm cache,
     # and derive every extra slot on the same configured filesystem.
@@ -325,10 +325,20 @@ __pc_claim_target_dir() {
     exec 8>>"$lockfile" || continue
     if flock -n 8; then
       # A completed cut can outlive its launcher. Never reuse a target root that
-      # an active retention lease covers; a later cleanup/build must not erase
-      # the finalized artifact or its isolated Cargo cache.
-      if release_artifacts_retention_path_is_leased "$dir" >/dev/null 2>&1; then
-        echo "→ slot $i SKIPPED: target root $dir is covered by an active release-retention lease" >&2
+      # ANOTHER cut's active retention lease covers; a later cleanup/build must not
+      # erase the finalized artifact or its isolated Cargo cache.
+      #
+      # But a cut must never be refused its OWN lease. Leg 1 (linux) finishes and
+      # takes a cut-scoped lease over this slot; leg 2 (mac) then carries the SAME
+      # tag, so skipping on any match at all drove it to a private per-pid slot
+      # where PAPERCUSP_REUSE_LINUX found no leg-1 artifacts and the leg died after
+      # ~35min of redone work. The lease pre-registers the mac and windows paths, so
+      # it was authored expecting those legs to run inside it (EI-23946118243608426).
+      # Keep the tags the predicate reports instead of discarding them, and defer to
+      # the shared own-cut rule, which fails closed on an unset/foreign/invalid tag.
+      if lease_tags="$(release_artifacts_retention_path_is_leased "$dir" 2>/dev/null)" \
+        && ! release_artifacts_retention_matches_are_own_cut "$lease_tags"; then
+        echo "→ slot $i SKIPPED: target root $dir is covered by an active release-retention lease (${lease_tags//$'\n'/,})" >&2
         exec 8>&-
         continue
       fi
@@ -359,9 +369,12 @@ __pc_claim_target_dir() {
           exec 8>&-
           continue
         }
+        # Same own-cut rule as the preferred-root check above: refuse a FOREIGN
+        # cut's lease, never this cut's own (EI-23946118243608426).
         if [[ "$dir" != "$preferred_dir" ]] \
-          && release_artifacts_retention_path_is_leased "$dir" >/dev/null 2>&1; then
-          echo "→ slot $i SKIPPED: fallback target root $dir is covered by an active release-retention lease" >&2
+          && lease_tags="$(release_artifacts_retention_path_is_leased "$dir" 2>/dev/null)" \
+          && ! release_artifacts_retention_matches_are_own_cut "$lease_tags"; then
+          echo "→ slot $i SKIPPED: fallback target root $dir is covered by an active release-retention lease (${lease_tags//$'\n'/,})" >&2
           exec 8>&-
           continue
         fi
