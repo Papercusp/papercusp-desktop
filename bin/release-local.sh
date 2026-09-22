@@ -586,6 +586,9 @@ RELEASE_TASK_BUILD_IDENTITY=""
 RELEASE_TASK_WIN_ACTION=""
 RELEASE_TASK_WIN_REQUEST_ID=""
 RELEASE_TASK_WIN_IDENTITY=""
+RELEASE_TASK_MAC_ACTION=""
+RELEASE_TASK_MAC_REQUEST_ID=""
+RELEASE_TASK_MAC_IDENTITY=""
 RELEASE_TASK_MANIFEST_ACTION=""
 RELEASE_TASK_MANIFEST_REQUEST_ID=""
 RELEASE_TASK_MANIFEST_IDENTITY=""
@@ -593,6 +596,7 @@ RELEASE_TASK_MANIFEST_SKIP=0
 RELEASE_TASK_LAST_LOOKUP_MS=0
 RELEASE_TASK_BUILD_PREPARATION_START_MS=""
 RELEASE_TASK_WIN_PREPARATION_START_MS=""
+RELEASE_TASK_MAC_PREPARATION_START_MS=""
 RELEASE_TASK_MANIFEST_PREPARATION_START_MS=""
 RELEASE_TASK_PREPARATION_MS=""
 RELEASE_TASK_REUSE_EXPIRES_AT=""
@@ -838,17 +842,28 @@ release_task_content_identity() { # <platform>
 # helper only writes the zip and swaps the ARTIFACTS list, leaving the stub and
 # slices on disk, so a normalized cut still presents exactly one setup.exe per
 # role to a later resume.
+#
+# The mac leg's expected set is modelled DIFFERENTLY from these two, and
+# deliberately so (plan D-006). Windows and mac look alike — "one installer plus
+# one updater bundle per role" — but only Windows names EVERY artifact with the
+# version, which is what makes counting version-scoped files a real completeness
+# test there. Tauri leaves the mac "<Product>.app.tar.gz" UNVERSIONED, so no
+# count can separate this cut's updater bundle from a prior cut's; see
+# release_task_mac_outputs_absent for the cross-count rule that covers it.
 declare -A RELEASE_TASK_LEG_PLATFORM=(
   [linux]=linux-x86_64
   [windows]=windows-x86_64
+  [mac]=darwin-universal
 )
 declare -A RELEASE_TASK_LEG_PREFIX=(
   [linux]=RELEASE_TASK_BUILD
   [windows]=RELEASE_TASK_WIN
+  [mac]=RELEASE_TASK_MAC
 )
 declare -A RELEASE_TASK_LEG_REUSE_VAR=(
   [linux]=PAPERCUSP_REUSE_LINUX
   [windows]=PAPERCUSP_REUSE_WIN
+  [mac]=PAPERCUSP_REUSE_MAC
 )
 
 release_task_leg_assert_known() { # <leg>
@@ -961,6 +976,45 @@ release_task_windows_outputs_absent() { # <inno-dir>
   (( setups < expected || setup_sigs < expected ))
 }
 
+# The mac predicate is NOT the Windows one with different globs, though the two
+# legs emit the same SHAPE (one installer + one updater bundle per role).
+# Windows names every artifact with the version, so counting version-scoped files
+# IS a completeness test there. Tauri names the mac updater bundle
+# "<Product>.app.tar.gz" — UNVERSIONED — so a count of them cannot tell this cut's
+# bundle from one a prior cut left behind, and the version-scoped glob that makes
+# the Windows count sound is simply unavailable. Two consequences:
+#   * build-provenance.json is this leg's completeness ORACLE (its per-artifact
+#     sha256 is the only thing that can attribute an unversioned bundle), which is
+#     why its emission is now fatal in both producers rather than best-effort;
+#   * the unversioned half needs the cross-count rule the collection block already uses
+#     (P-009): more .app.tar.gz than THIS-version .dmg proves contamination.
+# Per role build-mac-cross.sh hard-fails without all four files — make_dmg gates
+# "$dmg.sig" and make_updater gates "$tgz.sig" — so a complete leg leaves exactly
+# one of each per role, and anything less is a genuinely incomplete local stage.
+release_task_mac_outputs_absent() { # <mac-bundle-dir>
+  local bundle="$1" expected=0 dmgs dmg_sigs tgzs tgz_sigs role
+  for role in $PAPERCUSP_BUILD_ROLES; do
+    case "$role" in gui|server) expected=$((expected + 1)) ;; esac
+  done
+  dmgs="$(find "$bundle/dmg" -maxdepth 1 -type f -name "*_${VERSION}_*.dmg" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  dmg_sigs="$(find "$bundle/dmg" -maxdepth 1 -type f -name "*_${VERSION}_*.dmg.sig" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  tgzs="$(find "$bundle/macos" -maxdepth 1 -type f -name "*.app.tar.gz" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  tgz_sigs="$(find "$bundle/macos" -maxdepth 1 -type f -name "*.app.tar.gz.sig" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  # Same three-way split as the other legs: surplus is contamination rather than
+  # "no completed result", so it goes to the strict verifier and fails closed even
+  # when provenance is missing.
+  (( dmgs <= expected && dmg_sigs <= expected && tgzs <= expected && tgz_sigs <= expected )) || return 1
+  # The unversioned-bundle rule, and the one case no count against `expected`
+  # can reach: a cut that is SHORT a role's dmg while carrying that role's stale
+  # .app.tar.gz sits at or under every expected count, so it would otherwise read
+  # as a clean incomplete stage and be retried — silently keeping a prior cut's
+  # updater bytes in the expected set. More bundles than this-version dmgs can
+  # only mean contamination, so fail closed exactly as collection does.
+  if (( tgzs > dmgs || tgz_sigs > dmgs )); then return 1; fi
+  [[ -f "$bundle/build-provenance.json" ]] || return 0
+  (( dmgs < expected || dmg_sigs < expected || tgzs < expected || tgz_sigs < expected ))
+}
+
 release_task_target_pubkey() {
   python3 - "$ROOT/src-tauri/tauri.conf.json" <<'PY'
 import json, sys
@@ -1007,6 +1061,28 @@ release_task_verify_windows_artifacts() { # <inno-dir> <reused:0|1>
   fi
   pubkey="$(release_task_target_pubkey)" || return $?
   bash "$ORCHESTRATOR_HERE/verify-provenance.sh" "$inno" \
+    --health-sha "$BUILD_SHA" --pubkey "$pubkey" --require-signed
+}
+
+release_task_verify_mac_artifacts() { # <mac-bundle-dir> <reused:0|1>
+  local bundle="$1" reused="$2" pubkey
+  assert_mac_artifact_cardinality "$bundle" || return $?
+  if [[ "$reused" == "1" ]]; then
+    # As on the other legs: a journal-controlled resume never inherits the manual
+    # salvage bypasses, because its source/gitlink identity is exact. This matters
+    # most here — PAPERCUSP_REUSE_MAC salvages bytes from an earlier cut, and the
+    # unversioned .app.tar.gz cannot be checked by name, so provenance is the only
+    # thing standing between a salvaged bundle and THIS cut's version label.
+    PAPERCUSP_ALLOW_REUSE_UNVERIFIED=0 \
+    PAPERCUSP_ALLOW_REUSE_VERSION_MISMATCH=0 \
+      assert_reused_provenance "$bundle" mac || return $?
+    if [[ "$MAC_REUSE_GIT_HEAD" != "$PROVENANCE_SOURCE_GIT_HEAD" || "$MAC_REUSE_GIT_DIRTY" != "false" ]]; then
+      echo "ERROR: reused mac provenance does not match the managed release's exact clean desktop gitlink." >&2
+      return 1
+    fi
+  fi
+  pubkey="$(release_task_target_pubkey)" || return $?
+  bash "$ORCHESTRATOR_HERE/verify-provenance.sh" "$bundle" \
     --health-sha "$BUILD_SHA" --pubkey "$pubkey" --require-signed
 }
 
@@ -1766,6 +1842,12 @@ release_task_leg_start linux || exit $?
 if [[ "$WITH_WINDOWS" == "1" ]]; then
   release_task_leg_start windows || exit $?
 fi
+# The mac receipt opens at the same boundary, under the same rule: only a cut that
+# actually builds mac may mint release.build.mac, or a mac-less cut would leave a
+# receipt no leg can settle.
+if [[ "$WITH_MAC" == "1" ]]; then
+  release_task_leg_start mac || exit $?
+fi
 
 # EI-20551860898590077: bind every artifact to THIS cut before the first tree
 # write. A failed cut may leave correctly named/signed same-version bytes behind;
@@ -2404,6 +2486,31 @@ assert_windows_artifact_cardinality() {  # $1 = inno output dir
   fi
 }
 
+# The mac sibling, reached only from the JOURNALLED path
+# (release_task_verify_mac_artifacts); the unjournalled collection block keeps its
+# historical "at least one artifact" gate plus the P-009 cross-count assertion.
+# Note the .app.tar.gz counts are EXACT here rather than merely "not more than the
+# dmgs": by the time a receipt is being verified the expected role set is known,
+# so an unversioned bundle set that is short is just as disqualifying as one that
+# is surplus — and verify-provenance.sh cannot see either, because it iterates the
+# artifacts build-provenance.json NAMES and never enumerates the directory.
+assert_mac_artifact_cardinality() {  # $1 = mac bundle dir ($MAC_OUT)
+  local dir="$1"
+  local expected=0 dmgs dmg_sigs tgzs tgz_sigs role
+  for role in $PAPERCUSP_BUILD_ROLES; do
+    case "$role" in gui|server) expected=$((expected + 1)) ;; esac
+  done
+  dmgs="$(find "$dir/dmg" -maxdepth 1 -type f -name "*_${VERSION}_*.dmg" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  dmg_sigs="$(find "$dir/dmg" -maxdepth 1 -type f -name "*_${VERSION}_*.dmg.sig" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  tgzs="$(find "$dir/macos" -maxdepth 1 -type f -name "*.app.tar.gz" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  tgz_sigs="$(find "$dir/macos" -maxdepth 1 -type f -name "*.app.tar.gz.sig" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  if [[ "$dmgs" != "$expected" || "$dmg_sigs" != "$expected" \
+        || "$tgzs" != "$expected" || "$tgz_sigs" != "$expected" ]]; then
+    echo "ERROR: mac $VERSION artifact set is ambiguous/incomplete for roles '$PAPERCUSP_BUILD_ROLES': expected dmgs=$expected dmg-signatures=$expected updater-bundles=$expected updater-signatures=$expected; found dmgs=$dmgs dmg-signatures=$dmg_sigs updater-bundles=$tgzs updater-signatures=$tgz_sigs. The .app.tar.gz set is UNVERSIONED, so a stale one from a prior cut is indistinguishable by name — clean $dir/macos/ and re-cut, or use PAPERCUSP_REUSE_MAC=1 (provenance-verified salvage)." >&2
+    exit 1
+  fi
+}
+
 # A completed Linux child must leave its receipt alongside its final bytes,
 # BEFORE a failed sibling can stop the parent collector (EI-22598852936937011).
 # Reuse keeps the original baked identity; the shared emitter preserves its
@@ -2527,6 +2634,15 @@ WIN_PID=""; MAC_PID=""; MAC_REUSE=0; WIN_REUSE=0
 # mints a fresh attempt), and that branch reads the flag.
 if [[ "${RELEASE_TASK_JOURNAL_ENABLED:-0}" == "1" && "$WITH_WINDOWS" == "1" ]]; then
   release_task_leg_prepare windows "$ROOT/src-tauri/target/windows-vm/bundle/inno" || exit $?
+fi
+# Same ordering rule for mac: prepare is what resolves a committed or reconcilable
+# receipt into PAPERCUSP_REUSE_MAC=1, so it must precede the branch that reads the
+# flag. MAC_OUT is bound here rather than inside those branches because prepare
+# needs the bundle dir before either has run; the later assignments repeat this
+# exact literal (build-mac-cross.sh's own OUT_BUNDLE, via PAPERCUSP_MAC_OUT).
+MAC_OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
+if [[ "${RELEASE_TASK_JOURNAL_ENABLED:-0}" == "1" && "$WITH_MAC" == "1" ]]; then
+  release_task_leg_prepare mac "$MAC_OUT" || exit $?
 fi
 if [[ "$WITH_WINDOWS" == "1" && "${PAPERCUSP_REUSE_WIN:-0}" == "1" ]]; then
   # SALVAGE PATH (2026-07-09, mirror of PAPERCUSP_REUSE_MAC below): the Windows VM
@@ -3017,7 +3133,12 @@ if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
   # path — a SALVAGED artifact inherited THIS cut's version/sha label with no
   # record of what was actually inside (the LABELED!=PACKED class). Emit the
   # same provenance (each file's sha256 + a `reused` flag) next to the mac
-  # artifacts. Best-effort: a provenance hiccup must never fail a good release.
+  # artifacts. MANDATORY, not best-effort (P-002 / plan D-006): the .app.tar.gz
+  # updater bundle is UNVERSIONED, so the per-artifact sha256 recorded here is
+  # the only thing that can tell this cut's bundle from a prior cut's — which
+  # makes it the mac phase receipt's completeness ORACLE, not a cross-check.
+  # Letting a "hiccup" pass would ship bytes nothing can attribute, and would
+  # make a COMPLETE mac build read as retryable-absent to the receipt below.
   # NOTE: PROVENANCE_SIDECAR_DIR is deliberately NOT set here, so `sidecar` records
   # null — "this leg did not record which sidecar was packed" (EI-20086238555902880).
   # Setting it to a local path would be actively WRONG on both of this block's paths:
@@ -3040,7 +3161,10 @@ if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
   PROVENANCE_GIT_ROOT="$ROOT" bash "$ROOT/bin/emit-build-provenance.sh" \
     "$MAC_OUT" "$VERSION" "$_mac_prov_sha" "$([[ "${MAC_REUSE:-0}" == "1" ]] && echo true || echo false)" \
     "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg "$MAC_OUT"/macos/*.app.tar.gz \
-    || echo "WARNING: mac build-provenance.json emit failed (non-fatal) — mac artifacts shipped WITHOUT a provenance record"
+    || { echo "ERROR: mac build-provenance.json emit failed — refusing to ship mac artifacts WITHOUT a provenance record (the .app.tar.gz is unversioned; nothing else can prove which cut these bytes belong to)." >&2; exit 1; }
+  if [[ "${RELEASE_TASK_JOURNAL_ENABLED:-0}" == "1" ]]; then
+    release_task_leg_commit mac "$MAC_OUT" "$MAC_REUSE" || exit $?
+  fi
 fi
 
 # Retain all final target/artifact roots only after every enabled leg has

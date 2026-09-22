@@ -379,6 +379,7 @@ test('future-dated identity-scan evidence cannot authorize reuse', () => {
 const JOURNAL_LEG_FIXTURES = {
   linux: { prefix: 'RELEASE_TASK_BUILD', reuseVar: 'PAPERCUSP_REUSE_LINUX', identity: 'linux-input' },
   windows: { prefix: 'RELEASE_TASK_WIN', reuseVar: 'PAPERCUSP_REUSE_WIN', identity: 'windows-input' },
+  mac: { prefix: 'RELEASE_TASK_MAC', reuseVar: 'PAPERCUSP_REUSE_MAC', identity: 'mac-input' },
 };
 
 function runJournalLegResume({ leg, action, absent = false, verify = 0 }) {
@@ -491,6 +492,68 @@ test('present but tampered Windows installers are not rewritten as confirmed abs
   assert.match(result.stderr, /not treating corruption as absence/);
   assert.doesNotMatch(log, /refuse release\.build\.windows/);
   assert.doesNotMatch(log, /begin:release\.build\.windows/);
+});
+
+// And the same four over the MAC registry row. The mac leg is the most expensive
+// one to lose to a restart (full cross-compile + lipo + sign + dmg per role), and
+// until it was journalled an interrupted cut rebuilt it from scratch however
+// complete the bytes on disk were.
+test('journal restart reconciles verified mac bytes and activates canonical reuse', () => {
+  const { result, log } = runJournalLegResume({ leg: 'mac', action: 'reconcile' });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /RESULT action=reuse request=old-request reuse=1/);
+  assert.match(log, /commit release\.build\.mac mac-input old-request/);
+  assert.doesNotMatch(log, /refuse release\.build\.mac/);
+  assert.match(result.stdout, /RELEASE_STAGE_TIMING schema=1 stage=release\.build\.mac decision=cache-hit/);
+});
+
+test('lost mac outcome is refused before a fresh one-use attempt', () => {
+  const { result, log } = runJournalLegResume({ leg: 'mac', action: 'reconcile', absent: true });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /RESULT action=run request=new-request reuse=0 cut=222/);
+  assert.match(log, /refuse release\.build\.mac mac-input old-request artifact-set:confirmed-absent/);
+  assert.match(log, /begin:release\.build\.mac:mac-input/);
+});
+
+test('committed mac receipt with lost artifacts fails closed instead of rebuilding', () => {
+  const { result, log } = runJournalLegResume({ leg: 'mac', action: 'reuse', absent: true });
+  assert.notEqual(result.status, 0, 'a spent committed receipt unexpectedly rebuilt');
+  assert.match(result.stderr, /committed but its artifact\/provenance set is absent/);
+  assert.doesNotMatch(log, /begin:release\.build\.mac/);
+});
+
+test('present but tampered mac artifacts are not rewritten as confirmed absence', () => {
+  const { result, log } = runJournalLegResume({ leg: 'mac', action: 'reconcile', verify: 1 });
+  assert.notEqual(result.status, 0, 'tampered mac artifacts unexpectedly entered a fresh attempt');
+  assert.match(result.stderr, /not treating corruption as absence/);
+  assert.doesNotMatch(log, /refuse release\.build\.mac/);
+  assert.doesNotMatch(log, /begin:release\.build\.mac/);
+});
+
+// Every leg in the shell registry must be journalled, or the "resume" this plan
+// item delivers silently covers a subset. Derived from the registry itself rather
+// than from a hand-kept list, so adding a leg without wiring its lifecycle fails
+// here instead of at 2am on a real cut.
+test('every registered release leg has a full journal lifecycle wired into the cutter', () => {
+  const registry = sliceBetween('declare -A RELEASE_TASK_LEG_PLATFORM=(', ')');
+  const registered = [...registry.matchAll(/^\s*\[([a-z0-9-]+)\]=\S+$/gm)].map((match) => match[1]);
+  assert.deepEqual(
+    registered.slice().sort(),
+    ['linux', 'mac', 'windows'],
+    'the leg registry changed — wire the new leg’s lifecycle before updating this list',
+  );
+  for (const leg of registered) {
+    for (const phase of ['start', 'prepare', 'commit']) {
+      assert.match(
+        source,
+        new RegExp(`release_task_leg_${phase} ${leg}\\b`),
+        `leg '${leg}' is registered but never calls release_task_leg_${phase}`,
+      );
+    }
+    for (const helper of [`release_task_${leg}_outputs_absent`, `release_task_verify_${leg}_artifacts`]) {
+      assert.match(source, new RegExp(`^${helper}\\(\\) \\{`, 'm'), `leg '${leg}' has no ${helper}`);
+    }
+  }
 });
 
 function runJournalManifestResume({ action, absent = false, verify = 0 }) {
@@ -769,6 +832,171 @@ test('the Windows expected set is one signed installer per role, excluding DiskS
     'present',
     'missing provenance cannot make a surplus same-version set retryable',
   );
+});
+
+function journalMacOutputShape(files, roles) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-mac-shape-'));
+  for (const [relative, value] of Object.entries(files)) {
+    const target = path.join(temp, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, value);
+  }
+  const command = [
+    'set -euo pipefail',
+    'ORCHESTRATOR_HERE=/unused',
+    'MONOREPO=/unused',
+    'VERSION=0.0.18',
+    'CHANNEL=nightly',
+    'TAG=desktop-v0.0.18-nightly',
+    `PAPERCUSP_BUILD_ROLES=${JSON.stringify(roles)}`,
+    'RELEASE_TASK_JOURNAL_ENABLED=0',
+    releaseTaskJournalHarness,
+    `if release_task_mac_outputs_absent ${JSON.stringify(temp)}; then printf 'absent\\n'; else printf 'present\\n'; fi`,
+  ].join('\n');
+  const result = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
+  fs.rmSync(temp, { recursive: true, force: true });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return result.stdout.trim();
+}
+
+const MAC_GUI = {
+  'dmg/Papercusp GUI_0.0.18_universal-apple-darwin.dmg': 'dmg',
+  'dmg/Papercusp GUI_0.0.18_universal-apple-darwin.dmg.sig': 'dmg-sig',
+  'macos/Papercusp GUI.app.tar.gz': 'updater',
+  'macos/Papercusp GUI.app.tar.gz.sig': 'updater-sig',
+};
+const MAC_SERVER = {
+  'dmg/Papercusp Server_0.0.18_universal-apple-darwin.dmg': 'dmg',
+  'dmg/Papercusp Server_0.0.18_universal-apple-darwin.dmg.sig': 'dmg-sig',
+  'macos/Papercusp Server.app.tar.gz': 'updater',
+  'macos/Papercusp Server.app.tar.gz.sig': 'updater-sig',
+};
+
+test('the mac expected set is one signed dmg plus one signed updater bundle per role', () => {
+  const guiOnly = { 'build-provenance.json': '{}', ...MAC_GUI };
+  assert.equal(journalMacOutputShape(guiOnly, 'gui'), 'present');
+  // As on Windows, the expected count comes from PAPERCUSP_BUILD_ROLES, never
+  // from what happens to have landed.
+  assert.equal(journalMacOutputShape(guiOnly, 'gui server'), 'absent');
+
+  const both = { ...guiOnly, ...MAC_SERVER };
+  assert.equal(journalMacOutputShape(both, 'gui server'), 'present');
+
+  // build-mac-cross.sh hard-fails without either signature, so a set missing one
+  // is an incomplete stage rather than something a receipt may pass over.
+  const noDmgSig = { ...both };
+  delete noDmgSig['dmg/Papercusp Server_0.0.18_universal-apple-darwin.dmg.sig'];
+  assert.equal(journalMacOutputShape(noDmgSig, 'gui server'), 'absent');
+  const noUpdaterSig = { ...both };
+  delete noUpdaterSig['macos/Papercusp Server.app.tar.gz.sig'];
+  assert.equal(journalMacOutputShape(noUpdaterSig, 'gui server'), 'absent');
+
+  const surplus = { ...both, 'dmg/Papercusp GUI (stale)_0.0.18_universal-apple-darwin.dmg': 'surplus' };
+  assert.equal(journalMacOutputShape(surplus, 'gui server'), 'present');
+  const surplusWithoutProvenance = { ...surplus };
+  delete surplusWithoutProvenance['build-provenance.json'];
+  assert.equal(
+    journalMacOutputShape(surplusWithoutProvenance, 'gui server'),
+    'present',
+    'missing provenance cannot make a surplus same-version set retryable',
+  );
+});
+
+// The mac receipt's ORACLE, tested at the producer that writes it. Everything
+// above trusts build-provenance.json to attribute an UNVERSIONED .app.tar.gz; this
+// runs build-mac-cross.sh's real provenance block to prove the leg cannot finish
+// without one. It was best-effort until P-002 (a trailing `|| echo WARN ... non-fatal`),
+// which meant a COMPLETE mac build could end with no attestation at all -- and the
+// predicate above would then read those good bytes as a retryable absence.
+function runMacProvenanceBlock({ artifacts = ['one.dmg'], emitStatus = 0, emitter = true } = {}) {
+  const macCrossPath = process.env.PAPERCUSP_BUILD_MAC_CROSS_PATH
+    || path.join(root, 'bin', 'build-mac-cross.sh');
+  const macCrossSource = fs.readFileSync(macCrossPath, 'utf8');
+  const from = macCrossSource.indexOf('# ── Provenance (shared emitter');
+  const to = macCrossSource.indexOf('echo "===== mac cross-build done', from);
+  assert(from >= 0, 'build-mac-cross.sh is missing its provenance block marker');
+  assert(to > from, 'build-mac-cross.sh is missing the marker after its provenance block');
+
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-mac-provenance-'));
+  const calls = path.join(temp, 'calls.log');
+  if (emitter) {
+    fs.writeFileSync(
+      path.join(temp, 'emit-build-provenance.sh'),
+      ['#!/usr/bin/env bash',
+       'printf "emit:%s\\n" "$*" >> ' + JSON.stringify(calls),
+       'exit ' + emitStatus,
+       ''].join('\n'),
+      { mode: 0o755 },
+    );
+  }
+  const command = [
+    'set -euo pipefail',
+    'fail() { printf "fail:%s\\n" "$*" >> ' + JSON.stringify(calls) + '; exit 9; }',
+    'HERE=' + JSON.stringify(temp),
+    'ROOT=/unused',
+    'OUT_BUNDLE=/unused/bundle',
+    'VERSION=0.0.18',
+    'MAC_CERT_P12=',
+    'DARWIN_SIDECAR=/unused/sidecar',
+    'PROV_ARTIFACTS=(' + artifacts.map((a) => JSON.stringify(a)).join(' ') + ')',
+    macCrossSource.slice(from, to),
+  ].join('\n');
+  const result = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
+  const log = fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : '';
+  fs.rmSync(temp, { recursive: true, force: true });
+  return { result, log };
+}
+
+test('the mac leg cannot finish without the provenance its receipt reads as an oracle', () => {
+  // Control FIRST: the happy path must actually reach the emitter, or the three
+  // failure assertions below would pass on a block that never runs anything.
+  const ok = runMacProvenanceBlock();
+  assert.equal(ok.result.status, 0, ok.result.stderr || ok.result.stdout);
+  assert.match(ok.log, /^emit:/m, 'CONTROL: the provenance block never invoked the emitter');
+  assert.doesNotMatch(ok.log, /^fail:/m);
+
+  // A failing emit is fatal, not a warning.
+  const failed = runMacProvenanceBlock({ emitStatus: 1 });
+  assert.notEqual(failed.result.status, 0, 'a failed mac provenance emit did not fail the leg');
+  assert.match(failed.log, /^fail:mac provenance emit failed/m);
+
+  // A leg that packed nothing has nothing to attest; finishing would leave a
+  // "successful" mac build behind whose completeness nothing can establish.
+  const empty = runMacProvenanceBlock({ artifacts: [] });
+  assert.notEqual(empty.result.status, 0, 'an empty artifact set did not fail the leg');
+  assert.match(empty.log, /^fail:mac leg recorded no artifacts to attest/m);
+  assert.doesNotMatch(empty.log, /^emit:/m);
+
+  // The emitter runs via `bash`, so its executable bit never gated execution --
+  // testing -x only ever SKIPPED the emit silently on a checkout that worked.
+  const missing = runMacProvenanceBlock({ emitter: false });
+  assert.notEqual(missing.result.status, 0, 'a missing provenance emitter was silently skipped');
+});
+
+// The case that makes mac a different predicate from Windows rather than the same
+// one with different globs. Tauri leaves "<Product>.app.tar.gz" UNVERSIONED, so a
+// prior cut’s updater bundle is indistinguishable BY NAME from this cut’s, and a
+// count against the expected role set cannot see it at all: the set below is at or
+// under every expected count. Only the cross-count against THIS-version dmgs can.
+test('a stale unversioned mac updater bundle is contamination, never a retryable absence', () => {
+  const staleSurvivor = {
+    'build-provenance.json': '{}',
+    ...MAC_GUI,
+    // The server leg died before its dmg landed, but a PRIOR cut’s server updater
+    // bundle is still sitting in macos/. Two bundles, one this-version dmg.
+    'macos/Papercusp Server.app.tar.gz': 'stale-updater-from-a-previous-cut',
+    'macos/Papercusp Server.app.tar.gz.sig': 'stale-updater-sig',
+  };
+  assert.equal(
+    journalMacOutputShape(staleSurvivor, 'gui server'),
+    'present',
+    'more updater bundles than this-version dmgs must fail closed, not be retried with the stale bytes still in the expected set',
+  );
+
+  // And the control that keeps the assertion above from passing vacuously: the
+  // SAME shortfall with no stale bundle left behind really is a retryable absence.
+  const honestShortfall = { 'build-provenance.json': '{}', ...MAC_GUI };
+  assert.equal(journalMacOutputShape(honestShortfall, 'gui server'), 'absent');
 });
 
 function runRealManifestReceiptVerification({ tamper = false } = {}) {

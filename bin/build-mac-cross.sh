@@ -724,17 +724,34 @@ elif [[ $_artifact_rc -ne 0 ]]; then
 fi
 
 # ── Provenance (shared emitter, one schema across all legs). ──────────────────
-if [[ -x "$HERE/emit-build-provenance.sh" && ${#PROV_ARTIFACTS[@]} -gt 0 ]]; then
-  PROVENANCE_GIT_ROOT="$ROOT" \
-  PROVENANCE_SIGNED="$([[ -n "$MAC_CERT_P12" ]] && echo true || echo false)" \
-  PROVENANCE_SIDECAR_DIR="$DARWIN_SIDECAR" \
-    bash "$HERE/emit-build-provenance.sh" \
-      "$OUT_BUNDLE" \
-      "$VERSION" \
-      "${PAPERCUSP_BUILD_SHA:-}" \
-      false \
-      "${PROV_ARTIFACTS[@]}" || echo "WARN: provenance emit failed (non-fatal)"
-fi
+# MANDATORY, never best-effort (P-002 / plan D-006). The mac updater bundle
+# ("<Product>.app.tar.gz") is UNVERSIONED by tauri, so neither its filename nor a
+# count of it can distinguish THIS cut's bundle from a prior cut's; the
+# per-artifact sha256 in build-provenance.json is the only instrument that can.
+# That makes provenance the mac leg's completeness ORACLE rather than a
+# cross-check, and a leg that "succeeded" without it has produced bytes whose
+# completeness is unprovable: release_task_mac_outputs_absent then reads a
+# COMPLETE mac build as retryable-absent, and a committed receipt hard-fails the
+# cut instead of naming the real fault here. Linux (release-local.sh) and Windows
+# (build-windows-cross.sh) have always emitted fatally; mac was the lone
+# best-effort leg, which is exactly the leg that could least afford to be.
+#
+# Both former skip conditions are faults, not permissible no-ops: an empty
+# artifact set means the leg packed nothing to attest, and the emitter runs via
+# `bash` so its executable bit never gated execution — testing -x only ever
+# silently skipped the emit on a checkout that would have worked.
+[[ ${#PROV_ARTIFACTS[@]} -gt 0 ]] \
+  || fail "mac leg recorded no artifacts to attest — refusing to finish a build whose provenance would be empty"
+PROVENANCE_GIT_ROOT="$ROOT" \
+PROVENANCE_SIGNED="$([[ -n "$MAC_CERT_P12" ]] && echo true || echo false)" \
+PROVENANCE_SIDECAR_DIR="$DARWIN_SIDECAR" \
+  bash "$HERE/emit-build-provenance.sh" \
+    "$OUT_BUNDLE" \
+    "$VERSION" \
+    "${PAPERCUSP_BUILD_SHA:-}" \
+    false \
+    "${PROV_ARTIFACTS[@]}" \
+  || fail "mac provenance emit failed — the .app.tar.gz is unversioned, so without this record nothing can prove which cut these bytes belong to"
 
 echo "===== mac cross-build done $(date) — artifacts in $OUT_BUNDLE ====="
 ls -lh "$OUT_BUNDLE/macos/" 2>/dev/null || true
