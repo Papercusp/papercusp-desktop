@@ -29,10 +29,18 @@ const cp = require('node:child_process');
 // Every platform whose bytes this repo produces. A stage identity must name one
 // of these: an unknown or empty platform is a caller bug that would otherwise
 // mint a receipt keyed to nothing, which then collides with every other leg's.
+// A platform is the RECEIPT NAMESPACE: two entries here can never share a stage
+// identity, so this list exists to stop a typo silently minting a private one.
+// 'darwin-universal' is a genuine third darwin entry rather than a synonym for
+// either single-arch key: release-local.sh builds MAC_BUILD_TARGET=
+// universal-apple-darwin exclusively, emits "<Product>_<version>_
+// universal-apple-darwin.dmg", and a universal artifact's receipt must NOT be
+// interchangeable with a thin aarch64/x86_64 one that ships different bytes.
 const KNOWN_PLATFORMS = [
   'linux-x86_64',
   'linux-aarch64',
   'windows-x86_64',
+  'darwin-universal',
   'darwin-aarch64',
   'darwin-x86_64',
   'android',
