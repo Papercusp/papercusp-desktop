@@ -594,6 +594,12 @@ RELEASE_TASK_MANIFEST_REQUEST_ID=""
 RELEASE_TASK_MANIFEST_IDENTITY=""
 RELEASE_TASK_MANIFEST_SKIP=0
 RELEASE_TASK_LAST_LOOKUP_MS=0
+# P-003 clause 1 (D-008): the PRIOR committed receipt's artifact-set digest, read
+# back at begin. Empty when the stage has no prior receipt (a fresh `run`).
+RELEASE_TASK_LAST_ARTIFACT_SET=""
+RELEASE_TASK_BUILD_ARTIFACT_SET=""
+RELEASE_TASK_WIN_ARTIFACT_SET=""
+RELEASE_TASK_MAC_ARTIFACT_SET=""
 RELEASE_TASK_BUILD_PREPARATION_START_MS=""
 RELEASE_TASK_WIN_PREPARATION_START_MS=""
 RELEASE_TASK_MAC_PREPARATION_START_MS=""
@@ -758,6 +764,67 @@ else {
 NODE
 }
 
+# P-003 clause 1 (D-008). Pull ONE committed evidence ref back out of a journal
+# reply by prefix. A malformed payload RAISES rather than printing nothing: an
+# empty result legitimately means "this stage has no such ref yet" (a first run),
+# so letting a parse failure share that spelling would turn a broken reader into
+# a clean "nothing to verify against" — the exact false-negative this whole
+# clause exists to remove.
+release_task_json_evidence_ref() { # <json> <prefix> — prints the ref's value, or nothing
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+try:
+    payload = json.loads(sys.argv[1])
+except Exception as err:
+    raise SystemExit(f"release journal reply is not JSON: {err}")
+refs = payload.get("evidenceRefs")
+if refs is None:
+    raise SystemExit("release journal reply carries no evidenceRefs key")
+prefix = sys.argv[2]
+for ref in refs:
+    if isinstance(ref, str) and ref.startswith(prefix):
+        print(ref[len(prefix):])
+        break
+PY
+}
+
+# P-003 clause 1 (D-008) / R-2 "output paths and hashes". A digest over the
+# ARTIFACT SET this leg produced, taken from build-provenance.json — which
+# already records every artifact's name, size and sha256 and is written
+# atomically (emit-build-provenance.sh:646,652).
+#
+# It digests ONLY (name, bytes, sha256) and deliberately excludes builtAtUtc,
+# mtime and sig presence. That exclusion is what makes the digest comparable at
+# all: a reuse RE-EMITS provenance (release_task_leg_commit's own note), so a
+# digest of the whole file would differ on every resume and could never be used
+# to verify anything. Identical artifact bytes therefore yield an identical
+# digest across cuts, which is precisely the property a reuse check needs.
+release_task_leg_output_digest() { # <bundle-dir>
+  python3 - "$1/build-provenance.json" <<'PY'
+import hashlib, json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+try:
+    manifest = json.loads(path.read_text())
+except FileNotFoundError:
+    raise SystemExit(f"no build provenance to digest: {path}")
+except Exception as err:
+    raise SystemExit(f"build provenance is unreadable: {err}")
+artifacts = manifest.get("artifacts")
+if not isinstance(artifacts, list) or not artifacts:
+    raise SystemExit(f"build provenance names no artifacts: {path}")
+rows = []
+for entry in artifacts:
+    name, digest, size = entry.get("name"), entry.get("sha256"), entry.get("bytes")
+    if not name or not digest:
+        raise SystemExit(f"artifact entry lacks name/sha256: {entry!r}")
+    rows.append((str(name), str(digest), str(size)))
+outer = hashlib.sha256()
+for name, digest, size in sorted(rows):
+    outer.update(name.encode() + b"\0" + digest.encode() + b"\0" + size.encode() + b"\0")
+print(outer.hexdigest())
+PY
+}
+
 release_task_begin_stage() { # <stage> <identity>; writes RELEASE_TASK_LAST_*
   local stage="$1" identity="$2" result
   release_task_assert_credential_fresh || return $?
@@ -768,6 +835,10 @@ release_task_begin_stage() { # <stage> <identity>; writes RELEASE_TASK_LAST_*
   RELEASE_TASK_LAST_ACTION="$(release_task_json_field "$result" action)" || return $?
   RELEASE_TASK_LAST_REQUEST_ID="$(release_task_json_field "$result" requestIdentity 1)" || return $?
   RELEASE_TASK_LAST_LOOKUP_MS="$(release_task_json_number_field "$result" lookupElapsedMs 0)" || return $?
+  RELEASE_TASK_LAST_ARTIFACT_SET="$(release_task_json_evidence_ref "$result" 'artifact-set:sha256:')" || {
+    echo "ERROR: could not read the prior artifact-set digest for $stage." >&2
+    return 1
+  }
   case "$RELEASE_TASK_LAST_ACTION" in
     run|reuse|reconcile|refused) ;;
     *) echo "ERROR: release journal returned unknown action '$RELEASE_TASK_LAST_ACTION' for $stage." >&2; return 2 ;;
@@ -931,6 +1002,7 @@ release_task_leg_start() { # <leg>
   release_task_begin_stage "$stage" "$identity" || return $?
   release_task_leg_set "$leg" ACTION "$RELEASE_TASK_LAST_ACTION"
   release_task_leg_set "$leg" REQUEST_ID "$RELEASE_TASK_LAST_REQUEST_ID"
+  release_task_leg_set "$leg" ARTIFACT_SET "$RELEASE_TASK_LAST_ARTIFACT_SET"
   case "$RELEASE_TASK_LAST_ACTION" in
     run) ;;
     reuse|reconcile)
@@ -1100,6 +1172,7 @@ release_task_verify_mac_artifacts() { # <mac-bundle-dir> <reused:0|1>
 release_task_leg_commit() { # <leg> <bundle-dir> <reused:0|1>
   local leg="${1:-}" bundle="$2" reused="$3"
   local provenance_sha result verify_started verification_ms decision action stage prep_start
+  local committed_set observed_set output_set
   [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
   release_task_leg_assert_known "$leg" || return $?
   stage="release.build.$leg"
@@ -1113,6 +1186,22 @@ release_task_leg_commit() { # <leg> <bundle-dir> <reused:0|1>
       # use these bytes.
       verify_started="$(release_task_now_ms)" || return $?
       "release_task_verify_${leg}_artifacts" "$bundle" "$reused" || return $?
+      # P-003 clause 1 (D-008). The checks above re-derive trust from the CURRENT
+      # tree — cardinality, provenance, signature — so a different-but-internally
+      # -consistent artifact set passes every one of them. This is the only check
+      # that asks the question reuse actually turns on: are these the same BYTES
+      # the receipt committed? A receipt with no digest predates the field and
+      # cannot answer, so it fails closed rather than reusing unverifiable bytes.
+      committed_set="$(release_task_leg_get "$leg" ARTIFACT_SET)"
+      if [[ -z "$committed_set" ]]; then
+        echo "ERROR: $stage has a committed receipt with no artifact-set digest; it cannot prove these bytes are the ones it accepted. Start a new release operation." >&2
+        return 1
+      fi
+      observed_set="$(release_task_leg_output_digest "$bundle")" || return $?
+      if [[ "$observed_set" != "$committed_set" ]]; then
+        echo "ERROR: $stage bytes are NOT the ones its receipt committed (receipt $committed_set, on disk $observed_set); refusing to reuse them." >&2
+        return 1
+      fi
       verification_ms="$(release_task_elapsed_ms "$verify_started")" || return $?
       RELEASE_TASK_PREPARATION_MS="$(release_task_elapsed_ms "$prep_start")" || return $?
       release_task_emit_timing "$stage" verified-reuse "$verification_ms"
@@ -1132,9 +1221,18 @@ release_task_leg_commit() { # <leg> <bundle-dir> <reused:0|1>
     return 1
   }
   provenance_sha="$(sha256sum "$bundle/build-provenance.json" | cut -d' ' -f1)"
+  # P-003 clause 1 (D-008) / R-2. `build-provenance:sha256:` digests the
+  # provenance FILE, which a reuse re-emits — so it can never be compared against
+  # anything. This is the re-emission-stable digest of the artifact set itself,
+  # and it is what the reuse branch above checks the bytes against.
+  output_set="$(release_task_leg_output_digest "$bundle")" || {
+    echo "ERROR: could not digest the $leg artifact set; refusing to commit a receipt that cannot be verified later." >&2
+    return 1
+  }
   if ! result="$(release_task_journal_call commit "$stage" "$(release_task_leg_get "$leg" IDENTITY)" \
       "$(release_task_leg_get "$leg" REQUEST_ID)" \
       "build-provenance:sha256:$provenance_sha" \
+      "artifact-set:sha256:$output_set" \
       "source-gitlink:$PROVENANCE_SOURCE_GIT_HEAD" \
       "artifact-set:hash-signature-verified" \
       "audit-reuse-expires:$RELEASE_TASK_REUSE_EXPIRES_AT")"; then
