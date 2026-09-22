@@ -34,6 +34,11 @@ const releaseTaskJournalHarness = sliceBetween(
   '# ── P-005: restart-safe release stages',
   '# ── end P-005 release-task journal helpers',
 );
+// P-003 clause 3 (D-008): the seed sparse-to-full fallback's two decisions.
+const seedFallbackHarness = sliceBetween(
+  '# P-003 clause 3 (D-008). The fallback',
+  'cut_release_seed() {',
+);
 const cutStartHarness = sliceBetween(
   '# EI-20551860898590077: bind every artifact',
   'echo "==> bumping version in manifests"',
@@ -634,6 +639,72 @@ test('a bundle whose provenance names no artifacts cannot mint a receipt', () =>
   });
   assert.notEqual(result.status, 0, 'a receipt was committed for artifacts that cannot be digested');
   assert.match(result.stderr, /names no artifacts/);
+});
+
+// ── P-003 clause 3 (D-008): the seed sparse-to-full fallback ─────────────────
+// Ported from ensure-release-seed.sh's P-014/D-012 recovery, which this script's
+// duplicate cut never had. The decisions are tested rather than the cut, which
+// shells out to `npx tsx`.
+function runSeedFallbackProbe(script) {
+  return spawnSync('bash', ['-c', [seedFallbackHarness, script].join('\n')], { encoding: 'utf8' });
+}
+
+test('only a genuine sparse refusal triggers the full-cut retry', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-seed-fallback-'));
+  const refused = path.join(tmp, 'refused.log');
+  const other = path.join(tmp, 'other.log');
+  fs.writeFileSync(refused, 'cut-seed: --sparse requires a fresh head snapshot\n');
+  fs.writeFileSync(other, 'ERROR: the operator database refused the connection\n');
+  // 0 = the predicate fired (shell true) and the cut will be retried as full.
+  const cases = [
+    [`1 1 ${JSON.stringify(refused)}`, 0, 'a refused sparse cut must retry as a full cut'],
+    [`0 1 ${JSON.stringify(refused)}`, 1, 'a SUCCESSFUL sparse cut must never be retried'],
+    [`1 0 ${JSON.stringify(refused)}`, 1, 'no --sparse was requested, so there is nothing to fall back from'],
+    [`1 1 ${JSON.stringify(other)}`, 1, 'an unrelated failure must surface, not be retried as a sparse refusal'],
+  ];
+  for (const [args, want, why] of cases) {
+    assert.equal(runSeedFallbackProbe(`release_seed_sparse_refused ${args}`).status, want, why);
+  }
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('the full-cut fallback skips force-backfill only when the refused attempt completed its refresh', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-seed-fallback-args-'));
+  const cases = [
+    ['[cut-seed] refreshed corestore source\n', '--no-force-backfill', 'a completed refresh must not be re-enqueued'],
+    ['[cut-seed] refreshed via the live operator\n', '--no-force-backfill', 'the live-operator refresh wording counts too'],
+    ['[cut-seed] starting\n', '', 'without proof of refresh the safe default is to force-backfill'],
+  ];
+  for (const [body, want, why] of cases) {
+    const log = path.join(tmp, `${Buffer.from(body).toString('hex').slice(0, 12)}.log`);
+    fs.writeFileSync(log, body);
+    const r = runSeedFallbackProbe(`release_seed_fallback_args ${JSON.stringify(log)}`);
+    assert.equal(r.status, 0, `the args builder must never fail the cut: ${r.stderr}`);
+    assert.equal(r.stdout.trim(), want, why);
+  }
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('the release seed cut fails the release instead of shipping a stale or seedless bundle', () => {
+  // The sibling this fallback came from exits 0 and ships seedless on a failed
+  // cut (ensure-release-seed.sh:299-310). That tolerance is right for a dev
+  // bundle and wrong for a release, and is why this was ported rather than
+  // converged onto that script — so assert the posture that makes them differ.
+  const source = fs.readFileSync(path.join(root, 'bin', 'release-local.sh'), 'utf8');
+  const body = source.slice(source.indexOf('cut_release_seed() {'));
+  const fn = body.slice(0, body.indexOf('\n}\n'));
+  assert.match(fn, /installer seed cut failed \(rc=\$cut_rc\); refusing to continue the release cut/);
+  // Match CODE, not prose: the comment explaining this posture necessarily
+  // contains the very words the negative assertion looks for, so an unstripped
+  // match fails on the explanation rather than on a real tolerance path — the
+  // self-match trap, in static form.
+  const code = fn
+    .split('\n')
+    .filter((line) => !/^\s*#/.test(line))
+    .join('\n');
+  assert.doesNotMatch(code, /ships seedless|cold-join|PAPERCUSP_SEED_REQUIRED/);
+  // Control: the stripper must not have eaten the code it is meant to judge.
+  assert.match(code, /return 1/, 'comment-stripping removed the function body — this check measured nothing');
 });
 
 test('every registered release leg has a full journal lifecycle wired into the cutter', () => {

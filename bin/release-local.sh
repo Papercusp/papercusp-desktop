@@ -2083,6 +2083,26 @@ else
   exit 1
 fi
 
+# P-003 clause 3 (D-008). The fallback's two DECISIONS, split out as pure
+# predicates over (rc, sparse-requested, cut log). The cut itself shells out to
+# `npx tsx` inside a subshell, so logic left inline with it is reachable only by
+# running a real seed cut — which is why the sibling's fallback has never had a
+# test. These are the parts worth testing, and they are testable in isolation.
+release_seed_sparse_refused() { # <rc> <sparse-arg-count> <cut-log>
+  [[ "${1:-0}" -ne 0 && "${2:-0}" -gt 0 ]] || return 1
+  grep -q -- '--sparse requires a fresh head snapshot' "${3:-/dev/null}"
+}
+
+# --no-force-backfill ONLY when the refused attempt proves its refresh completed.
+# Re-enqueueing the whole corpus otherwise would recreate the concurrent-cut
+# incident this recovery exists to handle; forcing it when refresh did NOT
+# complete is the safe default, so silence here means "force-backfill".
+release_seed_fallback_args() { # <cut-log> — prints the extra args, or nothing
+  grep -Eq '\[cut-seed\] refreshed (corestore source|via the live operator)' "${1:-/dev/null}" \
+    && printf '%s\n' --no-force-backfill
+  return 0
+}
+
 cut_release_seed() {
   if [[ "${PAPERCUSP_SKIP_SEED_CUT:-0}" == "1" ]]; then
     echo "==> seed: PAPERCUSP_SKIP_SEED_CUT=1 — leaving src-tauri/seed as-is"
@@ -2157,6 +2177,22 @@ cut_release_seed() {
     depth_args+=(--depth "$seed_depth")
   fi
   echo "==> cutting installer seed (hive=$seed_hive rev=$seed_rev depth=${seed_depth:-full} corestore=${PAPERCUSP_SEED_CORESTORE:-1} reuse=$seed_reuse sparse=$([[ ${#sparse_args[@]} -gt 0 ]] && echo 1 || echo 0))"
+  # ── P-003 clause 3 (D-008): the sparse-to-full fallback ──────────────────────
+  # PORTED from ensure-release-seed.sh:230-297 (P-014 / D-012), which has carried
+  # this recovery since the 2026-07-21 release shipped 461,475 blocks / 1.9 GB
+  # labelled sparse. This script kept its own duplicate of the cut and never got
+  # the fallback, so a `--sparse` refusal aborted the whole release cut here while
+  # the sibling recovered from it.
+  #
+  # NOT converged onto that script (revising D-008's preference on measurement):
+  # ensure-release-seed.sh EXITS 0 on a failed cut and will ship seedless
+  # (:299-310). That tolerance is right for a dev bundle and wrong for a release,
+  # so calling it would quietly widen what a release cut may publish. The cut
+  # becomes a FUNCTION for the same reason the sibling did — so the fallback can
+  # re-run it verbatim with a different flag set.
+  local cut_log cut_rc fallback_args errexit_was
+  cut_log="$(mktemp -t papercusp-release-seed-cut-XXXXXX.log)"
+  run_seed_cut() { # <extra cut-seed-cli args...>
   (
     cd "$operator_dir"
     OPATH="$PATH"
@@ -2179,9 +2215,52 @@ cut_release_seed() {
         --rev "$seed_rev" \
         "${depth_args[@]}" \
         "${core_args[@]}" \
-        "${sparse_args[@]}" \
-        "${emit_args[@]}"
-  )
+        "${emit_args[@]}" \
+        "$@"
+  ) 2>&1 | tee -a "$cut_log"
+  }
+  # errexit off ONLY across the attempts — a refused sparse cut is a state this
+  # function RECOVERS from, not a reason to abort the release. Restored before
+  # returning, or every later stage of the cut would silently lose errexit.
+  # `pipefail` deliberately stays ON, so $? after the tee pipeline is the CLI's
+  # exit code rather than tee's (the same property ensure-release-seed.sh relies on).
+  errexit_was=0
+  [[ $- == *e* ]] && errexit_was=1
+  set +e
+  run_seed_cut "${sparse_args[@]}"
+  cut_rc=$?
+
+  # cut-seed-cli REFUSES --sparse when it cannot append a fresh head __snapshot__
+  # (only a writable/quiesced open can). Before that refusal existed the cut
+  # "succeeded" and silently shipped the FULL core. Retry ONCE as a full cut: the
+  # release still gets a CURRENT, honestly-labelled seed, and the size cost is
+  # stated out loud with its remedy instead of hidden behind a warn.
+  if release_seed_sparse_refused "$cut_rc" "${#sparse_args[@]}" "$cut_log"; then
+    echo "WARN: SPARSE CUT REFUSED — the live operator holds the store, so no fresh head" >&2
+    echo "WARN: snapshot could be appended, and a sparse cut without one silently ships the FULL core." >&2
+    echo "WARN: retrying as a FULL cut: the bundle will carry the ENTIRE own-log history (~2GB)." >&2
+    echo "WARN: to ship a genuinely sparse seed, quiesce the operator on this box and re-run." >&2
+    # The refused attempt may already have completed the expensive refresh/drain
+    # before the sparse-only step refused. Re-enqueueing the whole corpus would
+    # recreate the concurrent-cut incident this recovery exists to handle — so
+    # resume without force-backfill ONLY when the log proves refresh completed.
+    mapfile -t fallback_args < <(release_seed_fallback_args "$cut_log")
+    if [[ ${#fallback_args[@]} -gt 0 ]]; then
+      echo "WARN: first sparse attempt completed refresh; full fallback will use --no-force-backfill." >&2
+    else
+      echo "WARN: first sparse attempt did not log refresh completion; full fallback will force-backfill." >&2
+    fi
+    run_seed_cut "${fallback_args[@]}"
+    cut_rc=$?
+  fi
+  (( errexit_was )) && set -e
+  rm -f "$cut_log"
+  # Unlike the dev-bundle sibling, a release that cannot cut a seed FAILS. It
+  # never silently falls back to the stale committed seed or ships seedless.
+  if [[ "$cut_rc" -ne 0 ]]; then
+    echo "ERROR: installer seed cut failed (rc=$cut_rc); refusing to continue the release cut." >&2
+    return 1
+  fi
 }
 
 cut_release_seed
