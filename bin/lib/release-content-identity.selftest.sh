@@ -59,6 +59,11 @@ printf '#!/usr/bin/env bash\n# models\n' > "$D/bin/lib/transformers-models.sh"
 printf '#!/usr/bin/env python3\n# scanner\n' > "$D/bin/audit-release-bundle.py"
 printf '#!/usr/bin/env bash\n# provenance\n' > "$D/bin/verify-provenance.sh"
 printf '// freshness\n' > "$D/bin/check-sidecar-freshness.js"
+# P-003 clause 4 (D-008): the compression producers are policy inputs, because
+# their PRESETS are hardcoded (`zstd --long=27`, `xz -9`) and only a fingerprint
+# of the producer can notice those change.
+printf '#!/usr/bin/env bash\n# source packager: zstd --long=27\n' > "$D/bin/stage-source-tree.sh"
+printf '#!/usr/bin/env bash\n# deb compressor: xz -9\n' > "$D/bin/repack-deb-xz.sh"
 
 identity() { # <platform> — prints the identity JSON, or nothing on failure
   node "$BUILDER" "$W" "$D" "$@" 2>/dev/null
@@ -149,9 +154,88 @@ fi
 
 # 8) the schema version must be the one the journal's receipts were minted under.
 SCHEMA="$(field "$LINUX" 'i.schemaVersion')"
-[[ "$SCHEMA" == "3" ]] \
-  && good "schemaVersion is 3" \
-  || bad "schemaVersion is '$SCHEMA', expected 3 — bump it deliberately when the shape changes"
+[[ "$SCHEMA" == "4" ]] \
+  && good "schemaVersion is 4" \
+  || bad "schemaVersion is '$SCHEMA', expected 4 — bump it deliberately when the shape changes"
+
+# ── P-003 clause 4 (D-008): compression policy is part of the reuse key ───────
+# R-3 requires package/compression outputs to be keyed by content AND policy.
+# The policy arrives in two forms and each needs its own mechanism, so each is
+# checked separately — one passing does not imply the other.
+
+# 9) the env-TUNABLE half. Tuning a knob changes the produced BYTES while every
+#    other input stays identical, so if this does not move the identity, a
+#    package compressed under one policy satisfies a request for another.
+for knob in PAPERCUSP_REUSE_SOURCE_ZSTD_LEVEL:19 \
+            PAPERCUSP_REUSE_DEB_XZ_THREADS:8 \
+            PAPERCUSP_REUSE_DEB_XZ_MEMLIMIT:8GiB; do
+  var="${knob%%:*}"; val="${knob#*:}"
+  TUNED="$(env "$var=$val" node "$BUILDER" "$W" "$D" linux-x86_64 2>/dev/null)"
+  if [[ -z "$TUNED" ]]; then
+    bad "CONTROL: the identity failed to build with $var=$val — this check measured nothing"
+  elif [[ "$TUNED" == "$LINUX" ]]; then
+    bad "$var did NOT change the identity — differently-compressed bytes would be reused"
+  else
+    good "$var=$val invalidates the identity"
+  fi
+done
+
+# 10) the HARDCODED half. The presets live in the producers' own text, so only a
+#     fingerprint of those files can catch an edit to them.
+printf '#!/usr/bin/env bash\n# deb compressor: xz -6\n' > "$D/bin/repack-deb-xz.sh"
+PRESET="$(identity linux-x86_64)"
+if [[ -z "$PRESET" ]]; then
+  bad "CONTROL: the identity failed to build after a compressor edit — check 10 measured nothing"
+elif [[ "$PRESET" == "$LINUX" ]]; then
+  bad "editing the deb compressor did NOT change the identity — a preset change would survive in stale receipts"
+else
+  good "a compression-producer edit invalidates the identity"
+fi
+printf '#!/usr/bin/env bash\n# deb compressor: xz -9\n' > "$D/bin/repack-deb-xz.sh"
+
+# 11) the recorded defaults must be the ones that would actually RUN. A default
+#     that drifts from its producer records a policy no build ever used, which is
+#     worse than recording none — it reads as evidence while being fiction.
+#     These mirror repack-deb-xz.sh:23-24 and stage-source-tree.sh:385.
+for pair in compression.sourceZstdLevel:6 compression.debXzThreads:4 compression.debXzMemoryLimit:4GiB; do
+  node_path="${pair%:*}"; want="${pair##*:}"
+  got="$(field "$LINUX" "i.$node_path")"
+  [[ "$got" == "$want" ]] \
+    && good "$node_path defaults to $want (mirrors its producer)" \
+    || bad "$node_path is '$got', expected '$want' — the recorded policy is not the one that runs"
+done
+
+# 12) DRIFT PIN. Check 11 asserts LITERALS; on its own "mirrors its producer" is
+#     a COMMENT, not a fact. This proves those literals are what the producers
+#     actually default to AND that release-local.sh relays the same ones — so a
+#     producer retuned to `xz -T8` fails here instead of leaving every receipt
+#     quietly claiming 4. (Derived-truth ladder: the duplicate is unavoidable
+#     across three languages, so it is PINNED rather than hand-maintained.)
+#     An empty extraction is a BROKEN INSTRUMENT, never a pass — it would compare
+#     "" against "" on both sides and report agreement.
+producer_default() { # <file> <VAR> — prints VAR's ${VAR:-default} value
+  awk -v v="$2" 'match($0, v ":-[^}\"]*") {
+    print substr($0, RSTART + length(v) + 2, RLENGTH - length(v) - 2); exit
+  }' "$1" 2>/dev/null
+}
+for spec in "stage-source-tree.sh:PAPERCUSP_SOURCE_ZSTD_LEVEL:6" \
+            "repack-deb-xz.sh:PAPERCUSP_XZ_THREADS:4" \
+            "repack-deb-xz.sh:PAPERCUSP_XZ_MEMORY_LIMIT:4GiB"; do
+  file="${spec%%:*}"; rest="${spec#*:}"; var="${rest%%:*}"; want="${rest##*:}"
+  got="$(producer_default "$HERE/../$file" "$var")"
+  relay="$(producer_default "$HERE/../release-local.sh" "$var")"
+  if [[ -z "$got" ]]; then
+    bad "PIN CONTROL: could not read $var's default out of $file — this check measured nothing"
+  elif [[ -z "$relay" ]]; then
+    bad "PIN CONTROL: release-local.sh does not relay $var at all — the identity cannot see this policy"
+  elif [[ "$got" != "$want" ]]; then
+    bad "$file defaults $var to '$got' but the identity records '$want' — the recorded policy is fiction"
+  elif [[ "$relay" != "$want" ]]; then
+    bad "release-local.sh relays $var as '$relay', not the producer's '$want'"
+  else
+    good "$var default '$want' agrees across $file, release-local.sh and the identity"
+  fi
+done
 
 echo
 if [[ "$FAILS" -eq 0 ]]; then
