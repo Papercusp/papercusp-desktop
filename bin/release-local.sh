@@ -2426,9 +2426,10 @@ if [[ "$WITH_ARM64" == "1" ]]; then
   for deb in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/deb/*_"$VERSION"_*.deb; do
     [[ -f "$deb" ]] && PAPERCUSP_TAURI_CLI_VERSION="$TAURI_CLI_VERSION" bash "$ROOT/bin/repack-deb-xz.sh" "$deb"
   done
-  for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*_"$VERSION"_*; do
-    [[ -f "$f" ]] && ARTIFACTS+=("$f")
-  done
+  # NOTE: collection deliberately does NOT happen here. The canonical collector
+  # below resets ARTIFACTS=() post-join, so an append at this point is discarded
+  # — arm64 was the only leg appending before that reset, and its entries never
+  # survived. The single live arm64 collection is in that collector block.
 fi
 if [[ "$WITH_MAC" == "1" && "${PAPERCUSP_REUSE_MAC:-0}" == "1" ]]; then
   # EMERGENCY SALVAGE PATH (last resort — NOT first-class; see EI-12853). REUSE the

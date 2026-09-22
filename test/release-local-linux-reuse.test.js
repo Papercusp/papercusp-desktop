@@ -547,6 +547,10 @@ function runLinuxContentIdentity(mutator = () => {}) {
     'set -euo pipefail',
     `MONOREPO=${JSON.stringify(workspace)}`,
     `ROOT=${JSON.stringify(desktop)}`,
+    // The identity builder is no longer an inline heredoc: it execs the real
+    // bin/lib/release-content-identity.js, so this must be the REAL bin dir
+    // (MONOREPO/ROOT stay fixtures). Pointing it at a fixture would test nothing.
+    `ORCHESTRATOR_HERE=${JSON.stringify(path.join(root, 'bin'))}`,
     'PAPERCUSP_BUILD_ROLES=gui',
     'TAURI_CLI_VERSION=2.11.0',
     'PAPERCUSP_RELEASE_HOST=https://updates.invalid/release-key',
