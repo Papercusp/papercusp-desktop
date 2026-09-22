@@ -98,6 +98,16 @@ function buildContentIdentity({ workspace, desktop, platform, env = process.env 
     identityScanner: path.join(desktop, 'bin', 'audit-release-bundle.py'),
     provenanceVerifier: path.join(desktop, 'bin', 'verify-provenance.sh'),
     freshnessVerifier: path.join(desktop, 'bin', 'check-sidecar-freshness.js'),
+    // P-003 clause 4 (D-008). The compressed PACKAGE stages carry compression
+    // policy in TWO forms and each needs a different mechanism. The presets are
+    // HARDCODED in these producers — `zstd --long=27` (stage-source-tree.sh) and
+    // `xz -9` (repack-deb-xz.sh) — so nothing but a fingerprint of the producer
+    // itself can notice them changing; that is exactly what this policy-file set
+    // already does for the provenance/identity gates above. The env-TUNABLE half
+    // (levels, threads, memlimit) cannot be caught this way, because tuning a knob
+    // leaves these bytes identical — it is keyed separately under `compression`.
+    sourcePackager: path.join(desktop, 'bin', 'stage-source-tree.sh'),
+    debCompressor: path.join(desktop, 'bin', 'repack-deb-xz.sh'),
     // This builder DEFINES what a stage identity means, so a change to it must
     // invalidate receipts minted under the old definition. Without the
     // self-fingerprint, editing the policy set below (adding a gate, dropping
@@ -118,7 +128,11 @@ function buildContentIdentity({ workspace, desktop, platform, env = process.env 
     // self-fingerprint. Both change the hash of an otherwise-identical stage,
     // so the version bump is what makes that invalidation deliberate and
     // legible rather than an unexplained cache miss.
-    schemaVersion: 3,
+    // v4 adds `compression` (P-003 clause 4, D-008). Editing this file already
+    // busts every prior receipt via the identityBuilder self-fingerprint, so the
+    // bump buys legibility rather than invalidation: it makes the one-time miss
+    // read as a deliberate policy widening instead of an unexplained cache miss.
+    schemaVersion: 4,
     platform,
     dependencies: {
       generation: dependency.identity,
@@ -147,6 +161,26 @@ function buildContentIdentity({ workspace, desktop, platform, env = process.env 
       rustflags: env.PAPERCUSP_REUSE_RUSTFLAGS || '',
       channelConfig: env.PAPERCUSP_REUSE_CHANNEL_CONFIG || '',
       releaseHostSha256: sha(env.PAPERCUSP_REUSE_RELEASE_HOST || ''),
+    },
+    // P-003 clause 4 (D-008) — the env-TUNABLE half of compression policy.
+    // R-3 requires package/compression outputs to be keyed by "content and policy
+    // identity", and the Design section names the xz preset specifically. Tuning
+    // any knob below changes the produced BYTES while leaving every other field
+    // here identical, so without this block a package compressed under one policy
+    // satisfies a request for another.
+    //
+    // These defaults MIRROR the producers and are pinned to them by
+    // release-local-linux-reuse.test.js — a default that drifts from its producer
+    // would record a policy that never ran, which is worse than recording none.
+    //
+    // Keying on these cannot make reuse host-specific: repack-deb-xz.sh:18-24
+    // deliberately fixes threads/memlimit ("make its default resource cost
+    // independent of host size") instead of scaling to host cores, so they are
+    // policy an operator tunes, never facts about the machine.
+    compression: {
+      sourceZstdLevel: Number(env.PAPERCUSP_REUSE_SOURCE_ZSTD_LEVEL || 6),
+      debXzThreads: Number(env.PAPERCUSP_REUSE_DEB_XZ_THREADS || 4),
+      debXzMemoryLimit: env.PAPERCUSP_REUSE_DEB_XZ_MEMLIMIT || '4GiB',
     },
     policy: {
       files: policies,
