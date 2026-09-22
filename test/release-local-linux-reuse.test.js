@@ -696,6 +696,81 @@ test('partial Linux output is retryable, while complete or surplus shape reaches
   );
 });
 
+function journalWindowsOutputShape(files, roles) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-windows-shape-'));
+  for (const [relative, value] of Object.entries(files)) {
+    const target = path.join(temp, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, value);
+  }
+  const command = [
+    'set -euo pipefail',
+    'ORCHESTRATOR_HERE=/unused',
+    'MONOREPO=/unused',
+    'VERSION=0.0.18',
+    'CHANNEL=nightly',
+    'TAG=desktop-v0.0.18-nightly',
+    `PAPERCUSP_BUILD_ROLES=${JSON.stringify(roles)}`,
+    'RELEASE_TASK_JOURNAL_ENABLED=0',
+    releaseTaskJournalHarness,
+    `if release_task_windows_outputs_absent ${JSON.stringify(temp)}; then printf 'absent\\n'; else printf 'present\\n'; fi`,
+  ].join('\n');
+  const result = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
+  fs.rmSync(temp, { recursive: true, force: true });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return result.stdout.trim();
+}
+
+test('the Windows expected set is one signed installer per role, excluding DiskSpan slices and the normalized zip', () => {
+  const guiOnly = {
+    'build-provenance.json': '{}',
+    'Papercusp GUI_0.0.18_x64-setup.exe': 'setup',
+    'Papercusp GUI_0.0.18_x64-setup.exe.sig': 'setup-sig',
+  };
+  assert.equal(journalWindowsOutputShape(guiOnly, 'gui'), 'present');
+  // The SAME bytes are one role short once the cut asks for both roles: the
+  // expected count is derived from PAPERCUSP_BUILD_ROLES, never from what landed.
+  assert.equal(journalWindowsOutputShape(guiOnly, 'gui server'), 'absent');
+
+  const both = {
+    ...guiOnly,
+    'Papercusp Server_0.0.18_x64-setup.exe': 'setup',
+    'Papercusp Server_0.0.18_x64-setup.exe.sig': 'setup-sig',
+  };
+  assert.equal(journalWindowsOutputShape(both, 'gui server'), 'present');
+
+  // An installer whose updater signature never landed is incomplete. Shipping it
+  // is what build-windows-cross.sh's own ".sig" gate refuses, so a receipt must
+  // not be able to pass over it.
+  const unsigned = { ...both };
+  delete unsigned['Papercusp Server_0.0.18_x64-setup.exe.sig'];
+  assert.equal(journalWindowsOutputShape(unsigned, 'gui server'), 'absent');
+
+  // The spanned-Server shape. papercusp_normalize_spanned_server writes the zip
+  // and leaves the stub + ".bin" slices on disk, so a normalized cut must still
+  // read as exactly complete rather than as surplus contamination.
+  const normalized = {
+    ...both,
+    'Papercusp Server_0.0.18_x64-setup-1.bin': 'slice',
+    'Papercusp Server_0.0.18_x64-setup-2.bin': 'slice',
+    'Papercusp Server_0.0.18_x64-setup.zip': 'zip',
+    'Papercusp Server_0.0.18_x64-setup.zip.sig': 'zip-sig',
+  };
+  assert.equal(journalWindowsOutputShape(normalized, 'gui server'), 'present');
+
+  // Surplus is contamination from another lane, never "no completed result": it
+  // must reach the strict verifier, with or without provenance.
+  const surplus = { ...both, 'Papercusp GUI (stale)_0.0.18_x64-setup.exe': 'surplus' };
+  assert.equal(journalWindowsOutputShape(surplus, 'gui server'), 'present');
+  const surplusWithoutProvenance = { ...surplus };
+  delete surplusWithoutProvenance['build-provenance.json'];
+  assert.equal(
+    journalWindowsOutputShape(surplusWithoutProvenance, 'gui server'),
+    'present',
+    'missing provenance cannot make a surplus same-version set retryable',
+  );
+});
+
 function runRealManifestReceiptVerification({ tamper = false } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-manifest-receipt-'));
   const artifact = path.join(temp, 'Papercusp_GUI_0.0.18_amd64.AppImage');
