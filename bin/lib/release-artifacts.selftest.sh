@@ -1025,6 +1025,74 @@ else
 fi
 
 echo
+echo "retention lease TTL (WI-10002441)"
+# A lease with expires_ns=0 is PERMANENT. The release workflow wrote nothing but
+# expires_ns=0 for its whole life, so every cut pinned its target slot forever
+# (lease-desktop-v0.0.19-alpha held dev2 from 2026-09-07). These prove the bounded
+# path works AND that an elapsed lease actually frees the path again.
+__pc_ttl_tag="desktop-v0.0.0-selftest-ttl-$$"
+__pc_ttl_file="$WORK/ttl-subject.txt"
+: > "$__pc_ttl_file"
+
+( unset PAPERCUSP_RELEASE_RETENTION_TTL_SEC
+  release_artifacts_retention_lease_acquire "$__pc_ttl_tag" "$__pc_ttl_file" ) >/dev/null
+if grep -qx 'expires_ns=0' "$(release_artifacts_retention_lease_path "$__pc_ttl_tag")"; then
+  ok "no TTL still yields a permanent lease (the documented default is unchanged)"
+else
+  bad "the library default changed — expires_ns should be 0 when no TTL is set"
+fi
+
+rm -f "$(release_artifacts_retention_lease_path "$__pc_ttl_tag")"
+( export PAPERCUSP_RELEASE_RETENTION_TTL_SEC=3600
+  release_artifacts_retention_lease_acquire "$__pc_ttl_tag" "$__pc_ttl_file" ) >/dev/null
+if grep -qx 'expires_ns=0' "$(release_artifacts_retention_lease_path "$__pc_ttl_tag")"; then
+  bad "a TTL of 3600 still wrote a PERMANENT lease (expires_ns=0)"
+else
+  ok "a TTL yields a bounded lease (expires_ns > 0)"
+fi
+
+# The payoff: an elapsed lease must stop pinning its path, or a TTL buys nothing.
+__pc_ttl_expired="$(release_artifacts_retention_lease_path "${__pc_ttl_tag}-expired")"
+{
+  printf 'schema=papercusp-release-retention/v1\n'
+  printf 'tag=%s-expired\n' "$__pc_ttl_tag"
+  printf 'created_ns=1\n'
+  printf 'expires_ns=2\n'
+  printf 'path=%s\n' "$__pc_ttl_file"
+} > "$__pc_ttl_expired"
+rm -f "$(release_artifacts_retention_lease_path "$__pc_ttl_tag")"
+if release_artifacts_retention_path_is_leased "$__pc_ttl_file" >/dev/null 2>&1; then
+  bad "an EXPIRED lease still pins its path — a TTL would never free a target slot"
+else
+  ok "an expired lease no longer pins its path (the slot is reclaimable)"
+fi
+rm -f "$__pc_ttl_expired"
+
+# DRIFT GUARD, derived not hand-listed: any entry point that exports
+# PAPERCUSP_RELEASE_TAG causes a lease to be acquired, so it must also state a
+# retention window. A new entry point that forgets re-introduces this bug silently.
+__pc_bin_dir="${PAPERCUSP_SELFTEST_BIN_DIR:-$DIR/..}"
+__pc_tag_setters=()
+while IFS= read -r f; do
+  [[ -n "$f" ]] && __pc_tag_setters+=("$f")
+done < <(grep -rlE '^[[:space:]]*export[^#]*PAPERCUSP_RELEASE_TAG=' "$__pc_bin_dir" --include='*.sh' 2>/dev/null | sort)
+
+if [[ "${#__pc_tag_setters[@]}" -ge 2 ]]; then
+  ok "control: found ${#__pc_tag_setters[@]} release entry point(s) exporting PAPERCUSP_RELEASE_TAG (the scan sees something)"
+  __pc_ttl_missing=()
+  for f in "${__pc_tag_setters[@]}"; do
+    grep -qE 'PAPERCUSP_RELEASE_RETENTION_TTL_SEC=' "$f" || __pc_ttl_missing+=("${f##*/}")
+  done
+  if [[ "${#__pc_ttl_missing[@]}" -eq 0 ]]; then
+    ok "every release entry point that exports the tag also sets a retention TTL"
+  else
+    bad "entry point(s) export PAPERCUSP_RELEASE_TAG with NO retention TTL — their leases pin paths forever: ${__pc_ttl_missing[*]}"
+  fi
+else
+  bad "control FAILED: the entry-point scan found ${#__pc_tag_setters[@]} tag setter(s) under $__pc_bin_dir — expected at least 2, so this check measured nothing"
+fi
+
+echo
 if [[ "$FAILS" -eq 0 ]]; then
   echo "release-artifacts self-test: ALL PASS"
   exit 0
