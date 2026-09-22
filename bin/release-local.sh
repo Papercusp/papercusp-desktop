@@ -583,12 +583,16 @@ RELEASE_TASK_JOURNAL_ENABLED=0
 RELEASE_TASK_BUILD_ACTION=""
 RELEASE_TASK_BUILD_REQUEST_ID=""
 RELEASE_TASK_BUILD_IDENTITY=""
+RELEASE_TASK_WIN_ACTION=""
+RELEASE_TASK_WIN_REQUEST_ID=""
+RELEASE_TASK_WIN_IDENTITY=""
 RELEASE_TASK_MANIFEST_ACTION=""
 RELEASE_TASK_MANIFEST_REQUEST_ID=""
 RELEASE_TASK_MANIFEST_IDENTITY=""
 RELEASE_TASK_MANIFEST_SKIP=0
 RELEASE_TASK_LAST_LOOKUP_MS=0
 RELEASE_TASK_BUILD_PREPARATION_START_MS=""
+RELEASE_TASK_WIN_PREPARATION_START_MS=""
 RELEASE_TASK_MANIFEST_PREPARATION_START_MS=""
 RELEASE_TASK_PREPARATION_MS=""
 RELEASE_TASK_REUSE_EXPIRES_AT=""
@@ -824,24 +828,27 @@ release_task_content_identity() { # <platform>
 #
 # arm64 and android have none of 1-3, so they are not listed (WI-10002472).
 #
-# WINDOWS has all four and is the next leg to wire (WI-10002471); it is absent
-# only because its two predicates are not written yet, NOT because it lacks a
-# prerequisite. Its expected set derives from PAPERCUSP_BUILD_ROLES exactly as
-# the linux counts do: bin/build-windows-cross.sh takes
-# ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}" and hard-fails a role that
-# yields no "<AppName>_<version>_x64-setup.exe" or no .sig, so the contract is
-# one signed setup.exe per role. Count those; do NOT count the
-# "*-setup-N.bin" DiskSpan slices (variable per role, and
-# papercusp_normalize_spanned_server replaces stub+slices with one zip at
-# collection time).
+# WINDOWS has all four (WI-10002471). Its expected set derives from
+# PAPERCUSP_BUILD_ROLES exactly as the linux counts do: bin/build-windows-cross.sh
+# takes ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}" and hard-fails a role that
+# yields no "<AppName>_<version>_x64-setup.exe", and again if the tauri signer
+# yields no .sig, so the contract is one SIGNED setup.exe per role. Count those;
+# do NOT count the "*-setup-N.bin" DiskSpan slices (variable per role) nor the
+# "-setup.zip" papercusp_normalize_spanned_server adds at collection time — that
+# helper only writes the zip and swaps the ARTIFACTS list, leaving the stub and
+# slices on disk, so a normalized cut still presents exactly one setup.exe per
+# role to a later resume.
 declare -A RELEASE_TASK_LEG_PLATFORM=(
   [linux]=linux-x86_64
+  [windows]=windows-x86_64
 )
 declare -A RELEASE_TASK_LEG_PREFIX=(
   [linux]=RELEASE_TASK_BUILD
+  [windows]=RELEASE_TASK_WIN
 )
 declare -A RELEASE_TASK_LEG_REUSE_VAR=(
   [linux]=PAPERCUSP_REUSE_LINUX
+  [windows]=PAPERCUSP_REUSE_WIN
 )
 
 release_task_leg_assert_known() { # <leg>
@@ -935,6 +942,25 @@ release_task_linux_outputs_absent() { # <bundle-dir>
      || debs < expected_debs || deb_sigs < expected_debs ))
 }
 
+release_task_windows_outputs_absent() { # <inno-dir>
+  local inno="$1" expected=0 setups setup_sigs role
+  for role in $PAPERCUSP_BUILD_ROLES; do
+    case "$role" in gui|server) expected=$((expected + 1)) ;; esac
+  done
+  # One SIGNED "<AppName>_<version>_x64-setup.exe" per role; see the leg-registry
+  # note above for why the DiskSpan ".bin" slices and the normalized "-setup.zip"
+  # are deliberately outside both globs.
+  setups="$(find "$inno" -maxdepth 1 -type f -name "*_${VERSION}_x64-setup.exe" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  setup_sigs="$(find "$inno" -maxdepth 1 -type f -name "*_${VERSION}_x64-setup.exe.sig" -printf x 2>/dev/null | wc -c | tr -d ' ')"
+  # Same three-way split as the Linux predicate: surplus is contamination rather
+  # than "no completed result", so it goes to the strict verifier and fails closed
+  # even when provenance is missing; missing provenance with no surplus proves
+  # only an incomplete local stage, which is retryable under a fresh request.
+  (( setups <= expected && setup_sigs <= expected )) || return 1
+  [[ -f "$inno/build-provenance.json" ]] || return 0
+  (( setups < expected || setup_sigs < expected ))
+}
+
 release_task_target_pubkey() {
   python3 - "$ROOT/src-tauri/tauri.conf.json" <<'PY'
 import json, sys
@@ -962,6 +988,25 @@ release_task_verify_linux_artifacts() { # <bundle-dir> <reused:0|1>
   fi
   pubkey="$(release_task_target_pubkey)" || return $?
   bash "$ORCHESTRATOR_HERE/verify-provenance.sh" "$bundle" \
+    --health-sha "$BUILD_SHA" --pubkey "$pubkey" --require-signed
+}
+
+release_task_verify_windows_artifacts() { # <inno-dir> <reused:0|1>
+  local inno="$1" reused="$2" pubkey
+  assert_windows_artifact_cardinality "$inno" || return $?
+  if [[ "$reused" == "1" ]]; then
+    # As on Linux: a journal-controlled resume never inherits the manual salvage
+    # bypasses, because its source/gitlink identity is exact.
+    PAPERCUSP_ALLOW_REUSE_UNVERIFIED=0 \
+    PAPERCUSP_ALLOW_REUSE_VERSION_MISMATCH=0 \
+      assert_reused_provenance "$inno" windows || return $?
+    if [[ "$WINDOWS_REUSE_GIT_HEAD" != "$PROVENANCE_SOURCE_GIT_HEAD" || "$WINDOWS_REUSE_GIT_DIRTY" != "false" ]]; then
+      echo "ERROR: reused Windows provenance does not match the managed release's exact clean desktop gitlink." >&2
+      return 1
+    fi
+  fi
+  pubkey="$(release_task_target_pubkey)" || return $?
+  bash "$ORCHESTRATOR_HERE/verify-provenance.sh" "$inno" \
     --health-sha "$BUILD_SHA" --pubkey "$pubkey" --require-signed
 }
 
