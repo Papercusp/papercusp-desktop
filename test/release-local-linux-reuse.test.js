@@ -555,7 +555,7 @@ function runLinuxContentIdentity(mutator = () => {}) {
     'DESKTOP_CHANNEL_BUILD_CFG=(--config src-tauri/tauri.nightly.conf.json)',
     'PAPERCUSP_RELEASE_REUSE_MAX_AGE_SEC=86400',
     releaseTaskJournalHarness,
-    'release_task_linux_content_identity',
+    'release_task_content_identity linux-x86_64',
   ].join('\n');
   const result = spawnSync('bash', ['-c', command], { encoding: 'utf8', timeout: 30_000 });
   fs.rmSync(temp, { recursive: true, force: true });
