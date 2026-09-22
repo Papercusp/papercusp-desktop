@@ -843,6 +843,14 @@ release_task_content_identity() { # <platform>
 # slices on disk, so a normalized cut still presents exactly one setup.exe per
 # role to a later resume.
 #
+# MAC has all four as of P-002 — but only three of them were FOUND true; #1 had
+# to be MADE true (plan D-006). Its build-provenance emission was BEST-EFFORT in
+# both producers (`|| echo "WARN: … (non-fatal)"`), so the one prerequisite a mac
+# receipt depends on most was the one its producers treated as optional. That is
+# now fatal in build-mac-cross.sh and in the collection block below; without it a
+# COMPLETE mac build whose emit merely warned would read as retryable-absent, and
+# a committed receipt would hard-fail the cut rather than name the real fault.
+#
 # The mac leg's expected set is modelled DIFFERENTLY from these two, and
 # deliberately so (plan D-006). Windows and mac look alike — "one installer plus
 # one updater bundle per role" — but only Windows names EVERY artifact with the
