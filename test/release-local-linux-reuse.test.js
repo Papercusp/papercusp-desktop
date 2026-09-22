@@ -9,7 +9,12 @@ const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
-const scriptPath = path.join(root, 'bin', 'release-local.sh');
+// Overridable so a mutation probe can point this suite at a MUTATED COPY
+// outside the tree (mutation-probe.sh tier 2) instead of editing the shared
+// checkout, where git-sync can commit the mutant mid-run. Defaults to the real
+// script, so an ordinary run is unchanged.
+const scriptPath = process.env.PAPERCUSP_RELEASE_LOCAL_PATH
+  || path.join(root, 'bin', 'release-local.sh');
 const source = fs.readFileSync(scriptPath, 'utf8');
 
 function sliceBetween(start, end) {
@@ -395,7 +400,7 @@ function runJournalLinuxResume({ action, absent = false, verify = 0 }) {
     `release_task_journal_call() { printf '%s\\n' "$*" >> ${JSON.stringify(calls)}; [[ "$1" != commit ]] || printf '%s\\n' '{"state":"committed"}'; }`,
     'release_task_begin_stage() { RELEASE_TASK_LAST_ACTION=run; RELEASE_TASK_LAST_REQUEST_ID=new-request; printf "begin:%s:%s\\n" "$1" "$2" >> ' + JSON.stringify(calls) + '; }',
     "release_artifacts_cut_start_write() { printf '222\\n'; }",
-    `release_task_prepare_linux_stage ${JSON.stringify(bundle)}`,
+    `release_task_leg_prepare linux ${JSON.stringify(bundle)}`,
     'printf "RESULT action=%s request=%s reuse=%s cut=%s\\n" "$RELEASE_TASK_BUILD_ACTION" "$RELEASE_TASK_BUILD_REQUEST_ID" "$PAPERCUSP_REUSE_LINUX" "${PAPERCUSP_RELEASE_CUT_START_NS:-}"',
   ].join('\n');
   const result = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
@@ -686,4 +691,86 @@ test('real manifest receipt matches the canonical generator and rejects changed 
   const changed = runRealManifestReceiptVerification({ tamper: true });
   assert.notEqual(changed.status, 0, 'changed manifest unexpectedly matched its receipt inputs');
   assert.match(changed.stderr, /does not match the canonical generator/);
+});
+
+function runLegVerb(verb) {
+  const command = [
+    'set -euo pipefail',
+    'RELEASE_TASK_JOURNAL_ENABLED=0',
+    releaseTaskJournalHarness,
+    'RELEASE_TASK_JOURNAL_ENABLED=1',
+    verb,
+  ].join('\n');
+  return spawnSync('bash', ['-c', command], { encoding: 'utf8' });
+}
+
+test('an unregistered leg is refused at every entry point, before any journal call', () => {
+  for (const verb of [
+    'release_task_leg_start bogus',
+    'release_task_leg_prepare bogus /tmp/papercusp-nonexistent',
+    'release_task_leg_commit bogus /tmp/papercusp-nonexistent 0',
+  ]) {
+    const result = runLegVerb(verb);
+    assert.equal(result.status, 2, `${verb} did not fail closed: ${result.stderr || result.stdout}`);
+    assert.match(result.stderr, /unknown release leg 'bogus'/);
+  }
+
+  // 0-CONTROL: a REGISTERED leg must get PAST this guard, or every assertion
+  // above would hold just as well for a registry that refuses everything.
+  const known = runLegVerb('release_task_leg_prepare linux /tmp/papercusp-nonexistent');
+  assert.doesNotMatch(known.stderr, /unknown release leg/);
+});
+
+// The canonical post-join collector, sliced whole so the arm64 guard runs in
+// its real position — after the linux collection it follows and depends on.
+const collectorHarness = sliceBetween(
+  '# ── Collect artifacts in the PARENT',
+  '# Retain all final target',
+);
+
+function runArm64Collection({ includeArm64Artifact = true } = {}) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-arm64-collect-'));
+  const target = path.join(temp, 'target');
+  const linuxBundle = path.join(target, 'release', 'bundle');
+  const arm64Bundle = path.join(target, 'aarch64-unknown-linux-gnu', 'release', 'bundle');
+  for (const dir of ['deb', 'appimage']) {
+    fs.mkdirSync(path.join(linuxBundle, dir), { recursive: true });
+    fs.mkdirSync(path.join(arm64Bundle, dir), { recursive: true });
+  }
+  fs.writeFileSync(path.join(linuxBundle, 'deb', 'Papercusp_GUI_0.0.18_amd64.deb'), 'linux-bytes');
+  if (includeArm64Artifact) {
+    fs.writeFileSync(path.join(arm64Bundle, 'deb', 'Papercusp_GUI_0.0.18_arm64.deb'), 'arm64-bytes');
+  }
+  const command = [
+    'set -euo pipefail',
+    `CARGO_TARGET_ROOT=${JSON.stringify(target)}`,
+    'VERSION=0.0.18',
+    'LINUX_REUSE=0',
+    'RELEASE_TASK_JOURNAL_ENABLED=0',
+    'WITH_ARM64=1',
+    "WIN_PID=''",
+    'WIN_REUSE=0',
+    "MAC_PID=''",
+    'MAC_REUSE=0',
+    'assert_linux_artifact_cardinality() { :; }',
+    collectorHarness,
+    'printf "COLLECTED=%s\\n" "${#ARTIFACTS[@]}"',
+  ].join('\n');
+  const result = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
+  fs.rmSync(temp, { recursive: true, force: true });
+  return result;
+}
+
+test('an arm64 leg that produced nothing fails the cut instead of publishing without it', () => {
+  const empty = runArm64Collection({ includeArm64Artifact: false });
+  assert.notEqual(empty.status, 0, 'an empty arm64 bundle was collected silently');
+  assert.match(`${empty.stdout}${empty.stderr}`, /WITH_ARM64=1 but no 0\.0\.18 arm64 artifacts/);
+
+  // 0-CONTROL. Without this, the assertion above would pass just as happily if
+  // the collector were broken for some reason unrelated to the guard — and the
+  // arm64 entry must also actually REACH ARTIFACTS, which is the half that was
+  // silently discarded before (the pre-reset append).
+  const present = runArm64Collection();
+  assert.equal(present.status, 0, present.stderr || present.stdout);
+  assert.match(present.stdout, /COLLECTED=2/);
 });

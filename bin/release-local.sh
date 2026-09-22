@@ -798,10 +798,66 @@ release_task_content_identity() { # <platform>
     node "$ORCHESTRATOR_HERE/lib/release-content-identity.js" "$MONOREPO" "$ROOT" "$platform"
 }
 
-release_task_start_linux_stage() {
-  [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
+# ── Leg registry ────────────────────────────────────────────────────────────
+# One row per JOURNALLED build leg. The fail-closed state machine below is
+# written ONCE and dispatches through this registry, so adding a leg is a row
+# plus its two predicates (`release_task_<leg>_outputs_absent` and
+# `release_task_verify_<leg>_artifacts`) — never another copy of the state
+# machine. Each leg keeps its own state-variable PREFIX, so the names the rest
+# of the script already reads (RELEASE_TASK_BUILD_ACTION, …) are unchanged.
+#
+# A leg is journallable only once it HAS the prerequisites the receipt contract
+# depends on (plan decision D-004) — adding a row without them mints receipts
+# nothing can verify, which is WORSE than no receipt: a receipt that passes on
+# incomplete bytes is a false guarantee:
+#   1. a build-provenance emission (the committed output hash),
+#   2. a reuse variable for a `reuse`/`reconcile` action to land in,
+#   3. an assert_reused_provenance label, and
+#   4. a way to know its EXPECTED artifact set, so `outputs_absent` can tell
+#      "incomplete" from "complete" instead of guessing.
+#
+# arm64 and android have none of 1-3. WINDOWS has 1-3 but fails 4: the roles it
+# actually builds are decided inside build-windows-on-vm.sh (gui-only
+# server-side — a hard Inno-spanning limit, not a scope choice), that decision
+# is never surfaced back here, and there is no inno expected-count logic
+# anywhere — only the binary `win_found` check at collection. A cardinality
+# predicate written from this file would therefore be a GUESS, failing either
+# toward refusing good receipts or toward accepting partial installers. Wiring
+# windows starts by having its leg report the role set it built.
+declare -A RELEASE_TASK_LEG_PLATFORM=(
+  [linux]=linux-x86_64
+)
+declare -A RELEASE_TASK_LEG_PREFIX=(
+  [linux]=RELEASE_TASK_BUILD
+)
+declare -A RELEASE_TASK_LEG_REUSE_VAR=(
+  [linux]=PAPERCUSP_REUSE_LINUX
+)
+
+release_task_leg_assert_known() { # <leg>
+  [[ -n "${RELEASE_TASK_LEG_PREFIX[${1:-}]:-}" ]] && return 0
+  echo "ERROR: unknown release leg '${1:-<empty>}'; add it to the leg registry before journalling it." >&2
+  return 2
+}
+
+# Read/write a leg's state slot by name. Indirect expansion rather than a
+# nameref on purpose: a `local -n` whose target collides with a local in an
+# enclosing frame is a circular-reference error, and these functions call each
+# other (prepare -> commit) over the SAME slots.
+release_task_leg_get() { # <leg> <slot>
+  local var="${RELEASE_TASK_LEG_PREFIX[$1]}_$2"
+  printf '%s' "${!var-}"
+}
+release_task_leg_set() { # <leg> <slot> <value>
+  printf -v "${RELEASE_TASK_LEG_PREFIX[$1]}_$2" '%s' "$3"
+}
+
+# The source identity EVERY journalled leg shares: this cut's desktop checkout
+# must be the exact clean gitlink the source sha names. Re-checked per leg
+# (cheap, idempotent) so no leg can begin against a source its receipt would
+# not match.
+release_task_assert_source_exact() {
   local expected_desktop_sha
-  RELEASE_TASK_BUILD_PREPARATION_START_MS="$(release_task_now_ms)" || return $?
   expected_desktop_sha="$(git -C "$MONOREPO" ls-tree "$EXPECTED_SOURCE_SHA" -- papercusp-desktop \
     | awk '$1 == "160000" && $2 == "commit" && $4 == "papercusp-desktop" { print $3 }')"
   if [[ -z "$expected_desktop_sha" || "$PROVENANCE_SOURCE_GIT_HEAD" != "$expected_desktop_sha" ]]; then
@@ -812,24 +868,37 @@ release_task_start_linux_stage() {
     echo "ERROR: managed release source is dirty; task-journal reuse requires the exact clean source/gitlink tuple." >&2
     return 1
   fi
-  RELEASE_TASK_BUILD_IDENTITY="$(release_task_content_identity linux-x86_64)" || {
-    echo "ERROR: could not construct the complete Linux release reuse identity." >&2
+}
+
+release_task_leg_start() { # <leg>
+  [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
+  local leg="${1:-}" identity stage prep_start
+  release_task_leg_assert_known "$leg" || return $?
+  stage="release.build.$leg"
+  # Captured into a local first: `set "$(...)"` would report the SETTER's
+  # status, silently swallowing a failed clock read.
+  prep_start="$(release_task_now_ms)" || return $?
+  release_task_leg_set "$leg" PREPARATION_START_MS "$prep_start"
+  release_task_assert_source_exact || return $?
+  identity="$(release_task_content_identity "${RELEASE_TASK_LEG_PLATFORM[$leg]}")" || {
+    echo "ERROR: could not construct the complete $leg release reuse identity." >&2
     return 1
   }
-  release_task_begin_stage release.build.linux "$RELEASE_TASK_BUILD_IDENTITY" || return $?
-  RELEASE_TASK_BUILD_ACTION="$RELEASE_TASK_LAST_ACTION"
-  RELEASE_TASK_BUILD_REQUEST_ID="$RELEASE_TASK_LAST_REQUEST_ID"
-  case "$RELEASE_TASK_BUILD_ACTION" in
+  release_task_leg_set "$leg" IDENTITY "$identity"
+  release_task_begin_stage "$stage" "$identity" || return $?
+  release_task_leg_set "$leg" ACTION "$RELEASE_TASK_LAST_ACTION"
+  release_task_leg_set "$leg" REQUEST_ID "$RELEASE_TASK_LAST_REQUEST_ID"
+  case "$RELEASE_TASK_LAST_ACTION" in
     run) ;;
     reuse|reconcile)
       # This happens before the cut-start stamp is selected: a valid resumed
       # artifact must preserve the original boundary, not be made stale by a
       # newly-written timestamp and then rejected for the wrong reason.
-      PAPERCUSP_REUSE_LINUX=1
-      echo "==> [journal] release.build.linux is $RELEASE_TASK_BUILD_ACTION; existing bytes require reconciliation before reuse"
+      printf -v "${RELEASE_TASK_LEG_REUSE_VAR[$leg]}" '%s' 1
+      echo "==> [journal] $stage is $RELEASE_TASK_LAST_ACTION; existing bytes require reconciliation before reuse"
       ;;
     refused)
-      echo "ERROR: release.build.linux has an unresolved refused receipt; start a new release operation after resolving it." >&2
+      echo "ERROR: $stage has an unresolved refused receipt; start a new release operation after resolving it." >&2
       return 1
       ;;
   esac
@@ -886,95 +955,104 @@ release_task_verify_linux_artifacts() { # <bundle-dir> <reused:0|1>
     --health-sha "$BUILD_SHA" --pubkey "$pubkey" --require-signed
 }
 
-release_task_commit_linux_stage() { # <bundle-dir> <reused:0|1>
-  local bundle="$1" reused="$2" provenance_sha result verify_started verification_ms decision
+release_task_leg_commit() { # <leg> <bundle-dir> <reused:0|1>
+  local leg="${1:-}" bundle="$2" reused="$3"
+  local provenance_sha result verify_started verification_ms decision action stage prep_start
   [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
-  case "$RELEASE_TASK_BUILD_ACTION" in
+  release_task_leg_assert_known "$leg" || return $?
+  stage="release.build.$leg"
+  action="$(release_task_leg_get "$leg" ACTION)"
+  prep_start="$(release_task_leg_get "$leg" PREPARATION_START_MS)"
+  case "$action" in
     run|reconcile) ;;
     reuse)
       # A committed receipt authorizes no mutation, but it also grants no trust:
       # recheck after collection/provenance re-emit before downstream consumers
       # use these bytes.
       verify_started="$(release_task_now_ms)" || return $?
-      release_task_verify_linux_artifacts "$bundle" "$reused" || return $?
+      "release_task_verify_${leg}_artifacts" "$bundle" "$reused" || return $?
       verification_ms="$(release_task_elapsed_ms "$verify_started")" || return $?
-      RELEASE_TASK_PREPARATION_MS="$(release_task_elapsed_ms "$RELEASE_TASK_BUILD_PREPARATION_START_MS")" || return $?
-      release_task_emit_timing release.build.linux verified-reuse "$verification_ms"
+      RELEASE_TASK_PREPARATION_MS="$(release_task_elapsed_ms "$prep_start")" || return $?
+      release_task_emit_timing "$stage" verified-reuse "$verification_ms"
       return 0
       ;;
-    *) echo "ERROR: cannot commit release.build.linux from action '$RELEASE_TASK_BUILD_ACTION'." >&2; return 2 ;;
+    *) echo "ERROR: cannot commit $stage from action '$action'." >&2; return 2 ;;
   esac
   verify_started="$(release_task_now_ms)" || return $?
-  release_task_verify_linux_artifacts "$bundle" "$reused" || {
-    echo "ERROR: release.build.linux bytes failed verification; receipt remains $RELEASE_TASK_BUILD_ACTION (fail closed)." >&2
+  "release_task_verify_${leg}_artifacts" "$bundle" "$reused" || {
+    echo "ERROR: $stage bytes failed verification; receipt remains $action (fail closed)." >&2
     return 1
   }
   verification_ms="$(release_task_elapsed_ms "$verify_started")" || return $?
-  RELEASE_TASK_PREPARATION_MS="$(release_task_elapsed_ms "$RELEASE_TASK_BUILD_PREPARATION_START_MS")" || return $?
+  RELEASE_TASK_PREPARATION_MS="$(release_task_elapsed_ms "$prep_start")" || return $?
   RELEASE_TASK_REUSE_EXPIRES_AT="$(release_task_audit_reuse_expiry)" || {
-    echo "ERROR: verified Linux bytes have no fresh release identity-scan evidence." >&2
+    echo "ERROR: verified $leg bytes have no fresh release identity-scan evidence." >&2
     return 1
   }
   provenance_sha="$(sha256sum "$bundle/build-provenance.json" | cut -d' ' -f1)"
-  if ! result="$(release_task_journal_call commit release.build.linux "$RELEASE_TASK_BUILD_IDENTITY" \
-      "$RELEASE_TASK_BUILD_REQUEST_ID" \
+  if ! result="$(release_task_journal_call commit "$stage" "$(release_task_leg_get "$leg" IDENTITY)" \
+      "$(release_task_leg_get "$leg" REQUEST_ID)" \
       "build-provenance:sha256:$provenance_sha" \
       "source-gitlink:$PROVENANCE_SOURCE_GIT_HEAD" \
       "artifact-set:hash-signature-verified" \
       "audit-reuse-expires:$RELEASE_TASK_REUSE_EXPIRES_AT")"; then
-    echo "ERROR: verified Linux bytes could not be committed to the release journal." >&2
+    echo "ERROR: verified $leg bytes could not be committed to the release journal." >&2
     return 1
   fi
   [[ "$(release_task_json_field "$result" state)" == "committed" ]] || {
-    echo "ERROR: release journal did not confirm release.build.linux committed." >&2
+    echo "ERROR: release journal did not confirm $stage committed." >&2
     return 1
   }
-  RELEASE_TASK_BUILD_ACTION=reuse
+  release_task_leg_set "$leg" ACTION reuse
   decision="$([[ "$reused" == "1" ]] && printf cache-hit || printf built)"
-  release_task_emit_timing release.build.linux "$decision" "$verification_ms"
+  release_task_emit_timing "$stage" "$decision" "$verification_ms"
 }
 
-release_task_prepare_linux_stage() { # <bundle-dir>
-  local bundle="$1" result
+release_task_leg_prepare() { # <leg> <bundle-dir>
+  local leg="${1:-}" bundle="$2" action stage reuse_var
   [[ "$RELEASE_TASK_JOURNAL_ENABLED" == "1" ]] || return 0
-  case "$RELEASE_TASK_BUILD_ACTION" in
+  release_task_leg_assert_known "$leg" || return $?
+  stage="release.build.$leg"
+  reuse_var="${RELEASE_TASK_LEG_REUSE_VAR[$leg]}"
+  action="$(release_task_leg_get "$leg" ACTION)"
+  case "$action" in
     run) return 0 ;;
     reuse|reconcile) ;;
-    *) echo "ERROR: invalid release.build.linux action '$RELEASE_TASK_BUILD_ACTION'." >&2; return 2 ;;
+    *) echo "ERROR: invalid $stage action '$action'." >&2; return 2 ;;
   esac
 
-  if release_task_linux_outputs_absent "$bundle"; then
-    if [[ "$RELEASE_TASK_BUILD_ACTION" == "reuse" ]]; then
-      echo "ERROR: release.build.linux is committed but its artifact/provenance set is absent; refusing to rebuild under the spent receipt." >&2
+  if "release_task_${leg}_outputs_absent" "$bundle"; then
+    if [[ "$action" == "reuse" ]]; then
+      echo "ERROR: $stage is committed but its artifact/provenance set is absent; refusing to rebuild under the spent receipt." >&2
       return 1
     fi
-    echo "==> [journal] prior release.build.linux outcome is confirmed absent; refusing its spent request before retry"
-    release_task_journal_call refuse release.build.linux "$RELEASE_TASK_BUILD_IDENTITY" \
-      "$RELEASE_TASK_BUILD_REQUEST_ID" "artifact-set:confirmed-absent" >/dev/null || return $?
-    release_task_begin_stage release.build.linux "$RELEASE_TASK_BUILD_IDENTITY" || return $?
+    echo "==> [journal] prior $stage outcome is confirmed absent; refusing its spent request before retry"
+    release_task_journal_call refuse "$stage" "$(release_task_leg_get "$leg" IDENTITY)" \
+      "$(release_task_leg_get "$leg" REQUEST_ID)" "artifact-set:confirmed-absent" >/dev/null || return $?
+    release_task_begin_stage "$stage" "$(release_task_leg_get "$leg" IDENTITY)" || return $?
     [[ "$RELEASE_TASK_LAST_ACTION" == "run" ]] || {
-      echo "ERROR: release.build.linux did not mint a fresh attempt after confirmed absence." >&2
+      echo "ERROR: $stage did not mint a fresh attempt after confirmed absence." >&2
       return 1
     }
-    RELEASE_TASK_BUILD_ACTION=run
-    RELEASE_TASK_BUILD_REQUEST_ID="$RELEASE_TASK_LAST_REQUEST_ID"
-    PAPERCUSP_REUSE_LINUX=0
+    release_task_leg_set "$leg" ACTION run
+    release_task_leg_set "$leg" REQUEST_ID "$RELEASE_TASK_LAST_REQUEST_ID"
+    printf -v "$reuse_var" '%s' 0
     PAPERCUSP_RELEASE_CUT_START_NS="$(release_artifacts_cut_start_write "$TAG")" || return $?
     export PAPERCUSP_RELEASE_CUT_START_NS
-    echo "==> [journal] release.build.linux retry=$RELEASE_TASK_BUILD_REQUEST_ID; refreshed cut-start=$PAPERCUSP_RELEASE_CUT_START_NS"
+    echo "==> [journal] $stage retry=$(release_task_leg_get "$leg" REQUEST_ID); refreshed cut-start=$PAPERCUSP_RELEASE_CUT_START_NS"
     return 0
   fi
 
-  release_task_verify_linux_artifacts "$bundle" 1 || {
-    echo "ERROR: release.build.linux receipt has present but mismatched/partial bytes; not treating corruption as absence." >&2
+  "release_task_verify_${leg}_artifacts" "$bundle" 1 || {
+    echo "ERROR: $stage receipt has present but mismatched/partial bytes; not treating corruption as absence." >&2
     return 1
   }
-  if [[ "$RELEASE_TASK_BUILD_ACTION" == "reconcile" ]]; then
-    release_task_commit_linux_stage "$bundle" 1 || return $?
+  if [[ "$action" == "reconcile" ]]; then
+    release_task_leg_commit "$leg" "$bundle" 1 || return $?
   fi
-  PAPERCUSP_REUSE_LINUX=1
-  RELEASE_TASK_BUILD_ACTION=reuse
-  echo "==> [journal] release.build.linux verified; activating the existing PAPERCUSP_REUSE_LINUX path"
+  printf -v "$reuse_var" '%s' 1
+  release_task_leg_set "$leg" ACTION reuse
+  echo "==> [journal] $stage verified; activating the existing $reuse_var path"
 }
 
 release_task_manifest_input_identity() { # <artifact>...
@@ -1622,7 +1700,7 @@ fi
 # version/seed/build sequence below.
 papercusp_export_rust_path_remap
 PAPERCUSP_LINUX_RUSTFLAGS="$(papercusp_rustflags_with_lld linux "${RUSTFLAGS:-}")"
-release_task_start_linux_stage || exit $?
+release_task_leg_start linux || exit $?
 
 # EI-20551860898590077: bind every artifact to THIS cut before the first tree
 # write. A failed cut may leave correctly named/signed same-version bytes behind;
@@ -2268,7 +2346,7 @@ emit_linux_build_provenance() {
 LINUX_LEG_LOG="/tmp/papercusp-linuxleg-${TAG}.log"
 LINUX_PID=""; LINUX_REUSE=0
 if [[ "${RELEASE_TASK_JOURNAL_ENABLED:-0}" == "1" ]]; then
-  release_task_prepare_linux_stage "$CARGO_TARGET_ROOT/release/bundle" || exit $?
+  release_task_leg_prepare linux "$CARGO_TARGET_ROOT/release/bundle" || exit $?
 fi
 if [[ "${PAPERCUSP_REUSE_LINUX:-0}" == "1" ]]; then
   # EI-21024313639787521: Linux is just as salvageable as Windows/macOS. A late
@@ -2326,7 +2404,7 @@ else
     # the parent collector from running.  If this response is lost, the next
     # process reconciles the exact provenance bytes and the same request ID.
     if [[ "${RELEASE_TASK_JOURNAL_ENABLED:-0}" == "1" ]]; then
-      release_task_commit_linux_stage "$CARGO_TARGET_ROOT/release/bundle" 0
+      release_task_leg_commit linux "$CARGO_TARGET_ROOT/release/bundle" 0
     fi
   ) >"$LINUX_LEG_LOG" 2>&1 &
   LINUX_PID=$!
@@ -2766,12 +2844,17 @@ fi
 # manual reuse path and proves the collected bytes did not change before the
 # all-platform join continued.
 if [[ "${RELEASE_TASK_JOURNAL_ENABLED:-0}" == "1" ]]; then
-  release_task_commit_linux_stage "$LINUX_BUNDLE" "$LINUX_REUSE" || exit $?
+  release_task_leg_commit linux "$LINUX_BUNDLE" "$LINUX_REUSE" || exit $?
 fi
 if [[ "$WITH_ARM64" == "1" ]]; then
+  arm64_found=0
   for f in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/{deb,appimage}/*_"$VERSION"_*; do
-    [[ -f "$f" ]] && ARTIFACTS+=("$f")
+    [[ -f "$f" ]] && ARTIFACTS+=("$f") && arm64_found=1
   done
+  # Parity with the linux/win/mac legs, each of which fails the cut on an empty
+  # glob. arm64 alone collected silently, so WITH_ARM64=1 could contribute ZERO
+  # bytes and still publish a release advertising arm64 support.
+  [[ "$arm64_found" == "1" ]] || { echo "ERROR: WITH_ARM64=1 but no $VERSION arm64 artifacts in $CARGO_TARGET_ROOT/aarch64-unknown-linux-gnu/release/bundle"; exit 1; }
 fi
 if [[ -n "$WIN_PID" || "$WIN_REUSE" == "1" ]]; then
   win_found=0
