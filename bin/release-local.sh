@@ -2689,7 +2689,8 @@ assert_reused_provenance() {  # $1 = artifact dir, $2 = leg label
 
 assert_linux_artifact_cardinality() {  # $1 = Linux bundle dir
   local dir="$1"
-  local expected_appimages=0 expected_debs=0 appimages appimage_sigs debs deb_sigs role
+  local expected_appimages=0 expected_debs=0 appimages appimage_sigs debs deb_sigs role artifact
+  local -a artifacts=()
   [[ " $PAPERCUSP_BUILD_ROLES " == *" gui "* ]] && expected_appimages=1
   for role in $PAPERCUSP_BUILD_ROLES; do
     case "$role" in gui|server) expected_debs=$((expected_debs + 1)) ;; esac
@@ -2702,6 +2703,13 @@ assert_linux_artifact_cardinality() {  # $1 = Linux bundle dir
         || "$debs" != "$expected_debs" || "$deb_sigs" != "$expected_debs" ]]; then
     echo "ERROR: Linux $VERSION bundle is ambiguous/incomplete for roles '$PAPERCUSP_BUILD_ROLES': expected appimages=$expected_appimages signatures=$expected_appimages debs=$expected_debs deb-signatures=$expected_debs; found appimages=$appimages signatures=$appimage_sigs debs=$debs deb-signatures=$deb_sigs. Quarantine stale/failed same-version bytes before collection (EI-21025181491857558)." >&2
     exit 1
+  fi
+  for artifact in "$dir"/appimage/*_"$VERSION"_*.AppImage "$dir"/appimage/*_"$VERSION"_*.AppImage.sig \
+                  "$dir"/deb/*_"$VERSION"_*.deb "$dir"/deb/*_"$VERSION"_*.deb.sig; do
+    [[ -f "$artifact" ]] && artifacts+=("$artifact")
+  done
+  if [[ ${#artifacts[@]} -gt 0 ]]; then
+    release_artifacts_assert_fresh "$TAG" "${artifacts[@]}" || return $?
   fi
 }
 
