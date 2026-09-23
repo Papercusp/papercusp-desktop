@@ -25,7 +25,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
@@ -351,6 +351,32 @@ test('desktop launcher shares the resolved operator port with Tauri devUrl (EI-2
     /devUrl.*\$\{OPERATOR_DEV_PORT\}/,
     'Tauri devUrl must follow the selected operator port instead of hardcoding :3270',
   );
+});
+
+test('desktop launcher starts Tauri without the fixed dev-server wait while the operator boots', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-desktop-launch-'));
+  const npmShim = path.join(tmp, 'npm');
+  try {
+    fs.writeFileSync(npmShim, '#!/usr/bin/env bash\nprintf "%s\\n" "$@"\n');
+    fs.chmodSync(npmShim, 0o755);
+    const launched = spawnSync('bash', [path.join(root, 'bin/desktop-dev-nohmr')], {
+      env: {
+        ...process.env,
+        PATH: `${tmp}:${process.env.PATH}`,
+        CARGO_TARGET_DIR: path.join(tmp, 'target'),
+        OPERATOR_DEV_PORT: '45555',
+      },
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+    assert.equal(launched.status, 0, launched.stderr);
+    const args = launched.stdout.trim().split('\n');
+    assert.deepEqual(args.slice(0, 5), ['run', 'tauri', '--', 'dev', '--no-dev-server-wait']);
+    assert.equal(args[5], '--config');
+    assert.equal(JSON.parse(args[6]).build.devUrl, 'http://127.0.0.1:45555');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('frozen host entry: runs the validated plain-node bundle inside the frozen source root (EI-22616267024724225)', async () => {
