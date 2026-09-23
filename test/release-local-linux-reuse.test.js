@@ -91,6 +91,7 @@ function runFreshWithFailedSibling({ emitterFails = false } = {}) {
   const bundle = path.join(temp, 'target', 'release', 'bundle');
   const tag = path.basename(temp);
   const linuxLog = `/tmp/papercusp-linuxleg-${tag}.log`;
+  const cutStartPath = `/tmp/papercusp-cut-start-${tag}.txt`;
   fs.mkdirSync(bin, { recursive: true });
   fs.writeFileSync(path.join(bin, 'repack-deb-xz.sh'), [
     '#!/usr/bin/env bash',
@@ -108,10 +109,12 @@ function runFreshWithFailedSibling({ emitterFails = false } = {}) {
   const emitter = path.join(bin, 'emit-build-provenance.sh');
   if (emitterFails) fs.writeFileSync(emitter, 'exit 23\n');
   else fs.symlinkSync(path.join(root, 'bin', 'emit-build-provenance.sh'), emitter);
+  fs.writeFileSync(cutStartPath, '1\n');
 
   try {
     const command = [
       'set -euo pipefail',
+      `source ${JSON.stringify(path.join(root, 'bin', 'lib', 'release-artifacts.sh'))}`,
       `ROOT=${JSON.stringify(temp)}`,
       `ORCHESTRATOR_HERE=${JSON.stringify(bin)}`,
       `CARGO_TARGET_ROOT=${JSON.stringify(path.join(temp, 'target'))}`,
@@ -153,6 +156,7 @@ function runFreshWithFailedSibling({ emitterFails = false } = {}) {
   } finally {
     fs.rmSync(temp, { recursive:true, force:true });
     fs.rmSync(linuxLog, { force:true });
+    fs.rmSync(cutStartPath, { force:true });
   }
 }
 
@@ -203,8 +207,10 @@ function runReuse({
   includeArtifact = true,
   includeProvenance = true,
   extraArtifact = false,
+  staleAppImage = false,
 } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-linux-reuse-'));
+  const tag = `desktop-v0.0.18-alpha-${path.basename(temp)}`;
   const bundle = path.join(temp, 'target', 'release', 'bundle');
   const appimageDir = path.join(bundle, 'appimage');
   const debDir = path.join(bundle, 'deb');
@@ -220,6 +226,11 @@ function runReuse({
       fs.writeFileSync(`${deb}.sig`, `finished-linux-${role}-deb-signature`);
     }
   }
+  if (staleAppImage && includeArtifact) {
+    const staleAppImagePath = path.join(appimageDir, 'Papercusp_GUI_0.0.18_amd64.AppImage');
+    fs.utimesSync(staleAppImagePath, 1, 1);
+    fs.utimesSync(`${staleAppImagePath}.sig`, 1, 1);
+  }
   if (extraArtifact) {
     const stale = path.join(appimageDir, 'Papercusp GUI_0.0.18_amd64.AppImage');
     fs.writeFileSync(stale, 'failed-pre-repair-bytes');
@@ -230,14 +241,17 @@ function runReuse({
     if (priorBuildSha !== null) provenance.buildSha = priorBuildSha;
     fs.writeFileSync(path.join(bundle, 'build-provenance.json'), JSON.stringify(provenance));
   }
+  const cutStartPath = `/tmp/papercusp-cut-start-${tag}.txt`;
+  fs.writeFileSync(cutStartPath, `${staleAppImage ? '2000000000' : '1'}\n`);
 
   const command = [
     'set -euo pipefail',
+    `source ${JSON.stringify(path.join(root, 'bin', 'lib', 'release-artifacts.sh'))}`,
     `ROOT=${JSON.stringify(temp)}`,
     `CARGO_TARGET_ROOT=${JSON.stringify(path.join(temp, 'target'))}`,
     'VERSION=0.0.18',
     'BUILD_SHA=exact-source-sha',
-    'TAG=desktop-v0.0.18-alpha',
+    `TAG=${JSON.stringify(tag)}`,
     "PAPERCUSP_BUILD_ROLES='gui server'",
     'PAPERCUSP_REUSE_LINUX=1',
     linuxReuseHarness,
@@ -245,6 +259,7 @@ function runReuse({
   ].join('\n');
   const result = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
   fs.rmSync(temp, { recursive: true, force: true });
+  fs.rmSync(cutStartPath, { force: true });
   return result;
 }
 
@@ -280,6 +295,13 @@ test('Linux salvage refuses two same-version AppImages instead of picking by ite
   assert.notEqual(result.status, 0, 'ambiguous Linux AppImage set unexpectedly passed');
   assert.match(result.stdout + result.stderr, /bundle is ambiguous\/incomplete/);
   assert.match(result.stdout + result.stderr, /found appimages=2 signatures=2/);
+});
+
+test('Linux salvage refuses a stale same-version AppImage before trusting reuse provenance', () => {
+  const result = runReuse({ staleAppImage: true });
+  assert.notEqual(result.status, 0, 'stale Linux AppImage unexpectedly passed the freshness gate');
+  assert.match(result.stdout + result.stderr, /freshness check FAILED/);
+  assert.match(result.stderr, /stale \(mtime .*Papercusp_GUI_0\.0\.18_amd64\.AppImage/);
 });
 
 test('Linux reuse stays on the shared provenance and collection surfaces', () => {
