@@ -122,10 +122,13 @@ Given one cut artifact directory and its `build-provenance.json`, it asserts
 - `gitDirty == false`;
 - `buildSha == the supplied live `/api/health` sha`;
 - **each artifact's sha256** matches what provenance recorded;
-- **D-004 signature dimension** — each artifact's minisign `.sig` verifies against
-  the embedded updater pubkey (Node Blake2b-512 + Ed25519, no external `minisign`),
-  and `latest.json`'s per-platform `url` + `signature` reference the *exact*
-  artifact whose sha256 was just verified.
+- **D-004 signature dimension** — every co-located minisign `.sig` verifies against
+  the embedded updater pubkey (Node Blake2b-512 + Ed25519, no external `minisign`).
+  `--require-signed` requires signatures for the D-019 published suffix set in
+  `bin/lib/release-artifacts.sh`; Windows DiskSpanning `.bin` slices are still
+  SHA-256 checked but intentionally excluded because they are normalized into a
+  published `.zip`, which remains signature-required. `latest.json`'s per-platform
+  `url` + `signature` reference the *exact* artifact whose sha256 was verified.
 
 A targeted single-dir check with explicit args:
 `bash bin/verify-provenance.sh <artifact-dir> --health-sha <sha> [--require-signed]`.

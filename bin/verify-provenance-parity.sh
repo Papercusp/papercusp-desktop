@@ -114,6 +114,28 @@ print("  ✓ schema: base keys+types OK; windows adds exactly packedSrcFingerpri
 print("  ✓ WI-4243: subpath names, per-artifact sig recording, .bin slices enumerated")
 PY
 
+VERIFY_WIN="$TMP/win-require-signed.out"
+if bash "$HERE/verify-provenance.sh" "$TMP/win" --require-signed --allow-dirty >"$VERIFY_WIN" 2>&1; then
+  fail "--require-signed accepted an unsigned published Windows installer"
+fi
+grep -Fq "artifact 'App_0.0.0_x64-setup.exe' has no .sig and --require-signed was set" "$VERIFY_WIN" \
+  || fail "--require-signed stopped requiring signatures for published Windows installers"
+if grep -Fq "artifact 'App_0.0.0_x64-setup-1.bin' has no .sig and --require-signed was set" "$VERIFY_WIN"; then
+  fail "--require-signed incorrectly required a signature on a DiskSpanning .bin slice"
+fi
+
+BIN_ONLY="$TMP/win-bin-only"
+mkdir -p "$BIN_ONLY"
+printf 'fixture\n' > "$BIN_ONLY/App_0.0.0_x64-setup-1.bin"
+PROVENANCE_GIT_ROOT="$ROOT" PROVENANCE_PACKED_SRC_FINGERPRINT=testfp PROVENANCE_SIGNED=false \
+  bash "$EMITTER" "$BIN_ONLY" 0.0.0 testsha false "$BIN_ONLY/App_0.0.0_x64-setup-1.bin" >/dev/null \
+  || fail "emitter (windows .bin-only mode) exited non-zero"
+bash "$HERE/verify-provenance.sh" "$BIN_ONLY" --require-signed --allow-dirty >"$TMP/win-bin-only.verify.out" 2>&1 \
+  || fail "--require-signed rejected a Windows DiskSpanning .bin-only fixture"
+grep -Fq "outside the D-019 published signable set" "$TMP/win-bin-only.verify.out" \
+  || fail "--require-signed did not disclose why the .bin signature is not required"
+pass "--require-signed follows the D-019 signable suffix set and excludes Windows .bin slices"
+
 # ── Check 2: no leg re-forks the shared emitter ────────────────────────────
 grep -q 'bin/emit-build-provenance.sh' "$RELEASE_LOCAL" \
   || fail "release-local.sh no longer calls bin/emit-build-provenance.sh (linux/mac leg re-forked?)"

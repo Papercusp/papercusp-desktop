@@ -35,7 +35,8 @@
 #   --latest-json PATH   cross-check this manifest (default: ARTIFACT_DIR/latest.json if present)
 #   --pubkey VALUE|PATH  minisign pubkey for the sig check (default: plugins.updater.pubkey
 #                        from src-tauri/tauri.conf.json)
-#   --require-signed     fail if ANY artifact lacks a .sig (default: verify sigs that exist)
+#   --require-signed     require .sig for published artifacts in the D-019 signable suffix set
+#                        (default: verify sigs that exist)
 #   --allow-dirty        don't fail when build-start gitDirty==true
 #   --json               emit a machine-readable verdict to stdout
 # Exit: 0 = all checks pass · 1 = a check failed · 2 = usage/setup error.
@@ -44,6 +45,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 NODE_HELPER="$HERE/verify-tauri-signature.mjs"
+source "$HERE/lib/release-artifacts.sh"
 
 DIR=""
 HEALTH_SHA=""
@@ -111,6 +113,7 @@ PROV="$DIR/build-provenance.json"
 
 DIR="$DIR" PROV="$PROV" HEALTH_SHA="$HEALTH_SHA" LATEST_JSON="$LATEST_JSON" \
 PUBKEY="$PUBKEY" NODE_HELPER="$NODE_HELPER" \
+RELEASE_ARTIFACTS_SIGNABLE_SUFFIXES="$RELEASE_ARTIFACTS_SIGNABLE_SUFFIXES" \
 REQUIRE_SIGNED="$REQUIRE_SIGNED" ALLOW_DIRTY="$ALLOW_DIRTY" JSON="$JSON" \
 python3 <<'PY'
 import os, sys, json, hashlib, subprocess, pathlib, re
@@ -126,6 +129,11 @@ NODE_HELPER = os.environ["NODE_HELPER"]
 REQUIRE_SIGNED = os.environ.get("REQUIRE_SIGNED") == "1"
 ALLOW_DIRTY = os.environ.get("ALLOW_DIRTY") == "1"
 AS_JSON = os.environ.get("JSON") == "1"
+SIGNABLE_SUFFIXES = tuple(os.environ["RELEASE_ARTIFACTS_SIGNABLE_SUFFIXES"].split())
+
+if not SIGNABLE_SUFFIXES:
+    print("D-019 signable artifact suffix policy is empty", file=sys.stderr)
+    sys.exit(2)
 
 failures = []
 notes = []
@@ -331,8 +339,10 @@ for a in prov_artifacts:
             # WI-4243: the emitter recorded a co-located .sig at build time —
             # its absence now means the signature was stripped/lost in transit.
             failures.append(f"artifact {name!r}: provenance records a .sig but none is co-located (signature stripped?)")
-        elif REQUIRE_SIGNED:
+        elif REQUIRE_SIGNED and any(name.endswith(suffix) for suffix in SIGNABLE_SUFFIXES):
             failures.append(f"artifact {name!r} has no .sig and --require-signed was set")
+        elif REQUIRE_SIGNED:
+            notes.append(f"artifact {name!r} is outside the D-019 published signable set — signature not required")
         else:
             notes.append(f"artifact {name!r} has no co-located .sig — signature not checked")
     artifacts_report.append(entry)
