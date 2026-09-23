@@ -2153,17 +2153,18 @@ mod discovery_tests {
     use super::{decide_server_supervision, ServerSupervisionAction as A};
 
     // A live Server just resets the dead counter.
-    // (Args: process_alive, server_shell_alive, in_boot_grace, dead_count,
-    // dead_threshold, respawns_in_window, max_respawns, already_gave_up.)
+    // (Args: process_alive, launchdaemon_installed, server_shell_alive,
+    // in_boot_grace, dead_count, dead_threshold, respawns_in_window,
+    // max_respawns, already_gave_up.)
     #[test]
     fn supervision_healthy_when_process_alive() {
         assert_eq!(
-            decide_server_supervision(true, false, false, 0, 10, 0, 5, false),
+            decide_server_supervision(true, false, false, false, 0, 10, 0, 5, false),
             A::Healthy
         );
         // …even if it was flapping a moment ago (dead_count carried in).
         assert_eq!(
-            decide_server_supervision(true, false, false, 7, 10, 0, 5, false),
+            decide_server_supervision(true, false, false, false, 7, 10, 0, 5, false),
             A::Healthy
         );
     }
@@ -2173,7 +2174,7 @@ mod discovery_tests {
     #[test]
     fn supervision_waits_during_boot_grace() {
         assert_eq!(
-            decide_server_supervision(false, false, true, 99, 10, 0, 5, false),
+            decide_server_supervision(false, false, false, true, 99, 10, 0, 5, false),
             A::Wait
         );
     }
@@ -2183,7 +2184,7 @@ mod discovery_tests {
     #[test]
     fn supervision_waits_below_debounce_threshold() {
         assert_eq!(
-            decide_server_supervision(false, false, false, 9, 10, 0, 5, false),
+            decide_server_supervision(false, false, false, false, 9, 10, 0, 5, false),
             A::Wait
         );
     }
@@ -2193,11 +2194,11 @@ mod discovery_tests {
     #[test]
     fn supervision_respawns_when_dead_past_threshold() {
         assert_eq!(
-            decide_server_supervision(false, false, false, 10, 10, 0, 5, false),
+            decide_server_supervision(false, false, false, false, 10, 10, 0, 5, false),
             A::Respawn
         );
         assert_eq!(
-            decide_server_supervision(false, false, false, 10, 10, 4, 5, false),
+            decide_server_supervision(false, false, false, false, 10, 10, 4, 5, false),
             A::Respawn
         );
     }
@@ -2207,7 +2208,7 @@ mod discovery_tests {
     #[test]
     fn supervision_gives_up_at_respawn_cap() {
         assert_eq!(
-            decide_server_supervision(false, false, false, 10, 10, 5, 5, false),
+            decide_server_supervision(false, false, false, false, 10, 10, 5, 5, false),
             A::GiveUp
         );
     }
@@ -2220,17 +2221,17 @@ mod discovery_tests {
         // While the respawn window is still saturated, a latched give-up holds
         // (and never re-notifies — GiveUp only fires on the transition).
         assert_eq!(
-            decide_server_supervision(false, false, false, 999, 10, 5, 5, true),
+            decide_server_supervision(false, false, false, false, 999, 10, 5, 5, true),
             A::Wait
         );
         // Window drained → retry (the slow-retry tier; the caller clears the latch).
         assert_eq!(
-            decide_server_supervision(false, false, false, 999, 10, 0, 5, true),
+            decide_server_supervision(false, false, false, false, 999, 10, 0, 5, true),
             A::Respawn
         );
         // The Server coming back while latched reads Healthy (caller clears latch).
         assert_eq!(
-            decide_server_supervision(true, false, false, 0, 10, 0, 5, true),
+            decide_server_supervision(true, false, false, false, 0, 10, 0, 5, true),
             A::Healthy
         );
     }
@@ -2242,21 +2243,37 @@ mod discovery_tests {
     #[test]
     fn supervision_defers_to_live_shell_instead_of_burning_the_cap() {
         assert_eq!(
-            decide_server_supervision(false, true, false, 999, 10, 0, 5, false),
+            decide_server_supervision(false, false, true, false, 999, 10, 0, 5, false),
             A::DeferToShell
         );
         assert_eq!(
-            decide_server_supervision(false, true, false, 999, 10, 5, 5, false),
+            decide_server_supervision(false, false, true, false, 999, 10, 5, 5, false),
             A::DeferToShell
         );
         // A latched give-up defers too (the shell may still recover it).
         assert_eq!(
-            decide_server_supervision(false, true, false, 999, 10, 5, 5, true),
+            decide_server_supervision(false, false, true, false, 999, 10, 5, 5, true),
             A::DeferToShell
         );
         // A live operator process wins over the shell signal.
         assert_eq!(
-            decide_server_supervision(true, true, false, 0, 10, 0, 5, false),
+            decide_server_supervision(true, false, true, false, 0, 10, 0, 5, false),
+            A::Healthy
+        );
+    }
+
+    #[test]
+    fn supervision_defers_to_installed_launchdaemon_while_it_is_temporarily_unloaded() {
+        assert_eq!(
+            decide_server_supervision(false, true, false, false, 999, 10, 5, 5, true),
+            A::DeferToLaunchDaemon
+        );
+        assert_eq!(
+            decide_server_supervision(false, true, true, false, 999, 10, 0, 5, false),
+            A::DeferToLaunchDaemon
+        );
+        assert_eq!(
+            decide_server_supervision(true, true, false, false, 0, 10, 0, 5, false),
             A::Healthy
         );
     }
@@ -3880,6 +3897,9 @@ fn next_operator_port(applied_port: u16, latest: Option<&OperatorDiscovery>) -> 
 enum ServerSupervisionAction {
     /// The Server process is alive — reset the dead counter, nothing to do.
     Healthy,
+    /// A system LaunchDaemon plist is installed and owns the Server lifecycle;
+    /// the GUI must not launch the Server bundle during a temporary bootout.
+    DeferToLaunchDaemon,
     /// Dead, but still inside the debounce window or a post-respawn boot grace —
     /// keep waiting (a normal restart briefly looks dead as the pid rolls over).
     Wait,
@@ -3912,6 +3932,7 @@ enum ServerSupervisionAction {
 /// process is provably up, so a bundle launch can only single-instance no-op.
 fn decide_server_supervision(
     process_alive: bool,
+    launchdaemon_installed: bool,
     server_shell_alive: bool,
     in_boot_grace: bool,
     dead_count: u32,
@@ -3925,6 +3946,9 @@ fn decide_server_supervision(
         // launch, the shell's own serve supervisor) brought the Server back —
         // the caller clears the latch and re-arms auto-respawn.
         return ServerSupervisionAction::Healthy;
+    }
+    if launchdaemon_installed {
+        return ServerSupervisionAction::DeferToLaunchDaemon;
     }
     if server_shell_alive {
         // WI-3270 (c): operator dead but the Server shell is alive — launching
@@ -4253,6 +4277,16 @@ fn server_shell_alive(workspace_home: &std::path::Path) -> bool {
     shell_heartbeat_fresh(hb.ts, unix_now_secs(), SERVER_SHELL_HEARTBEAT_MAX_AGE)
 }
 
+#[cfg(target_os = "macos")]
+fn server_launchdaemon_installed() -> bool {
+    std::path::Path::new("/Library/LaunchDaemons/com.papercusp.server.plist").is_file()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn server_launchdaemon_installed() -> bool {
+    false
+}
+
 /// Build the one successful-attach signal shared by initial boot, fallback,
 /// delayed boot recovery, and dynamic-port watcher recovery. The explicit
 /// restored latch makes a successful attach win over diagnostic retry loops
@@ -4469,10 +4503,10 @@ fn spawn_operator_watcher(
         let mut grace_until: Option<Instant> = None;
         let mut respawn_times: Vec<Instant> = Vec::new();
         let mut gave_up = false;
-        // WI-3270 transition latches: defer-to-shell logging (once per streak)
-        // and the operator-dead notification (once per dead episode — give-up
-        // can now recur across retry cycles, the user shouldn't be re-notified
-        // every ~5 minutes).
+        // Defer-to-supervisor logging (once per streak) and the operator-dead
+        // notification (once per dead episode — give-up can now recur across
+        // retry cycles, the user shouldn't be re-notified every ~5 minutes).
+        let mut deferred_to_launchdaemon = false;
         let mut deferred_to_shell = false;
         let mut dead_notified = false;
         loop {
@@ -4531,11 +4565,15 @@ fn spawn_operator_watcher(
                 consecutive_dead
             };
             respawn_times.retain(|t| now.duration_since(*t) < RESPAWN_WINDOW);
+            // An installed system LaunchDaemon owns the Server bundle lifecycle
+            // even while its plist is temporarily booted out for a payload swap.
+            let launchdaemon_installed = server_launchdaemon_installed();
             // WI-3270 (c): a fresh Server-shell heartbeat means a bundle launch
             // can only single-instance no-op — read it before deciding.
             let shell_alive = server_shell_alive(&workspace_home);
             match decide_server_supervision(
                 process_alive,
+                launchdaemon_installed,
                 shell_alive,
                 in_boot_grace,
                 dead_count,
@@ -4546,6 +4584,7 @@ fn spawn_operator_watcher(
             ) {
                 ServerSupervisionAction::Healthy => {
                     consecutive_dead = 0;
+                    deferred_to_launchdaemon = false;
                     deferred_to_shell = false;
                     dead_notified = false;
                     if gave_up {
@@ -4558,10 +4597,24 @@ fn spawn_operator_watcher(
                 }
                 ServerSupervisionAction::Wait => {
                     consecutive_dead = dead_count;
+                    deferred_to_launchdaemon = false;
                     deferred_to_shell = false;
+                }
+                ServerSupervisionAction::DeferToLaunchDaemon => {
+                    consecutive_dead = dead_count;
+                    deferred_to_shell = false;
+                    if !deferred_to_launchdaemon {
+                        eprintln!(
+                            "[papercusp-desktop] system/com.papercusp.server.plist is installed; \
+                             deferring Server bundle launches to launchd, including during a \
+                             temporary bootout for a payload swap"
+                        );
+                        deferred_to_launchdaemon = true;
+                    }
                 }
                 ServerSupervisionAction::DeferToShell => {
                     consecutive_dead = dead_count;
+                    deferred_to_launchdaemon = false;
                     if !deferred_to_shell {
                         eprintln!(
                             "[papercusp-desktop] operator process dead but the Papercusp Server \
@@ -4581,6 +4634,7 @@ fn spawn_operator_watcher(
                         gave_up = false;
                     }
                     deferred_to_shell = false;
+                    deferred_to_launchdaemon = false;
                     // Every platform ships the Server as an independently-installed
                     // sibling product. Re-launch that bundle by identity; the
                     // Server's own in-process supervisor remains responsible for a
@@ -4598,6 +4652,7 @@ fn spawn_operator_watcher(
                 }
                 ServerSupervisionAction::GiveUp => {
                     deferred_to_shell = false;
+                    deferred_to_launchdaemon = false;
                     eprintln!(
                         "[papercusp-desktop] Papercusp Server respawn cap hit ({} in {}s) — the Server \
                          keeps dying; backing off until the respawn window drains (WI-2667 / WI-3270)",

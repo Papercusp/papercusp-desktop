@@ -31,6 +31,7 @@ fi
 source "$HERE/seed-resource-root.sh"
 
 APP="/Applications/Papercusp Server.app"
+GUI_APP="/Applications/Papercusp GUI.app"
 SIDECAR="$APP/Contents/Resources/sidecar"
 REAL_HOME="${PAPERCUSP_RIG_HOME:-/Users/aviweiss}"
 CUR="${PAPERCUSP_RIG_SIDECAR_DIR:-${REAL_HOME}/rig-sidecar-current}"
@@ -49,6 +50,8 @@ CLEANUP_CONTROL=""
 SELF_TEST=0
 LAUNCHD_RUN=0
 STOP_ONLY=0
+QUIESCE_GUI=0
+QUIESCE_SERVER=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --stage)
@@ -73,6 +76,14 @@ while [ "$#" -gt 0 ]; do
       STOP_ONLY=1
       shift
       ;;
+    --quiesce-gui)
+      QUIESCE_GUI=1
+      shift
+      ;;
+    --quiesce-server)
+      QUIESCE_SERVER=1
+      shift
+      ;;
     *)
       echo "FATAL: unknown argument: $1" >&2
       exit 2
@@ -80,8 +91,13 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ "$LAUNCHD_RUN" = "1" ] && { [ "$STOP_ONLY" = "1" ] || [ -n "$STAGE" ]; }; then
-  echo "FATAL: --launchd-run cannot be combined with --stop-only or --stage" >&2
+if [ "$LAUNCHD_RUN" = "1" ] && { [ "$STOP_ONLY" = "1" ] || [ -n "$STAGE" ] || [ "$QUIESCE_GUI" = "1" ] || [ "$QUIESCE_SERVER" = "1" ]; }; then
+  echo "FATAL: --launchd-run cannot be combined with stop, quiesce, or stage options" >&2
+  exit 2
+fi
+
+if { [ "$QUIESCE_GUI" = "1" ] || [ "$QUIESCE_SERVER" = "1" ]; } && { [ "$STOP_ONLY" = "1" ] || [ -n "$STAGE" ]; }; then
+  echo "FATAL: app-bundle quiescence cannot be combined with --stop-only or --stage" >&2
   exit 2
 fi
 
@@ -371,6 +387,52 @@ process_executable() {
   lsof -nP -a -p "$1" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1
 }
 
+quiesce_exact_app() {
+  local bundle="$1" expected_id="$2" label="$3" info executable_name executable bundle_id pids pid current i
+  info="$bundle/Contents/Info.plist"
+  [ -f "$info" ] || { echo "no installed $label bundle; no app process to quiesce"; return 0; }
+  bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$info" 2>/dev/null)" \
+    || { echo "FATAL: cannot read $label bundle identifier from $info" >&2; return 1; }
+  [ "$bundle_id" = "$expected_id" ] \
+    || { echo "FATAL: $label bundle identifier is $bundle_id, expected $expected_id" >&2; return 1; }
+  executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$info" 2>/dev/null)" \
+    || { echo "FATAL: cannot read $label executable name from $info" >&2; return 1; }
+  case "$executable_name" in ''|*/*) echo "FATAL: invalid $label bundle executable name" >&2; return 1 ;; esac
+  executable="$bundle/Contents/MacOS/$executable_name"
+  [ -x "$executable" ] || { echo "FATAL: $label executable is missing: $executable" >&2; return 1; }
+  command -v lsof >/dev/null 2>&1 || { echo "FATAL: lsof is required to verify $label process identity" >&2; return 1; }
+  pids="$(lsof -t -nP -a -d txt "$executable" 2>/dev/null || true)"
+  [ -n "$pids" ] || { echo "$label has no running bundle executable"; return 0; }
+  for pid in $pids; do
+    case "$pid" in ''|*[!0-9]*) echo "FATAL: lsof returned an invalid $label PID" >&2; return 1 ;; esac
+    current="$(process_executable "$pid")"
+    [ "$current" = "$executable" ] \
+      || { echo "FATAL: PID $pid no longer maps to the exact $label executable" >&2; return 1; }
+  done
+  for pid in $pids; do
+    current="$(process_executable "$pid")"
+    [ "$current" = "$executable" ] \
+      || { echo "FATAL: PID $pid changed identity before stopping $label" >&2; return 1; }
+    if ! kill -TERM "$pid" 2>/dev/null && kill -0 "$pid" 2>/dev/null; then
+      echo "FATAL: could not send SIGTERM to exact $label PID $pid" >&2
+      return 1
+    fi
+    for i in $(seq 1 30); do
+      kill -0 "$pid" 2>/dev/null || break
+      current="$(process_executable "$pid")"
+      [ "$current" = "$executable" ] || break
+      sleep 1
+    done
+    if kill -0 "$pid" 2>/dev/null && [ "$(process_executable "$pid")" = "$executable" ]; then
+      echo "FATAL: exact $label PID $pid is still running after the clean-stop window" >&2
+      return 1
+    fi
+  done
+  pids="$(lsof -t -nP -a -d txt "$executable" 2>/dev/null || true)"
+  [ -z "$pids" ] || { echo "FATAL: $label is still running after the clean-quit window (PIDs: $pids)" >&2; return 1; }
+  echo "QUIESCED: $label ($expected_id), exact executable $executable"
+}
+
 is_current_operator_pid() {
   local op="$1" cmd exe
   case "$op" in ''|*[!0-9]*) return 1 ;; esac
@@ -464,6 +526,21 @@ wait_for_port_free() {
   done
   return 1
 }
+
+if [ "$QUIESCE_GUI" = "1" ] && [ "$QUIESCE_SERVER" = "1" ]; then
+  echo "FATAL: choose only one exact app bundle to quiesce per invocation" >&2
+  exit 2
+fi
+
+if [ "$QUIESCE_GUI" = "1" ]; then
+  quiesce_exact_app "$GUI_APP" "com.papercusp.gui" "Papercusp GUI" || exit 1
+  exit 0
+fi
+
+if [ "$QUIESCE_SERVER" = "1" ]; then
+  quiesce_exact_app "$APP" "com.papercusp.server" "Papercusp Server" || exit 1
+  exit 0
+fi
 
 stop_owned_operator || { echo "FATAL: exact current operator did not stop" >&2; exit 1; }
 

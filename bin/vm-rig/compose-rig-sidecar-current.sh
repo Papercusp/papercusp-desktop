@@ -255,10 +255,18 @@ if [ "$PUSH" = "1" ]; then
   rsync -a "$DESKTOP_ROOT/src-tauri/launchd/com.papercusp.server.plist.template" "$VM:$REMOTE_LAUNCHD_DIR/com.papercusp.server.plist.template"
   rsync -a "$DESKTOP_ROOT/src-tauri/launchd/com.papercusp.server.current.plist.template" "$VM:$REMOTE_LAUNCHD_DIR/com.papercusp.server.current.plist.template"
 
+  # Stop the old GUI supervisor before touching launchd. It predates the
+  # LaunchDaemon-aware deferral and can relaunch the stale installed Server
+  # bundle while the current payload is being swapped.
+  ssh "$VM" "PAPERCUSP_RIG_HOME=$REMOTE_HOME_Q PAPERCUSP_RIG_SIDECAR_DIR=$REMOTE_DIR_Q bash $REMOTE_LAUNCHER_Q --quiesce-gui"
   # Quiesce the system job before the atomic swap. Otherwise launchd can
   # interpret the deploy's exact-PID stop as a crash and respawn the old payload
   # into the same port/embedded-Postgres boundary while the swap is in flight.
   ssh "$VM" "sudo -n $REMOTE_INSTALLER_Q --bootout-only"
+  # The old GUI may already have left a Server.app process behind. Once its
+  # LaunchDaemon owner is booted out, stop only a PID proven to map to the exact
+  # installed Server bundle; the helper fails closed if identity is uncertain.
+  ssh "$VM" "PAPERCUSP_RIG_HOME=$REMOTE_HOME_Q PAPERCUSP_RIG_SIDECAR_DIR=$REMOTE_DIR_Q bash $REMOTE_LAUNCHER_Q --quiesce-server"
   if ! ssh "$VM" "PAPERCUSP_RIG_HOME=$REMOTE_HOME_Q PAPERCUSP_RIG_SIDECAR_DIR=$REMOTE_DIR_Q bash $REMOTE_LAUNCHER_Q --stage $REMOTE_STAGE_Q"; then
     echo "FATAL: staged deploy failed; restoring current-payload LaunchDaemon around the rollback payload" >&2
     ssh "$VM" "sudo -n $REMOTE_INSTALLER_Q --user $REMOTE_SERVICE_USER_Q --current-payload $REMOTE_DIR_Q --current-launcher $REMOTE_LAUNCHER_Q" || true
