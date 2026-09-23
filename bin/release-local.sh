@@ -2697,7 +2697,7 @@ assert_linux_artifact_cardinality() {  # $1 = Linux bundle dir
 # that script verifies the artifacts build-provenance.json NAMES, so a surplus
 # installer left by another lane is invisible to it while the version-scoped
 # collection glob would still sweep the bytes into the release.
-assert_windows_artifact_cardinality() {  # $1 = inno output dir
+assert_windows_artifact_cardinality() {  # $1 = inno output dir  # assert-integrity-ok: reached via dynamic dispatch "release_task_verify_${leg}_artifacts" (leg=windows, release_task_leg_prepare/commit)
   local dir="$1"
   local expected=0 setups setup_sigs role
   for role in $PAPERCUSP_BUILD_ROLES; do
@@ -2719,7 +2719,7 @@ assert_windows_artifact_cardinality() {  # $1 = inno output dir
 # so an unversioned bundle set that is short is just as disqualifying as one that
 # is surplus — and verify-provenance.sh cannot see either, because it iterates the
 # artifacts build-provenance.json NAMES and never enumerates the directory.
-assert_mac_artifact_cardinality() {  # $1 = mac bundle dir ($MAC_OUT)
+assert_mac_artifact_cardinality() {  # $1 = mac bundle dir ($MAC_OUT)  # assert-integrity-ok: reached via dynamic dispatch "release_task_verify_${leg}_artifacts" (leg=mac, release_task_leg_prepare/commit)
   local dir="$1"
   local expected=0 dmgs dmg_sigs tgzs tgz_sigs role
   for role in $PAPERCUSP_BUILD_ROLES; do
