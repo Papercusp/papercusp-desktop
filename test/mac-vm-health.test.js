@@ -641,6 +641,8 @@ test('current mac rig launcher validates staged integrity and deployment preserv
 
   const composer = await readFile(currentComposer, 'utf8');
   const launcher = await readFile(currentBoot, 'utf8');
+  assert.equal(spawnSync('bash', ['-n', currentBoot]).status, 0, 'current launcher must remain valid Bash');
+  assert.equal(spawnSync('bash', ['-n', currentComposer]).status, 0, 'current composer must remain valid Bash');
   assert.match(composer, /\[ -x "\$HERE\/boot-headless-current\.sh" \]/);
   assert.match(composer, /rsync -a --chmod=F755 "\$HERE\/boot-headless-current\.sh"/);
   assert.match(composer, /EMBEDDED_PG_SRC="\$REPO_ROOT\/libs\/papercusp\/packages\/embedded-postgres-server"/);
@@ -652,8 +654,19 @@ test('current mac rig launcher validates staged integrity and deployment preserv
   // is therefore the same PID operator.json and lsof must report.
   assert.match(launcher, /--launchd-run\)\s*\n\s*LAUNCHD_RUN=1/);
   assert.match(launcher, /--stop-only\)\s*\n\s*STOP_ONLY=1/);
+  assert.match(launcher, /--quiesce-gui\)\s*\n\s*QUIESCE_GUI=1/);
+  assert.match(launcher, /--quiesce-server\)\s*\n\s*QUIESCE_SERVER=1/);
+  assert.match(launcher, /CFBundleIdentifier/);
+  assert.match(launcher, /lsof -t -nP -a -d txt "\$executable"/);
+  assert.match(launcher, /kill -TERM "\$pid"/);
   assert.match(launcher, /printf '%s\\n' "\$\$" > "\$PIDFILE"/);
   assert.match(launcher, /exec "\$NODE" --heapsnapshot-near-heap-limit=1 "\$SERVE" --ensure/);
+  const guiQuiesce = composer.indexOf('bash $REMOTE_LAUNCHER_Q --quiesce-gui');
+  const daemonBootout = composer.indexOf('sudo -n $REMOTE_INSTALLER_Q --bootout-only');
+  const serverQuiesce = composer.indexOf('bash $REMOTE_LAUNCHER_Q --quiesce-server');
+  const stageSwap = composer.indexOf('bash $REMOTE_LAUNCHER_Q --stage $REMOTE_STAGE_Q');
+  assert.ok(guiQuiesce >= 0 && guiQuiesce < daemonBootout, 'stop the existing GUI supervisor before booting out launchd');
+  assert.ok(daemonBootout < serverQuiesce && serverQuiesce < stageSwap, 'stop the exact Server bundle after bootout and before swapping payloads');
   assert.match(
     launcher,
     /if \[ "\$STOP_ONLY" = "1" \]; then\s*\n\s*rm -f "\$PIDFILE"\s*\n\s*echo "STOPPED: exact current-payload operator is offline[^\n]+"\s*\n\s*exit 0\s*\nfi/,
