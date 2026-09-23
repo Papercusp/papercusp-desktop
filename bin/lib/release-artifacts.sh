@@ -195,6 +195,7 @@ release_artifacts_smoke_receipt_write() {
 
   python3 - "$out" "$tag" "$version" "$platform" "$verifier" "$build_sha" "$provenance" "$@" <<'PY'
 import datetime
+import fcntl
 import hashlib
 import json
 import os
@@ -307,7 +308,7 @@ receipt = {
 }
 payload = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
 
-def atomic_write(destination):
+def atomic_write(destination, contents):
     destination = pathlib.Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(
@@ -315,7 +316,7 @@ def atomic_write(destination):
     )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(payload)
+            handle.write(contents)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, destination)
@@ -326,12 +327,53 @@ def atomic_write(destination):
             pass
         raise
 
-# The provenance-adjacent copy is the durable audit artifact.  Write the /tmp
-# hand-off last so a failed durable write can never leave a newly-authorizing
-# canonical receipt behind.
+# The provenance-adjacent copy is the durable audit artifact.  Windows smoke
+# also advances a monotonic, host-wide success watermark in the release
+# retention root; per-build receipts alone cannot detect that all smoke runs
+# have stopped.  Persist the watermark before authorizing this cut with receipts.
+if platform == "windows":
+    retention_root = pathlib.Path(
+        os.environ.get(
+            "PAPERCUSP_RELEASE_RETENTION_ROOT",
+            str(pathlib.Path.home() / ".papercusp" / "release-retention"),
+        )
+    )
+    watermark_path = retention_root / "latest-windows-smoke.json"
+    lock_path = retention_root / "latest-windows-smoke.lock"
+    watermark = {
+        "schemaVersion": "papercusp-windows-smoke-success/v1",
+        "result": "pass",
+        "platform": "windows",
+        "tag": tag,
+        "version": version,
+        "buildSha": build_sha,
+        "verifiedAtUtc": receipt["verifiedAtUtc"],
+    }
+    watermark_payload = json.dumps(watermark, indent=2, sort_keys=True) + "\n"
+    retention_root.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        current_verified = datetime.datetime.fromisoformat(
+            receipt["verifiedAtUtc"].replace("Z", "+00:00")
+        )
+        try:
+            previous = json.loads(watermark_path.read_text(encoding="utf-8"))
+            previous_stamp = previous.get("verifiedAtUtc")
+            previous_verified = datetime.datetime.fromisoformat(
+                previous_stamp.replace("Z", "+00:00")
+            ) if isinstance(previous_stamp, str) else None
+            if previous_verified is not None and previous_verified.tzinfo is None:
+                previous_verified = None
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            previous_verified = None
+        if previous_verified is None or current_verified >= previous_verified:
+            atomic_write(watermark_path, watermark_payload)
+
+# The /tmp hand-off is written last so a failed durable write can never leave a
+# newly-authorizing per-build receipt behind.
 sibling = prov_path.parent / f"platform-smoke-{tag}-{platform}.json"
-atomic_write(sibling)
-atomic_write(out)
+atomic_write(sibling, payload)
+atomic_write(out, payload)
 print(out)
 PY
 }

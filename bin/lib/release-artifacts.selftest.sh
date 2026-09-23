@@ -45,6 +45,7 @@ WORK="$(mktemp -d /tmp/relart-selftest.XXXXXX)"
 RETENTION_ROOT="$WORK/retention"
 export PAPERCUSP_RELEASE_RETENTION_ROOT="$RETENTION_ROOT"
 export PAPERCUSP_RELEASE_DELETION_AUDIT_PATH="$RETENTION_ROOT/deletion-audit.tsv"
+LATEST_WINDOWS_SMOKE="$RETENTION_ROOT/latest-windows-smoke.json"
 # Unique tags so the /tmp manifests can't collide with a real cut or a parallel run.
 TAG="desktop-v0.0.0-selftest-$$"
 TAG_EMPTY="desktop-v0.0.0-selftest-empty-$$"
@@ -458,6 +459,11 @@ if release_artifacts_smoke_receipt_write \
 else
   bad "a valid content-bound GUI+Server smoke receipt was rejected"
 fi
+if [[ ! -e "$LATEST_WINDOWS_SMOKE" ]]; then
+  ok "non-Windows smoke does not advance the Windows success watermark"
+else
+  bad "non-Windows smoke incorrectly advanced the Windows success watermark"
+fi
 
 # The publish-facing runner must actually invoke the canonical verifier when a
 # receipt is absent, pass it the exact GUI+Server installers, and validate the
@@ -702,6 +708,19 @@ if release_artifacts_smoke_receipt_write \
   ok "Windows normalized zip is authorized only by its exact exercised stub+slices"
 else
   bad "Windows normalized zip did not validate against its exercised payload members"
+fi
+if python3 - "$LATEST_WINDOWS_SMOKE" "$TAG_SMOKE-win" "$SMOKE_BUILD_SHA" <<'PY'
+import json, pathlib, sys
+marker = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert marker["schemaVersion"] == "papercusp-windows-smoke-success/v1"
+assert marker["result"] == "pass" and marker["platform"] == "windows"
+assert marker["tag"] == sys.argv[2] and marker["buildSha"] == sys.argv[3]
+assert marker["verifiedAtUtc"].endswith("Z")
+PY
+then
+  ok "validated Windows smoke advances the durable success watermark"
+else
+  bad "validated Windows smoke did not write a valid durable success watermark"
 fi
 mapfile -t WIN_SMOKE_INPUTS < <(
   release_artifacts_smoke_inputs windows "$WIN_GUI" "$WIN_ZIP"
