@@ -572,6 +572,18 @@ if [[ "$host_checked" -eq 0 && "$prov_checked" -eq 0 && "$byte_checked" -eq 0 ]]
 fi
 echo
 
+# Refuse an unapproved reduced desktop scope before writing either artifact
+# objects or updater manifests. The registry recorder enforces the same owner
+# directive at record time; this repeats it at the publication boundary.
+if ! npx tsx "${REPO_ROOT}/apps/operator/lib/release/finalize-release-publication.ts" \
+    --preflight \
+    --version "$VERSION" \
+    --channel "$CHANNEL" \
+    --workspace "${PAPERCUSP_WORKSPACE_ID:-papercusp-workspace}"; then
+  echo "ERROR: release scope preflight failed — refusing to upload artifacts or updater manifests." >&2
+  exit 1
+fi
+
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "DRY_RUN=1 — nothing uploaded."
   exit 0
