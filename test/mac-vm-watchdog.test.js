@@ -1,0 +1,399 @@
+// Tests for bin/mac-vm-watchdog.mjs and qmp-command.py's status-events mode
+// (WI-10002582 / EI-24019740313758959).
+import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+
+import {
+  classify,
+  coldRestart,
+  decide,
+  loadConfig,
+  parseCursorProbe,
+  parseNeighStates,
+  resolveDbUrl,
+  RESTART_MIN_INTERVAL_FLOOR_SEC,
+  runOnce,
+} from '../bin/mac-vm-watchdog.mjs';
+
+// Overridable so a falsifiability probe can point these tests at a pre-fix copy.
+const qmpCommand = process.env.QMP_COMMAND_UNDER_TEST || new URL('../bin/qmp-command.py', import.meta.url).pathname;
+const tempDirs = new Set();
+
+async function tempDir() {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'mac-vm-watchdog-'));
+  tempDirs.add(dir);
+  return dir;
+}
+
+test.afterEach(async () => {
+  await Promise.all([...tempDirs].map((d) => rm(d, { recursive: true, force: true })));
+  tempDirs.clear();
+});
+
+// ── qmp-command.py against a fake QMP server ─────────────────────────────
+
+async function fakeQmp({ status = 'running', resetsBeforeReply = 0, resetsDuringWindow = 0, greet = true } = {}) {
+  const dir = await tempDir();
+  const sock = path.join(dir, 'qmp.sock');
+  const commands = [];
+  const timers = [];
+  const server = net.createServer((conn) => {
+    conn.on('error', () => {});
+    if (!greet) return; // hold the slot without a greeting, like a second client
+    const reset = () => conn.write(`${JSON.stringify({ event: 'RESET', data: { guest: true }, timestamp: {} })}\n`);
+    conn.write(`${JSON.stringify({ QMP: { version: {}, capabilities: [] } })}\n`);
+    let buf = '';
+    conn.on('data', (chunk) => {
+      buf += chunk;
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const msg = JSON.parse(buf.slice(0, i));
+        buf = buf.slice(i + 1);
+        commands.push(msg.execute);
+        if (msg.execute === 'query-status') {
+          for (let n = 0; n < resetsBeforeReply; n += 1) reset();
+          conn.write(`${JSON.stringify({ return: { status, running: status === 'running', singlestep: false } })}\n`);
+          for (let n = 0; n < resetsDuringWindow; n += 1) timers.push(setTimeout(reset, 50 + n * 50));
+        } else {
+          conn.write('{"return": {}}\n');
+        }
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(sock, resolve));
+  return {
+    sock,
+    commands,
+    close: () => new Promise((resolve) => {
+      timers.forEach(clearTimeout);
+      server.close(resolve);
+    }),
+  };
+}
+
+function runQmp(args, env = {}) {
+  return new Promise((resolve) => {
+    execFile('python3', [qmpCommand, ...args], { env: { ...process.env, ...env }, timeout: 20_000 }, (err, stdout, stderr) => {
+      resolve({ code: err ? err.code : 0, stdout, stderr });
+    });
+  });
+}
+
+test('status-events counts RESET events before the reply and during the window', async () => {
+  const qmp = await fakeQmp({ resetsBeforeReply: 2, resetsDuringWindow: 3 });
+  try {
+    const r = await runQmp([qmp.sock, 'status-events', '1']);
+    assert.equal(r.code, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.status, 'running');
+    assert.equal(out.running, true);
+    assert.equal(out.events.RESET, 5);
+    assert.equal(out.window_sec, 1);
+    assert.deepEqual(qmp.commands, ['qmp_capabilities', 'query-status']);
+  } finally {
+    await qmp.close();
+  }
+});
+
+test('query-status no longer mistakes an interleaved RESET event for its reply', async () => {
+  // Before the fix, the first RESET line was read as the reply and the helper
+  // reported "VM is not running" for a running (reset-looping) VM.
+  const qmp = await fakeQmp({ resetsBeforeReply: 3 });
+  try {
+    const r = await runQmp([qmp.sock, 'query-status']);
+    assert.equal(r.code, 0, r.stderr);
+  } finally {
+    await qmp.close();
+  }
+});
+
+test('status-events reports a missing greeting as slot contention (exit 75)', async () => {
+  const qmp = await fakeQmp({ greet: false });
+  try {
+    const r = await runQmp([qmp.sock, 'status-events', '1'], { PAPERCUSP_QMP_TIMEOUT_SEC: '0.5' });
+    assert.equal(r.code, 75, r.stderr);
+  } finally {
+    await qmp.close();
+  }
+});
+
+test('status-events rejects an unbounded or missing window', async () => {
+  for (const bad of [['status-events'], ['status-events', '0'], ['status-events', '61'], ['status-events', 'x']]) {
+    const r = await runQmp(['/nonexistent.sock', ...bad]);
+    assert.equal(r.code, 1, `${bad.join(' ')} should be refused`);
+  }
+});
+
+// ── pure pieces ──────────────────────────────────────────────────────────
+
+const cfg = (over = {}) => ({ ...loadConfig({ HOME: '/home/x' }), ...over });
+
+function signals({ active = true, job = '', ageSec = 7200, qmp = {}, alive = true, cursor = { skipped: true } } = {}) {
+  return {
+    service: { active, activeState: active ? 'active' : 'inactive', job, mainPid: 4242, activeAgeSec: ageSec },
+    qmp: { ok: true, status: 'running', running: true, events: {}, windowSec: 5, ...qmp },
+    guest: { pingOk: alive, neighStates: alive ? ['REACHABLE'] : ['FAILED'], alive },
+    cursor,
+  };
+}
+
+test('loadConfig keeps the one-restart-per-hour floor and rejects a bad remedy', () => {
+  assert.equal(loadConfig({ HOME: '/h', MAC_VM_WATCHDOG_RESTART_MIN_INTERVAL_SEC: '60' }).restartMinIntervalSec, RESTART_MIN_INTERVAL_FLOOR_SEC);
+  assert.equal(loadConfig({ HOME: '/h', MAC_VM_WATCHDOG_RESTART_MIN_INTERVAL_SEC: '7200' }).restartMinIntervalSec, 7200);
+  assert.equal(loadConfig({ HOME: '/h' }).unit, 'papercusp-vm-mac.service');
+  assert.throws(() => loadConfig({ HOME: '/h', MAC_VM_WATCHDOG_REMEDY: 'system_reset' }));
+});
+
+test('classify maps each signal combination to its verdict', () => {
+  const c = cfg();
+  const cases = [
+    [signals({ qmp: { events: { RESET: 5 } } }), 'reset-loop', 'restart'],
+    [signals({ qmp: { events: { RESET: 1 } } }), 'healthy', 'ok'],
+    [signals({ qmp: { status: 'guest-panicked', running: false } }), 'vm-fatal-state', 'restart'],
+    [signals({ qmp: { status: 'paused', running: false } }), 'vm-not-running', 'alert'],
+    [signals({ qmp: { ok: false, contended: true } }), 'op-in-flight', 'skip'],
+    [signals({ qmp: { ok: false, error: 'connection refused' } }), 'qmp-unresponsive', 'alert'],
+    [signals({ job: '812' }), 'op-in-flight', 'skip'],
+    [signals({ active: false }), 'service-inactive', 'alert'],
+    [signals({ alive: false, ageSec: 120 }), 'booting', 'grace'],
+    [signals({ alive: false, ageSec: 7200 }), 'guest-unreachable', 'restart'],
+    [signals({ cursor: { ok: true, ageSec: 4000, position: 9 } }), 'cursor-stale', 'alert'],
+    [signals({ cursor: { ok: false, error: 'ssh: timeout' } }), 'healthy', 'ok'],
+  ];
+  for (const [s, verdict, kind] of cases) {
+    const got = classify(s, c);
+    assert.equal(got.verdict, verdict, JSON.stringify(s));
+    assert.equal(got.kind, kind, verdict);
+  }
+});
+
+test('resolveDbUrl reads HARNESS_ADMIN_DATABASE_URL from the operator process', async () => {
+  // Measured on the tower: the operator carries only this key. Before it was listed,
+  // resolution returned '' and every alert was silently skipped.
+  const deps = {
+    exec: async () => ({ code: 0, stdout: '777\n', stderr: '' }),
+    readProcEnviron: (pid) => (pid === 777 ? 'PATH=/bin\0HARNESS_ADMIN_DATABASE_URL=postgres://u@h:5432/papercusp\0' : ''),
+  };
+  assert.equal(await resolveDbUrl(cfg({ dbUrl: '' }), deps), 'postgres://u@h:5432/papercusp');
+  assert.equal(loadConfig({ HOME: '/h', HARNESS_ADMIN_DATABASE_URL: 'postgres://env/db' }).dbUrl, 'postgres://env/db');
+});
+
+test('parsers read the neighbour table and the fold cursor probe', () => {
+  assert.deepEqual(parseNeighStates('[{"dst":"172.31.44.2","state":["REACHABLE"]}]'), ['REACHABLE']);
+  assert.deepEqual(parseNeighStates('not json'), []);
+  const probe = parseCursorProbe('2026-09-23T03:00:00.000Z papercusp 5b00878b0000 position=7 updated=2026-09-23T02:30:00.000Z apply_failure=NULL peer=live');
+  assert.deepEqual(probe, { ok: true, position: 7, ageSec: 1800 });
+  assert.equal(parseCursorProbe('2026-09-23T03:00:00.000Z NO ROW for 5b00878b%').ok, false);
+});
+
+test('decide alerts first, restarts on the second reset-loop check, then rate-limits', () => {
+  const c = cfg();
+  const loop = classify(signals({ qmp: { events: { RESET: 6 } } }), c);
+  const t0 = 1_000_000;
+
+  const r1 = decide(loop, {}, c, t0, null);
+  assert.deepEqual(r1.actions.map((a) => a.type), ['alert']);
+  assert.equal(r1.state.streak, 1);
+
+  const r2 = decide(loop, r1.state, c, t0 + 60, null);
+  assert.deepEqual(r2.actions.map((a) => a.type), ['alert', 'cold-restart']);
+  assert.equal(r2.state.lastRestartAt, t0 + 60);
+
+  const r3 = decide(loop, r2.state, c, t0 + 120, null);
+  assert.deepEqual(r3.actions.map((a) => a.type), ['alert'], 'rate limit is announced once');
+  assert.match(r3.actions[0].summary, /needs a human/);
+  const r4 = decide(loop, r3.state, c, t0 + 180, null);
+  assert.deepEqual(r4.actions, [], 'the same withheld state is not re-alerted every minute');
+
+  const r5 = decide(loop, r4.state, c, t0 + 60 + RESTART_MIN_INTERVAL_FLOOR_SEC, null);
+  assert.ok(r5.actions.some((a) => a.type === 'cold-restart'), 'an hour later the remedy is available again');
+});
+
+test('decide honours a hold, alert-only mode, and announces recovery', () => {
+  const c = cfg();
+  const loop = classify(signals({ qmp: { events: { RESET: 6 } } }), c);
+  const hold = { until: 2_000_000, by: 'su-leader', reason: 'fold op' };
+  const first = decide(loop, {}, c, 1_000_000, hold);
+  const held = decide(loop, first.state, c, 1_000_060, hold);
+  assert.ok(!held.actions.some((a) => a.type === 'cold-restart'));
+  assert.match(held.actions[0].summary, /su-leader/);
+
+  const alertOnly = decide(loop, first.state, cfg({ remedy: 'alert-only' }), 1_000_060, null);
+  assert.ok(!alertOnly.actions.some((a) => a.type === 'cold-restart'));
+
+  const healthy = classify(signals(), c);
+  const recovered = decide(healthy, held.state, c, 1_000_120, null);
+  assert.equal(recovered.actions[0].category, 'severe-event-resolved');
+  assert.equal(recovered.state.streak, 0);
+  assert.equal(recovered.state.condition, null);
+});
+
+test('decide leaves state untouched for skip and boot grace', () => {
+  const c = cfg();
+  const prev = { condition: 'reset-loop', streak: 1, conditionSince: 5, lastAlertAt: 5 };
+  for (const s of [signals({ job: '9' }), signals({ alive: false, ageSec: 30 })]) {
+    const r = decide(classify(s, c), prev, c, 100, null);
+    assert.deepEqual(r.actions, []);
+    assert.equal(r.state.streak, 1);
+    assert.equal(r.state.condition, 'reset-loop');
+  }
+});
+
+test('guest-unreachable needs three consecutive checks before a restart', () => {
+  const c = cfg();
+  const dead = classify(signals({ alive: false }), c);
+  let state = {};
+  const types = [];
+  for (let i = 0; i < 3; i += 1) {
+    const r = decide(dead, state, c, 1_000_000 + i * 60, null);
+    state = r.state;
+    types.push(r.actions.map((a) => a.type).join('+'));
+  }
+  assert.deepEqual(types, ['alert', '', 'alert+cold-restart']);
+});
+
+// ── end to end with fake system deps ─────────────────────────────────────
+
+function fakeDeps({ resets = 6, qmpCode = 0, quitCode = 0, pingCode = 0, startCode = 0 } = {}) {
+  const calls = [];
+  let nowMs = Date.parse('2026-09-23T04:00:00Z');
+  let qemuAlive = true;
+  const deps = {
+    calls,
+    advance: (sec) => { nowMs += sec * 1000; },
+    set resets(n) { resets = n; },
+    exec: async (cmd, args, opts = {}) => {
+      calls.push({ cmd, args, stdin: opts.stdin });
+      const a = args.join(' ');
+      if (cmd === 'systemctl' && a.includes('--value')) return { code: 0, stdout: '0\n', stderr: '' };
+      if (cmd === 'systemctl' && args[1] === 'show') {
+        return { code: 0, stdout: 'ActiveState=active\nSubState=running\nJob=\nMainPID=4242\nActiveEnterTimestampMonotonic=1000000\n', stderr: '' };
+      }
+      if (cmd === 'systemctl' && args[1] === 'start') {
+        qemuAlive = true;
+        return { code: startCode, stdout: '', stderr: startCode ? 'start failed' : '' };
+      }
+      if (cmd === 'python3' && args[2] === 'status-events') {
+        if (qmpCode !== 0) return { code: qmpCode, stdout: '', stderr: 'qmp busy' };
+        return { code: 0, stdout: `${JSON.stringify({ status: 'running', running: true, events: { RESET: resets }, window_sec: 5 })}\n`, stderr: '' };
+      }
+      if (cmd === 'python3' && args[2] === 'quit') {
+        if (quitCode === 0) qemuAlive = false;
+        return { code: quitCode, stdout: '', stderr: quitCode ? 'quit refused' : '' };
+      }
+      if (cmd === 'ping') return { code: pingCode, stdout: '', stderr: '' };
+      if (cmd === 'ip') return { code: 0, stdout: pingCode ? '[{"state":["FAILED"]}]' : '[{"state":["REACHABLE"]}]', stderr: '' };
+      if (cmd === 'psql') return { code: 0, stdout: '', stderr: '' };
+      return { code: 127, stdout: '', stderr: `unexpected ${cmd}` };
+    },
+    nowMs: () => nowMs,
+    monotonicUs: () => 1_000_000 + 7200 * 1e6,
+    sleep: async (ms) => { nowMs += ms; },
+    pidAlive: () => qemuAlive,
+    readProcEnviron: () => '',
+    log: () => {},
+  };
+  return deps;
+}
+
+async function e2eConfig(over = {}) {
+  const dir = await tempDir();
+  return cfg({ stateDir: dir, holdFile: path.join(dir, 'hold.json'), dbUrl: 'postgres://fake/db', ...over });
+}
+
+const typesOf = (calls) => calls.map((c) => (c.cmd === 'python3' ? `qmp:${c.args[2]}` : c.cmd === 'systemctl' ? `systemctl:${c.args[1]}` : c.cmd));
+
+test('runOnce: alert on the first reset-loop check, cold restart on the second, never system_reset', async () => {
+  const c = await e2eConfig();
+  const deps = fakeDeps({ resets: 7 });
+
+  await runOnce(c, deps);
+  assert.ok(!typesOf(deps.calls).includes('qmp:quit'), 'first check only alerts');
+  assert.equal(typesOf(deps.calls).filter((t) => t === 'psql').length, 1);
+
+  deps.calls.length = 0;
+  deps.advance(60);
+  const second = await runOnce(c, deps);
+  const seq = typesOf(deps.calls);
+  const alertAt = seq.indexOf('psql');
+  const quitAt = seq.indexOf('qmp:quit');
+  const startAt = seq.indexOf('systemctl:start');
+  assert.ok(alertAt >= 0 && alertAt < quitAt && quitAt < startAt, `alert, then quit, then start: ${seq.join(' ')}`);
+  assert.equal(seq.filter((t) => t === 'psql').length, 2, 'an alert before and a result alert after');
+  const restart = second.record.results.find((r) => r.type === 'cold-restart');
+  assert.equal(restart.ok, true);
+  const start = deps.calls.find((x) => x.cmd === 'systemctl' && x.args[1] === 'start');
+  assert.deepEqual(start.args, ['--user', 'start', 'papercusp-vm-mac.service']);
+
+  const qmpCommands = new Set(deps.calls.filter((x) => x.cmd === 'python3').map((x) => x.args[2]));
+  assert.deepEqual([...qmpCommands].sort(), ['quit', 'status-events'], 'the only QMP commands are the probe and quit');
+  assert.ok(!deps.calls.some((x) => x.args.includes('system_reset')), 'no process is ever asked for system_reset');
+
+  const state = JSON.parse(await readFile(path.join(c.stateDir, 'state.json'), 'utf8'));
+  assert.equal(typeof state.lastRestartAt, 'number');
+  const log = (await readFile(path.join(c.stateDir, 'actions.jsonl'), 'utf8')).trim().split('\n');
+  assert.equal(log.length, 2, 'each acting run is logged');
+});
+
+test('runOnce: at most one cold restart per hour while the loop persists', async () => {
+  const c = await e2eConfig();
+  const deps = fakeDeps({ resets: 9 });
+  for (let i = 0; i < 30; i += 1) {
+    await runOnce(c, deps);
+    deps.advance(60);
+  }
+  const quits = typesOf(deps.calls).filter((t) => t === 'qmp:quit').length;
+  assert.equal(quits, 1, '30 minutes of reset loop, one cold restart');
+});
+
+test('runOnce: a hold blocks the restart; a contended QMP slot skips the run', async () => {
+  const c = await e2eConfig();
+  await writeFile(c.holdFile, JSON.stringify({ until: Math.floor(Date.parse('2026-09-23T06:00:00Z') / 1000), by: 'su-rig', reason: 'deploy' }));
+  const deps = fakeDeps({ resets: 8 });
+  await runOnce(c, deps);
+  deps.advance(60);
+  await runOnce(c, deps);
+  assert.ok(!typesOf(deps.calls).includes('qmp:quit'));
+
+  const c2 = await e2eConfig();
+  const busy = fakeDeps({ qmpCode: 75 });
+  const out = await runOnce(c2, busy);
+  assert.equal(out.classification.verdict, 'op-in-flight');
+  assert.ok(!typesOf(busy.calls).includes('psql'), 'a skipped run sends no alert');
+});
+
+test('runOnce --dry-run has no side effects', async () => {
+  const c = await e2eConfig();
+  const deps = fakeDeps({ resets: 8 });
+  const out = await runOnce(c, deps, { dryRun: true });
+  assert.equal(out.classification.verdict, 'reset-loop');
+  assert.deepEqual(out.record.planned, ['alert']);
+  assert.ok(!typesOf(deps.calls).includes('psql'));
+  assert.ok(!typesOf(deps.calls).includes('qmp:quit'));
+  assert.equal(existsSync(path.join(c.stateDir, 'state.json')), false);
+});
+
+test('coldRestart stops at a refused QMP quit and never starts a second qemu', async () => {
+  const c = await e2eConfig();
+  const deps = fakeDeps({ quitCode: 1 });
+  const out = await coldRestart(c, deps, { service: { mainPid: 4242 } });
+  assert.equal(out.ok, false);
+  assert.equal(out.step, 'qmp-quit');
+  assert.ok(!typesOf(deps.calls).includes('systemctl:start'));
+});
+
+test('coldRestart refuses to start while the old qemu is still alive', async () => {
+  const c = await e2eConfig({ quitWaitSec: 3 });
+  const deps = fakeDeps();
+  deps.pidAlive = () => true;
+  const out = await coldRestart(c, deps, { service: { mainPid: 4242 } });
+  assert.equal(out.ok, false);
+  assert.equal(out.step, 'wait-qemu-exit');
+  assert.ok(!typesOf(deps.calls).includes('systemctl:start'));
+});

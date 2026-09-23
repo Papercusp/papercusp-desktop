@@ -47,7 +47,15 @@ export const MAX_HOLD_SEC = 24 * 3600;
 export const FATAL_RUN_STATES = new Set(['internal-error', 'guest-panicked', 'io-error', 'shutdown']);
 const ACTIONS_LOG_MAX_BYTES = 5 * 1024 * 1024;
 const RUN_LOCK_STALE_SEC = 900;
-const DB_URL_KEYS = ['PAPERCUSP_DATABASE_URL', 'DATABASE_URL', 'HARNESS_ADMIN_URL', 'PAPERCUSP_HARNESS_ADMIN_URL'];
+// HARNESS_ADMIN_DATABASE_URL is the key the tower operator (papercup-dev-api) actually carries;
+// measured 2026-09-23 — without it the /proc fallback resolved nothing and every alert was skipped.
+const DB_URL_KEYS = [
+  'HARNESS_ADMIN_DATABASE_URL',
+  'PAPERCUSP_DATABASE_URL',
+  'DATABASE_URL',
+  'HARNESS_ADMIN_URL',
+  'PAPERCUSP_HARNESS_ADMIN_URL',
+];
 
 function numEnv(env, key, dflt, min = 0) {
   const raw = env[key];
