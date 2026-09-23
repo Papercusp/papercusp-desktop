@@ -7,9 +7,13 @@ const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
 const builder = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
+const releaseLocal = fs.readFileSync(path.join(root, 'bin/release-local.sh'), 'utf8');
 const windowsBuilder = fs.readFileSync(path.join(root, 'bin/build-windows-cross.sh'), 'utf8');
 const sidecarLockHelper = fs.readFileSync(path.join(root, 'bin/lib/sidecar-lock-yield.sh'), 'utf8');
 const liveFederationGate = fs.readFileSync(path.join(root, 'bin/live-federation-gate.sh'), 'utf8');
+const buildLockStart = builder.indexOf('SIDECAR_BUILD_LOCK="$SIDECAR_FINAL_DIR.build.lock"');
+const buildLockEnd = builder.indexOf('# Acquire/release the reader-facing lock', buildLockStart);
+const SIDECAR_BUILD_LOCK_BLOCK = builder.slice(buildLockStart, buildLockEnd);
 
 const SIDECAR_PUBLISH_LOCK_FUNCTION = (
   builder.match(/^__pc_acquire_sidecar_publish_lock\(\) \{\n[\s\S]*?^\}$/m) || []
@@ -52,7 +56,7 @@ test('every release writer uses the shared bounded cooperative sidecar-lock help
   assert.match(sidecarLockHelper, /holder context follows/);
   assert.match(
     builder,
-    /if ! flock -w "\$SIDECAR_LOCK_WAIT" 8; then[\s\S]*?__pc_report_sidecar_lock_timeout "\$SIDECAR_BUILD_LOCK"/,
+    /if ! flock -w "\$SIDECAR_BUILD_LOCK_WAIT" 8; then[\s\S]*?__pc_report_sidecar_lock_timeout "\$SIDECAR_BUILD_LOCK"/,
     'the Linux build-lock timeout must include live holder context',
   );
   assert.match(
@@ -153,6 +157,56 @@ test('long build serialization is distinct from the reader-facing publication lo
   } finally {
     if (holder.exitCode === null) holder.kill('SIGTERM');
     await new Promise((resolve) => holder.once('close', resolve));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('split release legs wait for a live sidecar build without widening the reader lock', async () => {
+  assert(SIDECAR_BUILD_LOCK_BLOCK, 'could not extract the shipped sidecar build-lock acquisition');
+  assert(builder.includes('SIDECAR_BUILD_LOCK_WAIT_SEC'), 'the builder must accept a build-only lock budget');
+  assert(builder.includes('flock -w "$SIDECAR_BUILD_LOCK_WAIT" 8'), 'the build lock must use its own budget');
+  assert(releaseLocal.includes('PAPERCUSP_SIDECAR_BUILD_LOCK_WAIT_SEC='), 'release-local must set a release-sized build budget');
+  assert(releaseLocal.includes(':-3600'), 'the default release build-lock budget must cover a long release leg');
+  assert(sidecarLockHelper.includes('PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-60'), 'the generic lock default remains 60s');
+  assert(sidecarLockHelper.includes('flock -w "$SIDECAR_LOCK_WAIT" 9'), 'the reader-facing publish lock keeps the generic bound');
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-release-build-lock-wait-'));
+  const base = path.join(tmp, 'sidecar');
+  const ready = path.join(tmp, 'ready');
+  let holder;
+  try {
+    holder = spawn(
+      'flock',
+      ['-x', base + '.build.lock', 'bash', '-c', ': >"$READY"; sleep 1.3'],
+      { stdio: 'ignore', env: { ...process.env, READY: ready } },
+    );
+    await waitForFile(ready);
+    const harness = [
+      'set -euo pipefail',
+      'SIDECAR_FINAL_DIR="$1"',
+      'SIDECAR_TMP_DIR="$2"',
+      sidecarLockHelper,
+      SIDECAR_BUILD_LOCK_BLOCK,
+      'echo BUILD_LOCK_ACQUIRED',
+    ].join('\n');
+    const startedAt = Date.now();
+    const result = spawnSync('bash', ['-c', harness, 'bash', base, base + '.tmp'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PAPERCUSP_SIDECAR_LOCK_WAIT_SEC: '1',
+        PAPERCUSP_SIDECAR_BUILD_LOCK_WAIT_SEC: '4',
+      },
+    });
+    const elapsedMs = Date.now() - startedAt;
+
+    assert.equal(result.status, 0, 'release builder failed behind a live sidecar build: ' + result.stdout + result.stderr);
+    assert.match(result.stdout, /BUILD_LOCK_ACQUIRED/);
+    assert(elapsedMs >= 900, 'the test holder should outlive the generic 1s wait (elapsed ' + elapsedMs + 'ms)');
+  } finally {
+    if (holder && holder.exitCode === null) {
+      await new Promise((resolve) => holder.once('close', resolve));
+    }
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
