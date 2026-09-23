@@ -4918,6 +4918,16 @@ fi
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
   VM_RELEASE_TRUST_OUTPUT_DIR="${PAPERCUSP_VM_RELEASE_TRUST_OUTPUT_DIR:-$SIDECAR_DIR.release-trust}"
   echo "→ generating vm-release SBOM + fail-closed High/Critical vulnerability verdict"
+  # The audit pins GRYPE_DB_AUTO_UPDATE=false so the DB cannot change MID-scan, and refuses a DB
+  # older than VM_RELEASE_GRYPE_DB_MAX_AGE_HOURS. Nothing else on the build host refreshes it, so
+  # a cut run >3 days after the last manual refresh died HERE after a full sidecar build (P-318
+  # r40, 2026-09-23: "grype DB is 92.6h old; maximum is 72h"). Refresh BEFORE the scan: `grype db
+  # update` is a no-op on a current DB, and a failed refresh is not fatal here — the audit's own
+  # fail-closed freshness check still decides, so this can never admit a stale DB.
+  if command -v grype >/dev/null 2>&1; then
+    GRYPE_CHECK_FOR_APP_UPDATE=false grype db update \
+      || echo "  ⚠ grype db update failed — the audit's freshness check decides" >&2
+  fi
   python3 "$HERE/audit-release-bundle.py" --audit-vulnerabilities \
     "$SIDECAR_DIR" "$VM_RELEASE_TRUST_OUTPUT_DIR"
   echo "  ✓ vm-release vulnerability evidence: $VM_RELEASE_TRUST_OUTPUT_DIR"
