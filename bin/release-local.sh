@@ -2140,6 +2140,15 @@ release_seed_fallback_args() { # <cut-log> — prints the extra args, or nothing
   return 0
 }
 
+release_seed_cut_is_quiesced() {
+  local runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  [[ -f "$runtime_dir/papercusp-seed-cut.quiesce" ]] && return 0
+  local unit="${SEED_CUT_BG_HOST_UNIT:-papercusp-bg-host.service}"
+  local state
+  state="$(systemctl --user is-enabled "$unit" 2>/dev/null || true)"
+  [[ "$state" == "masked" || "$state" == "masked-runtime" ]]
+}
+
 cut_release_seed() {
   if [[ "${PAPERCUSP_SKIP_SEED_CUT:-0}" == "1" ]]; then
     echo "==> seed: PAPERCUSP_SKIP_SEED_CUT=1 — leaving src-tauri/seed as-is"
@@ -2197,6 +2206,11 @@ cut_release_seed() {
   if [[ "$seed_reuse" == "1" ]]; then
     core_args+=(--reuse-corestore "$seed_out")
     [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]] && echo "WARN: PAPERCUSP_SEED_STORE_DIR ignored under seed-reuse (PAPERCUSP_SEED_REUSE_CORESTORE=$seed_reuse)" >&2
+  fi
+  if [[ "${PAPERCUSP_SEED_CORESTORE:-1}" == "1" && "$seed_reuse" != "1" ]] \
+      && ! release_seed_cut_is_quiesced; then
+    echo "ERROR: fresh release seed cut requires a quiesced operator; run bin/cut-seed-quiesced.sh." >&2
+    return 1
   fi
   # Offline dogfood restores need the bundled epoch keys too. Keep parity with
   # mac-vm-build.sh; opt out only for diagnostic cuts.

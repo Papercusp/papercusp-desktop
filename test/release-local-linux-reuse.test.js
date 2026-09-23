@@ -39,6 +39,8 @@ const seedFallbackHarness = sliceBetween(
   '# P-003 clause 3 (D-008). The fallback',
   'cut_release_seed() {',
 );
+const cutReleaseSeedHarness =
+  sliceBetween('cut_release_seed() {', '\n}\n\ncut_release_seed') + '\n}';
 const cutStartHarness = sliceBetween(
   '# EI-20551860898590077: bind every artifact',
   'echo "==> bumping version in manifests"',
@@ -648,6 +650,80 @@ test('a bundle whose provenance names no artifacts cannot mint a receipt', () =>
 function runSeedFallbackProbe(script) {
   return spawnSync('bash', ['-c', [seedFallbackHarness, script].join('\n')], { encoding: 'utf8' });
 }
+
+function runCutSeedQuiesceProbe({ marker = false, unitState = 'enabled' } = {}) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-cut-seed-quiesce-'));
+  const rootDir = path.join(temp, 'root');
+  const monorepo = path.join(temp, 'monorepo');
+  const runtimeDir = path.join(temp, 'runtime');
+  const bin = path.join(temp, 'bin');
+  const npxLog = path.join(temp, 'npx-called.log');
+  fs.mkdirSync(path.join(rootDir, 'src-tauri'), { recursive: true });
+  fs.mkdirSync(path.join(monorepo, 'apps', 'operator'), { recursive: true });
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(monorepo, 'apps', 'operator', '.env.local'), '');
+  if (marker) fs.writeFileSync(path.join(runtimeDir, 'papercusp-seed-cut.quiesce'), '{}\n');
+  fs.writeFileSync(path.join(bin, 'npx'), [
+    '#!/usr/bin/env bash',
+    'printf called >> "$PROBE_NPX_LOG"',
+    'exit 0',
+  ].join('\n'));
+  fs.writeFileSync(path.join(bin, 'systemctl'), [
+    '#!/usr/bin/env bash',
+    'if [[ "$*" == *"is-enabled"* ]]; then',
+    '  printf "%s\n" "$PROBE_SYSTEMD_STATE"',
+    '  [[ "$PROBE_SYSTEMD_STATE" == "masked" || "$PROBE_SYSTEMD_STATE" == "masked-runtime" ]] && exit 1',
+    '  exit 0',
+    'fi',
+    'exit 0',
+  ].join('\n'));
+  fs.chmodSync(path.join(bin, 'npx'), 0o755);
+  fs.chmodSync(path.join(bin, 'systemctl'), 0o755);
+
+  try {
+    const script = [seedFallbackHarness, cutReleaseSeedHarness, 'cut_release_seed'].join('\n');
+    const result = spawnSync('bash', ['-c', script], {
+      encoding: 'utf8',
+      timeout: 5_000,
+      env: {
+        ...process.env,
+        PATH: bin + path.delimiter + (process.env.PATH || ''),
+        ROOT: rootDir,
+        MONOREPO: monorepo,
+        XDG_RUNTIME_DIR: runtimeDir,
+        PROBE_NPX_LOG: npxLog,
+        PROBE_SYSTEMD_STATE: unitState,
+        PAPERCUSP_SKIP_SEED_CUT: '0',
+        PAPERCUSP_SEED_REUSE_CORESTORE: 'auto',
+        PAPERCUSP_SEED_CORESTORE: '1',
+        PAPERCUSP_SEED_SPARSE: '1',
+      },
+    });
+    return { result, npxCalled: fs.existsSync(npxLog) };
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+}
+
+test('fresh release seed refuses before the snapshot unless quiescence is attested', () => {
+  const unquiesced = runCutSeedQuiesceProbe({ unitState: 'enabled' });
+  assert.notEqual(unquiesced.result.status, 0, 'an unquiesced fresh cut must fail');
+  assert.equal(unquiesced.npxCalled, false, 'the snapshot child must not run before quiescence');
+  assert.match(
+    unquiesced.result.stdout + '\n' + unquiesced.result.stderr,
+    /requires a quiesced operator.*cut-seed-quiesced/i,
+  );
+
+  for (const allowed of [
+    { marker: true, unitState: 'enabled' },
+    { marker: false, unitState: 'masked-runtime' },
+  ]) {
+    const quiesced = runCutSeedQuiesceProbe(allowed);
+    assert.equal(quiesced.result.status, 0, quiesced.result.stderr || quiesced.result.stdout);
+    assert.equal(quiesced.npxCalled, true, 'an attested quiesce must permit the fresh cut');
+  }
+});
 
 test('only a genuine sparse refusal triggers the full-cut retry', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-seed-fallback-'));
