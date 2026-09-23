@@ -2393,6 +2393,7 @@ export PAPERCUSP_SKIP_DEP_GENERATION="${PAPERCUSP_SKIP_DEP_GENERATION:-1}"
 # The sidecar packages the superproject, while the installer provenance above
 # names the desktop submodule. Keep the sidecar's cut-start identity in the
 # same repository as its source-drift check; BUILD_SHA stays the desktop label.
+PAPERCUSP_SIDECAR_BUILD_LOCK_WAIT_SEC="${PAPERCUSP_SIDECAR_BUILD_LOCK_WAIT_SEC:-3600}" \
 PAPERCUSP_SIDECAR_MIN_FREE_GB=0 \
 PROVENANCE_SOURCE_GIT_HEAD="$EXPECTED_SOURCE_SHA" \
 "${PC_NICE[@]}" bash "$ROOT/bin/build-desktop-sidecar.sh"

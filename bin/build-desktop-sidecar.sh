@@ -484,20 +484,28 @@ source "$HERE/lib/sidecar-lock-yield.sh"
 SIDECAR_BUILD_LOCK="$SIDECAR_FINAL_DIR.build.lock"
 SIDECAR_BUILD_LOCKDIR=""
 SIDECAR_PUBLISH_LOCKDIR=""
+# Split release legs may wait behind another platform's legitimate base-sidecar
+# build. Keep that build-to-build budget separate from the reader-facing publish
+# lock, whose default remains bounded by SIDECAR_LOCK_WAIT (60s).
+SIDECAR_BUILD_LOCK_WAIT="${PAPERCUSP_SIDECAR_BUILD_LOCK_WAIT_SEC:-$SIDECAR_LOCK_WAIT}"
+if ! [[ "$SIDECAR_BUILD_LOCK_WAIT" =~ ^[0-9]+$ ]]; then
+  echo "FATAL: PAPERCUSP_SIDECAR_BUILD_LOCK_WAIT_SEC must be non-negative integer seconds" >&2
+  exit 2
+fi
 
 # Build-to-build serialization must never reuse the reader-facing sidecar.lock:
 # dependency generation and npm installs routinely take minutes, while Tauri only
 # needs a stable already-published tree. A distinct lock keeps those readers live.
 if command -v flock >/dev/null 2>&1; then
   exec 8>"$SIDECAR_BUILD_LOCK"
-  if ! flock -w "$SIDECAR_LOCK_WAIT" 8; then
-    __pc_report_sidecar_lock_timeout "$SIDECAR_BUILD_LOCK"
+  if ! flock -w "$SIDECAR_BUILD_LOCK_WAIT" 8; then
+    __pc_report_sidecar_lock_timeout "$SIDECAR_BUILD_LOCK" "" "$SIDECAR_BUILD_LOCK_WAIT"
     exit 5
   fi
 else
   # macOS ships no flock(1) — serialize builders with a PID-stamped mkdir.
   SIDECAR_BUILD_LOCKDIR="$SIDECAR_FINAL_DIR.build.lockdir"
-  __pc_build_lock_deadline=$(( $(date +%s) + SIDECAR_LOCK_WAIT ))
+  __pc_build_lock_deadline=$(( $(date +%s) + SIDECAR_BUILD_LOCK_WAIT ))
   while ! mkdir "$SIDECAR_BUILD_LOCKDIR" 2>/dev/null; do
     holder="$(cat "$SIDECAR_BUILD_LOCKDIR/pid" 2>/dev/null || true)"
     if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
@@ -505,7 +513,7 @@ else
       continue
     fi
     if (( $(date +%s) >= __pc_build_lock_deadline )); then
-      __pc_report_sidecar_lock_timeout "$SIDECAR_BUILD_LOCK" "$SIDECAR_BUILD_LOCKDIR"
+      __pc_report_sidecar_lock_timeout "$SIDECAR_BUILD_LOCK" "$SIDECAR_BUILD_LOCKDIR" "$SIDECAR_BUILD_LOCK_WAIT"
       exit 5
     fi
     sleep 1

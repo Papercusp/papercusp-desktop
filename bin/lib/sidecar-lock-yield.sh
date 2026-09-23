@@ -94,7 +94,8 @@ __pc_request_cooperative_reader_yield() {
 __pc_report_sidecar_lock_timeout() {
   local lock_path="$1"
   local lockdir="${2:-}"
-  echo "FATAL: timed out after ${SIDECAR_LOCK_WAIT}s waiting for the sidecar lock ($lock_path)." >&2
+  local wait_sec="${3:-$SIDECAR_LOCK_WAIT}"
+  echo "FATAL: timed out after ${wait_sec}s waiting for the sidecar lock ($lock_path)." >&2
   echo "       A live reader or build still owns it; holder context follows." >&2
   __pc_sidecar_lock_holder_lines "$lock_path" "$lockdir"
   echo "       If the holder is tauri-guarded, it should yield on SIGUSR1; otherwise stop the holder or choose an isolated sidecar output." >&2
