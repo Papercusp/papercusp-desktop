@@ -58,7 +58,250 @@ OTHER_NAME='Papercusp Server'
 OTHER_ID='com.papercusp.server'
 
 skip() { echo "SKIP inno-uninstall-cleanup: $1"; exit 0; }
-fail() { echo "FAIL inno-uninstall-cleanup: $1"; exit 1; }
+KEEP_WORK=0
+RC=0
+fail() {
+  echo "FAIL inno-uninstall-cleanup: $1" >&2
+  if [[ -n "${WORK:-}" && -d "${WORK:-}" ]]; then
+    KEEP_WORK=1
+    echo "DIAGNOSTICS PRESERVED AT: $WORK" >&2
+  fi
+  exit 1
+}
+ok()  { echo "  ✓ $1"; }
+bad() { echo "  ✗ $1"; RC=1; }
+
+# Return 0 and print the value, 1 only for a confirmed missing value, and 2
+# when the registry query itself failed or its successful output was unreadable.
+# Callers must preserve that distinction; an empty command substitution is not
+# evidence that a product guard returned false.
+rvalue() {
+  local key=$1 name=$2 output status parsed
+  if output=$(WINEPREFIX="$TESTPREFIX" xvfb-run -a wine reg query "$key" /v "$name" 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+
+  if [[ $status -ne 0 ]]; then
+    case "${output,,}" in
+      *"unable to find the specified registry key or value"*|\
+      *"unable to find the specified registry value"*) return 1 ;;
+    esac
+  fi
+
+  if [[ $status -eq 0 ]]; then
+    parsed=$(printf '%s\n' "$output" | tr -d '\r' | awk -v name="$name" '
+      {
+        line = $0
+        sub(/^[ \t]+/, "", line)
+        if (index(line, name) == 1) {
+          rest = substr(line, length(name) + 1)
+          if (match(rest, /REG_[A-Z_]+[ \t]+/)) {
+            print "__INNO_REG_VALUE_PRESENT__" substr(rest, RSTART + RLENGTH)
+            exit
+          }
+        }
+      }')
+    if [[ $parsed == __INNO_REG_VALUE_PRESENT__* ]]; then
+      printf '%s' "${parsed#__INNO_REG_VALUE_PRESENT__}"
+      return 0
+    fi
+  fi
+
+  if [[ $status -ne 0 ]]; then
+    printf 'registry query failed for %s / %s (exit %s): %s\n' "$key" "$name" "$status" "$output" >&2
+  else
+    printf 'registry query succeeded but %s / %s could not be parsed: %s\n' "$key" "$name" "$output" >&2
+  fi
+  return 2
+}
+
+assert_rvalue_equals() {
+  local key=$1 name=$2 expected=$3 pass_message=$4 fail_message=$5 actual status
+  if actual=$(rvalue "$key" "$name"); then
+    if [[ -z $actual ]]; then
+      fail "registry probe returned an empty value for $key / $name; case measured no valid state"
+    elif [[ $actual == "$expected" ]]; then
+      ok "$pass_message"
+    else
+      bad "$fail_message (got '$actual')"
+    fi
+  else
+    status=$?
+    if [[ $status -eq 1 ]]; then
+      fail "expected registry probe value $key / $name was absent; case measured nothing"
+    else
+      fail "registry query failed for $key / $name; case measured nothing (read status $status)"
+    fi
+  fi
+}
+
+assert_rvalue_absent() {
+  local key=$1 name=$2 pass_message=$3 fail_message=$4 actual status
+  if actual=$(rvalue "$key" "$name"); then
+    bad "$fail_message (got '$actual')"
+  else
+    status=$?
+    if [[ $status -eq 1 ]]; then
+      ok "$pass_message"
+    else
+      fail "registry query failed for $key / $name; case measured nothing (read status $status)"
+    fi
+  fi
+}
+
+assert_rvalue_present() {
+  local key=$1 name=$2 pass_message=$3 fail_message=$4 actual status
+  if actual=$(rvalue "$key" "$name"); then
+    if [[ -n $actual ]]; then
+      ok "$pass_message"
+    else
+      bad "$fail_message (registry value was empty)"
+      return 1
+    fi
+  else
+    status=$?
+    if [[ $status -eq 1 ]]; then
+      bad "$fail_message (registry value absent)"
+      return 1
+    fi
+    fail "registry query failed for $key / $name (status $status); case measured nothing"
+  fi
+}
+
+require_rvalue_present() {
+  local key=$1 name=$2 failure_message=$3 actual status
+  if actual=$(rvalue "$key" "$name"); then
+    [[ -n $actual ]] || fail "$failure_message (value was empty; fixture did not establish its precondition)"
+  else
+    status=$?
+    if [[ $status -eq 1 ]]; then
+      fail "$failure_message (confirmed absent; fixture did not establish its precondition)"
+    fi
+    fail "$failure_message (registry query failed with status $status; case measured nothing)"
+  fi
+}
+
+run_install() {
+  WINEPREFIX="$TESTPREFIX" timeout 300 xvfb-run -a wine "$HARNESS_EXE" \
+    /VERYSILENT /NORESTART /SUPPRESSMSGBOXES >"$WORK/install-$1.log" 2>&1
+}
+
+checked_command() {
+  local label=$1 log=$2 status
+  shift 2
+  if "$@"; then
+    return 0
+  else
+    status=$?
+    fail "$label failed (exit $status); case measured nothing (diagnostics: $log)"
+  fi
+}
+
+# Exercise the same reporting helpers with mocked instruments before checking
+# for the optional Windows toolchain. This keeps failure-vs-product verdicts in
+# the project's existing shell self-test, including on hosts that skip Wine.
+failure_reporting_contract_selftest() {
+  local root mockbin actual status output
+  root=$(mktemp -d "${TMPDIR:-/tmp}/inno-instrument-selftest.XXXXXX") || fail "could not create instrument-test directory"
+  mockbin="$root/bin"
+  mkdir -p "$mockbin" "$root/work" "$root/prefix" || fail "could not prepare instrument-test directories"
+  local PATH="$mockbin:$PATH"
+  local TESTPREFIX="$root/prefix"
+  local WORK="$root/work"
+  local HARNESS_EXE="$root/fake-harness.exe"
+
+  cat >"$mockbin/xvfb-run" <<'MOCK_XVFB'
+#!/usr/bin/env bash
+[[ "${1:-}" == "-a" ]] && shift
+exec "$@"
+MOCK_XVFB
+  cat >"$mockbin/wine" <<'MOCK_WINE'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "reg" && "${2:-}" == "query" ]]; then
+  case "${MOCK_REG_MODE:-readable}" in
+    readable)
+      printf 'HKEY_CURRENT_USER\\Software\\PapercuspSelftest\r\n    SharedRuntimeStillNeeded    REG_SZ    yes\r\n'
+      exit 0
+      ;;
+    absent)
+      printf 'reg: Unable to find the specified registry value\n' >&2
+      exit 1
+      ;;
+    unreadable)
+      printf 'ERROR: Access is denied.\n' >&2
+      exit 13
+      ;;
+  esac
+fi
+if [[ "${MOCK_INSTALL_MODE:-success}" == "failure" ]]; then
+  printf 'simulated installer failure\n' >&2
+  exit 37
+fi
+exit 0
+MOCK_WINE
+  chmod +x "$mockbin/xvfb-run" "$mockbin/wine"
+
+  local MOCK_REG_MODE=readable MOCK_INSTALL_MODE=success
+  export MOCK_REG_MODE MOCK_INSTALL_MODE
+  if actual=$(rvalue 'HKCU\\Software\\PapercuspSelftest' SharedRuntimeStillNeeded); then
+    [[ $actual == yes ]] || fail "readable registry fixture returned '$actual', expected yes"
+  else
+    status=$?
+    fail "readable registry fixture failed with status $status"
+  fi
+  ok "registry query returns a readable value"
+
+  MOCK_REG_MODE=absent
+  if rvalue 'HKCU\\Software\\PapercuspSelftest' SharedRuntimeStillNeeded >/dev/null 2>"$root/absent.log"; then
+    fail "missing registry fixture was reported as present"
+  else
+    status=$?
+  fi
+  [[ $status -eq 1 ]] || fail "missing registry fixture returned status $status, expected 1"
+  if output=$(assert_rvalue_equals 'HKCU\\Software\\PapercuspSelftest' SharedRuntimeStillNeeded yes "shared runtime remains protected" "SHARED DISTRO WOULD BE OFFERED FOR DELETION" 2>&1); then
+    fail "missing probe fixture was allowed to report product behavior"
+  else
+    status=$?
+  fi
+  [[ $status -eq 1 && $output == *"case measured nothing"* && $output != *"SHARED DISTRO WOULD BE OFFERED FOR DELETION"* ]] || fail "missing probe fixture was not reported as unmeasured"
+  ok "missing probe values are not reported as product failures"
+  RC=0
+  if assert_rvalue_present 'HKCU\\Software\\PapercuspSelftest' SharedRuntimeStillNeeded \
+      "shared runtime remains protected" "SHARED DISTRO WOULD BE OFFERED FOR DELETION" >"$root/present-violation.log" 2>&1; then
+    fail "confirmed missing product state was not recorded as a product failure"
+  fi
+  [[ $RC -eq 1 ]] || fail "confirmed missing product state did not fail the assertion"
+  grep -q 'SHARED DISTRO WOULD BE OFFERED FOR DELETION' "$root/present-violation.log" || fail "product failure message was lost for a measured absent guard"
+  RC=0
+  ok "measured absent product state remains a product failure"
+  ok "confirmed missing registry values remain distinct"
+
+  MOCK_REG_MODE=unreadable
+  if actual=$(rvalue 'HKCU\\Software\\PapercuspSelftest' SharedRuntimeStillNeeded 2>"$root/unreadable.log"); then
+    fail "unreadable registry fixture was reported as a value"
+  else
+    status=$?
+  fi
+  [[ $status -eq 2 ]] || fail "unreadable registry fixture returned status $status, expected 2"
+  grep -q 'registry query failed' "$root/unreadable.log" || fail "unreadable registry fixture did not retain an instrument diagnostic"
+  ok "registry read failures are not product-state values"
+
+  MOCK_INSTALL_MODE=failure
+  if output=$(checked_command "fault-injected install" "$WORK/install-fault.log" run_install fault 2>&1); then
+    fail "failed install fixture was allowed to reach product assertions"
+  else
+    status=$?
+  fi
+  [[ $status -eq 1 && $output == *"case measured nothing"* ]] || fail "failed install fixture lacked an unmeasured-case diagnostic"
+  [[ -s "$WORK/install-fault.log" ]] || fail "failed install fixture did not retain its log"
+  ok "install failures stop guard assertions and retain their log"
+
+  rm -rf "$root"
+}
+
+failure_reporting_contract_selftest
 
 [[ -f "$ISS" ]] || fail "papercusp.iss not found at $ISS"
 command -v wine     >/dev/null 2>&1 || skip "wine not installed"
@@ -72,9 +315,16 @@ TESTPREFIX="$(mktemp -d "$HOME/.cache/inno-uninst-prefix.XXXXXX")" || fail "mkte
 cleanup() {
   WINEPREFIX="$TESTPREFIX" wineserver -k >/dev/null 2>&1 || true
   for _ in 1 2 3; do
-    rm -rf "$WORK" "$TESTPREFIX" 2>/dev/null && break
+    if [[ $KEEP_WORK -eq 1 ]]; then
+      rm -rf "$TESTPREFIX" 2>/dev/null && break
+    else
+      rm -rf "$WORK" "$TESTPREFIX" 2>/dev/null && break
+    fi
     sleep 1
   done
+  if [[ $KEEP_WORK -eq 1 ]]; then
+    echo "DIAGNOSTICS PRESERVED AT: $WORK"
+  fi
 }
 trap cleanup EXIT
 
@@ -169,7 +419,8 @@ UNINST_ROOT='HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall'
 PROBE_KEY='HKCU\Software\PapercuspSelftest'
 
 wreg()  { WINEPREFIX="$TESTPREFIX" xvfb-run -a wine reg "$@" >/dev/null 2>&1; }
-# Prints the value's data, or nothing when the value is absent.
+# Registry assertion helpers above keep instrument errors and missing probe
+# values out of product verdicts.
 # Two things make the naive `awk '$1 == name { print $3 }'` wrong here, and both
 # fail in the direction that reads as "value absent" — i.e. as a PASS for a
 # cleanup that did nothing:
@@ -179,57 +430,31 @@ wreg()  { WINEPREFIX="$TESTPREFIX" xvfb-run -a wine reg "$@" >/dev/null 2>&1; }
 #     ("Papercusp GUI"), so they span $1..$2 and never equal $1.
 # Match on the name as a prefix of the trimmed line and take everything after
 # the REG_* type column instead.
-rvalue() {
-  WINEPREFIX="$TESTPREFIX" xvfb-run -a wine reg query "$1" /v "$2" 2>/dev/null \
-    | tr -d '\r' \
-    | awk -v name="$2" '
-        {
-          line = $0
-          sub(/^[ \t]+/, "", line)
-          if (index(line, name) == 1) {
-            rest = substr(line, length(name) + 1)
-            if (match(rest, /REG_[A-Z_]+[ \t]+/)) {
-              print substr(rest, RSTART + RLENGTH)
-              exit
-            }
-          }
-        }'
-}
-
-RC=0
-ok()  { echo "  ✓ $1"; }
-bad() { echo "  ✗ $1"; RC=1; }
-
-run_install() {
-  WINEPREFIX="$TESTPREFIX" timeout 300 xvfb-run -a wine "$HARNESS_EXE" \
-    /VERYSILENT /NORESTART /SUPPRESSMSGBOXES >"$WORK/install-$1.log" 2>&1
-}
-
 # ── Cases 5/6: the SHARED-DISTRO guard, measured at install time ─────────────
 # 5) sibling product present => the runtime is still needed => never offered.
 wreg add "$UNINST_ROOT\\${OTHER_ID}_is1" /v UninstallString /d 'C:\whatever\unins000.exe' /f
 wreg delete "$PROBE_KEY" /f
-run_install with-sibling
-[[ "$(rvalue "$PROBE_KEY" OtherRoleAppId)" == "$OTHER_ID" ]] \
-  && ok "resolves the sibling role id ($OTHER_ID)" \
-  || bad "OtherRoleAppId resolved to '$(rvalue "$PROBE_KEY" OtherRoleAppId)', expected $OTHER_ID"
-[[ "$(rvalue "$PROBE_KEY" SharedRuntimeStillNeeded)" == "yes" ]] \
-  && ok "shared papercup-runtime is kept while the sibling product is installed (data-safety control)" \
-  || bad "SHARED DISTRO WOULD BE OFFERED FOR DELETION while $OTHER_NAME is still installed"
+checked_command "install with sibling" "$WORK/install-with-sibling.log" run_install with-sibling
+assert_rvalue_equals "$PROBE_KEY" OtherRoleAppId "$OTHER_ID" \
+  "resolves the sibling role id ($OTHER_ID)" \
+  "OtherRoleAppId did not resolve to $OTHER_ID"
+assert_rvalue_equals "$PROBE_KEY" SharedRuntimeStillNeeded yes \
+  "shared papercup-runtime is kept while the sibling product is installed (data-safety control)" \
+  "SHARED DISTRO WOULD BE OFFERED FOR DELETION while $OTHER_NAME is still installed"
 
 # 6) sibling gone => this is the last Papercusp product => the offer is allowed.
 wreg delete "$UNINST_ROOT\\${OTHER_ID}_is1" /f
 wreg delete "$PROBE_KEY" /f
-run_install no-sibling
-[[ "$(rvalue "$PROBE_KEY" SharedRuntimeStillNeeded)" == "no" ]] \
-  && ok "shared papercup-runtime becomes removable once no sibling product remains" \
-  || bad "the runtime is never offered for removal even as the last product — DEFECT 2 unfixed"
-[[ "$(rvalue "$PROBE_KEY" EmptyFixtureRemoved)" == "yes" ]] \
-  && ok "empty role directory is removed by the narrow helper (recurrence fixture)" \
-  || bad "empty role directory helper did not remove the empty fixture"
-[[ "$(rvalue "$PROBE_KEY" NonEmptyFixturePreserved)" == "yes" ]] \
-  && ok "non-empty role directory is preserved by the narrow helper" \
-  || bad "directory helper would remove a non-empty payload/config directory"
+checked_command "install without sibling" "$WORK/install-no-sibling.log" run_install no-sibling
+assert_rvalue_equals "$PROBE_KEY" SharedRuntimeStillNeeded no \
+  "shared papercup-runtime becomes removable once no sibling product remains" \
+  "the runtime is never offered for removal even as the last product — DEFECT 2 unfixed"
+assert_rvalue_equals "$PROBE_KEY" EmptyFixtureRemoved yes \
+  "empty role directory is removed by the narrow helper (recurrence fixture)" \
+  "empty role directory helper did not remove the empty fixture"
+assert_rvalue_equals "$PROBE_KEY" NonEmptyFixturePreserved yes \
+  "non-empty role directory is preserved by the narrow helper" \
+  "directory helper would remove a non-empty payload/config directory"
 
 # ── Seed the state a real uninstall must clean (and must NOT) ────────────────
 # The role under test AND its sibling both have autostart registered.
@@ -237,14 +462,21 @@ wreg add "$RUN_KEY"      /v "$ROLE_NAME"  /d 'C:\gone\papercusp-desktop.exe' /f
 wreg add "$RUN_KEY"      /v "$OTHER_NAME" /d 'C:\still-here\papercusp-desktop.exe' /f
 wreg add "$APPROVED_KEY" /v "$ROLE_NAME"  /d 'marker' /f
 
-STARTUP_WIN="$(rvalue "$PROBE_KEY" UserStartup)"
-[[ -n "$STARTUP_WIN" ]] || fail "the harness did not publish {userstartup} — cannot locate the Startup folder Inno uses"
+if STARTUP_WIN=$(rvalue "$PROBE_KEY" UserStartup); then
+  [[ -n "$STARTUP_WIN" ]] || fail "the harness published an empty {userstartup} path"
+else
+  status=$?
+  if [[ $status -eq 1 ]]; then
+    fail "the harness did not publish {userstartup} — cannot locate the Startup folder Inno uses"
+  fi
+  fail "registry query for {userstartup} failed (status $status); case measured nothing"
+fi
 STARTUP_DIR="$(WINEPREFIX="$TESTPREFIX" winepath -u "$STARTUP_WIN" 2>/dev/null)"
 [[ -n "$STARTUP_DIR" ]] || fail "winepath could not map $STARTUP_WIN to a unix path"
 mkdir -p "$STARTUP_DIR" 2>/dev/null
 printf 'stub' > "$STARTUP_DIR/$ROLE_NAME.lnk"
 
-[[ -n "$(rvalue "$RUN_KEY" "$ROLE_NAME")" ]] || fail "seeding failed: this role's Run value absent before the uninstall"
+require_rvalue_present "$RUN_KEY" "$ROLE_NAME" "seeding failed: this role's Run value absent before the uninstall"
 [[ -f "$STARTUP_DIR/$ROLE_NAME.lnk" ]]       || fail "seeding failed: startup shortcut absent before the uninstall"
 
 # ── Run the real uninstaller ─────────────────────────────────────────────────
@@ -257,8 +489,11 @@ CONFIG_SENTINEL="$(dirname "$APPDIR")/Papercusp/uninstall-preserve-sentinel.txt"
 mkdir -p "$(dirname "$CONFIG_SENTINEL")" 2>/dev/null
 printf 'keep-user-config' > "$CONFIG_SENTINEL"
 UNINST_LOG_WIN="$(WINEPREFIX="$TESTPREFIX" winepath -w "$WORK" 2>/dev/null)\\inno-uninstall.log"
-WINEPREFIX="$TESTPREFIX" timeout 300 xvfb-run -a wine "$UNINST" \
-  /VERYSILENT /NORESTART /SUPPRESSMSGBOXES "/LOG=$UNINST_LOG_WIN" >"$WORK/uninstall.log" 2>&1
+run_uninstall() {
+  WINEPREFIX="$TESTPREFIX" timeout 300 xvfb-run -a wine "$UNINST" \
+    /VERYSILENT /NORESTART /SUPPRESSMSGBOXES "/LOG=$UNINST_LOG_WIN" >"$WORK/uninstall-launch.log" 2>&1
+}
+checked_command "uninstall invocation" "$WORK/uninstall-launch.log" run_uninstall
 
 # AN INNO UNINSTALLER RETURNS BEFORE IT HAS FINISHED. unins000.exe copies itself
 # to %TEMP% and relaunches from there (so it can delete its own directory), and
@@ -276,17 +511,17 @@ done
 sleep 2
 
 # ── Cases 1-4 ────────────────────────────────────────────────────────────────
-[[ -z "$(rvalue "$RUN_KEY" "$ROLE_NAME")" ]] \
-  && ok "login-autostart Run value removed (WI-39403 DEFECT 1)" \
-  || bad "RUN VALUE SURVIVED — every login still launches a deleted exe (WI-39403 regression)"
+assert_rvalue_absent "$RUN_KEY" "$ROLE_NAME" \
+  "login-autostart Run value removed (WI-39403 DEFECT 1)" \
+  "RUN VALUE SURVIVED — every login still launches a deleted exe (WI-39403 regression)"
 
-[[ -n "$(rvalue "$RUN_KEY" "$OTHER_NAME")" ]] \
-  && ok "the sibling product's Run value is spared (falsifiability control)" \
-  || bad "CROSS-ROLE DELETE — uninstalling $ROLE_NAME disabled $OTHER_NAME's auto-start"
+assert_rvalue_present "$RUN_KEY" "$OTHER_NAME" \
+  "the sibling product's Run value is spared (falsifiability control)" \
+  "CROSS-ROLE DELETE — uninstalling $ROLE_NAME disabled $OTHER_NAME's auto-start"
 
-[[ -z "$(rvalue "$APPROVED_KEY" "$ROLE_NAME")" ]] \
-  && ok "StartupApproved\\Run marker removed (no orphan Task Manager row)" \
-  || bad "StartupApproved marker survived — Task Manager still lists a program that is gone"
+assert_rvalue_absent "$APPROVED_KEY" "$ROLE_NAME" \
+  "StartupApproved\\Run marker removed (no orphan Task Manager row)" \
+  "StartupApproved marker survived — Task Manager still lists a program that is gone"
 
 [[ ! -f "$STARTUP_DIR/$ROLE_NAME.lnk" ]] \
   && ok "dangling Startup shortcut swept" \
@@ -306,6 +541,8 @@ echo
 if [[ $RC -eq 0 ]]; then
   echo "PASS inno-uninstall-cleanup: autostart cleaned, sibling role and shared runtime protected"
 else
+  KEEP_WORK=1
   echo "FAIL inno-uninstall-cleanup: see the assertions above"
+  echo "DIAGNOSTICS PRESERVED AT: $WORK"
 fi
 exit $RC
