@@ -2,7 +2,7 @@
 // release-content-identity.js — the canonical, reviewable content identity for
 // ONE release stage on ONE platform.
 //
-// This object is the release journal's INPUT: release-task-journal.ts hashes it
+// This object is the release journal's INPUT: release-task-journal.mts hashes it
 // (releaseStageInputHash) and a receipt is only reusable while the hash still
 // matches. Source SHA + the complete gitlink tuple are added by the journal
 // itself; this object binds every REMAINING input that can change produced or

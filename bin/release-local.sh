@@ -620,7 +620,7 @@ release_task_journal_configure() {
     return 2
   fi
 
-  RELEASE_TASK_JOURNAL_CLI="${PAPERCUSP_RELEASE_TASK_JOURNAL_CLI:-$ORCHESTRATOR_HERE/../../scripts/lib/release-task-journal.ts}"
+  RELEASE_TASK_JOURNAL_CLI="${PAPERCUSP_RELEASE_TASK_JOURNAL_CLI:-$ORCHESTRATOR_HERE/../../scripts/lib/release-task-journal.mts}"
   RELEASE_TASK_JOURNAL_ROOT="$(cd "$ORCHESTRATOR_HERE/../.." && pwd)"
   if [[ -z "${PAPERCUSP_RELEASE_TASK_JOURNAL_RUNNER:-}" && ! -f "$RELEASE_TASK_JOURNAL_CLI" ]]; then
     echo "ERROR: managed release journal adapter is missing at $RELEASE_TASK_JOURNAL_CLI." >&2
@@ -858,7 +858,7 @@ release_task_begin_stage() { # <stage> <identity>; writes RELEASE_TASK_LAST_*
 }
 
 # Canonical, reviewable PER-PLATFORM stage identity. Source SHA + the complete
-# gitlink tuple are added by release-task-journal.ts; bin/lib/release-content-identity.js
+# gitlink tuple are added by release-task-journal.mts; bin/lib/release-content-identity.js
 # binds every remaining input that can change produced/trusted bytes. No secret
 # material enters it: signing is represented only by the public updater-key digest.
 #

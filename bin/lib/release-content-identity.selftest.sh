@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # release-content-identity.selftest.sh — guards the release journal's INPUT.
 #
-# release-content-identity.js produces the object release-task-journal.ts hashes
+# release-content-identity.js produces the object release-task-journal.mts hashes
 # into a stage's inputHash. A receipt is reusable exactly while that hash still
 # matches, so every property below is an invalidation rule in disguise:
 #
