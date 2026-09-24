@@ -650,10 +650,20 @@ echo "boot-current: DHT=$PAPERCUSP_DHT_BOOTSTRAP  PORT=$PAPERCUSP_HONO_PORT"
 # relaunched it, and the relaunch erased the only evidence of why. A crash log is
 # worth the most at exactly the moment the next boot destroys it — and because
 # the supervisor relaunches automatically, the destructive boot always follows
-# the crash immediately. Keep one generation; at ~15MB/40min that costs nothing.
+# the crash immediately.
+# Keep PAPERCUSP_RIG_LOG_GENERATIONS generations (default 3), not one. A rig
+# redeploy boots twice back to back (the compose relaunch, then the reset's
+# bootstrap), so with one generation the second boot rotated the finished run's
+# log away: P-007 run #7's 222MB log was lost that way (EI-24182214054084170).
+LOG_GENERATIONS="${PAPERCUSP_RIG_LOG_GENERATIONS:-3}"
 if [ -s "$LOG" ]; then
+  gen="$LOG_GENERATIONS"
+  while [ "$gen" -gt 1 ]; do
+    [ -e "$LOG.$((gen - 1))" ] && mv -f "$LOG.$((gen - 1))" "$LOG.$gen" 2>/dev/null
+    gen=$((gen - 1))
+  done
   mv -f "$LOG" "$LOG.1" 2>/dev/null || true
-  echo "boot-current: previous run's log preserved at $LOG.1"
+  echo "boot-current: previous run's log preserved at $LOG.1 (keeping $LOG_GENERATIONS generations)"
 fi
 : > "$LOG"
 cd "$CUR" || exit 1
