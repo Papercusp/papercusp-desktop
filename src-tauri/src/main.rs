@@ -3020,6 +3020,66 @@ mod helper_tests {
     }
 
     #[test]
+    fn native_discovery_respects_papercusp_home() {
+        // Each environment case runs in a child of this Cargo test binary.
+        // Never mutate the parent process environment while other tests run.
+        if let Some(home) = std::env::var_os("PAPERCUSP_DISCOVERY_TEST_HOME") {
+            let home = std::path::PathBuf::from(home);
+            let expected_port: u16 = std::env::var("PAPERCUSP_DISCOVERY_TEST_PORT")
+                .unwrap().parse().unwrap();
+            let expected_socket = std::env::var("PAPERCUSP_DISCOVERY_TEST_SOCKET").unwrap();
+            let expected_socket = if expected_socket.is_empty() { None } else { Some(expected_socket) };
+            assert_eq!(
+                super::read_operator_discovery(&home).map(|d| d.port),
+                if expected_port == 0 { None } else { Some(expected_port) },
+                "HTTP discovery must use the explicitly selected instance",
+            );
+            assert_eq!(find_endpoint_ipc_socket(&home, false), expected_socket);
+            assert_eq!(
+                super::find_endpoint_ipc_socket_resolved(&home, false).path,
+                expected_socket.map(std::path::PathBuf::from),
+                "validated IPC discovery must use the same instance as HTTP",
+            );
+            return;
+        }
+
+        let home = temp_dir("native-discovery-override");
+        let canonical = home.join(".papercusp");
+        let isolated = home.join("isolated-state");
+        let operator = FakeServeProcess::spawn();
+        for (dir, port) in [(&canonical, 40001), (&isolated, 40002)] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("operator.json"), serde_json::json!({
+                "port": port, "pid": operator.pid(),
+            }).to_string()).unwrap();
+            let socket = dir.join("endpoint.sock");
+            std::fs::write(&socket, b"").unwrap();
+            std::fs::write(dir.join("endpoint-ipc.json"), serde_json::json!({
+                "socketPath": socket, "pid": operator.pid(),
+            }).to_string()).unwrap();
+        }
+        let missing = home.join("missing-state");
+        for (root, port, socket) in [
+            (None, 40001, canonical.join("endpoint.sock")),
+            (Some(std::path::Path::new("")), 40001, canonical.join("endpoint.sock")),
+            (Some(isolated.as_path()), 40002, isolated.join("endpoint.sock")),
+            (Some(missing.as_path()), 0, std::path::PathBuf::new()),
+        ] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "helper_tests::native_discovery_respects_papercusp_home", "--nocapture"])
+                .env("PAPERCUSP_DISCOVERY_TEST_HOME", &home)
+                .env("PAPERCUSP_DISCOVERY_TEST_PORT", port.to_string())
+                .env("PAPERCUSP_DISCOVERY_TEST_SOCKET", socket);
+            if let Some(root) = root { command.env("PAPERCUSP_HOME", root); }
+            else { command.env_remove("PAPERCUSP_HOME"); }
+            let result = command.output().unwrap();
+            assert!(result.status.success(), "discovery root {root:?}:\n{}\n{}",
+                String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+        }
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn read_dev_ipc_socket_rejects_missing_or_malformed() {
         let dir = temp_dir("ipc-bad");
         // Missing file.
@@ -3632,9 +3692,19 @@ fn parse_operator_discovery(txt: &str) -> Option<OperatorDiscovery> {
     })
 }
 
-/// Parse `<home>/.papercusp/operator.json`, or None.
+/// Match serve.ts's established per-instance runtime directory. An explicit
+/// root is authoritative: a missing file there must not adopt the user's
+/// unrelated default instance. Empty follows Node's `PAPERCUSP_HOME || ...`.
+fn native_papercusp_dir(workspace_home: &std::path::Path) -> std::path::PathBuf {
+    std::env::var_os("PAPERCUSP_HOME")
+        .filter(|root| !root.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| workspace_home.join(".papercusp"))
+}
+
+/// Parse this instance's operator.json, or None.
 fn read_operator_discovery(workspace_home: &std::path::Path) -> Option<OperatorDiscovery> {
-    let path = workspace_home.join(".papercusp/operator.json");
+    let path = native_papercusp_dir(workspace_home).join("operator.json");
     let txt = std::fs::read_to_string(path).ok()?;
     parse_operator_discovery(&txt)
 }
@@ -4006,7 +4076,7 @@ fn find_endpoint_ipc_socket(workspace_home: &std::path::Path, via_wsl: bool) -> 
     }
     #[cfg(not(target_os = "windows"))]
     let _ = via_wsl;
-    read_dev_ipc_socket(&workspace_home.join(".papercusp/endpoint-ipc.json"))
+    read_dev_ipc_socket(&native_papercusp_dir(workspace_home).join("endpoint-ipc.json"))
 }
 
 /// `find_endpoint_ipc_socket`, validated AND explaining the outcome — the
@@ -4030,7 +4100,7 @@ fn find_endpoint_ipc_socket_resolved(
     if via_wsl {
         return resolve_wsl_endpoint_ipc_socket(read_endpoint_ipc_socket_via_wsl());
     }
-    let path = workspace_home.join(".papercusp/endpoint-ipc.json");
+    let path = native_papercusp_dir(workspace_home).join("endpoint-ipc.json");
     let state = inspect_advertisement(&path, via_wsl);
     match state.live_socket() {
         // Production: the sidecar we spawned IS the operator serving this
