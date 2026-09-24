@@ -28,6 +28,7 @@ use std::ffi::c_ulong;
 #[cfg(any(debug_assertions, feature = "devtools"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
+  cell::Cell,
   collections::HashMap,
   rc::Rc,
   sync::{Arc, Mutex},
@@ -63,6 +64,51 @@ const WEBVIEW_ID: &str = "webview_id";
 mod drag_drop;
 mod synthetic_mouse_events;
 mod web_context;
+
+// An initial or transitional WebKit document can have no URI or a URI (for
+// example file:///...) that http::Request cannot represent. Keep that parse
+// error at this boundary instead of unwinding through GTK's C callback, which
+// aborts the whole desktop process. This is representability, not the app's
+// origin authorization: http::Uri accepts about:blank, and the app handler
+// remains responsible for deciding which parsed origins it trusts.
+fn dispatch_ipc_message<F>(
+  page_uri: Option<&str>,
+  body: String,
+  handler: F,
+) -> std::result::Result<(), http::Error>
+where
+  F: FnOnce(Request<String>),
+{
+  let request = Request::builder()
+    .uri(page_uri.unwrap_or_default())
+    .body(body)?;
+  handler(request);
+  Ok(())
+}
+
+#[cfg(test)]
+mod ipc_uri_tests {
+  use super::dispatch_ipc_message;
+
+  #[test]
+  fn rejects_unready_or_invalid_page_origins_without_dispatching_ipc() {
+    let mut delivered = Vec::new();
+    for uri in [None, Some("file:///tmp/index.html"), Some("http://[bad")] {
+      let result = dispatch_ipc_message(uri, "payload".into(), |request| delivered.push(request));
+      assert!(result.is_err(), "unexpectedly accepted {uri:?}");
+    }
+    assert!(delivered.is_empty());
+
+    dispatch_ipc_message(Some("about:blank"), "previously accepted".into(), |request| {
+      delivered.push(request);
+    }).expect("URI parser accepts about:blank; preserve the app handler's authorization decision");
+    dispatch_ipc_message(Some("papercusp://localhost"), "ready".into(), |request| {
+      delivered.push(request);
+    }).expect("valid application origin should dispatch");
+    assert_eq!(delivered.len(), 2);
+    assert_eq!(delivered[1].body(), "ready");
+  }
+}
 
 #[cfg(feature = "x11")]
 struct X11Data {
@@ -635,18 +681,31 @@ impl InnerWebView {
       .expect("WebView does not have UserContentManager");
 
     // Connect before registering as recommended by the docs
+    let invalid_uri_warned = Cell::new(false);
     manager.connect_script_message_received(None, move |_m, msg| {
       #[cfg(feature = "tracing")]
       let _span = tracing::info_span!(parent: None, "wry::ipc::handle").entered();
 
       if let Some(js) = msg.js_value() {
         if let Some(ipc_handler) = &ipc_handler {
-          ipc_handler(
-            Request::builder()
-              .uri(webview.uri().unwrap().to_string())
-              .body(js.to_string())
-              .unwrap(),
-          );
+          let page_uri = webview.uri().map(|uri| uri.to_string());
+          match dispatch_ipc_message(page_uri.as_deref(), js.to_string(), |request| ipc_handler(request)) {
+            Ok(()) => invalid_uri_warned.set(false),
+            Err(error) if !invalid_uri_warned.replace(true) => {
+              // Never log the full URI: it can contain tokens or document data.
+              let kind = match page_uri.as_deref() {
+                None => "absent",
+                Some(uri) if uri.starts_with("about:") => "about",
+                Some(uri) if uri.starts_with("file:") => "file",
+                Some(uri) if uri.starts_with("data:") => "data",
+                Some(uri) if uri.starts_with("papercusp:") => "papercusp",
+                Some(uri) if uri.starts_with("http:") || uri.starts_with("https:") => "http",
+                _ => "other",
+              };
+              eprintln!("[wry:ipc] ignored message from unparseable page URI ({kind}): {error}");
+            }
+            Err(_) => {}
+          }
         }
       }
     });
