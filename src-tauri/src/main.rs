@@ -1213,8 +1213,16 @@ mod tests {
     fn papercusp_home_override_redirects_wsl_discovery_paths() {
         use super::{wsl_endpoint_ipc_json_path, wsl_operator_json_path};
 
-        // SAFETY: single-threaded unit test; PAPERCUSP_HOME is not touched by
-        // any other test in this crate, so there is no cross-test race.
+        if std::env::var_os("PAPERCUSP_WSL_DISCOVERY_TEST_CHILD").is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::papercusp_home_override_redirects_wsl_discovery_paths", "--nocapture"])
+                .env("PAPERCUSP_WSL_DISCOVERY_TEST_CHILD", "1")
+                .output().unwrap();
+            assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+            return;
+        }
+        // SAFETY: this child runs only this test, so changing its environment
+        // cannot race the native discovery tests in the parent Cargo process.
         let prev = std::env::var_os("PAPERCUSP_HOME");
 
         unsafe {
@@ -2997,6 +3005,15 @@ mod helper_tests {
 
     #[test]
     fn find_endpoint_ipc_socket_reads_workspace_home_when_not_via_wsl() {
+        if std::env::var_os("PAPERCUSP_DEFAULT_DISCOVERY_TEST_CHILD").is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "helper_tests::find_endpoint_ipc_socket_reads_workspace_home_when_not_via_wsl", "--nocapture"])
+                .env("PAPERCUSP_DEFAULT_DISCOVERY_TEST_CHILD", "1")
+                .env_remove("PAPERCUSP_HOME")
+                .output().unwrap();
+            assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+            return;
+        }
         // WI-3395: the non-WSL path (mac/linux, and the Windows fallback) resolves
         // the socket from workspace_home/.papercusp/endpoint-ipc.json. The WSL
         // read is Windows-only + needs a live distro, so it isn't unit-covered
@@ -3040,6 +3057,11 @@ mod helper_tests {
                 expected_socket.map(std::path::PathBuf::from),
                 "validated IPC discovery must use the same instance as HTTP",
             );
+            if std::env::var_os("PAPERCUSP_HOME").is_some_and(|v| !v.is_empty()) {
+                assert_eq!(super::operator_discovery_port_from_home(),
+                    if expected_port == 0 { None } else { Some(expected_port) },
+                    "the recovery path must honor the same explicit instance");
+            }
             return;
         }
 
@@ -5446,8 +5468,8 @@ fn wait_for_operator(
     let discovery_path = if via_wsl {
         "/home/papercup/.papercusp/operator.json".to_string()
     } else {
-        workspace_home
-            .join(".papercusp/operator.json")
+        native_papercusp_dir(workspace_home)
+            .join("operator.json")
             .display()
             .to_string()
     };
@@ -9612,7 +9634,7 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
                     // static :3070 default, then retain that live state after
                     // the later reset/re-dial (EI-22626134896342971).
                     env_switch::prime_explicit_api_target();
-                    let papercusp_dir = std::path::PathBuf::from(home).join(".papercusp");
+                    let papercusp_dir = native_papercusp_dir(std::path::Path::new(&home));
                     // EI-190: resolve the socket for the SELECTED operator
                     // (the dev wrapper's build switcher), re-read on every
                     // (re)connect — so /api deliberately follows the chosen
