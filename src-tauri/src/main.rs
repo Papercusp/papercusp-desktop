@@ -640,12 +640,36 @@ fn grant_media_permission<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
 /// production builds (no dev-wrapper target buttons) had NO recovery short
 /// of restarting the app. Replace it with a bundled retry page that polls
 /// the failed URI and navigates back the moment the origin answers.
+///
+/// WI-10002878 (#463): the page must not claim the operator was LOST when it
+/// never answered in the first place. `tauri dev --no-dev-server-wait` opens
+/// the window before `bin/hono-host.ts` is listening, and a production cold
+/// start can race its sidecar the same way — so every cold start used to
+/// greet the user with "Papercusp lost its operator process". Each webview
+/// now remembers which origins have COMMITTED a main-frame load (WebKit only
+/// commits once a server returned a response; a refused connection fails
+/// provisionally and never commits). A failure on an origin that has never
+/// answered renders the "starting" variant; the "lost" wording is reserved
+/// for an origin that was up before.
 #[cfg(target_os = "linux")]
 fn install_load_failure_recovery<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
     let _ = window.with_webview(|webview| {
+        use std::sync::Arc;
         use webkit2gtk::WebViewExt;
         let wv: webkit2gtk::WebView = webview.inner();
-        wv.connect_load_failed(|wv, _event, failing_uri, error| {
+        let tracker = Arc::new(Mutex::new(RecoveryTracker::default()));
+        {
+            let tracker = Arc::clone(&tracker);
+            wv.connect_load_changed(move |wv, event| {
+                if event != webkit2gtk::LoadEvent::Committed {
+                    return;
+                }
+                if let Ok(mut t) = tracker.lock() {
+                    t.on_committed(wv.uri().as_deref());
+                }
+            });
+        }
+        wv.connect_load_failed(move |wv, _event, failing_uri, error| {
             // Cancellations are NORMAL navigation (a load superseded by a
             // newer one, a download) — intercepting them would break the app.
             if error.matches(webkit2gtk::NetworkError::Cancelled)
@@ -656,13 +680,81 @@ fn install_load_failure_recovery<R: tauri::Runtime>(window: &tauri::WebviewWindo
             eprintln!(
                 "[papercusp-desktop] main-frame load failed for {failing_uri} ({error}) — showing recovery page"
             );
+            let kind = tracker
+                .lock()
+                .map(|mut t| t.on_failed(failing_uri))
+                .unwrap_or(RecoveryKind::Starting);
             // content_uri = the failed URI so the page keeps that security
             // origin: its same-origin health poll dials exactly the origin
             // that died.
-            wv.load_alternate_html(&recovery_page_html(failing_uri), failing_uri, Some(failing_uri));
+            wv.load_alternate_html(
+                &recovery_page_html(failing_uri, kind),
+                failing_uri,
+                Some(failing_uri),
+            );
             true
         });
     });
+}
+
+/// Which story the recovery page tells (WI-10002878): `Starting` when the
+/// failing origin has never answered in this webview (a cold start still
+/// waiting on the operator's boot), `Lost` when it answered before and has
+/// since gone away.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoveryKind {
+    Starting,
+    Lost,
+}
+
+/// Per-webview bookkeeping behind install_load_failure_recovery, kept pure so
+/// the commit/fail sequencing is unit-testable without a WebKit instance.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Default)]
+struct RecoveryTracker {
+    /// Origins that have COMMITTED a real main-frame load (i.e. answered).
+    answered: std::collections::HashSet<String>,
+    /// Set when a recovery page is about to load: its own commit carries the
+    /// failed URI as content URI and must not count as the operator answering.
+    alternate_pending: bool,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl RecoveryTracker {
+    /// A main-frame load committed at `uri`.
+    fn on_committed(&mut self, uri: Option<&str>) {
+        if std::mem::take(&mut self.alternate_pending) {
+            return;
+        }
+        if let Some(origin) = uri.and_then(uri_origin) {
+            self.answered.insert(origin);
+        }
+    }
+
+    /// A main-frame load failed at `failing_uri` and the recovery page is
+    /// about to be shown: which variant should it be?
+    fn on_failed(&mut self, failing_uri: &str) -> RecoveryKind {
+        self.alternate_pending = true;
+        match uri_origin(failing_uri) {
+            Some(origin) if self.answered.contains(&origin) => RecoveryKind::Lost,
+            _ => RecoveryKind::Starting,
+        }
+    }
+}
+
+/// `scheme://host[:port]` of a URI, lower-cased, or `None` when it has no
+/// authority (about:blank, data:, a bare path). The origin — not the full
+/// URI — is what "has this operator answered before" is keyed on, so an
+/// in-app navigation to a new route still counts as the same operator.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn uri_origin(uri: &str) -> Option<String> {
+    let (scheme, rest) = uri.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if scheme.is_empty() || authority.is_empty() {
+        return None;
+    }
+    Some(format!("{}://{}", scheme.to_ascii_lowercase(), authority.to_ascii_lowercase()))
 }
 
 fn restore_window_visibility_once<R: tauri::Runtime>(
@@ -729,12 +821,24 @@ fn restore_window_visibility<R: tauri::Runtime + 'static>(
 /// escaped to `<`: JSON alone leaves `</script>` intact inside the
 /// literal, which would still terminate the script element.
 #[cfg(target_os = "linux")]
-fn recovery_page_html(failing_uri: &str) -> String {
+fn recovery_page_html(failing_uri: &str, kind: RecoveryKind) -> String {
     let uri_js = serde_json::to_string(failing_uri)
         .unwrap_or_else(|_| "\"/\"".to_string())
         .replace('<', "\\u003c");
+    let (title, heading, detail) = match kind {
+        RecoveryKind::Starting => (
+            "Papercusp — starting",
+            "Starting Papercusp…",
+            "Waiting for the operator process to finish starting up. This window opens automatically the moment it answers.",
+        ),
+        RecoveryKind::Lost => (
+            "Papercusp — reconnecting",
+            "Papercusp lost its operator process",
+            "The window will reconnect automatically as soon as the operator is back. Nothing is lost — this page is polling for it.",
+        ),
+    };
     format!(
-        r#"<!doctype html><html><head><meta charset="utf-8"><title>Papercusp — reconnecting</title><style>
+        r#"<!doctype html><html><head><meta charset="utf-8"><title>{title}</title><style>
   html,body{{height:100%;margin:0;background:#101216;color:#d6dae2;font:14px/1.5 ui-sans-serif,system-ui,sans-serif}}
   .wrap{{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center;padding:24px}}
   h1{{font-size:17px;font-weight:600;margin:0}}
@@ -745,8 +849,8 @@ fn recovery_page_html(failing_uri: &str) -> String {
   @keyframes b{{50%{{opacity:.25}}}}
 </style></head><body><div class="wrap">
   <div class="dot"></div>
-  <h1>Papercusp lost its operator process</h1>
-  <p>The window will reconnect automatically as soon as the operator is back. Nothing is lost — this page is polling for it.</p>
+  <h1>{heading}</h1>
+  <p>{detail}</p>
   <button onclick="location.replace(TARGET)">Retry now</button>
   <script>
     const TARGET = {uri_js};
@@ -1161,16 +1265,82 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn recovery_page_embeds_uri_safely() {
-        let html = super::recovery_page_html("http://127.0.0.1:3170/adv?ws=x");
+        let html = super::recovery_page_html("http://127.0.0.1:3170/adv?ws=x", super::RecoveryKind::Lost);
         assert!(html.contains(r#"const TARGET = "http://127.0.0.1:3170/adv?ws=x";"#));
         assert!(html.contains("Retry now"));
 
-        let hostile = super::recovery_page_html(r#"http://x/"</script><script>alert(1)"#);
+        let hostile = super::recovery_page_html(
+            r#"http://x/"</script><script>alert(1)"#,
+            super::RecoveryKind::Starting,
+        );
         // The quote is JSON-escaped and `<` is unicode-escaped, so neither a
         // raw </script> nor a raw <script> from the URI survives in the HTML.
         assert!(!hostile.contains("</script><script>alert"));
         assert!(hostile.contains(r#"\""#));
         assert!(hostile.contains(r"</script"));
+    }
+
+    /// WI-10002878 (#463): a cold start — the operator has never answered —
+    /// must not tell the user the operator was LOST. Only an origin that was
+    /// up before gets the "lost" wording. Both variants keep polling.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovery_page_cold_start_does_not_claim_the_operator_was_lost() {
+        let uri = "http://127.0.0.1:3270/adv?ws=papercusp-workspace";
+        let starting = super::recovery_page_html(uri, super::RecoveryKind::Starting);
+        assert!(!starting.contains("lost its operator process"), "cold start must not claim a loss");
+        assert!(starting.contains("Starting Papercusp"));
+        assert!(starting.contains("<title>Papercusp — starting</title>"));
+        assert!(starting.contains("poll();"), "the starting page must still poll for the operator");
+
+        let lost = super::recovery_page_html(uri, super::RecoveryKind::Lost);
+        assert!(lost.contains("Papercusp lost its operator process"));
+        assert!(lost.contains("<title>Papercusp — reconnecting</title>"));
+        assert!(lost.contains("poll();"));
+    }
+
+    /// WI-10002878: the commit/fail sequencing WebKit drives. The recovery
+    /// page's OWN commit (alternate HTML under the failed URI) must not count
+    /// as the operator answering, or a retry during a cold start would flip to
+    /// the "lost" wording. Mirrors the live A/A2/C/D headless check.
+    #[test]
+    fn recovery_tracker_tells_cold_start_from_loss() {
+        use super::RecoveryKind::{Lost, Starting};
+        let mut t = super::RecoveryTracker::default();
+        let op = "http://127.0.0.1:3270/adv?ws=papercusp-workspace";
+
+        assert_eq!(t.on_failed(op), Starting, "A: first load before the operator listens");
+        t.on_committed(Some(op)); // the recovery page's own commit
+        assert_eq!(t.on_failed(op), Starting, "A2: a retry that fails again is still a cold start");
+        t.on_committed(Some(op)); // recovery page again
+        t.on_committed(Some("http://127.0.0.1:3270/adv?tab=harnesses")); // operator answered
+        assert_eq!(t.on_failed(op), Lost, "C: it was up before, now it is gone");
+        t.on_committed(Some(op)); // recovery page
+        assert_eq!(
+            t.on_failed("http://127.0.0.1:3170/adv"),
+            Starting,
+            "D: a different operator origin that never answered"
+        );
+        t.on_committed(None); // a commit with no URI must not panic or record anything
+        assert_eq!(t.on_failed("http://127.0.0.1:3170/adv"), Starting);
+    }
+
+    /// The "has this operator answered before" memory is keyed on origin, so
+    /// every route of one operator shares it and a different port does not.
+    #[test]
+    fn uri_origin_keys_on_scheme_host_and_port() {
+        use super::uri_origin;
+        assert_eq!(
+            uri_origin("http://127.0.0.1:3270/adv?tab=harnesses&ws=x").as_deref(),
+            Some("http://127.0.0.1:3270")
+        );
+        assert_eq!(uri_origin("http://127.0.0.1:3270").as_deref(), Some("http://127.0.0.1:3270"));
+        assert_eq!(uri_origin("HTTP://LocalHost:3070?x=1").as_deref(), Some("http://localhost:3070"));
+        assert_eq!(uri_origin("tauri://localhost/index.html#/a").as_deref(), Some("tauri://localhost"));
+        assert_ne!(uri_origin("http://127.0.0.1:3270/"), uri_origin("http://127.0.0.1:3170/"));
+        assert_eq!(uri_origin("about:blank"), None);
+        assert_eq!(uri_origin("/relative/path"), None);
+        assert_eq!(uri_origin("http:///no-authority"), None);
     }
 
     #[test]
