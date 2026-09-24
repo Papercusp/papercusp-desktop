@@ -1302,6 +1302,21 @@ else
   echo "WARNING: sentinel worker not found at $SENTINEL_WORKER_SRC — the desktop will run with NO blocked-loop detection"
 fi
 
+# Snapshot-fold worker (WI-10002855). TypeScript, so esbuild it beside serve.mjs like
+# the sentinel. The own-log compaction folds its whole history in this thread; without
+# the .mjs every compaction FAILS rather than freezing the sidecar's event loop.
+FOLD_WORKER_SRC="$REPO_ROOT/packages/operator-core/lib/sync/hyperbee/snapshot-fold.worker.ts"
+if [[ -f "$FOLD_WORKER_SRC" ]]; then
+  npx --yes esbuild@0.25.0 "$FOLD_WORKER_SRC" \
+    --bundle --platform=node --format=esm --target=node22 \
+    --outfile="$SIDECAR_DIR/snapshot-fold.worker.mjs" \
+    --log-limit=5 \
+    && echo "    ✓ bundled snapshot-fold worker beside serve.mjs" \
+    || echo "WARNING: snapshot-fold worker bundle FAILED — own-log compactions will fail until it is rebuilt"
+else
+  echo "WARNING: snapshot-fold worker not found at $FOLD_WORKER_SRC — own-log compactions will fail"
+fi
+
 # opusscript_native_wasm.wasm (EI-501) — the SAME dirname(import.meta.url)
 # gotcha as git-ext-bridge.mjs above, one layer deeper: esbuild INLINES
 # opusscript's JS shim (voice-node/codec.ts's lazy `import('opusscript')`) into
