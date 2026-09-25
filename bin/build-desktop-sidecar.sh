@@ -1307,8 +1307,11 @@ fi
 # the .mjs every compaction FAILS rather than freezing the sidecar's event loop.
 FOLD_WORKER_SRC="$REPO_ROOT/packages/operator-core/lib/sync/hyperbee/snapshot-fold.worker.ts"
 if [[ -f "$FOLD_WORKER_SRC" ]]; then
+  # sodium-native stays external (D-024: the P-530 filter opens `{__rekey}` rows in
+  # this thread); it resolves from the sidecar's node_modules, as for serve.mjs.
   npx --yes esbuild@0.25.0 "$FOLD_WORKER_SRC" \
     --bundle --platform=node --format=esm --target=node22 \
+    --external:sodium-native \
     --outfile="$SIDECAR_DIR/snapshot-fold.worker.mjs" \
     --log-limit=5 \
     && echo "    ✓ bundled snapshot-fold worker beside serve.mjs" \
