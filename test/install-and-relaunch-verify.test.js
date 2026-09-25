@@ -18,6 +18,7 @@ const {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -208,12 +209,14 @@ printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
   return { root, deb, server, log, flipped, configured, updated, ssh, scp, emitDpkgWarning };
 }
 
-function macFixture({ executeInstall = false, freeGb = 20, nativePreflight = 'healthy', installedMismatch = false } = {}) {
+function macFixture({ executeInstall = false, executeTransfer = false, freeGb = 20, nativePreflight = 'healthy', installedMismatch = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'install-relaunch-mac-'));
   const artifacts = join(root, 'artifacts');
   const shims = join(root, 'shims');
+  const remote = join(root, 'remote');
   mkdirSync(artifacts);
   mkdirSync(shims);
+  mkdirSync(remote);
 
   const dmg = join(artifacts, `Papercusp GUI_${VERSION}_universal-apple-darwin.dmg`);
   const server = join(artifacts, `Papercusp Server_${VERSION}_universal-apple-darwin.dmg`);
@@ -275,6 +278,19 @@ printf 'SSH %s\\n' "$*" >> "$MOCK_LOG"
 case "$*" in
   *"echo VM-OK"*) printf 'VM-OK\\n' ;;
   *"PC-REMOTE-DIR-READY"*) printf 'PC-REMOTE-DIR-READY\\n' ;;
+  *"PAPERCUSP_NATIVE_ARTIFACT_STAGE"*)
+    if [[ "$*" == *"GUI_${VERSION}_universal-apple-darwin.dmg"* ]]; then
+      printf 'TRANSFER GUI\\n' >> "$MOCK_LOG"
+    elif [[ "$*" == *"Server_${VERSION}_universal-apple-darwin.dmg"* ]]; then
+      printf 'TRANSFER Server\\n' >> "$MOCK_LOG"
+    fi
+    if [[ "$MOCK_EXECUTE_TRANSFER" == 1 ]]; then
+      command="\${@: -1}"
+      bash -c "$command"
+      exit $?
+    fi
+    printf 'PAPERCUSP_NATIVE_ARTIFACT_STAGE_OK\\n'
+    ;;
   *"PAPERCUSP_NATIVE_MAC_PREFLIGHT"*)
     case "$MOCK_NATIVE_PREFLIGHT" in
       no-console) printf 'macOS native preflight: SSH user must own the logged-in GUI console\\n' >&2; exit 2 ;;
@@ -322,7 +338,7 @@ esac
 printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
 `);
 
-  return { root, dmg, server, log, flipped, ssh, scp, shims, applications, executeInstall, freeGb, nativePreflight, installedMismatch };
+  return { root, dmg, server, log, flipped, ssh, scp, shims, applications, remote, executeInstall, executeTransfer, freeGb, nativePreflight, installedMismatch };
 }
 
 function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
@@ -343,14 +359,17 @@ function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
   if (f.requireHostKeyOptions) env.MOCK_REQUIRE_HOST_KEY_OPTIONS = '1';
   if (f.nativePreflight) env.MOCK_NATIVE_PREFLIGHT = f.nativePreflight;
   if (f.installedMismatch) env.MOCK_INSTALLED_MISMATCH = '1';
-  if (f.executeInstall) {
+  if (f.executeInstall || f.executeTransfer) {
     env.PATH = `${f.shims}:${process.env.PATH}`;
-    env.MOCK_EXECUTE_INSTALL = '1';
-    env.MOCK_APPLICATIONS = f.applications;
-    env.MOCK_ROOT = f.root;
     env.MOCK_FREE_GB = String(f.freeGb);
     env.PAPERCUSP_DISK_RESERVATION_DIR = join(f.root, 'reservations');
   }
+  if (f.executeInstall) {
+    env.MOCK_EXECUTE_INSTALL = '1';
+    env.MOCK_APPLICATIONS = f.applications;
+    env.MOCK_ROOT = f.root;
+  }
+  if (f.executeTransfer) env.MOCK_EXECUTE_TRANSFER = '1';
   return spawnSync('bash', [
     SCRIPT,
     '--platform', platform,
@@ -675,7 +694,14 @@ for (const installedMismatch of [false, true]) {
       assert.equal(verdict.installationMode, 'verify-existing-dmg');
       const log = readFileSync(f.log, 'utf8');
       assert.match(log, /PAPERCUSP_VERIFY_INSTALLED_MAC/);
-      assert.doesNotMatch(log, /ditto --noextattr|rm -rf/);
+      const verifyCalls = log.split('\n')
+        .filter((line) => line.startsWith('SSH ') && line.includes('PAPERCUSP_VERIFY_INSTALLED_MAC'));
+      assert.equal(
+        verifyCalls.length,
+        installedMismatch ? 1 : 2,
+        'verification must stop on the first mismatch; otherwise both roles use the non-mutating verifier',
+      );
+      for (const call of verifyCalls) assert.doesNotMatch(call, /ditto --noextattr|rm -rf/);
       assert.equal(existsSync(f.flipped), !installedMismatch);
       if (!installedMismatch) assert.match(verdict.notes.join(' '), /both installed apps match/);
     } finally {
@@ -716,13 +742,13 @@ test('macOS DMG install verifies matching GUI and Server apps before split-role 
     assert.equal(verdict.portHeld, true);
 
     const lines = readFileSync(f.log, 'utf8').trim().split('\n');
-    const guiPush = lines.findIndex((line) => line.startsWith('SCP ') && line.includes(f.dmg));
-    const serverPush = lines.findIndex((line) => line.startsWith('SCP ') && line.includes(f.server));
+    const guiPush = lines.findIndex((line) => line === 'TRANSFER GUI');
+    const serverPush = lines.findIndex((line) => line === 'TRANSFER Server');
     const install = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('hdiutil attach') && line.includes(basename(f.dmg)));
     const serverInstall = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('hdiutil attach') && line.includes(basename(f.server)));
     const relaunch = lines.findIndex((line) => line.startsWith('SSH ') && line.includes('open -n') && line.includes('Papercusp GUI.app'));
-    assert.ok(guiPush >= 0, 'macOS GUI DMG must be pushed');
-    assert.ok(serverPush > guiPush, 'matching macOS Server DMG must be pushed after the GUI DMG');
+    assert.ok(guiPush >= 0, 'macOS GUI DMG must be capacity-admitted and streamed');
+    assert.ok(serverPush > guiPush, 'matching macOS Server DMG must stream after the GUI DMG');
     assert.ok(install >= 0, 'macOS DMG must use the guarded mount/copy install path');
     assert.ok(serverInstall > install, 'matching Server must install after the GUI');
     assert.ok(relaunch > serverInstall, 'macOS must not relaunch before both staged apps verify');
@@ -731,9 +757,9 @@ test('macOS DMG install verifies matching GUI and Server apps before split-role 
     assert.ok(command.includes('ditto --noextattr --noqtn'), 'DMG copy must suppress extended attributes and quarantine');
     assert.ok(command.includes('xattr -cr'), 'staged app must clear any residual extended attributes');
     const codesign = command.indexOf('codesign --verify --deep --strict');
-    const replace = command.indexOf('rm -rf "$target"');
+    const replace = command.indexOf('mv "$target" "$rollback"');
     assert.ok(codesign >= 0, 'staged app must pass strict codesign verification');
-    assert.ok(replace > codesign, 'the known-good installed app must not be replaced before strict codesign passes');
+    assert.ok(replace > codesign, 'the known-good installed app must not rotate into rollback before strict codesign passes');
 
     const serverCommand = lines[serverInstall];
     assert.ok(serverCommand.includes('ditto --noextattr --noqtn'));
@@ -744,6 +770,37 @@ test('macOS DMG install verifies matching GUI and Server apps before split-role 
       relaunchCommand.indexOf('Papercusp Server.app') < relaunchCommand.indexOf('Papercusp GUI.app'),
       'new Server must launch first so its serve --ensure owns the identity flip',
     );
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('macOS refuses artifact transfer below the 16 GiB staging floor before writing bytes', () => {
+  const f = macFixture({ executeTransfer: true, freeGb: 15 });
+  try {
+    const result = runVerify(f, ['--remote-dir', f.remote], 'mac', f.dmg);
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /insufficient disk for native artifact transfer staging/);
+    assert.match(result.stdout, /need ~16GB/);
+    assert.equal(readdirSync(f.remote).length, 0, 'a refused transfer must leave no final or partial artifact');
+    const actionCalls = readFileSync(f.log, 'utf8').split('\n').filter((line) => line.startsWith('SSH '));
+    for (const call of actionCalls) assert.doesNotMatch(call, /hdiutil attach|open -n/);
+    assert.equal(existsSync(f.flipped), false);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('macOS streams both artifacts through the live disk reservation and commits exact bytes atomically', () => {
+  const f = macFixture({ executeTransfer: true, freeGb: 20 });
+  try {
+    const result = runVerify(f, ['--remote-dir', f.remote], 'mac', f.dmg);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.deepEqual(readFileSync(join(f.remote, basename(f.dmg))), readFileSync(f.dmg));
+    assert.deepEqual(readFileSync(join(f.remote, basename(f.server))), readFileSync(f.server));
+    assert.deepEqual(readdirSync(f.remote).filter((name) => name.includes('.incoming.')), []);
+    const transfers = readFileSync(f.log, 'utf8').split('\n').filter((line) => line.startsWith('TRANSFER '));
+    assert.deepEqual(transfers, ['TRANSFER GUI', 'TRANSFER Server']);
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
@@ -777,8 +834,9 @@ test('macOS reserves the expanded app on its destination filesystem before each 
     assert.ok(log.includes(`DF ${f.applications}\n`));
     for (const product of ['Papercusp GUI', 'Papercusp Server']) {
       assert.equal(readFileSync(join(f.applications, `${product}.app`, 'payload'), 'utf8'), 'new-build');
-      assert.equal(readFileSync(join(f.applications, `${product}.app.rollback`, 'payload'), 'utf8'), 'retained-rollback');
+      assert.equal(readFileSync(join(f.applications, `${product}.app.rollback`, 'payload'), 'utf8'), 'known-good');
     }
+    assert.deepEqual(readdirSync(f.applications).filter((name) => name.includes('.rollback.old.')), []);
     assert.equal(existsSync(f.flipped), true);
   } finally {
     rmSync(f.root, { recursive: true, force: true });

@@ -8,9 +8,10 @@
 # What it proves (the sequence, per platform):
 #   1. BEFORE: snapshot the RUNNING operator — /api/health {sha,version} + its
 #      sticky port (from operator.json). This is the pre-update operator.
-#   2. PUSH: scp the new GUI + matching Server installers to the VM; the GUI
-#      does not own the operator. On Windows, also push every provenance-listed
-#      Inno span companion.
+#   2. PUSH: transfer the new GUI + matching Server installers to the VM; the
+#      GUI does not own the operator. macOS streams each artifact through a
+#      capacity-admitted remote shell so the reservation lives for the whole
+#      write. On Windows, also push every provenance-listed Inno span companion.
 #   3. INSTALL: run the GUI + Server installers. They replace the app bytes on
 #      disk but the OLD operator keeps serving (that is exactly the EI-9002
 #      scenario).
@@ -168,7 +169,7 @@ mac_dmg_install_command() { # $1=product name, $2=artifact placeholder
   script="$(
     cat "$HERE/lib/disk-preflight.sh"
     printf '\nset -e; set -o pipefail; '
-    printf 'mount_dir=$(mktemp -d /tmp/papercusp-dmg.XXXXXX); stage="/Applications/.%s.app.install.$$"; target="/Applications/%s.app"; cleanup() { hdiutil detach "$mount_dir" >/dev/null 2>&1 || true; rmdir "$mount_dir" >/dev/null 2>&1 || true; rm -rf "$stage"; }; trap cleanup EXIT HUP INT TERM; hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" %s >/dev/null; app_src="$mount_dir/%s.app"; test -d "$app_src"; ' \
+    printf 'mount_dir=$(mktemp -d /tmp/papercusp-dmg.XXXXXX); stage="/Applications/.%s.app.install.$$"; target="/Applications/%s.app"; rollback="${target}.rollback"; rollback_old="${rollback}.old.$$.${RANDOM}"; had_target=0; had_rollback=0; cleanup() { hdiutil detach "$mount_dir" >/dev/null 2>&1 || true; rmdir "$mount_dir" >/dev/null 2>&1 || true; rm -rf "$stage"; if [ "$had_target" = 1 ] && [ ! -e "$target" ] && [ -e "$rollback" ]; then mv "$rollback" "$target" >/dev/null 2>&1 || true; fi; if [ "$had_rollback" = 1 ] && [ ! -e "$rollback" ] && [ -e "$rollback_old" ]; then mv "$rollback_old" "$rollback" >/dev/null 2>&1 || true; fi; if [ -e "$target" ] && [ -e "$rollback" ] && [ -e "$rollback_old" ]; then rm -rf "$rollback_old"; fi; }; trap cleanup EXIT HUP INT TERM; hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" %s >/dev/null; app_src="$mount_dir/%s.app"; test -d "$app_src"; ' \
       "$product" "$product" "$artifact_placeholder" "$product"
     cat <<'INSTALL'
 app_kib=$(du -sk "$app_src" | awk '{print $1}')
@@ -179,11 +180,56 @@ rm -rf "$stage"
 ditto --noextattr --noqtn "$app_src" "$stage"
 xattr -cr "$stage"
 codesign --verify --deep --strict "$stage"
-rm -rf "$target"
+# Maintain exactly one known rollback. The previous rollback is not discarded
+# until the verified stage is published; cleanup restores both generations if
+# either rename fails or the remote shell is interrupted between them.
+if [ -e "$target" ]; then
+  had_target=1
+  if [ -e "$rollback" ]; then
+    had_rollback=1
+    mv "$rollback" "$rollback_old"
+  fi
+  mv "$target" "$rollback"
+fi
 mv "$stage" "$target"
+rm -rf "$rollback_old"
 INSTALL
   )"
   # %q keeps the helper and paths intact across SSH's remote-shell boundary.
+  printf 'bash -c %q' "$script"
+}
+
+# Stream a macOS artifact through the SAME remote shell that owns the disk
+# reservation. A standalone preflight followed by scp would release its
+# pid-bound claim before the first byte crossed the wire (check-then-hope).
+# The default 16 GiB floor is the measured full-candidate staging requirement
+# from EI-22528361121225839; callers may raise it, never silently lower it.
+mac_artifact_stage_command() { # $1=remote path, $2=expected bytes, $3=required GiB
+  local remote_path="$1" expected_bytes="$2" need_gb="$3" script
+  script="$(
+    cat "$HERE/lib/disk-preflight.sh"
+    printf '\nset -e; set -o pipefail; target=%q; expected_bytes=%q; need_gb=%q; ' \
+      "$remote_path" "$expected_bytes" "$need_gb"
+    cat <<'STAGE'
+# PAPERCUSP_NATIVE_ARTIFACT_STAGE
+tmp="${target}.incoming.$$.$RANDOM"
+cleanup() {
+  rm -f "$tmp"
+  papercusp_release_disk_reservation
+}
+trap cleanup EXIT HUP INT TERM
+papercusp_require_free_gb "$(dirname "$target")" "$need_gb" "native artifact transfer staging"
+cat > "$tmp"
+actual_bytes="$(wc -c < "$tmp" | tr -d '[:space:]')"
+case "$actual_bytes" in ''|*[!0-9]*) echo "cannot measure transferred artifact: $tmp" >&2; exit 2 ;; esac
+if [ "$actual_bytes" != "$expected_bytes" ]; then
+  echo "transferred artifact size mismatch: got $actual_bytes bytes, expected $expected_bytes" >&2
+  exit 2
+fi
+mv -f "$tmp" "$target"
+printf 'PAPERCUSP_NATIVE_ARTIFACT_STAGE_OK\n'
+STAGE
+  )"
   printf 'bash -c %q' "$script"
 }
 
@@ -648,7 +694,38 @@ fi
 
 SCP=("$SCP_BIN" -i "$SSH_KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -o BatchMode=yes)
 for option in "${SCP_OPTIONS[@]}"; do SCP+=( -o "$option" ); done
+
+mac_stage_artifact() { # $1=local path, $2=remote path
+  local local_path="$1" remote_path="$2" bytes need_gb headroom command transfer_out="" transfer_rc=0
+  bytes="$(wc -c < "$local_path" | tr -d '[:space:]')"
+  case "$bytes" in ''|*[!0-9]*) fail_check "push: cannot measure $(basename "$local_path") before transfer"; return ;; esac
+  need_gb=$(( (bytes + 1073741823) / 1073741824 ))
+  [[ "$need_gb" -ge 1 ]] || need_gb=1
+  headroom="${PAPERCUSP_MAC_TRANSFER_HEADROOM_GB:-16}"
+  case "$headroom" in
+    ''|*[!0-9]*) fail_check "push: PAPERCUSP_MAC_TRANSFER_HEADROOM_GB must be a positive integer"; return ;;
+    *)
+      [[ "$headroom" -ge 16 ]] || { fail_check "push: PAPERCUSP_MAC_TRANSFER_HEADROOM_GB cannot lower the 16 GiB safety floor"; return; }
+      [[ "$need_gb" -ge "$headroom" ]] || need_gb="$headroom"
+      ;;
+  esac
+  command="$(mac_artifact_stage_command "$remote_path" "$bytes" "$need_gb")"
+  transfer_out="$(timeout "$INSTALL_TIMEOUT" "${SSH[@]}" "$command" < "$local_path" 2>&1 | tr -d '\r\0')" || transfer_rc=$?
+  if [[ "$transfer_rc" -ne 0 || "$transfer_out" != *PAPERCUSP_NATIVE_ARTIFACT_STAGE_OK* ]]; then
+    fail_check "push: capacity-admitted macOS transfer of $(basename "$local_path") failed (exit $transfer_rc)${transfer_out:+ — output: ${transfer_out:0:500}}"
+  fi
+}
+
 if [[ ${#FAILURES[@]} -eq 0 ]]; then
+if [[ "$PLATFORM" == "mac" ]]; then
+  mac_stage_artifact "$ARTIFACT" "$REMOTE_ARTIFACT"
+  if [[ ${#FAILURES[@]} -eq 0 ]]; then
+    for server_path in "${SERVER_ARTIFACTS[@]}"; do
+      mac_stage_artifact "$server_path" "$REMOTE_DIR/$(basename "$server_path")"
+      [[ ${#FAILURES[@]} -eq 0 ]] || break
+    done
+  fi
+else
 SCP_OUT=""
 SCP_RC=0
 SCP_OUT="$("${SCP[@]}" "$ARTIFACT" "$SSH_HOST:$REMOTE_ARTIFACT" 2>&1)" || SCP_RC=$?
@@ -672,6 +749,7 @@ for server_path in "${SERVER_ARTIFACTS[@]}"; do
     fi
   fi
 done
+fi
 fi
 
 # ── 3. INSTALL (does NOT terminate the operator) ────────────────────────────
