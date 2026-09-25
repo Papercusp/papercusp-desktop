@@ -950,6 +950,16 @@ else
   else
     bad "live-federation-gate's .deb repack no longer consults local_matrix_due — the attestation wall will starve the local-matrix leg of --deb, and it will die on the staleness guard after provisioning frames + evicting 24 cores (EI-20580419609576585)"
   fi
+  # EI-23005428051787372: the gate .deb is a throwaway, but a DEFAULT-level compressor (bare
+  # -Zgzip = gzip -9, the xz default, the dpkg zstd default) spends 25-60 single-core minutes
+  # on the ~4.9GB sidecar tree, which every exact-SHA release certification waits behind.
+  # Anchored to the PROPERTY (an explicit fast level or no compression), not one flag spelling.
+  repack_line="$(sed -n "${repack_ln}p" "$gate_file")"
+  if grep -qE -- '-Znone|-z[0-3]([^0-9]|$)' <<<"$repack_line"; then
+    ok "live-federation-gate repacks the gate .deb at an explicit fast compression level (EI-23005428051787372)"
+  else
+    bad "live-federation-gate's .deb repack uses a default (slow) compression level — gzip -9 costs 25-60 single-core min per run and delays every release certification; pass -z1 (or -Znone) (EI-23005428051787372)"
+  fi
 fi
 # EI-20578660332729593: local-matrix.sh must validate every cheap host-side precondition
 # BEFORE the first state-creating step. Three inputs — the sidecar node binary, the .deb, and

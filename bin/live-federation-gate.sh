@@ -2155,11 +2155,18 @@ if [ -z "${GATE_DEB:-}" ]; then
       fi
     fi
     if [ -n "$BASE_DEB" ]; then
+      # EI-23005428051787372: `-Zgzip` alone means gzip level 9, which compresses the ~4.9GB
+      # sidecar tree on ONE core for 25-60 min per run — dead wall-clock that every exact-SHA
+      # release certification (and therefore every :3070 deploy) waits behind. This .deb is a
+      # throwaway consumed only by the local content-matrix and the ubuntu-24.04 frames, so
+      # size barely matters. Measured on a 307MB slice of this tree (2026-09-25, nice 10):
+      # gzip -9 ≈ 92s, -Zzstd (dpkg default level) 32.7s/90MB, -Zgzip -z1 4.9s/130MB. -z1 is
+      # the fastest AND keeps the data.tar.gz member every existing consumer already reads.
       GATE_DEB="$WORK/Papercusp_gate.deb"
       ( cd "$WORK" && mkdir -p pkg && dpkg-deb -R "$BASE_DEB" pkg \
           && test -x pkg/usr/bin/papercusp-desktop \
           && APPDIR="$(find pkg/usr/lib -maxdepth 1 -mindepth 1 -type d | head -1)" && rm -rf "$APPDIR/sidecar" && cp -r "$DESKTOP_DIR/src-tauri/sidecar" "$APPDIR/sidecar" \
-          && dpkg-deb -Zgzip -b pkg "$GATE_DEB" && rm -rf pkg ) >"$WORK/repack.log" 2>&1 \
+          && dpkg-deb -Zgzip -z1 -b pkg "$GATE_DEB" && rm -rf pkg ) >"$WORK/repack.log" 2>&1 \
         && log "repacked fresh .deb (base=$BASE_DEB)" || { log "repack FAILED ($WORK/repack.log) — skipping content-matrix"; GATE_DEB=""; SKIP_MATRIX=1; }
     else
       log "no base .deb to repack — skipping content-matrix leg"; SKIP_MATRIX=1
