@@ -1797,8 +1797,12 @@ if [[ "${PAPERCUSP_SKIP_MIGRATION_BOOTSMOKE:-0}" != "1" ]]; then
   # headroom for the same reason (green-checkpoint.ts buildGreenCheckpointEnv, EI-21863578695350444
   # after the 2026-08-29 timeout); the cut's preflight ran the same file at the bare default and
   # died on it during the 0.0.20 cut (2026-09-17). A pre-set value still wins.
-  # NOTE: this does NOT widen the per-test budgets — those are `}, 300_000);` in the test file.
-  ( cd "$ROOT/.." && VITEST_INTEGRATION_HOOK_TIMEOUT_MS="${VITEST_INTEGRATION_HOOK_TIMEOUT_MS:-180000}" npm run test:file -- packages/operator-core/lib/release-preflight-migration-boot-smoke.integration.test.ts ) \
+  # The seeded replay's case budget grows with the migration corpus. The test:file
+  # watchdog is a separate deadline; leave room for that case, the other two cases,
+  # setup, and teardown so it cannot kill a still-progressing proof at 10 minutes.
+  migration_sql_count="$(find "$ROOT/../libs/papercusp/libs/db/sql" -maxdepth 1 -name '*.sql' -type f | wc -l)"
+  migration_file_timeout_ms="$((600000 + migration_sql_count * 2100))"
+  ( cd "$ROOT/.." && VITEST_INTEGRATION_HOOK_TIMEOUT_MS="${VITEST_INTEGRATION_HOOK_TIMEOUT_MS:-180000}" PAPERCUSP_TEST_FILE_TIMEOUT_MS="${PAPERCUSP_TEST_FILE_TIMEOUT_MS:-$migration_file_timeout_ms}" npm run test:file -- packages/operator-core/lib/release-preflight-migration-boot-smoke.integration.test.ts ) \
     || { echo "ERROR: migration boot-smoke failed (above) — a migration crashes on a from-scratch replay, so a packaged install would crash-loop its seed on first boot. Fix the offending migration, or PAPERCUSP_SKIP_MIGRATION_BOOTSMOKE=1 to override (Docker-less box only)."; exit 1; }
 fi
 
