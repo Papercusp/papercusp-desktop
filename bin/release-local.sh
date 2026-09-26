@@ -2213,7 +2213,7 @@ cut_release_seed() {
     echo "==> seed: hydrating $seed_out from snapshot store $seed_snapshot (WI-10003231)"
     local seed_tmp="$seed_out.hydrate.$$"
     rm -rf "$seed_tmp"
-    mkdir -p "$(dirname "$seed_out")"
+    mkdir -p "$seed_tmp"
     if ! cp -a --reflink=auto "$seed_snapshot/." "$seed_tmp/"; then
       rm -rf "$seed_tmp"
       echo "ERROR: could not hydrate the release seed from $seed_snapshot" >&2

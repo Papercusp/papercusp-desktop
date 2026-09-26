@@ -673,7 +673,7 @@ function runSeedFallbackProbe(script) {
   return spawnSync('bash', ['-c', [seedFallbackHarness, script].join('\n')], { encoding: 'utf8' });
 }
 
-function runCutSeedQuiesceProbe({ marker = false, unitState = 'enabled' } = {}) {
+function runCutSeedQuiesceProbe({ marker = false, unitState = 'enabled', snapshot = null } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-cut-seed-quiesce-'));
   const rootDir = path.join(temp, 'root');
   const monorepo = path.join(temp, 'monorepo');
@@ -688,7 +688,7 @@ function runCutSeedQuiesceProbe({ marker = false, unitState = 'enabled' } = {}) 
   if (marker) fs.writeFileSync(path.join(runtimeDir, 'papercusp-seed-cut.quiesce'), '{}\n');
   fs.writeFileSync(path.join(bin, 'npx'), [
     '#!/usr/bin/env bash',
-    'printf called >> "$PROBE_NPX_LOG"',
+    'printf "called %s\\n" "$*" >> "$PROBE_NPX_LOG"',
     'exit 0',
   ].join('\n'));
   fs.writeFileSync(path.join(bin, 'systemctl'), [
@@ -702,6 +702,17 @@ function runCutSeedQuiesceProbe({ marker = false, unitState = 'enabled' } = {}) 
   ].join('\n'));
   fs.chmodSync(path.join(bin, 'npx'), 0o755);
   fs.chmodSync(path.join(bin, 'systemctl'), 0o755);
+  // Keep the probe hermetic on a box whose real snapshot store is populated.
+  let snapshotDir = '';
+  if (snapshot) {
+    snapshotDir = path.join(temp, 'snapshot-store');
+    if (snapshot.corestore) fs.mkdirSync(path.join(snapshotDir, 'corestore'), { recursive: true });
+    if (snapshot.manifest) {
+      fs.mkdirSync(snapshotDir, { recursive: true });
+      fs.writeFileSync(path.join(snapshotDir, 'manifest.json'), '{"cutTs":1}\n');
+    }
+  }
+  const seedOut = path.join(rootDir, 'src-tauri', 'seed');
 
   try {
     const script = [seedFallbackHarness, cutReleaseSeedHarness, 'cut_release_seed'].join('\n');
@@ -720,9 +731,15 @@ function runCutSeedQuiesceProbe({ marker = false, unitState = 'enabled' } = {}) 
         PAPERCUSP_SEED_REUSE_CORESTORE: 'auto',
         PAPERCUSP_SEED_CORESTORE: '1',
         PAPERCUSP_SEED_SPARSE: '1',
+        PAPERCUSP_SEED_SNAPSHOT_DIR: snapshotDir,
       },
     });
-    return { result, npxCalled: fs.existsSync(npxLog) };
+    return {
+      result,
+      npxCalled: fs.existsSync(npxLog),
+      npxArgs: fs.existsSync(npxLog) ? fs.readFileSync(npxLog, 'utf8') : '',
+      hydrated: fs.existsSync(path.join(seedOut, 'manifest.json')) && fs.existsSync(path.join(seedOut, 'corestore')),
+    };
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
@@ -745,6 +762,21 @@ test('fresh release seed refuses before the snapshot unless quiescence is attest
     assert.equal(quiesced.result.status, 0, quiesced.result.stderr || quiesced.result.stdout);
     assert.equal(quiesced.npxCalled, true, 'an attested quiesce must permit the fresh cut');
   }
+});
+
+test('an isolated cut root hydrates its seed from the snapshot store and needs no quiesce (WI-10003231)', () => {
+  const hydrated = runCutSeedQuiesceProbe({ unitState: 'enabled', snapshot: { corestore: true, manifest: true } });
+  assert.equal(hydrated.result.status, 0, hydrated.result.stderr || hydrated.result.stdout);
+  assert.equal(hydrated.hydrated, true, 'the snapshot must land in src-tauri/seed');
+  assert.match(hydrated.result.stdout, /hydrating .* from snapshot store/);
+  assert.match(hydrated.npxArgs, /--reuse-corestore/, 'a hydrated seed must take the reuse path, not a fresh cut');
+
+  // A store without a manifest is not a usable snapshot: behave exactly as before.
+  const partial = runCutSeedQuiesceProbe({ unitState: 'enabled', snapshot: { corestore: true, manifest: false } });
+  assert.notEqual(partial.result.status, 0, 'an incomplete store must not bypass the quiesce guard');
+  assert.equal(partial.hydrated, false);
+  assert.equal(partial.npxCalled, false);
+  assert.match(partial.result.stdout + '\n' + partial.result.stderr, /requires a quiesced operator/i);
 });
 
 test('only a genuine sparse refusal triggers the full-cut retry', () => {
