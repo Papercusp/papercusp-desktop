@@ -389,8 +389,13 @@ WS_B_JOINED="$(fed_capture_nonempty_with_retry \
     AND lower(m.github_username) = lower('$P_B_USER')
   ORDER BY m.workspace_id
   LIMIT 1;")" || true
+# WI-10003237: how long the membership projection took, measured from the join stamp.
+# The FATAL is intermittent, so the PASS runs carry the latency distribution — a PASS
+# landing near the 40x3s bound is evidence for the projection-latency reading.
+MEMB_WAITED_S="$(( ($(date +%s) * 1000 - JOIN_MS) / 1000 ))"
+MEMB_BOUND_S="$(awk -v n="${MEMBERSHIP_RETRIES:-40}" -v d="${MEMBERSHIP_RETRY_DELAY_SEC:-3}" 'BEGIN{printf "%d", n*d}')"
 if [ -z "$WS_B_JOINED" ]; then
-  echo "FATAL: joined Pot '$HIVE_SLUG' has no persisted membership for B account '$P_B_USER' after ${MEMBERSHIP_RETRIES:-40} attempts"
+  echo "FATAL: joined Pot '$HIVE_SLUG' has no persisted membership for B account '$P_B_USER' after ${MEMBERSHIP_RETRIES:-40} attempts (waited_s=$MEMB_WAITED_S bound_s=$MEMB_BOUND_S)"
   # WI-10003237 distinguishing probe — B is still up here, so record which reading
   # holds before the EXIT trap tears it down: a B membership row under ANOTHER
   # workspace/slug (the JOIN above drifted), a membership row whose Pot row is missing
@@ -410,7 +415,7 @@ if [ -z "$WS_B_JOINED" ]; then
   cat "$WORK/membership-fatal.diag" 2>/dev/null || true
   exit 6
 fi
-echo "  membership-persistence=PASS workspace='$WS_B_JOINED' (bounded asynchronous projection wait)"
+echo "  membership-persistence=PASS workspace='$WS_B_JOINED' waited_s=$MEMB_WAITED_S bound_s=$MEMB_BOUND_S (bounded asynchronous projection wait)"
 if [ -n "$WS_B_JOINED" ] && [ "$WS_B_JOINED" != "$WS_B" ]; then
   echo "  WS_B re-derived post-join: '$WS_B' → '$WS_B_JOINED' (Pot '$HIVE_SLUG' + B member '$P_B_USER' persisted there)"
   WS_B="$WS_B_JOINED"
