@@ -2200,6 +2200,28 @@ cut_release_seed() {
   # in) is still available — force it with PAPERCUSP_SEED_REUSE_CORESTORE=0 on
   # a quiesced box.
   local seed_reuse="${PAPERCUSP_SEED_REUSE_CORESTORE:-auto}"
+  # WI-10003231: src-tauri/seed is gitignored and setup-release-checkout.sh
+  # re-extracts this submodule from git on every fire, so an isolated cut root
+  # (the managed nightly, a relcut) NEVER holds a snapshot to auto-reuse. It then
+  # fell to the fresh-from-live-store branch below, which demands a quiesced
+  # operator a managed cut never has. Hydrate from the persistent snapshot store
+  # first. Copy rather than hardlink: the reuse cut writes into $seed_out. An
+  # empty PAPERCUSP_SEED_SNAPSHOT_DIR disables hydration.
+  local seed_snapshot="${PAPERCUSP_SEED_SNAPSHOT_DIR-$HOME/.papercusp/release-seeds/current}"
+  if [[ "$seed_reuse" == "auto" && -n "$seed_snapshot" && ! -d "$seed_out/corestore" \
+        && -d "$seed_snapshot/corestore" && -f "$seed_snapshot/manifest.json" ]]; then
+    echo "==> seed: hydrating $seed_out from snapshot store $seed_snapshot (WI-10003231)"
+    local seed_tmp="$seed_out.hydrate.$$"
+    rm -rf "$seed_tmp"
+    mkdir -p "$(dirname "$seed_out")"
+    if ! cp -a --reflink=auto "$seed_snapshot/." "$seed_tmp/"; then
+      rm -rf "$seed_tmp"
+      echo "ERROR: could not hydrate the release seed from $seed_snapshot" >&2
+      return 1
+    fi
+    rm -rf "$seed_out"
+    mv "$seed_tmp" "$seed_out"
+  fi
   if [[ "$seed_reuse" == "auto" ]]; then
     if [[ -d "$seed_out/corestore" && -f "$seed_out/manifest.json" ]]; then
       seed_reuse=1
