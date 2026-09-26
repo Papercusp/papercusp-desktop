@@ -905,6 +905,19 @@ test('sidecar source union declares every bare runtime import in operator-core',
     ]),
   );
   const builtins = new Set(builtinModules.map((name) => name.replace(/^node:/, '')));
+  // Source-tree-only entries that no bundled runtime ever loads, so their imports never
+  // reach the sidecar. snapshot-fold.worker.dev.mjs loads the .ts worker through tsx for
+  // tsx/vitest runtimes; the sidecar loads the esbuilt snapshot-fold.worker.mjs instead
+  // (snapshot-fold-offload.ts picks the bundled worker whenever it exists).
+  const sourceTreeOnly = new Set([
+    'packages/operator-core/lib/sync/hyperbee/snapshot-fold.worker.dev.mjs',
+  ]);
+  for (const relative of sourceTreeOnly) {
+    assert.ok(
+      fs.existsSync(path.join(repoRoot, relative)),
+      `stale sourceTreeOnly entry (file is gone): ${relative}`,
+    );
+  }
   const missing = new Map();
   const packageName = (specifier) =>
     specifier.startsWith('@')
@@ -930,6 +943,7 @@ test('sidecar source union declares every bare runtime import in operator-core',
         continue;
       }
       if (!/\.[cm]?[jt]sx?$/.test(entry.name) || /\.(test|spec)\.[^.]+$/.test(entry.name)) continue;
+      if (sourceTreeOnly.has(path.relative(repoRoot, file))) continue;
       const source = ts.createSourceFile(
         file,
         fs.readFileSync(file, 'utf8'),

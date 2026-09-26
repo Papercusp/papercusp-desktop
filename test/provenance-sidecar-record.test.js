@@ -1052,7 +1052,7 @@ test('the future Darwin sidecar build receives release identity and source prove
 
   const block = releaseLocal.slice(start, end);
   const invocation = block.match(
-    /env\s+\\\s*TARGET_OS=darwin[\s\S]*?bash "\$ROOT\/bin\/build-desktop-sidecar\.sh"/,
+    /env\s+\\\s*TARGET_OS=darwin[\s\S]*?bash "\$ORCHESTRATOR_HERE\/build-desktop-sidecar\.sh"/,
   );
   assert.ok(
     invocation,

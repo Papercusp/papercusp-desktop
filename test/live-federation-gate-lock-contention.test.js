@@ -108,7 +108,7 @@ test('the classifier pattern is pinned to sidecar-lock-yield.sh\'s ONLY emitter 
   // If this drifts (the FATAL wording or the holder-line format changes),
   // build_lock_contention_check must be updated in lockstep or it silently
   // stops matching and every future contention window falls back to RED.
-  assert.match(sidecarLockHelper, /echo "FATAL: timed out after \$\{SIDECAR_LOCK_WAIT\}s waiting for the sidecar lock/);
+  assert.match(sidecarLockHelper, /echo "FATAL: timed out after \$\{wait_sec\}s waiting for the sidecar lock \(\$lock_path\)/);
   assert.match(sidecarLockHelper, /printf '       pid %s \(running %ss\): %s\\n'/);
 });
 
