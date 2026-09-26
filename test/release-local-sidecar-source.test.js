@@ -47,13 +47,18 @@ test('Linux AppImage exact-source salvage runs current producer logic against th
   assert.match(release, /bash "\$APPIMAGE_PRODUCER"/);
 });
 
-test('release sidecar skips unused dependency generation before invoking the frozen target producer', () => {
+test('release sidecar skips unused dependency generation before invoking the current producer', () => {
   const skip =
     'export PAPERCUSP_SKIP_DEP_GENERATION="${PAPERCUSP_SKIP_DEP_GENERATION:-1}"';
   const skipAt = calls.linux.indexOf(skip);
-  const sidecarAt = calls.linux.indexOf('bash "$ROOT/bin/build-desktop-sidecar.sh"');
+  const sidecarAt = calls.linux.indexOf('bash "$ORCHESTRATOR_HERE/build-desktop-sidecar.sh"');
   assert.ok(skipAt >= 0, 'release-local must declare the D-186 dependency-generation skip');
-  assert.ok(sidecarAt > skipAt, 'the skip must reach the target sidecar before it starts');
+  assert.ok(sidecarAt > skipAt, 'the skip must reach the current sidecar builder before it starts');
+  assert.match(calls.linux, /PAPERCUSP_DESKTOP_TARGET_ROOT="\$ROOT" \\\n/);
+  assert.match(calls.mac, /"PAPERCUSP_DESKTOP_TARGET_ROOT=\$ROOT" \\\n/);
+  assert.match(calls.mac, /bash "\$ORCHESTRATOR_HERE\/build-desktop-sidecar\.sh"/);
+  assert.doesNotMatch(release, /bash "\$ROOT\/bin\/build-desktop-sidecar\.sh"/);
+  assert.match(sidecar, /ROOT="\$\(cd "\$\{PAPERCUSP_DESKTOP_TARGET_ROOT:-\$HERE\/\.\.\}" && pwd\)"/);
 });
 
 test('release reserves sidecar disk before long preflights and does not double-count it in the child', () => {
@@ -65,7 +70,7 @@ test('release reserves sidecar disk before long preflights and does not double-c
     'sidecar disk reservation must precede migration lint and boot-smoke',
   );
 
-  const childAt = calls.linux.indexOf('bash "$ROOT/bin/build-desktop-sidecar.sh"');
+  const childAt = calls.linux.indexOf('bash "$ORCHESTRATOR_HERE/build-desktop-sidecar.sh"');
   const releaseAt = calls.linux.indexOf('papercusp_release_disk_reservation');
   assert.match(calls.linux, /PAPERCUSP_SIDECAR_MIN_FREE_GB=0 \\\nPROVENANCE_SOURCE_GIT_HEAD=/);
   assert.ok(childAt >= 0 && releaseAt > childAt, 'parent reservation must outlive the child build');
@@ -315,7 +320,10 @@ for (const platform of Object.keys(calls)) {
           git(workspace, 'commit', '-qam', 'source moved');
         }
         fs.mkdirSync(path.join(desktop, 'bin'));
-        fs.writeFileSync(path.join(desktop, 'bin', 'build-desktop-sidecar.sh'), [
+        const orchestratorBin = path.join(temp, 'orchestrator', 'bin');
+        fs.mkdirSync(orchestratorBin, { recursive: true });
+        fs.writeFileSync(path.join(desktop, 'bin', 'build-desktop-sidecar.sh'), 'exit 97 # frozen builder must not run\n');
+        fs.writeFileSync(path.join(orchestratorBin, 'build-desktop-sidecar.sh'), [
           '#!/usr/bin/env bash',
           'set -euo pipefail',
           headGuard,
@@ -337,6 +345,7 @@ for (const platform of Object.keys(calls)) {
             // real script it inherits the global export from calls.linux above.
             ...(platform === 'mac' ? { PAPERCUSP_SKIP_DEP_GENERATION: '1' } : {}),
             ROOT: desktop,
+            ORCHESTRATOR_HERE: orchestratorBin,
             REPO_ROOT: workspace,
             EXPECTED_SOURCE_SHA: expected,
             PROVENANCE_SOURCE_GIT_HEAD: desktopHead,
