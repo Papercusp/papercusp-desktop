@@ -50,7 +50,9 @@ SRC_HEX="$(printf 'papercusp-selftest-source' | sha256sum | cut -d' ' -f1)"
 printf 'identity=v1-%s\nsource=%s\n' "$SRC_HEX" "$SRC_HEX" \
   > "$W/node_modules/.papercusp-dependency-generation"
 printf '{"lockfileVersion":3}\n' > "$W/package-lock.json"
-printf '{"lockfileVersion":3,"installed":true}\n' > "$W/node_modules/.package-lock.json"
+# Deliberately NO node_modules/.package-lock.json: a release tree materialized
+# from a dependency generation never has one (dependency-generation.sh prunes
+# it), so the CONTROL below proves the builder accepts that real shape.
 printf 'bundle: workspace-host\n' > "$W/content-bundles/workspace-host/bundle.yaml"
 printf '{"contract":"v1"}\n' > "$D/src-tauri/distribution-contract.json"
 printf '{"productName":"papercusp"}\n' > "$D/src-tauri/tauri.conf.json"
@@ -154,9 +156,23 @@ fi
 
 # 8) the schema version must be the one the journal's receipts were minted under.
 SCHEMA="$(field "$LINUX" 'i.schemaVersion')"
-[[ "$SCHEMA" == "4" ]] \
-  && good "schemaVersion is 4" \
-  || bad "schemaVersion is '$SCHEMA', expected 4 — bump it deliberately when the shape changes"
+[[ "$SCHEMA" == "5" ]] \
+  && good "schemaVersion is 5" \
+  || bad "schemaVersion is '$SCHEMA', expected 5 — bump it deliberately when the shape changes"
+
+# 8b) npm's install bookkeeping must never key reuse. It is pruned at the
+#     generation boundary, so requiring it failed every journalled managed cut,
+#     and hashing it would split identical installs on npm's own rewrites.
+printf '{"lockfileVersion":3,"installed":true}\n' > "$W/node_modules/.package-lock.json"
+BOOKKEPT="$(identity linux-x86_64)"
+rm -f -- "$W/node_modules/.package-lock.json"
+if [[ -z "$BOOKKEPT" ]]; then
+  bad "CONTROL: the identity failed to build with node_modules/.package-lock.json present — check 8b measured nothing"
+elif [[ "$BOOKKEPT" != "$LINUX" ]]; then
+  bad "node_modules/.package-lock.json changed the identity — npm bookkeeping is keying reuse"
+else
+  good "node_modules/.package-lock.json is neither required nor hashed"
+fi
 
 # ── P-003 clause 4 (D-008): compression policy is part of the reuse key ───────
 # R-3 requires package/compression outputs to be keyed by content AND policy.

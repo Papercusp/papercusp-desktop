@@ -132,16 +132,18 @@ function buildContentIdentity({ workspace, desktop, platform, env = process.env 
     // busts every prior receipt via the identityBuilder self-fingerprint, so the
     // bump buys legibility rather than invalidation: it makes the one-time miss
     // read as a deliberate policy widening instead of an unexplained cache miss.
-    schemaVersion: 4,
+    // v5 drops `installedLock` (node_modules/.package-lock.json). That file is
+    // npm's install bookkeeping, and dependency_generation_prune_ephemeral
+    // deletes it at the generation boundary, so a release tree materialized from
+    // a generation never has one: requiring it failed every journalled managed
+    // cut at leg start (nightly 2026-09-24). The installed tree is already bound,
+    // completely, by `generation` — its identity is the source manifest hash.
+    schemaVersion: 5,
     platform,
     dependencies: {
       generation: dependency.identity,
       source: dependency.source,
       packageLock: fileSha(path.join(workspace, 'package-lock.json'), 'workspace package lock'),
-      installedLock: fileSha(
-        path.join(workspace, 'node_modules', '.package-lock.json'),
-        'installed dependency lock',
-      ),
       cargoLock: fileSha(path.join(desktop, 'src-tauri', 'Cargo.lock'), 'Cargo lock'),
     },
     toolchain: {
