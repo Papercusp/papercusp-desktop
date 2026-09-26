@@ -21,6 +21,13 @@ scn_concurrent_lww() {
   if [ "$rc" = 0 ]; then
     echo "concurrent writes OK (no loss on different keys; deterministic byte-identical LWW winner on the same key)"
   else
+    # WI-10003114: the scenario's failure-time diagnostics (PHASE2 final rows + the
+    # PHASE2-DIAG PG capture of row/outbox/refusal counters + rosters) are the ONLY evidence
+    # that names which column keeps re-stamping a contested row. The ✓/✗ projection below
+    # dropped them, so every banked FAIL lost them. Emit them FIRST so the matrix's
+    # "last N lines" excerpt still ends on the key lines.
+    echo "concurrent writes / LWW FAIL — failure-time diagnostics:"
+    printf '%s\n' "$out" | awk '/PHASE2 final:|PHASE2-DIAG/{p=1} p' | sed 's/^/      /'
     echo "concurrent writes / LWW FAIL — key lines:"
     printf '%s\n' "$out" | grep -E '✗|OVERALL:|PHASE2 timing:' | sed 's/^/      /'
     echo "      ── full assert transcript (all ✓/✗) ──"

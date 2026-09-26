@@ -39,6 +39,7 @@ TESTS=(
   b9-attestation-precondition.selftest.sh
   b3-revocation-kcut.selftest.sh
   b5-restart.selftest.sh
+  b6-concurrent.selftest.sh
   matrix-scenario-adapters.selftest.sh
   matrix-verdict-states.selftest.sh
   matrix-pass-transcript.selftest.sh
