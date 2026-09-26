@@ -111,7 +111,23 @@ log() { printf '\n=== %s ===\n' "$*"; }
 # etc. appended to FED_KILL_PIDS. A CLEAN full-completion exit (status 0, whatever
 # the content-matrix poll results say) is UNCHANGED: still left running for lanes
 # E/G, per the header note — only the early-abort paths get cleaned.
-trap 'ec=$?; [ "$ec" -ne 0 ] && { log "cleanup on early exit (scoped to $WORK, status=$ec)"; fed_cleanup_scoped "$WORK"; }; exit $ec' EXIT
+# WI-10003237 (same class as WI-40008 in the from-repo smoke): fed_cleanup_scoped ends
+# in `rm -rf "$WORK"`, so an early exit deleted inst-a.log/inst-b.log BEFORE the gate's
+# post-leg bank_pair_logs could copy them — the 2026-09-26 membership-persistence
+# FATAL (cert 20260926-053945) left no serve log at all and was undiagnosable. Bank at
+# the one exit path every early-abort branch shares, BEFORE the cleanup wipes $WORK.
+# The gate wires PAPERCUSP_SMOKE_LOG_BANK_DIR per run; unset = no-op (manual runs).
+bank_instance_logs() {
+  local dst="${PAPERCUSP_SMOKE_LOG_BANK_DIR:-}" f n=0
+  [ -n "$dst" ] || return 0
+  mkdir -p "$dst" 2>/dev/null || return 0
+  for f in "${FED_LOG[a]}" "${FED_LOG[b]}" "$WORK"/*.diag; do
+    [ -f "$f" ] || continue
+    cp -p "$f" "$dst/" 2>/dev/null && n=$((n + 1))
+  done
+  log "banked $n content-matrix artifact(s) -> $dst"
+}
+trap 'ec=$?; [ "$ec" -ne 0 ] && { bank_instance_logs; log "cleanup on early exit (scoped to $WORK, status=$ec)"; fed_cleanup_scoped "$WORK"; }; exit $ec' EXIT
 jget() { printf '%s' "$1" | python3 -c "
 import json,sys
 try: d=json.load(sys.stdin)
@@ -375,6 +391,23 @@ WS_B_JOINED="$(fed_capture_nonempty_with_retry \
   LIMIT 1;")" || true
 if [ -z "$WS_B_JOINED" ]; then
   echo "FATAL: joined Pot '$HIVE_SLUG' has no persisted membership for B account '$P_B_USER' after ${MEMBERSHIP_RETRIES:-40} attempts"
+  # WI-10003237 distinguishing probe — B is still up here, so record which reading
+  # holds before the EXIT trap tears it down: a B membership row under ANOTHER
+  # workspace/slug (the JOIN above drifted), a membership row whose Pot row is missing
+  # (pots projection lagged/dropped), or no row at all (persistence dropped). Printed
+  # to stdout (content-matrix.out survives) AND banked via bank_instance_logs.
+  {
+    echo "--- membership-fatal diag (B, $(date -u +%FT%TZ))"
+    echo "B pot_members for account '$P_B_USER' (any pot/workspace):"
+    q b "SELECT workspace_id||' | '||pot_home_slug||' | '||origin||' | '||binding_status||' | '||joined_at FROM harness_shared.pot_members WHERE lower(github_username)=lower('$P_B_USER') ORDER BY joined_at DESC LIMIT 20;" || echo "  (query failed)"
+    echo "B pot_members for pot '$HIVE_SLUG' (any account):"
+    q b "SELECT workspace_id||' | '||github_username||' | '||origin FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' LIMIT 20;" || echo "  (query failed)"
+    echo "B pots rows for '$HIVE_SLUG' (either slug column):"
+    q b "SELECT workspace_id||' | '||pot_home_slug||' | '||canonical_pot_home_slug FROM harness_shared.pots WHERE pot_home_slug='$HIVE_SLUG' OR canonical_pot_home_slug='$HIVE_SLUG' LIMIT 20;" || echo "  (query failed)"
+    echo "B row counts: pot_members=$(q b "SELECT count(*) FROM harness_shared.pot_members;" || echo '?') pots=$(q b "SELECT count(*) FROM harness_shared.pots;" || echo '?')"
+    echo "join-pot response (first 400 chars): $(printf '%s' "$jr" | head -c 400)"
+  } > "$WORK/membership-fatal.diag" 2>&1 || true
+  cat "$WORK/membership-fatal.diag" 2>/dev/null || true
   exit 6
 fi
 echo "  membership-persistence=PASS workspace='$WS_B_JOINED' (bounded asynchronous projection wait)"

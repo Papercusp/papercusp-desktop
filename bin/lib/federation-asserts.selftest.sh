@@ -551,6 +551,7 @@ fi
 # Subject paths are env-overridable so falsifiability can be proven by the COPY-OUT mutation-probe
 # tier (scripts/mutation-probe.sh) without ever mutating this shared tree.
 FROMREPO_SMOKE_FILE="${PROBE_FROMREPO_SMOKE:-$DIR/../two-instance-hive-from-repo-smoke.sh}"
+MATRIX_SMOKE_FILE="${PROBE_MATRIX_SMOKE:-$DIR/../two-instance-content-matrix-smoke.sh}"
 GATE_FILE="${PROBE_GATE_FILE:-$DIR/../live-federation-gate.sh}"
 
 # (i) Every subset verdict block that can print "<NAME> OVERALL: INCOMPLETE" must record that
@@ -597,6 +598,18 @@ if grep -q 'bank_instance_logs' "$FROMREPO_SMOKE_FILE" \
   ok "from-repo smoke banks instance logs on the shared EXIT path, including pre-verdict failures (WI-40008)"
 else
   bad "from-repo smoke/gate no longer wires PAPERCUSP_SMOKE_LOG_BANK_DIR through the EXIT cleanup — early boot/create failures will delete their only frame logs (WI-40008)"
+fi
+
+# WI-10003237: the SAME class in the content-matrix smoke. Its EXIT trap's
+# fed_cleanup_scoped rm -rf's the pair dir, so the banking must run INSIDE the trap and
+# BEFORE the cleanup (order checked on the trap line itself), and the gate must hand the
+# content-matrix leg its own destination — the from-repo wiring above does not cover it.
+if grep -qE "^trap '.*bank_instance_logs.*fed_cleanup_scoped" "$MATRIX_SMOKE_FILE" \
+  && grep -q 'PAPERCUSP_SMOKE_LOG_BANK_DIR="$WORK/pair-logs-content-matrix"' "$GATE_FILE" \
+  && grep -q 'membership-fatal.diag' "$MATRIX_SMOKE_FILE"; then
+  ok "content-matrix smoke banks serve logs + the membership-fatal diag on its EXIT path before cleanup, and the gate wires its bank dir (WI-10003237)"
+else
+  bad "content-matrix smoke/gate no longer banks serve logs before fed_cleanup_scoped (or lost the membership-fatal diag) — an early content-matrix FATAL deletes its only evidence again (WI-10003237)"
 fi
 
 # 8) Route-cutover guard (WI-2929): the live federation driver runs against the

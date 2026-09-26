@@ -2566,8 +2566,13 @@ if [ "$SKIP_MATRIX" != 1 ]; then
   # advancing and left under three minutes for this leg. Preparation stays ordinarily
   # preemptible (and exactly retryable); only the first real federation decision is atomic.
   gate_preempt_protect_until_first_verdict
+  # WI-10003237: PAPERCUSP_SMOKE_LOG_BANK_DIR makes the smoke bank its serve logs (+ any
+  # *.diag probe) on its own early-exit path, BEFORE fed_cleanup_scoped rm -rf's the pair
+  # dir — bank_pair_logs below only ever sees a pair that exited cleanly. Same dir, so a
+  # clean run's later bank_pair_logs copy simply refreshes the files.
   MATRIX_RES="$(run_smoke content-matrix two-instance-content-matrix-smoke.sh "${GATE_DEB:-}" \
-    PAPERCUSP_SMOKE_DISPLAY="$GATE_DISPLAY" DISCOVERY_RETRIES=100)"
+    PAPERCUSP_SMOKE_DISPLAY="$GATE_DISPLAY" DISCOVERY_RETRIES=100 \
+    PAPERCUSP_SMOKE_LOG_BANK_DIR="$WORK/pair-logs-content-matrix")"
   # EI-18721667437666267 — bank the pair's federation logs into this run's artifact dir
   # BEFORE the next run overwrites them. Must stay here, immediately after the leg: the
   # carve-out below can rewrite MATRIX_RES, and banking must not depend on the verdict.
