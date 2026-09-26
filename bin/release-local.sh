@@ -2416,7 +2416,8 @@ export PAPERCUSP_SKIP_DEP_GENERATION="${PAPERCUSP_SKIP_DEP_GENERATION:-1}"
 PAPERCUSP_SIDECAR_BUILD_LOCK_WAIT_SEC="${PAPERCUSP_SIDECAR_BUILD_LOCK_WAIT_SEC:-3600}" \
 PAPERCUSP_SIDECAR_MIN_FREE_GB=0 \
 PROVENANCE_SOURCE_GIT_HEAD="$EXPECTED_SOURCE_SHA" \
-"${PC_NICE[@]}" bash "$ROOT/bin/build-desktop-sidecar.sh"
+PAPERCUSP_DESKTOP_TARGET_ROOT="$ROOT" \
+"${PC_NICE[@]}" bash "$ORCHESTRATOR_HERE/build-desktop-sidecar.sh"
 papercusp_release_disk_reservation
 # P-004: the exact sha of the serve.mjs we just built — exported so every leg's
 # packer asserts it packs THIS byte-identical sidecar (fail-closed on a
@@ -3041,7 +3042,8 @@ elif [[ "$WITH_MAC" == "1" ]]; then
       "PAPERCUSP_BUILD_VERSION=$VERSION" \
       "PROVENANCE_SOURCE_GIT_HEAD=$EXPECTED_SOURCE_SHA" \
       "PROVENANCE_SOURCE_GIT_DIRTY=$PROVENANCE_SOURCE_GIT_DIRTY" \
-      bash "$ROOT/bin/build-desktop-sidecar.sh"
+      "PAPERCUSP_DESKTOP_TARGET_ROOT=$ROOT" \
+      bash "$ORCHESTRATOR_HERE/build-desktop-sidecar.sh"
     mac_expected_serve_sha="$(sha256sum "$MAC_SIDECAR_DIR/serve.mjs" 2>/dev/null | cut -d' ' -f1)"
     if [[ -z "$mac_expected_serve_sha" ]]; then
       echo "ERROR: Darwin sidecar build did not produce $MAC_SIDECAR_DIR/serve.mjs — cannot proceed" >&2
