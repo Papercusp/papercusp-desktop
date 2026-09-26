@@ -202,7 +202,7 @@ function buildContentIdentity({ workspace, desktop, platform, env = process.env 
   };
 }
 
-module.exports = { buildContentIdentity, KNOWN_PLATFORMS };
+module.exports = { buildContentIdentity, dependencyMarkerFields, KNOWN_PLATFORMS };
 
 if (require.main === module) {
   const [workspace, desktop, platform] = process.argv.slice(2);
