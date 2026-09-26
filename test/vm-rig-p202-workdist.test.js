@@ -49,6 +49,12 @@ function bundleBindingViolations(body) {
   ) {
     violations.push("selects psql from an independent app glob");
   }
+  if (
+    body.includes("sidecar/bin/node") &&
+    !body.includes('case "$CMD" in "$n "*) B="${n%/node}/psql"; break ;; esac')
+  ) {
+    violations.push("derives psql from a node that is not the listener's node");
+  }
   return violations;
 }
 
@@ -102,6 +108,18 @@ test("the bundle-binding detector rejects the old first-glob-wins implementation
     done
   `;
   assert.ok(bundleBindingViolations(oldShape).length >= 3);
+});
+
+test("the bundle-binding detector rejects psql taken from a node the listener is not running", () => {
+  const body = functionSlice("discover_vm", "\ndrv_psql_rig() {");
+  const bound = 'case "$CMD" in "$n "*) B="${n%/node}/psql"; break ;; esac';
+  assert.ok(body.includes(bound));
+  const unbound = body.replace(bound, '[ -x "$n" ] && B="${n%/node}/psql" && break');
+  assert.ok(
+    bundleBindingViolations(unbound).includes(
+      "derives psql from a node that is not the listener's node",
+    ),
+  );
 });
 
 test("the gate-restore detector rejects a one-shot best-effort clear", () => {

@@ -127,13 +127,21 @@ discover_vm() {
     [ -n "$L" ] || exit 1
     [ "$(printf '%s\n' "$L" | wc -l | tr -d ' ')" = 1 ] || exit 1
     CMD=$(ps -o command= -p "$L" 2>/dev/null | sed 's/^[[:space:]]*//')
+    # Between candidates the rig serves the P-007 rig-sidecar bundle
+    # (~/rig-sidecar-current/serve.mjs) under the packaged app's node, so accept
+    # that bundle too — still bound to the argv of the process owning the port.
     S=""
-    for c in /Applications/Papercusp*.app/Contents/Resources/sidecar/serve.mjs; do
+    for c in /Applications/Papercusp*.app/Contents/Resources/sidecar/serve.mjs "$HOME/rig-sidecar-current/serve.mjs"; do
       [ -f "$c" ] || continue
       case "$CMD" in *"$c"*) S="$c"; break ;; esac
     done
     [ -n "$S" ] || exit 1
-    B="${S%/serve.mjs}/bin/psql"
+    # psql ships beside the node that is actually running, in the same app.
+    B=""
+    for n in /Applications/Papercusp*.app/Contents/Resources/sidecar/bin/node; do
+      case "$CMD" in "$n "*) B="${n%/node}/psql"; break ;; esac
+    done
+    [ -n "$B" ] || B="${S%/serve.mjs}/bin/psql"
     [ -x "$B" ] || exit 1
     printf "%s\t%s\t%s\t%s" "$P" "$B" "$S" "$(hostname)"
 EOS
