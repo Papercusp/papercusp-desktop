@@ -150,7 +150,7 @@ papercusp_export_rust_lld linux
 TAURI_CLI_VERSION="${PAPERCUSP_TAURI_CLI_VERSION:-${TAURI_CLI_VERSION:-2.11.0}}"
 echo "==> tauri build --bundles appimage (the linuxdeploy sidecar-scan crash is EXPECTED and ignored)"
 PAPERCUSP_BUILD_SHA="${PAPERCUSP_BUILD_SHA:-}" PAPERCUSP_BUILD_VERSION="${PAPERCUSP_BUILD_VERSION:-$VERSION}" \
-  "${DESKTOP_CHANNEL_BUILD_ENV[@]}" \
+  env "${DESKTOP_CHANNEL_BUILD_ENV[@]}" \
   npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles appimage \
   "${DESKTOP_CHANNEL_BUILD_CFG[@]}" \
   || echo "   (tauri appimage step exited non-zero as expected — finishing with appimagetool)"

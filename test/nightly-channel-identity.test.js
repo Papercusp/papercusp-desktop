@@ -378,3 +378,83 @@ test('(C) the chokepoint emits both halves, and they agree with release.config.t
     assert.deepEqual(r.env, [], `${lane} must not bake channel stamps`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// (D) The stamps must reach the build as ENVIRONMENT, which means `env` in front.
+//
+// Bash recognises `K=V` as an assignment only LEXICALLY, before expansion. A
+// `"${DESKTOP_CHANNEL_BUILD_ENV[@]}"` placed after the prefix assignments of a
+// command therefore expands to the WORD `PAPERCUSP_CHANNEL=nightly`, which bash
+// then runs as the command name: rc=127. The update lanes have empty arrays, so
+// every alpha/beta/stable cut ran the bare form cleanly and hid it; the first
+// nightly cut to reach its linux leg (0.0.22-20260926.1358, WI-10002524) died
+// there at +0s after ~40 min of build. (B) could not see it: it asks whether
+// the stamps are on the same command, not whether they are APPLIED.
+// ---------------------------------------------------------------------------
+
+const ENV_EXPANSION = new RegExp(`"?\\$\\{${ENV_ARRAY}\\[@\\]\\}"?`, 'g');
+
+/** Expansions of the stamp array that are not the arguments of `env`. */
+function scanForStampsNotViaEnv(files) {
+  const bad = [];
+  for (const { name, text } of files) {
+    for (const l of logicalLines(text)) {
+      for (const m of l.text.matchAll(ENV_EXPANSION)) {
+        if (/(?:^|[\s;&|(])env\s+$/.test(l.text.slice(0, m.index))) continue;
+        bad.push({ name, line: l.line, text: l.text });
+      }
+    }
+  }
+  return bad;
+}
+
+test('(D) every build site applies the channel stamps through `env`', () => {
+  // The PREMISE first, by running bash: without it the scan below is a style rule.
+  const { spawnSync } = require('node:child_process');
+  const probe = (prefix) =>
+    spawnSync(
+      'bash',
+      [
+        '-c',
+        `. "${path.join(root, 'bin', 'lib', 'gen-latest-manifest.sh')}"
+         desktop_channel_identity "${CHANNEL}" || exit 99
+         (cd / && PROBE=1 ${prefix}"\${${ENV_ARRAY}[@]}" printenv PAPERCUSP_CHANNEL)`,
+      ],
+      { encoding: 'utf8' },
+    );
+  const bare = probe('');
+  assert.equal(bare.status, 127, `the bare form should be command-not-found; got ${bare.status} ${bare.stderr}`);
+  const viaEnv = probe('env ');
+  assert.equal(viaEnv.status, 0, viaEnv.stderr);
+  assert.equal(viaEnv.stdout.trim(), declaredIdentitySuffix());
+
+  // Permanent controls: the scan must catch the shape that shipped broken.
+  const bareSite = `(cd "$ROOT" && RUSTFLAGS="$X" "\${${ENV_ARRAY}[@]}" npx tauri build "\${${CFG_ARRAY}[@]}")`;
+  const envSite = `(cd "$ROOT" && RUSTFLAGS="$X" env "\${${ENV_ARRAY}[@]}" npx tauri build "\${${CFG_ARRAY}[@]}")`;
+  const continuedBare = `A=1 \\\n  "\${${ENV_ARRAY}[@]}" \\\n  npx tauri build`;
+  assert.equal(scanForStampsNotViaEnv([{ name: 'ctl', text: bareSite }]).length, 1);
+  assert.equal(scanForStampsNotViaEnv([{ name: 'ctl', text: continuedBare }]).length, 1);
+  assert.deepEqual(scanForStampsNotViaEnv([{ name: 'ctl', text: envSite }]), []);
+  // Printing or recording the array ([*]) applies nothing, so it is not a site.
+  assert.deepEqual(scanForStampsNotViaEnv([{ name: 'ctl', text: `echo "\${${ENV_ARRAY}[*]}"` }]), []);
+  // `environment` is not `env`.
+  assert.equal(scanForStampsNotViaEnv([{ name: 'ctl', text: `environment "\${${ENV_ARRAY}[@]}" x` }]).length, 1);
+
+  const files = buildScripts();
+  const sites = files.flatMap(({ name, text }) =>
+    logicalLines(text)
+      .filter((l) => new RegExp(ENV_EXPANSION.source).test(l.text))
+      .map((l) => `${name}:${l.line}`),
+  );
+  assert(
+    sites.length >= 3,
+    `expected the linux deb, appimage and arm64 build sites to expand ${ENV_ARRAY}; found ${sites.length}`,
+  );
+  const bad = scanForStampsNotViaEnv(files);
+  assert.deepEqual(
+    bad,
+    [],
+    `these expand ${ENV_ARRAY} where bash runs its first entry as a COMMAND (rc=127 on nightly); prefix it with env:\n` +
+      bad.map((b) => `  ${b.name}:${b.line}  ${b.text}`).join('\n'),
+  );
+});
