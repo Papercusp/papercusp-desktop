@@ -259,6 +259,13 @@ fi
   # quarantined". drained_at IS NULL = pending; quarantined_at IS NOT NULL = rejected.
   echo "── substrate_outbox pending/quarantined rows, frame b (pot_members/pot_epoch_keys only) ──"
   drv_psql b "SELECT table_name, op, key, ts, drained_at, quarantined_at FROM harness_shared.substrate_outbox WHERE table_name IN ('pot_members','pot_epoch_keys') ORDER BY ts;"
+  # WI-10003237 (cert 20260926-071526): joiner b's join-hive identity write lost a
+  # pots_public_key_key race, so NO pots row existed at the (workspace, canonical slug)
+  # pot_members federates under and every apply failed pot_members_pot_fkey (1280x).
+  # pot_members above then reads EMPTY with no hint why; this dump names the row that
+  # holds the Pot's pubkey (its slug/canonical/workspace is the discriminator).
+  echo "── pots identity rows, frame b (workspace | slug | canonical | keychain | pubkey hex prefix) ──"
+  drv_psql b "SELECT workspace_id, pot_home_slug, canonical_pot_home_slug, keychain_id, left(encode(public_key,'hex'),16) FROM harness_shared.pots ORDER BY created_at;"
   echo "── WS-DIAG (WI-5672) end ──"
 } 2>&1 || fed_log "⚠ WS-DIAG (WI-5672) dump failed — non-fatal, continuing run"
 

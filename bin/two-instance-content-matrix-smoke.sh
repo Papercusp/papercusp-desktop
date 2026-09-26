@@ -409,6 +409,12 @@ if [ -z "$WS_B_JOINED" ]; then
     q b "SELECT workspace_id||' | '||github_username||' | '||origin FROM harness_shared.pot_members WHERE pot_home_slug='$HIVE_SLUG' LIMIT 20;" || echo "  (query failed)"
     echo "B pots rows for '$HIVE_SLUG' (either slug column):"
     q b "SELECT workspace_id||' | '||pot_home_slug||' | '||canonical_pot_home_slug FROM harness_shared.pots WHERE pot_home_slug='$HIVE_SLUG' OR canonical_pot_home_slug='$HIVE_SLUG' LIMIT 20;" || echo "  (query failed)"
+    # WI-10003237 (cert 071526 local-matrix): the joiner's pots write lost a
+    # pots_public_key_key race, so the Pot's single identity row sat under a
+    # DIFFERENT (workspace, slug) — invisible to the by-slug query above. Dump every
+    # row (a fresh frame holds a handful) so the pubkey holder is named.
+    echo "B ALL pots rows (workspace | slug | canonical | keychain | pubkey hex prefix):"
+    q b "SELECT workspace_id||' | '||pot_home_slug||' | '||canonical_pot_home_slug||' | '||keychain_id||' | '||left(encode(public_key,'hex'),16) FROM harness_shared.pots ORDER BY created_at LIMIT 40;" || echo "  (query failed)"
     echo "B row counts: pot_members=$(q b "SELECT count(*) FROM harness_shared.pot_members;" || echo '?') pots=$(q b "SELECT count(*) FROM harness_shared.pots;" || echo '?')"
     echo "join-pot response (first 400 chars): $(printf '%s' "$jr" | head -c 400)"
   } > "$WORK/membership-fatal.diag" 2>&1 || true
