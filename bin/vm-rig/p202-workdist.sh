@@ -372,6 +372,16 @@ if [ "$GATE_PRIOR" != "true" ] && [ "$GATE_PRIOR" != "false" ]; then
   echo "  ⚠ SETUP FAIL: could not read the VM's $GATE_FLAG value (got '$GATE_PRIOR')"; echo "RESULT: NO VERDICT"; exit 2
 fi
 GATE_GLOBAL_BEFORE="$(gate_global_state)"
+# A freshly wiped rig DB (the P-007 fresh-join runs) has NO override rows at all, so
+# the '@global' read returns zero rows. With no legacy rows either, the code default
+# governs, exactly as when '@global' lacks the key — and the restore below leaves an
+# empty '@global' row, which resolves identically. With legacy rows present, arming
+# would be a real cutover, so that case still refuses.
+if [ -z "$GATE_GLOBAL_BEFORE" ] &&
+   [ "$(drv_psql vm "SELECT count(*) FROM harness_shared.operator_flag_overrides;" 2>/dev/null | tr -d '[:space:]')" = 0 ]; then
+  GATE_GLOBAL_BEFORE="false:-"
+  echo "    VM has no flag override rows at all; treating the key as absent from '@global'"
+fi
 case "$GATE_GLOBAL_BEFORE" in
   true:*)  GATE_PRIOR_PRESENT=1 ;;
   false:*) GATE_PRIOR_PRESENT=0 ;;
