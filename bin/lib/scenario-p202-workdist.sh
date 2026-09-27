@@ -184,18 +184,17 @@ scenario_p202_workdist() {
     || return 2
   echo "    fleet '$WD_FLEET' created on tower (this caller is its leader)"
 
-  # SETUP b: the VM donates the CHEAPEST possible seat. haiku/low/count 1 is
-  # deliberate — the honor leg boots a real agent, and this run must not be a
-  # meaningful draw on inference budget.
+  # SETUP b: the VM donates one explicitly modelled seat. The driver validates
+  # WD_MODEL/WD_EFFORT and defaults them to the owner's current agent policy.
   # `hive` is NOT optional here. This workspace hosts TWO shared hives (papercusp and
   # shared-hive-test-hive-2), so resource:delegate refuses with `hive_required` rather
   # than guessing — "without it the seat would be delegated locally but never
   # discoverable pot-wide", i.e. WD-2 would then fail for a reason that is not a
   # federation defect at all. Found by calibrating the MCP detector against a real refusal.
   _wd_mcp vm 'resource:delegate' \
-    "{\"fleetSlug\":\"$WD_FLEET\",\"kind\":\"agent_slot\",\"model\":\"haiku\",\"effort\":\"low\",\"count\":1,\"hive\":\"$WD_HIVE\"}" \
+    "{\"fleetSlug\":\"$WD_FLEET\",\"kind\":\"agent_slot\",\"model\":\"$WD_MODEL\",\"effort\":\"$WD_EFFORT\",\"count\":1,\"hive\":\"$WD_HIVE\"}" \
     || return 2
-  echo "    VM delegated 1 haiku/low agent_slot to '$WD_FLEET'"
+  echo "    VM delegated 1 $WD_MODEL/$WD_EFFORT agent_slot to '$WD_FLEET'"
 
   # FINDING: the delegation must have PUBLISHED a local seat-offer on the VM.
   # (WI-5447 is the sibling bug in the other direction — a revoked allotment

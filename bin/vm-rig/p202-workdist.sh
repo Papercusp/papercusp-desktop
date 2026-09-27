@@ -22,9 +22,8 @@
 #     agents on the VM. The driver records the prior value and restores it from an
 #     EXIT trap, so an interrupt cannot leave the gate open.
 #   · It DOES cause ONE real bounded agent to be launched on the VM if every gate
-#     passes — that is the leg P-202 exists to prove. The seat is the cheapest
-#     available (haiku / effort low / count 1) precisely so the run is not a
-#     meaningful draw on inference budget.
+#     passes — that is the leg P-202 exists to prove. Model and effort follow the
+#     owner's current agent policy by default and remain explicit run inputs.
 #   · It leaves behind one throwaway fleet + its offer rows, run-id suffixed, the
 #     same way the matrix scenarios do.
 #
@@ -43,6 +42,8 @@
 #         PCUSP_TOWER_MCP  tower sidecar port (default 3070)
 #         PCUSP_VM_MCP     VM sidecar port     (default 3070)
 #         PCUSP_WS         workspace    (default papercusp-workspace)
+#         PCUSP_P202_MODEL delegated seat model (default gpt-5.6-sol)
+#         PCUSP_P202_EFFORT delegated seat effort (default xhigh)
 # Exit:   0 all WD probes pass · 1 one or more red · 2 preflight/setup failed (NO verdict)
 
 set -uo pipefail
@@ -67,6 +68,15 @@ WD_PLAN="p2p-public-release-endgame-2026-09-01"
 # `hive_required` outright. Passing the wrong one would publish the seat where the
 # other host is not looking, which would surface as a federation red.
 WD_HIVE="${PCUSP_RIG_HIVE:-papercusp}"
+WD_MODEL="${PCUSP_P202_MODEL:-gpt-5.6-sol}"
+WD_EFFORT="${PCUSP_P202_EFFORT:-xhigh}"
+case "$WD_MODEL" in
+  ''|*[!A-Za-z0-9._:-]*) echo "FATAL: invalid PCUSP_P202_MODEL '$WD_MODEL'" >&2; exit 2 ;;
+esac
+case "$WD_EFFORT" in
+  low|medium|high|xhigh|max) ;;
+  *) echo "FATAL: invalid PCUSP_P202_EFFORT '$WD_EFFORT'" >&2; exit 2 ;;
+esac
 
 # ── deliberate speed bump ─────────────────────────────────────────────────────
 # Not a permission check. This run arms a gate that lets a remote owner spawn on
@@ -77,7 +87,7 @@ for arg in "$@"; do case "$arg" in --i-accept-live-spawn) ACK=1 ;; esac; done
 if [ "$ACK" != 1 ]; then
   cat >&2 <<'EOM'
 REFUSING: this driver arms the VM's accept-delegated-seats gate and launches one
-real bounded agent there (haiku/low, count 1).
+real bounded agent there ($WD_MODEL/$WD_EFFORT, count 1).
 Re-run with --i-accept-live-spawn once you have confirmed:
   - the rig is free (no in-flight coordination/endgame measurement),
   - you accept ONE cheap agent booting on the VM,

@@ -16,6 +16,10 @@ const driverPath = path.join(
   "p202-workdist.sh",
 );
 const source = fs.readFileSync(driverPath, "utf8");
+const scenarioSource = fs.readFileSync(
+  path.join(import.meta.dirname, "..", "bin", "lib", "scenario-p202-workdist.sh"),
+  "utf8",
+);
 
 function functionSlice(name, endMarker) {
   const start = source.indexOf(`${name}() {`);
@@ -130,4 +134,13 @@ test("the gate-restore detector rejects a one-shot best-effort clear", () => {
     GATE_ARMED=0
   `;
   assert.ok(gateRestoreViolations(oldShape).length >= 3);
+});
+
+test("live agent seat defaults to the owner's current model policy", () => {
+  assert.match(source, /WD_MODEL="\$\{PCUSP_P202_MODEL:-gpt-5\.6-sol\}"/);
+  assert.match(source, /WD_EFFORT="\$\{PCUSP_P202_EFFORT:-xhigh\}"/);
+  assert.match(source, /low\|medium\|high\|xhigh\|max/);
+  assert.ok(scenarioSource.includes('\\"model\\":\\"$WD_MODEL\\"'));
+  assert.ok(scenarioSource.includes('\\"effort\\":\\"$WD_EFFORT\\"'));
+  assert.doesNotMatch(scenarioSource, /\\"model\\":\\"haiku\\"/);
 });
