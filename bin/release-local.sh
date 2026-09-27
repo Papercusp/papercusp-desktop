@@ -354,6 +354,17 @@ source "$ORCHESTRATOR_HERE/lib/inno-spanned-server.sh"
 # collection follows the claimed dir automatically.
 # shellcheck source=lib/claim-target-dir.sh
 ensure_release_cargo_path
+# WI-10003533: the slot picker exempts a retention lease held by THIS cut's own
+# tag (EI-23946118243608426), and it learns that tag from PAPERCUSP_RELEASE_TAG.
+# The tag used to be exported ~1700 lines below, after the slot was already
+# claimed, so on every real launch the exemption saw an empty tag. A run-leg
+# retry then skipped the very slot holding its earlier legs' artifacts, and
+# PAPERCUSP_REUSE_* found nothing to reuse. Derive it from the same
+# VERSION/CHANNEL the later export uses, before claiming a slot.
+if [[ -n "${VERSION:-}" && -n "${CHANNEL:-}" ]]; then
+  PAPERCUSP_RELEASE_TAG="$(desktop_release_tag "$VERSION" "$CHANNEL")"
+  export PAPERCUSP_RELEASE_TAG
+fi
 source "$ORCHESTRATOR_HERE/lib/claim-target-dir.sh"
 require_release_host
 
