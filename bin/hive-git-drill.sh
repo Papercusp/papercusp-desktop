@@ -401,8 +401,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 process.env.PAPERCUSP_HIVE_GIT_ROOT = '$LEGD_ROOT';
 import { generateEd25519KeypairDer, signWithPrivateKeyDer } from '$HGGIT/../../identity/ed25519';
-import { defaultRunGit, ensurePotGitRepo, writeNamespaceRef } from '$HGGIT/storage';
+import { defaultRunGit, ensurePotGitRepo, readNamespaceRef, writeNamespaceRef } from '$HGGIT/storage';
 import { WORK_REF, readStaging } from '$HGGIT/integrator';
+import { buildSigrefs, SIGREFS_REF } from '$HGGIT/sigrefs';
 import { runIntegratorTick } from '$HGGIT/integrator-tick';
 import { runWorktreeBridgeTick } from '$HGGIT/worktree-bridge-tick';
 import { listIntegrationRequests } from '$HGGIT/integration-requests';
@@ -451,6 +452,31 @@ async function main() {
   const integrator = keypair();
   const memberSteer = keypair();
   const memberBelow = keypair();
+  // WI-10003543: the integrator tick is an owner-key-gated hive effect
+  // (hive-effect-authority.ts). Without an authority whose hive_id matches the
+  // signed context it skips as not-integrator and never announces, so pass the
+  // owning hive's context + authority and the members' accepted signed floors
+  // (mirrors leg-d-integration-chain.integration.test.ts).
+  const ownerKeys = generateEd25519KeypairDer();
+  const scope = { hive_id: ownerKeys.pubkeyBase64, repo_key: REPO_KEY };
+  const context = { ...scope, store_generation: 'sg2-1-' + 'a'.repeat(40) };
+  const authority = { ...scope, sign: async (bytes: Buffer) => signWithPrivateKeyDer(ownerKeys.privateKeyDer, bytes) };
+  async function acceptedFloors() {
+    const floors: Record<string, { hive_id: string; repo_key: string; store_generation: string; version: number; sigrefs_oid: string }> = {};
+    for (const m of [memberSteer, memberBelow]) {
+      const signed = await buildSigrefs(repo, m.pubkeyBase64, m.sign, { nowMs: Date.now(), context });
+      const oid = await readNamespaceRef(repo, m.pubkeyBase64, SIGREFS_REF);
+      if (!oid) throw new Error('sigrefs ref missing for ' + m.pubkeyBase64.slice(0, 12));
+      floors[m.pubkeyBase64] = { ...context, version: signed.version, sigrefs_oid: oid };
+    }
+    return floors;
+  }
+  // Null-announcement detector: print WHY the tick did not announce instead of
+  // feeding null into runWorktreeBridgeTick (the pre-fix crash said nothing).
+  async function failNoAnnouncement(tick: string, o: { skipped?: string; errors: string[]; integration: { advanced?: boolean } | null }) {
+    await sql.end();
+    console.log(JSON.stringify({ stagingIsSteerSha: false, integrationAdvanced: o.integration?.advanced === true, announcementNull: tick, skipped: o.skipped ?? null, errors: o.errors }));
+  }
 
   const src = join('$LEGD_ROOT', 'src');
   await initWorktree(src);
@@ -475,9 +501,11 @@ async function main() {
     memberDevicePubkeysBase64: [memberSteer.pubkeyBase64, memberBelow.pubkeyBase64],
     integratorDevicePubkeyBase64: integrator.pubkeyBase64,
     epoch: 1, priorSeq: 0, sign: integrator.sign,
+    context, acceptedSnapshots: await acceptedFloors(), authority,
     resolveTier: (dev) => (dev === memberSteer.pubkeyBase64 ? 'steer' : 'message'),
     deps: { isIntegrator: async () => true, sql },
   });
+  if (!out.announcement) return failNoAnnouncement('first-tick', out);
 
   // WI-4230 fix: capture the FIRST tick's staging check HERE, before the
   // second tick (out2, below) advances staging again — reading it at the
@@ -496,8 +524,8 @@ async function main() {
   const otherWt = join('$LEGD_ROOT', 'other-machine-wt');
   await initWorktree(otherWt);
   const bridgeOut = await runWorktreeBridgeTick({
-    bareRepoPath: repo, worktreePath: otherWt, pending: [out.announcement!],
-    prior: { epochSeq: null, stagingSha: null }, accept: { expectedDevice: integrator.pubkeyBase64 },
+    bareRepoPath: repo, worktreePath: otherWt, pending: [out.announcement],
+    prior: { epochSeq: null, stagingSha: null }, accept: { expectedContext: context, expectedDevice: integrator.pubkeyBase64 },
   });
   const otherHead = await git(['rev-parse', 'HEAD'], otherWt);
   const otherContent = await readFile(join(otherWt, 'f.txt'), 'utf8');
@@ -514,13 +542,15 @@ async function main() {
     memberDevicePubkeysBase64: [memberSteer.pubkeyBase64, memberBelow.pubkeyBase64],
     integratorDevicePubkeyBase64: integrator.pubkeyBase64,
     epoch: 1, priorSeq: 1, sign: integrator.sign,
+    context, acceptedSnapshots: await acceptedFloors(), authority,
     resolveTier: (dev) => (dev === memberSteer.pubkeyBase64 ? 'steer' : 'message'),
     deps: { isIntegrator: async () => true, sql },
   });
+  if (!out2.announcement) return failNoAnnouncement('second-tick', out2);
   await writeFile(join(otherWt, 'f.txt'), 'locally-edited, uncommitted\n');
   const dirtyBridgeOut = await runWorktreeBridgeTick({
-    bareRepoPath: repo, worktreePath: otherWt, pending: [out2.announcement!],
-    prior: bridgeOut.watermark, accept: { expectedDevice: integrator.pubkeyBase64 },
+    bareRepoPath: repo, worktreePath: otherWt, pending: [out2.announcement],
+    prior: bridgeOut.watermark, accept: { expectedContext: context, expectedDevice: integrator.pubkeyBase64 },
   });
   const dirtyHeadAfter = await git(['rev-parse', 'HEAD'], otherWt);
   const dirtyContentAfter = await readFile(join(otherWt, 'f.txt'), 'utf8');

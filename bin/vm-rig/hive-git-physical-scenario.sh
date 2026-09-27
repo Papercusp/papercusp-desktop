@@ -146,7 +146,7 @@ require_phase_a_two_host_substrate_ready() {
   fi
 
   if ! tower_raw="$(printf '%s\n' "$PHASE_A_TOWER_STATUS_ARGS" \
-    | "$TOWER_CALL" dev:dogfood_substrate_status --json - --client hive-git-phase-a-readiness \
+    | "$TOWER_CALL" dev:dogfood_substrate_status --json - \
       --workspace=papercusp-workspace --harness="$TOWER_GIT_SYNC_SLUG")"; then
     fail 'phase A tower substrate readiness probe could not reach the tower operator'
   fi
