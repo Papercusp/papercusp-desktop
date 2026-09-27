@@ -6,7 +6,7 @@
 // /mnt/data/cargo-target on 2026-09-03 (WI-212675). bin/build-and-archive-deb.sh
 // still defaulted `${CARGO_TARGET_DIR:-$HOME/.cargo-target}`. tauri built and
 // signed the .deb under the configured target, and the script then FATAL'd with
-// "emitted no fresh .deb under /home/marsh-office/.cargo-target/...". That cost
+// "emitted no fresh .deb under $HOME/.cargo-target/...". That cost
 // a full ~10 minute build on the P-204 critical path. EI-22589688521091797 fixed
 // the same defect in claim-target-dir.sh a fortnight earlier, so this is a CLASS:
 // the resolver is now shared, and the scan below keeps the literal from growing

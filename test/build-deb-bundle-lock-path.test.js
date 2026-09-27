@@ -26,7 +26,9 @@ const path = require('node:path');
 const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
-const scriptPath = path.join(root, 'bin/build-and-archive-deb.sh');
+// Overridable ONLY so scripts/mutation-probe.sh can point this guard at a
+// frozen copy (historical / copy-out mode) without touching the shared tree.
+const scriptPath = process.env.PAPERCUSP_BUILD_DEB_SCRIPT || path.join(root, 'bin/build-and-archive-deb.sh');
 
 /**
  * Extract just the CARGO_TARGET + BUNDLE_LOCK computation (through the
