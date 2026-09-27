@@ -26,9 +26,16 @@
 # last N (default 10) archived builds so this can run unattended
 # (e.g. from a CI/gate script) without unbounded disk growth.
 #
-# Usage: bin/build-and-archive-deb.sh [--debug] [--keep N]
-#   --debug     build the debug bundle (tauri build --debug) instead of release
-#   --keep N    number of archived builds to retain (default 10)
+# Usage: bin/build-and-archive-deb.sh [--debug] [--keep N] [--test-artifact]
+#   --debug          build the debug bundle (tauri build --debug) instead of release
+#   --keep N         number of archived builds to retain (default 10)
+#   --test-artifact  build a DRILL/TEST Server .deb from a dev (unaudited) sidecar
+#                    (WI-10003499). The release identity audit and source-coherence
+#                    proofs are NOT required, and the output never lands where a
+#                    consumer scavenges: it goes to bundle/deb/test-artifacts/ with
+#                    a TEST-ARTIFACT file name, and the live bundle/deb copy is
+#                    removed. Pass the printed path explicitly to a drill, e.g.
+#                    bin/hive-git-drill.sh <path>. Never publish one.
 set -euo pipefail
 LIVE_DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIVE_REPO_DIR="${PAPERCUSP_REPO_DIR:-/home/marsh-office/papercupai-workspace/papercusp}"
@@ -87,9 +94,11 @@ snapshot_copy_tree_independent() {
 
 DEBUG=0
 KEEP=10
+TEST_ARTIFACT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --debug) DEBUG=1; shift ;;
+    --test-artifact) TEST_ARTIFACT=1; shift ;;
     --keep)
       [[ $# -ge 2 ]] || { echo "FATAL: --keep requires a number" >&2; exit 2; }
       KEEP="$2"
@@ -205,6 +214,27 @@ if ! git -C "$LIVE_DESKTOP_DIR" worktree add --detach \
 fi
 DEB_SOURCE_SNAPSHOT_WORKTREE=1
 
+# WI-10003499: the desktop Rust sources compile SUPERPROJECT-owned files in via
+# relative include_str!/include_bytes! paths that climb out of papercusp-desktop.
+# Without them the private worktree fails at `cargo build` with "couldn't read
+# src/../../../libs/...". Stage each one from the SAME pinned superproject commit,
+# resolved through submodule gitlinks and hash-verified, never from the live tree.
+# test/build-deb-superproject-inputs.test.js scans src-tauri/src for non-test
+# out-of-tree includes and fails when one is missing from this list.
+DEB_SUPERPROJECT_BUILD_INPUTS=(
+  libs/generic/desktop-ipc/src/csp-policy.json
+)
+# shellcheck source=lib/superproject-blob.sh
+source "$LIVE_DESKTOP_DIR/bin/lib/superproject-blob.sh"
+for _superproject_input in "${DEB_SUPERPROJECT_BUILD_INPUTS[@]}"; do
+  papercusp_materialize_superproject_blob "$LIVE_REPO_DIR" "$DEB_SOURCE_SNAPSHOT_COMMIT" \
+    "$_superproject_input" "$DEB_SOURCE_SNAPSHOT_ROOT/$_superproject_input" || {
+    echo "FATAL: could not stage superproject build input $_superproject_input at ${DEB_SOURCE_SNAPSHOT_COMMIT:0:10}." >&2
+    exit 4
+  }
+done
+unset _superproject_input
+
 # The desktop package owns @tauri-apps/cli in its own package-lock/node_modules;
 # the superproject root deliberately does not. A detached worktree therefore
 # has no `tauri` executable unless we carry this package-local toolchain too.
@@ -308,12 +338,30 @@ papercusp_export_rust_lld linux
 # Reuse the cross-build freshness contract rather than inventing a second stamp:
 # the final assembled-sidecar identity scan records releaseIdentityAudit only
 # after it passes, and this assertion cannot be bypassed by ALLOW_STALE.
-PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT=1 \
-  PAPERCUSP_REQUIRE_SOURCE_COHERENCE=1 \
+#
+# --test-artifact (WI-10003499) is the ONE sanctioned way to package without that
+# proof. A release-audited sidecar requires a clean source tree, and the shared
+# canonical tree is never clean, so drills that need a CURRENT Server .deb (P-505
+# hive-git-drill, the migration-freshness check) had no producer at all. The
+# relaxation is paid for at the OUTPUT: a test artifact is written only to
+# bundle/deb/test-artifacts/ under a TEST-ARTIFACT name, and the live bundle/deb
+# copy is removed, so no scavenger (live-federation-gate, a drill's default pick)
+# can mistake it for a canonical build. The ordinary freshness verdicts still run.
+if [[ "$TEST_ARTIFACT" == "1" ]]; then
+  echo "==> TEST ARTIFACT MODE (WI-10003499): release identity audit and source coherence are NOT required;" >&2
+  echo "    output goes ONLY to bundle/deb/test-artifacts/ — never archive/, never the scavenged bundle/deb path. Do not publish it." >&2
   node "$LIVE_DESKTOP_DIR/bin/check-sidecar-freshness.js" \
     --sidecar "$DESKTOP_DIR/src-tauri/sidecar" \
     --repo-root "$LIVE_REPO_DIR" \
-    --label build-and-archive-deb
+    --label build-and-archive-deb:test-artifact
+else
+  PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT=1 \
+    PAPERCUSP_REQUIRE_SOURCE_COHERENCE=1 \
+    node "$LIVE_DESKTOP_DIR/bin/check-sidecar-freshness.js" \
+      --sidecar "$DESKTOP_DIR/src-tauri/sidecar" \
+      --repo-root "$LIVE_REPO_DIR" \
+      --label build-and-archive-deb
+fi
 
 # --- SEED OVERLAY / SERVER PRODUCT (WI-6075 / GUI-Server split P-007) ---
 #
@@ -340,6 +388,13 @@ fi
 
 DEB_DIR="$CARGO_TARGET/$PROFILE_DIR/bundle/deb"
 ARCHIVE_DIR="$DEB_DIR/archive"
+ARCHIVE_LABEL=""
+if [[ "$TEST_ARTIFACT" == "1" ]]; then
+  # WI-10003499: a test artifact must never share the canonical archive or its
+  # retention census, and its file name must say what it is wherever it travels.
+  ARCHIVE_DIR="$DEB_DIR/test-artifacts"
+  ARCHIVE_LABEL="TEST-ARTIFACT-"
+fi
 
 # WI-3287 / env-switcher-packaged-all-platforms-2026-07-06: stage the bundled
 # env-sidecars/staging bundle inside sidecar/ (if a sidecar was already built)
@@ -864,7 +919,7 @@ else
 fi
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BASENAME="$(basename "$DEB_PATH" .deb)"
-ARCHIVED_PATH="$ARCHIVE_DIR/${STAMP}-${GIT_SHA}-${BASENAME}.deb"
+ARCHIVED_PATH="$ARCHIVE_DIR/${STAMP}-${GIT_SHA}-${ARCHIVE_LABEL}${BASENAME}.deb"
 ARCHIVED_SIG_PATH="${ARCHIVED_PATH}.sig"
 LIVE_SIG_PATH="${DEB_PATH}.sig"
 
@@ -960,4 +1015,18 @@ if [ "$COUNT" -gt "$KEEP" ]; then
   done
 fi
 
-echo "=== done: live artifact $DEB_PATH, archived verified pair $ARCHIVED_PATH (+ .sig), $KEEP most-recent builds retained ==="
+echo "=== done: archived verified pair $ARCHIVED_PATH (+ .sig), $KEEP most-recent builds retained ==="
+# Keep the line above the ONLY `echo "=== done:` in this file and keep the
+# branch below AFTER it: build-deb-archive-immutability.test.js slices the real
+# archive block up to that literal.
+if [[ "$TEST_ARTIFACT" == "1" ]]; then
+  # WI-10003499: remove the live copy LAST, after the test-artifact pair is
+  # published and verified. bundle/deb/Papercusp*_amd64.deb is exactly what
+  # live-federation-gate and hive-git-drill scavenge by default; leaving an
+  # unaudited package there would let a release-shaped consumer pick it up.
+  rm -f -- "$DEB_PATH" "$LIVE_SIG_PATH"
+  echo "    TEST ARTIFACT: live bundle/deb copy removed; pass this path explicitly to a drill."
+  echo "TEST_ARTIFACT_DEB=$ARCHIVED_PATH"
+else
+  echo "    live artifact: $DEB_PATH"
+fi
