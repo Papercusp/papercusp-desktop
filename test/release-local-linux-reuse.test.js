@@ -486,7 +486,11 @@ function runJournalLegResume({ leg, action, absent = false, verify = 0, provenan
     "release_artifacts_cut_start_write() { printf '222\\n'; }",
     entry === 'commit'
       ? `release_task_leg_commit ${leg} ${JSON.stringify(bundle)} 1`
-      : `release_task_leg_prepare ${leg} ${JSON.stringify(bundle)}`,
+      : entry === 'prepare-then-settle'
+        // The real cut: prepare reconciles+commits, then the collection join
+        // settles the same leg again in the SAME process (WI-10003545).
+        ? `release_task_leg_prepare ${leg} ${JSON.stringify(bundle)}\nrelease_task_leg_commit ${leg} ${JSON.stringify(bundle)} 1`
+        : `release_task_leg_prepare ${leg} ${JSON.stringify(bundle)}`,
     `printf "RESULT action=%s request=%s reuse=%s cut=%s\\n" "$${prefix}_ACTION" "$${prefix}_REQUEST_ID" "$${reuseVar}" "\${PAPERCUSP_RELEASE_CUT_START_NS:-}"`,
   ].join('\n');
   const result = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
@@ -633,6 +637,27 @@ for (const leg of ['linux', 'windows', 'mac']) {
     const { result } = runJournalLegResume({ leg, action: 'reuse', entry: 'commit', artifactSet: '' });
     assert.notEqual(result.status, 0, `a ${leg} receipt with no digest still authorized reuse`);
     assert.match(result.stderr, /no artifact-set digest/);
+  });
+
+  // WI-10003545 (0.0.22, op 2db8843f): a cross-task `reconcile` begin carries the
+  // NEW intent's refs, so the leg starts with NO digest in memory. Prepare then
+  // commits a receipt WITH a digest; the collection-join settle of the same leg
+  // must check against that digest, not refuse the receipt it just wrote.
+  test(`${leg} collection-join settle after a reconcile commit reuses the digest it just committed`, () => {
+    const { result, log } = runJournalLegResume({
+      leg,
+      action: 'reconcile',
+      entry: 'prepare-then-settle',
+      artifactSet: '',
+    });
+    assert.equal(result.status, 0, `the ${leg} settle refused its own fresh receipt: ${result.stderr}`);
+    assert.doesNotMatch(result.stderr, /no artifact-set digest/);
+    assert.equal(
+      (log.match(new RegExp(`^commit release\\.build\\.${leg} `, 'gm')) ?? []).length,
+      1,
+      'the settle must verify against the committed receipt, not journal a second commit',
+    );
+    assert.match(log, new RegExp(`artifact-set:sha256:${fixtureArtifactSetDigest()}`));
   });
 }
 
