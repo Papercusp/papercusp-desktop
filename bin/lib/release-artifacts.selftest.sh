@@ -1043,6 +1043,25 @@ else
   bad "control FAILED: $__pc_picker missing or empty — the slot-picker checks measured nothing"
 fi
 
+# WI-10003533: the own-cut rule reads PAPERCUSP_RELEASE_TAG, so release-local.sh must
+# SET the tag before it sources the slot picker. It used to export the tag ~1700 lines
+# later, so on a real launch the rule saw an empty tag and every run-leg retry skipped
+# its own leased slot (and the artifacts its earlier legs left there). Subject path is
+# overridable so falsifiability can be proven against a mutated COPY outside the tree.
+__pc_release_local="${PAPERCUSP_SELFTEST_RELEASE_LOCAL:-$DIR/../release-local.sh}"
+__pc_claim_line="$(grep -nE '^[[:space:]]*source[[:space:]].*lib/claim-target-dir\.sh' "$__pc_release_local" 2>/dev/null | head -1 | cut -d: -f1)"
+__pc_tag_line="$(grep -nE '^[[:space:]]*(export[[:space:]]+)?PAPERCUSP_RELEASE_TAG=' "$__pc_release_local" 2>/dev/null | head -1 | cut -d: -f1)"
+if [[ -n "$__pc_claim_line" && -n "$__pc_tag_line" ]]; then
+  ok "control: release-local.sh claims a slot (line $__pc_claim_line) and sets the release tag (line $__pc_tag_line)"
+  if (( __pc_tag_line < __pc_claim_line )); then
+    ok "release-local.sh sets PAPERCUSP_RELEASE_TAG before it claims a target slot"
+  else
+    bad "release-local.sh claims its target slot (line $__pc_claim_line) before setting PAPERCUSP_RELEASE_TAG (line $__pc_tag_line) — the own-cut lease exemption sees an empty tag"
+  fi
+else
+  bad "control FAILED: could not locate the slot claim or the tag assignment in $__pc_release_local — this check measured nothing"
+fi
+
 echo
 echo "retention lease TTL (WI-10002441)"
 # A lease with expires_ns=0 is PERMANENT. The release workflow wrote nothing but
