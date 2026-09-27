@@ -129,6 +129,23 @@ test('current-payload composer deploys the launcher dependency and launcher fail
   );
 });
 
+// WI-10003486 — current serve.mjs ran against the INSTALLED app's months-old harness
+// (PAPERCUSP_HARNESS_DIR -> /Applications/Papercusp Server.app), so every delegated
+// psu seat died at boot on "su.md tiling is unsound" (P-202 WD-5/WD-6). The payload
+// now carries its own harness, stamped, sealed, and required by the launcher.
+test('current payload ships its own harness and the launcher refuses a payload without it', () => {
+  const composer = fs.readFileSync(currentComposer, 'utf8');
+  const launcher = fs.readFileSync(currentLauncher, 'utf8');
+  assert.match(composer, /HARNESS_SRC="\$REPO_ROOT\/libs\/papercusp\/packages\/harness"/);
+  assert.match(composer, /printf 'harnessSuSha256=%s\\n'/);
+  assert.match(composer, /BUILD-STAMP\.txt db-sql sql prompts harness \\/);
+  assert.match(composer, /rsync -a --delete "\$OUT\/harness\/" "\$VM:\$REMOTE_STAGE\/harness\/"/);
+  assert.match(launcher, /export PAPERCUSP_HARNESS_DIR="\$CUR\/harness"/);
+  const result = spawnSync('bash', [currentLauncher, '--self-test'], { encoding: 'utf8' });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /SELF-TEST PASS: .*missing\/stale harness/);
+});
+
 test('env-sidecar staging carries the primary provenance formats beside the exact bundle copy', () => {
   const source = fs.readFileSync(stageEnvSidecars, 'utf8');
   assert.match(source, /cp -al "\$SIDECAR\/serve\.mjs" "\$ENV_SC\/serve\.mjs"/);

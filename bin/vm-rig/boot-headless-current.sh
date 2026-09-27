@@ -15,6 +15,9 @@
 #   rig-sidecar-current/serve.mjs      ← tower-built, current tree
 #   rig-sidecar-current/db-sql/        ← current migrations
 #   rig-sidecar-current/prompts/       ← current prompts
+#   rig-sidecar-current/harness/       ← current harness package (blueprints,
+#       identity, hooks, …) — PAPERCUSP_HARNESS_DIR (WI-10003486: the installed
+#       app's harness is months older than the code that parses it)
 #   rig-sidecar-current/node_modules/  ← per-entry symlinks → app bundle's
 #       node_modules (darwin natives), + @embedded-postgres/darwin-x64 →
 #       the bundle's nested embedded-postgres-server copy
@@ -114,8 +117,18 @@ cleanup_control() {
 }
 trap cleanup_control EXIT
 
+HARNESS_SU_REL="blueprints/base/prompts/su.md"
+
+file_sha256() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | cut -d' ' -f1
+  else
+    sha256sum "$1" | cut -d' ' -f1
+  fi
+}
+
 validate_payload() {
-  local root="$1" require_stamp="${2:-0}" f expected_max expected_count actual_max actual_count
+  local root="$1" require_stamp="${2:-0}" f expected_max expected_count actual_max actual_count expected_su
   for f in "$root/serve.mjs" "$root/db-sql" "$root/node_modules" "$root/node_modules/@papercusp/embedded-postgres-server/src/migration-runner.js" "$root/sql" "$root/prompts"; do
     [ -e "$f" ] || { echo "FATAL: staged payload is missing $f" >&2; return 1; }
   done
@@ -123,6 +136,16 @@ validate_payload() {
     for f in "$root/BUILD-STAMP.txt" "$root/PAYLOAD-MANIFEST.sha256"; do
       [ -s "$f" ] || { echo "FATAL: staged payload is missing $f" >&2; return 1; }
     done
+    # WI-10003486: a new payload must carry the harness its serve.mjs was built
+    # against. Falling back to the installed app's harness pairs current code
+    # with months-old blueprints (psu seats die at boot on su.md tiling).
+    [ -s "$root/harness/$HARNESS_SU_REL" ] \
+      || { echo "FATAL: staged payload is missing harness/$HARNESS_SU_REL" >&2; return 1; }
+    expected_su="$(sed -n 's/^harnessSuSha256=//p' "$root/BUILD-STAMP.txt" | tail -1)"
+    [ -n "$expected_su" ] \
+      || { echo "FATAL: BUILD-STAMP.txt lacks harnessSuSha256" >&2; return 1; }
+    [ "$(file_sha256 "$root/harness/$HARNESS_SU_REL")" = "$expected_su" ] \
+      || { echo "FATAL: staged harness/$HARNESS_SU_REL differs from BUILD-STAMP.txt" >&2; return 1; }
     for f in "${RUNTIME_SIBLINGS[@]}"; do
       [ -s "$root/$f" ] || { echo "FATAL: staged payload is missing runtime sibling $f" >&2; return 1; }
       awk -v name="$f" '$2 == name && length($1) == 64 { found = 1 } END { exit !found }' \
@@ -186,8 +209,11 @@ overlay_payload() {
     cp "$stage/$subtree" "$candidate/$subtree.new" || return 1
     mv -f "$candidate/$subtree.new" "$candidate/$subtree" || return 1
   done
-  for subtree in db-sql sql prompts; do
+  for subtree in db-sql sql prompts harness; do
     rm -rf "$candidate/$subtree"
+    # A stage without harness/ leaves the candidate without one; validation
+    # then refuses it (fail closed) instead of inheriting a stale copy.
+    [ -e "$stage/$subtree" ] || continue
     cp -a "$stage/$subtree" "$candidate/$subtree"
   done
   # Refresh the externalized package's JS sources without deleting the
@@ -215,14 +241,14 @@ write_self_test_manifest() {
   (
     cd "$root" || exit 1
     if command -v shasum >/dev/null 2>&1; then
-      find serve.mjs "${RUNTIME_SIBLINGS[@]}" BUILD-STAMP.txt db-sql sql prompts \
+      find serve.mjs "${RUNTIME_SIBLINGS[@]}" BUILD-STAMP.txt db-sql sql prompts harness \
         node_modules/@papercusp/embedded-postgres-server/package.json \
         node_modules/@papercusp/embedded-postgres-server/src \
         -type f -print0 \
         | LC_ALL=C sort -z \
         | xargs -0 shasum -a 256 > PAYLOAD-MANIFEST.sha256
     else
-      find serve.mjs "${RUNTIME_SIBLINGS[@]}" BUILD-STAMP.txt db-sql sql prompts \
+      find serve.mjs "${RUNTIME_SIBLINGS[@]}" BUILD-STAMP.txt db-sql sql prompts harness \
         node_modules/@papercusp/embedded-postgres-server/package.json \
         node_modules/@papercusp/embedded-postgres-server/src \
         -type f -print0 \
@@ -286,10 +312,34 @@ run_filesystem_self_test() {
     > "$stage/node_modules/@papercusp/embedded-postgres-server/package.json"
   printf '%s\n' 'export function migrationTransactionChunks(ddl) { return [ddl]; }' \
     > "$stage/node_modules/@papercusp/embedded-postgres-server/src/migration-runner.js"
-  printf 'stamp\ndbSqlHighest=000\ndbSqlCount=1\n' > "$stage/BUILD-STAMP.txt"
+  # The CURRENT payload predates WI-10003486 (no harness/); the stage carries one.
+  mkdir -p "$stage/harness/$(dirname "$HARNESS_SU_REL")"
+  printf '%s\n' new-su > "$stage/harness/$HARNESS_SU_REL"
+  printf 'stamp\ndbSqlHighest=000\ndbSqlCount=1\nharnessSuSha256=%s\n' \
+    "$(file_sha256 "$stage/harness/$HARNESS_SU_REL")" > "$stage/BUILD-STAMP.txt"
   : > "$current/sql/001-bootstrap.sql"
   : > "$stage/sql/001-bootstrap.sql"
   : > "$stage/db-sql/000-baseline.sql"
+  write_self_test_manifest "$stage" || { rm -rf "$root"; return 1; }
+  validate_payload "$stage" 1 || { rm -rf "$root"; return 1; }
+
+  # WI-10003486: a stage WITHOUT harness/ used to fall back to the installed
+  # app's months-old harness. Reject it, and reject a harness whose su.md is
+  # not the one the composer stamped (even when the manifest is re-sealed).
+  mv "$stage/harness" "$root/harness-saved"
+  write_self_test_manifest "$stage" 2>/dev/null
+  if validate_payload "$stage" 1 >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL: payload without harness/ was admitted" >&2
+    rm -rf "$root"; return 1
+  fi
+  mv "$root/harness-saved" "$stage/harness"
+  printf '%s\n' stale-su > "$stage/harness/$HARNESS_SU_REL"
+  write_self_test_manifest "$stage" || { rm -rf "$root"; return 1; }
+  if validate_payload "$stage" 1 >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL: harness su.md differing from the stamp was admitted" >&2
+    rm -rf "$root"; return 1
+  fi
+  printf '%s\n' new-su > "$stage/harness/$HARNESS_SU_REL"
   write_self_test_manifest "$stage" || { rm -rf "$root"; return 1; }
   validate_payload "$stage" 1 || { rm -rf "$root"; return 1; }
 
@@ -337,6 +387,8 @@ run_filesystem_self_test() {
 
   prepare_candidate "$current" "$stage" "$candidate" || { rm -rf "$root"; return 1; }
   [ "$(cat "$candidate/serve.mjs")" = new ] || { rm -rf "$root"; return 1; }
+  [ "$(cat "$candidate/harness/$HARNESS_SU_REL")" = new-su ] \
+    || { echo "SELF-TEST FAIL: candidate harness was not taken from the stage" >&2; rm -rf "$root"; return 1; }
   for sibling in "${RUNTIME_SIBLINGS[@]}"; do
     [ "$(cat "$candidate/$sibling")" = new-worker ] || { rm -rf "$root"; return 1; }
   done
@@ -353,7 +405,7 @@ run_filesystem_self_test() {
   done
   [ "$(cat "$failed/serve.mjs")" = new ] || { rm -rf "$root"; return 1; }
   rm -rf "$root"
-  echo "SELF-TEST PASS: staged validation rejects missing/tampered payloads and swap/rollback preserves the previous payload"
+  echo "SELF-TEST PASS: staged validation rejects missing/tampered payloads (incl. missing/stale harness) and swap/rollback preserves the previous payload"
 }
 
 if [ "$SELF_TEST" = "1" ]; then
@@ -627,7 +679,15 @@ export PAPERCUSP_BIND_HOST="127.0.0.1"
 export HOSTNAME="127.0.0.1"
 export NODE_ENV="production"
 export PAPERCUSP_SERVE_UI="1"
-export PAPERCUSP_HARNESS_DIR="$SIDECAR/harness"
+# WI-10003486: the harness is DATA the current serve.mjs parses (su.md tiling,
+# builtin blueprints, identity). Use the payload's own copy; the installed app's
+# is only a loud fallback for a restart of a pre-WI-10003486 payload.
+if [ -s "$CUR/harness/$HARNESS_SU_REL" ]; then
+  export PAPERCUSP_HARNESS_DIR="$CUR/harness"
+else
+  echo "WARN: $CUR has no harness/ — falling back to the INSTALLED app's harness ($SIDECAR/harness); psu seats may die at boot on a stale su.md. Re-run compose-rig-sidecar-current.sh." >&2
+  export PAPERCUSP_HARNESS_DIR="$SIDECAR/harness"
+fi
 export PAPERCUSP_TEMPLATES_DIR="$SIDECAR/templates"
 export PAPERCUSP_RUBRICS_DIR="$SIDECAR/rubrics"
 export PAPERCUSP_DESKTOP="1"

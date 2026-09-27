@@ -81,8 +81,16 @@ MAIN_SQL_SRC="$REPO_ROOT/libs/papercusp/libs/db/sql"
 LOCKS_SQL_SRC="$REPO_ROOT/libs/papercusp/packages/locks/src/sql"
 EMBEDDED_PG_SRC="$REPO_ROOT/libs/papercusp/packages/embedded-postgres-server"
 PROMPTS_SRC="$WEB_DIR/prompts"
+# WI-10003486: the harness package (blueprints/, identity/, hooks/, templates/, …)
+# is DATA the current serve.mjs reads at runtime via PAPERCUSP_HARNESS_DIR. It used
+# to be left to the installed app bundle, so current code ran against a Sep-7
+# 0.0.19 harness: every delegated psu seat died at boot on "su.md tiling is
+# unsound" (P-202 WD-5/WD-6), and the stale builtin su.mode-auto blueprint broke
+# the mode catalog (WI-10003470). Code and the data it parses ship TOGETHER.
+HARNESS_SRC="$REPO_ROOT/libs/papercusp/packages/harness"
+HARNESS_SU_REL="blueprints/base/prompts/su.md"
 
-for d in "$MAIN_SQL_SRC" "$LOCKS_SQL_SRC" "$EMBEDDED_PG_SRC/src" "$EMBEDDED_PG_SRC/bin" "$EMBEDDED_PG_SRC/package.json" "$PROMPTS_SRC" "$WEB_DIR/bin/bundle-host-common.sh"; do
+for d in "$MAIN_SQL_SRC" "$LOCKS_SQL_SRC" "$EMBEDDED_PG_SRC/src" "$EMBEDDED_PG_SRC/bin" "$EMBEDDED_PG_SRC/package.json" "$PROMPTS_SRC" "$HARNESS_SRC/$HARNESS_SU_REL" "$WEB_DIR/bin/bundle-host-common.sh"; do
   [ -e "$d" ] || { echo "FATAL: missing $d" >&2; exit 1; }
 done
 [ -x "$HERE/boot-headless-current.sh" ] || {
@@ -181,6 +189,19 @@ rm -rf "$OUT/sql";    mkdir -p "$OUT/sql";    cp -a "$LOCKS_SQL_SRC"/. "$OUT/sql
 echo "→ prompts/"
 rm -rf "$OUT/prompts"; cp -a "$PROMPTS_SRC" "$OUT/prompts"
 
+# ── 3a. harness (WI-10003486) ───────────────────────────────────────────────
+# Same filter as build-desktop-sidecar.sh's harness copy: regular files only
+# (dev-time symlinks dangle off-tower), no docs-viewer sub-project, no
+# node_modules, no .git.
+echo "→ harness/  ← $HARNESS_SRC"
+rm -rf "$OUT/harness"; mkdir -p "$OUT/harness"
+rsync -a --no-links \
+  --exclude '/docs-viewer/' --exclude 'node_modules/' --exclude '.git/' \
+  "$HARNESS_SRC/" "$OUT/harness/"
+cmp -s "$HARNESS_SRC/$HARNESS_SU_REL" "$OUT/harness/$HARNESS_SU_REL" \
+  || { echo "FATAL: composed harness/$HARNESS_SU_REL does not match the repo copy" >&2; exit 1; }
+HARNESS_SU_SHA256="$(sha256sum "$OUT/harness/$HARNESS_SU_REL" | cut -d' ' -f1)"
+
 # The serve bundle externalizes @papercusp/embedded-postgres-server so its
 # platform-native binaries resolve from the installed app's node_modules. The
 # JS package itself remains part of the runtime contract: the current
@@ -201,6 +222,8 @@ out_count="$(find "$OUT/db-sql" -maxdepth 1 -type f -name '*.sql' | wc -l | tr -
 [ "$out_max" = "$repo_max" ] \
   || { echo "FATAL: composed db-sql/ at $out_max but repo is at $repo_max" >&2; exit 1; }
 printf 'dbSqlHighest=%s\ndbSqlCount=%s\n' "$out_max" "$out_count" >> "$OUT/BUILD-STAMP.txt"
+# The launcher refuses a staged payload whose harness su.md differs from this.
+printf 'harnessSuSha256=%s\n' "$HARNESS_SU_SHA256" >> "$OUT/BUILD-STAMP.txt"
 
 # EI-20225452142754784: the old physical deploy copied directories with ad-hoc
 # rsync commands and validated only local source shape. A trailing-slash mistake
@@ -212,7 +235,7 @@ printf 'dbSqlHighest=%s\ndbSqlCount=%s\n' "$out_max" "$out_count" >> "$OUT/BUILD
 (
   cd "$OUT"
   manifest_tmp="PAYLOAD-MANIFEST.sha256.tmp.$$"
-  find serve.mjs "${HOST_WORKER_OUTPUTS[@]}" systemd-scope-env-runner.mjs BUILD-STAMP.txt db-sql sql prompts \
+  find serve.mjs "${HOST_WORKER_OUTPUTS[@]}" systemd-scope-env-runner.mjs BUILD-STAMP.txt db-sql sql prompts harness \
     node_modules/@papercusp/embedded-postgres-server/package.json \
     node_modules/@papercusp/embedded-postgres-server/src \
     node_modules/@papercusp/embedded-postgres-server/bin \
@@ -221,7 +244,7 @@ printf 'dbSqlHighest=%s\ndbSqlCount=%s\n' "$out_max" "$out_count" >> "$OUT/BUILD
     | xargs -0 sha256sum > "$manifest_tmp"
   mv -f "$manifest_tmp" PAYLOAD-MANIFEST.sha256
 )
-echo "  ✓ sql/ = locks set; db-sql/ fresh at migration $out_max ($out_count files); payload manifest sealed"
+echo "  ✓ sql/ = locks set; db-sql/ fresh at migration $out_max ($out_count files); harness/ current (su.md ${HARNESS_SU_SHA256:0:12}); payload manifest sealed"
 
 # ── 5. push ─────────────────────────────────────────────────────────────────
 if [ "$PUSH" = "1" ]; then
@@ -239,7 +262,7 @@ if [ "$PUSH" = "1" ]; then
   # The active directory is not written in place. boot-headless-current.sh
   # validates the complete stage, stops the exact recorded owner PID, swaps the
   # sibling directories atomically, and restores the backup if health fails.
-  ssh "$VM" "mkdir -p $REMOTE_STAGE_Q/db-sql $REMOTE_STAGE_Q/sql $REMOTE_STAGE_Q/prompts $REMOTE_STAGE_Q/node_modules $REMOTE_LAUNCHD_DIR_Q $REMOTE_LAUNCHER_DIR_Q"
+  ssh "$VM" "mkdir -p $REMOTE_STAGE_Q/db-sql $REMOTE_STAGE_Q/sql $REMOTE_STAGE_Q/prompts $REMOTE_STAGE_Q/harness $REMOTE_STAGE_Q/node_modules $REMOTE_LAUNCHD_DIR_Q $REMOTE_LAUNCHER_DIR_Q"
   rsync -a "$OUT/serve.mjs" "$VM:$REMOTE_STAGE/serve.mjs"
   for runtime_sibling in "${HOST_WORKER_OUTPUTS[@]}" systemd-scope-env-runner.mjs; do
     rsync -a "$OUT/$runtime_sibling" "$VM:$REMOTE_STAGE/$runtime_sibling"
@@ -249,6 +272,7 @@ if [ "$PUSH" = "1" ]; then
   rsync -a --delete "$OUT/db-sql/"  "$VM:$REMOTE_STAGE/db-sql/"
   rsync -a --delete "$OUT/sql/"     "$VM:$REMOTE_STAGE/sql/"
   rsync -a --delete "$OUT/prompts/" "$VM:$REMOTE_STAGE/prompts/"
+  rsync -a --delete "$OUT/harness/" "$VM:$REMOTE_STAGE/harness/"
   ssh "$VM" "mkdir -p $REMOTE_STAGE_Q/node_modules/@papercusp/embedded-postgres-server"
   rsync -a --delete "$OUT/node_modules/@papercusp/embedded-postgres-server/" \
     "$VM:$REMOTE_STAGE/node_modules/@papercusp/embedded-postgres-server/"
