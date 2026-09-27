@@ -37,6 +37,8 @@ VM_TSX='/Users/aviweiss/.papercusp-workspaces/.shared/dev-source/node_modules/ts
 VM_SOURCE="${HIVE_GIT_PHYSICAL_VM_SOURCE:-}"
 VM_PRODUCER="$VM_SOURCE/packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts"
 VM_CALL='/tmp/vmcall.sh'
+VM_MCP_CALL='/tmp/mcp-call.mjs'
+DEPLOY="$HERE/deploy.sh"
 # The unprojected diagnostic includes detailed rows for every booted harness and
 # can cross the transport result door.  Pin the dispatch-level projection at
 # the call site so this destructive gate always receives the direct readiness
@@ -1077,6 +1079,32 @@ verify_physical_vm_source() {
     || fail 'physical VM producer digest does not match the tower'
 }
 
+# Every phase reaches the VM operator through $VM_CALL, which runs $VM_MCP_CALL.
+# Both live in the VM's /tmp, which loses them (reboot, macOS tmp cleanup) while
+# deploy.sh's persistent copy survives. A missing driver surfaced as "phase A VM
+# substrate readiness probe could not reach the VM operator" — a misdiagnosis of
+# a healthy operator (2026-09-27, WI-2039874: VM up 18h, /tmp/vmcall.sh gone,
+# /tmp/mcp-call.mjs stale). Pin both helpers to the checked-in bytes and restore
+# them through the canonical deploy seam before any phase runs.
+vm_driver_digests() {
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "[ -x '$VM_CALL' ] && [ -f '$VM_MCP_CALL' ] && shasum -a 256 '$VM_CALL' '$VM_MCP_CALL' | awk '{print \$1}' | paste -s -d ' ' -" \
+    2>/dev/null || true
+}
+
+ensure_vm_driver_current() {
+  local want have
+  want="$(sha256sum "$HERE/vmcall.sh" | awk '{print $1}') $(sha256sum "$REPO_ROOT/scripts/mcp-call.mjs" | awk '{print $1}')"
+  have="$(vm_driver_digests)"
+  [ "$have" = "$want" ] && return 0
+  printf 'hive-git-physical-scenario: VM driver missing or stale (have=%s want=%s); restoring through %s\n' \
+    "${have:-none}" "$want" "$DEPLOY" >&2
+  "$DEPLOY" "$VM" >&2 || true
+  have="$(vm_driver_digests)"
+  [ "$have" = "$want" ] \
+    || fail "VM driver still missing or stale after $DEPLOY (have=${have:-none} want=$want): $VM_CALL and $VM_MCP_CALL must match the checked-in bytes"
+}
+
 # OFFLINE CONTRACT BOUNDARY. This must remain before the first phase call and
 # before any future ssh/mutation primitive until all seven fixed executors and
 # their focused falsifiability tests are checked in.
@@ -1109,6 +1137,7 @@ case "$VM_SOURCE" in
   *) fail "HIVE_GIT_PHYSICAL_VM_SOURCE=$VM_SOURCE is not a probe-staged source root (expected /tmp/hive-git-physical-source.<pid>). Only hive-git-physical-probe.sh stages the VM producer, and it stages nowhere else; a hand-supplied root — including the installed dev-source tree, which carries no producer — resolves VM_PRODUCER to a path that does not exist and surfaces as ERR_MODULE_NOT_FOUND." ;;
 esac
 verify_physical_vm_source
+ensure_vm_driver_current
 
 scenario_started_at="$(now_iso)"
 run_all_phases
