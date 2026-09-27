@@ -1138,6 +1138,11 @@ echo "→ esbuild-bundling the serve entry (headless operator boot) → $SIDECAR
 # from the development-host recipe so a host-graph change cannot silently
 # leave the packaged sidecar with a different esbuild boundary.
 source "$WEB_DIR/bin/bundle-host-common.sh"
+# bundle_host_workers is CALLED by this orchestrator script, so an older frozen target whose
+# helper predates it must get the orchestrator's copy (EI-21078401508503033, WI-10003497).
+# shellcheck source=lib/host-worker-bundler.sh
+source "$HERE/lib/host-worker-bundler.sh"
+papercusp_ensure_host_worker_bundler "$HERE/../../apps/operator/bin/bundle-host-common.sh" || exit 1
 HOST_EXTERNALS=(
   "${HOST_COMMON_EXTERNALS[@]}"
 
