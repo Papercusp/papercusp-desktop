@@ -41,7 +41,13 @@ LIVE_DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIVE_REPO_DIR="${PAPERCUSP_REPO_DIR:-/home/marsh-office/papercupai-workspace/papercusp}"
 DESKTOP_DIR="$LIVE_DESKTOP_DIR"
 REPO_DIR="$LIVE_REPO_DIR"
-CARGO_TARGET="${CARGO_TARGET_DIR:-$HOME/.cargo-target}"
+# Ask Cargo where it writes, never a hard-coded name (WI-10003499). The old
+# `${CARGO_TARGET_DIR:-$HOME/.cargo-target}` default outlived the 2026-09-03
+# target-dir move. tauri built the .deb into the configured target, and this
+# script then refused with "emitted no fresh .deb" at the old path.
+# shellcheck source=lib/cargo-target-root.sh
+source "$LIVE_DESKTOP_DIR/bin/lib/cargo-target-root.sh"
+CARGO_TARGET="$(papercusp_cargo_target_root "$LIVE_DESKTOP_DIR/src-tauri")"
 
 DEB_SOURCE_SNAPSHOT_ROOT=""
 DEB_SOURCE_SNAPSHOT_PARENT=""

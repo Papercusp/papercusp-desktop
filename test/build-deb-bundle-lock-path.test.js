@@ -35,12 +35,41 @@ const scriptPath = path.join(root, 'bin/build-and-archive-deb.sh');
  * acquisition / build invocation so this never contends a real lock or
  * spawns a build.
  */
-function computeLockPath({ cargoTargetDir, explicitLock } = {}) {
+/**
+ * WI-10003499: CARGO_TARGET now comes from Cargo itself
+ * (bin/lib/cargo-target-root.sh), so the harness runs against a HERMETIC Cargo
+ * fixture. That is a throwaway crate plus a private CARGO_HOME whose config.toml
+ * pins `build.target-dir`. The host's real ~/.cargo/config.toml can then never
+ * decide the verdict. The real resolver is symlinked into the fixture, so the
+ * code under test is the checked-in file.
+ */
+const RUSTUP_HOME = process.env.RUSTUP_HOME || path.join(os.homedir(), '.rustup');
+
+function makeCargoFixture(configuredTarget) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-cargo-fixture-'));
+  fs.mkdirSync(path.join(dir, 'src-tauri', 'src'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'src-tauri', 'Cargo.toml'),
+    '[package]\nname = "deb-lock-fixture"\nversion = "0.1.0"\nedition = "2021"\n');
+  fs.writeFileSync(path.join(dir, 'src-tauri', 'src', 'lib.rs'), '');
+  fs.mkdirSync(path.join(dir, 'bin', 'lib'), { recursive: true });
+  fs.symlinkSync(path.join(root, 'bin', 'lib', 'cargo-target-root.sh'),
+    path.join(dir, 'bin', 'lib', 'cargo-target-root.sh'));
+  fs.mkdirSync(path.join(dir, 'cargo-home'));
+  fs.writeFileSync(path.join(dir, 'cargo-home', 'config.toml'),
+    `[build]\ntarget-dir = ${JSON.stringify(configuredTarget || path.join(dir, 'configured-target'))}\n`);
+  return dir;
+}
+
+function computeLockPath({ cargoTargetDir, explicitLock, configuredTarget } = {}) {
   const full = fs.readFileSync(scriptPath, 'utf8');
 
-  const targetLineStart = full.indexOf('CARGO_TARGET="');
-  assert.ok(targetLineStart > 0, 'CARGO_TARGET assignment not found — did it move or get renamed?');
-  const targetLineEnd = full.indexOf('\n', targetLineStart);
+  const sourceLine = 'source "$LIVE_DESKTOP_DIR/bin/lib/cargo-target-root.sh"';
+  const targetLineStart = full.indexOf(sourceLine);
+  assert.ok(targetLineStart > 0, 'the shared Cargo target resolver is no longer sourced — did CARGO_TARGET regress to a hard-coded default?');
+  const assignAt = full.indexOf('CARGO_TARGET="', targetLineStart);
+  assert.ok(assignAt > targetLineStart, 'CARGO_TARGET assignment not found — did it move or get renamed?');
+  const targetLineEnd = full.indexOf('\n', assignAt);
+  const fixture = makeCargoFixture(configuredTarget);
 
   const bundleStart = full.indexOf('BUNDLE_LOCK="${PAPERCUSP_DEB_BUNDLE_LOCK');
   assert.ok(bundleStart > 0, 'BUNDLE_LOCK assignment not found — did it move or get renamed?');
@@ -51,22 +80,32 @@ function computeLockPath({ cargoTargetDir, explicitLock } = {}) {
 
   const harness = [
     'set -euo pipefail',
+    `LIVE_DESKTOP_DIR=${JSON.stringify(fixture)}`,
     full.slice(targetLineStart, targetLineEnd),
     full.slice(bundleStart, bundleEnd),
     'printf \'%s\\n%s\\n\' "$CARGO_TARGET" "$BUNDLE_LOCK"',
     '',
   ].join('\n');
 
-  const env = { ...process.env };
+  const env = {
+    ...process.env,
+    CARGO_HOME: path.join(fixture, 'cargo-home'),
+    RUSTUP_HOME,
+  };
+  delete env.CARGO_BUILD_TARGET_DIR;
   if (cargoTargetDir === undefined) delete env.CARGO_TARGET_DIR;
   else env.CARGO_TARGET_DIR = cargoTargetDir;
   if (explicitLock === undefined) delete env.PAPERCUSP_DEB_BUNDLE_LOCK;
   else env.PAPERCUSP_DEB_BUNDLE_LOCK = explicitLock;
 
-  const res = spawnSync('bash', ['-c', harness], { encoding: 'utf8', env });
-  assert.equal(res.status, 0, `harness failed: ${res.stderr}`);
-  const [cargoTarget, bundleLock] = res.stdout.trim().split('\n');
-  return { cargoTarget, bundleLock };
+  try {
+    const res = spawnSync('bash', ['-c', harness], { encoding: 'utf8', env });
+    assert.equal(res.status, 0, `harness failed: ${res.stderr}`);
+    const [cargoTarget, bundleLock] = res.stdout.trim().split('\n');
+    return { cargoTarget, bundleLock, fixture };
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
 }
 
 test('default lock path lives UNDER CARGO_TARGET, not a fixed /tmp path', () => {
@@ -96,11 +135,35 @@ test('two different CARGO_TARGET_DIR values get two different lock paths (no cro
   }
 });
 
-test('unset CARGO_TARGET_DIR still serializes the common case under $HOME/.cargo-target', () => {
-  const { bundleLock } = computeLockPath({});
-  const expectedHome = process.env.HOME || os.homedir();
+test('unset CARGO_TARGET_DIR follows the target Cargo is CONFIGURED to use, never $HOME/.cargo-target', () => {
+  // WI-10003499: this test used to pin `$HOME/.cargo-target`. Once the box
+  // moved `build.target-dir` to the data disk (2026-09-03), that pin kept the
+  // script looking where Cargo no longer writes, and a successful build
+  // FATAL'd with "emitted no fresh .deb". The common case still serializes on
+  // ONE shared lock, now under the configured target.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-lock-path-'));
+  try {
+    const relocated = path.join(tmp, 'data disk', 'cargo-target');
+    const { cargoTarget, bundleLock } = computeLockPath({ configuredTarget: relocated });
+    const expectedHome = process.env.HOME || os.homedir();
 
-  assert.equal(bundleLock, path.join(expectedHome, '.cargo-target', '.deb-bundle.lock'));
+    assert.equal(cargoTarget, relocated);
+    assert.equal(bundleLock, path.join(relocated, '.deb-bundle.lock'));
+    assert.notEqual(cargoTarget, path.join(expectedHome, '.cargo-target'));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('an exported EMPTY CARGO_TARGET_DIR does not hide the configured target', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-lock-path-'));
+  try {
+    const relocated = path.join(tmp, 'relocated-target');
+    const { cargoTarget } = computeLockPath({ cargoTargetDir: '', configuredTarget: relocated });
+    assert.equal(cargoTarget, relocated);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('an explicit PAPERCUSP_DEB_BUNDLE_LOCK still overrides the derived default', () => {

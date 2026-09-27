@@ -60,6 +60,8 @@ __pc_slot_lockdir="${HOME}/.papercusp/desktop-dev-slots"
 __pc_claim_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=release-artifacts.sh
 source "$__pc_claim_dir/release-artifacts.sh"
+# shellcheck source=cargo-target-root.sh
+source "$__pc_claim_dir/cargo-target-root.sh"
 
 # Is a live process EXECUTING out of this target dir?
 #
@@ -249,27 +251,8 @@ __pc_cargo_target_root() {
   elif [[ ! -f "$project/Cargo.toml" ]]; then
     project="$__pc_claim_dir/../../src-tauri"
   fi
-  node - "$project" <<'JS'
-const { execFileSync } = require('node:child_process');
-const path = require('node:path');
-const env = { ...process.env };
-// The caller already honored a non-empty explicit override. An exported empty
-// value must not hide Cargo's configuration during this read-only resolution.
-delete env.CARGO_TARGET_DIR;
-try {
-  const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--format-version', '1'], {
-    cwd: process.argv[2], env, encoding: 'utf8', timeout: 10000,
-    maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
-  }));
-  if (typeof metadata.target_directory !== 'string' || !path.isAbsolute(metadata.target_directory)) {
-    throw new Error('Cargo metadata did not return an absolute target_directory');
-  }
-  process.stdout.write(metadata.target_directory);
-} catch (error) {
-  console.error(`ERROR: cannot resolve Cargo target directory for ${process.argv[2]} — refusing to claim a different filesystem: ${String(error.stderr || error.message).slice(0, 1200)}`);
-  process.exit(1);
-}
-JS
+  # The shared resolver (bin/lib/cargo-target-root.sh) is the single reader.
+  papercusp_cargo_metadata_target_dir "$project"
 }
 
 __pc_claim_target_dir() {
