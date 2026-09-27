@@ -1252,76 +1252,8 @@ if [[ ! -f "$SIDECAR_DIR/systemd-scope-env-runner.mjs" ]]; then
 fi
 echo "    ✓ staged systemd-scope-env-runner.mjs next to serve.mjs"
 
-# WORKER SCRIPTS — the SAME dirname(import.meta.url) gotcha as git-ext-bridge.mjs
-# above, and it has been silently live in the packaged desktop app (WI-37555,
-# measured 2026-08-09). Each of these modules spawns `new Worker(resolve(dirname(
-# here), '<name>.script.mjs'))`, which inside this bundle resolves to $SIDECAR_DIR
-# — and NOTHING was copying them here, so the spawn failed with ENOENT on every
-# packaged install. Measured on the 2026-08-09 06:06 sidecar build: serve.mjs
-# REFERENCES local-embedder-worker.script.mjs, and no *.script.mjs existed beside
-# it at all.
-#
-# Every one of these workers has a deliberate INLINE fallback, which is exactly
-# why this went unnoticed — the app keeps working and merely moves the work onto
-# the main event loop:
-#   - local-embedder-worker  → every embed runs inline ONNX (~6s vs ~36ms; WI-4196)
-#   - cpu-task-worker        → large responses JSON.stringify on the loop (EI-19465075959589134)
-#   - local-reranker-worker  → rerank blocks the loop AND its timeout bound stops
-#                              being exact, re-opening EI-20005411672741677 on the
-#                              no-sidecar desktop install, which is that bug's
-#                              entire exposed case.
-# WARN rather than exit, matching bundle-host.sh: a missing worker is slow, not
-# broken, and a hard failure here would block a desktop build over a perf asset.
-# `packages/operator-core/lib/worker-scripts-bundled.test.ts` fails if a NEW
-# worker script is added without a copy step in BOTH bundlers.
-for _worker_src in \
-  "$REPO_ROOT/libs/generic/memory/src/local-embedder-worker.script.mjs" \
-  "$REPO_ROOT/packages/operator-core/lib/cpu-task-worker.script.mjs" \
-  "$REPO_ROOT/libs/generic/rerank/src/local-reranker-worker.script.mjs"; do
-  _worker_name="$(basename "$_worker_src")"
-  if [[ -f "$_worker_src" ]]; then
-    cp "$_worker_src" "$SIDECAR_DIR/$_worker_name"
-    echo "    ✓ staged $_worker_name next to serve.mjs"
-  else
-    echo "WARNING: worker script not found at $_worker_src — that subsystem will run INLINE on the main event loop in the packaged app"
-  fi
-done
-
-# Blocked-event-loop sentinel worker (EI-20013016005187186). Unlike the workers
-# above this one is TypeScript and imports the shared decider, so a plain copy
-# cannot work: the packaged desktop sidecar runs `node serve.mjs` with NO tsx
-# loader. Bundle it to a self-contained .mjs beside the entry, matching the
-# host bundle's runtime artifact. The sentinel's runtime resolver prefers this
-# .mjs and falls back to the .ts only for tsx runtimes.
-SENTINEL_WORKER_SRC="$REPO_ROOT/packages/operator-core/lib/event-loop-sentinel.worker.ts"
-if [[ -f "$SENTINEL_WORKER_SRC" ]]; then
-  npx --yes esbuild@0.25.0 "$SENTINEL_WORKER_SRC" \
-    --bundle --platform=node --format=esm --target=node22 \
-    --outfile="$SIDECAR_DIR/event-loop-sentinel.worker.mjs" \
-    --log-limit=5 \
-    && echo "    ✓ bundled event-loop sentinel worker beside serve.mjs" \
-    || echo "WARNING: sentinel worker bundle FAILED — the desktop will run with NO blocked-loop detection"
-else
-  echo "WARNING: sentinel worker not found at $SENTINEL_WORKER_SRC — the desktop will run with NO blocked-loop detection"
-fi
-
-# Snapshot-fold worker (WI-10002855). TypeScript, so esbuild it beside serve.mjs like
-# the sentinel. The own-log compaction folds its whole history in this thread; without
-# the .mjs every compaction FAILS rather than freezing the sidecar's event loop.
-FOLD_WORKER_SRC="$REPO_ROOT/packages/operator-core/lib/sync/hyperbee/snapshot-fold.worker.ts"
-if [[ -f "$FOLD_WORKER_SRC" ]]; then
-  # sodium-native stays external (D-024: the P-530 filter opens `{__rekey}` rows in
-  # this thread); it resolves from the sidecar's node_modules, as for serve.mjs.
-  npx --yes esbuild@0.25.0 "$FOLD_WORKER_SRC" \
-    --bundle --platform=node --format=esm --target=node22 \
-    --external:sodium-native \
-    --outfile="$SIDECAR_DIR/snapshot-fold.worker.mjs" \
-    --log-limit=5 \
-    && echo "    ✓ bundled snapshot-fold worker beside serve.mjs" \
-    || echo "WARNING: snapshot-fold worker bundle FAILED — own-log compactions will fail until it is rebuilt"
-else
-  echo "WARNING: snapshot-fold worker not found at $FOLD_WORKER_SRC — own-log compactions will fail"
-fi
+# Required workers are shared with the host and current-build rig.
+bundle_host_workers "$REPO_ROOT" "$SIDECAR_DIR" || exit 1
 
 # opusscript_native_wasm.wasm (EI-501) — the SAME dirname(import.meta.url)
 # gotcha as git-ext-bridge.mjs above, one layer deeper: esbuild INLINES

@@ -30,6 +30,14 @@ if [[ ! -r "$HERE/seed-resource-root.sh" ]]; then
 fi
 source "$HERE/seed-resource-root.sh"
 
+# New staged payloads must match the host/desktop runtime graph. Restart-only
+# can still recover an older payload; it does not certify that payload current.
+RUNTIME_SIBLINGS=(
+  local-embedder-worker.script.mjs cpu-task-worker.script.mjs
+  local-reranker-worker.script.mjs event-loop-sentinel.worker.mjs
+  snapshot-fold.worker.mjs systemd-scope-env-runner.mjs
+)
+
 APP="/Applications/Papercusp Server.app"
 GUI_APP="/Applications/Papercusp GUI.app"
 SIDECAR="$APP/Contents/Resources/sidecar"
@@ -115,6 +123,12 @@ validate_payload() {
     for f in "$root/BUILD-STAMP.txt" "$root/PAYLOAD-MANIFEST.sha256"; do
       [ -s "$f" ] || { echo "FATAL: staged payload is missing $f" >&2; return 1; }
     done
+    for f in "${RUNTIME_SIBLINGS[@]}"; do
+      [ -s "$root/$f" ] || { echo "FATAL: staged payload is missing runtime sibling $f" >&2; return 1; }
+      awk -v name="$f" '$2 == name && length($1) == 64 { found = 1 } END { exit !found }' \
+        "$root/PAYLOAD-MANIFEST.sha256" \
+        || { echo "FATAL: runtime sibling is not hash-bound: $f" >&2; return 1; }
+    done
   fi
   if [ -e "$root/sql/000-baseline.sql" ] || [ ! -e "$root/sql/001-bootstrap.sql" ]; then
     echo "FATAL: staged payload sql/ is not the locks migration set" >&2
@@ -168,6 +182,10 @@ overlay_payload() {
   local candidate="$1" stage="$2" subtree
   cp -a "$stage/serve.mjs" "$candidate/serve.mjs.new"
   mv -f "$candidate/serve.mjs.new" "$candidate/serve.mjs"
+  for subtree in "${RUNTIME_SIBLINGS[@]}"; do
+    cp "$stage/$subtree" "$candidate/$subtree.new" || return 1
+    mv -f "$candidate/$subtree.new" "$candidate/$subtree" || return 1
+  done
   for subtree in db-sql sql prompts; do
     rm -rf "$candidate/$subtree"
     cp -a "$stage/$subtree" "$candidate/$subtree"
@@ -197,14 +215,14 @@ write_self_test_manifest() {
   (
     cd "$root" || exit 1
     if command -v shasum >/dev/null 2>&1; then
-      find serve.mjs BUILD-STAMP.txt db-sql sql prompts \
+      find serve.mjs "${RUNTIME_SIBLINGS[@]}" BUILD-STAMP.txt db-sql sql prompts \
         node_modules/@papercusp/embedded-postgres-server/package.json \
         node_modules/@papercusp/embedded-postgres-server/src \
         -type f -print0 \
         | LC_ALL=C sort -z \
         | xargs -0 shasum -a 256 > PAYLOAD-MANIFEST.sha256
     else
-      find serve.mjs BUILD-STAMP.txt db-sql sql prompts \
+      find serve.mjs "${RUNTIME_SIBLINGS[@]}" BUILD-STAMP.txt db-sql sql prompts \
         node_modules/@papercusp/embedded-postgres-server/package.json \
         node_modules/@papercusp/embedded-postgres-server/src \
         -type f -print0 \
@@ -240,7 +258,7 @@ rollback_payload() {
 }
 
 run_filesystem_self_test() {
-  local root current stage candidate backup failed external
+  local root current stage candidate backup failed external sibling
   root="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-sidecar-selftest.XXXXXX")" || return 1
   current="$root/current"
   stage="$root/stage"
@@ -260,6 +278,10 @@ run_filesystem_self_test() {
   ln -s "$external" "$current/node_modules/@papercusp"
   printf '%s\n' old > "$current/serve.mjs"
   printf '%s\n' new > "$stage/serve.mjs"
+  for sibling in "${RUNTIME_SIBLINGS[@]}"; do
+    printf '%s\n' old-worker > "$current/$sibling"
+    printf '%s\n' new-worker > "$stage/$sibling"
+  done
   printf '%s\n' '{"name":"embedded-postgres-server"}' \
     > "$stage/node_modules/@papercusp/embedded-postgres-server/package.json"
   printf '%s\n' 'export function migrationTransactionChunks(ddl) { return [ddl]; }' \
@@ -270,6 +292,29 @@ run_filesystem_self_test() {
   : > "$stage/db-sql/000-baseline.sql"
   write_self_test_manifest "$stage" || { rm -rf "$root"; return 1; }
   validate_payload "$stage" 1 || { rm -rf "$root"; return 1; }
+
+  # A worker omitted from BOTH the payload and its manifest used to pass.
+  # Also reject a present-but-unbound worker and changed worker bytes.
+  for sibling in "${RUNTIME_SIBLINGS[@]}"; do
+    cp "$stage/PAYLOAD-MANIFEST.sha256" "$stage/manifest-saved"
+    awk -v name="$sibling" '$2 != name' "$stage/manifest-saved" > "$stage/PAYLOAD-MANIFEST.sha256"
+    if validate_payload "$stage" 1 >/dev/null 2>&1; then
+      echo "SELF-TEST FAIL: unbound worker was admitted: $sibling" >&2
+      rm -rf "$root"; return 1
+    fi
+    rm "$stage/$sibling"
+    if validate_payload "$stage" 1 >/dev/null 2>&1; then
+      echo "SELF-TEST FAIL: missing worker was admitted: $sibling" >&2
+      rm -rf "$root"; return 1
+    fi
+    mv "$stage/manifest-saved" "$stage/PAYLOAD-MANIFEST.sha256"
+    printf '%s\n' tampered-worker > "$stage/$sibling"
+    if validate_payload "$stage" 1 >/dev/null 2>&1; then
+      echo "SELF-TEST FAIL: tampered worker was admitted: $sibling" >&2
+      rm -rf "$root"; return 1
+    fi
+    printf '%s\n' new-worker > "$stage/$sibling"
+  done
 
   printf '%s\n' tampered >> "$stage/serve.mjs"
   if validate_payload "$stage" 1 >/dev/null 2>&1; then
@@ -292,6 +337,9 @@ run_filesystem_self_test() {
 
   prepare_candidate "$current" "$stage" "$candidate" || { rm -rf "$root"; return 1; }
   [ "$(cat "$candidate/serve.mjs")" = new ] || { rm -rf "$root"; return 1; }
+  for sibling in "${RUNTIME_SIBLINGS[@]}"; do
+    [ "$(cat "$candidate/$sibling")" = new-worker ] || { rm -rf "$root"; return 1; }
+  done
   [ "$(cat "$candidate/node_modules/@papercusp/embedded-postgres-server/src/migration-runner.js")" != old ] \
     || { echo "SELF-TEST FAIL: candidate package source was not refreshed" >&2; rm -rf "$root"; return 1; }
   [ "$(cat "$external/embedded-postgres-server/src/migration-runner.js")" = old ] \
@@ -300,6 +348,9 @@ run_filesystem_self_test() {
   [ "$(cat "$current/serve.mjs")" = new ] || { rm -rf "$root"; return 1; }
   rollback_payload "$current" "$backup" "$failed" || { rm -rf "$root"; return 1; }
   [ "$(cat "$current/serve.mjs")" = old ] || { rm -rf "$root"; return 1; }
+  for sibling in "${RUNTIME_SIBLINGS[@]}"; do
+    [ "$(cat "$current/$sibling")" = old-worker ] || { rm -rf "$root"; return 1; }
+  done
   [ "$(cat "$failed/serve.mjs")" = new ] || { rm -rf "$root"; return 1; }
   rm -rf "$root"
   echo "SELF-TEST PASS: staged validation rejects missing/tampered payloads and swap/rollback preserves the previous payload"
