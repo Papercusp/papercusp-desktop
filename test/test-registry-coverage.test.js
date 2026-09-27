@@ -47,14 +47,30 @@ function testChainScriptNames() {
   return names;
 }
 
+/**
+ * The `test/…` arguments exactly as the SHELL splits them — whitespace tokens, not a
+ * regex scan over the body. A regex scan counted `test/a.test.jstest/b.test.js` (a
+ * dropped space) as BOTH files, while `node --test` received ONE glob that matched no
+ * file and — Node ≥21 treats arguments as globs — skipped it without a word, so two
+ * guards silently stopped running (WI-10003497).
+ */
+function testPathTokens(body) {
+  return body.split(/\s+/).filter((t) => t.startsWith('test/'));
+}
+
+/** Tokens that name no real test file: typos, glued paths, deleted files. */
+function findDeadTokens(tokens, onDisk) {
+  return tokens.filter((t) => !onDisk.has(t));
+}
+
+/** Every `test/…` token the scripts `npm test` reaches. */
+function tokensReachableFromNpmTest() {
+  return testChainScriptNames().flatMap((name) => testPathTokens(pkg.scripts?.[name] ?? ''));
+}
+
 /** Every test/*.test.js file named by the scripts `npm test` reaches. */
 function filesReachableFromNpmTest() {
-  const reachable = new Set();
-  for (const name of testChainScriptNames()) {
-    const body = pkg.scripts?.[name] ?? '';
-    for (const m of body.matchAll(/test\/[\w.-]+\.test\.js/g)) reachable.add(m[0]);
-  }
-  return reachable;
+  return new Set(tokensReachableFromNpmTest());
 }
 
 function filesOnDisk() {
@@ -99,6 +115,32 @@ test('every test/*.test.js is run by `npm test`', () => {
       'one until the thing it guards against actually ships. Do NOT silence this by ' +
       'adding the file to EXCLUSIONS unless it genuinely cannot run in the default ' +
       'suite (external hardware, network, or minutes of wall-clock) — and then say why.',
+  );
+});
+
+test('CONTROL: a glued or missing path is a dead token, not two reachable files', () => {
+  const onDisk = new Set(['test/a.test.js', 'test/b.test.js']);
+  const tokens = testPathTokens('node --test test/a.test.jstest/b.test.js test/gone.test.js');
+  // The exact WI-10003497 shape: neither half may count as reachable…
+  assert.equal(new Set(tokens).has('test/a.test.js'), false);
+  assert.equal(new Set(tokens).has('test/b.test.js'), false);
+  // …and both the glued token and the stale one are reported.
+  assert.deepEqual(findDeadTokens(tokens, onDisk), ['test/a.test.jstest/b.test.js', 'test/gone.test.js']);
+  // Calibration: a correctly spaced script yields no dead tokens.
+  assert.deepEqual(findDeadTokens(testPathTokens('node --test test/a.test.js test/b.test.js'), onDisk), []);
+});
+
+test('every `test/…` argument of `npm test` names a real test file', () => {
+  // `node --test` treats each argument as a glob and silently skips one that matches
+  // nothing, so a typo or a dropped space removes tests with a GREEN exit.
+  const dead = findDeadTokens(tokensReachableFromNpmTest(), new Set(filesOnDisk()));
+  assert.deepEqual(
+    dead,
+    [],
+    'These `test/…` arguments name no file, so `node --test` silently skips them:\n' +
+      dead.map((t) => `  • ${t}`).join('\n') +
+      '\n\nFix the path (a missing space between two entries is the usual cause) ' +
+      'in the `test:shell` script of papercusp-desktop/package.json.',
   );
 });
 
