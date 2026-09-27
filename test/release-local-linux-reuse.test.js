@@ -106,6 +106,20 @@ function runFreshWithFailedSibling({ emitterFails = false } = {}) {
     `printf "final-appimage" > ${JSON.stringify(path.join(bundle, 'appimage', 'Papercusp_GUI_0.0.18_amd64.AppImage'))}`,
     `printf "final-appimage-signature" > ${JSON.stringify(path.join(bundle, 'appimage', 'Papercusp_GUI_0.0.18_amd64.AppImage.sig'))}`,
   ].join('\n'));
+  // The Linux leg invokes Tauri as `env ... npx ...` (9a095e76), and `env`
+  // execs an EXTERNAL binary — a bash function named npx is invisible to it,
+  // so the stub must be a PATH executable or the real Tauri CLI runs.
+  const stubs = path.join(temp, 'stubs');
+  fs.mkdirSync(stubs, { recursive: true });
+  const deb = path.join(temp, 'target', 'release', 'bundle', 'deb');
+  fs.writeFileSync(path.join(stubs, 'npx'), [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    'role=GUI',
+    '[[ "$*" != *tauri.server.conf.json* ]] || role=Server',
+    `mkdir -p ${JSON.stringify(deb)}`,
+    `printf "raw:%s" "$role" > ${JSON.stringify(deb)}"/Papercusp_\${role}_0.0.18_amd64.deb"`,
+  ].join('\n'), { mode: 0o755 });
   const emitter = path.join(bin, 'emit-build-provenance.sh');
   if (emitterFails) fs.writeFileSync(emitter, 'exit 23\n');
   else fs.symlinkSync(path.join(root, 'bin', 'emit-build-provenance.sh'), emitter);
@@ -130,12 +144,7 @@ function runFreshWithFailedSibling({ emitterFails = false } = {}) {
       'KEY_FILE=unused-test-key',
       'DESKTOP_CHANNEL_BUILD_ENV=(); DESKTOP_CHANNEL_BUILD_CFG=(); PC_NICE=()',
       'CHANNEL=alpha',
-      'npx() {',
-      '  local role=GUI',
-      '  [[ "$*" != *tauri.server.conf.json* ]] || role=Server',
-      '  mkdir -p "$CARGO_TARGET_ROOT/release/bundle/deb"',
-      '  printf "raw:%s" "$role" > "$CARGO_TARGET_ROOT/release/bundle/deb/Papercusp_${role}_0.0.18_amd64.deb"',
-      '}',
+      `export PATH=${JSON.stringify(stubs)}:"$PATH"`,
       linuxReuseHarness,
       '(exit 7) & WIN_PID=$!',
       'if wait "$WIN_PID"; then win_rc=0; else win_rc=$?; fi',
