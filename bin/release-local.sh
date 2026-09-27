@@ -120,6 +120,20 @@ CHANNEL="$2"
 ORCHESTRATOR_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+# A detached systemd launch may inherit a PATH without rustup's bin directory.
+# Resolve Cargo before the first metadata query while preserving a toolchain the
+# caller deliberately placed earlier on PATH.
+ensure_release_cargo_path() {
+  command -v cargo >/dev/null 2>&1 && return 0
+  local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+  if [[ -x "$cargo_home/bin/cargo" ]]; then
+    export PATH="$PATH:$cargo_home/bin"
+  fi
+  command -v cargo >/dev/null 2>&1 || {
+    echo "ERROR: cargo not resolvable (checked PATH and $cargo_home/bin)" >&2
+    return 12
+  }
+}
 # Signing-key selection must agree with every OTHER producer in bin/ — and with this
 # same file's Windows preflight below, which already resolves
 # "${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/...}" because build-windows-cross.sh:121 does.
@@ -339,6 +353,7 @@ source "$ORCHESTRATOR_HERE/lib/inno-spanned-server.sh"
 # CARGO_TARGET_ROOT below is derived from `cargo metadata`, so artifact
 # collection follows the claimed dir automatically.
 # shellcheck source=lib/claim-target-dir.sh
+ensure_release_cargo_path
 source "$ORCHESTRATOR_HERE/lib/claim-target-dir.sh"
 require_release_host
 

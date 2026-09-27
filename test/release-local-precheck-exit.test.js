@@ -28,7 +28,9 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
@@ -41,6 +43,50 @@ const root = path.resolve(__dirname, '..');
 // commit even when nothing goes wrong. One line here removes that need.
 const SCRIPT = process.env.PROBE_RELEASE_LOCAL || path.join(root, 'bin', 'release-local.sh');
 const src = () => fs.readFileSync(SCRIPT, 'utf8');
+
+test('release launcher resolves Cargo under a minimal systemd PATH before build preflight', (t) => {
+  const text = src();
+  const definition = text.match(/^ensure_release_cargo_path\(\) \{\n[\s\S]*?^\}/m)?.[0];
+  assert(definition, 'Cargo PATH resolver is missing');
+  const call = firstLine(text, /^ensure_release_cargo_path$/);
+  const targetClaim = firstLine(text, /^source "\$ORCHESTRATOR_HERE\/lib\/claim-target-dir.sh"$/);
+  const metadata = firstLine(text, /^CARGO_TARGET_ROOT="\$\(cd /);
+  assert(call > 0 && call < targetClaim && targetClaim < metadata, 'Cargo must be resolved before release build setup');
+
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'release-cargo-path-'));
+  t.after(() => fs.rmSync(fixture, { recursive: true, force: true }));
+  const home = path.join(fixture, 'home');
+  const relocated = path.join(fixture, 'relocated');
+  const preferred = path.join(fixture, 'preferred');
+  for (const bin of [path.join(home, '.cargo', 'bin'), path.join(relocated, 'bin'), preferred]) {
+    fs.mkdirSync(bin, { recursive: true });
+  }
+  const writeCargo = (bin, name) => {
+    const file = path.join(bin, 'cargo');
+    fs.writeFileSync(file, `#!/bin/sh\nprintf '%s\\n' '${name}'\n`, { mode: 0o755 });
+    return file;
+  };
+  writeCargo(path.join(home, '.cargo', 'bin'), 'default');
+  writeCargo(path.join(relocated, 'bin'), 'relocated');
+  writeCargo(preferred, 'preferred');
+  const run = (env) => spawnSync('bash', ['-c', `${definition}\nensure_release_cargo_path || exit $?\ncargo`], {
+    encoding: 'utf8',
+    env: { HOME: home, PATH: '/usr/bin:/bin', ...env },
+  });
+
+  let result = run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), 'default');
+  result = run({ CARGO_HOME: relocated });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), 'relocated');
+  result = run({ CARGO_HOME: relocated, PATH: `${preferred}:/usr/bin:/bin` });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), 'preferred');
+  result = run({ CARGO_HOME: path.join(fixture, 'missing') });
+  assert.equal(result.status, 12);
+  assert.match(result.stderr, /cargo not resolvable/);
+});
 
 /** 1-based line index of the first line matching `re`, or -1. */
 function firstLine(text, re) {
