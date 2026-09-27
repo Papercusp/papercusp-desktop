@@ -1277,6 +1277,14 @@ release_task_leg_commit() { # <leg> <bundle-dir> <reused:0|1>
     echo "ERROR: release journal did not confirm $stage committed." >&2
     return 1
   }
+  # WI-10003545. Flipping ACTION to reuse routes every later settle of this leg in
+  # THIS process (the collection-join commit below) through the reuse branch, which
+  # checks the bytes against ARTIFACT_SET. That slot was loaded at leg start from
+  # the begin response, and a cross-task `reconcile` begin returns the NEW intent's
+  # refs, which carry no digest — so without this the parent settle refused a
+  # receipt the journal had just committed WITH a digest ("no artifact-set digest",
+  # op 2db8843f, 0.0.22). The digest just committed is the one to check against.
+  release_task_leg_set "$leg" ARTIFACT_SET "$output_set"
   release_task_leg_set "$leg" ACTION reuse
   decision="$([[ "$reused" == "1" ]] && printf cache-hit || printf built)"
   release_task_emit_timing "$stage" "$decision" "$verification_ms"
