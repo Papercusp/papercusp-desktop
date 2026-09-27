@@ -26,7 +26,11 @@ IMPLEMENTATION_STATE='ready-v1'
 PHASE_A_POT_HOME='hello-world-3-pot'
 PHASE_A_REPO_KEY='gh-1303510992'
 TOWER_GIT_SYNC_SLUG="$PHASE_A_POT_HOME"
-VM_GIT_SYNC_SLUG='hello-world'
+# The VM's canonical invite-link join registers the pot repo under the pot slug
+# (joined_via_link + remote_hive + self_repo), and that entry owns git-sync. The
+# old joinHiveAsView member 'hello-world' is gone since the P-007 fresh join
+# (WI-10003546). Mirrors PHASE_A_VM_GIT_SYNC_SLUG in physical-drill-phase-a.ts.
+VM_GIT_SYNC_SLUG="$PHASE_A_POT_HOME"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
 PRODUCER="$REPO_ROOT/packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts"
@@ -44,15 +48,15 @@ DEPLOY="$HERE/deploy.sh"
 # the call site so this destructive gate always receives the direct readiness
 # shape rather than a {summary,_projection} spill wrapper.
 PHASE_A_TOWER_STATUS_ARGS='{"targetHarness":{"workspaceId":"papercusp-workspace","harnessSlug":"hello-world-3-pot"},"projection":{"pick":["substrateActive","reachedSubstrateOwner","healthInputsObserved","bootedCount","harnesses[].workspaceId","harnesses[].harnessSlug","harnesses[].verdict","harnesses[].reasons","contentConnectivity[].workspaceId","contentConnectivity[].harnessSlug","contentConnectivity[].topicHex","contentConnectivity[].contentPeers","contentConnectivity[].lastContentAnnounceRecvMs"]}}'
-PHASE_A_VM_STATUS_ARGS='{"targetHarness":{"workspaceId":"papercusp-workspace","harnessSlug":"hello-world"},"projection":{"pick":["substrateActive","reachedSubstrateOwner","healthInputsObserved","bootedCount","harnesses[].workspaceId","harnesses[].harnessSlug","harnesses[].verdict","harnesses[].reasons","contentConnectivity[].workspaceId","contentConnectivity[].harnessSlug","contentConnectivity[].topicHex","contentConnectivity[].contentPeers","contentConnectivity[].lastContentAnnounceRecvMs"]}}'
+PHASE_A_VM_STATUS_ARGS='{"targetHarness":{"workspaceId":"papercusp-workspace","harnessSlug":"hello-world-3-pot"},"projection":{"pick":["substrateActive","reachedSubstrateOwner","healthInputsObserved","bootedCount","harnesses[].workspaceId","harnesses[].harnessSlug","harnesses[].verdict","harnesses[].reasons","contentConnectivity[].workspaceId","contentConnectivity[].harnessSlug","contentConnectivity[].topicHex","contentConnectivity[].contentPeers","contentConnectivity[].lastContentAnnounceRecvMs"]}}'
 TOWER_CALL="$HOME/.local/bin/ptool"
 TOWER_REPO="$HOME/.papercusp/pot-git/$PHASE_A_POT_HOME/$PHASE_A_REPO_KEY.git"
 VM_REPO="/Users/aviweiss/.papercusp/pot-git/$PHASE_A_POT_HOME/$PHASE_A_REPO_KEY.git"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no)
 
-# The pot home is the owner/tower's self_repo, but on a joined VM it is an
-# intentionally ineligible remote-hive view. All production ticks must target
-# the runnable member entry that owns system:git-sync on that host.
+# Every production tick targets the entry that owns system:git-sync on its
+# host: the tower's self_repo pot home, and the VM's link-joined clone of the
+# same pot repo (see VM_GIT_SYNC_SLUG above).
 run_tower_git_sync() {
   printf '{"installSlug":"%s"}\n' "$TOWER_GIT_SYNC_SLUG" \
     | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME"
@@ -384,7 +388,7 @@ fs.writeFileSync(`${dir}/verify-input.json`, JSON.stringify({
   identities: { towerDeviceKey, vmDeviceKey },
   quarantine: read('quarantine'),
   bootstrap: {
-    tool: 'git-sync:run', installSlug: 'hello-world', targetHost: 'vm', fired: true,
+    tool: 'git-sync:run', installSlug: 'hello-world-3-pot', targetHost: 'vm', fired: true,
     startedAt: bootstrapStarted, finishedAt: bootstrapFinished,
   },
   observations: {
@@ -513,7 +517,7 @@ const [
   reverseReceiveStarted, reverseReceiveFinished, reverseFinished,
 ] = process.argv.slice(2);
 const read = (direction, name) => JSON.parse(fs.readFileSync(`${dir}/${direction}/${name}.json`, 'utf8'));
-const gitSyncSlug = (host) => host === 'tower' ? 'hello-world-3-pot' : 'hello-world';
+const gitSyncSlug = (host) => host === 'tower' ? 'hello-world-3-pot' : 'hello-world-3-pot';
 const direction = ({ name, sourceHost, destinationHost, sourceDeviceKey, destinationDeviceKey,
   windowStarted, publishStarted, publishFinished, receiveStarted, receiveFinished, windowFinished }) => {
   const observations = {
@@ -726,7 +730,7 @@ const [
   dirtyIntegrateStarted, dirtyIntegrateFinished, dirtyBridgeStarted, dirtyBridgeFinished,
 ] = process.argv.slice(2);
 const read = (path) => JSON.parse(fs.readFileSync(`${dir}/${path}.json`, 'utf8'));
-const gitSyncSlug = (host) => host === 'tower' ? 'hello-world-3-pot' : 'hello-world';
+const gitSyncSlug = (host) => host === 'tower' ? 'hello-world-3-pot' : 'hello-world-3-pot';
 const trigger = (host, role, triggerStartedAt, triggerFinishedAt) => ({
   tool: 'git-sync:run', installSlug: gitSyncSlug(host), host, role, fired: true,
   startedAt: triggerStartedAt, finishedAt: triggerFinishedAt,
@@ -884,7 +888,7 @@ const [
   rollbackTowerStarted, rollbackTowerFinished, rollbackVmStarted, rollbackVmFinished,
 ] = process.argv.slice(2);
 const read = (name) => JSON.parse(fs.readFileSync(`${dir}/${name}.json`, 'utf8'));
-const gitSyncSlug = (host) => host === 'tower' ? 'hello-world-3-pot' : 'hello-world';
+const gitSyncSlug = (host) => host === 'tower' ? 'hello-world-3-pot' : 'hello-world-3-pot';
 const trigger = (host, role, triggerStartedAt, triggerFinishedAt) => ({
   tool: 'git-sync:run', installSlug: gitSyncSlug(host), host, role, fired: true,
   startedAt: triggerStartedAt, finishedAt: triggerFinishedAt,
