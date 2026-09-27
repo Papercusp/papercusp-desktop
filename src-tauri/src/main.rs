@@ -3675,12 +3675,38 @@ fn make_sidecar_command(
         }
     }
     let mut cmd = Command::new("node");
-    cmd.arg("--require")
+    // Cap glibc malloc arenas (host-memory-reduction-2026-09-27 D-027). serve
+    // re-execs itself to get the cap when its launcher omits it; setting it
+    // here skips that second exec. A no-op outside glibc.
+    cmd.env("MALLOC_ARENA_MAX", "2")
+        .arg("--require")
         .arg(preload)
         .arg(server_js)
         .current_dir(sidecar_dir);
     isolate_process_group(&mut cmd);
     cmd
+}
+
+#[cfg(test)]
+mod sidecar_command_env_tests {
+    use super::make_sidecar_command;
+    use std::ffi::OsStr;
+    use std::path::Path;
+
+    #[test]
+    fn native_sidecar_command_caps_malloc_arenas() {
+        let cmd = make_sidecar_command(
+            false,
+            Path::new("/opt/papercusp/sidecar"),
+            Path::new("sidecar-preload.js"),
+            Path::new("serve.mjs"),
+        );
+        let arena_max = cmd
+            .get_envs()
+            .find(|(key, _)| *key == OsStr::new("MALLOC_ARENA_MAX"))
+            .and_then(|(_, value)| value);
+        assert_eq!(arena_max, Some(OsStr::new("2")));
+    }
 }
 
 /// Minimal operator.json discovery (SP1 C5). Written atomically by `serve`

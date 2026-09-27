@@ -130,3 +130,16 @@ test('every spawn-sidecar var enabled on the service units is also enabled here'
       'Add them to DEFAULT_DEV_CMD in bin/dev-operator-ifneeded.sh.',
   );
 });
+
+// host-memory-reduction-2026-09-27 D-027: the glibc arena cap shipped as
+// 40-malloc-arena.conf drop-ins (the WI-7344 bug class again), and the :3270
+// desktop operator held 1.8 GB in 64 MiB arenas. boot-malloc-arena.ts now
+// re-execs an uncapped host, so this pin is about skipping that second exec.
+test('the desktop operator launcher caps glibc malloc arenas', () => {
+  assert.match(
+    devCommandLine(),
+    /\bMALLOC_ARENA_MAX=2\b/,
+    'DEFAULT_DEV_CMD must set MALLOC_ARENA_MAX=2, matching the systemd ' +
+      'operator units, or every desktop boot pays a re-exec in boot-malloc-arena.ts.',
+  );
+});
