@@ -44,7 +44,15 @@ test('complete hot-payload identity changes for non-serve repairs and removed fi
     ], { encoding: 'utf8', timeout: 120000,
       env: { ...process.env, CARGO_TARGET_DIR: path.join(temp, 'target') } });
     assert.equal(result.status, 0, String(result.error || result.stderr || result.stdout));
-    assert.ok(result.stdout.includes(`${process.platform === 'win32' ? 4 : 5} passed; 0 failed; 0 ignored`),
+    // Every module test plus the one driver test must run. Derive the count from the module
+    // itself so adding a test there cannot strand a hardcoded number (it did: 5 vs 7).
+    const identitySource = fs.readFileSync(
+      path.join(root, 'src-tauri/src/sidecar_runtime_identity.rs'), 'utf8');
+    const moduleTests = (identitySource.match(/#\[test\]/g) || []).length;
+    const unixOnlyTests = (identitySource.match(/#\[test\]\s*#\[cfg\(unix\)\]/g) || []).length;
+    assert.ok(moduleTests > 0, 'sidecar_runtime_identity.rs declares no #[test] functions');
+    const expectedPassed = 1 + moduleTests - (process.platform === 'win32' ? unixOnlyTests : 0);
+    assert.ok(result.stdout.includes(`${expectedPassed} passed; 0 failed; 0 ignored`),
       result.stdout);
     const generation = source.slice(source.indexOf('fn sidecar_runtime_generation('),
       source.indexOf('fn wsl_runtime_sidecar_path('));
