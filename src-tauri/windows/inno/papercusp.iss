@@ -113,12 +113,16 @@ Source: "{#BuildRoot}\sidecar\spa\*"; DestDir: "{app}\sidecar\spa"; Flags: recur
 #if AppId == "com.papercusp.server"
 ; The Server owns the full operator/runtime closure, Windows WSL runtime, seed,
 ; environment sidecars and optional dev-source archive.
+; WI-10003665: PrepareToInstall helpers (never installed). Listed FIRST so
+; ExtractTemporaryFile reads them from the first disk slice.
+Source: "stop-wsl-payload-holders.ps1"; Flags: dontcopy
+Source: "stop-wsl-payload-holders.sh"; Flags: dontcopy
 ; EI-22656004539777797: the Windows launcher requires this content identity
 ; before staging the runtime into WSL. Name it explicitly: wildcard enumeration
 ; under the Wine producer can omit dotfiles while still packing serve.mjs.
 ; No skipifsourcedoesntexist: a missing runtime stamp must fail compilation.
 Source: "{#BuildRoot}\sidecar\.sidecar-build-stamp"; DestDir: "{app}\sidecar"; Flags: ignoreversion
-Source: "{#BuildRoot}\sidecar\*"; DestDir: "{app}\sidecar"; Excludes: "source.tar.zst,.sidecar-build-stamp"; Flags: recursesubdirs createallsubdirs
+Source: "{#BuildRoot}\sidecar\*"; DestDir: "{app}\sidecar"; Excludes: "source.tar.zst,.sidecar-build-stamp,.sidecar-runtime-generation"; Flags: recursesubdirs createallsubdirs
 Source: "{#BuildRoot}\resources\*"; DestDir: "{app}\resources"; Flags: recursesubdirs createallsubdirs nocompression
 Source: "{#BuildRoot}\seed\*"; DestDir: "{app}\seed"; Flags: recursesubdirs createallsubdirs nocompression
 ; Bundled env sidecars (WI-3285; pinned contract, plan
@@ -139,6 +143,13 @@ Source: "{#BuildRoot}\env-sidecars\*"; DestDir: "{app}\sidecar\env-sidecars"; Fl
 ; as seed/resources). Absent on a build without PAPERCUSP_STAGE_SOURCE=1 →
 ; entry skipped, dev/local stay 'no-source-tree' exactly as before.
 Source: "{#BuildRoot}\sidecar\source.tar.zst"; DestDir: "{app}\sidecar"; Flags: nocompression skipifsourcedoesntexist
+; WI-10003673: the hot-runtime generation, precomputed by build-windows-cross.sh
+; (bin/lib/sidecar-runtime-generation.js) and bound to the stamp above, so the
+; launcher does not hash ~5 GB on every boot. KEEP THIS THE LAST Server entry:
+; files are written in [Files] order, so a launch racing an in-progress install
+; finds no record (and walks) instead of a record describing files not yet
+; written. No skipifsourcedoesntexist: a Server without it must not compile.
+Source: "{#BuildRoot}\.sidecar-runtime-generation"; DestDir: "{app}\sidecar"; Flags: ignoreversion
 #endif
 
 [Icons]

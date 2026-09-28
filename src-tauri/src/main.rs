@@ -932,13 +932,19 @@ fn windows_path_to_wsl(path: &std::path::Path) -> String {
 /// Content generation used for the distro-local Windows sidecar snapshot.
 ///
 /// The stamp still gates readiness, but serveSha256 identifies only ONE file.
-/// Hash the entire hot payload so a repaired install cannot reuse an older
-/// completed snapshot with the same serve.mjs and obsolete SPA/dependency files.
+/// The key covers the entire hot payload so a repaired install cannot reuse an
+/// older completed snapshot with the same serve.mjs and obsolete SPA/dependency
+/// files.
+///
+/// WI-10003673: the Windows packer ships that key precomputed, bound to these
+/// exact stamp bytes, so a normal boot costs two small reads instead of hashing
+/// ~5 GB before the marker probe (measured ~9 min per boot on the VM). The walk
+/// stays as the fallback for an install without a matching record.
 #[cfg(any(target_os = "windows", test))]
 fn sidecar_runtime_generation(sidecar_dir: &std::path::Path) -> std::io::Result<String> {
     let stamp_path = sidecar_dir.join(".sidecar-build-stamp");
-    let stamp_text = std::fs::read_to_string(&stamp_path)?;
-    let stamp: serde_json::Value = serde_json::from_str(&stamp_text).map_err(|error| {
+    let stamp_bytes = std::fs::read(&stamp_path)?;
+    let stamp: serde_json::Value = serde_json::from_slice(&stamp_bytes).map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("invalid {}: {error}", stamp_path.display()),
@@ -955,6 +961,17 @@ fn sidecar_runtime_generation(sidecar_dir: &std::path::Path) -> std::io::Result<
                 format!("{} has no valid 64-hex serveSha256", stamp_path.display()),
             )
         })?;
+    match sidecar_runtime_identity::precomputed_generation(sidecar_dir, &stamp_bytes) {
+        Ok(Some(generation)) => return Ok(generation),
+        Ok(None) => eprintln!(
+            "[papercusp-desktop] no {} in {}; hashing the installed sidecar tree (slow path)",
+            sidecar_runtime_identity::PRECOMPUTED_GENERATION_FILE,
+            sidecar_dir.display()
+        ),
+        Err(error) => eprintln!(
+            "[papercusp-desktop] ignoring precomputed sidecar generation ({error}); hashing the installed sidecar tree (slow path)"
+        ),
+    }
     sidecar_runtime_identity::generation(sidecar_dir)
 }
 
@@ -1100,6 +1117,58 @@ mod tests {
             ))
         );
         assert!(wsl_runtime_sidecar_path("/home/papercup/.papercusp", "../escape").is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// WI-10003673: a record bound to the installed stamp is the key and the
+    /// ~5 GB walk never runs; an unbound record falls back to the walk. The
+    /// non-UTF-8 filename makes the walk fail loudly, which is how this test
+    /// tells "returned the record" apart from "walked and happened to match".
+    #[test]
+    #[cfg(unix)]
+    fn windows_sidecar_runtime_generation_prefers_the_bound_precomputed_record() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::ffi::OsStrExt;
+        let dir = std::env::temp_dir().join(format!(
+            "papercusp-wi10003673-generation-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let stamp = format!(r#"{{"serveSha256":"{}"}}"#, "ab".repeat(32));
+        std::fs::write(dir.join(".sidecar-build-stamp"), &stamp).unwrap();
+        let walked = sidecar_runtime_generation(&dir).unwrap();
+
+        std::fs::write(dir.join(std::ffi::OsStr::from_bytes(b"not-utf8-\xff")), "x").unwrap();
+        assert!(
+            sidecar_runtime_generation(&dir).is_err(),
+            "without a record the launcher must walk (and this tree makes the walk fail)"
+        );
+
+        let precomputed = "cd".repeat(32);
+        let record = |stamp_sha: String| {
+            format!(
+                r#"{{"schema":"papercusp-sidecar-runtime-generation/v1","generation":"{precomputed}","stampSha256":"{stamp_sha}"}}"#
+            )
+        };
+        let bound = format!("{:x}", Sha256::digest(stamp.as_bytes()));
+        std::fs::write(dir.join(".sidecar-runtime-generation"), record(bound)).unwrap();
+        assert_eq!(sidecar_runtime_generation(&dir).unwrap(), precomputed);
+
+        let other = format!("{:x}", Sha256::digest(b"another build's stamp"));
+        std::fs::write(dir.join(".sidecar-runtime-generation"), record(other)).unwrap();
+        assert!(
+            sidecar_runtime_generation(&dir).is_err(),
+            "a record bound to another stamp must fall back to the walk"
+        );
+        std::fs::remove_file(dir.join(std::ffi::OsStr::from_bytes(b"not-utf8-\xff"))).unwrap();
+        assert_eq!(
+            sidecar_runtime_generation(&dir).unwrap(),
+            walked,
+            "the fallback walk ignores the record file itself"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3964,8 +4033,10 @@ fn run_wsl_exec_with_timeout(
 
 /// Materialize the hot Windows sidecar tree on WSL ext4 and return its native
 /// Linux path. The installed bundle remains the immutable source of truth;
-/// `.sidecar-build-stamp` content-addresses a distro-local snapshot, so normal
-/// launches are a single marker probe and updates publish through a temp dir.
+/// its content generation (precomputed at package time and bound to
+/// `.sidecar-build-stamp`, WI-10003673) addresses a distro-local snapshot, so
+/// normal launches are a single marker probe and updates publish through a
+/// temp dir.
 ///
 /// `source.tar.zst` and the DB seed archives are intentionally excluded: they
 /// are one-time extraction inputs (and can be multi-gigabyte), not hot runtime

@@ -551,6 +551,24 @@ BUILDROOT_WIN="$(winpath "$STAGE")"
 # Clean stale collected artifacts (files only; keep any prev-version subdirs).
 find "$OUT_DIR" -maxdepth 1 -type f -delete
 
+# ── WI-10003673: precompute the Server's hot-runtime generation ──────────────
+# Without it the installed launcher SHA-256s the whole ~5 GB {app}\sidecar on
+# EVERY boot before its snapshot marker probe (~9 min on the VM). Hash the
+# pinned snapshot here, in the layout papercusp.iss installs (sidecar\* plus the
+# env-sidecars overlay), bound to this build's .sidecar-build-stamp. The .iss
+# ships the record as {app}\sidecar\.sidecar-runtime-generation (Server only,
+# LAST [Files] entry) and fails compilation if it is missing.
+if [[ " $ROLES " == *" server "* ]]; then
+  _generation_mounts=()
+  [[ -d "$SRC_TAURI/env-sidecars" ]] \
+    && _generation_mounts=(--mount "env-sidecars=$SRC_TAURI/env-sidecars")
+  node "$ROOT/bin/lib/sidecar-runtime-generation.js" \
+      --sidecar "$SRC_TAURI/sidecar" "${_generation_mounts[@]}" \
+      --installer-script "$SRC_TAURI/windows/inno/papercusp.iss" \
+      --out "$STAGE/.sidecar-runtime-generation" \
+    || fail "could not precompute the Windows sidecar runtime generation (WI-10003673)"
+fi
+
 # ── Per-role: cross-compile -> stage exe -> ISCC-under-wine -> collect ────────
 run_iscc() {
   local app_id="$1" app_name="$2"
