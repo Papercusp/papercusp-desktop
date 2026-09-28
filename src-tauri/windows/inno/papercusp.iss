@@ -352,7 +352,7 @@ end;
 
 { WI-10003665: CloseRoleScopedRunningApplication stops the role's Windows exe,
   but the Server's operator runs INSIDE the WSL distro as a detached daemon and
-  keeps DrvFs handles into {app} (measured: node serve.mjs held
+  keeps DrvFs handles into the install dir (measured: node serve.mjs held
   sidecar\source.tar.zst open). Windows refuses to rename a directory holding
   an open file, so BeginPayloadUpgrade failed ("cannot retain ...\sidecar"),
   the install exited 7 and the old version stayed installed. Stop exactly the

@@ -56,7 +56,7 @@ skip_pid() {
 # `find` lists every cwd/root/exe/fd link target (no per-fd fork: a busy
 # distro has thousands), then each maps file is parsed with `read` alone.
 holders() {
-  local entry target pid seen=" " proc _addr _perms _offset _dev _inode path
+  local entry target pid seen=" " path
   while IFS=$'\t' read -r entry target; do
     pid="${entry#/proc/}"
     pid="${pid%%/*}"
@@ -68,22 +68,20 @@ holders() {
     fi
   done < <(find /proc/[0-9]*/cwd /proc/[0-9]*/root /proc/[0-9]*/exe /proc/[0-9]*/fd \
              -maxdepth 1 -type l -printf '%p\t%l\n' 2>/dev/null)
-  for proc in /proc/[0-9]*; do
-    pid="${proc##*/}"
+  # Mappings: one grep over every maps file (a bash `read` loop over each line
+  # was measured far too slow on a busy host). maps pads before the path, so
+  # " <root>/" matches only a path that STARTS at the root, never a sibling
+  # like "<root>-old/".
+  local patterns=() root
+  for root in "${roots[@]}"; do patterns+=(-e " $root/"); done
+  while IFS= read -r path; do
+    pid="${path#/proc/}"
+    pid="${pid%%/*}"
     skip_pid "$pid" && continue
     [[ "$seen" == *" $pid "* ]] && continue
-    [[ -r "$proc/maps" ]] || continue
-    # maps: address perms offset dev inode [path] — `read` gives the path,
-    # spaces included, to the last variable.
-    while read -r _addr _perms _offset _dev _inode path; do
-      [[ "$path" == /* ]] || continue
-      if under_root "${path% (deleted)}"; then
-        echo "$pid maps=$path"
-        seen+="$pid "
-        break
-      fi
-    done <"$proc/maps" 2>/dev/null
-  done
+    echo "$pid maps"
+    seen+="$pid "
+  done < <(grep -lF "${patterns[@]}" /proc/[0-9]*/maps 2>/dev/null)
 }
 
 pids_of() { awk '{print $1}' <<<"$1" | sort -u; }

@@ -55,7 +55,9 @@ function stop(roots, env = {}) {
   return spawnSync('bash', [script, ...roots], {
     encoding: 'utf8',
     env: { ...process.env, PAPERCUSP_STOP_TERM_GRACE_SEC: '3', PAPERCUSP_STOP_KILL_GRACE_SEC: '3', ...env },
-    timeout: 30_000,
+    // One /proc scan takes ~6 s on the shared dev host (~4,700 processes; the
+    // distro has ~50), and the KILL path scans three times.
+    timeout: 120_000,
   });
 }
 
