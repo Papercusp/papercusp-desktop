@@ -411,12 +411,25 @@ phase_a_storage_join() {
   "$TSX" "$PRODUCER" phase-a-observe tower present "$TOWER_REPO" \
     "$tower_device" "$vm_device" >"$phase_dir/tower-before.json"
 
+  # Quarantine and the absence observation MUST be one VM process: the VM's
+  # scheduled git-sync bootstrap tick legitimately recreates a missing store,
+  # and two separate ssh + tsx launches left a ~25s window it won on P-505
+  # run 12 (WI-10003632). The producer renames, then observes absence
+  # microseconds later, and emits both records; split them here.
   ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-a-quarantine '$VM_REPO' '$run_id'" \
-    >"$phase_dir/quarantine.json"
-  ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-a-observe vm absent '$VM_REPO' '$vm_device' '$tower_device'" \
-    >"$phase_dir/vm-absent.json"
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-a-quarantine-observe '$VM_REPO' '$run_id' '$vm_device' '$tower_device'" \
+    >"$phase_dir/quarantine-observe.json"
+  node - "$phase_dir" <<'NODE' || fail 'phase A quarantine-observe did not return quarantine + vmAbsent records'
+const fs = require('node:fs');
+const dir = process.argv[2];
+const raw = fs.readFileSync(`${dir}/quarantine-observe.json`, 'utf8');
+const start = raw.indexOf('{');
+const end = raw.lastIndexOf('}');
+const value = start >= 0 && end > start ? JSON.parse(raw.slice(start, end + 1)) : null;
+if (!value || typeof value.quarantine !== 'object' || typeof value.vmAbsent !== 'object') process.exit(1);
+fs.writeFileSync(`${dir}/quarantine.json`, JSON.stringify(value.quarantine, null, 2));
+fs.writeFileSync(`${dir}/vm-absent.json`, JSON.stringify(value.vmAbsent, null, 2));
+NODE
 
   bootstrap_started="$(now_iso)"
   run_vm_git_sync >"$phase_dir/bootstrap-raw.json"
