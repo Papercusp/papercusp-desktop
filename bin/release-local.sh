@@ -3434,7 +3434,13 @@ if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
   if (( _mac_tgz_n > _mac_dmg_n )); then
     echo "ERROR: mac collection has ${_mac_tgz_n} .app.tar.gz updater bundle(s) but only ${_mac_dmg_n} ${VERSION} .dmg — the UNVERSIONED .app.tar.gz set is contaminated by a prior cut (P-009). Clean $MAC_OUT/macos/ and re-cut, or use PAPERCUSP_REUSE_MAC=1 (provenance-verified salvage)."; exit 1
   fi
-  bash "$ROOT/bin/audit-bundle.sh" "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg
+  # WI-10003577: scan the finished dmgs with THE canonical release gate, not the
+  # retired bin/audit-bundle.sh. That script carried its OWN copy of the PostHog-key
+  # allowlist (only our public key), which drifted from audit-release-bundle.py's
+  # BENIGN_ERE — so the 0.0.22 cut failed on lost-pixel's vendor key, which ships in
+  # the Server sidecar ON PURPOSE (design comparison, build-desktop-sidecar.sh) and
+  # which the canonical gate already classifies as benign. One gate, one allowlist.
+  python3 "$ROOT/bin/audit-release-bundle.py" --scan-artifact "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg
   # EI-8914 parity: the Windows leg records build-provenance.json (⚠ CORRECTED
   # 2026-09-22: via the shared bin/emit-build-provenance.sh called from
   # bin/build-windows-cross.sh — the build-windows-on-vm.sh this line used to name

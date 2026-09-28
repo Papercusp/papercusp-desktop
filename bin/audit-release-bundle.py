@@ -329,7 +329,8 @@ FORBIDDEN_PATH = [
 
 # ── CONTENT: real credential VALUES (grep -E, C speed). Not the word "secret".
 #
-# The phx_/phc_ rules absorb bin/audit-bundle.sh, which was a SEPARATE "privacy
+# The phx_/phc_ rules absorb bin/audit-bundle.sh (now a pure delegate to this file,
+# WI-10003577), which was a SEPARATE "privacy
 # auditor" release-local.sh already ran on the finished .deb/.dmg — and which
 # could never have caught this leak: it greps the EXTRACTED bundle, where
 # source.tar.zst is still a single zstd blob. It was structurally blind to the
@@ -364,10 +365,11 @@ BENIGN_ERE = [
     # The ONE deliberately-public key every build ships (posthog-public-defaults.ts):
     # anonymous-capture only, cannot read events. Shipping it is the feature.
     # ⚠ ROTATION SYNC (WI-5013 0.0.11 cut red, 2026-07-15): this literal exists in
-    # THREE places that must move together — posthog-public-defaults.ts (the shipped
-    # value), bin/audit-bundle.sh PUBLIC_PROJECT_KEY, and HERE. The 2026-07 rotation
-    # updated the first two and missed this one, redding the next cut on our own
-    # public key. When rotating: update all three in the same change.
+    # TWO places that must move together — posthog-public-defaults.ts (the shipped
+    # value) and HERE. (A third copy, bin/audit-bundle.sh PUBLIC_PROJECT_KEY, drifted
+    # the other way and redded the 0.0.22 cut on lost-pixel's vendor key below; that
+    # script is now a pure delegate to this gate — WI-10003577.) When rotating:
+    # update both in the same change.
     r"phc_nm3LSXkJKynGzsGTZfwqUywbrfsryNNNVWrxHy7Kriug",
     # Third-party vendors' OWN public anon keys, compiled into their npm packages:
     # mem0ai/dist/* and lost-pixel/dist/constants.js. Not our secrets, and not ours

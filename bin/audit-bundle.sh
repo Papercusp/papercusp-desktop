@@ -1,228 +1,59 @@
 #!/usr/bin/env bash
-# audit-bundle.sh — verify production artifacts contain no PostHog leaks.
-#
-# V1 privacy contract: a freshly installed production binary must make
-# zero network requests to flags.papercuspai.com under any usage. That
-# requires that NO discovery file and NO PostHog env var has been baked
-# into the artifact at build time.
+# audit-bundle.sh — compatibility entry point for THE release privacy gate.
 #
 # Usage:
-#   bin/audit-bundle.sh path/to/artifact.deb [path/to/artifact.dmg ...]
+#   bin/audit-bundle.sh <artifact-or-dir> [<artifact-or-dir> ...]
 #
-# Exits 0 if every artifact is clean. Exits 1 (and lists matches) if any
-# artifact contains posthog.json, posthog-personal.json, or any of the
-# PAPERCUSP_POSTHOG_* env-var names.
+# Every argument is scanned by bin/audit-release-bundle.py — the ONE release gate
+# (credentials incl. PostHog phx_/phc_ keys, build-box identity, forbidden paths):
+#   • a finished installer/archive (.deb .dmg .msi .exe .AppImage .zip .tar.gz …)
+#     → `--scan-artifact` (expands it and fails closed if it cannot be read)
+#   • a directory (an unpacked .app, a staged sidecar)            → `--scan-dir`
+# Exit: 0 clean · 1 a finding · 2 could not check (e.g. no owner-name literal —
+# export PAPERCUSP_RELEASE_OWNER_NAME — or an unreadable container).
 #
-# Supported formats: .deb, .dmg, .msi, .exe, .rpm, .AppImage, or a raw
-# directory (e.g. an unpacked Papercusp.app or .next-prod/standalone).
+# WHY THIS IS A WRAPPER (WI-10003577, 2026-09-28). This script used to be a SEPARATE
+# PostHog-key scanner with its OWN allowlist: a single PUBLIC_PROJECT_KEY. The
+# canonical gate absorbed its phx_/phc_ rules in 2026-07 and grew the curated
+# BENIGN_ERE list (our public key + third-party vendors' own anon keys), but this
+# copy was never retired. The two lists drifted, and the 0.0.22 mac cut went red on
+# lost-pixel's vendor key — a package the Server sidecar ships ON PURPOSE (design
+# comparison) and that the canonical gate already classifies as benign. Two scanners
+# with two allowlists is the defect; a second copy of the list here would reintroduce
+# it. Keep this file a pure delegate: no needles, no allowlist.
+# test/audit-bundle-delegates.test.js pins that behaviourally.
 set -euo pipefail
 
-NEEDLES=(
-  # No literal-string needles. Bare `phx_` / `phc_` / `posthog.json`
-  # all show up legitimately in source/docs/code. We use regex needles
-  # below to match only actual SECRETS (long random suffixes), not
-  # placeholders or path references.
-  ''
-)
-
-# Regex needles. Match real PostHog keys: phx_ / phc_ followed by 30+
-# alphanumeric / underscore chars. Placeholders like phx_xxx or phc_…
-# don't qualify. Hand-crafted to avoid false positives in docs.
-REGEX_NEEDLES=(
-  'phx_[A-Za-z0-9_]{30,}'
-  'phc_[A-Za-z0-9_]{30,}'
-)
-
-# The ONE deliberately-public projectKey every build ships
-# (packages/operator-core/lib/posthog-public-defaults.ts): an
-# anonymous-capture client credential, bundled so a user's opt-in alone
-# enables telemetry. It is NOT a leak — mask it before the regex scan so
-# any OTHER phc_/phx_ key (esp. write-side phx_ personal keys) still
-# FAILS. Keep in sync with POSTHOG_PUBLIC_DEFAULTS.projectKey.
-PUBLIC_PROJECT_KEY='phc_nm3LSXkJKynGzsGTZfwqUywbrfsryNNNVWrxHy7Kriug'
-
-# Soft-warn needles: signals that posthog-js (the browser SDK) is in the
-# bundle. Today it's dynamic-imported only when the user opts into
-# telemetry (default off), so its presence is not a privacy leak per se.
-# But a hostile fork could remove the opt-in gate and silently turn it
-# on, so it's worth surfacing. WARN, do not FAIL.
-WARN_NEEDLES=(
-  'node_modules/posthog-js/'
-  'posthog-js@'
-)
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AUDIT="$HERE/audit-release-bundle.py"
 
 if [[ $# -eq 0 ]]; then
-  echo "usage: $0 <artifact> [<artifact>...]" >&2
+  echo "usage: $0 <artifact-or-dir> [<artifact-or-dir>...]" >&2
   exit 2
 fi
 
-FAIL=0
-PASSED=0
-TOTAL=$#
-
-scan_path() {
-  local path="$1"
-  local label="$2"
-  local matches=()
-  # Paths to ignore: documentation that legitimately mentions the
-  # needles in prose (e.g. content/docs/posthog/*, .mdx, .md). These
-  # don't load into a shipped runtime, so they aren't privacy leaks.
-  local exclude_re='(content/docs|/docs/|\.mdx|\.md$|\.rsc$|app/docs/.*\.html$)'
-  for needle in "${NEEDLES[@]}"; do
-    [[ -z "$needle" ]] && continue
-    if grep -rlF --binary-files=text -- "$needle" "$path" 2>/dev/null \
-        | grep -vE "$exclude_re" \
-        | head -5 | grep -q .; then
-      matches+=("$needle")
-    fi
-  done
-  for re in "${REGEX_NEEDLES[@]}"; do
-    # A file matches only if it contains a key OTHER than the public
-    # projectKey: strip the allowed key from each candidate file's
-    # content before re-testing the regex.
-    local hit=""
-    while IFS= read -r f; do
-      if sed "s/$PUBLIC_PROJECT_KEY//g" "$f" 2>/dev/null | grep -qE -- "$re"; then
-        hit="$f"
-        break
-      fi
-    done < <(grep -rlE --binary-files=text -- "$re" "$path" 2>/dev/null | grep -vE "$exclude_re" | head -20)
-    if [[ -n "$hit" ]]; then
-      matches+=("regex:$re")
-    fi
-  done
-
-  # Soft warnings (informational, do not affect exit code).
-  local warnings=()
-  for needle in "${WARN_NEEDLES[@]}"; do
-    if grep -rlF --binary-files=text -- "$needle" "$path" 2>/dev/null | head -3 | grep -q .; then
-      warnings+=("$needle")
-    fi
-  done
-  if [[ ${#warnings[@]} -gt 0 ]]; then
-    echo "WARN: $label contains telemetry-related code (default OFF; opt-in gated):" >&2
-    for w in "${warnings[@]}"; do
-      echo "  - found: $w" >&2
-    done
-  fi
-
-  if [[ ${#matches[@]} -gt 0 ]]; then
-    echo "FAIL: $label" >&2
-    for m in "${matches[@]}"; do
-      echo "  - found: $m" >&2
-      if [[ "$m" == regex:* ]]; then
-        local re="${m#regex:}"
-        # List only files still matching after the public-key mask.
-        while IFS= read -r f; do
-          if sed "s/$PUBLIC_PROJECT_KEY//g" "$f" 2>/dev/null | grep -qE -- "$re"; then
-            echo "      $f" >&2
-          fi
-        done < <(grep -rlE --binary-files=text -- "$re" "$path" 2>/dev/null | grep -vE "$exclude_re" | head -20)
-      else
-        grep -rlF --binary-files=text -- "$m" "$path" 2>/dev/null \
-          | grep -vE "$exclude_re" \
-          | head -3 | sed 's|^|      |' >&2
-      fi
-    done
-    return 1
-  fi
-  return 0
-}
-
-for artifact in "$@"; do
-  if [[ ! -e "$artifact" ]]; then
-    echo "FAIL: $artifact (not found)" >&2
-    FAIL=$((FAIL+1))
-    continue
-  fi
-
-  # Per-artifact scratch dir. NOTE: do NOT name this variable TMPDIR — that is a
-  # magic env var `mktemp` honours as its base directory. Naming it TMPDIR made
-  # each iteration set TMPDIR to a dir we then `rm -rf` at the end of the loop
-  # (line below), so the NEXT artifact's bare `mktemp -d` resolved against the
-  # just-deleted dir and died with "failed to create directory via template
-  # '<deleted>/tmp.XXXXXXXXXX': No such file or directory" — which failed the
-  # entire release cut at the mac audit (two dmgs → 2nd iteration) after every
-  # platform had built and signed. Anchor the template at the REAL ambient
-  # TMPDIR (which we never touch now) so it is immune to that class entirely.
-  EXDIR=$(mktemp -d "${TMPDIR:-/tmp}/audit-bundle-XXXXXX")
-  trap 'rm -rf "$EXDIR"' EXIT
-
-  case "$artifact" in
-    *.deb)
-      dpkg-deb -x "$artifact" "$EXDIR" 2>/dev/null
-      ;;
-    *.rpm)
-      if command -v rpm2cpio >/dev/null 2>&1; then
-        (cd "$EXDIR" && rpm2cpio "$artifact" | cpio -idm --quiet 2>/dev/null) || { echo "FAIL: $artifact rpm2cpio extraction failed" >&2; FAIL=$((FAIL+1)); continue; }
-      elif command -v 7z >/dev/null 2>&1; then
-        7z x -o"$EXDIR" "$artifact" >/dev/null 2>&1 || { echo "FAIL: $artifact 7z extraction failed" >&2; FAIL=$((FAIL+1)); continue; }
-      else
-        echo "FAIL: $artifact — neither rpm2cpio nor 7z available" >&2
-        FAIL=$((FAIL+1))
-        continue
-      fi
-      ;;
-    *.AppImage)
-      cp "$artifact" "$EXDIR/app.AppImage"
-      chmod +x "$EXDIR/app.AppImage"
-      (cd "$EXDIR" && ./app.AppImage --appimage-extract >/dev/null 2>&1) || true
-      ;;
-    *.dmg)
-      # On Linux: use 7z to extract. On macOS: hdiutil. Try both.
-      if command -v 7z >/dev/null 2>&1; then
-        7z x -o"$EXDIR" "$artifact" >/dev/null 2>&1 || true
-      elif command -v hdiutil >/dev/null 2>&1; then
-        MOUNT=$(hdiutil attach -nobrowse -readonly "$artifact" | grep '/Volumes/' | head -1 | awk '{print $NF}')
-        cp -R "$MOUNT" "$EXDIR/"
-        hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
-      else
-        echo "WARN: $artifact — neither 7z nor hdiutil available, scanning as binary blob" >&2
-        cp "$artifact" "$EXDIR/blob.dmg"
-      fi
-      ;;
-    *.msi)
-      # Use 7z (handles MSI containers). Fall back to raw scan.
-      if command -v 7z >/dev/null 2>&1; then
-        7z x -o"$EXDIR" "$artifact" >/dev/null 2>&1 || true
-      else
-        echo "WARN: $artifact — 7z not available, scanning as binary blob" >&2
-        cp "$artifact" "$EXDIR/blob.msi"
-      fi
-      ;;
-    *.exe)
-      # NSIS .exe installers — 7z can usually crack them.
-      if command -v 7z >/dev/null 2>&1; then
-        7z x -o"$EXDIR" "$artifact" >/dev/null 2>&1 || true
-      else
-        echo "WARN: $artifact — 7z not available, scanning as binary blob" >&2
-        cp "$artifact" "$EXDIR/blob.exe"
-      fi
-      ;;
-    *)
-      if [[ -d "$artifact" ]]; then
-        cp -R "$artifact" "$EXDIR/"
-      else
-        cp "$artifact" "$EXDIR/"
-      fi
-      ;;
-  esac
-
-  if scan_path "$EXDIR" "$artifact"; then
-    echo "OK:   $artifact"
-    PASSED=$((PASSED+1))
+artifacts=()
+dirs=()
+for arg in "$@"; do
+  if [[ -d "$arg" ]]; then
+    dirs+=("$arg")
   else
-    FAIL=$((FAIL+1))
+    # A missing path goes to --scan-artifact too: it refuses (exit 2) rather than
+    # reporting CLEAN on a file nobody read.
+    artifacts+=("$arg")
   fi
-
-  rm -rf "$EXDIR"
-  trap - EXIT
 done
 
-echo
-if [[ $FAIL -gt 0 ]]; then
-  echo "FAIL: $FAIL of $TOTAL artifacts contain PostHog leaks" >&2
-  exit 1
+rc=0
+if [[ ${#artifacts[@]} -gt 0 ]]; then
+  python3 "$AUDIT" --scan-artifact "${artifacts[@]}" || rc=$?
 fi
-echo "OK: $PASSED/$TOTAL artifacts clean"
-exit 0
+if [[ ${#dirs[@]} -gt 0 ]]; then
+  dir_rc=0
+  python3 "$AUDIT" --scan-dir "${dirs[@]}" || dir_rc=$?
+  # A finding (1) outranks could-not-check (2): report the leak.
+  if [[ $dir_rc -eq 1 || $rc -eq 0 ]]; then
+    [[ $dir_rc -ne 0 ]] && rc=$dir_rc
+  fi
+fi
+exit "$rc"
