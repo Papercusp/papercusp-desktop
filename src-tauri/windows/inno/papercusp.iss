@@ -330,6 +330,73 @@ begin
   end;
 end;
 
+#if AppId == "com.papercusp.server"
+function WslDistroRegistered(const Name: String): Boolean;
+var
+  Keys: TArrayOfString;
+  Value: String;
+  I: Integer;
+begin
+  Result := False;
+  if not RegGetSubkeyNames(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Lxss', Keys) then
+    Exit;
+  for I := 0 to GetArrayLength(Keys) - 1 do
+    if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Lxss\' + Keys[I],
+         'DistributionName', Value) and (CompareText(Value, Name) = 0) then
+    begin
+      Result := True;
+      Exit;
+    end;
+end;
+#endif
+
+{ WI-10003665: CloseRoleScopedRunningApplication stops the role's Windows exe,
+  but the Server's operator runs INSIDE the WSL distro as a detached daemon and
+  keeps DrvFs handles into {app} (measured: node serve.mjs held
+  sidecar\source.tar.zst open). Windows refuses to rename a directory holding
+  an open file, so BeginPayloadUpgrade failed ("cannot retain ...\sidecar"),
+  the install exited 7 and the old version stayed installed. Stop exactly the
+  distro processes that hold a handle under our payload roots (SIGTERM first:
+  serve's handler stops embedded PG cleanly), via the dontcopy helpers.
+  Best effort by design: a failure is logged and returned, and the rename in
+  BeginPayloadUpgrade stays the arbiter. The GUI never runs a WSL operator. }
+function StopWslPayloadHolders: String;
+#if AppId == "com.papercusp.server"
+var
+  PowerShell, Params, LogPath: String;
+  Output: AnsiString;
+  ResultCode: Integer;
+#endif
+begin
+  Result := '';
+#if AppId == "com.papercusp.server"
+  if not DirExists(ExpandConstant('{app}')) then
+    Exit;
+  if not WslDistroRegistered(SharedWslDistro) then
+  begin
+    Log('windows-wsl-payload-stop: distro ' + SharedWslDistro + ' is not registered; skip');
+    Exit;
+  end;
+  ExtractTemporaryFile('stop-wsl-payload-holders.ps1');
+  ExtractTemporaryFile('stop-wsl-payload-holders.sh');
+  LogPath := ExpandConstant('{tmp}\stop-wsl-payload-holders.log');
+  PowerShell := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+  Params := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
+    ExpandConstant('{tmp}\stop-wsl-payload-holders.ps1') + '" -AppDir "' +
+    ExpandConstant('{app}') + '" -ScriptDir "' + ExpandConstant('{tmp}') +
+    '" -LogPath "' + LogPath + '" -Distro ' + SharedWslDistro;
+  Log('windows-wsl-payload-stop: stopping WSL processes that hold ' + ExpandConstant('{app}'));
+  if not Exec(PowerShell, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Result := 'could not start PowerShell'
+  else if ResultCode <> 0 then
+    Result := Format('stop helper exit code %d', [ResultCode]);
+  if LoadStringFromFile(LogPath, Output) then
+    Log('windows-wsl-payload-stop: ' + String(Output));
+  if Result <> '' then
+    Log('windows-wsl-payload-stop-failed: ' + Result);
+#endif
+end;
+
 { D021 / EI-22789249437927838: Files entries overlay, rather than mirror, a
   destination directory. Retire ONLY our three payload roots before copying.
   Never delete the old tree: it may contain locally-added files. Retain it
@@ -508,10 +575,19 @@ begin
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  WslStopFailure: String;
 begin
   Result := CloseRoleScopedRunningApplication;
   if Result = '' then
+  begin
+    WslStopFailure := StopWslPayloadHolders;
     Result := BeginPayloadUpgrade;
+    if (Result <> '') and (WslStopFailure <> '') then
+      Result := Result + ' (stopping the WSL processes that hold it also failed: ' +
+        WslStopFailure + '. Quit {#AppName}, or run "wsl --terminate ' + SharedWslDistro +
+        '", then retry.)';
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
