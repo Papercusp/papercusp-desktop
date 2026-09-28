@@ -491,11 +491,14 @@ if [[ "$IS_HOLDING_PAGE" == "0" ]]; then
     echo "  ✗ GET $DETAIL_PAGE returned HTTP ${DETAIL_HTTP_CODE:-000}" >&2
     exit 1
   fi
-  if uploaded_by_this_run "$DETAIL_PAGE" && ! diff -q "$SITE_DIR/$DETAIL_PAGE" "$TMP_PAGE/$DETAIL_PAGE" >/dev/null; then
+  if ! uploaded_by_this_run "$DETAIL_PAGE"; then
+    echo "  ✓ linked work-item detail page served (not part of this ONLY publish, so not compared)"
+  elif ! diff -q "$SITE_DIR/$DETAIL_PAGE" "$TMP_PAGE/$DETAIL_PAGE" >/dev/null; then
     echo "  ✗ the served work-item detail page does NOT match what we uploaded" >&2
     exit 1
+  else
+    echo "  ✓ linked work-item detail page served and byte-identical"
   fi
-  echo "  ✓ linked work-item detail page served$(uploaded_by_this_run "$DETAIL_PAGE" && echo ' and byte-identical')"
 else
   echo "  ✓ holding page served; detail-page verification intentionally skipped"
 fi
