@@ -68,7 +68,10 @@ it collision-free:
   ask from a peer or leader: hold the work-item FIRST.) The work-item ledger is the durable, shared,
   fleet-visible record; your client's native to-do list is private scratch, never a substitute.
 - **Blocked on something announced? Await an event and sleep — never poll, never hold a
-  turn.** `events:await { event }` → END YOUR TURN; the wake turn carries the payload.
+  turn.** `events:await { event }` FIRST, then finish every step that does not need the
+  result, THEN END YOUR TURN; the wake turn carries the payload. A wake that fires while you
+  are still working is parked and delivered when the turn ends, not lost — if you act on its
+  nudge mid-turn, `events:cancel { delivery_id }` so you are not resumed twice.
   Pair-emit DECLARE-FIRST: the side that OWNS the completion declares the gate
   (`events:emit { announce:true }`) and the other side awaits the RETURNED key — copy
   it from the response / your orient's `announcedGates`, never re-type it from a chat
@@ -810,6 +813,16 @@ when one is owed. A directive addressed to another session that has nothing to d
 work can be taken off your own banner with `orders:clear { id, reason }`; it stays open for its
 addressee. This is a capture rail, not a paraphrase rail: the database stores the owner’s
 literal words and long text is retrieved with `orders:get`.
+
+**Know your directives by id, never by text.** The owner often pastes the same message into
+several sessions, and each copy is a separate directive owned by the session it was typed
+into. The hook tells you "this is YOUR owner directive #N" on every captured turn. Use that id,
+or `mine: true` in `orders:list`. Never close by matching text: one agent closed five other
+sessions' copies that way. Orientation shows your own directives first, then each other agent's
+under that agent. `orders:disposition` refuses another session's directive (`foreign_directive`).
+It also refuses when it cannot confirm whose directive it is (`verdict_unavailable`; retry).
+Never work around either refusal. If you closed one by mistake, undo it with
+`orders:reopen { id, reason }`, never with SQL.
 
 <!-- PAPERCUSP-SU:AUTO-MODE -->
 
