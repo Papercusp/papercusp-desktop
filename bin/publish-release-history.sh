@@ -10,6 +10,16 @@
 #
 #   Usage:  bin/publish-release-history.sh [version]
 #           DRY_RUN=1 bin/publish-release-history.sh     # gate + print, upload nothing
+#           FULL=1 bin/publish-release-history.sh        # gate + upload EVERY file
+#           ONLY=index.html,history.json ONLY_REASON="<why>" bin/publish-release-history.sh
+#                                                         # force: gate + upload just these
+#
+# INCREMENTAL BY DEFAULT (WI-10003694). The site is ~29k files / ~2 GB, and a full publish
+# costs ~8 min of gate + ~30 min of upload. release-site-delta.ts compares the site with a
+# manifest of what the LAST VERIFIED publish put live and gates + uploads only what changed,
+# so a one-page edit publishes in seconds. With no manifest (or another bucket/prefix, or
+# FULL=1) it runs the full publish and records the manifest for next time. ONLY= is the
+# caller-judged force for when you KNOW which files changed: it never hashes the rest.
 #
 # Generate the site first (it reads the release registry in Postgres):
 #   npx tsx apps/operator/lib/release/record-release-cli.ts --regenerate
@@ -182,17 +192,70 @@ if [[ -z "$KEY_PREFIX" ]]; then
   exit 1
 fi
 
+# ── Credentials ──────────────────────────────────────────────────────────────
+# Loaded before the delta plan: the publish manifest is keyed to the bucket + prefix.
+R2_ENV="${HOME}/.papercusp/r2.env"
+if [[ ! -f "$R2_ENV" ]]; then
+  echo "ERROR: $R2_ENV not found — R2 credentials are owner-provisioned." >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+set -a; . "$R2_ENV"; set +a
+: "${R2_ACCOUNT_ID:?set R2_ACCOUNT_ID in $R2_ENV}"
+: "${R2_BUCKET:?set R2_BUCKET in $R2_ENV}"
+: "${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID in $R2_ENV}"
+: "${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY in $R2_ENV}"
+ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+# ── What changed since the last VERIFIED publish (WI-10003694) ───────────────
+FULL="${FULL:-0}"
+ONLY="${ONLY:-}"
+ONLY_REASON="${ONLY_REASON:-}"
+MANIFEST="${PAPERCUSP_RELEASE_PUBLISH_MANIFEST:-$HOME/.papercusp/release-history-publish-manifest.json}"
+# Sibling of the site, so staging is a hard link on the same filesystem, never a 2 GB copy.
+WORK_DIR="$(mktemp -d "${SITE_DIR%/}.publish-XXXXXX")"
+TMP_PAGE="$(mktemp -d)"
+TMP_HISTORY="$(mktemp)"
+trap 'rm -rf "$WORK_DIR" "$TMP_PAGE"; rm -f "$TMP_HISTORY"' EXIT
+DELTA_ARGS=(plan "$SITE_DIR" --manifest "$MANIFEST" --bucket "$R2_BUCKET"
+  --out "$WORK_DIR/plan.json" --gate-list "$WORK_DIR/gate.list"
+  --remove-list "$WORK_DIR/remove.list" --stage "$WORK_DIR/stage")
+if [[ -n "$ONLY" ]]; then
+  DELTA_ARGS+=(--only "$ONLY" --reason "$ONLY_REASON")
+elif [[ "$FULL" == "1" ]]; then
+  DELTA_ARGS+=(--full)
+fi
+echo "==> publish delta: comparing the site with the last verified publish"
+# The secret prefix travels in the ENVIRONMENT, never argv (argv is in the process table).
+PAPERCUSP_PUBLISH_KEY_PREFIX="$KEY_PREFIX" \
+  npx tsx "${REPO_ROOT}/apps/operator/lib/release/release-site-delta.ts" "${DELTA_ARGS[@]}"
+DELTA_MODE="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).mode)' "$WORK_DIR/plan.json")"
+node -e 'const p = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(p.upload.join("\n") + (p.upload.length ? "\n" : ""))' \
+  "$WORK_DIR/plan.json" > "$WORK_DIR/upload.list"
+
+# In an ONLY publish, files outside the named set were NOT re-uploaded, so the public-path
+# checks below prove they are reachable but do not demand they match the local copy.
+uploaded_by_this_run() {
+  [[ "$DELTA_MODE" != "only" ]] || grep -Fxq -- "$1" "$WORK_DIR/upload.list"
+}
+
 # ── THE GATE — run BEFORE anything is uploaded ───────────────────────────────
 # Calls the SAME findIdentityLeaks() the renderer's scrub is built on (one
 # implementation, one behaviour — a gate that re-implements the rule it is
 # checking eventually disagrees with it, and then it is guarding nothing).
-echo "==> identity gate: scanning the finished bytes in $SITE_DIR"
+# Full publish: every file. Otherwise: exactly what the delta will upload (or every file,
+# when the identity rules changed since the last publish — release-site-delta decides).
+echo "==> identity gate: scanning the finished bytes in $SITE_DIR ($DELTA_MODE)"
 # The gate distinguishes 1 (FOUND LEAKS) from 2 (COULD NOT CHECK), and this caller must
 # too. Collapsing them re-creates, one layer up, the exact defect the split was made to
 # kill (EI-20583328178472869): a blind gate reported as a leak sends you hunting the
 # pages for a name that is not there, while the real fault is that nothing was hunted.
 set +e
-npx tsx "${REPO_ROOT}/apps/operator/lib/release/gate-release-site.ts" "$SITE_DIR"
+if [[ "$DELTA_MODE" == "full" ]]; then
+  npx tsx "${REPO_ROOT}/apps/operator/lib/release/gate-release-site.ts" "$SITE_DIR"
+else
+  npx tsx "${REPO_ROOT}/apps/operator/lib/release/gate-release-site.ts" "$SITE_DIR" --files-from "$WORK_DIR/gate.list"
+fi
 _gate_rc=$?
 set -e
 if [[ $_gate_rc -eq 2 ]]; then
@@ -218,20 +281,6 @@ elif [[ $_gate_rc -ne 0 ]]; then
   exit 1
 fi
 
-# ── Credentials ──────────────────────────────────────────────────────────────
-R2_ENV="${HOME}/.papercusp/r2.env"
-if [[ ! -f "$R2_ENV" ]]; then
-  echo "ERROR: $R2_ENV not found — R2 credentials are owner-provisioned." >&2
-  exit 1
-fi
-# shellcheck source=/dev/null
-set -a; . "$R2_ENV"; set +a
-: "${R2_ACCOUNT_ID:?set R2_ACCOUNT_ID in $R2_ENV}"
-: "${R2_BUCKET:?set R2_BUCKET in $R2_ENV}"
-: "${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID in $R2_ENV}"
-: "${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY in $R2_ENV}"
-ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-
 command -v aws >/dev/null 2>&1 || { echo "ERROR: aws CLI not on PATH." >&2; exit 1; }
 
 # R2 rejects the trailing-checksum headers newer aws-cli v2 sends by default.
@@ -251,6 +300,7 @@ echo "==> release host : ${BASE%/*}/<secret>"
 # is derived from PAPERCUSP_UPDATE_BASE_URL, not a grep-able env var).
 echo "==> bucket       : s3://${R2_BUCKET}/<secret>/"
 echo "==> pages        : $PAGES"
+echo "==> publish mode : $DELTA_MODE ($(wc -l < "$WORK_DIR/upload.list" | tr -d ' ') file(s) to upload, $(wc -l < "$WORK_DIR/remove.list" | tr -d ' ') to remove)"
 
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "DRY_RUN=1 — gate passed, nothing uploaded."
@@ -260,44 +310,85 @@ fi
 # Upload the plan + work-item pages FIRST, index.html LAST. index.html is what a
 # tester opens; publishing it before the pages it links to would serve 404 links.
 # (Same ordering rule as upload-release.sh: the thing that ADVERTISES goes last.)
-echo
-echo "==> uploading plan pages"
-aws s3 sync "$SITE_DIR/plans" "s3://${R2_BUCKET}/${KEY_PREFIX}/plans" \
-  --endpoint-url "$ENDPOINT" \
-  --content-type 'text/html; charset=utf-8' \
-  --cache-control 'no-cache, max-age=0' \
-  --delete --only-show-errors
+if [[ "$DELTA_MODE" == "full" ]]; then
+  echo
+  echo "==> uploading plan pages"
+  aws s3 sync "$SITE_DIR/plans" "s3://${R2_BUCKET}/${KEY_PREFIX}/plans" \
+    --endpoint-url "$ENDPOINT" \
+    --content-type 'text/html; charset=utf-8' \
+    --cache-control 'no-cache, max-age=0' \
+    --delete --only-show-errors
 
-echo "==> uploading work-item pages"
-aws s3 sync "$SITE_DIR/work-items" "s3://${R2_BUCKET}/${KEY_PREFIX}/work-items" \
-  --endpoint-url "$ENDPOINT" \
-  --content-type 'text/html; charset=utf-8' \
-  --cache-control 'no-cache, max-age=0' \
-  --delete --only-show-errors
+  echo "==> uploading work-item pages"
+  aws s3 sync "$SITE_DIR/work-items" "s3://${R2_BUCKET}/${KEY_PREFIX}/work-items" \
+    --endpoint-url "$ENDPOINT" \
+    --content-type 'text/html; charset=utf-8' \
+    --cache-control 'no-cache, max-age=0' \
+    --delete --only-show-errors
 
-# Shared History documents and their self-hosted renderer must be available
-# before the release index advertises its new change-history links.
-for directory in assets changes; do
-  if [[ -d "$SITE_DIR/$directory" ]]; then
-    echo "==> uploading shared Project History $directory"
-    aws s3 sync "$SITE_DIR/$directory" "s3://${R2_BUCKET}/${KEY_PREFIX}/$directory" \
-      --endpoint-url "$ENDPOINT" --cache-control 'no-cache, max-age=0' --only-show-errors
-  fi
-done
+  # Shared History documents and their self-hosted renderer must be available
+  # before the release index advertises its new change-history links.
+  for directory in assets changes; do
+    if [[ -d "$SITE_DIR/$directory" ]]; then
+      echo "==> uploading shared Project History $directory"
+      aws s3 sync "$SITE_DIR/$directory" "s3://${R2_BUCKET}/${KEY_PREFIX}/$directory" \
+        --endpoint-url "$ENDPOINT" --cache-control 'no-cache, max-age=0' --only-show-errors
+    fi
+  done
+  UPLOAD_FROM="$SITE_DIR"
+else
+  # Only the delta, from hard links of exactly the changed files — same headers per
+  # directory as the full path. `cp --recursive`, not `sync`: the delta was decided by
+  # content hash, so nothing here should second-guess it with mtimes.
+  STAGE="$WORK_DIR/stage"
+  echo
+  echo "==> uploading only what changed ($DELTA_MODE)"
+  for directory in plans work-items; do
+    if [[ -d "$STAGE/$directory" ]]; then
+      echo "==> uploading changed $directory pages"
+      aws s3 cp --recursive "$STAGE/$directory" "s3://${R2_BUCKET}/${KEY_PREFIX}/$directory" \
+        --endpoint-url "$ENDPOINT" \
+        --content-type 'text/html; charset=utf-8' \
+        --cache-control 'no-cache, max-age=0' --only-show-errors
+    fi
+  done
+  for directory in assets changes; do
+    if [[ -d "$STAGE/$directory" ]]; then
+      echo "==> uploading changed shared Project History $directory"
+      aws s3 cp --recursive "$STAGE/$directory" "s3://${R2_BUCKET}/${KEY_PREFIX}/$directory" \
+        --endpoint-url "$ENDPOINT" --cache-control 'no-cache, max-age=0' --only-show-errors
+    fi
+  done
+  UPLOAD_FROM="$STAGE"
+fi
 
 # history.json is what the INSTALLED APP's Update Center fetches (the same rail as
 # latest.json). It is not optional: without it every user's update history is empty.
-echo "==> uploading history.json (the in-app Update Center reads this)"
-aws s3 cp "$SITE_DIR/history.json" "s3://${R2_BUCKET}/${KEY_PREFIX}/history.json" \
-  --endpoint-url "$ENDPOINT" \
-  --content-type 'application/json' \
-  --cache-control 'no-cache, max-age=0' --only-show-errors
+if [[ -f "$UPLOAD_FROM/history.json" ]]; then
+  echo "==> uploading history.json (the in-app Update Center reads this)"
+  aws s3 cp "$UPLOAD_FROM/history.json" "s3://${R2_BUCKET}/${KEY_PREFIX}/history.json" \
+    --endpoint-url "$ENDPOINT" \
+    --content-type 'application/json' \
+    --cache-control 'no-cache, max-age=0' --only-show-errors
+fi
 
-echo "==> uploading index.html (LAST — this is the page we share)"
-aws s3 cp "$SITE_DIR/index.html" "s3://${R2_BUCKET}/${KEY_PREFIX}/index.html" \
-  --endpoint-url "$ENDPOINT" \
-  --content-type 'text/html; charset=utf-8' \
-  --cache-control 'no-cache, max-age=0' --only-show-errors
+if [[ -f "$UPLOAD_FROM/index.html" ]]; then
+  echo "==> uploading index.html (LAST — this is the page we share)"
+  aws s3 cp "$UPLOAD_FROM/index.html" "s3://${R2_BUCKET}/${KEY_PREFIX}/index.html" \
+    --endpoint-url "$ENDPOINT" \
+    --content-type 'text/html; charset=utf-8' \
+    --cache-control 'no-cache, max-age=0' --only-show-errors
+fi
+
+# Pages that disappeared from a MIRRORED directory (plans/, work-items/) are removed AFTER
+# the index stops linking them — the incremental twin of the full path's `sync --delete`.
+if [[ -s "$WORK_DIR/remove.list" ]]; then
+  echo "==> removing $(wc -l < "$WORK_DIR/remove.list" | tr -d ' ') page(s) no longer in the site"
+  while IFS= read -r key; do
+    [[ -n "$key" ]] || continue
+    aws s3 rm "s3://${R2_BUCKET}/${KEY_PREFIX}/$key" --endpoint-url "$ENDPOINT" --only-show-errors
+  done < "$WORK_DIR/remove.list"
+fi
 
 # ── Verify what actually landed ──────────────────────────────────────────────
 # Fetch the published objects back over the PUBLIC path — the same way a beta
@@ -308,9 +399,6 @@ aws s3 cp "$SITE_DIR/index.html" "s3://${R2_BUCKET}/${KEY_PREFIX}/index.html" \
 # publish just like a stale index or detail page.
 echo
 echo "==> verifying the public read path"
-TMP_PAGE="$(mktemp -d)"
-TMP_HISTORY="$(mktemp)"
-trap 'rm -rf "$TMP_PAGE"; rm -f "$TMP_HISTORY"' EXIT
 HTTP_CODE="$(curl -sS -o "$TMP_PAGE/index.html" -w '%{http_code}' --max-time 30 "${BASE}/index.html" 2>/dev/null)" || true
 
 if [[ -z "$HTTP_CODE" || "$HTTP_CODE" == "000" ]]; then
@@ -323,11 +411,14 @@ if [[ "$HTTP_CODE" != "200" ]]; then
   echo "  ✗ GET index.html returned HTTP $HTTP_CODE" >&2
   exit 1
 fi
-if ! diff -q "$SITE_DIR/index.html" "$TMP_PAGE/index.html" >/dev/null; then
+if ! uploaded_by_this_run index.html; then
+  echo "  ✓ index.html served (not part of this ONLY publish, so not compared)"
+elif ! diff -q "$SITE_DIR/index.html" "$TMP_PAGE/index.html" >/dev/null; then
   echo "  ✗ the served page does NOT match what we uploaded" >&2
   exit 1
+else
+  echo "  ✓ index.html served and byte-identical"
 fi
-echo "  ✓ index.html served and byte-identical"
 
 # history.json is what every installed app reads for its Update Center. A
 # successful authenticated upload does not prove that the public hostname (or
@@ -350,13 +441,17 @@ if [[ "$HISTORY_HTTP_CODE" != "200" ]]; then
   echo "  ✗ GET history.json returned HTTP $HISTORY_HTTP_CODE" >&2
   exit 1
 fi
-if ! diff -q "$SITE_DIR/history.json" "$TMP_HISTORY" >/dev/null; then
+if uploaded_by_this_run history.json && ! diff -q "$SITE_DIR/history.json" "$TMP_HISTORY" >/dev/null; then
   echo "  ✗ served history.json does NOT match what we uploaded" >&2
   echo "    The installed app would show stale or incomplete release history; refusing to certify this publish." >&2
   exit 1
 fi
 cp "$TMP_HISTORY" "$TMP_PAGE/history.json"
-echo "  ✓ history.json served and byte-identical"
+if uploaded_by_this_run history.json; then
+  echo "  ✓ history.json served and byte-identical"
+else
+  echo "  ✓ history.json served (not part of this ONLY publish, so not compared)"
+fi
 
 if [[ "$IS_HOLDING_PAGE" == "0" ]]; then
   # Follow the current release's actual link, then verify its document and the
@@ -372,12 +467,16 @@ NODE
   for relative in "$CHANGE_PAGE" "${CHANGE_PAGE%.html}.json" assets/project-history.js assets/project-history.css assets/vditor/dist/js/lute/lute.min.js; do
     mkdir -p "$TMP_PAGE/$(dirname "$relative")"
     if ! curl -fsS --max-time 60 "${BASE}/${relative}" -o "$TMP_PAGE/$relative" 2>/dev/null || \
-       ! cmp -s "$SITE_DIR/$relative" "$TMP_PAGE/$relative"; then
+       { uploaded_by_this_run "$relative" && ! cmp -s "$SITE_DIR/$relative" "$TMP_PAGE/$relative"; }; then
       echo "ERROR: served Project History file differs or is unavailable: $relative" >&2
       exit 1
     fi
   done
-  echo "  ✓ shared Project History page, data, renderer and plan assets served byte-identically"
+  if [[ "$DELTA_MODE" == "only" ]]; then
+    echo "  ✓ shared Project History page, data, renderer and plan assets served (compared only where this ONLY publish uploaded them)"
+  else
+    echo "  ✓ shared Project History page, data, renderer and plan assets served byte-identically"
+  fi
 fi
 
 # Follow one REAL link from the served index and compare that detail page too.
@@ -392,11 +491,11 @@ if [[ "$IS_HOLDING_PAGE" == "0" ]]; then
     echo "  ✗ GET $DETAIL_PAGE returned HTTP ${DETAIL_HTTP_CODE:-000}" >&2
     exit 1
   fi
-  if ! diff -q "$SITE_DIR/$DETAIL_PAGE" "$TMP_PAGE/$DETAIL_PAGE" >/dev/null; then
+  if uploaded_by_this_run "$DETAIL_PAGE" && ! diff -q "$SITE_DIR/$DETAIL_PAGE" "$TMP_PAGE/$DETAIL_PAGE" >/dev/null; then
     echo "  ✗ the served work-item detail page does NOT match what we uploaded" >&2
     exit 1
   fi
-  echo "  ✓ linked work-item detail page served and byte-identical"
+  echo "  ✓ linked work-item detail page served$(uploaded_by_this_run "$DETAIL_PAGE" && echo ' and byte-identical')"
 else
   echo "  ✓ holding page served; detail-page verification intentionally skipped"
 fi
@@ -408,6 +507,11 @@ if ! npx tsx "${REPO_ROOT}/apps/operator/lib/release/gate-release-site.ts" "$TMP
   echo "  ✗ the SERVED page contains identity — it is live. Take it down NOW." >&2
   exit 1
 fi
+
+# Record what is now live — only after every check above passed — so the next publish
+# uploads just what changes after this one.
+npx tsx "${REPO_ROOT}/apps/operator/lib/release/release-site-delta.ts" commit \
+  --plan "$WORK_DIR/plan.json" --manifest "$MANIFEST"
 
 echo
 echo "==> done — the release-history page is LIVE."
