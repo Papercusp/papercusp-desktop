@@ -695,10 +695,41 @@ fi
 SCP=("$SCP_BIN" -i "$SSH_KEY" -P "$SSH_PORT" -o IdentitiesOnly=yes -o BatchMode=yes)
 for option in "${SCP_OPTIONS[@]}"; do SCP+=( -o "$option" ); done
 
+# Is a byte-identical copy of $1 already staged at remote $2? A resume or retry
+# after a timed-out run finds the DMGs the first run already pushed; the first
+# run also consumed the very headroom the 16 GiB transfer floor demands, so
+# re-streaming them fails on exactly the disk-tight VM the resume exists for
+# (WI-10003669). Reuse is decided by exact size AND sha256 — never by name or
+# size alone — and any probe failure answers "no", falling through to the
+# capacity-admitted transfer.
+mac_staged_artifact_matches() { # $1=local path, $2=remote path, $3=bytes
+  local local_path="$1" remote_path="$2" bytes="$3" local_sha probe probe_out="" probe_rc=0 remote_sha
+  probe="$(
+    printf '# PAPERCUSP_NATIVE_ARTIFACT_REUSE_PROBE\ntarget=%q; expected_bytes=%q\n' "$remote_path" "$bytes"
+    cat <<'PROBE'
+[ -f "$target" ] || exit 0
+actual_bytes="$(wc -c < "$target" | tr -d '[:space:]')"
+[ "$actual_bytes" = "$expected_bytes" ] || exit 0
+remote_sha="$({ shasum -a 256 "$target" 2>/dev/null || sha256sum "$target"; } | awk '{print $1}')"
+printf 'PAPERCUSP_STAGED_SHA256=%s\n' "$remote_sha"
+PROBE
+  )"
+  probe_out="$(timeout "$INSTALL_TIMEOUT" "${SSH[@]}" "$probe" 2>/dev/null | tr -d '\r\0')" || probe_rc=$?
+  [[ "$probe_rc" -eq 0 ]] || return 1
+  remote_sha="$(printf '%s\n' "$probe_out" | sed -n 's/^PAPERCUSP_STAGED_SHA256=\([0-9a-f]\{64\}\)$/\1/p' | head -1)"
+  [[ -n "$remote_sha" ]] || return 1
+  local_sha="$({ sha256sum "$local_path" 2>/dev/null || shasum -a 256 "$local_path"; } | awk '{print $1}')"
+  [[ "$local_sha" =~ ^[0-9a-f]{64}$ && "$local_sha" == "$remote_sha" ]]
+}
+
 mac_stage_artifact() { # $1=local path, $2=remote path
   local local_path="$1" remote_path="$2" bytes need_gb headroom command transfer_out="" transfer_rc=0
   bytes="$(wc -c < "$local_path" | tr -d '[:space:]')"
   case "$bytes" in ''|*[!0-9]*) fail_check "push: cannot measure $(basename "$local_path") before transfer"; return ;; esac
+  if mac_staged_artifact_matches "$local_path" "$remote_path" "$bytes"; then
+    note "push: reused byte-identical staged $(basename "$local_path") at $remote_path (size + sha256 match; no transfer, no staging admission)"
+    return
+  fi
   need_gb=$(( (bytes + 1073741823) / 1073741824 ))
   [[ "$need_gb" -ge 1 ]] || need_gb=1
   headroom="${PAPERCUSP_MAC_TRANSFER_HEADROOM_GB:-16}"

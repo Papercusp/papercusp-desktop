@@ -278,6 +278,14 @@ printf 'SSH %s\\n' "$*" >> "$MOCK_LOG"
 case "$*" in
   *"echo VM-OK"*) printf 'VM-OK\\n' ;;
   *"PC-REMOTE-DIR-READY"*) printf 'PC-REMOTE-DIR-READY\\n' ;;
+  *"PAPERCUSP_NATIVE_ARTIFACT_REUSE_PROBE"*)
+    printf 'REUSE-PROBE\\n' >> "$MOCK_LOG"
+    if [[ "$MOCK_EXECUTE_TRANSFER" == 1 ]]; then
+      command="\${@: -1}"
+      bash -c "$command"
+      exit $?
+    fi
+    ;;
   *"PAPERCUSP_NATIVE_ARTIFACT_STAGE"*)
     if [[ "$*" == *"GUI_${VERSION}_universal-apple-darwin.dmg"* ]]; then
       printf 'TRANSFER GUI\\n' >> "$MOCK_LOG"
@@ -786,6 +794,46 @@ test('macOS refuses artifact transfer below the 16 GiB staging floor before writ
     const actionCalls = readFileSync(f.log, 'utf8').split('\n').filter((line) => line.startsWith('SSH '));
     for (const call of actionCalls) assert.doesNotMatch(call, /hdiutil attach|open -n/);
     assert.equal(existsSync(f.flipped), false);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+// WI-10003669: a resume after a timed-out run finds both DMGs already staged,
+// and that first run consumed the headroom the 16 GiB floor demands. Exact
+// size + sha256 matches must be reused without a transfer or an admission.
+test('macOS resume reuses byte-identical staged DMGs below the staging floor without re-streaming', () => {
+  const f = macFixture({ executeTransfer: true, freeGb: 5 });
+  try {
+    cpSync(f.dmg, join(f.remote, basename(f.dmg)));
+    cpSync(f.server, join(f.remote, basename(f.server)));
+    const result = runVerify(f, ['--verify-installed-mac', '--remote-dir', f.remote], 'mac', f.dmg);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.notes.filter((n) => /reused byte-identical staged/.test(n)).length, 2, verdict.notes.join('\n'));
+    const log = readFileSync(f.log, 'utf8').split('\n');
+    assert.equal(log.filter((line) => line === 'REUSE-PROBE').length, 2);
+    assert.deepEqual(log.filter((line) => line.startsWith('TRANSFER ')), []);
+    assert.deepEqual(readdirSync(f.remote).filter((name) => name.includes('.incoming.')), []);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('macOS never reuses a staged DMG whose bytes differ at the same size', () => {
+  const f = macFixture({ executeTransfer: true, freeGb: 5 });
+  try {
+    const staged = join(f.remote, basename(f.dmg));
+    const original = readFileSync(f.dmg);
+    const tampered = Buffer.from(original);
+    tampered[0] ^= 0xff;
+    writeFileSync(staged, tampered);
+    const result = runVerify(f, ['--verify-installed-mac', '--remote-dir', f.remote], 'mac', f.dmg);
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+    const verdict = JSON.parse(result.stdout);
+    assert.deepEqual(verdict.notes.filter((n) => /reused byte-identical staged/.test(n)), []);
+    assert.match(verdict.failures.join('\n'), /insufficient disk for native artifact transfer staging/);
+    assert.deepEqual(readFileSync(staged), tampered, 'a refused transfer leaves the staged file untouched');
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
