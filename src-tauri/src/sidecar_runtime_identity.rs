@@ -1,14 +1,70 @@
 //! Identity of the entire hot runtime, not just serve.mjs. Hash native NTFS
 //! directly; enumerating it through WSL/DrvFs reinstates the staging bottleneck.
 //! This is a cache key, NOT a substitute for release artifact acceptance.
+//!
+//! WI-10003673: walking the installed tree is ~17k files / ~5 GB and took ~9
+//! minutes per Server boot on the Windows VM, BEFORE the marker probe. The
+//! Windows packer therefore ships the key precomputed at build time
+//! (`bin/lib/sidecar-runtime-generation.js`) in [`PRECOMPUTED_GENERATION_FILE`],
+//! bound to the exact bytes of `.sidecar-build-stamp`. [`generation`] (the walk)
+//! remains the fallback when that record is absent or does not match.
 
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 
+/// Written by the Windows packer beside `.sidecar-build-stamp`. It describes
+/// the tree, so the walk excludes it (a record cannot hash itself).
+pub const PRECOMPUTED_GENERATION_FILE: &str = ".sidecar-runtime-generation";
+/// Schema tag the packer writes; anything else is ignored (walk fallback).
+pub const PRECOMPUTED_GENERATION_SCHEMA: &str = "papercusp-sidecar-runtime-generation/v1";
+
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+fn is_hex64(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// The build-time generation for `root`, when one is shipped AND bound to the
+/// installed stamp bytes. `Ok(None)` = no record (older producer): walk.
+/// `Err` = a record exists but must not be trusted (malformed, unknown schema,
+/// or written for a different stamp — e.g. left behind by another build): the
+/// caller logs the reason and walks. Never returns a key the record did not
+/// bind to THIS stamp, so a stale record can only cost a walk, never reuse an
+/// obsolete snapshot.
+pub fn precomputed_generation(root: &Path, stamp_bytes: &[u8]) -> io::Result<Option<String>> {
+    let path = root.join(PRECOMPUTED_GENERATION_FILE);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let record: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| invalid(format!("{}: {error}", path.display())))?;
+    let field = |name: &str| record.get(name).and_then(serde_json::Value::as_str);
+    if field("schema") != Some(PRECOMPUTED_GENERATION_SCHEMA) {
+        return Err(invalid(format!(
+            "{}: schema is not {PRECOMPUTED_GENERATION_SCHEMA}",
+            path.display()
+        )));
+    }
+    let generation = field("generation")
+        .filter(|value| is_hex64(value))
+        .ok_or_else(|| invalid(format!("{}: no 64-hex generation", path.display())))?;
+    let bound = field("stampSha256")
+        .filter(|value| is_hex64(value))
+        .ok_or_else(|| invalid(format!("{}: no 64-hex stampSha256", path.display())))?;
+    let installed = format!("{:x}", Sha256::digest(stamp_bytes));
+    if !bound.eq_ignore_ascii_case(&installed) {
+        return Err(invalid(format!(
+            "{} is bound to stamp {bound}, but the installed stamp hashes to {installed}",
+            path.display()
+        )));
+    }
+    Ok(Some(generation.to_ascii_lowercase()))
 }
 
 fn frame(hash: &mut Sha256, bytes: &[u8]) {
@@ -37,6 +93,7 @@ fn walk(root: &Path, relative: &str, hash: &mut Sha256, buffer: &mut [u8]) -> io
     for name in names {
         // Exactly the cold inputs excluded by the production tar invocation.
         // The completion marker is generated AFTER extraction, not payload.
+        // The precomputed-generation record describes this tree (WI-10003673).
         if relative.is_empty()
             && matches!(
                 name.as_str(),
@@ -44,6 +101,7 @@ fn walk(root: &Path, relative: &str, hash: &mut Sha256, buffer: &mut [u8]) -> io
                     | "db-seed.dump"
                     | "db-seed.tar.gz"
                     | ".papercusp-runtime-complete"
+                    | PRECOMPUTED_GENERATION_FILE
             )
         {
             continue;
@@ -175,6 +233,7 @@ mod tests {
             "db-seed.dump",
             "db-seed.tar.gz",
             ".papercusp-runtime-complete",
+            ".sidecar-runtime-generation",
         ] {
             fs::write(f.0.join(name), "not hot payload").unwrap();
         }
@@ -183,6 +242,61 @@ mod tests {
         let b = f.key();
         fs::write(f.0.join("nested/source.tar.zst"), "hot nested file").unwrap();
         assert_ne!(b, f.key());
+    }
+
+    fn record(generation: &str, stamp_sha: &str) -> String {
+        format!(
+            r#"{{"schema":"{PRECOMPUTED_GENERATION_SCHEMA}","generation":"{generation}","stampSha256":"{stamp_sha}"}}"#
+        )
+    }
+
+    fn sha(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn precomputed_record_is_used_only_when_bound_to_the_installed_stamp() {
+        let f = Fixture::new();
+        let stamp = b"same stamp bytes";
+        // Absent: the caller walks (older producers ship no record).
+        assert_eq!(precomputed_generation(&f.0, stamp).unwrap(), None);
+
+        let generation = "AB".repeat(32);
+        fs::write(f.0.join(PRECOMPUTED_GENERATION_FILE), record(&generation, &sha(stamp))).unwrap();
+        assert_eq!(
+            precomputed_generation(&f.0, stamp).unwrap().as_deref(),
+            Some("ab".repeat(32).as_str()),
+            "a bound record is the key, normalized to lowercase like the walk's output"
+        );
+        // A different stamp (another build's record left behind) is refused.
+        assert!(precomputed_generation(&f.0, b"another build's stamp").is_err());
+
+        for bad in [
+            record("not-hex", &sha(stamp)),
+            record(&"ab".repeat(31), &sha(stamp)),
+            record(&generation, "short"),
+            record(&generation, &sha(stamp)).replace("/v1", "/v0"),
+            "{not json".to_string(),
+        ] {
+            fs::write(f.0.join(PRECOMPUTED_GENERATION_FILE), &bad).unwrap();
+            assert!(precomputed_generation(&f.0, stamp).is_err(), "must not trust {bad}");
+        }
+    }
+
+    /// Cross-language contract: the exact bytes the Windows packer
+    /// (bin/lib/sidecar-runtime-generation.js) writes for the fixture stamp.
+    /// test/sidecar-runtime-generation.test.js pins the writer to the same file.
+    #[test]
+    fn reads_the_record_the_windows_packer_writes() {
+        let f = Fixture::new();
+        let stamp = include_bytes!("../../test/fixtures/sidecar-runtime-generation/stamp.json");
+        let written = include_str!("../../test/fixtures/sidecar-runtime-generation/record.json");
+        fs::write(f.0.join(PRECOMPUTED_GENERATION_FILE), written).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(written).unwrap();
+        assert_eq!(
+            precomputed_generation(&f.0, stamp).unwrap().as_deref(),
+            expected["generation"].as_str()
+        );
     }
 
     #[test]
