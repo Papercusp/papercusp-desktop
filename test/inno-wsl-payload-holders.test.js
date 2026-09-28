@@ -106,6 +106,49 @@ test('the helpers ship LF-only (bash inside WSL) and pass bash -n', () => {
   assert.equal(spawnSync('bash', ['-n', script]).status, 0);
 });
 
+// Pascal `{ ... }` comments end at the FIRST `}`, so a constant like {app} in a
+// comment closes it early and the rest compiles as code ("'BEGIN' expected").
+// The real-ISCC legs that would catch that are skipped in the default suite, so
+// scan [Code] statically: strings, // and (* *) comments and preprocessor lines
+// are skipped; a `{` inside a brace comment is the defect.
+test('papercusp.iss [Code] has no "{" inside a {...} comment (it would end the comment early)', () => {
+  // Controls: the scanner must flag the exact defect and ignore braces in strings.
+  assert.deepEqual(braceCommentOffenders("\n[Code]\n{ holds {app} open }\nbegin end;\n"), ['[Code] line 2']);
+  assert.deepEqual(braceCommentOffenders("\n[Code]\nS := '{#AppName} {app}'; // {x\n#if A\n"), []);
+  assert.deepEqual(braceCommentOffenders(iss), []);
+});
+
+function braceCommentOffenders(text) {
+  const code = text.slice(text.indexOf('\n[Code]'));
+  const offenders = [];
+  let line = 1;
+  let state = 'code';
+  for (let i = 0; i < code.length; i += 1) {
+    const c = code[i];
+    if (c === '\n') {
+      line += 1;
+      if (state === 'string' || state === 'line') state = 'code';
+      continue;
+    }
+    if (state === 'code') {
+      const lineStart = code.lastIndexOf('\n', i - 1) + 1;
+      if (code.slice(lineStart, i).trim() === '' && c === '#') state = 'line';
+      else if (c === "'") state = 'string';
+      else if (c === '/' && code[i + 1] === '/') state = 'line';
+      else if (c === '(' && code[i + 1] === '*') { state = 'paren'; i += 1; }
+      else if (c === '{') state = 'brace';
+    } else if (state === 'string') {
+      if (c === "'") state = 'code';
+    } else if (state === 'paren') {
+      if (c === '*' && code[i + 1] === ')') { state = 'code'; i += 1; }
+    } else if (state === 'brace') {
+      if (c === '{') offenders.push(`[Code] line ${line - 1}`);
+      else if (c === '}') state = 'code';
+    }
+  }
+  return offenders;
+}
+
 test('papercusp.iss runs the WSL stop between the role close and the payload rename, Server only', () => {
   const prepare = iss.slice(iss.indexOf('function PrepareToInstall'));
   const body = prepare.slice(0, prepare.indexOf('\nend;'));
