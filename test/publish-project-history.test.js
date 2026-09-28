@@ -27,7 +27,14 @@ function verify({ missing = false, mismatch = false } = {}) {
     const start = source.lastIndexOf('if [[ "$IS_HOLDING_PAGE" == "0" ]]; then', source.indexOf(marker));
     const end = source.indexOf('\n# Follow one REAL link', start);
     assert.ok(start >= 0 && end > start);
-    const script = `set -euo pipefail\nIS_HOLDING_PAGE=0\nBASE=https://example.invalid/unlisted\ncurl() { local url out; while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; https:*) url="$1"; shift;; *) shift;; esac; done; cp "$SERVED/\${url#"$BASE"/}" "$out"; }\n${source.slice(start, end)}`;
+    // The verification block calls uploaded_by_this_run(), defined far above the slice. Carry
+    // the REAL definition in (never a stub) and run it as a FULL publish (DELTA_MODE=full),
+    // where every file was re-uploaded and so must match the local copy — the property under test.
+    const helperStart = source.indexOf('uploaded_by_this_run() {');
+    const helperEnd = source.indexOf('\n}\n', helperStart);
+    assert.ok(helperStart >= 0 && helperEnd > helperStart, 'uploaded_by_this_run() definition not found');
+    const helper = source.slice(helperStart, helperEnd + 2);
+    const script = `set -euo pipefail\nIS_HOLDING_PAGE=0\nDELTA_MODE=full\nBASE=https://example.invalid/unlisted\ncurl() { local url out; while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; https:*) url="$1"; shift;; *) shift;; esac; done; cp "$SERVED/\${url#"$BASE"/}" "$out"; }\n${helper}\n${source.slice(start, end)}`;
     return spawnSync('bash', ['-c', script], { encoding: 'utf8', env: {
       ...process.env, SITE_DIR: site, SERVED: served, TMP_PAGE: temporary,
     } });
