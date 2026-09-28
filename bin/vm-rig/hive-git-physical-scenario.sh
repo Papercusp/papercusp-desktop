@@ -478,6 +478,7 @@ NODE
   # object databases. Capture tower first and the final VM snapshot second so
   # the evidence preserves the validator's causal order.
   local deadline=$((SECONDS + 1200))
+  local receive_drive=0 next_receive_drive=$((SECONDS + 60))
   while :; do
     "$TSX" "$PRODUCER" phase-a-observe tower present "$TOWER_REPO" \
       "$tower_device" "$vm_device" >"$phase_dir/tower-after.json"
@@ -521,6 +522,17 @@ NODE
         cat "$phase_dir/vm-after.err" >&2
       fi
       fail 'phase A canonical bootstrap did not reach strict two-host convergence within 20 minutes'
+    fi
+    # Drive both hosts' production receive instead of waiting on the 10-min
+    # scheduled tick (WI-10003711). The quarantine itself makes the VM commit a
+    # github-bridge escalation set and clear, which moves the VM namespace, and
+    # the tower only receives peer announces on its git-sync tick. Phase B already
+    # drives the receive this way on every attempt. Every fire is kept as evidence.
+    if [ "$SECONDS" -ge "$next_receive_drive" ]; then
+      receive_drive=$((receive_drive + 1))
+      run_vm_git_sync >"$phase_dir/drive-vm-receive-$receive_drive.log" 2>&1 || true
+      run_tower_git_sync >"$phase_dir/drive-tower-receive-$receive_drive.log" 2>&1 || true
+      next_receive_drive=$((SECONDS + 120))
     fi
     sleep 10
   done
@@ -568,6 +580,11 @@ phase_b_ref_announce() {
   while :; do
     attempt=$((attempt + 1))
     run_vm_git_sync >"$forward_dir/destination-receive-$attempt.json"
+    # Stamp the receive's finish BEFORE observing it. The verifier requires
+    # destinationReceive.finishedAt <= destinationAfter.observedAt, and a stamp
+    # taken after the loop's break always lands after the observation, which
+    # rejected every run (WI-10003717, P-505 run 14).
+    forward_receive_finished="$(now_iso)"
     if ssh "${SSH_OPTS[@]}" "$VM" \
       "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-observe vm tower-to-vm present '$VM_REPO' '$tower_device' '$run_id'" \
       >"$forward_dir/destination-after.json" 2>"$forward_dir/destination-after.err"; then
@@ -577,7 +594,6 @@ phase_b_ref_announce() {
       || fail 'phase B tower-to-vm ref announcement did not materialize within 20 minutes'
     sleep 10
   done
-  forward_receive_finished="$(now_iso)"
   forward_finished="$(now_iso)"
 
   reverse_started="$(now_iso)"
@@ -602,6 +618,7 @@ phase_b_ref_announce() {
   while :; do
     attempt=$((attempt + 1))
     run_tower_git_sync >"$reverse_dir/destination-receive-$attempt.json"
+    reverse_receive_finished="$(now_iso)"
     if "$TSX" "$PRODUCER" phase-b-observe tower vm-to-tower present "$TOWER_REPO" \
       "$vm_device" "$run_id" >"$reverse_dir/destination-after.json" 2>"$reverse_dir/destination-after.err"; then
       break
@@ -610,7 +627,6 @@ phase_b_ref_announce() {
       || fail 'phase B vm-to-tower ref announcement did not materialize within 20 minutes'
     sleep 10
   done
-  reverse_receive_finished="$(now_iso)"
   reverse_finished="$(now_iso)"
   finished_at="$(now_iso)"
 
