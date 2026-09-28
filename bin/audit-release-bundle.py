@@ -397,6 +397,28 @@ BENIGN_CREDENTIAL_VALUE_SHA256 = {
     "bc3ae723f57c6b9e3fd80b699fcc420f6074b0b1718039669d22631d508ac0a7",
 }
 
+_BENIGN_CREDENTIAL_RX = [re.compile(b) for b in BENIGN_ERE]
+
+
+def credential_rule(value):
+    """The CREDENTIAL_ERE rule name a matched value belongs to."""
+    for name, pat in CREDENTIAL_ERE:
+        if re.search(pat.replace("[[:space:]]", r"\s"), value):
+            return name
+    return "credential"
+
+
+def is_benign_credential(value):
+    """True when a credential-shaped VALUE is on a documented acceptance list.
+
+    The one classifier for both credential passes — phase B over source.tar.zst and
+    scan_dir over the assembled/finished bytes — so the two can never disagree about
+    what is benign (WI-10003577: a separate scanner with its own one-key list did).
+    """
+    if any(rx.search(value) for rx in _BENIGN_CREDENTIAL_RX):
+        return True
+    return hashlib.sha256(value.encode()).hexdigest() in BENIGN_CREDENTIAL_VALUE_SHA256
+
 
 # Attribution reads whole members into memory to regex them. Phase B has already
 # convicted the bundle by this point, so a member too big to attribute costs us a
@@ -2854,6 +2876,44 @@ def scan_dir(dirs):
     grep_l(high, False, dirs)
     grep_l(low, True, dirs, binary=False)
 
+    # ── CREDENTIALS in the bytes that ship (WI-10003577) ─────────────────────
+    # CREDENTIAL_ERE used to run ONLY in phase B, over source.tar.zst. This backstop
+    # — the one every platform leg points at the assembled sidecar / finished
+    # installer — hunted identity literals and nothing else, so a real key in the
+    # SHIPPED node_modules was invisible to it. The only finished-bytes key check was
+    # bin/audit-bundle.sh: mac-only, PostHog-only, with its own one-key allowlist
+    # that drifted from BENIGN_ERE and redded the 0.0.22 cut on lost-pixel's vendor
+    # key. Same rules and the same acceptances as phase B (is_benign_credential),
+    # binary-aware (`-a`), everywhere including node_modules: a credential cannot
+    # match by chance the way a bare first name does.
+    cred_hits = []
+
+    def grep_credentials(roots, label=None):
+        pats = [arg for _name, pat in CREDENTIAL_ERE for arg in ("-e", pat)]
+        for root in roots:
+            if not os.path.isdir(root):
+                continue
+            # -Z: NUL after the filename, so a path containing ':' cannot be split
+            # into a wrong (path, value) pair.
+            r = subprocess.run(["grep", "-raoZE", *pats, root], capture_output=True)
+            if r.returncode > 1:
+                print(f"    credentials: grep failed on {root} (exit {r.returncode}): "
+                      f"{r.stderr.decode('utf-8', 'replace')[:300]}", file=sys.stderr)
+                cred_hits.append(("scan-error", label or root, "(grep failed)"))
+                continue
+            for raw in r.stdout.split(b"\n"):
+                path_b, sep, val_b = raw.partition(b"\0")
+                if not sep:
+                    continue
+                val = val_b.decode("utf-8", "replace")
+                if is_benign_credential(val):
+                    continue
+                path = os.fsdecode(path_b)
+                shown = f"{label}!{os.path.relpath(path, root)}" if label else path
+                cred_hits.append((credential_rule(val), shown, val))
+
+    grep_credentials(dirs)
+
     # P-012 archive pass: a compressed archive's payload is not present in its own
     # bytes, so no grep — binary-aware or not — can see inside it. Expand, scan the
     # contents, discard. An archive we cannot open is reported and FAILS: the whole
@@ -2869,6 +2929,7 @@ def scan_dir(dirs):
                     uninspectable.append(arc)
                     continue
                 grep_l(high, False, [dest], label=arc)
+                grep_credentials([dest], label=arc)
                 # A SYSTEM IMAGE (an OS rootfs tarball, e.g. the WSL runtime) is
                 # vendor content end to end, so a bare first name inside it is never
                 # evidence — it is some upstream author's. Measured on the 0.0.14
@@ -3013,8 +3074,20 @@ def scan_dir(dirs):
         print("  sit in the tree unnoticed — do not 'fix' it by re-hiding it from the scan.")
         print("  Fix the SOURCE: make the link repo-relative, or stop tracking it.")
 
-    if not files and not link_hits:
-        print("    ✓ CLEAN — no sensitive/build-box identity in the assembled bundle "
+    if cred_hits:
+        print(f"\n    ✗ ASSEMBLED BUNDLE CARRIES A CREDENTIAL — MUST NOT SHIP "
+              f"({len(cred_hits)} hit(s))\n")
+        for rule, where, val in cred_hits[:40]:
+            # Never echo a live secret into a build log: enough to find it, no more.
+            print(f"        [{rule}]  {where}  ({val[:10]}…)")
+        if len(cred_hits) > 40:
+            print(f"        … and {len(cred_hits) - 40:,} more")
+        print("\n  Fix the SOURCE (prune the file from the sidecar copy, or scrub the value).")
+        print("  A third party's OWN published public key may be accepted in BENIGN_ERE /")
+        print("  BENIGN_CREDENTIAL_VALUE_SHA256 WITH the file it comes from named — never a broad pattern.")
+
+    if not files and not link_hits and not cred_hits:
+        print("    ✓ CLEAN — no sensitive/build-box identity or credential in the assembled bundle "
               f"({covered:,} file(s), {len(links):,} link target(s), "
               f"{len(archives)} archive(s) expanded and scanned)")
         print_coverage_gaps(identity_coverage_gaps(lits))
