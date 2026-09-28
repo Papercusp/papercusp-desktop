@@ -303,7 +303,7 @@ JSON
 
 phase_d_contract() {
   cat <<'JSON'
-{"schemaVersion":"hive-git-physical-phase-contract/v1","phase":"D","planItem":"P-305","state":"executor-installed","ready":true,"missingAssertions":[],"target":{"potHomeSlug":"hello-world-3-pot","repoKey":"gh-1303510992","topology":"vm-below-steer-to-tower-integrator-to-vm-worktree"},"causalOrder":["freshVmBelowSteerCommitCreated","vmGitSyncPublishTriggered","towerGitSyncQueueReceiveTriggered","exactPendingRequestObserved","productionRatificationApplied","towerGitSyncIntegrationTriggered","towerSignedStagingAdvanceObserved","vmReceivedIdenticalSignedAdvance","vmCanonicalAndWorktreeFastForwarded","vmOverlapFileMadeDirty","freshTowerOverlapCommitCreated","towerSecondSignedAdvanceObserved","vmMirrorAndCursorAdvanced","vmWorktreeHeadAndDirtyFileObservedUntouched"],"requiredObservations":["freshRunBoundBelowSteerHead","exactVisibleIntegrationRequest","ratifyIntegrationRequestResult","productionGitSyncTriggers","signedStagingAdvanceOnBothPhysicalHosts","integratorNamespaceAndCanonicalStagingOids","worktreeBridgeCursorEpochSeqAndEventRow","secondFreshOverlappingAdvance","unchangedDirtyWorktreeHead","unchangedProtectedFileHash"],"forbiddenEvidence":["localSecondWorktreeAsPhysicalProof","directGitFetch","directRefMutation","preAuthoredManifest","environmentSuppliedCommand","callerSelectedRepoOrWorktree"],"productionSurfaces":["git-sync:run","listIntegrationRequests","ratifyIntegrationRequest","pot-git:staging-advance","worktree-bridge"],"externalCommandOverrides":false}
+{"schemaVersion":"hive-git-physical-phase-contract/v1","phase":"D","planItem":"P-305","state":"executor-installed","ready":true,"missingAssertions":[],"target":{"potHomeSlug":"hello-world-3-pot","repoKey":"gh-1303510992","topology":"vm-below-steer-to-tower-integrator-to-vm-worktree"},"causalOrder":["freshVmBelowSteerCommitCreated","vmGitSyncPublishTriggered","towerGitSyncQueueReceiveTriggered","exactPendingRequestObserved","productionRatificationApplied","towerGitSyncIntegrationTriggered","towerSignedStagingAdvanceObserved","vmReceivedIdenticalSignedAdvance","vmCanonicalAndWorktreeFastForwarded","vmOverlapFileMadeDirty","freshTowerOverlapCommitCreated","towerSecondSignedAdvanceObserved","vmMirrorAndCursorAdvanced","vmWorktreeHeadAndDirtyFileObservedUntouched"],"requiredObservations":["freshRunBoundBelowSteerHead","exactVisibleIntegrationRequest","ratifyIntegrationRequestResult","productionGitSyncTriggers","signedStagingAdvanceOnBothPhysicalHosts","integratorNamespaceAndCanonicalStagingOids","worktreeBridgeCursorEpochSeqAndEventRow","secondFreshOverlappingAdvance","unchangedDirtyWorktreeHead","unchangedProtectedFileHash"],"forbiddenEvidence":["localSecondWorktreeAsPhysicalProof","directGitFetch","directRefMutation","preAuthoredManifest","environmentSuppliedCommand","callerSelectedRepoOrWorktree"],"productionSurfaces":["git-sync:run","setCommsTrust","listIntegrationRequests","ratifyIntegrationRequest","pot-git:staging-advance","worktree-bridge"],"externalCommandOverrides":false}
 JSON
 }
 
@@ -732,6 +732,31 @@ NODE
   "$TSX" "$PRODUCER" phase-c-verify "$phase_dir/verify-input.json" \
     >"$phase_dir/verdict.json"
 }
+# Phase D rig-state preconditions (WI-10003723). Both are set only while the
+# scenario holds a change it must undo, and the EXIT trap undoes it if the
+# phase dies first: the tower-side comms-tier hold, and this run's own planted
+# dirt in the VM worktree. Both undo steps are idempotent.
+PHASE_D_TIER_HOLD=''
+PHASE_D_VM_DIRTY_RUN=''
+phase_d_tier_restore() {
+  [ -n "$PHASE_D_TIER_HOLD" ] || return 0
+  "$TSX" "$PRODUCER" phase-d-tier-restore "$PHASE_D_TIER_HOLD"
+}
+phase_d_vm_reset() {
+  [ -n "$PHASE_D_VM_DIRTY_RUN" ] || return 0
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-reset '$PHASE_D_VM_DIRTY_RUN'"
+}
+phase_d_restore_on_exit() {
+  if [ -n "$PHASE_D_TIER_HOLD" ] && [ -f "$PHASE_D_TIER_HOLD" ]; then
+    phase_d_tier_restore >"${PHASE_D_TIER_HOLD%.json}-exit-restore.json" 2>"${PHASE_D_TIER_HOLD%.json}-exit-restore.err" \
+      || echo "hive-git-physical-scenario: WARNING phase D tier restore failed; run: $TSX $PRODUCER phase-d-tier-restore $PHASE_D_TIER_HOLD" >&2
+  fi
+  if [ -n "$PHASE_D_VM_DIRTY_RUN" ]; then
+    phase_d_vm_reset >/dev/null 2>&1 \
+      || echo "hive-git-physical-scenario: WARNING phase D VM worktree reset failed for run $PHASE_D_VM_DIRTY_RUN" >&2
+  fi
+}
 phase_d_worktree_materialization() {
   [ -x "$TSX" ] && [ -f "$PRODUCER" ] && [ -x "$TOWER_CALL" ] \
     || fail 'phase D local producer or canonical ptool is unavailable'
@@ -753,6 +778,18 @@ phase_d_worktree_materialization() {
   mkdir -m 700 "$phase_dir"
   mkdir -m 700 "$first_dir" "$dirty_dir"
   started_at="$(now_iso)"
+
+  # The tower's comms-trust row can pin the VM user at or above the
+  # auto-integrate tier ('steer'); the integrator then merges the VM head and
+  # never queues the request this phase must observe (P-505 run 15). Hold the
+  # user below steer through the production surface, with the exact prior row
+  # recorded first, then outwait the integrator's 30s tier cache
+  # (comms-tier-gate.ts CACHE_TTL_MS) before the below-steer head exists.
+  PHASE_D_TIER_HOLD="$phase_dir/phase-d-tier-hold.json"
+  trap phase_d_restore_on_exit EXIT
+  "$TSX" "$PRODUCER" phase-d-tier-hold "$vm_device" "$run_id" "$PHASE_D_TIER_HOLD" \
+    >"$phase_dir/tier-hold-receipt.json"
+  sleep 35
 
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-commit vm below-steer '$vm_device' '$run_id'" \
@@ -781,6 +818,9 @@ phase_d_worktree_materialization() {
   queue_finished="$(now_iso)"
   "$TSX" "$PRODUCER" phase-d-ratify "$vm_device" "$first_head" \
     >"$first_dir/ratification.json"
+  # Ratification is keyed to (device, head), so restoring the prior tier now
+  # cannot change how this run-bound head integrates.
+  phase_d_tier_restore >"$phase_dir/tier-restore.json"
 
   integrate_started="$(now_iso)"
   run_tower_git_sync >"$first_dir/integrate-raw.json"
@@ -814,6 +854,7 @@ phase_d_worktree_materialization() {
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-dirty '$run_id'" \
     >"$dirty_dir/dirty-mutation.json"
+  PHASE_D_VM_DIRTY_RUN="$run_id"
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-observe vm dirty-before '$tower_device' '$run_id'" \
     >"$dirty_dir/before-observation.json"
@@ -900,6 +941,12 @@ fs.writeFileSync(`${dir}/verify-input.json`, `${JSON.stringify(input, null, 2)}\
 NODE
   "$TSX" "$PRODUCER" phase-d-verify "$phase_dir/verify-input.json" \
     >"$phase_dir/verdict.json"
+  # The dirty file was this run's own probe; once observed untouched it is
+  # discarded so later phases and the next run start from a clean worktree.
+  phase_d_vm_reset >"$dirty_dir/reset.json"
+  PHASE_D_VM_DIRTY_RUN=''
+  PHASE_D_TIER_HOLD=''
+  trap - EXIT
 }
 phase_e_github_bridge() {
   [ -x "$TSX" ] && [ -f "$PRODUCER" ] && [ -x "$TOWER_CALL" ] \
