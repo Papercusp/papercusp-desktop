@@ -57,14 +57,74 @@ SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no)
 # Every production tick targets the entry that owns system:git-sync on its
 # host: the tower's self_repo pot home, and the VM's link-joined clone of the
 # same pot repo (see VM_GIT_SYNC_SLUG above).
+#
+# The tower's request-serving operator (:3070, PAPERCUSP_BACKGROUND_WORKERS=0)
+# refuses a mutating git-sync:run as request-only-host and names the
+# background-worker host in retry.dev_box_url (agent-tools/git_sync/run.ts).
+# P-505 run 11 (WI-2039874) recorded that refusal as the Phase B publish and
+# moved on; only the scheduled tick later published, out of causal order. So:
+# follow the named host once, and fail at the publish if it still did not fire.
+#
+# Prints the retry URL of a request-only-host refusal read from stdin, or
+# nothing for any other result (including unparseable output).
+git_sync_refusal_retry_url() {
+  node -e '
+    let raw = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { raw += chunk; });
+    process.stdin.on("end", () => {
+      let value = null;
+      try { value = JSON.parse(raw); } catch {
+        const start = raw.indexOf("{");
+        const end = raw.lastIndexOf("}");
+        if (start >= 0 && end > start) { try { value = JSON.parse(raw.slice(start, end + 1)); } catch {} }
+      }
+      if (!value || value.fired !== false || value.reason !== "request-only-host") return;
+      const url = value.retry && value.retry.dev_box_url;
+      if (typeof url === "string" && /^https?:\/\/[^\s]+$/.test(url)) process.stdout.write(url);
+    });
+  '
+}
+
 run_tower_git_sync() {
-  printf '{"installSlug":"%s"}\n' "$TOWER_GIT_SYNC_SLUG" \
-    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME"
+  local args out rc=0 retry_url
+  args="$(printf '{"installSlug":"%s"}' "$TOWER_GIT_SYNC_SLUG")"
+  out="$(printf '%s\n' "$args" \
+    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME")" || rc=$?
+  retry_url="$(printf '%s' "$out" | git_sync_refusal_retry_url)"
+  if [ -n "$retry_url" ]; then
+    echo "hive-git-physical-scenario: tower git-sync:run refused (request-only-host); re-firing on $retry_url" >&2
+    rc=0
+    out="$(printf '%s\n' "$args" \
+      | "$TOWER_CALL" git-sync:run --json - --url="$retry_url" --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME")" || rc=$?
+  fi
+  printf '%s\n' "$out"
+  return "$rc"
 }
 
 run_vm_git_sync() {
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_CALL' git-sync:run '{\"installSlug\":\"$VM_GIT_SYNC_SLUG\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'"
+}
+
+# Fails the run when a recorded git-sync:run result did not fire (a refusal or
+# a preview) or is not a JSON result at all. A fired result may still be
+# skipped or in progress; the phase observations judge its effect.
+require_git_sync_fired() {
+  local file="$1" label="$2" verdict
+  verdict="$(node -e '
+    const raw = require("fs").readFileSync(process.argv[1], "utf8");
+    let value = null;
+    try { value = JSON.parse(raw); } catch {
+      const start = raw.indexOf("{");
+      const end = raw.lastIndexOf("}");
+      if (start >= 0 && end > start) { try { value = JSON.parse(raw.slice(start, end + 1)); } catch {} }
+    }
+    if (!value || typeof value !== "object") { process.stdout.write("no JSON result"); process.exit(0); }
+    if (value.fired === true) process.exit(0);
+    process.stdout.write(`${value.status ?? "unknown"}: ${value.reason ?? value.note ?? "no reason"}`);
+  ' "$file")"
+  [ -z "$verdict" ] || fail "$label git-sync:run did not fire ($verdict); see $file"
 }
 
 # Phase A's quarantine is intentionally destructive: it removes the VM's
@@ -448,6 +508,7 @@ phase_b_ref_announce() {
     "$tower_device" "$run_id" >"$forward_dir/mutation.json"
   forward_publish_started="$(now_iso)"
   run_tower_git_sync >"$forward_dir/source-publish-raw.json"
+  require_git_sync_fired "$forward_dir/source-publish-raw.json" 'phase B tower source-publish'
   forward_publish_finished="$(now_iso)"
   "$TSX" "$PRODUCER" phase-b-observe tower tower-to-vm present "$TOWER_REPO" \
     "$tower_device" "$run_id" >"$forward_dir/source-after.json"
@@ -480,6 +541,7 @@ phase_b_ref_announce() {
     >"$reverse_dir/mutation.json"
   reverse_publish_started="$(now_iso)"
   run_vm_git_sync >"$reverse_dir/source-publish-raw.json"
+  require_git_sync_fired "$reverse_dir/source-publish-raw.json" 'phase B vm source-publish'
   reverse_publish_finished="$(now_iso)"
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-observe vm vm-to-tower present '$VM_REPO' '$vm_device' '$run_id'" \
@@ -633,6 +695,7 @@ phase_d_worktree_materialization() {
 
   publish_started="$(now_iso)"
   run_vm_git_sync >"$first_dir/publish-raw.json"
+  require_git_sync_fired "$first_dir/publish-raw.json" 'phase D vm publish'
   publish_finished="$(now_iso)"
 
   queue_started="$(now_iso)"
@@ -655,6 +718,7 @@ phase_d_worktree_materialization() {
 
   integrate_started="$(now_iso)"
   run_tower_git_sync >"$first_dir/integrate-raw.json"
+  require_git_sync_fired "$first_dir/integrate-raw.json" 'phase D tower integrate'
   integrate_finished="$(now_iso)"
   "$TSX" "$PRODUCER" phase-d-event tower 0 "$tower_device" "$first_head" \
     >"$first_dir/source-event.json"
@@ -693,6 +757,7 @@ phase_d_worktree_materialization() {
   second_head="$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).headOid)" "$dirty_dir/mutation.json")"
   dirty_integrate_started="$(now_iso)"
   run_tower_git_sync >"$dirty_dir/integrate-raw.json"
+  require_git_sync_fired "$dirty_dir/integrate-raw.json" 'phase D tower dirty integrate'
   dirty_integrate_finished="$(now_iso)"
   "$TSX" "$PRODUCER" phase-d-event tower 0 "$tower_device" "$second_head" \
     >"$dirty_dir/source-event.json"
@@ -815,9 +880,11 @@ phase_e_github_bridge() {
 
   tower_member_started="$(now_iso)"
   run_tower_git_sync >"$phase_dir/tower-member-raw.json"
+  require_git_sync_fired "$phase_dir/tower-member-raw.json" 'phase E tower member'
   tower_member_finished="$(now_iso)"
   vm_member_started="$(now_iso)"
   run_vm_git_sync >"$phase_dir/vm-member-raw.json"
+  require_git_sync_fired "$phase_dir/vm-member-raw.json" 'phase E vm member'
   vm_member_finished="$(now_iso)"
   "$TSX" "$PRODUCER" phase-e-observe tower bridged-member "$tower_device" "$run_id" \
     >"$phase_dir/tower-bridged-member.json"
@@ -829,12 +896,15 @@ phase_e_github_bridge() {
     >"$phase_dir/ingress-mutation.json"
   ingress_started="$(now_iso)"
   run_tower_git_sync >"$phase_dir/healthy-ingress-raw.json"
+  require_git_sync_fired "$phase_dir/healthy-ingress-raw.json" 'phase E tower healthy ingress'
   ingress_finished="$(now_iso)"
   integrate_started="$(now_iso)"
   run_tower_git_sync >"$phase_dir/healthy-integrate-raw.json"
+  require_git_sync_fired "$phase_dir/healthy-integrate-raw.json" 'phase E tower healthy integrate'
   integrate_finished="$(now_iso)"
   egress_started="$(now_iso)"
   run_tower_git_sync >"$phase_dir/healthy-egress-raw.json"
+  require_git_sync_fired "$phase_dir/healthy-egress-raw.json" 'phase E tower healthy egress'
   egress_finished="$(now_iso)"
   "$TSX" "$PRODUCER" phase-e-observe tower healthy-egress "$tower_device" "$run_id" \
     >"$phase_dir/healthy-observation.json"
@@ -851,6 +921,7 @@ phase_e_github_bridge() {
   divergence_armed=1
   divergence_started="$(now_iso)"
   run_tower_git_sync >"$phase_dir/divergence-egress-raw.json"
+  require_git_sync_fired "$phase_dir/divergence-egress-raw.json" 'phase E tower divergence egress'
   divergence_finished="$(now_iso)"
   "$TSX" "$PRODUCER" phase-e-observe tower divergence-after "$tower_device" "$run_id" \
     >"$phase_dir/divergence-after.json"
@@ -862,9 +933,11 @@ phase_e_github_bridge() {
     >"$phase_dir/rollback-mode.json"
   rollback_tower_started="$(now_iso)"
   run_tower_git_sync >"$phase_dir/rollback-tower-raw.json"
+  require_git_sync_fired "$phase_dir/rollback-tower-raw.json" 'phase E tower rollback'
   rollback_tower_finished="$(now_iso)"
   rollback_vm_started="$(now_iso)"
   run_vm_git_sync >"$phase_dir/rollback-vm-raw.json"
+  require_git_sync_fired "$phase_dir/rollback-vm-raw.json" 'phase E vm rollback'
   rollback_vm_finished="$(now_iso)"
   "$TSX" "$PRODUCER" phase-e-observe tower legacy-after "$tower_device" "$run_id" \
     >"$phase_dir/tower-legacy-after.json"
