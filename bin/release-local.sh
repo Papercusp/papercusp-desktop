@@ -3069,7 +3069,7 @@ elif [[ "$WITH_MAC" == "1" ]]; then
   # has no version in its filename), so a prior cut's dmg/app would contaminate
   # this release (a stale 0.0.2 dmg nearly shipped in 0.0.3-alpha, 2026-07-08).
   mkdir -p "$MAC_OUT/dmg" "$MAC_OUT/macos"
-  release_artifacts_guarded_delete "$MAC_OUT"/dmg/*.dmg "$MAC_OUT"/macos/*.app.tar.gz "$MAC_OUT"/macos/*.app.tar.gz.sig \
+  release_artifacts_guarded_delete "$MAC_OUT"/dmg/*.dmg "$MAC_OUT"/dmg/*.dmg.sig "$MAC_OUT"/macos/*.app.tar.gz "$MAC_OUT"/macos/*.app.tar.gz.sig \
     || { echo "ERROR: release-retention guard refused stale macOS output cleanup" >&2; exit 1; }
   (
     set -euo pipefail
@@ -3422,7 +3422,11 @@ if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
   # dir — can't be swept in. The .app.tar.gz updater bundle is UNVERSIONED by tauri, so
   # it rides the pre-collection clean (fresh path) / P-005 verification (reuse) plus the
   # cross-version-count assertion below.
-  for f in "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg "$MAC_OUT"/macos/*.app.tar.gz "$MAC_OUT"/macos/*.app.tar.gz.sig; do
+  # WI-10003589: the dmg's minisign sibling is part of the published set (D-019 put
+  # .dmg in RELEASE_ARTIFACTS_SIGNABLE_SUFFIXES). Omitting it here failed the 0.0.22
+  # cut at release.manifest with both .dmg.sig files sitting on disk.
+  for f in "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg.sig \
+           "$MAC_OUT"/macos/*.app.tar.gz "$MAC_OUT"/macos/*.app.tar.gz.sig; do
     [[ -f "$f" ]] && ARTIFACTS+=("$f") && mac_found=1
   done
   [[ "$mac_found" == "1" ]] || { echo "ERROR: WITH_MAC=1 but no mac artifacts $([[ "$MAC_REUSE" == "1" ]] && echo "in $MAC_OUT (reuse)" || echo "came back from the VM")"; exit 1; }
@@ -3484,6 +3488,13 @@ if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
     release_task_leg_commit mac "$MAC_OUT" "$MAC_REUSE" || exit $?
   fi
 fi
+
+# WI-10003589 / EI-23962107353168459: every leg collector above must carry the
+# on-disk .sig of each signable artifact it collected. Without this, a dropped
+# signature surfaces only at release.manifest, as the publish-time guard's
+# misleading "NO sibling .sig", after the whole cut has run.
+release_artifacts_assert_collected_sigs_complete "release-local" "${ARTIFACTS[@]}" \
+  || { echo "ERROR: a release-local leg collector dropped an on-disk signature (see above) — fix its glob" >&2; exit 1; }
 
 # Retain all final target/artifact roots only after every enabled leg has
 # finished and ARTIFACTS contains the exact bytes this cut will publish.
