@@ -86,17 +86,54 @@ git_sync_refusal_retry_url() {
   '
 }
 
-run_tower_git_sync() {
-  local args out rc=0 retry_url
+# One logical tower git-sync:run against the default door (empty $1) or the
+# named host. Prints the result and returns ptool's exit status.
+#
+# ptool gives git-sync:run a 60s client deadline, which is exactly the
+# server's own budget (a 45s fire, two 5s HEAD reads, 5s MCP settlement). Any
+# main-thread lag on the background-worker host therefore makes ptool give up
+# first with MCP -32001 outcome=unknown. P-505 run 13 (WI-10003638) lost Phase B
+# that way while bg-host logged ~30 event-loop-lag warnings in 7 minutes. The
+# transport stores a result under the call's _meta.idempotencyKey even after
+# the client has gone, and a replay with the SAME key returns it without
+# re-executing (_mcp-result-replay.ts). So each logical call carries its own
+# fresh key, and an unknown outcome is replayed with that key (at most twice)
+# instead of abandoning the phase. Never share one key between the
+# request-only attempt and the re-fire: both hosts share the replay store, so a
+# shared key would replay the refusal.
+tower_git_sync_call() {
+  local url="$1" args key errf out="" rc=0 attempt
+  local wait_sec="${TOWER_GIT_SYNC_REPLAY_WAIT_SEC:-30}"
+  local url_flags=()
+  [ -z "$url" ] || url_flags=("--url=$url")
   args="$(printf '{"installSlug":"%s"}' "$TOWER_GIT_SYNC_SLUG")"
-  out="$(printf '%s\n' "$args" \
-    | "$TOWER_CALL" git-sync:run --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME")" || rc=$?
+  key="$(node -e 'process.stdout.write(require("crypto").randomUUID())')"
+  errf="$(mktemp)"
+  for attempt in 0 1 2; do
+    if [ "$attempt" -gt 0 ]; then
+      echo "hive-git-physical-scenario: tower git-sync:run outcome unknown (rc=$rc); replaying idempotency key $key in ${wait_sec}s (replay $attempt/2)" >&2
+      sleep "$wait_sec"
+    fi
+    rc=0
+    out="$(printf '%s\n' "$args" \
+      | "$TOWER_CALL" git-sync:run --json - ${url_flags[@]+"${url_flags[@]}"} --idempotency-key="$key" \
+          --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" 2>"$errf")" || rc=$?
+    cat "$errf" >&2
+    if [ "$rc" -eq 0 ] || ! grep -q 'outcome=unknown' "$errf"; then break; fi
+  done
+  rm -f "$errf"
+  printf '%s\n' "$out"
+  return "$rc"
+}
+
+run_tower_git_sync() {
+  local out rc=0 retry_url
+  out="$(tower_git_sync_call '')" || rc=$?
   retry_url="$(printf '%s' "$out" | git_sync_refusal_retry_url)"
   if [ -n "$retry_url" ]; then
     echo "hive-git-physical-scenario: tower git-sync:run refused (request-only-host); re-firing on $retry_url" >&2
     rc=0
-    out="$(printf '%s\n' "$args" \
-      | "$TOWER_CALL" git-sync:run --json - --url="$retry_url" --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME")" || rc=$?
+    out="$(tower_git_sync_call "$retry_url")" || rc=$?
   fi
   printf '%s\n' "$out"
   return "$rc"
