@@ -99,20 +99,44 @@ const path = require('node:path');
 const [sourceRoot, destinationRoot, rawExitStatus] = process.argv.slice(2);
 const perFileLimitBytes = 256 * 1024;
 const totalLimitBytes = 1024 * 1024;
-const allowed = [
-  'failure.err',
-  'phase-a/two-host-substrate-readiness.json',
-  'phase-a/tower-before.json',
-  'phase-a/quarantine.json',
-  'phase-a/vm-absent.json',
-  'phase-a/bootstrap-raw.json',
-  'phase-a/tower-after.json',
-  'phase-a/vm-after.json',
-  'phase-a/vm-after.err',
-  'phase-a/verify-input.json',
-  'phase-a/verdict.json',
-  'phase-a/verdict.err',
-];
+// Which files are banked is DERIVED from the run tree, never hand-listed. A
+// hand-list named only Phase A, so every Phase B-G failure banked nothing of
+// the phase that failed (P-505 run 24 lost all Phase D observations,
+// WI-10003767). Scope: failure.err at the root, plus every .json/.err/.log file
+// under a phase-<letter>/ directory. Root-level identities, receipts and
+// unsigned evidence stay out. Order is priority under the byte cap: the LATEST
+// phase first (phases run A..G, so that is the one that failed), and inside a
+// phase the named observations before numbered poll attempts, newest attempt
+// first.
+const phaseDirs = fs.readdirSync(sourceRoot, { withFileTypes: true })
+  .filter((entry) => entry.isDirectory() && /^phase-[a-z]$/.test(entry.name))
+  .map((entry) => entry.name)
+  .sort()
+  .reverse();
+const attemptNumber = (relative) => {
+  const match = /-(\d+)\.[a-z]+$/.exec(relative);
+  return match ? Number(match[1]) : null;
+};
+const byPriority = (a, b) => {
+  const na = attemptNumber(a);
+  const nb = attemptNumber(b);
+  if ((na === null) !== (nb === null)) return na === null ? -1 : 1;
+  if (na !== null && nb !== null && na !== nb) return nb - na;
+  return a < b ? -1 : a > b ? 1 : 0;
+};
+const phaseFiles = (phase) => {
+  const out = [];
+  const walk = (relative) => {
+    for (const entry of fs.readdirSync(path.join(sourceRoot, relative), { withFileTypes: true })) {
+      const child = `${relative}/${entry.name}`;
+      if (entry.isDirectory()) walk(child);
+      else if (/\.(json|err|log)$/.test(entry.name)) out.push(child);
+    }
+  };
+  walk(phase);
+  return out.sort(byPriority);
+};
+const allowed = ['failure.err', ...phaseDirs.flatMap(phaseFiles)];
 const sensitiveKey = /(authorization|cookie|credential|password|secret|token|private.?key)/i;
 const sanitizeText = (value) => value
   .replace(
