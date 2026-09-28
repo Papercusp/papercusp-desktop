@@ -1624,6 +1624,10 @@ function runArm64Collection({ includeArm64Artifact = true } = {}) {
     "MAC_PID=''",
     'MAC_REUSE=0',
     'assert_linux_artifact_cardinality() { :; }',
+    // The collector calls release_artifacts_assert_collected_sigs_complete (the
+    // collector-side signature guard, a5f47fb9); source its real definition,
+    // as the linux/mac collection harnesses above do.
+    `source ${JSON.stringify(path.join(root, 'bin', 'lib', 'release-artifacts.sh'))}`,
     collectorHarness,
     'printf "COLLECTED=%s\\n" "${#ARTIFACTS[@]}"',
   ].join('\n');
