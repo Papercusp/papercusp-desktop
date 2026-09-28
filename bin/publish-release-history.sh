@@ -137,10 +137,10 @@ try {
 const releases = history && Array.isArray(history.releases) ? history.releases : null;
 const historyVersion = releases?.[0]?.version;
 const index = fs.readFileSync(indexPath, 'utf8');
-const headings = [...index.matchAll(/<h2\b[^>]*>([^<]*)<\/h2>/gi)].map((match) => match[1].trim());
-// Instructions also use h2; release headings are the numeric version headings.
-const indexReleaseVersions = headings.filter((value) => /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(value));
-const indexVersion = indexReleaseVersions[0];
+// WI-10003687: each release card declares the newest release it carries. The
+// card HEADING is not that version when a platform-only hotfix folds into it
+// (the 0.0.22 card carries Windows 0.0.23), so the guard reads the attribute.
+const indexVersion = index.match(/<section class="rel" data-newest-release="([^"]+)"/)?.[1];
 if (historyVersion !== expectedVersion || indexVersion !== expectedVersion) {
   fail(
     `generated release-history is not bound to current release ${expectedVersion}. ` +
