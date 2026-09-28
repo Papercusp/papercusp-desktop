@@ -24,6 +24,7 @@
 #   PCUSP_VM_NODE      node binary (default: auto-detect the packaged sidecar's)
 #   PCUSP_MCP_CALL     mcp-call.mjs path (default /tmp/mcp-call.mjs)
 #   PAPERCUSP_HONO_PORT  skip discovery, use this port
+#   PCUSP_OPERATOR_JSON  current-operator record (default ~/.papercusp/operator.json)
 
 MCP="${PCUSP_MCP_CALL:-/tmp/mcp-call.mjs}"
 
@@ -43,8 +44,45 @@ if [ -z "$NODE" ]; then
 fi
 [ -n "$NODE" ] || { echo "NO_NODE"; exit 4; }
 
-# port: explicit env wins; else probe every local listener for /api/health
+# port, in precedence order:
+#   1. explicit PAPERCUSP_HONO_PORT;
+#   2. ~/.papercusp/operator.json — the canonical record of WHICH operator is
+#      current — when it names a numeric port and a pid that is still alive;
+#   3. only then, scan every local listener for a 200 /api/health.
+# WI-10003588: the scan alone binds the FIRST healthy listener. A VM routinely
+# carries two operators (the current rig runtime plus the installed app's older
+# staging env-sidecar), so a current runtime that answers /api/health slowly was
+# silently swapped for the stale one, and every rig call returned a well-formed
+# WRONG answer (a false 'no live content peer'). When operator.json names a live
+# operator we bind it even if it is slow: a wedged current operator must fail
+# loudly through MCP_RESULT_TIMEOUT below, never be replaced by another one.
+# Liveness uses `ps -p`, not `kill -0`, which reports EPERM (i.e. "dead") for a
+# live operator owned by another user, such as a root LaunchDaemon.
 PORT="${PAPERCUSP_HONO_PORT:-}"
+PORT_SOURCE=env
+if [ -z "$PORT" ]; then
+  OPJSON="${PCUSP_OPERATOR_JSON:-$HOME/.papercusp/operator.json}"
+  PORT_SOURCE="scan (no $OPJSON)"
+  if [ -r "$OPJSON" ]; then
+    op=$("$NODE" -e '
+      try {
+        const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+        const port = Number(j.port), pid = Number(j.pid);
+        if (Number.isInteger(port) && port > 0 && port < 65536 && Number.isInteger(pid) && pid > 0) {
+          process.stdout.write(port + " " + pid);
+        }
+      } catch {}
+    ' "$OPJSON" 2>/dev/null)
+    op_port="${op% *}"; op_pid="${op#* }"
+    if [ -z "$op" ]; then
+      PORT_SOURCE="scan ($OPJSON unparsable or lacks port/pid)"
+    elif ps -p "$op_pid" -o pid= >/dev/null 2>&1; then
+      PORT="$op_port"; PORT_SOURCE="operator.json pid=$op_pid"
+    else
+      PORT_SOURCE="scan (operator.json pid=$op_pid is dead)"
+    fi
+  fi
+fi
 if [ -z "$PORT" ]; then
   if command -v lsof >/dev/null 2>&1; then
     cands=$(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -oE '127.0.0.1:[0-9]+' | grep -oE '[0-9]+$' | sort -u)
@@ -57,7 +95,7 @@ if [ -z "$PORT" ]; then
   done
 fi
 if [ -z "$PORT" ]; then echo "NO_OPERATOR_PORT"; exit 3; fi
-echo "[vmcall port=$PORT]" >&2
+echo "[vmcall port=$PORT source=$PORT_SOURCE]" >&2
 
 # A 200 /api/health response proves only that something is listening. Bound the
 # actual MCP child as well, so a selected operator whose event loop is wedged
