@@ -600,8 +600,13 @@ cmd_verify() {
   # cleanly but logs role=server, creates only the 10x10 tray placeholder, and
   # can never map the GUI webview. Read the writer's runtime log before accepting
   # any window/process evidence.
+  # WI-10003664: the GUI's writer (main.rs redirect_own_stdio under
+  # workspaces::shared_sidecar_home()) lands gui.log in the per-workspace state
+  # dir since 0.0.22 (~/.papercusp-workspaces/<ws>/.papercusp/logs/gui.log), not
+  # ~/.papercusp/logs — reading only the legacy path false-failed every fresh
+  # install. Search both; the exact-line match is unchanged.
   check "GUI runtime role + bundle identifier" \
-    "vm_ssh '$name' 'grep -Fq \"[papercusp-desktop] role=gui (identifier com.papercusp.gui)\" \"\$HOME/.papercusp/logs/gui.log\"' 2>/dev/null"
+    "vm_ssh '$name' 'grep -Fqs \"[papercusp-desktop] role=gui (identifier com.papercusp.gui)\" \"\$HOME/.papercusp/logs/gui.log\" \"\$HOME\"/.papercusp-workspaces/*/.papercusp/logs/gui.log' 2>/dev/null"
   # PG ready = a postgres serving the embedded data dir is actually running.
   check "embedded Postgres running"          "vm_ssh '$name' 'pgrep -af [p]ostgres 2>/dev/null | grep -q embedded-pg-data' 2>/dev/null"
   if [ -n "$op" ] && op_responds "$name" "$op"; then
