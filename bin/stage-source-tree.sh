@@ -208,107 +208,19 @@ echo "==> stage-source-tree: taring runnable monorepo tree from $MONO"
 # 0.0.8 GUI deb to 9.4GB (0.0.6: 2.9GB) with a ~35G first-boot extract; the
 # standalone Next operator path is RETIRED and nothing in hono-host /
 # host-bootstrap / env-operator-launcher resolves into .next at runtime.
-declare -a EXCLUDES=()
-# (1) secrets / privacy — from the gate, never re-typed here.
-while IFS= read -r pat; do
-  [[ -n "$pat" ]] && EXCLUDES+=(--exclude="$pat")
-done < <(python3 "$HERE/audit-release-bundle.py" --tar-excludes)
-(( ${#EXCLUDES[@]} > 0 )) \
-  || { echo "ERROR: audit-release-bundle.py --tar-excludes returned nothing — refusing to stage an UNFILTERED tree (WI-4419)" >&2; exit 1; }
-echo "    privacy excludes: ${#EXCLUDES[@]} patterns (derived from the gate's rules)"
-EXCLUDES+=(
-  # (2) heavy / irrelevant — size, not secrecy
-  --exclude='./papercusp-desktop'
-  --exclude='./target' --exclude='./.cargo-target'
-  # per-work-item isolated cargo target dirs (.wiNNNN-cargo-target): multi-GB
-  # build output — one swept into the 2026-07-09 0.0.5 cut and tripled the
-  # source bundle to 7.1G (plus "file changed as we read it" tar churn from
-  # the concurrent build writing it)
-  --exclude='./.wi*-cargo-target' --exclude='./*cargo-target*'
-  # Next.js build/cache dirs (WI-4229): apps/operator/.next hit 21G (19.5G
-  # webpack cache) and tripled the 0.0.8 source bundle; the standalone Next
-  # operator is retired and nothing resolves into .next at runtime (dist/ is
-  # the runtime-resolved build output and stays).
-  --exclude='./.next' --exclude='*/.next'
-  --exclude='*/.turbo'
-  # apps/operator-docs/dist (WI-4419): the STANDALONE Starlight docs-SITE build
-  # (193M, untracked). Exempt from the "dist/ stays" rule above — that rule is for
-  # package dist/ resolved at runtime via exports."main"; this dist is a static
-  # website nothing in the app consumes. Runtime reads the docs SOURCE tree
-  # (apps/operator-docs/src/content/docs) and the operator's OWN public/ copy of
-  # llms.txt (see resource-index.ts / _repo-paths.ts LLMS_TXT_PATH), NEVER this
-  # dist. It is also the RECURRING box-identity leak source: every operator-docs
-  # rebuild bakes the owner's git-name/email from an agent-insight into dist HTML
-  # (e.g. attributing-a-change-*.html), red-ing the cut ~10min in on stale output
-  # the cut never regenerates. Dropping it kills that class and shrinks the bundle.
-  --exclude='./apps/operator-docs/dist' --exclude='*/operator-docs/dist'
-  --exclude='./.idea' --exclude='*/.idea'
-  --exclude='./.vscode' --exclude='*/.vscode'
-  --exclude='*.log'
-  --exclude='*.tsbuildinfo'
-  --exclude='./.DS_Store' --exclude='*/.DS_Store'
-)
-# Rust/Cargo build targets at ANY depth. The `./target` above only anchors the
-# MONO ROOT; a nested crate target (apps/tui/target, apps/pui-*/target,
-# libs/**/src-tauri/target) sails through, and a cargo target bakes this box's
-# absolute home path into .rustc_info.json / *.d / release binaries — the 0.0.9
-# mac leg leaked /Users/<owner> ×8075 out of apps/tui/target/ and the gate
-# (correctly) red'd the cut (WI-4419). We CANNOT use a blanket `*/target`:
-# node_modules/weapon-regex ships its RUNTIME under core/target/ (package.json
-# exports → ./core/target/js-3/weapon-regex-opt/main.js), so `*/target` would drop
-# a shipped runtime and break module resolution. So discover the REAL cargo targets
-# generically — every `target/` dir OUTSIDE any node_modules, at any depth, so a new
-# crate can't re-open the hole (no hand-kept per-crate list) — and exclude each.
-# The gate carries a matching node_modules-scoped `cargo-build-target` path rule as
-# the fast backstop; the content identity scan is the ultimate one (WI-4419).
-while IFS= read -r tdir; do
-  [[ -n "$tdir" ]] && EXCLUDES+=(--exclude="$tdir")
-done < <(cd "$MONO" && find . -type d -name node_modules -prune -o -type d -name target -print 2>/dev/null)
-# ── ALLOWLIST (WI-4419). The EXCLUDES above are kept as a second layer for
-# NESTED junk inside an allowed dir (apps/operator/.next, a stray */.env), but
-# they are no longer what decides whether a top-level entry ships.
-#
-# WHY THIS IS AN ALLOWLIST NOW. It used to be `-cf - .` (everything at the mono
-# root, minus exclusions). A denylist can only ever exclude what someone already
-# learned to fear — read the EXCLUDES list as a postmortem log: cargo-target was
-# added after it blew up the 0.0.5 cut, .next after it tripled 0.0.8. Meanwhile
-# NOBODY thought of <mono>/.papercusp/, so the 0.0.8 bundles shipped 53,225
-# untracked files including 121 AGENT SESSION TRANSCRIPTS
-# (.papercusp/pi-sessions/*.jsonl) with the operator's home path in every record
-# (WI-4419). The mono root is a working tree on a busy dev box — .agent-tmp/,
-# .tmp/, scratch/, test-results/, ~140 .papercup-console-active.* turds — and a
-# denylist silently re-opens every single time any tool drops a new one.
-#
-# So: name what the dev(:3270 tsx hono-host) / local(:3055 vite) buttons actually
-# need. Anything not named here does not ship, including things that do not exist
-# yet. Adding a top-level dir to the repo is now a DELIBERATE decision to ship it.
-#
-# NOT shipped, on purpose: .papercusp .agent-tmp .claude .harness .nx .tmp*
-# .vitest-tmp .pcv-socktest scratch scratchpad test-results briefs _retired
-# papercusp-desktop .git .github benchmarks infra deploy — plus every root dotfile
-# (.env* .bashrc .gitconfig .npmrc .mcp.json*), which git happens to TRACK here,
-# so "tracked" was never a safety signal either.
-declare -a INCLUDES=()
+# The selection itself — privacy excludes (derived from the gate), heavy
+# excludes, discovered cargo targets, and the top-level ALLOWLIST — lives in
+# bin/lib/source-tree-selection.sh, shared with the private source preview
+# (bin/source-tree-select.sh, plan dhh-source-preview-2026-09-28) so the two
+# cuts cannot drift apart. The WHY of every entry is documented there.
+# shellcheck source=lib/source-tree-selection.sh
+. "$HERE/lib/source-tree-selection.sh"
+source_tree_selection "$HERE" "$MONO" installer || exit 1
+declare -a EXCLUDES=("${SELECTION_EXCLUDES[@]}")
+declare -a INCLUDES=("${SELECTION_INCLUDES[@]}")
 declare -a MISSING=()
-for entry in \
-  package.json package-lock.json tsconfig.base.json .nvmrc \
-  eslint.config.mjs knip.json bunfig.toml .gitignore .gitmodules \
-  CLAUDE.md AGENTS.md BORROWABLE.md \
-  node_modules apps libs packages \
-  tools scripts templates patches design design-tokens rubrics docs bin
-do
-  if [[ -e "$MONO/$entry" ]]; then
-    INCLUDES+=("./$entry")
-  else
-    MISSING+=("$entry")
-  fi
-done
-# The four load-bearing ones — a packaged install has no npm to repair a gap, so
-# a missing one is a silently-broken dev/local button in the field, not a warning.
-for required in node_modules apps libs packages; do
-  [[ -e "$MONO/$required" ]] \
-    || { echo "ERROR: allowlist requires $MONO/$required — refusing to stage a tree the dev/local buttons cannot run" >&2; exit 1; }
-done
+(( ${#SELECTION_MISSING[@]} == 0 )) || MISSING=("${SELECTION_MISSING[@]}")
+echo "    selection: ${#EXCLUDES[@]} exclude patterns (privacy half derived from the gate's rules)"
 (( ${#MISSING[@]} == 0 )) \
   || echo "    note: allowlist entries absent from this tree (skipped): ${MISSING[*]}"
 echo "    allowlist: ${#INCLUDES[@]} top-level entries"
