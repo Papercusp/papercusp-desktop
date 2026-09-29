@@ -1980,6 +1980,29 @@ else
   _wi3047_unverified "$PAPERCUSP_SUBMODULE_DIR is not a git repo"
 fi
 
+# ── Dogfood-pin tag precondition (read-only) ────────────────────────────────
+# EI-24611322499942803: the exact remote tag was first checked AFTER the manifest
+# bump below, so a cut run before op:prepare-tag failed with package.json,
+# tauri.conf.json and Cargo.toml already rewritten. The follow-up prepare-tag then
+# refused root_not_clean. Check the remote tag here, before the first write; the
+# post-bump block below still aligns the LOCAL tag and re-verifies both.
+# The shipped dogfood clone comes from GitHub, so certify against that exact public
+# remote, not whichever origin the cut checkout inherited. operator-core's
+# DOGFOOD_CANONICAL_REMOTE (release-cut-launch.ts) is pinned to this value by test.
+PAPERCUP_DOGFOOD_CANONICAL_REMOTE="https://github.com/Papercusp/papercup"
+if ! git -C "$MONOREPO" rev-parse --git-dir >/dev/null 2>&1; then
+  echo "ERROR: dogfood pin: $MONOREPO is not a git repo; refusing an unpinned release" >&2
+  exit 1
+fi
+_dogfood_pin_remote_sha="$(release_tag_remote_sha "$MONOREPO" "$TAG" "$PAPERCUP_DOGFOOD_CANONICAL_REMOTE")"
+if [[ "$_dogfood_pin_remote_sha" != "$EXPECTED_SOURCE_SHA" ]]; then
+  echo "ERROR: dogfood pin: $PAPERCUP_DOGFOOD_CANONICAL_REMOTE refs/tags/$TAG is ${_dogfood_pin_remote_sha:-<missing>}, expected $EXPECTED_SOURCE_SHA" >&2
+  echo "       Nothing has been modified. Create the tag first with release:cut{op:'prepare-tag',...,confirm:true}" >&2
+  echo "       (or PAPERCUSP_RELEASE_PREPARE_TAG_SHA=<sha> PAPERCUSP_RELEASE_PREPARE_TAG_CONFIRM=1 $0 $VERSION $CHANNEL)." >&2
+  exit 1
+fi
+echo "==> dogfood pin precondition: $TAG is at ${EXPECTED_SOURCE_SHA:0:12} on $PAPERCUP_DOGFOOD_CANONICAL_REMOTE"
+
 # ── PRECHECK-ONLY EXIT ────────────────────────────────────────────────────────
 # THE LAST POINT AT WHICH THIS SCRIPT HAS TOUCHED NOTHING. Everything above is
 # validation, provenance and preflight; the very next statement is the first
@@ -2150,10 +2173,8 @@ bump_version_manifests "$ROOT"
 if git -C "$MONOREPO" rev-parse --git-dir >/dev/null 2>&1; then
   export PAPERCUP_DOGFOOD_REPO_REF="$TAG"
   echo "==> dogfood pin: verifying $TAG at expected source ${EXPECTED_SOURCE_SHA:0:12}"
-  # The cut checkout's `origin` may be a local mirror or another checkout. The
-  # shipped dogfood clone comes from GitHub, so certify against that exact
-  # public remote rather than whichever origin the cutter happened to inherit.
-  PAPERCUP_DOGFOOD_CANONICAL_REMOTE="https://github.com/Papercusp/papercup"
+  # Certify against PAPERCUP_DOGFOOD_CANONICAL_REMOTE (set by the read-only
+  # precondition above the PRECHECK-ONLY exit), not the inherited origin.
   release_tag_prepare_local_exact "$MONOREPO" "$TAG" "$EXPECTED_SOURCE_SHA" "$PAPERCUP_DOGFOOD_CANONICAL_REMOTE"
 else
   echo "ERROR: dogfood pin: $MONOREPO is not a git repo; refusing an unpinned release" >&2
