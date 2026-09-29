@@ -49,6 +49,9 @@ unscannable bundle is not a clean one). Never prints a secret VALUE.
 Usage:  audit-release-bundle.py <path/to/source.tar.zst>
         audit-release-bundle.py --scan-dir <assembled-tree>...
         audit-release-bundle.py --scan-artifact <finished-installer>...
+        audit-release-bundle.py --scan-artifact --licenses <finished-installer>...
+                                  (also runs scripts/check-licenses.mjs --installer-tree
+                                  on the expanded trees — WI-10003906 / P-017)
         audit-release-bundle.py --distribution-census <gui|server> <platform> <artifact>...
         audit-release-bundle.py --prune-vm-release <assembled-sidecar>
         audit-release-bundle.py --audit-vm-release <assembled-sidecar>
@@ -3563,7 +3566,8 @@ def scan_artifact(paths):
     archive pass and acceptances — so there is no second scanner to drift.
     """
     require_windows_runtime = "--require-windows-server-runtime" in paths
-    paths = [path for path in paths if path != "--require-windows-server-runtime"]
+    want_licenses = "--licenses" in paths
+    paths = [path for path in paths if path not in ("--require-windows-server-runtime", "--licenses")]
     if not paths:
         print("AUDIT ERROR: --scan-artifact needs at least one artifact", file=sys.stderr)
         return 2
@@ -3638,7 +3642,42 @@ def scan_artifact(paths):
                     file=sys.stderr,
                 )
             return 1
+        if want_licenses:
+            license_rc = license_scan_trees(dests)
+            if license_rc != 0:
+                return license_rc
         return scan_dir(dests)
+
+
+def license_scan_trees(dests):
+    """License verdict over the SAME expanded installer trees (plan
+    open-source-release-2026-09-29 P-017, WI-10003906).
+
+    The npm and Cargo lockfile checks cover the dependency graph; a finished installer
+    also ships payloads no lockfile names (the Node runtime, PostgreSQL tools, gh,
+    kopia, a container rootfs, AI model weights). The policy lives in ONE place —
+    scripts/check-licenses.mjs in the superproject — so this only hands it the trees
+    this function's caller already expanded. Exit codes pass through: 1 = a denied or
+    unreviewed payload, 2 = not measured. Both stop the release.
+    """
+    repo = os.environ.get("PAPERCUSP_REPO_ROOT") or os.path.realpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+    )
+    script = os.path.join(repo, "scripts", "check-licenses.mjs")
+    node = shutil.which("node")
+    if not node or not os.path.isfile(script):
+        print(f"AUDIT ERROR: --licenses needs node on PATH and {script} "
+              f"(set PAPERCUSP_REPO_ROOT to the superproject)", file=sys.stderr)
+        return 2
+    print("==> license scan of FINISHED artifacts (P-017)")
+    cmd = [node, script, "--strict"]
+    for dest in dests:
+        cmd += ["--installer-tree", dest]
+    try:
+        return subprocess.run(cmd, timeout=3600).returncode
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"AUDIT ERROR: license scan could not run: {exc}", file=sys.stderr)
+        return 2
 
 
 def _sha256_file(path):
