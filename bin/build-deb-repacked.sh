@@ -102,6 +102,20 @@ fi
 # 2026-08-28 onward. Verified 2026-09-03 with same-capability controls against the real key in
 # a tty-less process: exported-empty SIGNS, unset reproduces the exact error string above.
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
+
+# Build identity (desktop-perf-measure-candidate-build-2026-09-29 P-001 / D-001).
+# The release gate attributes a desktop-perf run to a candidate by the identity of the
+# BINARY measured, and nothing in the binary exposed it: a local build baked an empty
+# PAPERCUSP_BUILD_SHA. The identity is the SUPERPROJECT HEAD (this dir is a submodule,
+# and the gate's candidate is a superproject commit). An explicit caller value wins.
+SUPERPROJECT="$(git -C "$ROOT" rev-parse --show-superproject-working-tree 2>/dev/null || true)"
+[[ -n "$SUPERPROJECT" ]] || SUPERPROJECT="$ROOT"
+export PAPERCUSP_BUILD_SHA="${PAPERCUSP_BUILD_SHA:-$(git -C "$SUPERPROJECT" rev-parse HEAD 2>/dev/null || true)}"
+BUILD_TREE_DIRTY=false
+if [[ -n "$(git -C "$SUPERPROJECT" status --porcelain --untracked-files=no --ignore-submodules=dirty 2>/dev/null | head -c1)" ]]; then
+  BUILD_TREE_DIRTY=true
+fi
+
 tauri "$TAURI_SUBCOMMAND" "${BUNDLE_ARGS[@]}" "${TAURI_ARGS[@]}"
 
 CARGO_TARGET_ROOT="$(
@@ -123,6 +137,23 @@ mapfile -d '' -t BUILT_DEBS < <(
   echo "FATAL: tauri $TAURI_SUBCOMMAND completed without a fresh Debian bundle under $DEB_DIR" >&2
   exit 7
 }
+
+# Record the identity beside the profile's binaries, only now that a fresh bundle is
+# proven. tools/perf-test/wdio/perf-report.ts readBuildIdentity() walks up from the
+# binary under test to this file and trusts it only when it is at least as new as the
+# binary, so a later plain `tauri build` can never inherit this sha. With no sha to
+# record, REMOVE any earlier file rather than leave a stale identity behind.
+PROFILE_DIR="${DEB_DIR%/bundle/deb}"
+BUILD_IDENTITY="$PROFILE_DIR/build-identity.json"
+if [[ "$PAPERCUSP_BUILD_SHA" =~ ^[0-9a-f]{7,64}$ ]]; then
+  printf '{"buildSha":"%s","builtAtMs":%s,"dirty":%s,"source":"build-deb-repacked.sh"}\n' \
+    "$PAPERCUSP_BUILD_SHA" "$(date +%s%3N)" "$BUILD_TREE_DIRTY" > "$BUILD_IDENTITY.tmp.$$"
+  mv -f "$BUILD_IDENTITY.tmp.$$" "$BUILD_IDENTITY"
+  echo "==> recorded build identity $PAPERCUSP_BUILD_SHA (dirty=$BUILD_TREE_DIRTY) at $BUILD_IDENTITY"
+else
+  rm -f "$BUILD_IDENTITY"
+  echo "==> no resolvable build sha; removed any stale $BUILD_IDENTITY" >&2
+fi
 
 # build-and-archive-deb.sh owns a dedicated, independently bounded repack
 # phase. Generic npm/tauri callers keep the historical behavior below; only
