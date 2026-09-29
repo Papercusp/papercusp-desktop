@@ -124,6 +124,10 @@ source_tree_selection() {
     --exclude='./docs/briefs'
     --exclude='./docs/reports'
     --exclude='*/storybook-static'
+    # Real session/doc/plan text sampled for the memory benchmark; the guards
+    # that read them skip when absent (prose-gold-set.test.ts).
+    --exclude='./packages/operator-core/lib/memory/bench/fixtures/prose-corpus.v1.json'
+    --exclude='./packages/operator-core/lib/memory/bench/fixtures/prose-gold-set.v1.json'
   )
   # The preview never ships dependencies, at any depth: a nested node_modules
   # inside apps/ or libs/ is installed output, not source.

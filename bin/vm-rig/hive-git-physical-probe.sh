@@ -457,7 +457,7 @@ if [ "$source_preflight" -eq 1 ]; then
 fi
 
 # The scenario receives the preflighted identities so its topology is pinned
-# before it mutates anything. It must emit fresh, UNATTESTED same-run A-G
+# before it mutates anything. It must emit fresh, UNATTESTED same-run A-H
 # observations at an absent path; the finalizer rejects pre-banked signatures.
 HIVE_GIT_PHYSICAL_PLAN="$HIVE_GIT_PHYSICAL_PLAN" \
   HIVE_GIT_PHYSICAL_EXECUTE="$HIVE_GIT_PHYSICAL_PLAN" \
