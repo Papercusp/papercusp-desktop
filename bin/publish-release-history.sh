@@ -192,6 +192,21 @@ if [[ -z "$KEY_PREFIX" ]]; then
   exit 1
 fi
 
+# ── The Instructions are NOT part of this site [owner 2026-09-28, #868] ──────
+# index.html loads them from <secret>/instructions.html, which only
+# bin/publish-release-instructions.sh writes — so a release can never roll them back.
+# This script never uploads that file. Refuse to publish an index whose Instructions
+# section would load nothing.
+if [[ "$IS_HOLDING_PAGE" == "0" ]]; then
+  INSTR_HTTP_CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "${BASE}/instructions.html" 2>/dev/null)" || true
+  if [[ "$INSTR_HTTP_CODE" != "200" ]]; then
+    echo "ERROR: the live instructions.html is missing (HTTP ${INSTR_HTTP_CODE:-000}) — the index's Instructions section would be empty." >&2
+    echo "       Publish it first (separately from any release):  bin/publish-release-instructions.sh" >&2
+    exit 1
+  fi
+  echo "==> instructions : live (published separately by publish-release-instructions.sh)"
+fi
+
 # ── Credentials ──────────────────────────────────────────────────────────────
 # Loaded before the delta plan: the publish manifest is keyed to the bucket + prefix.
 R2_ENV="${HOME}/.papercusp/r2.env"
