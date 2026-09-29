@@ -253,10 +253,14 @@ test('the dogfood pin verifies the canonical GitHub remote, not the cutter origi
   assert(seedStart > dogfoodStart, 'the dogfood pin section no longer precedes the seed cut');
   const dogfood = text.slice(dogfoodStart, seedStart);
 
-  assert.match(
-    dogfood,
-    /PAPERCUP_DOGFOOD_CANONICAL_REMOTE="https:\/\/github\.com\/Papercusp\/papercup"/,
-    'the dogfood pin no longer names the canonical GitHub remote explicitly',
+  // The definition is hoisted to the read-only remote-tag precondition above the
+  // PRECHECK-ONLY exit, so it must precede its first use — not sit in this section.
+  const canonicalDef = text.indexOf('PAPERCUP_DOGFOOD_CANONICAL_REMOTE="https://github.com/Papercusp/papercup"');
+  const firstUse = text.indexOf('$PAPERCUP_DOGFOOD_CANONICAL_REMOTE');
+  assert(canonicalDef >= 0, 'the dogfood pin no longer names the canonical GitHub remote explicitly');
+  assert(
+    firstUse > canonicalDef && canonicalDef < dogfoodStart,
+    'the canonical GitHub remote is no longer defined before the dogfood pin uses it',
   );
   assert.match(
     dogfood,

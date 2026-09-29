@@ -193,5 +193,5 @@ test('finished vm-release deb inspection rejects every dogfood-only payload clas
     assert.match(audit, new RegExp(forbidden.replaceAll('/', '\\/')));
   }
   assert.match(audit, /dpkg-deb --fsys-tarfile/);
-  assert.match(audit, /audit-release-bundle\.py" --scan-artifact "\$deb"/);
+  assert.match(audit, /audit-release-bundle\.py" --scan-artifact --licenses "\$deb"/);
 });
