@@ -1348,19 +1348,26 @@ NODE
 # observes what the tower serves; phase-h-verify judges the whole record.
 VM_OWNER_PORT=3070
 VM_HOME="/Users/${VM%@*}"
-VM_OWNER_LAUNCHER="$VM_HOME/.papercusp/vm-rig/boot-headless-current.sh"
+# The rig launcher stops the owner it runs, relaunches it and waits for health.
+# An installed-artifact run boots the app's own sidecar instead and names that
+# launcher in HIVE_GIT_PHYSICAL_VM_OWNER_LAUNCHER. That one only spawns, so the
+# restart stops the old owner first.
+VM_OWNER_LAUNCHER="${HIVE_GIT_PHYSICAL_VM_OWNER_LAUNCHER:-$VM_HOME/.papercusp/vm-rig/boot-headless-current.sh}"
+VM_OWNER_LAUNCHER_SPAWNS_ONLY=0
+[ -z "${HIVE_GIT_PHYSICAL_VM_OWNER_LAUNCHER:-}" ] || VM_OWNER_LAUNCHER_SPAWNS_ONLY=1
 # The publisher signs as the VM device. Over ssh the macOS login keychain
 # refuses (security exits 36), so the key comes from the encrypted-file tier
-# that boot-headless-current.sh points the owner at.
+# that both owner launchers point the owner at.
 VM_OWNER_IDENTITY_DIR="$VM_HOME/.papercusp-workspaces/.shared/.papercusp/identity"
 # The advertisement lease is 30s and phase-h-verify requires >= 35s of silence.
 PHASE_H_FREEZE_SEC=45
 PHASE_H_OWNER_PID=''
 PHASE_H_FROZEN=0
 
-# Prints the VM owner as {pid, healthSha, launcher}: the process listening on
-# the owner port, the build it reports, and its exact command line. A restart
-# on the same artifact keeps the sha and the command and changes only the pid.
+# Prints the VM owner as {pid, build, launcher}: the process listening on the
+# owner port, the build it reports (its health sha, or version:<v> for a release
+# build whose health carries no sha), and its exact command line. A restart on
+# the same artifact keeps the build and the command and changes only the pid.
 phase_h_owner_identity() {
   ssh "${SSH_OPTS[@]}" "$VM" \
     "pid=\$(lsof -nP -iTCP:$VM_OWNER_PORT -sTCP:LISTEN -t | head -1); [ -n \"\$pid\" ] || exit 3; echo \"\$pid\"; ps -o command= -p \"\$pid\"; curl -s -m 10 http://127.0.0.1:$VM_OWNER_PORT/api/health" \
@@ -1370,8 +1377,10 @@ const pid = Number(lines[0]);
 const launcher = (lines[1] ?? "").trim();
 let health = null;
 try { health = JSON.parse(lines.slice(2).join("\n")); } catch {}
-if (!Number.isInteger(pid) || pid <= 1 || !launcher || typeof health?.sha !== "string" || !health.sha) process.exit(1);
-process.stdout.write(`${JSON.stringify({ pid, healthSha: health.sha, launcher })}\n`);
+const build = typeof health?.sha === "string" && health.sha ? health.sha
+  : typeof health?.version === "string" && health.version ? `version:${health.version}` : "";
+if (!Number.isInteger(pid) || pid <= 1 || !launcher || !build) process.exit(1);
+process.stdout.write(`${JSON.stringify({ pid, build, launcher })}\n`);
 '
 }
 phase_h_thaw_owner() {
@@ -1388,6 +1397,20 @@ phase_h_restore_on_exit() {
 phase_h_observe_vm() {
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-h-observe vm '$1' '$VM_REPO' '$vm_device'" >"$2"
+}
+# Restarts the VM owner through its launcher, then waits up to 300s for the
+# owner port to answer health. A spawn-only launcher needs the old owner gone
+# first: TERM it and wait up to 90s for it and its children to exit, so the new owner
+# never starts against a database the old one is still shutting down.
+phase_h_restart_owner() {
+  if [ "$VM_OWNER_LAUNCHER_SPAWNS_ONLY" = 1 ]; then
+    ssh "${SSH_OPTS[@]}" "$VM" \
+      "pid=\$(lsof -nP -iTCP:$VM_OWNER_PORT -sTCP:LISTEN -t | head -1); [ -n \"\$pid\" ] || exit 3; kids=\$(pgrep -P \"\$pid\" | tr '\n' ' '); kill -TERM \"\$pid\"; for i in \$(seq 90); do alive=0; for q in \$pid \$kids; do kill -0 \"\$q\" 2>/dev/null && alive=1; done; [ \$alive = 0 ] && exit 0; sleep 1; done; exit 4" \
+      || return 1
+  fi
+  ssh "${SSH_OPTS[@]}" "$VM" "bash '$VM_OWNER_LAUNCHER'" || return 1
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "for i in \$(seq 300); do curl -sf -m 5 http://127.0.0.1:$VM_OWNER_PORT/api/health >/dev/null && exit 0; sleep 1; done; exit 5"
 }
 phase_h_observe_tower() {
   "$TSX" "$PRODUCER" phase-h-observe tower "$1" "$TOWER_REPO" "$vm_device" >"$2"
@@ -1486,9 +1509,9 @@ phase_h_serving_identity() {
   thawed_at="$(date +%s%3N)"
   phase_h_thaw_owner || fail "phase H could not resume VM owner pid $PHASE_H_OWNER_PID"
 
-  # restarted: the rig's own launcher restarts the owner on the same payload;
+  # restarted: the owner's own launcher restarts it on the same payload;
   # the pre-restart capability must refuse and the fresh runtime must publish.
-  ssh "${SSH_OPTS[@]}" "$VM" "bash '$VM_OWNER_LAUNCHER'" >"$phase_dir/owner-restart.log" 2>&1 \
+  phase_h_restart_owner >"$phase_dir/owner-restart.log" 2>&1 \
     || fail "phase H owner restart through $VM_OWNER_LAUNCHER failed; see $phase_dir/owner-restart.log"
   phase_h_owner_identity >"$phase_dir/owner-after.json" \
     || fail 'phase H could not identify the restarted VM serving owner'
