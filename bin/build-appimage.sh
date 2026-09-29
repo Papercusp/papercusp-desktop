@@ -305,6 +305,19 @@ cp -a "$GST_PLUGIN_SOURCE"/. "$GST_PLUGIN_DEST"/ || {
   exit 1
 }
 
+# 2c-gst-0. DROP GPL-LINKED PLUGINS (open-source-release-2026-09-29 P-020, D-003).
+#     Papercusp ships under the Elastic License 2.0, which is incompatible with
+#     redistributing GPL code. On Ubuntu these plugins link GPL libraries
+#     (libavcodec-extra, x264, x265, liba52, libmpeg2, libdvdread/dvdnav,
+#     mjpegtools, libsidplay, libcdio, faad2). Removing them before the ELF
+#     closure below means their GPL dependencies are never copied either.
+#     Cost: the webview cannot decode H.264/H.265/AAC and similar patented
+#     codecs from these plugins; the LGPL/BSD plugins (vorbis, opus, vpx, …) stay.
+GST_GPL_PLUGINS="${PAPERCUSP_GSTREAMER_GPL_PLUGINS:-libgstlibav.so libgstx264.so libgstx265.so libgsta52dec.so libgstmpeg2dec.so libgstdvdread.so libgstresindvd.so libgstmpeg2enc.so libgstmplex.so libgstsid.so libgstcdio.so libgstfaad.so}"
+for _gpl_plugin in $GST_GPL_PLUGINS; do
+  rm -f "$GST_PLUGIN_DEST/$_gpl_plugin"
+done
+
 GST_SCANNER_SOURCE="${PAPERCUSP_GSTREAMER_SCANNER:-}"
 if [ -z "$GST_SCANNER_SOURCE" ]; then
   for _scanner in \
@@ -501,6 +514,18 @@ copy_gstreamer_plugin_closure() {
 }
 
 copy_gstreamer_plugin_closure || exit 1
+
+# 2c-gst-ii. GPL LIBRARY GUARD (P-020). Whatever route a library took into the
+#     AppDir (linuxdeploy, the plugin closure, a future copy step), none of the
+#     GPL codec/media libraries dropped in 2c-gst-0 may ship under ELv2.
+GST_GPL_LIB_ERE="${PAPERCUSP_APPIMAGE_GPL_LIB_ERE:-^lib(avcodec|avformat|avfilter|avdevice|postproc|x264|x265|a52|mpeg2|dvdread|dvdnav|mjpegutils|mpeg2encpp|mplex2|sidplay|cdio|faad)[.-]}"
+_gpl_hits="$(find "$APPDIR" \( -type f -o -type l \) -name 'lib*.so*' -printf '%f\n' 2>/dev/null | grep -E "$GST_GPL_LIB_ERE" | sort -u || true)"
+if [ -n "$_gpl_hits" ]; then
+  echo "FATAL: GPL-licensed libraries are in the AppDir (incompatible with the Elastic License 2.0):" >&2
+  printf '  %s\n' $_gpl_hits >&2
+  exit 1
+fi
+echo "   GPL library guard: no GPL codec/media libraries in the AppDir"
 [ -f "$GST_PLUGIN_DEST/libgstapp.so" ] || {
   echo "FATAL: AppDir is missing the GStreamer appsink provider (libgstapp.so)" >&2
   exit 1
