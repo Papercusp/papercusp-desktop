@@ -144,7 +144,7 @@ mapfile -d '' -t BUILT_DEBS < <(
 # binary, so a later plain `tauri build` can never inherit this sha. With no sha to
 # record, REMOVE any earlier file rather than leave a stale identity behind.
 PROFILE_DIR="${DEB_DIR%/bundle/deb}"
-BUILD_IDENTITY="$PROFILE_DIR/build-identity.json"
+BUILD_IDENTITY="$PROFILE_DIR/build-provenance.json"
 if [[ "$PAPERCUSP_BUILD_SHA" =~ ^[0-9a-f]{7,64}$ ]]; then
   printf '{"buildSha":"%s","builtAtMs":%s,"dirty":%s,"source":"build-deb-repacked.sh"}\n' \
     "$PAPERCUSP_BUILD_SHA" "$(date +%s%3N)" "$BUILD_TREE_DIRTY" > "$BUILD_IDENTITY.tmp.$$"
