@@ -1038,6 +1038,11 @@ phase_e_github_bridge() {
   run_tower_git_sync >"$phase_dir/tower-member-raw.json"
   require_git_sync_fired "$phase_dir/tower-member-raw.json" 'phase E tower member'
   tower_member_finished="$(now_iso)"
+  # The VM learns the bridged row by federation; its tick must not fire before
+  # the row lands, or it measures a legacy tick (WI-10003791 second race).
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-e-await-mode bridged-member '$PHASE_E_MODE_WAIT_SEC'" \
+    >"$phase_dir/vm-member-mode-await.json"
   vm_member_started="$(now_iso)"
   run_vm_git_sync >"$phase_dir/vm-member-raw.json"
   require_git_sync_fired "$phase_dir/vm-member-raw.json" 'phase E vm member'
@@ -1091,6 +1096,9 @@ phase_e_github_bridge() {
   run_tower_git_sync >"$phase_dir/rollback-tower-raw.json"
   require_git_sync_fired "$phase_dir/rollback-tower-raw.json" 'phase E tower rollback'
   rollback_tower_finished="$(now_iso)"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-e-await-mode legacy-after '$PHASE_E_MODE_WAIT_SEC'" \
+    >"$phase_dir/rollback-vm-mode-await.json"
   rollback_vm_started="$(now_iso)"
   run_vm_git_sync >"$phase_dir/rollback-vm-raw.json"
   require_git_sync_fired "$phase_dir/rollback-vm-raw.json" 'phase E vm rollback'
