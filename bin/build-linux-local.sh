@@ -245,8 +245,11 @@ assert_vm_release_deb_runtime_only() {
   [[ "$leaked" == 0 ]] || exit 1
 
   # Reuse the archive-aware identity scanner so a runtime-only release cannot
-  # pass merely because its container bytes were opaque to grep.
-  python3 "$HERE/audit-release-bundle.py" --scan-artifact "$deb"
+  # pass merely because its container bytes were opaque to grep. --licenses also
+  # runs the installer license gate (scripts/check-licenses.mjs --installer-tree,
+  # WI-10003906 / P-017) on the same expanded tree: every native binary, model file
+  # and Syft package must map to a reviewed component in scripts/installer-components.json.
+  python3 "$HERE/audit-release-bundle.py" --scan-artifact --licenses "$deb"
 }
 
 case "${PAPERCUSP_REUSE_SIDECAR:-0}" in
