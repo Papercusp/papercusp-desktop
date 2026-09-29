@@ -46,7 +46,7 @@
 # (.env* .bashrc .gitconfig .npmrc .mcp.json*), which git happens to TRACK here,
 # so "tracked" was never a safety signal either.
 SOURCE_TREE_ALLOWLIST="package.json package-lock.json tsconfig.base.json .nvmrc
-eslint.config.mjs knip.json bunfig.toml .gitignore .gitmodules
+eslint.config.mjs knip.json bunfig.toml .gitignore
 CLAUDE.md AGENTS.md BORROWABLE.md
 node_modules apps libs packages
 tools scripts templates patches design design-tokens rubrics docs bin"
@@ -104,6 +104,26 @@ source_tree_selection() {
   SELECTION_EXCLUDES+=(
     --exclude='./libs/papercusp/plugins/gitnexus-bridge'
     --exclude='./node_modules/@papercupai/gitnexus-bridge'
+  )
+
+  # (4) closed / internal content — not part of the open-source product (plan
+  # open-source-release-2026-09-29 P-005, D-008). Closed-layer workspaces with no
+  # importer in the shipped tree (publish worker, swarm marketing site, marketplace
+  # UI, prospect contract), internal evidence/briefs/reports, and a built
+  # storybook. Like (3), npm tolerates the missing workspace directories.
+  SELECTION_EXCLUDES+=(
+    --exclude='./apps/papercusp-publish'
+    --exclude='./apps/the-swarm-site'
+    --exclude='./libs/marketplace-public-ui'
+    --exclude='./libs/generic/prospect-contract'
+    --exclude='./node_modules/@papercusp/publish-worker'
+    --exclude='./node_modules/@papercusp/the-swarm-site'
+    --exclude='./node_modules/@papercup/marketplace-public-ui'
+    --exclude='./node_modules/@oddsmith/prospect-contract'
+    --exclude='./docs/evidence'
+    --exclude='./docs/briefs'
+    --exclude='./docs/reports'
+    --exclude='*/storybook-static'
   )
   # The preview never ships dependencies, at any depth: a nested node_modules
   # inside apps/ or libs/ is installed output, not source.
