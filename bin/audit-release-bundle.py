@@ -3643,9 +3643,15 @@ def scan_artifact(paths):
                 )
             return 1
         if want_licenses:
+            # REPORT-ONLY for now [owner 2026-09-29, WI-10003906]: "lets disable the
+            # blocking for now". The verdict is printed on every release so findings are
+            # visible, but it does not stop the release. The AppImage (730 unreviewed bundled
+            # Ubuntu libs) and the Windows/macOS Server installers are not calibrated yet.
+            # To make it blocking again, return license_rc when it is non-zero.
             license_rc = license_scan_trees(dests)
             if license_rc != 0:
-                return license_rc
+                print(f"    ⚠ license scan exit {license_rc} — REPORT-ONLY, release not stopped "
+                      f"(see LICENSE_GATE lines above)", file=sys.stderr)
         return scan_dir(dests)
 
 

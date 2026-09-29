@@ -249,6 +249,7 @@ assert_vm_release_deb_runtime_only() {
   # runs the installer license gate (scripts/check-licenses.mjs --installer-tree,
   # WI-10003906 / P-017) on the same expanded tree: every native binary, model file
   # and Syft package must map to a reviewed component in scripts/installer-components.json.
+  # Report-only for now (owner decision 2026-09-29): findings print, the release continues.
   python3 "$HERE/audit-release-bundle.py" --scan-artifact --licenses "$deb"
 }
 
