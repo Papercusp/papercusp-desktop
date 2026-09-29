@@ -3,7 +3,7 @@ name = "papercusp-desktop"
 version = "0.0.22"
 description = "Papercusp desktop shell — Tauri webview + Node sidecar"
 authors = ["Papercusp Team"]
-license = "MIT"
+license = "Elastic-2.0"
 edition = "2021"
 rust-version = "1.77"
 
