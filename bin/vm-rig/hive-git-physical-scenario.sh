@@ -738,6 +738,18 @@ NODE
 # dirt in the VM worktree. Both undo steps are idempotent.
 PHASE_D_TIER_HOLD=''
 PHASE_D_VM_DIRTY_RUN=''
+# Bounded wait for the tower's own signed staging event after a tower integrate
+# that may have returned in_progress (WI-10003787). The producer caps it at 1200.
+PHASE_D_TOWER_EVENT_WAIT_SEC=600
+
+# A duplicate signed event for one head is a producer defect (WI-10003781);
+# retrying the VM capture would only turn it into a 20-minute timeout.
+phase_d_fail_on_duplicate_event() {
+  local err_file="$1" which="$2"
+  if grep -q 'duplicate signed production staging events' "$err_file" 2>/dev/null; then
+    fail "phase D $which advance: duplicate signed staging events for one head on the VM; see $err_file"
+  fi
+}
 phase_d_tier_restore() {
   [ -n "$PHASE_D_TIER_HOLD" ] || return 0
   "$TSX" "$PRODUCER" phase-d-tier-restore "$PHASE_D_TIER_HOLD"
@@ -826,7 +838,9 @@ phase_d_worktree_materialization() {
   run_tower_git_sync >"$first_dir/integrate-raw.json"
   require_git_sync_fired "$first_dir/integrate-raw.json" 'phase D tower integrate'
   integrate_finished="$(now_iso)"
-  "$TSX" "$PRODUCER" phase-d-event tower 0 "$tower_device" "$first_head" \
+  # The integrate call may return in_progress (45s window); the capture waits
+  # up to PHASE_D_TOWER_EVENT_WAIT_SEC for the one event (WI-10003787).
+  "$TSX" "$PRODUCER" phase-d-event tower 0 "$tower_device" "$first_head" "$PHASE_D_TOWER_EVENT_WAIT_SEC" \
     >"$first_dir/source-event.json"
   "$TSX" "$PRODUCER" phase-d-observe tower first-source "$tower_device" "$run_id" \
     >"$first_dir/source-observation.json"
@@ -842,6 +856,7 @@ phase_d_worktree_materialization() {
       >"$first_dir/destination-event.json" 2>"$first_dir/destination-event.err"; then
       break
     fi
+    phase_d_fail_on_duplicate_event "$first_dir/destination-event.err" 'first'
     [ "$SECONDS" -lt "$deadline" ] \
       || fail 'phase D first signed staging advance did not reach the VM within 20 minutes'
     sleep 10
@@ -866,7 +881,7 @@ phase_d_worktree_materialization() {
   run_tower_git_sync >"$dirty_dir/integrate-raw.json"
   require_git_sync_fired "$dirty_dir/integrate-raw.json" 'phase D tower dirty integrate'
   dirty_integrate_finished="$(now_iso)"
-  "$TSX" "$PRODUCER" phase-d-event tower 0 "$tower_device" "$second_head" \
+  "$TSX" "$PRODUCER" phase-d-event tower 0 "$tower_device" "$second_head" "$PHASE_D_TOWER_EVENT_WAIT_SEC" \
     >"$dirty_dir/source-event.json"
 
   dirty_bridge_started="$(now_iso)"
@@ -880,6 +895,7 @@ phase_d_worktree_materialization() {
       >"$dirty_dir/destination-event.json" 2>"$dirty_dir/destination-event.err"; then
       break
     fi
+    phase_d_fail_on_duplicate_event "$dirty_dir/destination-event.err" 'second'
     [ "$SECONDS" -lt "$deadline" ] \
       || fail 'phase D second signed staging advance did not reach the VM within 20 minutes'
     sleep 10
