@@ -132,6 +132,34 @@ printf '#!/usr/bin/env bash\nfor p in $(pgrep -f "%s"); do [ "$p" = "$$" ] || [ 
 cleanup() { [ -n "${KEEP_UP:-}" ] && { echo "KEEP_UP=1 — sidecar left running; $WORK/stop.sh to stop"; return; }; bash "$WORK/stop.sh" >/dev/null 2>&1; }
 trap cleanup EXIT
 
+# ── Verification-harness contract (expensive-verification-loops P-006) ───────
+# Bracket mode over the drill's own sections. The drill never aborts on a failed check
+# (ok/bad counters), so a phase is FAILED when a check failed inside it (reason checks-failed,
+# or the reason a section named with vh_fail). Phases declare no dependencies: every section
+# runs regardless, and the result must not claim otherwise. One evidence dir per run and a
+# HARNESS_RESULT line naming the first failing phase; VH_FAIL_OPEN never blocks the drill.
+VH_SH="$DESKTOP_DIR/../libs/generic/verification-harness/bin/vh.sh"
+if [ -f "$VH_SH" ]; then
+  # shellcheck source=../../libs/generic/verification-harness/bin/vh.sh
+  source "$VH_SH"
+  VH_FAIL_OPEN="${VH_FAIL_OPEN:-1}"
+  for _vh_p in setup mode leg-a leg-b leg-c physical leg-d leg-f; do vh_phase "$_vh_p" ""; done
+  vh_init hive-git-drill "${HIVE_GIT_DRILL_EVIDENCE_ROOT:-$(vh_default_root hive-git-drill)}"
+  vh_bracket_trap
+else
+  echo "VH_DISABLED harness=hive-git-drill reason=vh.sh-missing:$VH_SH" >&2
+  vh_begin() { :; }; vh_end() { :; }; vh_step() { :; }; vh_fail() { :; }
+fi
+_DRILL_FAIL_AT=0
+drill_phase() { # <phase|""> — close the open phase (failed if a check failed in it), open the next
+  if [ "$FAIL" -gt "$_DRILL_FAIL_AT" ] && [ -z "${VH_CUR_FAIL:-}" ]; then
+    vh_fail checks-failed "$((FAIL - _DRILL_FAIL_AT)) check(s) failed"
+  fi
+  _DRILL_FAIL_AT=$FAIL
+  if [ -n "$1" ]; then vh_begin "$1" || true; else vh_end; fi
+}
+
+drill_phase setup
 log "extract $DEB"
 fed_extract_deb "$DEB" "$PKG" papercusp-server || exit 1
 SIDE="$(fed_sidecar_dir "$PKG")"
@@ -240,6 +268,7 @@ POT_GIT_SLUG="${HIVE_SLUG//\//-}"
 # this still said hive_settings post-557 (mode "reads back ''", rollback
 # "does NOT revert" — both were psql silently failing against a table that no
 # longer existed, not a real hiveGit.mode bug).
+drill_phase mode
 log "LEG MODE — flip hiveGit.mode legacy -> bridged -> rollback -> legacy"
 NOWMS="$(date +%s)000"
 q "INSERT INTO harness_shared.pot_settings (workspace_id, harness_slug, setting_key, value, created_at, updated_at)
@@ -296,6 +325,7 @@ run_vitest_leg() {
 # LEG D/F. The genuine gap left for the rig is real network/DHT peer
 # discovery + a real second physical device, not the join mechanics.
 log "LEG A (P-302) — G-8 cold-clone bootstrap: a fresh joiner seeds every namespace a peer holds, over a real socket duplex"
+drill_phase leg-a
 run_vitest_leg "LEG A" lib/sync/pot-git/bootstrap.integration.test.ts
 
 # ── LEG B (P-303) replication — LIVE as of 2026-07-10: per the WI-3497/3498
@@ -307,6 +337,7 @@ run_vitest_leg "LEG A" lib/sync/pot-git/bootstrap.integration.test.ts
 # runRefAnnouncePublishTick/runRefAnnounceReceiveTick into a routine today) —
 # that scheduling + the genuine tower<->VM round-trip stay rig/P-003 work.
 log "LEG B (P-303) — G-3 announce-driven fetch: announce -> fetch -> sigrefs accept -> heads reconcile -> mirrored, over a real socket duplex"
+drill_phase leg-b
 run_vitest_leg "LEG B" lib/sync/pot-git/ref-announce.integration.test.ts
 
 # ── LEG C (P-304) trust / tamper drill — LIVE as of 2026-07-10: per the
@@ -317,9 +348,11 @@ run_vitest_leg "LEG B" lib/sync/pot-git/ref-announce.integration.test.ts
 # non-member fetch, all real production code over real bare repos + real
 # ed25519 keys, no network transport or rig needed.
 log "LEG C (P-304) — trust/tamper drill: relay-lie detection, rollback refusal (G-4b), non-member scope-serve-gate refusal"
+drill_phase leg-c
 run_vitest_leg "LEG C" lib/sync/pot-git/leg-c-trust-drill.integration.test.ts
 
 # ── SKIP census — the two Phase-3 legs still genuinely rig-gated ───────────
+drill_phase physical
 log "SKIP census — legs needing the real LIVE-1 rig (owners: p2p-git-live-activation-2026-07-09 lanes)"
 PHYSICAL_EVIDENCE_VALID=0
 PHYSICAL_EVIDENCE_RUN_ID=""
@@ -356,6 +389,8 @@ if [ -n "$physical_probe_cmd" ]; then
       # shellcheck source=lib/physical-failure-summary.sh
       . "$DESKTOP_DIR/bin/lib/physical-failure-summary.sh"
       physical_failure="$(physical_failure_summary "$WORK/physical-probe.stderr")"
+      _vh_step="${physical_failure%%:*}"; vh_step "${_vh_step// /-}"
+      vh_fail "adapter-exit-$physical_probe_rc" "$physical_failure; evidence $physical_run_dir"
       echo "    --- adapter stderr (last 25 lines; full: $physical_run_dir/physical-probe.stderr) ---"
       tail -n 25 "$WORK/physical-probe.stderr" 2>/dev/null | sed 's/^/    | /'
       bad "physical E/G adapter failed (exit $physical_probe_rc) in $physical_failure — evidence kept in $physical_run_dir"
@@ -405,6 +440,7 @@ fi
 # the join/replication MECHANICS single-box the same way; none of A/B/D
 # substitute for the real 2-machine run).
 log "LEG D (P-305) — integrator computes+publishes canonical staging; a non-steer head lands in the REAL PG integration-requests queue with a visible receipt; the OTHER machine's worktree ff-advances and never touches a dirty/locked file"
+drill_phase leg-d
 LEGD_ROOT="$WORK/leg-d-git-root"; mkdir -p "$LEGD_ROOT"
 # Node/tsx resolve a bare specifier (`import postgres from 'postgres'`) by
 # walking up node_modules from the SCRIPT'S OWN path — never from the process
@@ -628,6 +664,7 @@ fi
 # gcHiveGitRepo / checkPublishGuard functions via tsx against the checked-out
 # source — proving the actual production code, not a reimplementation.
 log "LEG F (P-307) — G-9 gc keep-work/last-N/departed-member archival + G-10 secrets/oversized-blob guard, real bare repos"
+drill_phase leg-f
 LEGF_GC_REPO="$WORK/leg-f-gc.git"; git init -q --bare "$LEGF_GC_REPO"
 NS_LIVE="$(printf '%064d' 1)"; NS_GONE="$(printf '%064d' 2)"
 legf_commit() { # <repo> <ref> <content> <committer-ts>
@@ -703,6 +740,7 @@ else
   bad "G-10 oversized-blob guard: oversized blob did not refuse as expected ($guard_out)"
 fi
 
+drill_phase ""   # close leg-f; the EXIT trap finalizes (HARNESS_RESULT) on whichever exit follows
 echo
 echo "════════════════════════════════════════════════════════"
 echo "P-301 hive-git drill (single-box scaffold): PASS=$PASS FAIL=$FAIL SKIP=$SKIPPED"
