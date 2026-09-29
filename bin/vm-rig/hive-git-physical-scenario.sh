@@ -2,7 +2,7 @@
 # hive-git-physical-scenario.sh — checked-in mutation/observation driver for
 # the P-505 two-machine hive-git release drill.
 #
-# This driver pins the invocation, topology, output, ordered A-G phase contract,
+# This driver pins the invocation, topology, output, ordered A-H phase contract,
 # and every fixed executor. It remains fail-closed at two independent edges:
 # the caller must opt into the canonical plan and the destructive execution
 # grant, and the producer will not sign or finalize anything unless every phase
@@ -325,13 +325,19 @@ phase_g_contract() {
 JSON
 }
 
+phase_h_contract() {
+  cat <<'JSON'
+{"schemaVersion":"hive-git-physical-phase-contract/v1","phase":"H","planItem":"P-521","state":"executor-installed","ready":true,"missingAssertions":[],"target":{"potHomeSlug":"hello-world-3-pot","servingOwner":"vm-operator","publisher":"separate-vm-process"},"causalOrder":["liveOwnerCapabilitySignsAndPublishes","frozenOwnerOmittedRetryableWithoutRefMove","sameArtifactRestartFreshRuntimePublishes","staleRuntimeCapabilityRefused","storeReplacementFreshGenerationPublishes","towerServesEachSignedSigrefs"]}
+JSON
+}
+
 if [ "${1:-}" = '--contract-check' ]; then
-  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":true,"phases":["A","B","C","D","E","F","G"],"phaseContracts":{"A":"executor-installed","B":"executor-installed","C":"executor-installed","D":"executor-installed","E":"executor-installed","F":"executor-installed","G":"executor-installed"}}\n' \
+  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":true,"phases":["A","B","C","D","E","F","G","H"],"phaseContracts":{"A":"executor-installed","B":"executor-installed","C":"executor-installed","D":"executor-installed","E":"executor-installed","F":"executor-installed","G":"executor-installed","H":"executor-installed"}}\n' \
     "$IMPLEMENTATION_STATE"
   exit 0
 fi
 if [ "${1:-}" = '--phase-contract' ]; then
-  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-scenario.sh --phase-contract A|B|C|D|E|F|G'
+  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-scenario.sh --phase-contract A|B|C|D|E|F|G|H'
   case "$2" in
     A) phase_a_contract ;;
     B) phase_b_contract ;;
@@ -340,13 +346,14 @@ if [ "${1:-}" = '--phase-contract' ]; then
     E) phase_e_contract ;;
     F) phase_f_contract ;;
     G) phase_g_contract ;;
+    H) phase_h_contract ;;
     *) fail "phase $2 has no installed offline contract" ;;
   esac
   exit 0
 fi
 if [ "${1:-}" = '--require-ready' ]; then
   [ "$IMPLEMENTATION_STATE" = 'ready-v1' ] \
-    || fail "scenario is not execution-ready ($IMPLEMENTATION_STATE); A-G phase executors have not all landed"
+    || fail "scenario is not execution-ready ($IMPLEMENTATION_STATE); A-H phase executors have not all landed"
   exit 0
 fi
 
@@ -545,7 +552,7 @@ phase_b_ref_announce() {
   [ -x "$TSX" ] && [ -f "$PRODUCER" ] && [ -x "$TOWER_CALL" ] \
     || fail 'phase B local producer or canonical ptool is unavailable'
 
-  # Like Phase A, this remains unreachable until every A-G executor exists.
+  # Like Phase A, this remains unreachable until every A-H executor exists.
   # Once enabled it creates only two run-bound refs in the fixed test repo and
   # drives only the production git-sync action. The destination action owns the
   # signed ref-announcement receive path and its Protomux git-upload-pack v2
@@ -1330,6 +1337,202 @@ NODE
     >"$phase_dir/verdict.json"
 }
 
+# Phase H (P-521 F3, D-081): the pot's serving identity survives an owner that
+# goes silent, restarts, and has its store replaced. The VM operator is the one
+# process that owns the serving identity. A SEPARATE VM process
+# (phase-h-attempt, never the owner) must publish through the capability the
+# owner advertises, refuse a stale capability retryably, and pick up the fresh
+# runtime after a restart and the fresh store generation after a replacement.
+# Each step observes the VM, attempts one publish with the most recent READY
+# capability the VM advertised, lets the tower receive on its own git-sync, and
+# observes what the tower serves; phase-h-verify judges the whole record.
+VM_OWNER_PORT=3070
+VM_HOME="/Users/${VM%@*}"
+VM_OWNER_LAUNCHER="$VM_HOME/.papercusp/vm-rig/boot-headless-current.sh"
+# The publisher signs as the VM device. Over ssh the macOS login keychain
+# refuses (security exits 36), so the key comes from the encrypted-file tier
+# that boot-headless-current.sh points the owner at.
+VM_OWNER_IDENTITY_DIR="$VM_HOME/.papercusp-workspaces/.shared/.papercusp/identity"
+# The advertisement lease is 30s and phase-h-verify requires >= 35s of silence.
+PHASE_H_FREEZE_SEC=45
+PHASE_H_OWNER_PID=''
+PHASE_H_FROZEN=0
+
+# Prints the VM owner as {pid, healthSha, launcher}: the process listening on
+# the owner port, the build it reports, and its exact command line. A restart
+# on the same artifact keeps the sha and the command and changes only the pid.
+phase_h_owner_identity() {
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "pid=\$(lsof -nP -iTCP:$VM_OWNER_PORT -sTCP:LISTEN -t | head -1); [ -n \"\$pid\" ] || exit 3; echo \"\$pid\"; ps -o command= -p \"\$pid\"; curl -s -m 10 http://127.0.0.1:$VM_OWNER_PORT/api/health" \
+    | node -e '
+const lines = require("node:fs").readFileSync(0, "utf8").split("\n");
+const pid = Number(lines[0]);
+const launcher = (lines[1] ?? "").trim();
+let health = null;
+try { health = JSON.parse(lines.slice(2).join("\n")); } catch {}
+if (!Number.isInteger(pid) || pid <= 1 || !launcher || typeof health?.sha !== "string" || !health.sha) process.exit(1);
+process.stdout.write(`${JSON.stringify({ pid, healthSha: health.sha, launcher })}\n`);
+'
+}
+phase_h_thaw_owner() {
+  [ "$PHASE_H_FROZEN" = 1 ] || return 0
+  ssh "${SSH_OPTS[@]}" "$VM" "kill -CONT $PHASE_H_OWNER_PID" || return 1
+  PHASE_H_FROZEN=0
+}
+# A frozen owner must never outlive the scenario. EXIT, not RETURN: set -e
+# ends the shell mid-function and a RETURN trap would never run.
+phase_h_restore_on_exit() {
+  phase_h_thaw_owner \
+    || echo "hive-git-physical-scenario: WARNING phase H could not resume the frozen VM owner; run: ssh $VM kill -CONT $PHASE_H_OWNER_PID" >&2
+}
+phase_h_observe_vm() {
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-h-observe vm '$1' '$VM_REPO' '$vm_device'" >"$2"
+}
+phase_h_observe_tower() {
+  "$TSX" "$PRODUCER" phase-h-observe tower "$1" "$TOWER_REPO" "$vm_device" >"$2"
+}
+# The captured observation travels to the VM on stdin, so no scp and no
+# fixed remote path; the VM-side temp file is removed however the attempt ends.
+phase_h_attempt() {
+  local step="$1" captured="$2" output="$3"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "set -e; f=\$(mktemp /tmp/hive-git-physical-phase-h.XXXXXX); trap 'rm -f \"\$f\"' EXIT; cat >\"\$f\"; PAPERCUSP_IDENTITY_DIR='$VM_OWNER_IDENTITY_DIR' '$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-h-attempt '$step' '$VM_REPO' '$vm_device' '$physical_run_id' \"\$f\"" \
+    <"$captured" >"$output" \
+    || fail "phase H $step publish attempt failed on the VM"
+}
+# Re-observes the VM until the owner advertises a ready capability. With a
+# previous observation it also requires a change: a fresh runtime after the
+# restart, a fresh store generation after the replacement.
+phase_h_await_vm_ready() {
+  local step="$1" output="$2" previous="$3" deadline=$((SECONDS + 600)) i=0
+  while :; do
+    i=$((i + 1))
+    phase_h_observe_vm "$step" "$output" || fail "phase H VM observation failed at step $step"
+    node - "$output" "$previous" "$step" <<'NODE' && return 0
+const fs = require('node:fs');
+const [path, previousPath, step] = process.argv.slice(2);
+const capability = (p) => JSON.parse(fs.readFileSync(p, 'utf8')).serving?.capability ?? null;
+const now = capability(path);
+if (!now) process.exit(1);
+if (!previousPath) process.exit(0);
+const before = capability(previousPath);
+const changed = step === 'replaced'
+  ? now.context?.store_generation !== before?.context?.store_generation
+  : now.runtimeId !== before?.runtimeId;
+process.exit(changed ? 0 : 1);
+NODE
+    [ "$SECONDS" -lt "$deadline" ] \
+      || fail "phase H VM owner advertised no fresh ready capability for step $step within 600s"
+    # Replacement needs the VM's own git-sync bootstrap to recreate the store.
+    [ "$step" != replaced ] || run_vm_git_sync >"$(dirname "$output")/replace-bootstrap-nudge-$i.json" 2>&1 || true
+    sleep 5
+  done
+}
+# Drives tower git-sync until the tower serves the attempt's post-publish
+# sigrefs, leaving the matching observation as the step's tower record.
+phase_h_tower_receive() {
+  local step="$1" attempt="$2" dir="$3" deadline=$((SECONDS + 600)) i=0
+  while :; do
+    i=$((i + 1))
+    run_tower_git_sync >"$dir/tower-receive-$step-$i.json" 2>&1 || true
+    phase_h_observe_tower "$step" "$dir/tower-$step.json" \
+      || fail "phase H tower observation failed at step $step"
+    node - "$attempt" "$dir/tower-$step.json" "$vm_device" <<'NODE' && return 0
+const fs = require('node:fs');
+const [attemptPath, towerPath, vmDevice] = process.argv.slice(2);
+const want = JSON.parse(fs.readFileSync(attemptPath, 'utf8')).sigrefsAfter?.sigrefsOid;
+const tower = JSON.parse(fs.readFileSync(towerPath, 'utf8'));
+const have = tower.namespaces?.find((n) => n.deviceKey === vmDevice);
+process.exit(want && have?.sigrefsOid === want && have.signatureValid ? 0 : 1);
+NODE
+    [ "$SECONDS" -lt "$deadline" ] \
+      || fail "phase H tower did not serve the VM's $step sigrefs within 600s"
+    sleep 10
+  done
+}
+phase_h_serving_identity() {
+  [ -x "$TSX" ] && [ -f "$PRODUCER" ] \
+    || fail 'phase H local producer is unavailable'
+
+  local phase_dir="$run_dir/phase-h"
+  local run_id="$physical_run_id"
+  local started_at finished_at frozen_at thawed_at
+  mkdir -m 700 "$phase_dir"
+  started_at="$(now_iso)"
+  phase_h_owner_identity >"$phase_dir/owner-before.json" \
+    || fail 'phase H could not identify the VM serving owner'
+  PHASE_H_OWNER_PID="$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).pid' "$phase_dir/owner-before.json")"
+  trap phase_h_restore_on_exit EXIT
+
+  # pre: the live owner's own capability signs, and the publish reaches the tower.
+  phase_h_await_vm_ready pre "$phase_dir/vm-pre.json" ''
+  phase_h_attempt pre "$phase_dir/vm-pre.json" "$phase_dir/attempt-pre.json"
+  phase_h_tower_receive pre "$phase_dir/attempt-pre.json" "$phase_dir"
+
+  # omitted: the frozen owner's advertisement goes stale; the publisher must
+  # refuse retryably and nothing may move on either host. The tower is only
+  # observed: a git-sync tick against a frozen peer proves nothing here.
+  ssh "${SSH_OPTS[@]}" "$VM" "kill -STOP $PHASE_H_OWNER_PID" \
+    || fail "phase H could not freeze VM owner pid $PHASE_H_OWNER_PID"
+  PHASE_H_FROZEN=1
+  frozen_at="$(date +%s%3N)"
+  sleep "$PHASE_H_FREEZE_SEC"
+  phase_h_observe_vm omitted "$phase_dir/vm-omitted.json" \
+    || fail 'phase H VM observation failed at step omitted'
+  phase_h_attempt omitted "$phase_dir/vm-pre.json" "$phase_dir/attempt-omitted.json"
+  phase_h_observe_tower omitted "$phase_dir/tower-omitted.json" \
+    || fail 'phase H tower observation failed at step omitted'
+  thawed_at="$(date +%s%3N)"
+  phase_h_thaw_owner || fail "phase H could not resume VM owner pid $PHASE_H_OWNER_PID"
+
+  # restarted: the rig's own launcher restarts the owner on the same payload;
+  # the pre-restart capability must refuse and the fresh runtime must publish.
+  ssh "${SSH_OPTS[@]}" "$VM" "bash '$VM_OWNER_LAUNCHER'" >"$phase_dir/owner-restart.log" 2>&1 \
+    || fail "phase H owner restart through $VM_OWNER_LAUNCHER failed; see $phase_dir/owner-restart.log"
+  phase_h_owner_identity >"$phase_dir/owner-after.json" \
+    || fail 'phase H could not identify the restarted VM serving owner'
+  phase_h_await_vm_ready restarted "$phase_dir/vm-restarted.json" "$phase_dir/vm-pre.json"
+  phase_h_attempt restarted "$phase_dir/vm-pre.json" "$phase_dir/attempt-restarted.json"
+  phase_h_tower_receive restarted "$phase_dir/attempt-restarted.json" "$phase_dir"
+
+  # replaced: quarantine the VM store so the production bootstrap recreates it
+  # under a new store generation; the restarted capability must refuse.
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-a-quarantine '$VM_REPO' '$run_id'" \
+    >"$phase_dir/replace-quarantine.json" \
+    || fail 'phase H could not quarantine the VM store'
+  run_vm_git_sync >"$phase_dir/replace-bootstrap.json"
+  require_git_sync_fired "$phase_dir/replace-bootstrap.json" 'phase H vm replace-bootstrap'
+  phase_h_await_vm_ready replaced "$phase_dir/vm-replaced.json" "$phase_dir/vm-restarted.json"
+  phase_h_attempt replaced "$phase_dir/vm-restarted.json" "$phase_dir/attempt-replaced.json"
+  phase_h_tower_receive replaced "$phase_dir/attempt-replaced.json" "$phase_dir"
+  trap - EXIT
+  finished_at="$(now_iso)"
+
+  node - "$phase_dir" "$run_id" "$started_at" "$finished_at" "$tower_device" "$vm_device" \
+    "$((thawed_at - frozen_at))" <<'NODE'
+const fs = require('node:fs');
+const [dir, runId, startedAt, finishedAt, towerDeviceKey, vmDeviceKey, frozenMs] = process.argv.slice(2);
+const read = (name) => JSON.parse(fs.readFileSync(`${dir}/${name}.json`, 'utf8'));
+const input = {
+  schemaVersion: 'hive-git-physical-phase-h-input/v1',
+  runId,
+  window: { startedAt, finishedAt },
+  identities: { towerDeviceKey, vmDeviceKey },
+  vmOwner: { before: read('owner-before'), after: read('owner-after'), frozenMs: Number(frozenMs) },
+  steps: Object.fromEntries(['pre', 'omitted', 'restarted', 'replaced'].map((step) => [step, {
+    vm: read(`vm-${step}`),
+    attempt: read(`attempt-${step}`),
+    tower: read(`tower-${step}`),
+  }])),
+};
+fs.writeFileSync(`${dir}/verify-input.json`, `${JSON.stringify(input, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+NODE
+  "$TSX" "$PRODUCER" phase-h-verify "$phase_dir/verify-input.json" \
+    >"$phase_dir/verdict.json"
+}
+
 assemble_unsigned_evidence() {
   local started_at="$1" finished_at="$2"
   node - "$run_dir" "$unsigned_out" "$physical_run_id" "$started_at" "$finished_at" \
@@ -1339,7 +1542,7 @@ const fs = require('node:fs');
 const [dir, output, runId, startedAt, finishedAt, towerDeviceKey, vmDeviceKey] = process.argv.slice(2);
 const readJson = (path) => JSON.parse(fs.readFileSync(path, 'utf8'));
 const phaseInput = (phase) => readJson(`${dir}/phase-${phase.toLowerCase()}/verify-input.json`);
-const inputs = Object.fromEntries([...'ABCDEFG'].map((phase) => [phase, phaseInput(phase)]));
+const inputs = Object.fromEntries([...'ABCDEFGH'].map((phase) => [phase, phaseInput(phase)]));
 const witness = (host, path) => {
   const bytes = fs.readFileSync(path);
   return {
@@ -1352,7 +1555,7 @@ const observedAt = (phase) => phase === 'G'
   ? inputs.G.result.observedAt
   : inputs[phase].window.finishedAt;
 const evidence = {
-  schemaVersion: 'hive-git-physical-evidence/v1',
+  schemaVersion: 'hive-git-physical-evidence/v2',
   plan: 'p2p-git-live-activation-2026-07-09',
   runId,
   window: { startedAt, finishedAt },
@@ -1367,7 +1570,7 @@ const evidence = {
     witness('tower', `${dir}/phase-f/tower-lifecycle.json`),
     witness('vm', `${dir}/phase-f/vm-lifecycle.json`),
   ],
-  legVerdicts: [...'ABCDEFG'].map((leg) => ({
+  legVerdicts: [...'ABCDEFGH'].map((leg) => ({
     leg,
     status: 'pass',
     scope: 'physical',
@@ -1377,6 +1580,7 @@ const evidence = {
   legE: inputs.E,
   legF: inputs.F,
   legG: inputs.G,
+  legH: inputs.H,
 };
 fs.writeFileSync(output, `${JSON.stringify(evidence, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
 NODE
@@ -1398,6 +1602,7 @@ run_all_phases() {
   phase_start E phase_e_github_bridge;            phase_e_github_bridge
   phase_start F phase_f_lifecycle_safety;         phase_f_lifecycle_safety
   phase_start G phase_g_owner_authority_chaos;    phase_g_owner_authority_chaos
+  phase_start H phase_h_serving_identity;         phase_h_serving_identity
 }
 
 verify_physical_vm_source() {
@@ -1442,10 +1647,10 @@ ensure_vm_driver_current() {
 }
 
 # OFFLINE CONTRACT BOUNDARY. This must remain before the first phase call and
-# before any future ssh/mutation primitive until all seven fixed executors and
+# before any future ssh/mutation primitive until all eight fixed executors and
 # their focused falsifiability tests are checked in.
 [ "$IMPLEMENTATION_STATE" = 'ready-v1' ] \
-  || fail "scenario is not execution-ready ($IMPLEMENTATION_STATE); A-G phase executors have not all landed"
+  || fail "scenario is not execution-ready ($IMPLEMENTATION_STATE); A-H phase executors have not all landed"
 [ "${HIVE_GIT_PHYSICAL_EXECUTE:-}" = "$EXPECTED_PLAN" ] \
   || fail 'destructive physical run requires HIVE_GIT_PHYSICAL_EXECUTE to equal the canonical plan slug'
 
