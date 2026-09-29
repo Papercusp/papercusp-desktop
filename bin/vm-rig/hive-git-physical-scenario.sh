@@ -964,6 +964,30 @@ NODE
   PHASE_D_TIER_HOLD=''
   trap - EXIT
 }
+# Phase E rig state (WI-10003791): the canary's original hiveGit.mode and a
+# fork-ahead control that stays armed until recovered. The EXIT trap undoes
+# both if the phase dies first. It must be EXIT: a RETURN trap never runs when
+# set -e ends the shell mid-function. Both undo steps are idempotent.
+PHASE_E_DIR=''
+PHASE_E_RUN_ID=''
+PHASE_E_RESTORE_MODE=''
+PHASE_E_DIVERGENCE_MUTATION=''
+# Bounded wait for each observation's stage mode: the VM learns the tower's
+# mode write by federation, so a one-shot read races it. The producer caps it at 1200.
+PHASE_E_MODE_WAIT_SEC=600
+phase_e_restore_on_exit() {
+  [ -n "$PHASE_E_DIR" ] || return 0
+  if [ -n "$PHASE_E_DIVERGENCE_MUTATION" ] && [ -s "$PHASE_E_DIVERGENCE_MUTATION" ]; then
+    "$TSX" "$PRODUCER" phase-e-recover "$PHASE_E_DIVERGENCE_MUTATION" \
+      >"$PHASE_E_DIR/exit-recovery.json" 2>"$PHASE_E_DIR/exit-recovery.err" \
+      || echo "hive-git-physical-scenario: WARNING phase E fork recovery failed; see $PHASE_E_DIR/exit-recovery.err" >&2
+  fi
+  if [ -n "$PHASE_E_RESTORE_MODE" ]; then
+    "$TSX" "$PRODUCER" phase-e-mode-ensure "$PHASE_E_RESTORE_MODE" "$PHASE_E_RUN_ID" \
+      >"$PHASE_E_DIR/exit-restore-mode.json" 2>"$PHASE_E_DIR/exit-restore-mode.err" \
+      || echo "hive-git-physical-scenario: WARNING phase E mode restore to $PHASE_E_RESTORE_MODE failed; see $PHASE_E_DIR/exit-restore-mode.err" >&2
+  fi
+}
 phase_e_github_bridge() {
   [ -x "$TSX" ] && [ -f "$PRODUCER" ] && [ -x "$TOWER_CALL" ] \
     || fail 'phase E local producer or canonical ptool is unavailable'
@@ -979,33 +1003,36 @@ phase_e_github_bridge() {
   local ingress_started ingress_finished integrate_started integrate_finished egress_started egress_finished
   local divergence_started divergence_finished rollback_tower_started rollback_tower_finished
   local rollback_vm_started rollback_vm_finished
-  local mode_armed=0 divergence_armed=0
+  local original_mode
   mkdir -m 700 "$phase_dir"
 
-  _phase_e_cleanup() {
-    set +e
-    if [ "$divergence_armed" -eq 1 ] && [ -s "$phase_dir/divergence-mutation.json" ]; then
-      "$TSX" "$PRODUCER" phase-e-recover "$phase_dir/divergence-mutation.json" \
-        >"$phase_dir/cleanup-recovery.json" 2>"$phase_dir/cleanup-recovery.err"
-    fi
-    if [ "$mode_armed" -eq 1 ]; then
-      "$TSX" "$PRODUCER" phase-e-mode legacy "$run_id" \
-        >"$phase_dir/cleanup-mode.json" 2>"$phase_dir/cleanup-mode.err"
-    fi
-    set -e
-  }
-  trap _phase_e_cleanup RETURN
+  # The fixed canary keeps the mode its hive chose (hello-world-3-pot has been
+  # bridged since 2026-07-17), but the contract starts from legacy. Record the
+  # original mode, arm the EXIT restore, then set the legacy baseline through
+  # the production surface. The baseline write is not evidence.
+  "$TSX" "$PRODUCER" phase-e-mode-read >"$phase_dir/original-mode.json"
+  original_mode="$(node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).mode))' \
+    "$phase_dir/original-mode.json")"
+  case "$original_mode" in
+    legacy|bridged) ;;
+    *) fail "phase E canary mode is '$original_mode'; the drill changes only legacy/bridged" ;;
+  esac
+  PHASE_E_DIR="$phase_dir"
+  PHASE_E_RUN_ID="$run_id"
+  PHASE_E_RESTORE_MODE="$original_mode"
+  trap phase_e_restore_on_exit EXIT
+  "$TSX" "$PRODUCER" phase-e-mode-ensure legacy "$run_id" \
+    >"$phase_dir/baseline-mode.json"
 
   started_at="$(now_iso)"
-  "$TSX" "$PRODUCER" phase-e-observe tower legacy-before "$tower_device" "$run_id" \
+  "$TSX" "$PRODUCER" phase-e-observe tower legacy-before "$tower_device" "$run_id" "$PHASE_E_MODE_WAIT_SEC" \
     >"$phase_dir/tower-legacy-before.json"
   ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-e-observe vm legacy-before '$vm_device' '$run_id'" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-e-observe vm legacy-before '$vm_device' '$run_id' '$PHASE_E_MODE_WAIT_SEC'" \
     >"$phase_dir/vm-legacy-before.json"
 
   "$TSX" "$PRODUCER" phase-e-mode bridged "$run_id" \
     >"$phase_dir/activation-mode.json"
-  mode_armed=1
 
   tower_member_started="$(now_iso)"
   run_tower_git_sync >"$phase_dir/tower-member-raw.json"
@@ -1015,10 +1042,10 @@ phase_e_github_bridge() {
   run_vm_git_sync >"$phase_dir/vm-member-raw.json"
   require_git_sync_fired "$phase_dir/vm-member-raw.json" 'phase E vm member'
   vm_member_finished="$(now_iso)"
-  "$TSX" "$PRODUCER" phase-e-observe tower bridged-member "$tower_device" "$run_id" \
+  "$TSX" "$PRODUCER" phase-e-observe tower bridged-member "$tower_device" "$run_id" "$PHASE_E_MODE_WAIT_SEC" \
     >"$phase_dir/tower-bridged-member.json"
   ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-e-observe vm bridged-member '$vm_device' '$run_id'" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-e-observe vm bridged-member '$vm_device' '$run_id' '$PHASE_E_MODE_WAIT_SEC'" \
     >"$phase_dir/vm-bridged-member.json"
 
   "$TSX" "$PRODUCER" phase-e-ingress "$run_id" \
@@ -1047,7 +1074,7 @@ phase_e_github_bridge() {
     >"$phase_dir/divergence-before.json"
   "$TSX" "$PRODUCER" phase-e-diverge "$run_id" \
     >"$phase_dir/divergence-mutation.json"
-  divergence_armed=1
+  PHASE_E_DIVERGENCE_MUTATION="$phase_dir/divergence-mutation.json"
   divergence_started="$(now_iso)"
   run_tower_git_sync >"$phase_dir/divergence-egress-raw.json"
   require_git_sync_fired "$phase_dir/divergence-egress-raw.json" 'phase E tower divergence egress'
@@ -1056,7 +1083,7 @@ phase_e_github_bridge() {
     >"$phase_dir/divergence-after.json"
   "$TSX" "$PRODUCER" phase-e-recover "$phase_dir/divergence-mutation.json" \
     >"$phase_dir/divergence-recovery.json"
-  divergence_armed=0
+  PHASE_E_DIVERGENCE_MUTATION=''
 
   "$TSX" "$PRODUCER" phase-e-mode legacy "$run_id" \
     >"$phase_dir/rollback-mode.json"
@@ -1068,13 +1095,18 @@ phase_e_github_bridge() {
   run_vm_git_sync >"$phase_dir/rollback-vm-raw.json"
   require_git_sync_fired "$phase_dir/rollback-vm-raw.json" 'phase E vm rollback'
   rollback_vm_finished="$(now_iso)"
-  "$TSX" "$PRODUCER" phase-e-observe tower legacy-after "$tower_device" "$run_id" \
+  "$TSX" "$PRODUCER" phase-e-observe tower legacy-after "$tower_device" "$run_id" "$PHASE_E_MODE_WAIT_SEC" \
     >"$phase_dir/tower-legacy-after.json"
   ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-e-observe vm legacy-after '$vm_device' '$run_id'" \
+    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-e-observe vm legacy-after '$vm_device' '$run_id' '$PHASE_E_MODE_WAIT_SEC'" \
     >"$phase_dir/vm-legacy-after.json"
-  mode_armed=0
   finished_at="$(now_iso)"
+
+  # Leave the canary in the mode its hive chose. Not evidence; the EXIT trap
+  # retries it if this write or anything after it fails.
+  "$TSX" "$PRODUCER" phase-e-mode-ensure "$PHASE_E_RESTORE_MODE" "$run_id" \
+    >"$phase_dir/restore-mode.json"
+  PHASE_E_RESTORE_MODE=''
 
   node - "$phase_dir" "$run_id" "$started_at" "$finished_at" "$tower_device" "$vm_device" \
     "$tower_member_started" "$tower_member_finished" "$vm_member_started" "$vm_member_finished" \
@@ -1135,7 +1167,8 @@ fs.writeFileSync(`${dir}/verify-input.json`, `${JSON.stringify(input, null, 2)}\
 NODE
   "$TSX" "$PRODUCER" phase-e-verify "$phase_dir/verify-input.json" \
     >"$phase_dir/verdict.json"
-  trap - RETURN
+  PHASE_E_DIR=''
+  trap - EXIT
 }
 phase_f_lifecycle_safety() {
   [ -x "$TSX" ] && [ -f "$PRODUCER" ] \
