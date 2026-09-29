@@ -284,6 +284,10 @@ reap_release_legs() { # kill this cut's own orphaned build-tool descendants, if 
   return 0
 }
 cleanup_release_local() {
+  local rc=$?
+  # Verification-harness contract (below): record the open phase + HARNESS_RESULT. No-op before
+  # the contract starts; never changes the cut's exit code.
+  if declare -F vh_exit >/dev/null 2>&1; then vh_exit "$rc"; fi
   reap_release_legs
   # The release orchestrator may reserve sidecar staging space before the long
   # migration/toolchain preflights below. Release it on every exit, including a
@@ -2033,6 +2037,31 @@ if [[ "${PAPERCUSP_RELEASE_PRECHECK_ONLY:-0}" == "1" ]]; then
   exit 0
 fi
 
+# ── Verification-harness contract (expensive-verification-loops P-006) ───────
+# Everything above is this cut's own preflight: it fails in seconds and writes nothing, so it
+# runs before the contract starts. From here the cut is expensive, so each section is a
+# bracketed phase (bump → sidecar → gates → build → tag): an abort names the phase and step it
+# died in, every cut keeps one evidence dir, and a HARNESS_RESULT line lands on stderr.
+# Bracket mode keeps `set -e` exactly as it was; VH_FAIL_OPEN means instrumentation that cannot
+# start never blocks a cut. cleanup_release_local finalizes it via vh_exit.
+VH_SH="$ROOT/../libs/generic/verification-harness/bin/vh.sh"
+if [[ -f "$VH_SH" ]]; then
+  # shellcheck source=../../libs/generic/verification-harness/bin/vh.sh
+  source "$VH_SH"
+  VH_LOG_FD="${VH_LOG_FD:-2}"
+  VH_FAIL_OPEN="${VH_FAIL_OPEN:-1}"
+  vh_phase bump ""
+  vh_phase sidecar bump
+  vh_phase gates sidecar
+  vh_phase build gates
+  vh_phase tag build
+  vh_init release-local "${PAPERCUSP_RELEASE_EVIDENCE_ROOT:-$(vh_default_root release-local)}"
+  vh_begin bump
+else
+  echo "VH_DISABLED harness=release-local reason=vh.sh-missing:$VH_SH" >&2
+  vh_begin() { :; }; vh_step() { :; }
+fi
+
 # The task-ledger intent is the managed cut's first mutation boundary.  It runs
 # only after every precheck (and after PRECHECK_ONLY returned), but before the
 # cut-start decision and the first release-tree write.  A restart therefore has
@@ -2467,6 +2496,7 @@ if [[ "${PAPERCUSP_RELEASE_NICE:-1}" != "0" ]]; then
 fi
 [[ ${#PC_NICE[@]} -gt 0 ]] && echo "==> local build legs run niced (P-006): ${PC_NICE[*]}"
 
+vh_begin sidecar
 echo "==> building sidecar"
 # P-004 (desktop-build-hardening-tri-platform-2026-07-11): record the cut-start
 # epoch BEFORE the sidecar build so the freshness stamp it writes is guaranteed
@@ -2541,6 +2571,7 @@ bash "$ROOT/bin/stage-source-tree.sh"
 # leak reds the tick it lands on `staging`, long before a release attempt; this
 # gate stays as defense-in-depth for a cut running off a snapshot older than the
 # latest green tick.)
+vh_begin gates
 echo "==> identity-literal lint gate (WI-4776): tracked source, before any staging work"
 _MONO="$(cd "$ROOT/.." && pwd)"
 _IDENTITY_LINT_STATUS=0
@@ -2657,6 +2688,7 @@ else
   echo "==> ⚠ boot gate SKIPPED (PAPERCUSP_SKIP_BOOT_GATE=1) — diagnostic cut only"
 fi
 
+vh_begin build
 echo "==> building Tauri Linux x86_64 (signed)"
 # Tauri v2 reads TAURI_SIGNING_PRIVATE_KEY (value = key content OR a path);
 # the v1-style _PATH variant is silently ignored and the build dies at the
@@ -3559,6 +3591,7 @@ else
   echo "==> artifact manifest: $ARTIFACTS_MANIFEST (${#ARTIFACTS[@]} verified files — journal reuse)"
 fi
 
+vh_begin tag
 echo "==> committing version bump"
 git -C "$ROOT" add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
 git -C "$ROOT" commit -m "release: $TAG" 2>&1 | tail -3 || echo "(nothing to commit)"
