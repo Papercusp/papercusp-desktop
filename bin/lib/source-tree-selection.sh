@@ -94,6 +94,17 @@ source_tree_selection() {
     --exclude='*.tsbuildinfo'
     --exclude='./.DS_Store' --exclude='*/.DS_Store'
   )
+
+  # (3) license — not ours to ship. The gitnexus-bridge plugin launches
+  # `npx gitnexus`, and GitNexus is PolyForm-Noncommercial-1.0.0, which a
+  # commercial ELv2 build must not install on a user's machine
+  # (plan open-source-release-2026-09-29 P-020). npm tolerates the now-missing
+  # workspace directory under both `npm install` and `npm ci`; the installer's
+  # node_modules symlink to it goes too so nothing dangles.
+  SELECTION_EXCLUDES+=(
+    --exclude='./libs/papercusp/plugins/gitnexus-bridge'
+    --exclude='./node_modules/@papercupai/gitnexus-bridge'
+  )
   # The preview never ships dependencies, at any depth: a nested node_modules
   # inside apps/ or libs/ is installed output, not source.
   if [[ "$mode" == "preview" ]]; then
