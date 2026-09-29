@@ -537,6 +537,10 @@ NODE
     sleep 10
   done
 }
+# Print one dotted field of a JSON artifact, or nothing when it is absent.
+phase_b_json_field() {
+  node -e 'const v = process.argv[2].split(".").reduce((o, k) => o?.[k], JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))); if (v != null) process.stdout.write(String(v));' "$1" "$2"
+}
 phase_b_ref_announce() {
   [ -x "$TSX" ] && [ -f "$PRODUCER" ] && [ -x "$TOWER_CALL" ] \
     || fail 'phase B local producer or canonical ptool is unavailable'
@@ -555,7 +559,8 @@ phase_b_ref_announce() {
   local forward_receive_started forward_receive_finished forward_finished
   local reverse_started reverse_publish_started reverse_publish_finished
   local reverse_receive_started reverse_receive_finished reverse_finished
-  local deadline attempt
+  local deadline attempt rc
+  local forward_oid forward_before_version reverse_oid reverse_before_version
   mkdir -m 700 "$phase_dir"
   mkdir -m 700 "$forward_dir" "$reverse_dir"
   started_at="$(now_iso)"
@@ -568,12 +573,35 @@ phase_b_ref_announce() {
     >"$forward_dir/destination-before.json"
   "$TSX" "$PRODUCER" phase-b-commit tower tower-to-vm "$TOWER_REPO" \
     "$tower_device" "$run_id" >"$forward_dir/mutation.json"
+  forward_oid="$(phase_b_json_field "$forward_dir/mutation.json" oid)"
+  forward_before_version="$(phase_b_json_field "$forward_dir/source-before.json" signedSigrefs.version)"
+  [ -n "$forward_oid" ] && [ -n "$forward_before_version" ] \
+    || fail 'phase B tower-to-vm has no mutation OID or pre-commit sigrefs version'
   forward_publish_started="$(now_iso)"
   run_tower_git_sync >"$forward_dir/source-publish-raw.json"
   require_git_sync_fired "$forward_dir/source-publish-raw.json" 'phase B tower source-publish'
-  forward_publish_finished="$(now_iso)"
-  "$TSX" "$PRODUCER" phase-b-observe tower tower-to-vm present "$TOWER_REPO" \
-    "$tower_device" "$run_id" >"$forward_dir/source-after.json"
+  # The publish fire can return in_progress while its ref-announce leg is still
+  # writing, so read the source until its signed sigrefs cover the fresh commit
+  # (P-505 run 33b read it once, 11s after signing, before the local sigrefs ref
+  # moved). Each retry nudges git-sync and re-stamps the publish finish, which
+  # keeps the verifier's publish-before-source-observation order.
+  deadline=$((SECONDS + 600))
+  attempt=0
+  while :; do
+    attempt=$((attempt + 1))
+    forward_publish_finished="$(now_iso)"
+    rc=0
+    "$TSX" "$PRODUCER" phase-b-observe tower tower-to-vm present "$TOWER_REPO" \
+      "$tower_device" "$run_id" "$forward_oid" "$forward_before_version" \
+      >"$forward_dir/source-after.json" 2>"$forward_dir/source-after.err" || rc=$?
+    [ "$rc" -ne 0 ] || break
+    [ "$rc" -eq 3 ] \
+      || fail "phase B tower source observation failed (exit $rc); see $forward_dir/source-after.err"
+    [ "$SECONDS" -lt "$deadline" ] \
+      || fail "phase B tower source sigrefs did not cover the fresh commit within 600s: $(tail -n 1 "$forward_dir/source-after.err")"
+    run_tower_git_sync >"$forward_dir/source-publish-nudge-$attempt.json" 2>&1 || true
+    sleep 10
+  done
   forward_receive_started="$(now_iso)"
   deadline=$((SECONDS + 1200))
   attempt=0
@@ -586,7 +614,7 @@ phase_b_ref_announce() {
     # rejected every run (WI-10003717, P-505 run 14).
     forward_receive_finished="$(now_iso)"
     if ssh "${SSH_OPTS[@]}" "$VM" \
-      "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-observe vm tower-to-vm present '$VM_REPO' '$tower_device' '$run_id'" \
+      "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-observe vm tower-to-vm present '$VM_REPO' '$tower_device' '$run_id' '$forward_oid' '$forward_before_version'" \
       >"$forward_dir/destination-after.json" 2>"$forward_dir/destination-after.err"; then
       break
     fi
@@ -605,13 +633,30 @@ phase_b_ref_announce() {
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-commit vm vm-to-tower '$VM_REPO' '$vm_device' '$run_id'" \
     >"$reverse_dir/mutation.json"
+  reverse_oid="$(phase_b_json_field "$reverse_dir/mutation.json" oid)"
+  reverse_before_version="$(phase_b_json_field "$reverse_dir/source-before.json" signedSigrefs.version)"
+  [ -n "$reverse_oid" ] && [ -n "$reverse_before_version" ] \
+    || fail 'phase B vm-to-tower has no mutation OID or pre-commit sigrefs version'
   reverse_publish_started="$(now_iso)"
   run_vm_git_sync >"$reverse_dir/source-publish-raw.json"
   require_git_sync_fired "$reverse_dir/source-publish-raw.json" 'phase B vm source-publish'
-  reverse_publish_finished="$(now_iso)"
-  ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-observe vm vm-to-tower present '$VM_REPO' '$vm_device' '$run_id'" \
-    >"$reverse_dir/source-after.json"
+  deadline=$((SECONDS + 600))
+  attempt=0
+  while :; do
+    attempt=$((attempt + 1))
+    reverse_publish_finished="$(now_iso)"
+    rc=0
+    ssh "${SSH_OPTS[@]}" "$VM" \
+      "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-observe vm vm-to-tower present '$VM_REPO' '$vm_device' '$run_id' '$reverse_oid' '$reverse_before_version'" \
+      >"$reverse_dir/source-after.json" 2>"$reverse_dir/source-after.err" || rc=$?
+    [ "$rc" -ne 0 ] || break
+    [ "$rc" -eq 3 ] \
+      || fail "phase B vm source observation failed (exit $rc); see $reverse_dir/source-after.err"
+    [ "$SECONDS" -lt "$deadline" ] \
+      || fail "phase B vm source sigrefs did not cover the fresh commit within 600s: $(tail -n 1 "$reverse_dir/source-after.err")"
+    run_vm_git_sync >"$reverse_dir/source-publish-nudge-$attempt.json" 2>&1 || true
+    sleep 10
+  done
   reverse_receive_started="$(now_iso)"
   deadline=$((SECONDS + 1200))
   attempt=0
@@ -620,7 +665,8 @@ phase_b_ref_announce() {
     run_tower_git_sync >"$reverse_dir/destination-receive-$attempt.json"
     reverse_receive_finished="$(now_iso)"
     if "$TSX" "$PRODUCER" phase-b-observe tower vm-to-tower present "$TOWER_REPO" \
-      "$vm_device" "$run_id" >"$reverse_dir/destination-after.json" 2>"$reverse_dir/destination-after.err"; then
+      "$vm_device" "$run_id" "$reverse_oid" "$reverse_before_version" \
+      >"$reverse_dir/destination-after.json" 2>"$reverse_dir/destination-after.err"; then
       break
     fi
     [ "$SECONDS" -lt "$deadline" ] \
