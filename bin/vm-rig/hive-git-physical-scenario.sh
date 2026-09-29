@@ -750,6 +750,40 @@ phase_d_fail_on_duplicate_event() {
     fail "phase D $which advance: duplicate signed staging events for one head on the VM; see $err_file"
   fi
 }
+# Observe one Phase D host until it has converged to the expected signed head
+# (WI-10003811). Each host reaches the head asynchronously. P-505 run 30 read
+# both once, 7-23s after the event, and caught each mid-flight. The tower's own
+# canonical ref, worktree and cursor were still on the prior head. The VM had
+# not yet refreshed its mirror of the integrator namespace ref. Between
+# attempts this fires that host's git-sync, so its bridge runs now rather than
+# on the 10-minute scheduled tick. The producer exits 3 when the host has not
+# converged and still prints the observation, so the last attempt survives as
+# evidence. The verifier stays the judge.
+# Usage: phase_d_observe_converged <tower|vm> <stage> <device> <run-id> <sha> <out.json> <budget-sec>
+phase_d_observe_converged() {
+  local host="$1" stage="$2" device="$3" run="$4" expected="$5" out="$6" budget="$7"
+  local deadline=$((SECONDS + budget)) attempt=0 rc
+  while :; do
+    attempt=$((attempt + 1))
+    rc=0
+    if [ "$host" = tower ]; then
+      "$TSX" "$PRODUCER" phase-d-observe tower "$stage" "$device" "$run" "$expected" \
+        >"$out" 2>"${out%.json}.err" || rc=$?
+    else
+      ssh "${SSH_OPTS[@]}" "$VM" \
+        "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-observe vm '$stage' '$device' '$run' '$expected'" \
+        >"$out" 2>"${out%.json}.err" || rc=$?
+    fi
+    [ "$rc" -ne 0 ] || return 0
+    [ "$rc" -eq 3 ] \
+      || fail "phase D $host $stage observation failed (exit $rc); see ${out%.json}.err"
+    [ "$SECONDS" -lt "$deadline" ] \
+      || fail "phase D $host $stage did not converge to $expected within ${budget}s: $(tail -n 1 "${out%.json}.err")"
+    if [ "$host" = tower ]; then run_tower_git_sync; else run_vm_git_sync; fi \
+      >"${out%.json}-nudge-$attempt.json" 2>&1 || true
+    sleep 10
+  done
+}
 phase_d_tier_restore() {
   [ -n "$PHASE_D_TIER_HOLD" ] || return 0
   "$TSX" "$PRODUCER" phase-d-tier-restore "$PHASE_D_TIER_HOLD"
@@ -842,8 +876,8 @@ phase_d_worktree_materialization() {
   # up to PHASE_D_TOWER_EVENT_WAIT_SEC for the one event (WI-10003787).
   "$TSX" "$PRODUCER" phase-d-event tower 0 "$tower_device" "$first_head" "$PHASE_D_TOWER_EVENT_WAIT_SEC" \
     >"$first_dir/source-event.json"
-  "$TSX" "$PRODUCER" phase-d-observe tower first-source "$tower_device" "$run_id" \
-    >"$first_dir/source-observation.json"
+  phase_d_observe_converged tower first-source "$tower_device" "$run_id" "$first_head" \
+    "$first_dir/source-observation.json" 1200
 
   first_bridge_started="$(now_iso)"
   deadline=$((SECONDS + 1200))
@@ -862,9 +896,8 @@ phase_d_worktree_materialization() {
     sleep 10
   done
   first_bridge_finished="$(now_iso)"
-  ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-observe vm first-destination '$tower_device' '$run_id'" \
-    >"$first_dir/destination-observation.json"
+  phase_d_observe_converged vm first-destination "$tower_device" "$run_id" "$first_head" \
+    "$first_dir/destination-observation.json" 1200
 
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-dirty '$run_id'" \
@@ -901,9 +934,11 @@ phase_d_worktree_materialization() {
     sleep 10
   done
   dirty_bridge_finished="$(now_iso)"
-  ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-observe vm dirty-after '$tower_device' '$run_id'" \
-    >"$dirty_dir/after-observation.json"
+  # Short bound: the dirt's file lock has a 30-minute TTL
+  # (PHASE_D_DIRT_LOCK_TTL_SEC), and the event waits above already spend part
+  # of it. git-sync must never see the dirt unlocked.
+  phase_d_observe_converged vm dirty-after "$tower_device" "$run_id" "$second_head" \
+    "$dirty_dir/after-observation.json" 300
   finished_at="$(now_iso)"
 
   node - "$phase_dir" "$run_id" "$started_at" "$finished_at" "$tower_device" "$vm_device" \
