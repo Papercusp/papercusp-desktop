@@ -335,10 +335,31 @@ if [ -n "$physical_probe_cmd" ]; then
     bad "physical E/G adapter: only the checked-in executable $canonical_physical_probe may produce release evidence"
   elif [ -z "${PAPERCUSP_CAPABILITY_BASH_BACKGROUND_TASK_ID:-}" ]; then
     bad "physical E/G adapter requires a durable capability:bash background task enrollment"
-  elif ! HIVE_GIT_PHYSICAL_PLAN=p2p-git-live-activation-2026-07-09 \
-    "$physical_probe_cmd" "$physical_evidence_file" "$physical_trust_file" \
-    >"$WORK/physical-probe.stdout" 2>"$WORK/physical-probe.stderr"; then
-    bad "physical E/G adapter command failed — see $WORK/physical-probe.stdout + physical-probe.stderr"
+  else
+    physical_probe_rc=0
+    HIVE_GIT_PHYSICAL_PLAN=p2p-git-live-activation-2026-07-09 \
+      "$physical_probe_cmd" "$physical_evidence_file" "$physical_trust_file" \
+      >"$WORK/physical-probe.stdout" 2>"$WORK/physical-probe.stderr" || physical_probe_rc=$?
+    # Keep this run's adapter output. The drill wipes $WORK at start (above), so
+    # without this every failed run's evidence was deleted by the next attempt
+    # (P-505, runs 17-31). Plan physical-drill-iteration-speed-2026-09-29 P-001.
+    physical_runs_dir="${HIVE_GIT_PHYSICAL_RUNS_DIR:-$HOME/.papercusp-drill-physical-runs}"
+    physical_run_dir="$physical_runs_dir/$(date -u +%Y%m%dT%H%M%SZ)-$$-rc$physical_probe_rc"
+    if mkdir -p "$physical_run_dir" 2>/dev/null; then
+      cp -p "$WORK/physical-probe.stdout" "$WORK/physical-probe.stderr" "$physical_run_dir/" 2>/dev/null || true
+      # Bound disk: keep the newest 30 runs.
+      ls -1dt "$physical_runs_dir"/*/ 2>/dev/null | tail -n +31 | xargs -r rm -rf --
+    else
+      physical_run_dir="$WORK"
+    fi
+    if [ "$physical_probe_rc" -ne 0 ]; then
+      # shellcheck source=lib/physical-failure-summary.sh
+      . "$DESKTOP_DIR/bin/lib/physical-failure-summary.sh"
+      physical_failure="$(physical_failure_summary "$WORK/physical-probe.stderr")"
+      echo "    --- adapter stderr (last 25 lines; full: $physical_run_dir/physical-probe.stderr) ---"
+      tail -n 25 "$WORK/physical-probe.stderr" 2>/dev/null | sed 's/^/    | /'
+      bad "physical E/G adapter failed (exit $physical_probe_rc) in $physical_failure — evidence kept in $physical_run_dir"
+    fi
   fi
 fi
 if [ -n "$physical_evidence_file" ] && [ -f "$physical_evidence_file" ] && [ -f "$physical_trust_file" ]; then

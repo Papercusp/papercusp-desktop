@@ -1336,14 +1336,22 @@ fs.writeFileSync(output, `${JSON.stringify(evidence, null, 2)}\n`, { flag: 'wx',
 NODE
 }
 
+# Each phase announces itself on stderr before it runs. The drill reads the LAST
+# marker to name the phase a failed run died in (bin/lib/physical-failure-summary.sh,
+# plan physical-drill-iteration-speed-2026-09-29 P-001). Informational only:
+# nothing parses it as evidence, and it never touches stdout.
+phase_start() {
+  echo "hive-git-physical-scenario: PHASE_START $1 $2 $(now_iso)" >&2
+}
+
 run_all_phases() {
-  phase_a_storage_join
-  phase_b_ref_announce
-  phase_c_trust_negative_controls
-  phase_d_worktree_materialization
-  phase_e_github_bridge
-  phase_f_lifecycle_safety
-  phase_g_owner_authority_chaos
+  phase_start A phase_a_storage_join;             phase_a_storage_join
+  phase_start B phase_b_ref_announce;             phase_b_ref_announce
+  phase_start C phase_c_trust_negative_controls;  phase_c_trust_negative_controls
+  phase_start D phase_d_worktree_materialization; phase_d_worktree_materialization
+  phase_start E phase_e_github_bridge;            phase_e_github_bridge
+  phase_start F phase_f_lifecycle_safety;         phase_f_lifecycle_safety
+  phase_start G phase_g_owner_authority_chaos;    phase_g_owner_authority_chaos
 }
 
 verify_physical_vm_source() {
