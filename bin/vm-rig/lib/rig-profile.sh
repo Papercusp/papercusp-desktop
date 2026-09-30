@@ -182,6 +182,34 @@ rig_profile_owner_git_failures() { # <rig dir>
   return 0
 }
 
+# Wait until the VM owner ANSWERS the call phase A makes first (dev:dogfood_substrate_status on
+# the rig's git-sync member). Store readiness alone is not enough. Same-box run 8
+# (20260930T072904Z) declared UP while the VM's converge git-sync fire was still running (its own
+# git-sync:run had already hit MCP_RESULT_TIMEOUT), and phase A's first VM call timed out after
+# 30s (WI-10003976 attempt-audit). Needs VM, VM_CALL, SB_WORKSPACE and SB_GIT_SYNC_SLUG, which
+# rig_profile_apply sets. vmcall exit 0 = answered, 5 = answered ok:false; anything else (the
+# timeout included) is "not answering yet". Returns 0 on an answer and 1 once <budget-sec>
+# passes without one. Call output goes to <rig dir>/converge-responsive.log.
+rig_profile_vm_answering() { # <rig dir> <budget-sec> [retry-interval-sec, default 5]
+  local dir="$1" budget="$2" interval="${3:-5}" start=$SECONDS rc args
+  args="{\"targetHarness\":{\"workspaceId\":\"$SB_WORKSPACE\",\"harnessSlug\":\"$SB_GIT_SYNC_SLUG\"}}"
+  while :; do
+    rc=0
+    ssh "$VM" "'$VM_CALL' dev:dogfood_substrate_status '$args' --client same-box-rig-up --workspace '$SB_WORKSPACE' --harness '$SB_GIT_SYNC_SLUG'" \
+      >/dev/null 2>>"$dir/converge-responsive.log" || rc=$?
+    if [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ]; then
+      echo "RIG_PROFILE vm-answering after $((SECONDS - start))s (vmcall rc=$rc)" >&2
+      return 0
+    fi
+    echo "RIG_PROFILE vm-not-answering-yet vmcall rc=$rc after $((SECONDS - start))s" >&2
+    if [ $((SECONDS - start)) -ge "$budget" ]; then
+      echo "RIG_PROFILE vm-not-answering the VM owner did not answer dev:dogfood_substrate_status within ${budget}s (log: $dir/converge-responsive.log)" >&2
+      return 1
+    fi
+    sleep "$interval"
+  done
+}
+
 # Extra `physical-drill-producer rig-preflight` arguments for the active profile, one per line
 # (read them with mapfile). The physical profile adds nothing: every check, both owners on
 # :3070. The same-box profile points hosts-answering at the two throwaway owners' ports — the
