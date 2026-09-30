@@ -455,12 +455,13 @@ test('CodeResources treats a short-name collision inside fixed-width signature d
       [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<plist><dict>',
-        '<key>Resources/sidecar/spa/assets/factor-aVI-w_hC.js</key>',
-        '<dict><key>hash2</key><data>hUSGV/Sl+8CAOep3WxHcDhWiRQi1iEP2rDbnpRt/AVI=</data></dict>',
+        '<key>Resources/sidecar/spa/assets/factor-zED-w_hC.js</key>',
+        '<dict><key>hash2</key><data>hUSGV/Sl+8CAOep3WxHcDhWiRQi1iEP2rDbnpR/ZEDA=</data></dict>',
         '</dict></plist>',
       ].join('\n'),
     );
-    const r = scanDir(path.join(dir, 'bundle'), { PAPERCUSP_RELEASE_OWNER_NAME: 'Avi' });
+    // Synthetic owner name (never the real one — this file ships in the public export).
+    const r = scanDir(path.join(dir, 'bundle'), { PAPERCUSP_RELEASE_OWNER_NAME: 'Zed' });
     assert.equal(r.status, 0, `opaque CodeResources digests must not impersonate owner identity:\n${r.stdout}`);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -477,12 +478,12 @@ test('THE FALSIFIER: authored owner identity in CodeResources still fails', () =
       [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<plist><dict>',
-        '<key>build-owner</key><string>Avi</string>',
-        '<key>hash2</key><data>hUSGV/Sl+8CAOep3WxHcDhWiRQi1iEP2rDbnpRt/AVI=</data>',
+        '<key>build-owner</key><string>Zed</string>',
+        '<key>hash2</key><data>hUSGV/Sl+8CAOep3WxHcDhWiRQi1iEP2rDbnpR/ZEDA=</data>',
         '</dict></plist>',
       ].join('\n'),
     );
-    const r = scanDir(path.join(dir, 'bundle'), { PAPERCUSP_RELEASE_OWNER_NAME: 'Avi' });
+    const r = scanDir(path.join(dir, 'bundle'), { PAPERCUSP_RELEASE_OWNER_NAME: 'Zed' });
     assert.equal(r.status, 1, `authored CodeResources identity must remain blocking:\n${r.stdout}`);
     assert.match(r.stdout, /CodeResources/);
   } finally {

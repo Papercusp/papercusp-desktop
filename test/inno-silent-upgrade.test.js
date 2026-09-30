@@ -49,8 +49,8 @@ test('the role predicate cannot select the sibling role with the same executable
   assert.match(code, /\$_.ExecutablePath -eq \$target/);
 
   const processes = [
-    { Name: 'papercusp-desktop.exe', ExecutablePath: 'C:\\Users\\Avi\\AppData\\Local\\Papercusp GUI\\papercusp-desktop.exe' },
-    { Name: 'papercusp-desktop.exe', ExecutablePath: 'C:\\Users\\Avi\\AppData\\Local\\Papercusp Server\\papercusp-desktop.exe' },
+    { Name: 'papercusp-desktop.exe', ExecutablePath: 'C:\\Users\\Zed\\AppData\\Local\\Papercusp GUI\\papercusp-desktop.exe' },
+    { Name: 'papercusp-desktop.exe', ExecutablePath: 'C:\\Users\\Zed\\AppData\\Local\\Papercusp Server\\papercusp-desktop.exe' },
   ];
   const target = processes[0].ExecutablePath;
   const selected = processes.filter(

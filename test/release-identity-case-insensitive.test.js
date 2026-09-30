@@ -2,8 +2,8 @@
 //
 // WHY THIS TEST EXISTS
 // The owner's name reached the PUBLISHED 0.0.17 Linux deb in lowercase, inside a SQL
-// comment ("Surfaced for avi:"), while every gate reported CLEAN. The matcher built
-// `\bAvi\b`, and `avi` is not `Avi`.
+// comment ("Surfaced for <name>:", all lowercase), while every gate reported CLEAN. The
+// matcher built `\b<Name>\b` from the capitalised name, and `zed` is not `Zed`.
 //
 // What makes it worth a permanent guard is that ONE rule (lit_ere) feeds THREE legs,
 // so a single blind spot produced three independent-looking proofs of cleanliness:
