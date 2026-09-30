@@ -520,8 +520,12 @@ vm_machine="${vm_fields#*$'\t'}"
 # The order is part of D-002: G may run only after the same physical run has
 # observed A-F. These fixed functions are intentionally not replaceable via env.
 phase_a_storage_join() {
-  [ "$PHASE_A_POT_HOME" = 'hello-world-3-pot' ] \
-    && [ "$PHASE_A_REPO_KEY" = 'gh-1303510992' ] \
+  # The physical rig's target is fixed. Only a diagnostic same-box run takes its own pot, and
+  # the producer re-derives that same target from the profile (physicalDrillTarget).
+  local want_pot='hello-world-3-pot' want_key='gh-1303510992'
+  if rig_profile_is_diagnostic; then want_pot="$SB_POT_HOME"; want_key="$SB_REPO_KEY"; fi
+  [ "$PHASE_A_POT_HOME" = "$want_pot" ] \
+    && [ "$PHASE_A_REPO_KEY" = "$want_key" ] \
     || fail 'phase A target drifted from its checked-in contract'
   [ -x "$TSX" ] && [ -f "$PRODUCER" ] \
     || fail 'phase A local observer is unavailable'
