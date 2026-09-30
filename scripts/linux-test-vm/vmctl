@@ -20,6 +20,10 @@
 #   vmctl gui-paste [name] TEXT   paste exact text into the focused guest field and capture it
 #   vmctl verify  [name]          assert install/PG/operator/window; capture logs+screenshot
 #   vmctl status  [name]          VM up? app up? operator :3070? disk free?
+#   vmctl endpoint [name]         print ssh_port= / ssh_key= / ssh_host= (the ONE source
+#                                 other tools derive this VM's SSH endpoint from)
+#   vmctl is-running [name]       exit 0 when the instance's qemu is alive, 1 otherwise
+#   vmctl wait-ssh [name] [sec]   block until SSH answers; exit 1 after the budget
 #   vmctl help
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
@@ -689,6 +693,30 @@ cmd_status() {
   fi
 }
 
+# ── machine-readable endpoint (WI-10004052) ───────────────────────────────
+# The release platform-smoke gate and install-and-relaunch-verify.sh used to
+# carry their OWN hard-coded SSH endpoint (the Windows VM's :2223 +
+# papercup-vm-win key), so the Linux leg dialled the wrong machine on every
+# release. Other tools now DERIVE this VM's endpoint from here — ports_for +
+# SSH_KEY + VM_USER stay the single source of truth, env overrides included.
+cmd_endpoint() {
+  local name="${1:-clean}" ssh_port
+  ssh_port="$(ports_for "$name" | awk '{print $1}')"
+  printf 'ssh_port=%s\n' "$ssh_port"
+  printf 'ssh_key=%s\n' "$SSH_KEY"
+  printf 'ssh_host=%s@127.0.0.1\n' "$VM_USER"
+}
+
+cmd_is_running() { vm_running "${1:-clean}"; }
+
+# cmd_up only WARNS when SSH is late; an automated caller needs a hard verdict.
+cmd_wait_ssh() {
+  local name="${1:-clean}" budget="${2:-300}"
+  [[ "$budget" =~ ^[1-9][0-9]*$ ]] || die "wait-ssh budget must be a positive integer (got '$budget')"
+  vm_running "$name" || die "$name is not running. vmctl up $name"
+  wait_ssh "$name" "$budget" || die "SSH on $name did not answer within ${budget}s — see $(vm_serial "$name")"
+}
+
 cmd_help() {
   awk '
     NR == 1 { next }
@@ -722,6 +750,9 @@ case "$cmd" in
   gui-paste) cmd_gui_paste "$@" ;;
   verify)    cmd_verify "$@" ;;
   status)    cmd_status "$@" ;;
+  endpoint)  cmd_endpoint "$@" ;;
+  is-running) cmd_is_running "$@" ;;
+  wait-ssh)  cmd_wait_ssh "$@" ;;
   help|-h|--help) cmd_help ;;
   *) die "unknown command: $cmd (try: vmctl help)" ;;
 esac

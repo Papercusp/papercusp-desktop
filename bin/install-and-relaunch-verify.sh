@@ -50,6 +50,16 @@
 #                                  build-provenance.json next to the artifact
 #   --expected-version VER         optional; default: version from that provenance
 #   --ssh-key / --ssh-port / --ssh-host / --distro / --app-image
+#                                  endpoint defaults are PER PLATFORM (flags win,
+#                                  then VM_SSH_KEY/VM_SSH_PORT/VM_SSH_HOST):
+#                                    windows  user@127.0.0.1:2223  ~/.ssh/papercup-vm-win
+#                                    mac      aviweiss@127.0.0.1:2222 ~/.ssh/papercup-vm-mac
+#                                             (MAC_VM_SSH_HOST overrides the user@host)
+#                                    linux    derived from scripts/linux-test-vm/vmctl
+#                                             endpoint <PAPERCUSP_LINUX_SMOKE_VM|clean>
+#                                             (tester@127.0.0.1:2224, papercup-vm-linux)
+#                                  A leg whose endpoint resolves to ANOTHER platform's
+#                                  VM port or key is refused (exit 2).
 #   --ssh-option NAME=VALUE    repeatable extra -o option for SSH
 #   --scp-option NAME=VALUE    repeatable extra -o option for SCP
 #   --remote-dir DIR               where to scp the artifact (default per platform)
@@ -86,9 +96,12 @@ ARTIFACT=""
 SERVER_ARTIFACT=""
 EXPECTED_SHA=""
 EXPECTED_VERSION=""
-SSH_KEY="${VM_SSH_KEY:-$HOME/.ssh/papercup-vm-win}"
-SSH_PORT="${VM_SSH_PORT:-2223}"
-SSH_HOST="${VM_SSH_HOST:-user@127.0.0.1}"
+# SSH endpoint: --ssh-* flags win, then VM_SSH_* env, then the PER-PLATFORM
+# default resolved after argument parsing (WI-10004052 — a single Windows
+# default used to send the Linux leg to the Windows VM's :2223 with its key).
+SSH_KEY="${VM_SSH_KEY:-}"
+SSH_PORT="${VM_SSH_PORT:-}"
+SSH_HOST="${VM_SSH_HOST:-}"
 DISTRO="${DISTRO:-papercup-runtime}"
 APP_IMAGE="papercusp-desktop.exe"
 REMOTE_DIR=""
@@ -335,6 +348,97 @@ case "$PLATFORM" in
     ;;
   *) echo "unknown --platform: $PLATFORM (want windows|mac|linux)" >&2; exit 2 ;;
 esac
+
+# ── Per-platform SSH endpoint (WI-10004052) ─────────────────────────────────
+# Each platform's leg must dial ITS OWN VM. The Linux clean-room VM's endpoint
+# is derived from vmctl (ports_for/SSH_KEY/VM_USER in lib/common.sh), never
+# restated here, so a VM_SSH_BASE / PAPERCUSP_TESTVM_* override moves both.
+LINUX_VMCTL="${PAPERCUSP_LINUX_VMCTL:-$HERE/../scripts/linux-test-vm/vmctl}"
+linux_vm_endpoint_field() { # $1=field name; reads `vmctl endpoint` output on stdin
+  sed -n "s/^$1=//p" | head -1
+}
+LINUX_ENDPOINT=""
+linux_endpoint() {
+  if [[ -z "$LINUX_ENDPOINT" ]]; then
+    LINUX_ENDPOINT="$(bash "$LINUX_VMCTL" endpoint "${PAPERCUSP_LINUX_SMOKE_VM:-clean}" 2>/dev/null)" || LINUX_ENDPOINT=""
+  fi
+  printf '%s\n' "$LINUX_ENDPOINT"
+}
+DERIVED_LINUX_ENDPOINT=0
+case "$PLATFORM" in
+  windows)
+    SSH_PORT="${SSH_PORT:-2223}"
+    SSH_KEY="${SSH_KEY:-$HOME/.ssh/papercup-vm-win}"
+    SSH_HOST="${SSH_HOST:-user@127.0.0.1}"
+    ;;
+  mac)
+    SSH_PORT="${SSH_PORT:-2222}"
+    SSH_KEY="${SSH_KEY:-$HOME/.ssh/papercup-vm-mac}"
+    SSH_HOST="${SSH_HOST:-${MAC_VM_SSH_HOST:-aviweiss@127.0.0.1}}"
+    ;;
+  linux)
+    if [[ -z "$SSH_PORT" || -z "$SSH_KEY" || -z "$SSH_HOST" ]]; then
+      endpoint="$(linux_endpoint)"
+      linux_port="$(linux_vm_endpoint_field ssh_port <<<"$endpoint")"
+      linux_key="$(linux_vm_endpoint_field ssh_key <<<"$endpoint")"
+      linux_host="$(linux_vm_endpoint_field ssh_host <<<"$endpoint")"
+      [[ "$linux_port" =~ ^[0-9]+$ && -n "$linux_key" && -n "$linux_host" ]] || {
+        echo "cannot derive the Linux test VM SSH endpoint from $LINUX_VMCTL endpoint — pass --ssh-port/--ssh-key/--ssh-host" >&2
+        exit 2
+      }
+      [[ -n "$SSH_PORT" ]] || { SSH_PORT="$linux_port"; DERIVED_LINUX_ENDPOINT=1; }
+      SSH_KEY="${SSH_KEY:-$linux_key}"
+      SSH_HOST="${SSH_HOST:-$linux_host}"
+    fi
+    ;;
+esac
+[[ "$SSH_PORT" =~ ^[0-9]+$ ]] || { echo "--ssh-port must be numeric (got '$SSH_PORT')" >&2; exit 2; }
+
+# Refuse a leg that resolved to another platform's VM. Keys are compared by
+# name everywhere; ports only for loopback hosts, where every rig VM is a
+# QEMU hostfwd and a port number therefore IS the machine's identity.
+cross_platform_endpoint_owner() {
+  local other key_name port_owner="" host_part="${SSH_HOST##*@}"
+  key_name="$(basename -- "$SSH_KEY")"
+  for other in windows mac linux; do
+    [[ "$other" != "$PLATFORM" ]] || continue
+    case "$other:$key_name" in
+      windows:papercup-vm-win|mac:papercup-vm-mac|linux:papercup-vm-linux)
+        printf '%s (key %s)\n' "$other" "$key_name"; return 0 ;;
+    esac
+  done
+  case "$host_part" in
+    127.0.0.1|localhost|::1) ;;
+    *) return 1 ;;
+  esac
+  case "$PLATFORM:$SSH_PORT" in
+    linux:2222|windows:2222) port_owner=mac ;;
+    linux:2223|mac:2223) port_owner=windows ;;
+  esac
+  if [[ -z "$port_owner" && "$PLATFORM" != linux ]]; then
+    local lp
+    lp="$(linux_vm_endpoint_field ssh_port <<<"$(linux_endpoint)")"
+    [[ -n "$lp" && "$SSH_PORT" == "$lp" ]] && port_owner=linux
+  fi
+  [[ -n "$port_owner" ]] || return 1
+  printf '%s (loopback port :%s)\n' "$port_owner" "$SSH_PORT"
+}
+if foreign="$(cross_platform_endpoint_owner)"; then
+  echo "refusing: --platform $PLATFORM resolved its SSH endpoint ($SSH_HOST:$SSH_PORT, key $SSH_KEY) to the $foreign VM — a $PLATFORM smoke must dial the $PLATFORM VM. Unset the stray VM_SSH_* env or pass this platform's --ssh-port/--ssh-key/--ssh-host." >&2
+  exit 2
+fi
+# The Linux clean-room VM is rebuilt from golden on every reset, and vmctl's own
+# policy is not to pin its throwaway loopback host key (lib/common.sh
+# _ssh_opts). Apply the same policy when the endpoint itself was derived from
+# vmctl, unless the caller already chose a host-key policy.
+if [[ "$DERIVED_LINUX_ENDPOINT" == 1 ]]; then
+  if [[ " ${SSH_OPTIONS[*]:-} " != *StrictHostKeyChecking=* ]]; then
+    SSH_OPTIONS+=( StrictHostKeyChecking=no UserKnownHostsFile=/dev/null LogLevel=ERROR )
+  fi
+  if [[ " ${SCP_OPTIONS[*]:-} " != *StrictHostKeyChecking=* ]]; then
+    SCP_OPTIONS+=( StrictHostKeyChecking=no UserKnownHostsFile=/dev/null LogLevel=ERROR )
+  fi
+fi
 REMOTE_ARTIFACT="$REMOTE_DIR/$REMOTE_BASENAME"
 # Real artifacts have spaces ("Papercusp GUI_0.0.7_x64-setup.exe"). Quoting is
 # needed ONLY where a remote SHELL parses the path (install/relaunch via ssh —
