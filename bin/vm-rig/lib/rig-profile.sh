@@ -122,9 +122,15 @@ rig_profile_apply() {
   export HIVE_GIT_DRILL_TARGET_POT_HOME="$SB_POT_HOME" HIVE_GIT_DRILL_TARGET_REPO_KEY="$SB_REPO_KEY" \
     HIVE_GIT_DRILL_TARGET_GITHUB_REMOTE="$SB_GITHUB_REMOTE"
 
+  # Tower-side producer calls run as the rig's throwaway tower, never as the caller's live
+  # operator (same-box-transport/tower-tsx).
+  TSX="$RIG_PROFILE_LIB_DIR/same-box-transport/tower-tsx"
+
   PATH="$RIG_PROFILE_LIB_DIR/same-box-transport:$PATH"
   export PATH HIVE_GIT_RIG HIVE_GIT_SAME_BOX_RIG
   export SAME_BOX_VM_HOME="$SB_VM_HOME" SAME_BOX_VM_PORT="$SB_VM_PORT" SAME_BOX_RIG_DIR="$dir"
+  export SAME_BOX_TOWER_HOME="$SB_TOWER_HOME" SAME_BOX_TOWER_PORT="$SB_TOWER_PORT" \
+    SAME_BOX_TSX="$SB_TSX" SAME_BOX_NODE="$SB_NODE"
   echo "RIG_PROFILE rig=same-box vm=$VM tower_port=$SB_TOWER_PORT vm_port=$SB_VM_PORT pot=$SB_POT_HOME dir=$dir" >&2
 }
 
