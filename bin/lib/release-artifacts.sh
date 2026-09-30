@@ -41,6 +41,21 @@ release_artifacts_cut_start_path() {
   printf '/tmp/papercusp-cut-start-%s.txt\n' "$1"
 }
 
+# release_artifacts_has_linux_version_artifact <bundle-dir> <version>
+# A primary package must exist before a platform leg may skip the Linux build;
+# a detached signature by itself is not a reusable Linux artifact.
+release_artifacts_has_linux_version_artifact() {
+  local bundle="${1:-}" version="${2:-}" artifact
+  [[ -n "$bundle" && -n "$version" ]] || {
+    echo "release-artifacts: Linux reuse check requires a bundle directory and version." >&2
+    return 2
+  }
+  for artifact in "$bundle"/deb/*_"$version"_*.deb "$bundle"/appimage/*_"$version"_*.AppImage; do
+    [[ -f "$artifact" ]] && return 0
+  done
+  return 1
+}
+
 release_artifacts_cut_start_now_ns() {
   local now
   now="$(date -u +%s%N 2>/dev/null || true)"

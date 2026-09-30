@@ -30,6 +30,10 @@ function sliceBetween(start, end) {
 // the shell logic: if the production branch changes, the behavior under test
 // changes with it.
 const linuxReuseHarness = sliceBetween('_prov_version()', '# ── Mobile');
+const linuxReusePreflightHarness = sliceBetween(
+  '# EI-24514809679788531: a non-Linux run-leg always skips the Linux build',
+  'require_release_host',
+);
 const releaseTaskJournalHarness = sliceBetween(
   '# ── P-005: restart-safe release stages',
   '# ── end P-005 release-task journal helpers',
@@ -271,6 +275,52 @@ function runReuse({
   fs.rmSync(cutStartPath, { force: true });
   return result;
 }
+
+function runLinuxReusePreflight(artifactName) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-linux-reuse-preflight-'));
+  const target = path.join(temp, 'target');
+  const appimageDir = path.join(target, 'release', 'bundle', 'appimage');
+  fs.mkdirSync(appimageDir, { recursive: true });
+  if (artifactName) fs.writeFileSync(path.join(appimageDir, artifactName), 'fixture');
+
+  const command = [
+    'set -euo pipefail',
+    'source ' + JSON.stringify(path.join(root, 'bin', 'lib', 'release-artifacts.sh')),
+    'VERSION=0.0.23',
+    'ROOT=' + JSON.stringify(temp),
+    'CARGO_TARGET_DIR=' + JSON.stringify(target),
+    'PAPERCUSP_REUSE_LINUX=1',
+    'papercusp_cargo_target_root() { printf "%s" "$CARGO_TARGET_DIR"; }',
+    linuxReusePreflightHarness,
+    'printf "FAST_PREFLIGHT_PASSED\\n"',
+  ].join('\n');
+  try {
+    return spawnSync('bash', ['-c', command], { encoding: 'utf8', timeout: 5000 });
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+}
+
+test('a non-Linux run-leg rejects missing Linux bytes before expensive preflight gates', () => {
+  const result = runLinuxReusePreflight();
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stderr, /no 0\.0\.23 Linux artifacts/);
+  assert.match(result.stderr, /run the Linux leg first/);
+  assert.doesNotMatch(result.stdout, /FAST_PREFLIGHT_PASSED/);
+});
+
+test('the Linux reuse guard precedes migration gates and release manifest writes', () => {
+  const guard = source.indexOf('# EI-24514809679788531: a non-Linux run-leg always skips the Linux build');
+  const migration = source.indexOf('checking migration boot-smoke');
+  const manifestWrite = source.indexOf('bump_version_manifests "$ROOT"');
+  assert.ok(guard >= 0 && migration > guard && manifestWrite > guard);
+});
+
+test('a same-version primary Linux package satisfies the early reuse guard', () => {
+  const result = runLinuxReusePreflight('Papercusp_GUI_0.0.23_amd64.AppImage');
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /FAST_PREFLIGHT_PASSED/);
+});
 
 test('same-version Linux salvage skips the build and enters the canonical collector', () => {
   const result = runReuse();

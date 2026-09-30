@@ -374,6 +374,21 @@ if [[ -n "${VERSION:-}" && -n "${CHANNEL:-}" ]]; then
   export PAPERCUSP_RELEASE_TAG
 fi
 source "$ORCHESTRATOR_HERE/lib/claim-target-dir.sh"
+
+# EI-24514809679788531: a non-Linux run-leg always skips the Linux build, so
+# validate its same-version salvage input in the exact Cargo slot just claimed.
+# This must precede migration, sidecar, identity and boot gates, and the first
+# manifest write; otherwise an invalid Windows/macOS/arm64 leg burns ~20 minutes
+# before release-local.sh eventually notices that there are no Linux bytes.
+if [[ "${PAPERCUSP_REUSE_LINUX:-0}" == "1" ]]; then
+  CARGO_TARGET_ROOT="$(papercusp_cargo_target_root "$ROOT/src-tauri")"
+  LINUX_BUNDLE="$CARGO_TARGET_ROOT/release/bundle"
+  if ! release_artifacts_has_linux_version_artifact "$LINUX_BUNDLE" "$VERSION"; then
+    echo "ERROR: PAPERCUSP_REUSE_LINUX=1 but no $VERSION Linux artifacts in $LINUX_BUNDLE. A non-Linux run-leg requires a completed same-version Linux leg in this target slot; run the Linux leg first, or use release:cut{op:'run',windows:true} (or the requested platform flag) for a single-command cut." >&2
+    exit 1
+  fi
+fi
+
 require_release_host
 
 # EI-22579401012596804: reserve sidecar staging headroom BEFORE the long WSL,
