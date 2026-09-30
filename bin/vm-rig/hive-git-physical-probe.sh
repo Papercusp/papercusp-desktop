@@ -75,14 +75,28 @@ fi
 [ -x "$SCENARIO" ] \
   || fail "canonical E/G scenario driver is not executable: $SCENARIO"
 
+# physical-drill-iteration-speed-2026-09-29 P-002 (R-3): a diagnostic re-run names
+# its phases in HIVE_GIT_PHYSICAL_PHASES (the drill's --only-phase/--from-phase).
+# Validate it before the first ssh, so a typo costs a second rather than a staging
+# round-trip. Empty = every phase = the only run that may produce release evidence.
+# shellcheck source=../lib/physical-phase-select.sh
+. "$HERE/../lib/physical-phase-select.sh"
+physical_phases="$(physical_phase_list "${HIVE_GIT_PHYSICAL_PHASES:-}")" \
+  || fail "invalid HIVE_GIT_PHYSICAL_PHASES: ${HIVE_GIT_PHYSICAL_PHASES:-}"
+physical_full_run=0
+physical_phase_is_full "$physical_phases" && physical_full_run=1
+
 # Readiness is an OFFLINE gate and must precede the first VM ssh. An incomplete
 # checked-in scenario must not touch the physical rig merely to discover that
 # it cannot emit an admissible manifest yet.
 "$SCENARIO" --require-ready >/dev/null
 # Phase E is the only phase that touches GitHub remotes. Prove the fixed canary
 # has both configured remotes, authenticated push permission, and the exact
-# starting refs before the first SSH or any phase mutation.
-"$TSX" "$PRODUCER" phase-e-preflight >/dev/null
+# starting refs before the first SSH or any phase mutation. A partial run that
+# does not select E never touches the remotes, so it skips this check.
+case ",$physical_phases," in
+  *,E,*) "$TSX" "$PRODUCER" phase-e-preflight >/dev/null ;;
+esac
 
 run_dir="$(mktemp -d "${TMPDIR:-/tmp}/hive-git-physical-run.XXXXXX")"
 remote_source="/tmp/hive-git-physical-source.$$"
@@ -463,6 +477,14 @@ HIVE_GIT_PHYSICAL_PLAN="$HIVE_GIT_PHYSICAL_PLAN" \
   HIVE_GIT_PHYSICAL_EXECUTE="$HIVE_GIT_PHYSICAL_PLAN" \
   HIVE_GIT_PHYSICAL_VM_SOURCE="$remote_source" \
   "$SCENARIO" "$unsigned_evidence" "$tower_identity" "$vm_identity"
+# PARTIAL-RUN-EXIT (P-002): a partial run is a diagnostic. The scenario writes no
+# unsigned evidence for it, and nothing here may sign or finalize one: release
+# evidence needs every phase from ONE run. Report what ran and stop before `sign`.
+if [ "$physical_full_run" != 1 ]; then
+  printf '{"schemaVersion":"hive-git-physical-partial/v1","phases":"%s","releaseEvidence":false}\n' \
+    "$physical_phases"
+  exit 0
+fi
 [ -s "$unsigned_evidence" ] || fail 'canonical scenario produced no unsigned evidence'
 
 "$TSX" "$PRODUCER" sign "$unsigned_evidence" tower "$TOWER_CACHE" >"$tower_receipt"

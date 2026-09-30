@@ -64,6 +64,10 @@
 # would graduate to.
 #
 # Usage: bin/hive-git-drill.sh [path/to/Papercusp\ Server_..._amd64.deb]
+#        bin/hive-git-drill.sh --only-phase D[,E] | --from-phase D
+#               diagnostic re-run of just those physical-scenario phases against the
+#               rig the last run left; local legs skipped; never release evidence.
+#               Needs HIVE_GIT_PHYSICAL_PROBE_CMD (below).
 #   KEEP_UP=1   leave the sidecar running for inspection
 #   HIVE_GIT_PHYSICAL_PROBE_CMD=/absolute/executable
 #               optional real-rig adapter. It MUST resolve to the checked-in
@@ -82,27 +86,69 @@ REPO_DIR="${PAPERCUSP_REPO_DIR:-/home/marsh-office/papercupai-workspace/papercus
 # heredoc expands $HGGIT at *creation* time, and HGGIT was only being set much
 # later, right before LEG F — so LEG D's imports resolved to '/storage' etc.).
 HGGIT="$REPO_DIR/packages/operator-core/lib/sync/pot-git"
+
+# ── Physical phase re-run (physical-drill-iteration-speed-2026-09-29 P-002, R-3) ──
+# `--only-phase D[,E]` / `--from-phase D` re-runs just those A-H phases of the physical
+# scenario against the rig state the previous run left (the join, the pot repo, the VM
+# install): minutes instead of a full 18-26 minute run. It skips the local single-box
+# legs, needs HIVE_GIT_PHYSICAL_PROBE_CMD, and never produces release evidence — the
+# probe exits before signing. Selection is validated here, before anything starts.
+# shellcheck source=lib/physical-phase-select.sh
+. "$DESKTOP_DIR/bin/lib/physical-phase-select.sh"
+PHYSICAL_ONLY=""
+_drill_args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --only-phase|--from-phase)
+      PHYSICAL_ONLY="$(physical_phase_select "${1#--}" "${2:-}")" || exit 2
+      shift; [ $# -gt 0 ] && shift ;;
+    --only-phase=*|--from-phase=*)
+      _sel_mode="${1%%=*}"
+      PHYSICAL_ONLY="$(physical_phase_select "${_sel_mode#--}" "${1#*=}")" || exit 2
+      shift ;;
+    *) _drill_args+=("$1"); shift ;;
+  esac
+done
+set -- ${_drill_args[@]+"${_drill_args[@]}"}
+if [ -n "$PHYSICAL_ONLY" ]; then
+  if physical_phase_is_full "$PHYSICAL_ONLY"; then
+    echo "FATAL: the selection $PHYSICAL_ONLY is every physical phase — that is the full release run; drop --only-phase/--from-phase" >&2
+    exit 2
+  fi
+  if [ -z "${HIVE_GIT_PHYSICAL_PROBE_CMD:-}" ]; then
+    echo "FATAL: --only-phase/--from-phase re-runs physical scenario phases on the rig and needs HIVE_GIT_PHYSICAL_PROBE_CMD" >&2
+    exit 2
+  fi
+  if [ "${REQUIRE_ZERO_SKIPS:-0}" = "1" ]; then
+    echo "FATAL: REQUIRE_ZERO_SKIPS=1 is release acceptance, which needs every leg and phase from one run; a partial re-run can never satisfy it" >&2
+    exit 2
+  fi
+  echo "PHYSICAL_PARTIAL phases=$PHYSICAL_ONLY (diagnostic re-run: local legs skipped, no release evidence)"
+fi
+
 DEB="${1:-}"
 EXPECTED_DEB_PACKAGE="papercusp-server"
-if [ -z "$DEB" ]; then
-  # The shared Cargo bundle can contain GUI, Server, and other Papercusp products.
-  # Select by the writer-owned Debian Package field, not the ambiguous filename
-  # family or newest mtime (WI-40905). Preserve spaces in product names while
-  # passing every candidate to the shared identity-aware selector.
-  DEB_CANDIDATES=()
-  while IFS= read -r candidate; do
-    DEB_CANDIDATES+=("$candidate")
-  done < <(ls -1t /home/marsh-office/.cargo-target/release/bundle/deb/Papercusp*_amd64.deb 2>/dev/null || true)
-  if [ "${#DEB_CANDIDATES[@]}" -gt 0 ]; then
-    DEB="$(fed_select_newest_deb_by_package "$EXPECTED_DEB_PACKAGE" "${DEB_CANDIDATES[@]}")" || exit 2
+if [ -z "$PHYSICAL_ONLY" ]; then
+  if [ -z "$DEB" ]; then
+    # The shared Cargo bundle can contain GUI, Server, and other Papercusp products.
+    # Select by the writer-owned Debian Package field, not the ambiguous filename
+    # family or newest mtime (WI-40905). Preserve spaces in product names while
+    # passing every candidate to the shared identity-aware selector.
+    DEB_CANDIDATES=()
+    while IFS= read -r candidate; do
+      DEB_CANDIDATES+=("$candidate")
+    done < <(ls -1t "${CARGO_TARGET_DIR:-$HOME/.cargo-target}"/release/bundle/deb/Papercusp*_amd64.deb 2>/dev/null || true)
+    if [ "${#DEB_CANDIDATES[@]}" -gt 0 ]; then
+      DEB="$(fed_select_newest_deb_by_package "$EXPECTED_DEB_PACKAGE" "${DEB_CANDIDATES[@]}")" || exit 2
+    fi
   fi
-fi
-DEB="$(readlink -f "$DEB" 2>/dev/null || echo "${DEB:-}")"
-[ -f "$DEB" ] || { echo "FATAL: no .deb found (pass one; tried .cargo-target bundle dir)"; exit 2; }
-DEB_PACKAGE="$(dpkg-deb -f "$DEB" Package 2>/dev/null || true)"
-if [ "$DEB_PACKAGE" != "$EXPECTED_DEB_PACKAGE" ]; then
-  echo "FATAL: selected .deb '$DEB' has Package='${DEB_PACKAGE:-unknown}', expected Package='$EXPECTED_DEB_PACKAGE' (wrong Papercusp product); pass a Server .deb explicitly."
-  exit 2
+  DEB="$(readlink -f "$DEB" 2>/dev/null || echo "${DEB:-}")"
+  [ -f "$DEB" ] || { echo "FATAL: no .deb found (pass one; tried .cargo-target bundle dir)"; exit 2; }
+  DEB_PACKAGE="$(dpkg-deb -f "$DEB" Package 2>/dev/null || true)"
+  if [ "$DEB_PACKAGE" != "$EXPECTED_DEB_PACKAGE" ]; then
+    echo "FATAL: selected .deb '$DEB' has Package='${DEB_PACKAGE:-unknown}', expected Package='$EXPECTED_DEB_PACKAGE' (wrong Papercusp product); pass a Server .deb explicitly."
+    exit 2
+  fi
 fi
 LUXON_SRC="$REPO_DIR/node_modules/luxon"
 REPO_URL="${HIVE_SMOKE_REPO_URL:-https://github.com/octocat/Hello-World}"
@@ -144,7 +190,10 @@ if [ -f "$VH_SH" ]; then
   source "$VH_SH"
   VH_FAIL_OPEN="${VH_FAIL_OPEN:-1}"
   for _vh_p in setup mode leg-a leg-b leg-c physical leg-d leg-f; do vh_phase "$_vh_p" ""; done
-  vh_init hive-git-drill "${HIVE_GIT_DRILL_EVIDENCE_ROOT:-$(vh_default_root hive-git-drill)}"
+  # A physical partial re-run reports only the physical phase; the rest are not-selected.
+  # shellcheck disable=SC2086 # the empty expansion must vanish; the set one must split
+  vh_init hive-git-drill "${HIVE_GIT_DRILL_EVIDENCE_ROOT:-$(vh_default_root hive-git-drill)}" \
+    ${PHYSICAL_ONLY:+--only physical}
   vh_bracket_trap
 else
   echo "VH_DISABLED harness=hive-git-drill reason=vh.sh-missing:$VH_SH" >&2
@@ -159,6 +208,10 @@ drill_phase() { # <phase|""> — close the open phase (failed if a check failed 
   if [ -n "$1" ]; then vh_begin "$1" || true; else vh_end; fi
 }
 
+# LOCAL-LEGS-BEGIN — setup through LEG C run on this box's packaged sidecar. A physical
+# partial re-run (--only-phase/--from-phase) needs none of it: the probe drives the real
+# tower+VM rig directly, so these legs are skipped (the harness records them not-selected).
+if [ -z "$PHYSICAL_ONLY" ]; then
 drill_phase setup
 log "extract $DEB"
 fed_extract_deb "$DEB" "$PKG" papercusp-server || exit 1
@@ -350,6 +403,12 @@ run_vitest_leg "LEG B" lib/sync/pot-git/ref-announce.integration.test.ts
 log "LEG C (P-304) — trust/tamper drill: relay-lie detection, rollback refusal (G-4b), non-member scope-serve-gate refusal"
 drill_phase leg-c
 run_vitest_leg "LEG C" lib/sync/pot-git/leg-c-trust-drill.integration.test.ts
+else
+  # vh_begin on a phase the plan skips records it `skipped not-selected` (and opens nothing),
+  # so the partial run's HARNESS_RESULT names what it deliberately did not run.
+  for _local_leg in setup mode leg-a leg-b leg-c; do drill_phase "$_local_leg"; done
+fi
+# LOCAL-LEGS-END
 
 # ── SKIP census — the two Phase-3 legs still genuinely rig-gated ───────────
 drill_phase physical
@@ -371,6 +430,7 @@ if [ -n "$physical_probe_cmd" ]; then
   else
     physical_probe_rc=0
     HIVE_GIT_PHYSICAL_PLAN=p2p-git-live-activation-2026-07-09 \
+      HIVE_GIT_PHYSICAL_PHASES="$PHYSICAL_ONLY" \
       "$physical_probe_cmd" "$physical_evidence_file" "$physical_trust_file" \
       >"$WORK/physical-probe.stdout" 2>"$WORK/physical-probe.stderr" || physical_probe_rc=$?
     # Keep this run's adapter output. The drill wipes $WORK at start (above), so
@@ -396,6 +456,21 @@ if [ -n "$physical_probe_cmd" ]; then
       bad "physical E/G adapter failed (exit $physical_probe_rc) in $physical_failure — evidence kept in $physical_run_dir"
     fi
   fi
+fi
+# PHYSICAL-PARTIAL-EXIT (P-002): a partial re-run ends here. Its verdict is the probe's
+# exit code alone; the release-evidence checks, LEG D and LEG F below are not part of it.
+if [ -n "$PHYSICAL_ONLY" ]; then
+  if [ "${physical_probe_rc:-1}" -eq 0 ]; then
+    ok "physical phases $PHYSICAL_ONLY passed (diagnostic partial run, not release evidence) — output kept in ${physical_run_dir:-$WORK}"
+  fi
+  drill_phase leg-d   # closes physical; leg-d and leg-f are recorded not-selected
+  drill_phase leg-f
+  drill_phase ""
+  echo
+  echo "P-301 hive-git drill (physical partial $PHYSICAL_ONLY): PASS=$PASS FAIL=$FAIL SKIP=$SKIPPED"
+  if [ "$FAIL" -ne 0 ]; then echo "OVERALL: FAIL"; exit 1; fi
+  echo "OVERALL: PASS — physical phases $PHYSICAL_ONLY only; NOT release evidence (run the full drill for that)"
+  exit 0
 fi
 if [ -n "$physical_evidence_file" ] && [ -f "$physical_evidence_file" ] && [ -f "$physical_trust_file" ]; then
   physical_evidence_file="$(readlink -f "$physical_evidence_file")"
