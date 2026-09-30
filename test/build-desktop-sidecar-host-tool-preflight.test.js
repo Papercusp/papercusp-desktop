@@ -18,10 +18,14 @@ const root = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(root, '..');
 const script = path.join(root, 'bin/build-desktop-sidecar.sh');
 
-function shadowPathWithout(hidden) {
+function shadowPathWithout(hidden, shims = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-host-preflight-'));
   const bin = path.join(dir, 'bin');
   fs.mkdirSync(bin);
+  // Shims are written first so they win over the real tool of the same name.
+  for (const [name, body] of Object.entries(shims)) {
+    fs.writeFileSync(path.join(bin, name), body, { mode: 0o755 });
+  }
   for (const entry of (process.env.PATH || '').split(path.delimiter)) {
     let names;
     try { names = fs.readdirSync(entry); } catch { continue; }
@@ -35,8 +39,8 @@ function shadowPathWithout(hidden) {
   return { dir, bin };
 }
 
-function runWithHidden(hidden, extraEnv = {}) {
-  const { dir, bin } = shadowPathWithout(hidden);
+function runWithHidden(hidden, extraEnv = {}, shims = {}) {
+  const { dir, bin } = shadowPathWithout(hidden, shims);
   try {
     const env = {
       ...process.env,
@@ -79,6 +83,43 @@ test('a darwin cross-build names every missing host tool in ONE failure', () => 
   assert.equal(r.status, 1, output);
   assert.match(output, /- kopia \(snapshot subsystem/);
   assert.match(output, /- rcodesign \(darwin cross-build/);
+});
+
+// pkg-config shims: `--exists alsa` answers per the shim, everything else fails
+// (the preflight is the only caller that runs before it exits).
+const PKG_CONFIG_NO_ALSA = '#!/bin/sh\nexit 1\n';
+const PKG_CONFIG_WITH_ALSA = '#!/bin/sh\n[ "$1" = "--exists" ] && [ "$2" = "alsa" ] && exit 0\nexit 1\n';
+
+test('a native Linux build without ALSA headers fails in the preflight (build5: alsa-sys exit 101)', () => {
+  const r = runWithHidden([], { TARGET_OS: 'linux' }, { 'pkg-config': PKG_CONFIG_NO_ALSA });
+  const output = `${r.stdout}${r.stderr}`;
+  assert.equal(r.status, 1, output);
+  assert.match(output, /- ALSA development headers, alsa\.pc .*libasound2-dev/);
+  assert.doesNotMatch(output, /esbuild-bundling|copying first-party|chat dock/,
+    'the preflight must stop the build before any assembly step');
+});
+
+test('a native Linux build without pkg-config names pkg-config itself', () => {
+  const r = runWithHidden(['pkg-config'], { TARGET_OS: 'linux' });
+  const output = `${r.stdout}${r.stderr}`;
+  assert.equal(r.status, 1, output);
+  assert.match(output, /- pkg-config \(native Rust builds/);
+});
+
+test('ALSA headers present: the preflight does not demand them (control)', () => {
+  // kopia hidden so the run still stops in the preflight instead of building.
+  const r = runWithHidden(['kopia'], { TARGET_OS: 'linux' }, { 'pkg-config': PKG_CONFIG_WITH_ALSA });
+  const output = `${r.stdout}${r.stderr}`;
+  assert.equal(r.status, 1, output);
+  assert.match(output, /- kopia \(snapshot subsystem/);
+  assert.doesNotMatch(output, /ALSA development headers|- pkg-config/);
+});
+
+test('a darwin cross-build does not demand host ALSA headers', () => {
+  const r = runWithHidden(['kopia'], { TARGET_OS: 'darwin' }, { 'pkg-config': PKG_CONFIG_NO_ALSA });
+  const output = `${r.stdout}${r.stderr}`;
+  assert.equal(r.status, 1, output);
+  assert.doesNotMatch(output, /ALSA development headers/);
 });
 
 test('the preflight is placed before the first toolchain step in the script', () => {

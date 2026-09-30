@@ -20,8 +20,8 @@ Agents run through the CLIs you already use (for example the `claude` CLI); set 
 
 | Platform | Install |
 |---|---|
-| **Ubuntu / Debian** | `sudo apt install build-essential curl wget file pkg-config libssl-dev libxdo-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf` |
-| **Fedora / RHEL** | `sudo dnf install webkit2gtk4.1-devel openssl-devel libappindicator-gtk3-devel librsvg2-devel libxdo-devel` |
+| **Ubuntu / Debian** | `sudo apt install build-essential curl wget file pkg-config libssl-dev libxdo-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev patchelf` |
+| **Fedora / RHEL** | `sudo dnf install webkit2gtk4.1-devel openssl-devel libappindicator-gtk3-devel librsvg2-devel libxdo-devel alsa-lib-devel` |
 | **macOS** | Xcode Command Line Tools (`xcode-select --install`) |
 | **Windows** | WebView2 (preinstalled on Windows 11) + Visual Studio Build Tools |
 

@@ -440,6 +440,17 @@ if [[ "${DISTRIBUTION_PROFILE:-}" != "vm-release" ]] \
    && ! command -v kopia >/dev/null 2>&1; then
   _missing_host_tools+=("kopia (snapshot subsystem — https://kopia.io/docs/installation/, apt/brew install kopia)")
 fi
+# ALSA dev headers: the chat-dock step natively `cargo build`s apps/tui, whose
+# `pui-audio` bin pulls cpal → alsa-sys, and alsa-sys's build script needs
+# `alsa.pc` via pkg-config on Linux. A fresh Ubuntu host without libasound2-dev
+# died on it (exit 101) ~8 minutes in (WI-10003960 R-15 build5).
+if [[ "$CROSS_BUILD" != "1" && "$TARGET_OS" == "linux" ]]; then
+  if ! command -v pkg-config >/dev/null 2>&1; then
+    _missing_host_tools+=("pkg-config (native Rust builds — apt install pkg-config)")
+  elif ! pkg-config --exists alsa 2>/dev/null; then
+    _missing_host_tools+=("ALSA development headers, alsa.pc (chat-dock pui audio — apt install libasound2-dev / dnf install alsa-lib-devel)")
+  fi
+fi
 if [[ "$CROSS_BUILD" == "1" && "$TARGET_OS" == "darwin" ]]; then
   for _t in file curl python3 rcodesign; do
     command -v "$_t" >/dev/null 2>&1 || _missing_host_tools+=("$_t (darwin cross-build vendoring/signing)")
