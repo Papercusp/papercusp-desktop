@@ -53,6 +53,15 @@ TAG_FRESH="desktop-v0.0.0-selftest-fresh-$$"
 TAG_GUARD="desktop-v0.0.0-selftest-guard-$$"
 TAG_SMOKE="desktop-v0.0.0-selftest-smoke-$$"
 export PAPERCUSP_SMOKE_RECEIPT_ROOT="$WORK/smoke-receipts"
+# WI-10004052: the automatic-runner cases below prove the VERIFIER PROTOCOL with a
+# fake verifier and no VM. The Linux leg's clean-room VM lifecycle is covered by
+# test/linux-platform-smoke-vm.test.js (fake vmctl). Switch it off here and point
+# vmctl at nothing, so an ambient PAPERCUSP_LINUX_SMOKE_BASELINE_* in the caller's
+# shell can never make this selftest reset the real Linux test VM.
+export PAPERCUSP_LINUX_SMOKE_VM_MANAGED=0
+export PAPERCUSP_LINUX_VMCTL="$WORK/vmctl-must-not-run"
+unset PAPERCUSP_LINUX_SMOKE_BASELINE_GUI PAPERCUSP_LINUX_SMOKE_BASELINE_SERVER \
+      PAPERCUSP_LINUX_SMOKE_BASELINE_DIR PAPERCUSP_LINUX_SMOKE_VM
 cleanup() {
   rm -rf "$WORK"
   rm -f "$(release_artifacts_manifest_path "$TAG")" "$(release_artifacts_manifest_path "$TAG_EMPTY")" "$(release_artifacts_manifest_path "$TAG_FRESH")" "$(release_artifacts_cut_start_path "$TAG_FRESH")"
