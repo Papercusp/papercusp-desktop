@@ -490,6 +490,16 @@ test('bootstrap journal lines are recorded as diagnostics and never gate the leg
   assert.match(r.calls, /journalctl --user -u papercusp-server\.service/);
 });
 
+test('evidence never carries the operator home path (identity-leak lint would leave it uncommitted)', opts, () => {
+  const fx = fixture();
+  const r = run(fx, { env: { HOME: fx.root } });
+  assert.equal(r.status, 0, r.stderr);
+  const text = readFileSync(join(fx.root, 'evidence.json'), 'utf8');
+  assert.ok(!text.includes(`${fx.root}/`), 'no absolute home path survives in the evidence');
+  assert.match(r.doc.command[0], /~\//, 'home-relative paths are written as ~/');
+  assert.equal(r.doc.redactions.length, 1);
+});
+
 test('no journal lines are recorded as absent, not invented', opts, () => {
   const r = run(fixture());
   assert.equal(r.legs['offline-restore'].status, 'pass');
