@@ -168,6 +168,20 @@ rig_profile_same_box_paths_ready() {
   )
 }
 
+# The pot-git / git-sync failure lines each same-box owner logged (<rig dir>/{tower,vm}.log),
+# newest 5 per owner, prefixed with the log name. A store that never initialises says WHY in
+# its OWNER's log, not in converge-*.log: same-box run 7 (WI-10003976) died pointing at the
+# converge logs while vm.log held 'pot-git: init --bare failed ... refusing local git spawn'.
+rig_profile_owner_git_failures() { # <rig dir>
+  local role
+  for role in tower vm; do
+    [ -f "$1/$role.log" ] || continue
+    { grep -E 'pot-git.*(failed|refus)|git-sync.*(failed|error)' "$1/$role.log" | tail -n 5 \
+      | sed "s/^/  $role.log: /"; } || true
+  done
+  return 0
+}
+
 # Extra `physical-drill-producer rig-preflight` arguments for the active profile, one per line
 # (read them with mapfile). The physical profile adds nothing: every check, both owners on
 # :3070. The same-box profile points hosts-answering at the two throwaway owners' ports — the
