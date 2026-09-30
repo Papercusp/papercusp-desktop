@@ -149,8 +149,11 @@ converge_pot_git() {
     ssh "$VM" "'$VM_NODE' '$VM_TSX' '$vm_producer' same-box-pot-mode bridged" \
       >"$dir/converge-mode-vm.json" 2>>"$dir/converge-mode.log" \
       || { echo "same-box-rig: could not set the VM pot mode (log: $dir/converge-mode.log)" >&2; exit 1; }
+    # A store counts only once it is a bare repo: git-sync creates the directory before its init
+    # lands, and an existence check here let run 20260930T054405Z reach phase A on an empty store.
+    bare_repo() { [ "$(git --git-dir="$1" rev-parse --is-bare-repository 2>/dev/null)" = true ]; }
     while :; do
-      [ -d "$TOWER_REPO" ] && [ -d "$VM_REPO" ] && {
+      bare_repo "$TOWER_REPO" && [ "$(ssh "$VM" "git --git-dir='$VM_REPO' rev-parse --is-bare-repository" 2>/dev/null)" = true ] && {
         echo "same-box-rig: pot-git stores present on both owners after $((SECONDS - start))s" >&2
         exit 0
       }

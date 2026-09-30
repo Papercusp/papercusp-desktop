@@ -156,6 +156,12 @@ rig_profile_same_box_paths_ready() {
       if [ -z "${!var:-}" ] || [ ! -e "${!var}" ]; then
         echo "RIG_PROFILE_PATH_MISSING $var=${!var:-<unset>}" >&2
         missing=1
+      elif [[ "$var" == *_REPO ]] && [ "$(git --git-dir="${!var}" rev-parse --is-bare-repository 2>/dev/null)" != true ]; then
+        # A pot-git store is ready only once it is a bare repo. git-sync creates the directory
+        # before its init lands, and same-box run 20260930T054405Z failed phase A in 50s on an
+        # empty store directory that an existence check had passed.
+        echo "RIG_PROFILE_PATH_NOT_A_REPO $var=${!var}" >&2
+        missing=1
       fi
     done
     exit "$missing"
