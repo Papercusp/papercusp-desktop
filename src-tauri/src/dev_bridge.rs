@@ -553,7 +553,8 @@ pub fn start_bridge(
     // TMPDIR is scoped (the normal verifier/session setup).
     let token_path = bridge_token_path(std::process::id());
     let token_json = serde_json::to_string_pretty(&token_file).unwrap();
-    fs::write(&token_path, &token_json).map_err(|e| format!("Failed to write token file: {e}"))?;
+    write_private_token_file(&token_path, &token_json)
+        .map_err(|e| format!("Failed to write token file: {e}"))?;
 
     // Keep cleanup state alive for the application lifetime. A local guard is
     // incorrect here: `start_bridge` returns immediately after spawning the
