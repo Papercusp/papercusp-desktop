@@ -33,11 +33,21 @@
 #                        (recorded separately from the installer identity).
 #   preflight-fresh      no Papercusp product installed, nothing answering on the
 #                        operator record, remote dir writable.
+#   os-prerequisites     (linux) WHILE ONLINE, before egress is denied: install the
+#                        Depends + Recommends that BOTH .debs declare, read from
+#                        their control fields, via `apt-get satisfy` — never a
+#                        Papercusp package. The provisioned package=version list
+#                        is recorded (osPrerequisites.provisioned). An
+#                        unsatisfiable declared dependency FAILS the row (plan
+#                        ruling amending D-083 item 1: "offline" means the
+#                        Papercusp install and first launch fetch nothing; the
+#                        distro's declared dependencies are a prerequisite).
 #   offline              egress measured before (positive control) and denied
 #                        after; a target that can still reach the internet voids.
-#   install              real installers, exit status recorded; on linux the
-#                        dependency closure is simulated first and every package
-#                        apt would have to DOWNLOAD is named.
+#   install              real installers, exit status recorded; on linux both
+#                        .debs install with --no-download, the dependency
+#                        closure is simulated first and every package apt would
+#                        still have to DOWNLOAD is named (plus apt's own E: line).
 #   installed-bytes      runtime digest of the installed tree.
 #   witness-compat       installed digest == witness digest, field by field.
 #   first-launch         Server started through its supported entry; /api/health
@@ -65,15 +75,7 @@
 #     [--expected-sha SHA] [--ssh-host H] [--ssh-port N] [--ssh-key K] \
 #     [--ssh-option K=V]... [--remote-dir DIR] [--offline enforce|verify] \
 #     [--expect-pot SLUG] [--mcp-call PATH] [--health-timeout SEC] \
-#     [--install-timeout SEC] [--keep-offline] [--join-evidence PATH] \
-#     [--stage-os-deps]
-#   --stage-os-deps (linux only) fetches the .debs' declared OS dependency
-#   closure (webkit2gtk, gstreamer, … — the Tauri runtime libs Papercusp never
-#   bundles) into apt's cache WHILE ONLINE, download-only, before egress is
-#   denied. The offline install then uses only cached bytes. The staged list is
-#   recorded as install.osPrerequisites and offline.stageOsDeps=yes, so the
-#   evidence claims "offline given the declared OS prerequisites", never "bare
-#   box". Without it, a target lacking those libs fails install and names them.
+#     [--install-timeout SEC] [--keep-offline] [--join-evidence PATH]
 #   --join-evidence is the Discovery/join operational-test-evidence JSON for
 #   the same candidate (e.g. docs/evidence/p505-run34-exact-0025-physical-*.json).
 #   --witness defaults to the Server .deb on linux (the drill's exact bytes);
@@ -115,7 +117,6 @@ HEALTH_TIMEOUT=300
 INSTALL_TIMEOUT=1800
 KEEP_OFFLINE=0
 JOIN_EVIDENCE=""
-STAGE_OS_DEPS=0
 ORIG_CMD="$(printf '%q ' "$0" "$@")"
 
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
@@ -143,7 +144,6 @@ while [[ $# -gt 0 ]]; do
     --health-timeout) HEALTH_TIMEOUT="${2:-}"; shift 2 ;;
     --install-timeout) INSTALL_TIMEOUT="${2:-}"; shift 2 ;;
     --keep-offline) KEEP_OFFLINE=1; shift ;;
-    --stage-os-deps) STAGE_OS_DEPS=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -153,8 +153,7 @@ die2() { echo "offline-installer-journey: $*" >&2; exit 2; }
 case "$PLATFORM" in
   linux) : "${OFFLINE_MODE:=enforce}"; : "${REMOTE_DIR:=/tmp/pcoij}" ;;
   mac) : "${OFFLINE_MODE:=verify}"; : "${REMOTE_DIR:=/tmp/pcoij}"
-       [[ "$OFFLINE_MODE" == verify ]] || die2 "--offline enforce is not implemented for mac (egress is measured, never assumed)"
-       [[ "$STAGE_OS_DEPS" == 0 ]] || die2 "--stage-os-deps is linux-only (a DMG declares no OS package dependencies)" ;;
+       [[ "$OFFLINE_MODE" == verify ]] || die2 "--offline enforce is not implemented for mac (egress is measured, never assumed)" ;;
   *) die2 "--platform linux|mac is required" ;;
 esac
 [[ "$OFFLINE_MODE" == enforce || "$OFFLINE_MODE" == verify ]] || die2 "--offline must be enforce|verify"
@@ -434,15 +433,50 @@ done
 echo "PCOIJ firewall=removed"
 SH
 
+read -r -d '' PROVISION_LINUX <<'SH'
+GUI="$REMOTE_DIR/gui.deb"; SRV="$REMOTE_DIR/server.deb"
+# Declared Depends + Recommends of BOTH .debs, from their control fields. An entry
+# naming a Papercusp package (alternatives included) is dropped: this step must
+# never install Papercusp itself.
+decl=""
+for d in "$SRV" "$GUI"; do
+  for f in Depends Recommends; do
+    v=$(dpkg-deb -f "$d" "$f" 2>/dev/null | tr '\n' ' ')
+    echo "PCOIJ declared.$(basename "$d" .deb).$f=$v"
+    [ -n "$v" ] && decl="$decl${decl:+, }$v"
+  done
+done
+keep=$(printf '%s' "$decl" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | grep -v 'papercusp' | paste -sd, - | sed 's/,/, /g')
+echo "PCOIJ satisfy=$keep"
+dpkg-query -W -f='${Package}=${Version}\n' 2>/dev/null | LC_ALL=C sort > "$REMOTE_DIR/dpkg-before.txt"
+if [ -z "$keep" ]; then
+  echo "PCOIJ satisfyExit=0"
+else
+  sudo -n apt-get update > "$REMOTE_DIR/apt-update.log" 2>&1; echo "PCOIJ aptUpdateExit=$?"
+  sudo -n env DEBIAN_FRONTEND=noninteractive apt-get satisfy --yes "$keep" > "$REMOTE_DIR/apt-satisfy.log" 2>&1
+  echo "PCOIJ satisfyExit=$?"
+  echo "PCOIJ satisfyError=$(grep -E '^E:' "$REMOTE_DIR/apt-satisfy.log" | head -2 | tr '\n' ' ')"
+fi
+dpkg-query -W -f='${Package}=${Version}\n' 2>/dev/null | LC_ALL=C sort > "$REMOTE_DIR/dpkg-after.txt"
+prov=$(LC_ALL=C comm -13 "$REMOTE_DIR/dpkg-before.txt" "$REMOTE_DIR/dpkg-after.txt")
+echo "PCOIJ provisioned=$(printf '%s' "$prov" | tr '\n' ' ')"
+echo "PCOIJ provisionedCount=$(printf '%s' "$prov" | grep -c .)"
+echo "PCOIJ provisionedPapercusp=$(printf '%s' "$prov" | grep '^papercusp' | tr '\n' ' ')"
+SH
+
 read -r -d '' INSTALL_LINUX <<'SH'
 GUI="$REMOTE_DIR/gui.deb"; SRV="$REMOTE_DIR/server.deb"
 # Offline dependency closure: anything apt would still have to fetch is named.
-sudo -n apt-get -s install --no-download "$SRV" "$GUI" > "$REMOTE_DIR/apt-sim.log" 2>&1; echo "PCOIJ aptSimExit=$?"
+# Simulate WITHOUT --no-download: `-s` never downloads, and with --no-download apt
+# aborts ("Unable to fetch some archives") before printing a single Inst line,
+# which left this list empty on the real 0.0.25 VM run.
+sudo -n apt-get -s install "$SRV" "$GUI" > "$REMOTE_DIR/apt-sim.log" 2>&1; echo "PCOIJ aptSimExit=$?"
 need=$(sed -n 's/^Inst \([^ ]*\).*/\1/p' "$REMOTE_DIR/apt-sim.log" | grep -v '^papercusp-' | while read -r p; do
-  ls /var/cache/apt/archives/"${p}"_*.deb >/dev/null 2>&1 || printf '%s ' "$p"; done)
+  ls "$PCOIJ_ROOT"/var/cache/apt/archives/"${p}"_*.deb >/dev/null 2>&1 || printf '%s ' "$p"; done)
 echo "PCOIJ needsDownload=$need"
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-download "$SRV" "$GUI" > "$REMOTE_DIR/apt-install.log" 2>&1
 echo "PCOIJ installExit=$?"
+echo "PCOIJ aptError=$(grep -E '^E:' "$REMOTE_DIR/apt-install.log" | head -2 | tr '\n' ' ')"
 tail -n 20 "$REMOTE_DIR/apt-install.log" | sed 's/^/PCOIJ-LOG /'
 st=$(dpkg-query -W -f='${Package}=${db:Status-Abbrev} ' papercusp-server papercusp-gui 2>/dev/null)
 echo "PCOIJ dpkgStatus=$st"
@@ -554,9 +588,39 @@ skip_rest() { # mark every remaining leg unmeasured with one reason
   local l; for l in "$@"; do leg "$l" unmeasured "$REASON"; done
 }
 REMAINING="offline install installed-bytes witness-compat first-launch offline-restore restart-reresolve"
+[[ "$PLATFORM" == linux ]] && REMAINING="os-prerequisites $REMAINING"
 if [[ "$TARGET_OK" != 1 ]]; then
   REASON="not reached: preflight did not pass"; skip_rest $REMAINING
 else
+  # Artifacts go over the control session once, BEFORE egress is denied (scp is
+  # not egress either way); linux provisioning reads the .debs' control fields.
+  ext=deb; [[ "$PLATFORM" == mac ]] && ext=dmg
+  PUSH_OK=0
+  push "$GUI_ARTIFACT" "$REMOTE_DIR/gui.$ext" && push "$SERVER_ARTIFACT" "$REMOTE_DIR/server.$ext" && push "$MCP_CALL" "$REMOTE_DIR/mcp-call.mjs" && PUSH_OK=1
+
+  # ── Leg 3b: OS prerequisites, provisioned ONLINE (linux) ─────────────────
+  if [[ "$PLATFORM" == linux ]]; then
+    if [[ "$PUSH_OK" != 1 ]]; then
+      leg os-prerequisites unmeasured "artifact transfer failed — see $LOG_DIR/push.log" "$LOG_DIR/push.log"
+    else
+      rc=$(remote os-prerequisites "$PROVISION_LINUX" "$INSTALL_TIMEOUT"); PR="$LOG_DIR/os-prerequisites.log"
+      for k in declared.server.Depends declared.server.Recommends declared.gui.Depends declared.gui.Recommends satisfy provisioned provisionedCount; do
+        ident osPrerequisites "$k" "$(kv "$k" "$PR")"
+      done
+      ident osPrerequisites satisfyExit "$(kv satisfyExit "$PR")"
+      if [[ "$rc" == 124 ]]; then leg os-prerequisites fail "provisioning exceeded ${INSTALL_TIMEOUT}s" "$PR"
+      elif [[ -z "$(kv satisfyExit "$PR")" ]]; then
+        leg os-prerequisites void "provisioning script returned no satisfyExit (ssh rc=$rc) — not a measurement" "$PR"
+      elif [[ "$(kv satisfyExit "$PR")" != 0 ]]; then
+        leg os-prerequisites fail "the distro cannot satisfy a declared dependency: apt-get satisfy exit $(kv satisfyExit "$PR"): $(kv satisfyError "$PR")" "$PR"
+      elif [[ -n "$(kv provisionedPapercusp "$PR")" ]]; then
+        leg os-prerequisites fail "provisioning installed a Papercusp package: $(kv provisionedPapercusp "$PR")" "$PR"
+      else
+        leg os-prerequisites pass "$(kv provisionedCount "$PR") packages provisioned online from the declared Depends+Recommends of both .debs (no Papercusp package)" "$PR"
+      fi
+    fi
+  fi
+
   # ── Leg 4: offline ───────────────────────────────────────────────────────
   rc=$(remote offline-deny-egress "$OFFLINE_UP" 120); OF="$LOG_DIR/offline-deny-egress.log"
   [[ "$(kv firewall "$OF")" == iptables ]] && FIREWALL_APPLIED=1
@@ -574,8 +638,7 @@ else
   fi
 
   # ── Leg 5: install ───────────────────────────────────────────────────────
-  ext=deb; [[ "$PLATFORM" == mac ]] && ext=dmg
-  if push "$GUI_ARTIFACT" "$REMOTE_DIR/gui.$ext" && push "$SERVER_ARTIFACT" "$REMOTE_DIR/server.$ext" && push "$MCP_CALL" "$REMOTE_DIR/mcp-call.mjs"; then
+  if [[ "$PUSH_OK" == 1 ]]; then
     body="$INSTALL_LINUX"; [[ "$PLATFORM" == mac ]] && body="$INSTALL_MAC"
     rc=$(remote install "$body" "$INSTALL_TIMEOUT"); IN="$LOG_DIR/install.log"
     ident install needsDownload "$(kv needsDownload "$IN")"
@@ -583,7 +646,8 @@ else
     ident install sshExit "$rc"
     if [[ "$rc" == 124 ]]; then leg install fail "installer exceeded ${INSTALL_TIMEOUT}s" "$IN"; INSTALL_OK=0
     elif [[ "$(kv installExit "$IN")" != 0 ]]; then
-      leg install fail "installer exit $(kv installExit "$IN"); offline-unsatisfied deps: $(kv needsDownload "$IN")" "$IN"; INSTALL_OK=0
+      apt_err=""; [[ "$PLATFORM" == linux ]] && apt_err="; apt: $(kv aptError "$IN")"
+      leg install fail "installer exit $(kv installExit "$IN"); offline-unsatisfied deps: $(kv needsDownload "$IN")$apt_err" "$IN"; INSTALL_OK=0
     elif [[ "$PLATFORM" == linux && "$(kv dpkgStatus "$IN")" != *papercusp-server=ii* ]] || [[ "$PLATFORM" == linux && "$(kv dpkgStatus "$IN")" != *papercusp-gui=ii* ]]; then
       leg install fail "packages not fully configured: $(kv dpkgStatus "$IN")" "$IN"; INSTALL_OK=0
     else
@@ -722,6 +786,8 @@ doc = {
     'installedRuntime': ids.get('runtime.installed', {}),
     'serving': {'launch': ids.get('serving.launch', {}), 'restart': ids.get('serving.restart', {})},
     'target': ids.get('target', {}), 'offline': ids.get('offline', {}), 'install': ids.get('install', {}),
+    # The distro dependencies provisioned ONLINE before egress was denied (package=version).
+    'osPrerequisites': ids.get('osPrerequisites', {}),
     'restore': ids.get('restore', {}), 'legs': legs,
     'logs': [dict(zip(('path', 'sha256'), l.rstrip('\n').split('\t'))) for l in open(logs_f) if l.strip()],
     'runDir': run_dir,

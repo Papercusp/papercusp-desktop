@@ -16,7 +16,8 @@ const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { test, after } = require('node:test');
 
-const SCRIPT = join(__dirname, '..', 'bin', 'offline-installer-journey.sh');
+// Overridable so scripts/mutation-probe.sh can point the suite at a mutated COPY.
+const SCRIPT = process.env.PCOIJ_SCRIPT || join(__dirname, '..', 'bin', 'offline-installer-journey.sh');
 const VERSION = '0.0.25';
 const GIT_HEAD = '93f1c72063bb422583c9c24e7092f1bed767f64f';
 const PY = ['/usr/bin/python3.12', '/usr/bin/python3'].find((p) => existsSync(p));
@@ -54,10 +55,19 @@ json.dump({'port': srv.server_address[1], 'pid': os.getpid()}, open(os.path.join
 srv.serve_forever()
 `;
 
+// Declared relations shaped like the real Tauri .debs: the GUI needs the distro's
+// WebKitGTK (with an alternative) AND the Papercusp Server package, which the
+// online provisioning step must never install.
+const DEPENDS = {
+  'papercusp-server': { depends: 'libc6 (>= 2.35)' },
+  'papercusp-gui': { depends: 'libwebkit2gtk-4.1-0 (>= 2.40) | libwebkit2gtk-4.1-0-alt, papercusp-server (= 0.0.25)', recommends: 'xdg-desktop-portal-gtk' },
+};
+
 function buildDeb(root, name, pkg, { serve = SERVE, migrations = ['1236-a.sql', '1237-b.sql'] } = {}) {
   const dir = join(root, 'build', name);
   mkdirSync(join(dir, 'DEBIAN'), { recursive: true });
-  writeFileSync(join(dir, 'DEBIAN', 'control'), `Package: ${pkg}\nVersion: ${VERSION}\nArchitecture: amd64\nMaintainer: t\nDescription: t\n`);
+  const rel = DEPENDS[pkg] ?? {};
+  writeFileSync(join(dir, 'DEBIAN', 'control'), `Package: ${pkg}\nVersion: ${VERSION}\nArchitecture: amd64\nMaintainer: t\n${rel.depends ? `Depends: ${rel.depends}\n` : ''}${rel.recommends ? `Recommends: ${rel.recommends}\n` : ''}Description: t\n`);
   if (pkg === 'papercusp-server') {
     const side = join(dir, 'usr', 'lib', 'Papercusp Server', 'sidecar');
     mkdirSync(join(side, 'bin'), { recursive: true });
@@ -106,20 +116,40 @@ mkdir -p "$(dirname "$dst")" && cp "$src" "$dst"
 `);
   exe(join(stubs, 'sudo'), '#!/usr/bin/env bash\n[ "$1" = -n ] && shift\nexec "$@"\n');
   exe(join(stubs, 'loginctl'), '#!/usr/bin/env bash\necho "loginctl $*" >> "$FAKE_STATE/calls.log"\n');
+  // dpkg-query: the Papercusp status query reads dpkg-status; the whole-system
+  // package=version listing (the provisioning before/after diff) reads dpkg-all.
   exe(join(stubs, 'dpkg-query'), `#!/usr/bin/env bash
-[ -f "$FAKE_STATE/dpkg-status" ] || exit 1
-tr '\\n' ' ' < "$FAKE_STATE/dpkg-status"
+case "$*" in
+  *papercusp-*) [ -f "$FAKE_STATE/dpkg-status" ] || exit 1; tr '\\n' ' ' < "$FAKE_STATE/dpkg-status" ;;
+  *) [ -f "$FAKE_STATE/dpkg-all" ] && cat "$FAKE_STATE/dpkg-all"; exit 0 ;;
+esac
 `);
+  // apt-get, faithful to the behaviour measured on the real 0.0.25 Linux VM:
+  //  - satisfy installs each declared relation (first alternative) or fails on an
+  //    unsatisfiable one (FAKE_APT_UNSATISFIABLE);
+  //  - FAKE_APT_MISSING is a package the install still needs that nothing
+  //    provisioned; with --no-download apt ABORTS before printing any Inst line,
+  //    -s included — only a plain -s simulation names it.
   exe(join(stubs, 'apt-get'), `#!/usr/bin/env bash
 echo "apt-get $*" >> "$FAKE_STATE/calls.log"
-debs=(); sim=0
-for a in "$@"; do case "$a" in -s) sim=1 ;; *.deb) debs+=("$a") ;; esac; done
-if [ "$sim" = 1 ]; then
-  echo "Inst papercusp-server (${VERSION} local)"; echo "Inst papercusp-gui (${VERSION} local)"
-  [ -n "\${FAKE_APT_MISSING:-}" ] && echo "Inst \${FAKE_APT_MISSING} (2.44 Ubuntu:24.04/noble [amd64])"
+[ "$1" = update ] && exit 0
+installed() { grep -q "^$1=" "$FAKE_STATE/dpkg-all" 2>/dev/null; }
+if [ "$1" = satisfy ]; then
+  shift; spec=""; for a in "$@"; do case "$a" in -*) ;; *) spec="$a" ;; esac; done
+  for u in \${FAKE_APT_UNSATISFIABLE:-}; do case "$spec" in *"$u"*) echo "E: Unable to satisfy dependencies. Reached two conflicting assignments: $u"; exit 100 ;; esac; done
+  printf '%s\\n' "$spec" | tr ',' '\\n' | sed 's/|.*//; s/(.*//; s/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | while read -r p; do
+    installed "$p" || echo "$p=2.44" >> "$FAKE_STATE/dpkg-all"; done
   exit 0
 fi
-if [ -n "\${FAKE_APT_MISSING:-}" ]; then echo "E: Unable to fetch some archives (--no-download)"; exit 100; fi
+debs=(); sim=0; nodl=0
+for a in "$@"; do case "$a" in -s) sim=1 ;; --no-download) nodl=1 ;; *.deb) debs+=("$a") ;; esac; done
+missing=""; if [ -n "\${FAKE_APT_MISSING:-}" ] && ! installed "$FAKE_APT_MISSING"; then missing="$FAKE_APT_MISSING"; fi
+if [ -n "$missing" ] && [ "$nodl" = 1 ]; then echo "E: Unable to fetch some archives, maybe run apt-get update or try with --fix-missing?"; exit 100; fi
+if [ "$sim" = 1 ]; then
+  echo "Inst papercusp-server (${VERSION} local)"; echo "Inst papercusp-gui (${VERSION} local)"
+  [ -n "$missing" ] && echo "Inst $missing (2.44 Ubuntu:24.04/noble [amd64])"
+  exit 0
+fi
 for d in "\${debs[@]}"; do
   dpkg-deb -x "$d" "$FAKE_ROOT" || exit 1
   printf '%s=ii\\n' "$(dpkg-deb -f "$d" Package)" >> "$FAKE_STATE/dpkg-status"
@@ -205,7 +235,7 @@ test('happy path: every leg passes, installer identity is recorded apart from th
   const r = run(fx);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.doc.verdict, 'PASS');
-  for (const leg of ['installer-identity', 'join-runtime-match', 'runtime-identity', 'preflight-fresh', 'offline', 'install', 'installed-bytes', 'witness-compat', 'first-launch', 'offline-restore', 'restart-reresolve']) {
+  for (const leg of ['installer-identity', 'join-runtime-match', 'runtime-identity', 'preflight-fresh', 'os-prerequisites', 'offline', 'install', 'installed-bytes', 'witness-compat', 'first-launch', 'offline-restore', 'restart-reresolve']) {
     assert.equal(r.legs[leg]?.status, 'pass', `${leg}: ${r.legs[leg]?.detail}`);
   }
   // The P-521 readiness manifest binds an evidence document only when it is an
@@ -244,7 +274,24 @@ test('happy path: every leg passes, installer identity is recorded apart from th
   assert.match(r.doc.offline.egressBefore, /^reachable:/);
   assert.equal(existsSync(join(fx.state, 'offline')), false, 'egress firewall removed on exit');
   assert.match(r.calls, /apt-get install --yes --no-download/);
-  assert.doesNotMatch(r.calls, /apt-get update/);
+  // Plan ruling (amends D-083 item 1): the .debs' declared Depends + Recommends are
+  // provisioned ONLINE, verbatim from their control fields, BEFORE egress is denied;
+  // the Papercusp packages install afterwards with --no-download. Only that step may
+  // touch the network (apt-get update + satisfy), never the install.
+  assert.match(r.calls, /apt-get update[\s\S]*apt-get satisfy[\s\S]*PCOIJ_OFFLINE -j REJECT[\s\S]*apt-get install --yes --no-download/);
+  const satisfy = r.calls.split('\n').find((l) => l.startsWith('apt-get satisfy'));
+  assert.match(satisfy, /libwebkit2gtk-4\.1-0 \(>= 2\.40\) \| libwebkit2gtk-4\.1-0-alt/);
+  assert.match(satisfy, /libc6 \(>= 2\.35\)/);
+  assert.match(satisfy, /xdg-desktop-portal-gtk/, 'Recommends are provisioned too');
+  assert.doesNotMatch(satisfy, /papercusp/, 'provisioning never installs a Papercusp package');
+  assert.doesNotMatch(r.calls.split('PCOIJ_OFFLINE -j REJECT')[1], /apt-get (update|satisfy)/);
+  assert.equal(r.doc.osPrerequisites.satisfyExit, '0');
+  assert.equal(r.doc.osPrerequisites.provisioned.trim(), 'libc6=2.44 libwebkit2gtk-4.1-0=2.44 xdg-desktop-portal-gtk=2.44');
+  assert.equal(r.doc.osPrerequisites.provisionedCount, '3');
+  assert.match(r.doc.osPrerequisites['declared.gui.Depends'], /papercusp-server \(= 0\.0\.25\)/, 'the declared list is recorded unfiltered');
+  // Artifacts cross the control session exactly once.
+  const scps = readFileSync(join(fx.state, 'transport.log'), 'utf8').split('\n').filter((l) => l.startsWith('SCP') && l.endsWith('/gui.deb'));
+  assert.equal(scps.length, 1);
   assert.match(r.calls, /loginctl enable-linger/);
   for (const l of r.doc.logs) assert.match(l.sha256, /^[0-9a-f]{64}$/);
 });
@@ -295,14 +342,29 @@ test('egress that survives enforcement voids offline; the restore is then not an
   assert.equal(r.legs['first-launch'].status, 'pass');
 });
 
-test('a declared dependency that would need a download fails install and names it', opts, () => {
-  const r = run(fixture(), { env: { FAKE_APT_MISSING: 'libwebkit2gtk-4.1-0' } });
+test('a dependency the install would still have to download fails install and names it', opts, () => {
+  // The apt stub aborts -s --no-download with no Inst lines exactly like real apt, so
+  // this fails if the closure simulation ever passes --no-download again (the
+  // 0.0.25 VM run named ZERO of ~76 missing packages that way).
+  const r = run(fixture(), { env: { FAKE_APT_MISSING: 'libgstreamer-gl1.0-0' } });
   assert.equal(r.status, 1);
+  assert.equal(r.legs['os-prerequisites'].status, 'pass');
   assert.equal(r.legs.install.status, 'fail');
-  assert.match(r.legs.install.detail, /libwebkit2gtk-4\.1-0/);
+  assert.match(r.legs.install.detail, /offline-unsatisfied deps: libgstreamer-gl1\.0-0/);
+  assert.match(r.legs.install.detail, /apt: E: Unable to fetch some archives/);
+  assert.match(r.doc.install.needsDownload, /libgstreamer-gl1\.0-0/);
   for (const leg of ['installed-bytes', 'witness-compat', 'first-launch', 'offline-restore', 'restart-reresolve']) {
     assert.equal(r.legs[leg].status, 'unmeasured', leg);
   }
+});
+
+test('a declared dependency the distro cannot satisfy FAILS the row — never a skip', opts, () => {
+  const r = run(fixture(), { env: { FAKE_APT_UNSATISFIABLE: 'libwebkit2gtk-4.1-0' } });
+  assert.equal(r.status, 1, r.stderr);
+  assert.equal(r.doc.verdict, 'FAIL');
+  assert.equal(r.legs['os-prerequisites'].status, 'fail');
+  assert.match(r.legs['os-prerequisites'].detail, /cannot satisfy a declared dependency: apt-get satisfy exit 100: E: Unable to satisfy dependencies/);
+  assert.equal(r.doc.osPrerequisites.provisionedCount, '0');
 });
 
 test('installed runtime that differs from the minimal witness fails witness-compat', opts, () => {
@@ -335,7 +397,7 @@ test('a target that already carries Papercusp voids preflight and installs nothi
   assert.equal(r.status, 3);
   assert.equal(r.legs['preflight-fresh'].status, 'void');
   assert.doesNotMatch(r.calls, /apt-get/);
-  for (const leg of ['offline', 'install', 'first-launch', 'restart-reresolve']) assert.equal(r.legs[leg].status, 'unmeasured', leg);
+  for (const leg of ['os-prerequisites', 'offline', 'install', 'first-launch', 'restart-reresolve']) assert.equal(r.legs[leg].status, 'unmeasured', leg);
 });
 
 test('usage errors exit 2 before touching a target', () => {
