@@ -728,6 +728,207 @@ release_artifacts_smoke_inputs() {
   printf '%s\n%s\n' "$gui" "$server"
 }
 
+# ── Linux clean-room VM lifecycle for the canonical Linux leg (WI-10004052) ──
+# The Linux installed-update proof needs a real, disposable Ubuntu machine: the
+# vmctl "clean" instance (scripts/linux-test-vm). The leg used to dial the
+# Windows VM's endpoint and so could never produce a receipt. It now owns the
+# whole lifecycle: reset to a pristine overlay, boot, wait for SSH, install the
+# PREVIOUS release as the running baseline (the verifier proves an in-place
+# UPDATE, so a pristine VM alone has nothing to flip), run the verifier against
+# the vmctl-derived endpoint, and ALWAYS power the VM down. Every step is
+# bounded by timeout(1).
+#
+#   PAPERCUSP_LINUX_SMOKE_BASELINE_GUI / _SERVER  previous release's GUI + Server
+#                                    .deb (required when the overlay is reset)
+#   PAPERCUSP_LINUX_SMOKE_BASELINE_DIR  alternative: a directory holding exactly
+#                                    one GUI and one Server .deb
+#   PAPERCUSP_LINUX_SMOKE_VM         vmctl instance (default: clean)
+#   PAPERCUSP_LINUX_SMOKE_VM_MANAGED=0  skip the lifecycle (VM already prepared)
+#   PAPERCUSP_LINUX_SMOKE_RESET=0    boot the existing overlay; no reset, no
+#                                    baseline install (it must already hold one)
+#   PAPERCUSP_LINUX_SMOKE_{RESET,UP,SSH,BASELINE,BASELINE_START,VERIFY,DOWN}_TIMEOUT
+#                                    per-step budgets in seconds
+#   PAPERCUSP_LINUX_VMCTL            vmctl path (tests substitute a fake)
+release_artifacts_linux_vmctl() {
+  printf '%s\n' "${PAPERCUSP_LINUX_VMCTL:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/linux-test-vm/vmctl}"
+}
+
+# release_artifacts_linux_smoke_baseline <target-version> -> "<gui>\n<server>"
+release_artifacts_linux_smoke_baseline() {
+  local target_version="${1:-}" gui="${PAPERCUSP_LINUX_SMOKE_BASELINE_GUI:-}"
+  local server="${PAPERCUSP_LINUX_SMOKE_BASELINE_SERVER:-}" dir="${PAPERCUSP_LINUX_SMOKE_BASELINE_DIR:-}"
+  local f name version role
+  if [[ -z "$gui" && -z "$server" && -n "$dir" ]]; then
+    [[ -d "$dir" ]] || { echo "release-artifacts: PAPERCUSP_LINUX_SMOKE_BASELINE_DIR is not a directory: $dir" >&2; return 1; }
+    local -a guis=() servers=()
+    shopt -s nullglob
+    for f in "$dir"/*.deb; do
+      name="$(basename "$f")"
+      if [[ "$name" == *[Ss]erver* ]]; then servers+=("$f"); else guis+=("$f"); fi
+    done
+    shopt -u nullglob
+    (( ${#guis[@]} == 1 && ${#servers[@]} == 1 )) || {
+      echo "release-artifacts: $dir must hold exactly one GUI and one Server .deb (found ${#guis[@]} GUI, ${#servers[@]} Server)." >&2
+      return 1
+    }
+    gui="${guis[0]}"; server="${servers[0]}"
+  fi
+  [[ -n "$gui" && -n "$server" ]] || {
+    echo "release-artifacts: the Linux smoke resets the clean-room VM, so it needs the PREVIOUS release installed as the running baseline to update FROM." >&2
+    echo "       Set PAPERCUSP_LINUX_SMOKE_BASELINE_GUI + PAPERCUSP_LINUX_SMOKE_BASELINE_SERVER (or PAPERCUSP_LINUX_SMOKE_BASELINE_DIR) to that release's .debs." >&2
+    return 1
+  }
+  for f in "$gui" "$server"; do
+    [[ -f "$f" ]] || { echo "release-artifacts: Linux smoke baseline not found: $f" >&2; return 1; }
+    [[ "$f" == *.deb ]] || { echo "release-artifacts: Linux smoke baseline must be a .deb: $f" >&2; return 1; }
+  done
+  # A baseline of the SAME version can never flip; fail before booting a VM.
+  for role in gui server; do
+    [[ "$role" == gui ]] && f="$gui" || f="$server"
+    version=""
+    if command -v dpkg-deb >/dev/null 2>&1; then
+      version="$(dpkg-deb -f "$f" Version 2>/dev/null || true)"
+    fi
+    [[ -n "$version" ]] || version="$(basename "$f" | sed -n 's/.*_\([0-9][0-9.]*\)_[^_]*\.deb$/\1/p')"
+    if [[ -n "$target_version" && "$version" == "$target_version" ]]; then
+      echo "release-artifacts: Linux smoke $role baseline is already version $target_version ($f) — there would be nothing to update from." >&2
+      return 1
+    fi
+  done
+  printf '%s\n%s\n' "$gui" "$server"
+}
+
+# Bring the baseline's Server-owned operator up and wait until it answers
+# /api/health, then wait for the guest package manager to go idle (a Server
+# install leaves a detached apt worker that would fail the verifier's install).
+release_artifacts_linux_smoke_baseline_start_script() {
+  cat <<'START'
+set -euo pipefail
+rm -f /tmp/Papercusp.deb
+systemctl --user daemon-reload
+systemctl --user enable --now papercusp-server.service
+deadline=$(( $(date +%s) + BASELINE_BUDGET ))
+while :; do
+  port="$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.papercusp/operator.json")))["port"])' 2>/dev/null || true)"
+  if [ -n "$port" ] && curl -fsS -m 5 "http://127.0.0.1:$port/api/health" >/tmp/papercusp-baseline-health.json 2>/dev/null; then
+    printf 'PAPERCUSP_LINUX_BASELINE_OPERATOR_OK port=%s health=%s\n' "$port" "$(head -c 300 /tmp/papercusp-baseline-health.json)"
+    break
+  fi
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    echo "baseline operator did not answer /api/health within ${BASELINE_BUDGET}s" >&2
+    systemctl --user --no-pager status papercusp-server.service >&2 || true
+    exit 1
+  fi
+  sleep 5
+done
+idle=0
+apt_deadline=$(( $(date +%s) + 300 ))
+while [ "$idle" -lt 2 ]; do
+  if sudo fuser /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock >/dev/null 2>&1 \
+     || pgrep -x apt-get >/dev/null 2>&1 || pgrep -x apt >/dev/null 2>&1 || pgrep -x dpkg >/dev/null 2>&1; then
+    idle=0
+  else
+    idle=$((idle + 1))
+  fi
+  if [ "$(date +%s)" -ge "$apt_deadline" ]; then
+    echo "guest apt/dpkg did not go idle within 300s after the baseline install" >&2
+    exit 1
+  fi
+  sleep 1
+done
+START
+}
+
+# release_artifacts_linux_vm_smoke <version> <verifier> <verifier-args...>
+release_artifacts_linux_vm_smoke() {
+  local version="${1:-}" verifier="${2:-}"
+  shift 2 2>/dev/null || return 2
+  local vmctl vm reset endpoint port key host baseline="" base_gui="" base_server=""
+  local rc=0 booted=0 lock_fd lock_file start_out
+  vmctl="$(release_artifacts_linux_vmctl)"
+  vm="${PAPERCUSP_LINUX_SMOKE_VM:-clean}"
+  reset="${PAPERCUSP_LINUX_SMOKE_RESET:-1}"
+  [[ "$vm" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "release-artifacts: unsafe PAPERCUSP_LINUX_SMOKE_VM '$vm'." >&2; return 2; }
+  [[ -f "$vmctl" ]] || { echo "release-artifacts: Linux test VM controller missing: $vmctl" >&2; return 1; }
+
+  if [[ "$reset" == 1 ]]; then
+    baseline="$(release_artifacts_linux_smoke_baseline "$version")" || return 1
+    base_gui="$(printf '%s\n' "$baseline" | sed -n '1p')"
+    base_server="$(printf '%s\n' "$baseline" | sed -n '2p')"
+  fi
+
+  endpoint="$(bash "$vmctl" endpoint "$vm" 2>&1)" || {
+    echo "release-artifacts: cannot read the Linux test VM endpoint: $endpoint" >&2
+    return 1
+  }
+  port="$(printf '%s\n' "$endpoint" | sed -n 's/^ssh_port=//p' | head -1)"
+  key="$(printf '%s\n' "$endpoint" | sed -n 's/^ssh_key=//p' | head -1)"
+  host="$(printf '%s\n' "$endpoint" | sed -n 's/^ssh_host=//p' | head -1)"
+  [[ "$port" =~ ^[0-9]+$ && -n "$key" && -n "$host" ]] || {
+    echo "release-artifacts: malformed Linux test VM endpoint from $vmctl: $endpoint" >&2
+    return 1
+  }
+
+  # One release smoke per VM at a time; a VM that is ALREADY running belongs to
+  # someone else (fresh-install / federation work) and is never reset here.
+  lock_file="${TMPDIR:-/tmp}/papercusp-linux-smoke-$vm.lock"
+  exec {lock_fd}>"$lock_file" || { echo "release-artifacts: cannot open $lock_file" >&2; return 1; }
+  if ! flock -n "$lock_fd"; then
+    exec {lock_fd}>&-
+    echo "release-artifacts: another Linux platform smoke holds $lock_file — refusing to share the $vm VM." >&2
+    return 1
+  fi
+  if bash "$vmctl" is-running "$vm" >/dev/null 2>&1; then
+    exec {lock_fd}>&-
+    echo "release-artifacts: the Linux test VM '$vm' is already running — another lane may be using it, so it is NOT reset. Free it (scripts/linux-test-vm/vmctl down $vm) and re-run." >&2
+    return 1
+  fi
+
+  echo "release-artifacts: Linux smoke VM '$vm' → $host:$port (reset=$reset)"
+  booted=1
+  {
+    if [[ "$reset" == 1 ]]; then
+      timeout --kill-after=30 "${PAPERCUSP_LINUX_SMOKE_RESET_TIMEOUT:-180}" bash "$vmctl" reset "$vm" \
+        || { echo "release-artifacts: vmctl reset $vm failed or timed out" >&2; false; }
+    fi
+  } && {
+    timeout --kill-after=30 "${PAPERCUSP_LINUX_SMOKE_UP_TIMEOUT:-300}" bash "$vmctl" up "$vm" \
+      || { echo "release-artifacts: vmctl up $vm failed or timed out" >&2; false; }
+  } && {
+    timeout --kill-after=30 "$(( ${PAPERCUSP_LINUX_SMOKE_SSH_TIMEOUT:-300} + 30 ))" \
+      bash "$vmctl" wait-ssh "$vm" "${PAPERCUSP_LINUX_SMOKE_SSH_TIMEOUT:-300}" \
+      || { echo "release-artifacts: SSH on the $vm VM never answered" >&2; false; }
+  } && {
+    [[ "$reset" != 1 ]] || {
+      echo "release-artifacts: installing baseline $(basename "$base_server") + $(basename "$base_gui") on $vm"
+      timeout --kill-after=30 "${PAPERCUSP_LINUX_SMOKE_BASELINE_TIMEOUT:-2400}" bash "$vmctl" install "$vm" "$base_server" \
+        && timeout --kill-after=30 "${PAPERCUSP_LINUX_SMOKE_BASELINE_TIMEOUT:-2400}" bash "$vmctl" install "$vm" "$base_gui"
+    } || { echo "release-artifacts: baseline install on $vm failed or timed out" >&2; false; }
+  } && {
+    [[ "$reset" != 1 ]] || {
+      start_out="$(release_artifacts_linux_smoke_baseline_start_script \
+        | sed "s/BASELINE_BUDGET/${PAPERCUSP_LINUX_SMOKE_BASELINE_START_TIMEOUT:-900}/g" \
+        | timeout --kill-after=30 "$(( ${PAPERCUSP_LINUX_SMOKE_BASELINE_START_TIMEOUT:-900} + 360 ))" \
+            bash "$vmctl" ssh "$vm" 'bash -s' 2>&1)"
+      local start_rc=$?
+      printf '%s\n' "$start_out" | tail -n 20
+      [[ "$start_rc" -eq 0 && "$start_out" == *PAPERCUSP_LINUX_BASELINE_OPERATOR_OK* ]]
+    } || { echo "release-artifacts: the baseline operator on $vm never became healthy" >&2; false; }
+  } && {
+    timeout --kill-after=60 "${PAPERCUSP_LINUX_SMOKE_VERIFY_TIMEOUT:-5400}" "$verifier" "$@" \
+      --ssh-port "$port" --ssh-key "$key" --ssh-host "$host" \
+      --ssh-option StrictHostKeyChecking=no --ssh-option UserKnownHostsFile=/dev/null --ssh-option LogLevel=ERROR \
+      --scp-option StrictHostKeyChecking=no --scp-option UserKnownHostsFile=/dev/null --scp-option LogLevel=ERROR
+  }
+  rc=$?
+  if [[ "$booted" == 1 ]]; then
+    timeout --kill-after=30 "${PAPERCUSP_LINUX_SMOKE_DOWN_TIMEOUT:-180}" bash "$vmctl" down "$vm" \
+      || echo "release-artifacts: WARNING — could not power down the $vm VM; run scripts/linux-test-vm/vmctl down $vm" >&2
+  fi
+  exec {lock_fd}>&-
+  return "$rc"
+}
+
 # Run a real platform verifier when a receipt is absent/stale, then require the
 # receipt it produced.  This keeps hardware orchestration out of the manifest
 # generator while making the publish hand-off self-driving: a normal publish
@@ -794,15 +995,25 @@ release_artifacts_run_platform_smoke() {
       return 1
     }
     echo "release-artifacts: running $platform platform smoke verifier: $(basename "$verifier")"
-    "$verifier" \
-      --platform "$platform" \
-      --artifact "$gui" \
-      --server-artifact "$server" \
-      --expected-version "$version" \
-      --smoke-receipt-tag "$tag" \
-      --smoke-provenance "$provenance" \
+    local -a verifier_args=(
+      --platform "$platform"
+      --artifact "$gui"
+      --server-artifact "$server"
+      --expected-version "$version"
+      --smoke-receipt-tag "$tag"
+      --smoke-provenance "$provenance"
       --json
-    local verifier_rc=$?
+    )
+    local verifier_rc
+    if [[ "$platform" == linux && "${PAPERCUSP_LINUX_SMOKE_VM_MANAGED:-1}" != 0 ]]; then
+      # WI-10004052: the Linux leg owns its clean-room VM lifecycle and dials
+      # the vmctl-derived endpoint explicitly — never an ambient VM_SSH_* value.
+      release_artifacts_linux_vm_smoke "$version" "$verifier" "${verifier_args[@]}"
+      verifier_rc=$?
+    else
+      "$verifier" "${verifier_args[@]}"
+      verifier_rc=$?
+    fi
     [[ "$verifier_rc" -eq 0 ]] || {
       echo "ERROR: $platform platform smoke verifier failed (exit $verifier_rc) — refusing publication." >&2
       return 1
