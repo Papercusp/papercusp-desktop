@@ -1530,6 +1530,58 @@ opt_dep_version() {
   local pkg_json="$1" dep="$2"
   node -e "try{const d=require('$pkg_json').optionalDependencies||{};process.stdout.write(String(d['$dep']||''))}catch(e){}" 2>/dev/null
 }
+# WI-10004350: a nested runtime package bundled into the sidecar installs from
+# its COMMITTED lock. A lockless `npm install` resolves the newest in-range
+# versions at build time: two 0.0.26 cuts of one source shipped pg 8.23.0 and
+# 8.23.1, while the lock the tree tests pins pg 8.20.0. This copies
+# <src>/package-lock.json beside the package.json the caller already copied,
+# runs `npm ci` (which refuses a lock/package.json mismatch), then proves the
+# installed tree is lock-exact. npm flags follow the three positional args.
+install_locked_runtime_deps() {
+  local src="$1" dst="$2" label="$3"; shift 3
+  if [[ ! -f "$src/package-lock.json" ]]; then
+    echo "ERROR: WI-10004350: $label has no committed package-lock.json at $src; refusing a lockless npm install (it would ship whatever versions are newest at build time)"
+    return 1
+  fi
+  cp "$src/package-lock.json" "$dst/package-lock.json" || return 1
+  ( cd "$dst" && npm ci "$@" ) || { echo "ERROR: npm ci failed for $label runtime deps"; return 1; }
+  assert_lock_exact_install "$dst" "$label"
+}
+# Every lock entry that is installed must carry its locked version, and a
+# non-optional, non-dev, non-peer entry that is missing is a failure too.
+# Optional platform packages for other hosts are legitimately absent. A check
+# that matched zero installed packages is refused rather than passed.
+assert_lock_exact_install() {
+  local dir="$1" label="$2"
+  node - "$dir" "$label" <<'NODE'
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const [dir, label] = process.argv.slice(2);
+  const lock = JSON.parse(fs.readFileSync(path.join(dir, 'package-lock.json'), 'utf8'));
+  const problems = [];
+  let checked = 0;
+  for (const [key, entry] of Object.entries(lock.packages || {})) {
+    if (!key.startsWith('node_modules/') || !entry || !entry.version || entry.link) continue;
+    const manifest = path.join(dir, key, 'package.json');
+    if (!fs.existsSync(manifest)) {
+      if (!(entry.optional || entry.dev || entry.devOptional || entry.peer)) {
+        problems.push(`${key}: locked ${entry.version} but not installed`);
+      }
+      continue;
+    }
+    checked += 1;
+    const installed = JSON.parse(fs.readFileSync(manifest, 'utf8')).version;
+    if (installed !== entry.version) problems.push(`${key}: installed ${installed} != locked ${entry.version}`);
+  }
+  if (checked === 0) problems.push('zero locked packages are installed; refusing a vacuous pass');
+  if (problems.length > 0) {
+    console.error(`ERROR: WI-10004350: ${label} runtime deps are not lock-exact:`);
+    for (const problem of problems) console.error(`  ${problem}`);
+    process.exit(1);
+  }
+  console.log(`    ✓ ${label} runtime deps are lock-exact (${checked} installed packages match package-lock.json)`);
+NODE
+}
 prune_foreign_prebuilds() {
   local pkg_dir="$1"
   [[ -d "$pkg_dir/prebuilds" && -n "$_bare_node_platform" && -n "$_bare_node_arch" ]] || return 0
@@ -2978,15 +3030,19 @@ chmod +x "$EMBEDDED_PG_DST/bin/embedded-postgres-server.mjs"
 # binaries (~60-150MB per arch) — npm picks the right @embedded-postgres/<plat>
 # package automatically based on the build host's platform. For
 # cross-platform releases, run this script once per target platform.
-echo "→ installing embedded-postgres-server runtime deps into the bundle (~60-150MB binary download)"
-( cd "$EMBEDDED_PG_DST" && npm install --omit=dev --no-workspaces --legacy-peer-deps --silent ) || {
+# WI-10004350: from the package's COMMITTED lock (npm ci), never a lockless
+# npm install; the helper also proves the result is lock-exact.
+echo "→ installing embedded-postgres-server runtime deps into the bundle from its committed lock (~60-150MB binary download)"
+install_locked_runtime_deps "$EMBEDDED_PG_SRC" "$EMBEDDED_PG_DST" embedded-postgres-server \
+  --omit=dev --no-workspaces --legacy-peer-deps --silent || {
   echo "ERROR: failed to install embedded-postgres-server runtime deps"
   exit 1
 }
 # WI-5651: cross-swap the embedded-postgres binary pkg for a darwin build. npm
 # resolved @embedded-postgres/<HOST> above (e.g. linux-x64 — it keys the optional
 # binary pkg on the build host); for a cross darwin bundle that is dead weight AND
-# wrong. Drop it and fetch the target's binary pkg at the SAME resolved version.
+# wrong. Drop it and fetch the target's binary pkg at the version the COMMITTED
+# lock pins for it (WI-10004350: never a host-derived or newest version).
 # The published @embedded-postgres/darwin-<arch> tarball SHIPS native/bin/{initdb,
 # postgres,pg_ctl} as real Mach-O UNIVERSAL (fat x86_64+arm64) directly — no
 # postinstall — so npm-pack+extract yields runnable binaries the assertion below
@@ -2995,8 +3051,8 @@ if [[ "$CROSS_BUILD" == "1" && "$TARGET_OS" == "darwin" ]]; then
   _epg_root="$EMBEDDED_PG_DST/node_modules/@embedded-postgres"
   _epg_host="$(ls "$_epg_root" 2>/dev/null | sed -n 1p)"
   [[ -n "$_epg_host" ]] || { echo "ERROR: no @embedded-postgres/<host> pkg after npm install — cannot derive the cross version"; exit 1; }
-  _epg_ver="$(node -e "console.log(require('$_epg_root/$_epg_host/package.json').version)" 2>/dev/null)"
-  [[ -n "$_epg_ver" ]] || { echo "ERROR: could not read installed @embedded-postgres/$_epg_host version"; exit 1; }
+  _epg_ver="$(node -e "const l=require('$EMBEDDED_PG_DST/package-lock.json');process.stdout.write(String((l.packages['node_modules/@embedded-postgres/darwin-${TARGET_ARCH}']||{}).version||''))" 2>/dev/null)"
+  [[ -n "$_epg_ver" ]] || { echo "ERROR: WI-10004350: package-lock.json pins no @embedded-postgres/darwin-${TARGET_ARCH} version; cannot cross-swap lock-exactly"; exit 1; }
   echo "→ WI-5651 cross-swapping embedded-postgres binary pkg: drop $_epg_host, fetch darwin-${TARGET_ARCH}@${_epg_ver}"
   rm -rf "${_epg_root:?}"/*
   fetch_cross_npm_pkg "@embedded-postgres/darwin-${TARGET_ARCH}@${_epg_ver}" "$EMBEDDED_PG_DST/node_modules" || exit 1
