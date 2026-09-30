@@ -95,6 +95,11 @@ bin/lib/transformers-models.sh fetch ~/.cache/papercusp-models
 export PAPERCUSP_TRANSFORMERS_MODEL_CACHE=~/.cache/papercusp-models
 ```
 
+The installer license scan (`bin/audit-release-bundle.py --scan-artifact --licenses`, which runs
+`scripts/check-licenses.mjs --installer-tree`) also needs **syft** on `PATH`
+(<https://github.com/anchore/syft#installation>); without it the scan reports
+`LICENSE_GATE_RESULT status=undetermined` rather than a verdict.
+
 The sidecar build checks its host tools and models up front and names every missing one. A
 release cut also needs a signing key (`bin/setup-signing-key.sh`) and the release-identity inputs
 the build's audit checks against; `SHIPPING.md` and `RELEASE-RUNBOOK.md` describe the full flow.
