@@ -872,6 +872,17 @@ doc = {
     'runDir': run_dir,
     'scopeNote': 'No live peer join here (plan D-083): the Discovery/join row proves joining; this row proves the full installers lay down and serve, offline, the same runtime bytes that row joined with (join-runtime-match).',
 }
+# An absolute /home/<user>/ path trips git-sync's identity-leak content-lint, which
+# then SILENTLY leaves the evidence untracked (runs 3-8 of WI-10003962 never
+# committed). Redact the operator's home dir to '~' in every string, and say so.
+home = os.path.expanduser('~').rstrip('/')
+def redact(v):
+    if isinstance(v, str): return v.replace(home + '/', '~/') if home and home != '/' else v
+    if isinstance(v, list): return [redact(x) for x in v]
+    if isinstance(v, dict): return {k: redact(x) for k, x in v.items()}
+    return v
+doc = redact(doc)
+doc['redactions'] = ["the operator's home directory is written as '~' (identity-leak content-lint)"]
 json.dump(doc, open(out, 'w'), indent=2, sort_keys=False)
 print(verdict)
 PY
