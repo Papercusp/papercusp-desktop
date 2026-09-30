@@ -235,11 +235,15 @@ export PAPERCUSP_EXPECTED_SOURCE_SHA="$EXPECTED_SOURCE_SHA"
 # discovering the missing env only when build-desktop-sidecar.sh starts.
 # Runtime-only is load-bearing: persisting the owner's identity in the release
 # tree would manufacture the very identity leak this audit exists to catch.
-if [[ -z "${PAPERCUSP_RELEASE_OWNER_NAME:-}" ]]; then
-  echo "ERROR: release cut requires PAPERCUSP_RELEASE_OWNER_NAME at run time before any seed/build work." >&2
-  echo "       Pass the human owner name through release:cut; never write it into a tracked file." >&2
-  exit 2
-fi
+#
+# WI-10004349: the caller-supplied literals alone are NOT enough. 0.0.25 and 0.0.26 shipped
+# an owner name unscrubbed because release:cut passed one hand-typed name and no email while
+# ~/.papercusp/release-identity.env held the full set. So UNION that owner-provisioned file
+# into the environment first, then refuse unless both a name AND an email literal resolved.
+# shellcheck source=lib/release-identity-env.sh
+source "$ORCHESTRATOR_HERE/lib/release-identity-env.sh"
+papercusp_union_release_identity_env || exit 2
+papercusp_require_release_owner_identity || exit 2
 
 # ── EI-17272: reap orphaned build-tool descendants on ANY exit ────────────────
 # The Linux leg (below) launches `tauri build` → cargo → rustc, and
