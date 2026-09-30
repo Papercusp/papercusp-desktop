@@ -39,6 +39,10 @@ VM='aviweiss@172.31.44.2'
 VM_NODE='/Applications/Papercusp Server.app/Contents/Resources/sidecar/bin/node'
 VM_TSX='/Users/aviweiss/.papercusp-workspaces/.shared/dev-source/node_modules/tsx/dist/cli.mjs'
 VM_SOURCE="${HIVE_GIT_PHYSICAL_VM_SOURCE:-}"
+# WI-10004062: the probe's run-private, pinned-commit tower snapshot. Once the
+# execution gate below validates it, PRODUCER points INTO it, so no phase runs
+# tower bytes out of the shared working tree that parallel builders edit.
+TOWER_SOURCE="${HIVE_GIT_PHYSICAL_TOWER_SOURCE:-}"
 VM_PRODUCER="$VM_SOURCE/packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts"
 VM_CALL='/tmp/vmcall.sh'
 VM_MCP_CALL='/tmp/mcp-call.mjs'
@@ -1986,6 +1990,22 @@ case "$VM_SOURCE" in
   /tmp/hive-git-physical-source.[0-9]*) ;;
   *) fail "HIVE_GIT_PHYSICAL_VM_SOURCE=$VM_SOURCE is not a probe-staged source root (expected /tmp/hive-git-physical-source.<pid>). Only hive-git-physical-probe.sh stages the VM producer, and it stages nowhere else; a hand-supplied root — including the installed dev-source tree, which carries no producer — resolves VM_PRODUCER to a path that does not exist and surfaces as ERR_MODULE_NOT_FOUND." ;;
 esac
+# WI-10004062 — the tower half of the same contract. The probe resolves ONE
+# commit, extracts it into a run-private tower snapshot, and stages the same
+# commit on the VM. Every "$TSX" "$PRODUCER" call in the phases below must run
+# that snapshot, never $REPO_ROOT: the shared working tree changes under a run
+# (a peer's mid-run edit aborted WI-10004055 retry #1, and an uncommitted one
+# refused retry #2 before any phase).
+[ -n "$TOWER_SOURCE" ] \
+  || fail 'HIVE_GIT_PHYSICAL_TOWER_SOURCE is unset. The tower producer must run from the probe-staged pinned-commit snapshot, which hive-git-physical-probe.sh creates and exports for exactly one invocation; re-drive through the probe.'
+require_absolute 'HIVE_GIT_PHYSICAL_TOWER_SOURCE' "$TOWER_SOURCE"
+case "$TOWER_SOURCE" in
+  */hive-git-physical-tower-source.*) ;;
+  *) fail "HIVE_GIT_PHYSICAL_TOWER_SOURCE=$TOWER_SOURCE is not a probe-staged tower snapshot (expected .../hive-git-physical-tower-source.<id>). Running the tower producer from the shared working tree is exactly what WI-10004062 removed." ;;
+esac
+PRODUCER="$TOWER_SOURCE/packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts"
+[ -f "$PRODUCER" ] \
+  || fail "probe-staged tower snapshot carries no physical-drill producer: $PRODUCER"
 verify_physical_vm_source
 ensure_vm_driver_current
 
