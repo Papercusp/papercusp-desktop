@@ -88,3 +88,72 @@ test('the guard passes an AppDir with only LGPL/permissive media libraries', () 
     fs.rmSync(fx.root, { recursive: true, force: true });
   }
 });
+
+// D-013: GPL-only libraries reached through optional components other than
+// the codec plugins (installer license leg over the 0.0.25 AppImage).
+const NON_GST_DROP_BLOCK = slice(
+  'APPIMAGE_GPL_NON_GST_DROP=',
+  'echo "   GPL non-media libraries dropped (TIFF pixbuf loader, jbig, tray indicator)"',
+);
+
+test('D-013: the extra GPL-linked plugins are in the default drop list', () => {
+  const fx = fixture(
+    ['libgstaasink.so', 'libgstcacasink.so', 'libgstfluidsynthmidi.so', 'libgstdtsdec.so',
+      'libgstladspa.so', 'libgstteletext.so', 'libgstneonhttpsrc.so', 'libgstspandsp.so',
+      'libgstcdparanoia.so', 'libgstapp.so'],
+    [],
+  );
+  try {
+    const result = run(DROP_BLOCK, { GST_PLUGIN_DEST: fx.plugins });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(fs.readdirSync(fx.plugins), ['libgstapp.so']);
+  } finally {
+    fs.rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
+test('D-013: the non-media drop removes the TIFF loader, jbig and the tray indicator, and prunes loaders.cache', () => {
+  const fx = fixture([], ['libtiff.so.6', 'libjbig.so.0', 'libayatana-indicator3.so.7',
+    'libayatana-appindicator3.so.1', 'libdbusmenu-gtk3.so.4', 'libglib-2.0.so.0', 'libwebp.so.7']);
+  const loaders = path.join(fx.appdir, 'usr', 'lib', 'x86_64-linux-gnu', 'gdk-pixbuf-2.0', '2.10.0', 'loaders');
+  fs.mkdirSync(loaders, { recursive: true });
+  fs.writeFileSync(path.join(loaders, 'libpixbufloader-tiff.so'), 'x');
+  fs.writeFileSync(path.join(loaders, 'libpixbufloader-png.so'), 'x');
+  const cache = path.join(loaders, '..', 'loaders.cache');
+  fs.writeFileSync(cache, [
+    '# header',
+    '"libpixbufloader-png.so"\n"png" 5 "gdk-pixbuf" "PNG" "LGPL"',
+    '"libpixbufloader-tiff.so"\n"tiff" 5 "gdk-pixbuf" "TIFF" "LGPL"',
+  ].join('\n\n'));
+  try {
+    const result = run(NON_GST_DROP_BLOCK, { APPDIR: fx.appdir });
+    assert.equal(result.status, 0, result.stderr);
+    const libs = fs.readdirSync(path.join(fx.appdir, 'usr', 'lib')).filter((n) => /\.so(\.|$)/.test(n)).sort();
+    assert.deepEqual(libs, ['libglib-2.0.so.0', 'libwebp.so.7']);
+    assert.deepEqual(fs.readdirSync(loaders), ['libpixbufloader-png.so']);
+    const after = fs.readFileSync(cache, 'utf8');
+    assert.match(after, /libpixbufloader-png\.so/);
+    assert.doesNotMatch(after, /tiff/);
+  } finally {
+    fs.rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
+test('D-013: the guard fails on each newly covered GPL library', () => {
+  for (const lib of ['libslang.so.2', 'libgpm.so.2', 'libreadline.so.8', 'libjbig.so.0', 'libayatana-indicator3.so.7', 'libzvbi.so.0']) {
+    const fx = fixture(['libgstapp.so'], [lib]);
+    try {
+      const result = run(GUARD_BLOCK, { APPDIR: fx.appdir });
+      assert.equal(result.status, 1, `${lib} should fail the guard`);
+      assert.match(result.stderr, new RegExp(lib.replace(/\./g, '\\.')));
+    } finally {
+      fs.rmSync(fx.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('D-013: the drop follows the linuxdeploy merge and precedes the GPL library guard', () => {
+  const drop = SRC.indexOf('APPIMAGE_GPL_NON_GST_DROP=');
+  assert.ok(drop > SRC.indexOf('rm -rf "$DEPLOY_STAGE"'), 'drop must follow the linuxdeploy merge');
+  assert.ok(drop < SRC.indexOf('GST_GPL_LIB_ERE='), 'drop must precede the GPL library guard');
+});

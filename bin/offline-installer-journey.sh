@@ -65,7 +65,15 @@
 #     [--expected-sha SHA] [--ssh-host H] [--ssh-port N] [--ssh-key K] \
 #     [--ssh-option K=V]... [--remote-dir DIR] [--offline enforce|verify] \
 #     [--expect-pot SLUG] [--mcp-call PATH] [--health-timeout SEC] \
-#     [--install-timeout SEC] [--keep-offline] [--join-evidence PATH]
+#     [--install-timeout SEC] [--keep-offline] [--join-evidence PATH] \
+#     [--stage-os-deps]
+#   --stage-os-deps (linux only) fetches the .debs' declared OS dependency
+#   closure (webkit2gtk, gstreamer, … — the Tauri runtime libs Papercusp never
+#   bundles) into apt's cache WHILE ONLINE, download-only, before egress is
+#   denied. The offline install then uses only cached bytes. The staged list is
+#   recorded as install.osPrerequisites and offline.stageOsDeps=yes, so the
+#   evidence claims "offline given the declared OS prerequisites", never "bare
+#   box". Without it, a target lacking those libs fails install and names them.
 #   --join-evidence is the Discovery/join operational-test-evidence JSON for
 #   the same candidate (e.g. docs/evidence/p505-run34-exact-0025-physical-*.json).
 #   --witness defaults to the Server .deb on linux (the drill's exact bytes);
@@ -107,6 +115,7 @@ HEALTH_TIMEOUT=300
 INSTALL_TIMEOUT=1800
 KEEP_OFFLINE=0
 JOIN_EVIDENCE=""
+STAGE_OS_DEPS=0
 ORIG_CMD="$(printf '%q ' "$0" "$@")"
 
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
@@ -134,6 +143,7 @@ while [[ $# -gt 0 ]]; do
     --health-timeout) HEALTH_TIMEOUT="${2:-}"; shift 2 ;;
     --install-timeout) INSTALL_TIMEOUT="${2:-}"; shift 2 ;;
     --keep-offline) KEEP_OFFLINE=1; shift ;;
+    --stage-os-deps) STAGE_OS_DEPS=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -143,7 +153,8 @@ die2() { echo "offline-installer-journey: $*" >&2; exit 2; }
 case "$PLATFORM" in
   linux) : "${OFFLINE_MODE:=enforce}"; : "${REMOTE_DIR:=/tmp/pcoij}" ;;
   mac) : "${OFFLINE_MODE:=verify}"; : "${REMOTE_DIR:=/tmp/pcoij}"
-       [[ "$OFFLINE_MODE" == verify ]] || die2 "--offline enforce is not implemented for mac (egress is measured, never assumed)" ;;
+       [[ "$OFFLINE_MODE" == verify ]] || die2 "--offline enforce is not implemented for mac (egress is measured, never assumed)"
+       [[ "$STAGE_OS_DEPS" == 0 ]] || die2 "--stage-os-deps is linux-only (a DMG declares no OS package dependencies)" ;;
   *) die2 "--platform linux|mac is required" ;;
 esac
 [[ "$OFFLINE_MODE" == enforce || "$OFFLINE_MODE" == verify ]] || die2 "--offline must be enforce|verify"
