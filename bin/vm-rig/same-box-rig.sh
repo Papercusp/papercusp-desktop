@@ -158,7 +158,10 @@ converge_pot_git() {
     # 20-minute wait. Drive the production git-sync on the VM (announce), then on the tower
     # (receive), until a tower baseline passes the scenario's own `phase-a-precheck`.
     # Bounded: SAME_BOX_STEADY_SEC (default 360).
-    device_key() { node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).deviceKey || "")' "$1"; }
+    # The announce-identity cache stores the key as devicePubkeyBase64 (the field
+    # physical-drill-host-receipt.ts turns into the scenario's deviceKey). Run 20260930T092722Z
+    # read a `deviceKey` field that cache never has and failed rig-up after 19 minutes.
+    device_key() { node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).devicePubkeyBase64 || "")' "$1"; }
     steady_namespaces() {
       local tower_key vm_key steady_start=$SECONDS steady_budget="${SAME_BOX_STEADY_SEC:-360}"
       tower_key="$(device_key "$TOWER_CACHE" 2>/dev/null)"; vm_key="$(device_key "$VM_CACHE" 2>/dev/null)"
@@ -236,7 +239,7 @@ cmd_converge() {
   # Run through bash: the git index tracks lib/same-box-deploy.sh as 100644, so a fresh
   # checkout has no exec bit (r4 rig `up` died on 'Permission denied' here).
   SAME_BOX_RIG_DIR="$dir" bash "$HERE/lib/same-box-deploy.sh" same-box-vm >&2 || die "same-box-deploy.sh failed"
-  converge_pot_git || die "the pot-git stores never appeared on both owners (logs: $dir/converge-*.log)"
+  converge_pot_git || die "the pot-git convergence failed: stores, VM answering or the steady tower baseline (reason above; logs: $dir/converge-*.log)"
   profile_paths_ready || die "the rig profile names a path this rig does not have (RIG_PROFILE_PATH_MISSING above)"
   echo "same-box-rig: CONVERGED $dir"
   echo "HIVE_GIT_SAME_BOX_RIG=$dir"
@@ -354,7 +357,7 @@ EOF
   chmod 0755 "$dir/tower-call" "$dir/boot-vm.sh"
   ln -sfn "$ROOT" "$dir/vm-dep-source"
   SAME_BOX_RIG_DIR="$dir" bash "$HERE/lib/same-box-deploy.sh" same-box-vm >&2 || die "same-box-deploy.sh failed"
-  converge_pot_git || die "the pot-git stores never appeared on both owners (logs: $dir/converge-*.log)"
+  converge_pot_git || die "the pot-git convergence failed: stores, VM answering or the steady tower baseline (reason above; logs: $dir/converge-*.log)"
   profile_paths_ready || die "the rig profile names a path this rig does not have (RIG_PROFILE_PATH_MISSING above)"
 
   echo "same-box-rig: UP pot=$pot git_sync=$git_sync_slug repo_key=$repo_key tower=:$tp vm=:$vp dht=$dht"
