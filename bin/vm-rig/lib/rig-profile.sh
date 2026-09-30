@@ -123,6 +123,20 @@ rig_profile_apply() {
   echo "RIG_PROFILE rig=same-box vm=$VM tower_port=$SB_TOWER_PORT vm_port=$SB_VM_PORT pot=$SB_POT_HOME dir=$dir" >&2
 }
 
+# Extra `physical-drill-producer rig-preflight` arguments for the active profile, one per line
+# (read them with mapfile). The physical profile adds nothing: every check, both owners on
+# :3070. The same-box profile points hosts-answering at the two throwaway owners' ports — the
+# default :3070 there is the LIVE operator, which would report a down rig as up — and runs only
+# the checks that measure THIS rig. The other three read physical-rig state that a same-box rig
+# does not have (the composed VM payload stamp, the live tower's Phase D trust rows and Phase E
+# canary mode); running them would measure a different machine, so the probe names them skipped.
+rig_profile_preflight_args() {
+  [ "$(rig_profile_name)" = same-box ] || return 0
+  printf '%s\n' --check drill-source-committed --check hosts-answering \
+    --tower-port "$SB_TOWER_PORT" --vm-port "$SB_VM_PORT"
+  echo "RIG_PROFILE preflight=same-box checks=drill-source-committed,hosts-answering skipped=canary-mode-baseline,vm-trust-hold-ready,vm-payload-current (physical-rig state)" >&2
+}
+
 # Phases the same-box rig cannot prove (a physical-only property), as "X:reason;Y:reason".
 # The probe refuses a same-box selection that includes one, naming the reason, rather than
 # running a phase whose verdict would mean nothing.

@@ -363,8 +363,12 @@ esac
 # canary mode baseline, no leftover Phase D trust hold, VM payload = the tower-composed build,
 # both owners answering. A refusal names the check (PHYSICAL_PREFLIGHT_FAILED <check>) in
 # seconds instead of surfacing mid-phase. PCUSP_VM_GITHUB_USER_ID overrides the VM user.
+# The rig profile adds its own checks/ports (same-box: the throwaway owners' ports, never :3070).
+rig_preflight_args=()
+mapfile -t rig_preflight_args < <(rig_profile_preflight_args)
 PCUSP_VM_SSH="$VM" "$TSX" "$PRODUCER" rig-preflight \
-  --vm-github-user-id "${PCUSP_VM_GITHUB_USER_ID:-1567022}" >/dev/null \
+  --vm-github-user-id "${PCUSP_VM_GITHUB_USER_ID:-1567022}" \
+  ${rig_preflight_args[@]+"${rig_preflight_args[@]}"} >/dev/null \
   || fail 'rig preflight refused the run (the PHYSICAL_PREFLIGHT_FAILED line above names the check)'
 
 run_dir="$(mktemp -d "${TMPDIR:-/tmp}/hive-git-physical-run.XXXXXX")"
