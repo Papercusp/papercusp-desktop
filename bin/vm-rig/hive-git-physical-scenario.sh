@@ -1153,7 +1153,10 @@ phase_e_github_bridge() {
   run_vm_git_sync >"$phase_dir/vm-member-raw.json"
   require_git_sync_fired "$phase_dir/vm-member-raw.json" 'phase E vm member'
   vm_member_finished="$(now_iso)"
-  "$TSX" "$PRODUCER" phase-e-observe tower bridged-member "$tower_device" "$run_id" "$PHASE_E_MODE_WAIT_SEC" \
+  # A tower observation judged on a fire's verdict waits for a finished fire
+  # started at/after that trigger: git-sync:run answers in_progress at 45s and
+  # the bridge row lands later (WI-10004055).
+  "$TSX" "$PRODUCER" phase-e-observe tower bridged-member "$tower_device" "$run_id" "$PHASE_E_MODE_WAIT_SEC" "$tower_member_started" \
     >"$phase_dir/tower-bridged-member.json"
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-e-observe vm bridged-member '$vm_device' '$run_id' '$PHASE_E_MODE_WAIT_SEC'" \
@@ -1173,7 +1176,7 @@ phase_e_github_bridge() {
   run_tower_git_sync >"$phase_dir/healthy-egress-raw.json"
   require_git_sync_fired "$phase_dir/healthy-egress-raw.json" 'phase E tower healthy egress'
   egress_finished="$(now_iso)"
-  "$TSX" "$PRODUCER" phase-e-observe tower healthy-egress "$tower_device" "$run_id" \
+  "$TSX" "$PRODUCER" phase-e-observe tower healthy-egress "$tower_device" "$run_id" "$PHASE_E_MODE_WAIT_SEC" "$egress_started" \
     >"$phase_dir/healthy-observation.json"
 
   "$TSX" "$PRODUCER" phase-e-watchdog 1 "$run_id" \
@@ -1190,7 +1193,7 @@ phase_e_github_bridge() {
   run_tower_git_sync >"$phase_dir/divergence-egress-raw.json"
   require_git_sync_fired "$phase_dir/divergence-egress-raw.json" 'phase E tower divergence egress'
   divergence_finished="$(now_iso)"
-  "$TSX" "$PRODUCER" phase-e-observe tower divergence-after "$tower_device" "$run_id" \
+  "$TSX" "$PRODUCER" phase-e-observe tower divergence-after "$tower_device" "$run_id" "$PHASE_E_MODE_WAIT_SEC" "$divergence_started" \
     >"$phase_dir/divergence-after.json"
   "$TSX" "$PRODUCER" phase-e-recover "$phase_dir/divergence-mutation.json" \
     >"$phase_dir/divergence-recovery.json"
