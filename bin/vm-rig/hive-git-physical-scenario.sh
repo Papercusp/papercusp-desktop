@@ -1577,6 +1577,133 @@ NODE
     >"$phase_dir/verdict.json"
 }
 
+# Phase J (P-521 F4, D-082): bounded target-apply outage, preserved cursor, replay.
+# The VM is the target and the only mutated host: a scoped fault on its Postgres
+# (phase-j-fault) makes the production read-merge apply of the tower's write A
+# fail retryably. The tower only authors writes A and B through its production
+# MCP verb; its bg-host is never frozen, restarted or faulted. The VM cursor must
+# hold at A past the retired retry budget and across a VM owner restart; after
+# the fault is removed, A and B must arrive with the tower's exact content.
+PHASE_J_FAULT_RUN=''
+PHASE_J_WAIT_SEC=900
+PHASE_J_LAST=''
+phase_j_producer_vm() {
+  local quoted="" a
+  for a in "$@"; do quoted="$quoted '$a'"; done
+  ssh "${SSH_OPTS[@]}" "$VM" "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER'$quoted"
+}
+phase_j_remove_fault() {
+  [ -n "$PHASE_J_FAULT_RUN" ] || return 0
+  phase_j_producer_vm phase-j-fault vm remove "$PHASE_J_FAULT_RUN" >"$1" || return 1
+  PHASE_J_FAULT_RUN=''
+}
+# The fault must never outlive the scenario (same EXIT rule as phase H).
+phase_j_restore_on_exit() {
+  phase_j_remove_fault "$run_dir/phase-j/exit-fault-remove.json" 2>"$run_dir/phase-j/exit-fault-remove.err" \
+    || echo "hive-git-physical-scenario: WARNING phase J could not remove the VM outage fault; run: ssh $VM '$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-j-fault vm sweep" >&2
+}
+# Samples the VM until the step's lag contract is met (producer exit 0). Exit 3
+# is a valid observation that has not reached the step yet; anything else fails.
+# Every sample is kept: the verifier judges each held one.
+phase_j_await_vm() {
+  local step="$1" prefix="$2" deadline=$((SECONDS + PHASE_J_WAIT_SEC)) i=0 rc
+  shift 2
+  while :; do
+    i=$((i + 1))
+    rc=0
+    phase_j_producer_vm phase-j-observe vm "$step" "$physical_run_id" "$@" >"$prefix-$i.json" || rc=$?
+    if [ "$rc" = 0 ]; then PHASE_J_LAST="$prefix-$i.json"; return 0; fi
+    [ "$rc" = 3 ] || fail "phase J VM observation failed at step $step (exit $rc); see $prefix-$i.json"
+    [ "$SECONDS" -lt "$deadline" ] \
+      || fail "phase J VM did not reach $step within ${PHASE_J_WAIT_SEC}s; last sample $prefix-$i.json"
+    sleep 10
+  done
+}
+phase_j_apply_outage_replay() {
+  [ -x "$TSX" ] && [ -f "$PRODUCER" ] \
+    || fail 'phase J local producer is unavailable'
+
+  local phase_dir="$run_dir/phase-j"
+  local run_id="$physical_run_id"
+  local started_at finished_at feature_a log_key held_pos w
+  mkdir -m 700 "$phase_dir"
+  started_at="$(now_iso)"
+  "$TSX" "$PRODUCER" phase-j-observe tower baseline "$run_id" >"$phase_dir/tower-baseline.json" \
+    || fail 'phase J tower baseline observation failed'
+  phase_j_producer_vm phase-j-observe vm baseline "$run_id" >"$phase_dir/vm-baseline.json" \
+    || fail 'phase J VM baseline observation failed'
+  phase_h_owner_identity >"$phase_dir/owner-before.json" \
+    || fail 'phase J could not identify the VM owner'
+
+  # Outage on: armed before the tower writes, so A can never land before it.
+  PHASE_J_FAULT_RUN="$run_id"
+  trap phase_j_restore_on_exit EXIT
+  phase_j_producer_vm phase-j-fault vm install "$run_id" >"$phase_dir/fault-install.json" \
+    || fail "phase J could not install the VM outage fault; see $phase_dir/fault-install.json"
+  for w in A B; do
+    "$TSX" "$PRODUCER" phase-j-write "$w" "$run_id" \
+      | "$TOWER_CALL" work_items:create --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
+        >"$phase_dir/tower-create-$w.json" \
+      || fail "phase J tower could not author write $w; see $phase_dir/tower-create-$w.json"
+  done
+  "$TSX" "$PRODUCER" phase-j-observe tower authored "$run_id" >"$phase_dir/tower-authored.json" \
+    || fail 'phase J tower authored observation failed'
+  feature_a="$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).writes?.A?.row?.featureId ?? ""' "$phase_dir/tower-authored.json")"
+  [ -n "$feature_a" ] || fail 'phase J tower has no row for write A'
+
+  # held: the durable failure names A, past the retired budget and the minimum hold.
+  phase_j_await_vm held "$phase_dir/vm-held" "$feature_a"
+  read -r log_key held_pos < <(node -e '
+const o = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+const c = (o.cursors ?? []).find((x) => x.applyFailure?.groupKey?.endsWith(`/${process.argv[2]}`));
+if (!c) process.exit(1);
+process.stdout.write(`${c.logKeyHex} ${c.applyFailure.position}\n`);
+' "$PHASE_J_LAST" "$feature_a") || fail "phase J held sample names no failing log; see $PHASE_J_LAST"
+
+  # held-after-restart: same artifact, new owner process, fault still in.
+  phase_h_restart_owner >"$phase_dir/owner-restart.log" 2>&1 \
+    || fail "phase J owner restart through $VM_OWNER_LAUNCHER failed; see $phase_dir/owner-restart.log"
+  phase_h_owner_identity >"$phase_dir/owner-after.json" \
+    || fail 'phase J could not identify the restarted VM owner'
+  phase_j_await_vm held-after-restart "$phase_dir/vm-held-after-restart" "$feature_a"
+  cp "$PHASE_J_LAST" "$phase_dir/vm-held-after-restart.json"
+
+  # Outage off, then replay.
+  phase_j_remove_fault "$phase_dir/fault-remove.json" \
+    || fail "phase J could not remove the VM outage fault; see $phase_dir/fault-remove.json"
+  trap - EXIT
+  phase_j_await_vm replayed "$phase_dir/vm-replayed" "$feature_a" "$log_key" "$held_pos"
+  cp "$PHASE_J_LAST" "$phase_dir/vm-replayed.json"
+  finished_at="$(now_iso)"
+
+  node - "$phase_dir" "$run_id" "$started_at" "$finished_at" "$tower_device" "$vm_device" "$feature_a" <<'NODE'
+const fs = require('node:fs');
+const [dir, runId, startedAt, finishedAt, towerDeviceKey, vmDeviceKey, featureA] = process.argv.slice(2);
+const read = (name) => JSON.parse(fs.readFileSync(`${dir}/${name}`, 'utf8'));
+const n = (name) => Number(/-(\d+)\.json$/.exec(name)[1]);
+// Held samples from the first one whose durable failure names A; earlier ones
+// only show the op had not reached the VM yet and are kept on disk.
+const names = (o) => (o.cursors ?? []).some((c) => c.applyFailure?.groupKey?.endsWith(`/${featureA}`));
+const held = fs.readdirSync(dir).filter((f) => /^vm-held-\d+\.json$/.test(f)).sort((a, b) => n(a) - n(b)).map(read);
+const input = {
+  schemaVersion: 'hive-git-physical-phase-j-input/v1',
+  runId,
+  window: { startedAt, finishedAt },
+  identities: { towerDeviceKey, vmDeviceKey },
+  baseline: { tower: read('tower-baseline.json'), vm: read('vm-baseline.json') },
+  fault: { install: read('fault-install.json'), remove: read('fault-remove.json') },
+  authored: read('tower-authored.json'),
+  held: held.slice(held.findIndex(names)),
+  vmOwner: { before: read('owner-before.json'), after: read('owner-after.json') },
+  heldAfterRestart: read('vm-held-after-restart.json'),
+  replayed: read('vm-replayed.json'),
+};
+fs.writeFileSync(`${dir}/verify-input.json`, `${JSON.stringify(input, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+NODE
+  "$TSX" "$PRODUCER" phase-j-verify "$phase_dir/verify-input.json" \
+    >"$phase_dir/verdict.json"
+}
+
 assemble_unsigned_evidence() {
   local started_at="$1" finished_at="$2"
   node - "$run_dir" "$unsigned_out" "$physical_run_id" "$started_at" "$finished_at" \
