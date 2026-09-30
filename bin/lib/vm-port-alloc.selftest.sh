@@ -30,7 +30,9 @@ bad() { echo "  ✗ $*"; FAILS=$((FAILS + 1)); }
 echo "linux-test-vm per-instance ports (WI-10004354)"
 T="$(mktemp -d "${TMPDIR:-/tmp}/vm-port-alloc-selftest.XXXXXX")" || { echo "  ✗ mktemp failed"; exit 1; }
 PIDS=()
-cleanup() { local p; for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null; done; rm -rf "$T"; }
+# Kill each fake's CHILD sleep too (by parent pid, never by name): an orphaned sleep
+# would outlive the test for its full duration.
+cleanup() { local p; for p in "${PIDS[@]}"; do pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null; done; rm -rf "$T"; }
 trap cleanup EXIT
 
 export PAPERCUSP_TESTVM_HOME="$T/vmhome"
@@ -46,7 +48,7 @@ fake_vm() {
   mkdir -p "$RUN_DIR/$name"
   bash -c 'sleep 120; :' fakeqemu -name "papercusp-testvm-$name" \
     -netdev "user,id=net0,net=10.0.2.0/24,hostfwd=tcp::${ssh}-:22,hostfwd=tcp::${op}-:3070" \
-    -vga virtio -spice "port=${spice},addr=127.0.0.1,disable-ticketing=on" &
+    -vga virtio -spice "port=${spice},addr=127.0.0.1,disable-ticketing=on" </dev/null >/dev/null 2>&1 &
   PIDS+=("$!")
   echo "$!" > "$RUN_DIR/$name/qemu.pid"
 }
@@ -79,22 +81,26 @@ out="$(ports_for adhoc-recycled 2>/dev/null)"; rc=$?
   && ok "allocating a fixed name returns its slot and writes no claim" || bad "vm_ports_allocate updater → '$(vm_ports_allocate updater)'"
 
 # ── 5. Allocation: a listening port is never handed out ──────────────────────
-export VM_SSH_BASE=41000 VM_SPICE_BASE=42000 VM_OP_BASE=43000
-python3 -c 'import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(("127.0.0.1",41010));s.listen(1);time.sleep(120)' 2>/dev/null &
+# The KERNEL picks the listener's port (bind to 0): a fixed port is flaky here because
+# it may sit in the ephemeral range, held by some outgoing connection (EADDRINUSE while
+# not LISTENing). The slot base is then derived so that slot 10's ssh port IS that port.
+python3 -c 'import socket,sys,time;s=socket.socket();s.bind(("127.0.0.1",0));s.listen(1);open(sys.argv[1],"w").write(str(s.getsockname()[1]));time.sleep(120)' "$T/lport" </dev/null >/dev/null 2>&1 &
 PIDS+=("$!")
-for _ in $(seq 1 50); do
-  listening="$(ss -Hltn 2>/dev/null | awk '{print $4}')"
-  case "$listening" in *:41010*) break ;; esac
-  sleep 0.1
-done
-case "$listening" in
-  *:41010*)
+LP=""
+for _ in $(seq 1 50); do LP="$(cat "$T/lport" 2>/dev/null)"; [ -n "$LP" ] && break; sleep 0.1; done
+listening="$(ss -Hltn 2>/dev/null | awk '{print $4}')"
+case "$LP:$listening" in
+  [0-9]*:*":$LP"*)
+    export VM_SSH_BASE=$(( LP - 10 )) VM_SPICE_BASE=42000 VM_OP_BASE=43000
     out="$(VM_ADHOC_SLOTS=1 vm_ports_allocate alloc-x 2>/dev/null)"; rc=$?
-    [ "$rc" -ne 0 ] && [ -z "$out" ] && ok "the only slot's ssh port is listening → allocation refuses" || bad "allocation handed out a listening port: '$out'"
+    [ "$rc" -ne 0 ] && [ -z "$out" ] && ok "the only slot's ssh port ($LP) is listening → allocation refuses" || bad "allocation handed out listening port $LP: '$out'"
     out="$(VM_ADHOC_SLOTS=2 vm_ports_allocate alloc-x 2>/dev/null)"
-    [ "$out" = "41011 42011 43011" ] && ok "with a second slot free it takes that one ($out)" || bad "expected '41011 42011 43011', got '$out'"
+    case "$out" in
+      "$LP "*) bad "with two slots, allocation still handed out listening port $LP: '$out'" ;;
+      *) ok "with two slots it never takes the listening one (got '${out:-none free}')" ;;
+    esac
     ;;
-  *) bad "could not bring up the test listener on 127.0.0.1:41010 (python3/ss missing?)" ;;
+  *) bad "could not bring up a test listener (port '$LP'; python3/ss missing?)" ;;
 esac
 
 # ── 6. Allocation: a fresh claim by an in-flight boot is respected ───────────
