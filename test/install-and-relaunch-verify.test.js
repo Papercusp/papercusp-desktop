@@ -349,9 +349,19 @@ printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
   return { root, dmg, server, log, flipped, ssh, scp, shims, applications, remote, executeInstall, executeTransfer, freeGb, nativePreflight, installedMismatch };
 }
 
-function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui) {
+// Ambient endpoint variables from the runner's shell must never decide which VM
+// a hermetic test dials; tests that exercise overrides pass them explicitly.
+const AMBIENT_ENDPOINT_ENV = [
+  'VM_SSH_PORT', 'VM_SSH_KEY', 'VM_SSH_HOST', 'MAC_VM_SSH_HOST', 'VM_SSH_BASE',
+  'PAPERCUSP_TESTVM_SSH_KEY', 'PAPERCUSP_TESTVM_USER', 'PAPERCUSP_LINUX_SMOKE_VM', 'PAPERCUSP_LINUX_VMCTL',
+];
+
+function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui, extraEnv = {}) {
+  const inherited = { ...process.env };
+  for (const name of AMBIENT_ENDPOINT_ENV) delete inherited[name];
   const env = {
-    ...process.env,
+    ...inherited,
+    ...extraEnv,
     HOME: f.root,
     PC_SSH: f.ssh,
     PC_SCP: f.scp,
@@ -941,6 +951,90 @@ test('Linux includes relaunch stderr in a failed verdict', () => {
     assert.equal(verdict.ok, false);
     assert.match(verdict.failures.join('\n'), /relaunch command failed/);
     assert.match(verdict.failures.join('\n'), /libwebkit2gtk-4\.1\.so\.0/);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+// ── WI-10004052: every platform leg dials ITS OWN VM ──────────────────────────
+function transportLines(f) {
+  return existsSync(f.log) ? readFileSync(f.log, 'utf8').trim().split('\n').filter(Boolean) : [];
+}
+
+test('Linux defaults to the vmctl clean-room VM endpoint, never the Windows VM', () => {
+  const f = linuxFixture();
+  try {
+    const result = runVerify(f, [], 'linux', f.deb);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const lines = transportLines(f);
+    assert.ok(lines.length > 0, 'the verifier must have contacted the (mock) VM');
+    for (const line of lines) {
+      assert.match(line, line.startsWith('SCP ') ? / -P 2224 / : / -p 2224 /, line);
+      assert.ok(line.includes(`${f.root}/.ssh/papercup-vm-linux`), line);
+      assert.doesNotMatch(line, /2223|papercup-vm-win/, 'the Linux leg must never reach the Windows VM');
+    }
+    assert.ok(lines.some((line) => line.includes('tester@127.0.0.1')), 'Linux uses the vmctl guest user');
+    // vmctl does not pin the throwaway VM's host key; the derived endpoint follows it.
+    assert.ok(lines.every((line) => line.includes('StrictHostKeyChecking=no')));
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+for (const [label, extraEnv] of [
+  ['an ambient Windows VM port', { VM_SSH_PORT: '2223' }],
+  ['an ambient Windows VM key', { VM_SSH_KEY: '/keys/papercup-vm-win' }],
+  ['an ambient Mac VM port', { VM_SSH_PORT: '2222' }],
+]) {
+  test(`Linux refuses ${label} before any VM contact`, () => {
+    const f = linuxFixture();
+    try {
+      const result = runVerify(f, [], 'linux', f.deb, extraEnv);
+      assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`);
+      assert.match(result.stderr, /refusing: --platform linux resolved its SSH endpoint .* (windows|mac)/);
+      assert.deepEqual(transportLines(f), [], 'no ssh/scp may run');
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+}
+
+test('Windows keeps its own endpoint and refuses the Linux VM port', () => {
+  const f = fixture();
+  try {
+    const result = runVerify(f);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const ssh = transportLines(f).filter((line) => line.startsWith('SSH '));
+    assert.ok(ssh.length > 0);
+    for (const line of ssh) {
+      assert.match(line, / -p 2223 /);
+      assert.ok(line.includes(`${f.root}/.ssh/papercup-vm-win`) && line.includes('user@127.0.0.1'), line);
+    }
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+  const g = fixture();
+  try {
+    const refused = runVerify(g, [], 'windows', g.gui, { VM_SSH_PORT: '2224' });
+    assert.equal(refused.status, 2, `${refused.stdout}\n${refused.stderr}`);
+    assert.match(refused.stderr, /refusing: --platform windows .* linux/);
+    assert.deepEqual(transportLines(g), []);
+  } finally {
+    rmSync(g.root, { recursive: true, force: true });
+  }
+});
+
+test('macOS defaults to the Mac VM endpoint', () => {
+  const f = macFixture();
+  try {
+    const result = runVerify(f, [], 'mac', f.dmg);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const ssh = transportLines(f).filter((line) => line.startsWith('SSH '));
+    assert.ok(ssh.length > 0);
+    for (const line of ssh) {
+      assert.match(line, / -p 2222 /);
+      assert.ok(line.includes(`${f.root}/.ssh/papercup-vm-mac`) && line.includes('aviweiss@127.0.0.1'), line);
+    }
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
