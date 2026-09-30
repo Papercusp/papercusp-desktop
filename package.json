@@ -1,6 +1,6 @@
 {
   "name": "@papercusp/desktop",
-  "version": "0.0.25",
+  "version": "0.0.26",
   "private": true,
   "description": "Tauri desktop shell for Papercusp. Spawns the Node sidecar and embeds the web UI.",
   "scripts": {
