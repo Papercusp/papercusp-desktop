@@ -106,11 +106,16 @@ rig_profile_apply() {
   TOWER_CACHE="$shared_tower/.papercusp/local-announce-identity.json"
   DEPLOY="$RIG_PROFILE_LIB_DIR/same-box-deploy.sh"
 
-  # The status probes name the pot and workspace; retarget them at the same-box pot.
-  PHASE_A_TOWER_STATUS_ARGS="${PHASE_A_TOWER_STATUS_ARGS//\"harnessSlug\":\"hello-world-3-pot\"/\"harnessSlug\":\"$SB_POT_HOME\"}"
-  PHASE_A_TOWER_STATUS_ARGS="${PHASE_A_TOWER_STATUS_ARGS//\"workspaceId\":\"papercusp-workspace\"/\"workspaceId\":\"$SB_WORKSPACE\"}"
-  PHASE_A_VM_STATUS_ARGS="${PHASE_A_VM_STATUS_ARGS//\"harnessSlug\":\"hello-world-3-pot\"/\"harnessSlug\":\"$SB_POT_HOME\"}"
-  PHASE_A_VM_STATUS_ARGS="${PHASE_A_VM_STATUS_ARGS//\"workspaceId\":\"papercusp-workspace\"/\"workspaceId\":\"$SB_WORKSPACE\"}"
+  # The scenario's status probes name the pot and workspace; retarget them at the same-box
+  # pot. The probe has no such variables, and runs under set -u, so only rewrite what exists.
+  if [ -n "${PHASE_A_TOWER_STATUS_ARGS:-}" ]; then
+    PHASE_A_TOWER_STATUS_ARGS="${PHASE_A_TOWER_STATUS_ARGS//\"harnessSlug\":\"hello-world-3-pot\"/\"harnessSlug\":\"$SB_POT_HOME\"}"
+    PHASE_A_TOWER_STATUS_ARGS="${PHASE_A_TOWER_STATUS_ARGS//\"workspaceId\":\"papercusp-workspace\"/\"workspaceId\":\"$SB_WORKSPACE\"}"
+  fi
+  if [ -n "${PHASE_A_VM_STATUS_ARGS:-}" ]; then
+    PHASE_A_VM_STATUS_ARGS="${PHASE_A_VM_STATUS_ARGS//\"harnessSlug\":\"hello-world-3-pot\"/\"harnessSlug\":\"$SB_POT_HOME\"}"
+    PHASE_A_VM_STATUS_ARGS="${PHASE_A_VM_STATUS_ARGS//\"workspaceId\":\"papercusp-workspace\"/\"workspaceId\":\"$SB_WORKSPACE\"}"
+  fi
 
   PATH="$RIG_PROFILE_LIB_DIR/same-box-transport:$PATH"
   export PATH HIVE_GIT_RIG HIVE_GIT_SAME_BOX_RIG
