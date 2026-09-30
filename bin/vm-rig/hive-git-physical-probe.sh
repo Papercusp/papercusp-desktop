@@ -32,6 +32,11 @@ TOWER_CACHE="${PAPERCUSP_ANNOUNCE_IDENTITY_CACHE:-$HOME/.papercusp-workspaces/.s
 VM_CACHE="${PCUSP_VM_ANNOUNCE_IDENTITY_CACHE:-/Users/aviweiss/.papercusp-workspaces/.shared/.papercusp/local-announce-identity.json}"
 VM_IDENTITY_DIR="${PCUSP_VM_IDENTITY_DIR:-/Users/aviweiss/.papercusp-workspaces/.shared/.papercusp/identity}"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no)
+# physical-drill-iteration-speed-2026-09-29 P-005 (D-003): HIVE_GIT_RIG=same-box retargets
+# every host value above at the same-box two-instance rig; the default changes nothing.
+# shellcheck source=lib/rig-profile.sh
+. "$HERE/lib/rig-profile.sh"
+rig_profile_apply || exit 2
 
 source_preflight=0
 if [ "${1:-}" = '--source-preflight' ]; then
@@ -85,6 +90,10 @@ physical_phases="$(physical_phase_list "${HIVE_GIT_PHYSICAL_PHASES:-}")" \
   || fail "invalid HIVE_GIT_PHYSICAL_PHASES: ${HIVE_GIT_PHYSICAL_PHASES:-}"
 physical_full_run=0
 physical_phase_is_full "$physical_phases" && physical_full_run=1
+# A same-box rehearsal is never release evidence, even with every phase selected (D-003),
+# and it refuses a phase that needs a property only the physical rig has.
+if rig_profile_is_diagnostic; then physical_full_run=0; fi
+rig_profile_refuse_physical_only "$physical_phases" || exit 2
 
 # Readiness is an OFFLINE gate and must precede the first VM ssh. An incomplete
 # checked-in scenario must not touch the physical rig merely to discover that

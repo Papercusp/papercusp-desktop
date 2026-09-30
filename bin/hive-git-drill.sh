@@ -107,12 +107,37 @@ while [ $# -gt 0 ]; do
       _sel_mode="${1%%=*}"
       PHYSICAL_ONLY="$(physical_phase_select "${_sel_mode#--}" "${1#*=}")" || exit 2
       shift ;;
+    --rig) HIVE_GIT_RIG="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
+    --rig=*) HIVE_GIT_RIG="${1#*=}"; shift ;;
     *) _drill_args+=("$1"); shift ;;
   esac
 done
 set -- ${_drill_args[@]+"${_drill_args[@]}"}
+# ── Same-box rehearsal (physical-drill-iteration-speed-2026-09-29 P-005, R-4, D-003) ──
+# `--rig same-box` runs the physical scenario through this SAME entry point, the same probe
+# and the same scenario, against the same-box two-instance rig (bin/vm-rig/same-box-rig.sh
+# up) instead of the physical rig, so harness timing and lifecycle bugs cost minutes. With no
+# phase selection it rehearses every phase. It skips the local legs and is never release
+# evidence. The rig profile (bin/vm-rig/lib/rig-profile.sh) owns every host value.
+# shellcheck source=vm-rig/lib/rig-profile.sh
+. "$DESKTOP_DIR/bin/vm-rig/lib/rig-profile.sh"
+rig_profile_validate "${HIVE_GIT_RIG:-physical}" || exit 2
+SAME_BOX=0
+if [ "${HIVE_GIT_RIG:-physical}" = same-box ]; then
+  SAME_BOX=1
+  export HIVE_GIT_RIG
+  rig_profile_load_same_box || exit 2
+  if [ "${REQUIRE_ZERO_SKIPS:-0}" = "1" ]; then
+    echo "FATAL: REQUIRE_ZERO_SKIPS=1 is release acceptance; a same-box rehearsal can never satisfy it" >&2
+    exit 2
+  fi
+  [ -n "$PHYSICAL_ONLY" ] || PHYSICAL_ONLY="$(physical_phase_select from-phase A)" || exit 2
+  : "${HIVE_GIT_PHYSICAL_PROBE_CMD:=$DESKTOP_DIR/bin/vm-rig/hive-git-physical-probe.sh}"
+  export HIVE_GIT_PHYSICAL_PROBE_CMD
+  echo "SAME_BOX_REHEARSAL phases=$PHYSICAL_ONLY rig=$HIVE_GIT_SAME_BOX_RIG (diagnostic: local legs skipped, never release evidence)"
+fi
 if [ -n "$PHYSICAL_ONLY" ]; then
-  if physical_phase_is_full "$PHYSICAL_ONLY"; then
+  if [ "$SAME_BOX" = 0 ] && physical_phase_is_full "$PHYSICAL_ONLY"; then
     echo "FATAL: the selection $PHYSICAL_ONLY is every physical phase — that is the full release run; drop --only-phase/--from-phase" >&2
     exit 2
   fi

@@ -1973,6 +1973,15 @@ ensure_vm_driver_current() {
 [ "${HIVE_GIT_PHYSICAL_EXECUTE:-}" = "$EXPECTED_PLAN" ] \
   || fail 'destructive physical run requires HIVE_GIT_PHYSICAL_EXECUTE to equal the canonical plan slug'
 
+# physical-drill-iteration-speed-2026-09-29 P-005 (D-003): HIVE_GIT_RIG=same-box retargets
+# every host value defined above (tower, VM, pot, owner launcher) at the same-box
+# two-instance rig, after all of them exist and before the first host access. The default
+# profile changes nothing. A same-box run is diagnostic: it never emits unsigned evidence.
+# shellcheck source=lib/rig-profile.sh
+. "$HERE/lib/rig-profile.sh"
+rig_profile_apply || fail "rig profile '$(rig_profile_name)' could not be applied"
+if rig_profile_is_diagnostic; then SCENARIO_FULL_RUN=0; fi
+
 # The staged VM source root is EPHEMERAL by design: hive-git-physical-probe.sh
 # creates /tmp/hive-git-physical-source.$$ on the VM, exports it here as
 # HIVE_GIT_PHYSICAL_VM_SOURCE for exactly one invocation, and removes it again
