@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# tsx for the same-box TOWER (plan physical-drill-iteration-speed-2026-09-29 D-003).
+#
+# On the physical rig the scenario runs on the tower as its owner, so `"$TSX" "$PRODUCER" …`
+# reads the tower operator's home and database. On the same-box rig the scenario runs in the
+# caller's own session, whose HOME and PAPERCUSP_HOME name the LIVE operator. rig-profile.sh
+# points TSX here so every tower-side producer call runs as the rig's throwaway tower instead:
+# its HOME, its owner port, and none of the caller's database or credential variables — the
+# same scrub fed_local_launch_sidecar applies to the owner process.
+set -uo pipefail
+if [ -z "${SAME_BOX_TOWER_HOME:-}" ] || [ ! -d "$SAME_BOX_TOWER_HOME" ]; then
+  echo "same-box tower-tsx: SAME_BOX_TOWER_HOME is unset or missing; apply the same-box rig profile first" >&2
+  exit 2
+fi
+if [ -z "${SAME_BOX_TSX:-}" ] || [ ! -f "$SAME_BOX_TSX" ]; then
+  echo "same-box tower-tsx: SAME_BOX_TSX is unset or missing; apply the same-box rig profile first" >&2
+  exit 2
+fi
+exec env -u DATABASE_URL -u PAPERCUSP_DATABASE_URL -u HARNESS_DATABASE_URL -u HARNESS_ADMIN_DATABASE_URL \
+  -u PAPERCUSP_PG_URL -u PAPERCUSP_HOME -u GH_TOKEN -u GITHUB_TOKEN \
+  HOME="$SAME_BOX_TOWER_HOME" PAPERCUSP_HONO_PORT="${SAME_BOX_TOWER_PORT:-}" \
+  "${SAME_BOX_NODE:-node}" "$SAME_BOX_TSX" "$@"
