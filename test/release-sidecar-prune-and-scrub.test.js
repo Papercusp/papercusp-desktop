@@ -210,7 +210,8 @@ test('vm-release prune removes non-runtime residue, preserves allowlisted assets
 
 test('vm-release build profile bundles OMP hooks and gates the final sidecar before verification', () => {
   const sh = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
-  const profileValidation = sh.indexOf('dogfood|vm-release');
+  // open-source-release-2026-09-29 D-005 added the `public` profile to the accepted set.
+  const profileValidation = sh.indexOf('dogfood|public|vm-release');
   const bundle = sh.indexOf('esbuild-bundling OMP runtime hooks for vm-release');
   const prune = sh.indexOf('--prune-vm-release');
   const postPruneSqlGate = sh.indexOf(

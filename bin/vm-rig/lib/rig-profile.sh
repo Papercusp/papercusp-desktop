@@ -27,7 +27,7 @@ RIG_PROFILE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RIG_PROFILE_SAME_BOX_HOST='same-box-vm'
 # The only keys rig.env may set. Anything else (or any line that is not KEY=value with a
 # quoted or plain value) refuses the rig: rig.env is sourced, so it must not carry code.
-RIG_PROFILE_SAME_BOX_KEYS='SB_TOWER_HOME SB_TOWER_PORT SB_VM_HOME SB_VM_PORT SB_NODE SB_TSX SB_POT_HOME SB_REPO_KEY SB_WORKSPACE SB_PHYSICAL_ONLY_PHASES'
+RIG_PROFILE_SAME_BOX_KEYS='SB_TOWER_HOME SB_TOWER_PORT SB_VM_HOME SB_VM_PORT SB_NODE SB_TSX SB_POT_HOME SB_REPO_KEY SB_GITHUB_REMOTE SB_WORKSPACE SB_PHYSICAL_ONLY_PHASES'
 
 rig_profile_name() { printf '%s\n' "${HIVE_GIT_RIG:-physical}"; }
 
@@ -60,7 +60,7 @@ rig_profile_load_same_box() {
   done <"$env"
   # shellcheck source=/dev/null
   . "$env"
-  for key in SB_TOWER_HOME SB_TOWER_PORT SB_VM_HOME SB_VM_PORT SB_NODE SB_TSX SB_POT_HOME SB_REPO_KEY SB_WORKSPACE; do
+  for key in SB_TOWER_HOME SB_TOWER_PORT SB_VM_HOME SB_VM_PORT SB_NODE SB_TSX SB_POT_HOME SB_REPO_KEY SB_GITHUB_REMOTE SB_WORKSPACE; do
     [ -n "${!key:-}" ] || { echo "FATAL: $env does not set $key" >&2; return 2; }
   done
   case "$SB_TOWER_PORT$SB_VM_PORT" in *[!0-9]*) echo "FATAL: $env ports must be numeric" >&2; return 2 ;; esac
@@ -116,6 +116,11 @@ rig_profile_apply() {
     PHASE_A_VM_STATUS_ARGS="${PHASE_A_VM_STATUS_ARGS//\"harnessSlug\":\"hello-world-3-pot\"/\"harnessSlug\":\"$SB_POT_HOME\"}"
     PHASE_A_VM_STATUS_ARGS="${PHASE_A_VM_STATUS_ARGS//\"workspaceId\":\"papercusp-workspace\"/\"workspaceId\":\"$SB_WORKSPACE\"}"
   fi
+
+  # The producer's target (physicalDrillTarget in physical-drill-phase-a.ts): it reads these
+  # only under HIVE_GIT_RIG=same-box and marks the run diagnostic, so it can never sign.
+  export HIVE_GIT_DRILL_TARGET_POT_HOME="$SB_POT_HOME" HIVE_GIT_DRILL_TARGET_REPO_KEY="$SB_REPO_KEY" \
+    HIVE_GIT_DRILL_TARGET_GITHUB_REMOTE="$SB_GITHUB_REMOTE"
 
   PATH="$RIG_PROFILE_LIB_DIR/same-box-transport:$PATH"
   export PATH HIVE_GIT_RIG HIVE_GIT_SAME_BOX_RIG

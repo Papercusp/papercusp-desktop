@@ -59,12 +59,20 @@ test('Hetzner .deb federation defaults to the Ubuntu 24.04 ABI while retaining a
   );
 });
 
+// open-source-release-2026-09-29 D-005 / P-019 moved the absent-knob default into
+// bin/lib/distribution-profile.sh (`dogfood` unless a public MANIFEST.json says `public`).
+// The helper's behaviour — including "no manifest keeps dogfood" — is exercised in
+// test/distribution-profile.test.js; here we pin that this entrypoint actually uses it.
+const PROFILE_DEFAULT_LINE =
+  'DISTRIBUTION_PROFILE="${PAPERCUSP_DISTRIBUTION_PROFILE:-$(default_distribution_profile "$ROOT")}"';
+
 test('dogfood remains the absent-knob default with both roles and developer staging', () => {
-  assert.match(
-    linuxScript,
-    /DISTRIBUTION_PROFILE="\$\{PAPERCUSP_DISTRIBUTION_PROFILE:-dogfood\}"/,
+  assert.match(linuxScript, /\. "\$HERE\/lib\/distribution-profile\.sh"/);
+  assert.ok(
+    linuxScript.includes(PROFILE_DEFAULT_LINE),
+    'the absent knob must resolve through default_distribution_profile (dogfood in the private tree)',
   );
-  assert.match(linuxScript, /dogfood\)\n\s+ROLES="\$\{PAPERCUSP_BUILD_ROLES:-gui server\}"/);
+  assert.match(linuxScript, /dogfood\|public\)\n\s+ROLES="\$\{PAPERCUSP_BUILD_ROLES:-gui server\}"/);
 
   const freshSidecar = linuxScript.slice(
     linuxScript.indexOf('case "${PAPERCUSP_REUSE_SIDECAR:-0}"'),
@@ -83,17 +91,19 @@ test('dogfood remains the absent-knob default with both roles and developer stag
 });
 
 test('vm-release is fail-closed, Server-only and disables source staging', () => {
-  const profileBlock = linuxScript.slice(
-    linuxScript.indexOf('DISTRIBUTION_PROFILE="${PAPERCUSP_DISTRIBUTION_PROFILE:-dogfood}"'),
-    linuxScript.indexOf('# ── OWNER-NAME PREFLIGHT'),
-  );
+  const blockStart = linuxScript.indexOf(PROFILE_DEFAULT_LINE);
+  const blockEnd = linuxScript.indexOf('# ── OWNER-NAME PREFLIGHT');
+  // A moved anchor must fail HERE, loudly — a -1 start silently slices to '' and every
+  // assertion below then reads as "the block lost its vm-release arm".
+  assert.ok(blockStart >= 0 && blockEnd > blockStart, 'profile block anchors not found');
+  const profileBlock = linuxScript.slice(blockStart, blockEnd);
   assert.match(profileBlock, /vm-release\)/);
   assert.match(profileBlock, /PAPERCUSP_BUILD_ROLES\+x/);
   assert.match(profileBlock, /PAPERCUSP_BUILD_ROLES" != "server"/);
   assert.match(profileBlock, /ROLES="server"/);
   assert.match(profileBlock, /export PAPERCUSP_BUILD_ROLES="\$ROLES"/);
   assert.match(profileBlock, /export PAPERCUSP_STAGE_SOURCE=0/);
-  assert.match(profileBlock, /must be dogfood or vm-release/);
+  assert.match(profileBlock, /must be dogfood, public or vm-release/);
 
   assert.match(
     linuxScript,
