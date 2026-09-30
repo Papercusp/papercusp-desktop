@@ -284,6 +284,34 @@ PY_NORMALIZE_APPIMAGE_HOOKS
 fi
 rm -rf "$DEPLOY_STAGE"
 
+# 2c-ii. DROP GPL-ONLY NON-MEDIA LIBRARIES (open-source-release-2026-09-29 D-013).
+#     The installer license leg over the 0.0.25 AppImage found two GPL-only chains
+#     outside GStreamer, both deployed by linuxdeploy/Tauri for optional features:
+#       - gdk-pixbuf's TIFF loader -> libtiff -> libjbig (GPL-2+). The webview
+#         decodes images itself; the pixbuf TIFF loader only serves GTK widgets.
+#       - the tray stack libayatana-appindicator3 -> libayatana-indicator3 (GPL-3)
+#         + ido3 + dbusmenu. Only the Server role builds a tray, and the Server
+#         ships as a .deb that depends on the system library; the GUI AppImage
+#         never loads it (libappindicator-sys dlopens on first tray use).
+#     Remove the files AND the TIFF loader's loaders.cache block, so gdk-pixbuf
+#     does not try to open a loader that is not there.
+APPIMAGE_GPL_NON_GST_DROP="${PAPERCUSP_APPIMAGE_GPL_NON_GST_DROP:-libpixbufloader-tiff.so libtiff.so* libjbig.so* libayatana-appindicator3.so* libayatana-indicator3.so* libayatana-ido3-0.4.so* libdbusmenu-glib.so* libdbusmenu-gtk3.so*}"
+for _drop in $APPIMAGE_GPL_NON_GST_DROP; do
+  find "$APPDIR" \( -type f -o -type l \) -name "$_drop" -delete
+done
+while IFS= read -r -d '' _pbcache_file; do
+  python3 - "$_pbcache_file" <<'PY_DROP_TIFF_LOADER'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+blocks = path.read_text(encoding="utf-8").split("\n\n")
+kept = [b for b in blocks if "libpixbufloader-tiff.so" not in b]
+if len(kept) != len(blocks):
+    path.write_text("\n\n".join(kept), encoding="utf-8")
+PY_DROP_TIFF_LOADER
+done < <(find "$APPDIR" -name loaders.cache -print0)
+echo "   GPL non-media libraries dropped (TIFF pixbuf loader, jbig, tray indicator)"
+
 # 2c-gst. BUNDLE THE GSTREAMER PLUGIN CLOSURE (EI-20082216700215037).
 #     linuxdeploy deploys WebKitGTK's libgstreamer dependencies but does not copy
 #     the element plugins that GStreamer discovers at runtime. On a pristine host
@@ -313,7 +341,7 @@ cp -a "$GST_PLUGIN_SOURCE"/. "$GST_PLUGIN_DEST"/ || {
 #     closure below means their GPL dependencies are never copied either.
 #     Cost: the webview cannot decode H.264/H.265/AAC and similar patented
 #     codecs from these plugins; the LGPL/BSD plugins (vorbis, opus, vpx, …) stay.
-GST_GPL_PLUGINS="${PAPERCUSP_GSTREAMER_GPL_PLUGINS:-libgstlibav.so libgstx264.so libgstx265.so libgsta52dec.so libgstmpeg2dec.so libgstdvdread.so libgstresindvd.so libgstmpeg2enc.so libgstmplex.so libgstsid.so libgstcdio.so libgstfaad.so}"
+GST_GPL_PLUGINS="${PAPERCUSP_GSTREAMER_GPL_PLUGINS:-libgstlibav.so libgstx264.so libgstx265.so libgsta52dec.so libgstmpeg2dec.so libgstdvdread.so libgstresindvd.so libgstmpeg2enc.so libgstmplex.so libgstsid.so libgstcdio.so libgstfaad.so libgstaasink.so libgstcacasink.so libgstfluidsynthmidi.so libgstdtsdec.so libgstladspa.so libgstteletext.so libgstneonhttpsrc.so libgstspandsp.so libgstcdparanoia.so}"
 for _gpl_plugin in $GST_GPL_PLUGINS; do
   rm -f "$GST_PLUGIN_DEST/$_gpl_plugin"
 done
@@ -518,7 +546,7 @@ copy_gstreamer_plugin_closure || exit 1
 # 2c-gst-ii. GPL LIBRARY GUARD (P-020). Whatever route a library took into the
 #     AppDir (linuxdeploy, the plugin closure, a future copy step), none of the
 #     GPL codec/media libraries dropped in 2c-gst-0 may ship under ELv2.
-GST_GPL_LIB_ERE="${PAPERCUSP_APPIMAGE_GPL_LIB_ERE:-^lib(avcodec|avformat|avfilter|avdevice|postproc|x264|x265|a52|mpeg2|dvdread|dvdnav|mjpegutils|mpeg2encpp|mplex2|sidplay|cdio|faad)[.-]}"
+GST_GPL_LIB_ERE="${PAPERCUSP_APPIMAGE_GPL_LIB_ERE:-^lib(avcodec|avformat|avfilter|avdevice|postproc|x264|x265|a52|mpeg2|dvdread|dvdnav|mjpegutils|mpeg2encpp|mplex2|sidplay|cdio|faad|slang|gpm|readline|dca|lrdf|zvbi|neon|fftw3|rubberband|xvidcore|vidstab|jbig|tiff|ayatana-indicator3)[.-]}"
 _gpl_hits="$(find "$APPDIR" \( -type f -o -type l \) -name 'lib*.so*' -printf '%f\n' 2>/dev/null | grep -E "$GST_GPL_LIB_ERE" | sort -u || true)"
 if [ -n "$_gpl_hits" ]; then
   echo "FATAL: GPL-licensed libraries are in the AppDir (incompatible with the Elastic License 2.0):" >&2
