@@ -148,8 +148,16 @@ run_tower_git_sync() {
 }
 
 run_vm_git_sync() {
+  local rc=0
   ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_CALL' git-sync:run '{\"installSlug\":\"$VM_GIT_SYNC_SLUG\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'"
+    "'$VM_CALL' git-sync:run '{\"installSlug\":\"$VM_GIT_SYNC_SLUG\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
+    || rc=$?
+  # mcp-call (forwarded by vmcall.sh and ssh) exits 5 when git-sync:run
+  # ANSWERED ok:false (EI-24654733539966460). Same rule as the tower side: the
+  # answer is on stdout for require_git_sync_fired to judge, so only a transport
+  # failure may abort under set -e.
+  [ "$rc" -ne 5 ] || rc=0
+  return "$rc"
 }
 
 # Fails the run when a recorded git-sync:run result did not fire (a refusal or
@@ -241,8 +249,13 @@ phase_a_host_substrate_readiness() {
 
 require_phase_a_two_host_substrate_ready() {
   local vm_raw tower_raw vm_evidence tower_evidence
-  if ! vm_raw="$(ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_CALL' dev:dogfood_substrate_status '$PHASE_A_VM_STATUS_ARGS' --client hive-git-phase-a-readiness --workspace papercusp-workspace --harness '$VM_GIT_SYNC_SLUG'")"; then
+  # Exit 5 is mcp-call's "the tool answered ok:false", forwarded by vmcall.sh
+  # (EI-24654733539966460): the VM operator was reached, and the readiness gate
+  # below judges the answer.
+  local vm_rc=0
+  vm_raw="$(ssh "${SSH_OPTS[@]}" "$VM" \
+    "'$VM_CALL' dev:dogfood_substrate_status '$PHASE_A_VM_STATUS_ARGS' --client hive-git-phase-a-readiness --workspace papercusp-workspace --harness '$VM_GIT_SYNC_SLUG'")" || vm_rc=$?
+  if [ "$vm_rc" -ne 0 ] && [ "$vm_rc" -ne 5 ]; then
     fail 'phase A VM substrate readiness probe could not reach the VM operator'
   fi
   if ! vm_evidence="$(phase_a_host_substrate_readiness vm "$VM_GIT_SYNC_SLUG" "$vm_raw")"; then
@@ -525,6 +538,7 @@ phase_a_storage_join() {
 
   require_phase_a_two_host_substrate_ready >"$phase_dir/two-host-substrate-readiness.json"
 
+  # single-read: the tower baseline, taken before the quarantine and the bootstrap — nothing is in flight yet
   "$TSX" "$PRODUCER" phase-a-observe tower present "$TOWER_REPO" \
     "$tower_device" "$vm_device" >"$phase_dir/tower-before.json"
 
@@ -533,6 +547,7 @@ phase_a_storage_join() {
   # and two separate ssh + tsx launches left a ~25s window it won on P-505
   # run 12 (WI-10003632). The producer renames, then observes absence
   # microseconds later, and emits both records; split them here.
+  # single-read: absence is read in the SAME process as the local rename — waiting would hand the store back to the bootstrap tick
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-a-quarantine-observe '$VM_REPO' '$run_id' '$vm_device' '$tower_device'" \
     >"$phase_dir/quarantine-observe.json"
@@ -646,8 +661,10 @@ phase_b_ref_announce() {
   started_at="$(now_iso)"
 
   forward_started="$(now_iso)"
+  # single-read: source baseline, taken before the tower-to-vm commit exists
   "$TSX" "$PRODUCER" phase-b-observe tower tower-to-vm absent "$TOWER_REPO" \
     "$tower_device" "$run_id" >"$forward_dir/source-before.json"
+  # single-read: destination baseline, taken before the tower-to-vm commit exists
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-observe vm tower-to-vm absent '$VM_REPO' '$tower_device' '$run_id'" \
     >"$forward_dir/destination-before.json"
@@ -705,9 +722,11 @@ phase_b_ref_announce() {
   forward_finished="$(now_iso)"
 
   reverse_started="$(now_iso)"
+  # single-read: source baseline, taken before the vm-to-tower commit exists
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-b-observe vm vm-to-tower absent '$VM_REPO' '$vm_device' '$run_id'" \
     >"$reverse_dir/source-before.json"
+  # single-read: destination baseline, taken before the vm-to-tower commit exists
   "$TSX" "$PRODUCER" phase-b-observe tower vm-to-tower absent "$TOWER_REPO" \
     "$vm_device" "$run_id" >"$reverse_dir/destination-before.json"
   ssh "${SSH_OPTS[@]}" "$VM" \
@@ -1029,6 +1048,7 @@ phase_d_worktree_materialization() {
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-dirty '$run_id'" \
     >"$dirty_dir/dirty-mutation.json"
   PHASE_D_VM_DIRTY_RUN="$run_id"
+  # single-read: baseline after the VM's own synchronous dirty write, before the tower commit — nothing cross-host is in flight
   ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-d-observe vm dirty-before '$tower_device' '$run_id'" \
     >"$dirty_dir/before-observation.json"
@@ -1239,6 +1259,7 @@ phase_e_github_bridge() {
   "$TSX" "$PRODUCER" phase-e-watchdog 2 "$run_id" \
     >"$phase_dir/watchdog-2.json"
 
+  # single-read: baseline taken before the divergence mutation exists
   "$TSX" "$PRODUCER" phase-e-observe tower divergence-before "$tower_device" "$run_id" \
     >"$phase_dir/divergence-before.json"
   "$TSX" "$PRODUCER" phase-e-diverge "$run_id" \
@@ -1577,9 +1598,11 @@ phase_h_serving_identity() {
   PHASE_H_FROZEN=1
   frozen_at="$(date +%s%3N)"
   sleep "$PHASE_H_FREEZE_SEC"
+  # single-read: the owner is SIGSTOPped; this records the frozen state after the fixed hold — nothing may move, so nothing converges
   phase_h_observe_vm omitted "$phase_dir/vm-omitted.json" \
     || fail 'phase H VM observation failed at step omitted'
   phase_h_attempt omitted "$phase_dir/vm-pre.json" "$phase_dir/attempt-omitted.json"
+  # single-read: negative control — the refused attempt must leave the tower unchanged, so one read after it is the evidence
   phase_h_observe_tower omitted "$phase_dir/tower-omitted.json" \
     || fail 'phase H tower observation failed at step omitted'
   thawed_at="$(date +%s%3N)"
@@ -1794,6 +1817,7 @@ phase_j_apply_outage_replay() {
   local started_at finished_at feature_a log_key held_pos w
   mkdir -m 700 "$phase_dir"
   started_at="$(now_iso)"
+  # single-read: baseline taken before the outage fault and the tower writes
   "$TSX" "$PRODUCER" phase-j-observe tower baseline "$run_id" >"$phase_dir/tower-baseline.json" \
     || fail 'phase J tower baseline observation failed'
   phase_j_producer_vm phase-j-observe vm baseline "$run_id" >"$phase_dir/vm-baseline.json" \
@@ -1819,6 +1843,7 @@ phase_j_apply_outage_replay() {
     drill_fixture_register "$phase_dir/tower-create-$w.json" \
       || fail "phase J tower create for write $w returned no work-item id; see $phase_dir/tower-create-$w.json"
   done
+  # single-read: the tower's own rows, committed synchronously by the creates above (ptool_result_ok) — 'authored' has no lag predicate
   "$TSX" "$PRODUCER" phase-j-observe tower authored "$run_id" >"$phase_dir/tower-authored.json" \
     || fail 'phase J tower authored observation failed'
   feature_a="$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).writes?.A?.row?.featureId ?? ""' "$phase_dir/tower-authored.json")"
