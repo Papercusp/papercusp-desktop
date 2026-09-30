@@ -46,7 +46,7 @@
 # (.env* .bashrc .gitconfig .npmrc .mcp.json*), which git happens to TRACK here,
 # so "tracked" was never a safety signal either.
 SOURCE_TREE_ALLOWLIST="package.json package-lock.json tsconfig.base.json .nvmrc
-tsconfig.declarations.json vitest.config.ts vitest.config.test.ts
+tsconfig.declarations.json vitest.config.ts
 eslint.config.mjs knip.json bunfig.toml .gitignore
 CLAUDE.md AGENTS.md BORROWABLE.md
 node_modules apps libs packages
