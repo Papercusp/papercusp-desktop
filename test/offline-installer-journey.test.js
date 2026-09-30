@@ -198,9 +198,23 @@ case "$*" in *127.0.0.1*) exec /usr/bin/curl "$@" ;; esac
 [ -f "$FAKE_STATE/offline" ] && exit 7
 exit 0
 `);
-  // mcp-call stand-in: python syntax, run by the installed "node".
+  // journalctl: the server's user journal is FAKE_STATE/journal (absent => empty).
+  exe(join(stubs, 'journalctl'), `#!/usr/bin/env bash
+echo "journalctl $*" >> "$FAKE_STATE/calls.log"
+[ -f "$FAKE_STATE/journal" ] && cat "$FAKE_STATE/journal"
+exit 0
+`);
+  // mcp-call stand-in: python syntax, run by the installed "node". Shaped like the
+  // real 0.0.25 pot:list ({count, hives}); FAKE_POT_AFTER=N lists the pot only from
+  // read N+1 on — the offline self-admit lands after the first-boot join attempt.
   const mcp = join(root, 'mcp-call.py.mjs');
-  writeFileSync(mcp, `import json, os\nprint(json.dumps({'pots': [{'slug': os.environ.get('FAKE_POT_SLUG', 'papercusp')}]}))\n`);
+  writeFileSync(mcp, `import json, os
+cnt = os.path.join(os.environ['FAKE_STATE'], 'potlist.count')
+n = (int(open(cnt).read()) if os.path.exists(cnt) else 0) + 1
+open(cnt, 'w').write(str(n))
+hives = [{'slug': os.environ.get('FAKE_POT_SLUG', 'papercusp')}] if n > int(os.environ.get('FAKE_POT_AFTER', '0')) else []
+print(json.dumps({'ok': True, 'count': len(hives), 'hives': hives}))
+`);
 
   const ledger = join(root, 'ledger.json');
   writeFileSync(ledger, JSON.stringify([
@@ -233,7 +247,7 @@ function run(fx, { args = [], env = {}, ledger = true, joinSha = sha(fx.server),
     timeout: 120000,
     env: {
       ...process.env,
-      PC_SSH: fx.ssh, PC_SCP: fx.scp, PCOIJ_TARGET_ROOT: fx.target, PCOIJ_HEALTH_POLL: '0.3',
+      PC_SSH: fx.ssh, PC_SCP: fx.scp, PCOIJ_TARGET_ROOT: fx.target, PCOIJ_HEALTH_POLL: '0.3', PCOIJ_RESTORE_POLL: '0.1',
       FAKE_ROOT: fx.target, FAKE_HOME: fx.home, FAKE_STATE: fx.state, FAKE_STUBS: fx.stubs,
       FAKE_BAKED_BUILD_SHA: BAKED_SHA,
       ...env,
@@ -437,10 +451,50 @@ test('no health identity (empty witness buildSha, no --expected-health-sha) refu
   assert.equal(r.calls, '', 'nothing ran on the target');
 });
 
-test('an absent seeded pot fails offline-restore', opts, () => {
-  const r = run(fixture(), { env: { FAKE_POT_SLUG: 'something-else' } });
+// The bootstrap lines a real 0.0.25 first boot writes to the server journal.
+const SEED_LINE = '[papercusp-hive] seed restore: restored=[corestore] deferred=[git]';
+const ADMIT_LINE = '[papercusp-hive] offline git seed still deferred — self-admitting DATA-only; git code back-fills via retry/online';
+
+test('an absent seeded pot fails offline-restore only after polling the whole window, naming the diagnostics', opts, () => {
+  const fx = fixture();
+  writeFileSync(join(fx.state, 'journal'), `boot\n${SEED_LINE}\n${ADMIT_LINE}\n`);
+  const r = run(fx, { args: ['--restore-timeout', '1'], env: { FAKE_POT_SLUG: 'something-else' } });
   assert.equal(r.status, 1);
-  assert.equal(r.legs['offline-restore'].status, 'fail');
+  const leg = r.legs['offline-restore'];
+  assert.equal(leg.status, 'fail');
+  assert.ok(Number(r.doc.restore.potListAttempts) > 1, `polled more than once, got ${r.doc.restore.potListAttempts}`);
+  assert.ok(Number(r.doc.restore.potListElapsedSec) >= 1, 'polled for the whole --restore-timeout window');
+  assert.match(leg.detail, /absent after \d+s \/ \d+ pot:list reads/);
+  assert.ok(leg.detail.includes("seed restore 'seed restore: restored=[corestore] deferred=[git]'"), leg.detail);
+});
+
+test('a pot the offline self-admit lists only after several reads PASSES — polled, never one read (D-088)', opts, () => {
+  const r = run(fixture(), { env: { FAKE_POT_AFTER: '3' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.legs['offline-restore'].status, 'pass');
+  assert.equal(r.doc.restore.potListAttempts, '4');
+  assert.equal(r.doc.restore.timeoutSec, '180');
+});
+
+test('bootstrap journal lines are recorded as diagnostics and never gate the leg', opts, () => {
+  const fx = fixture();
+  // Even a FAILED seed restore in the journal does not fail a leg whose pot is listed:
+  // the row is the pot:list observation; the journal only explains it.
+  writeFileSync(join(fx.state, 'journal'), `${SEED_LINE}\n[papercusp-hive] seed restore FAILED for corestore — cold-pathing\n`);
+  const r = run(fx);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.legs['offline-restore'].status, 'pass');
+  assert.equal(r.doc.restore.seedRestore, 'seed restore FAILED for corestore — cold-pathing');
+  assert.equal(r.doc.restore.bootstrapLast, 'seed restore FAILED for corestore — cold-pathing');
+  assert.equal(r.doc.restore.journalExit, '0');
+  assert.match(r.calls, /journalctl --user -u papercusp-server\.service/);
+});
+
+test('no journal lines are recorded as absent, not invented', opts, () => {
+  const r = run(fixture());
+  assert.equal(r.legs['offline-restore'].status, 'pass');
+  assert.equal(r.doc.restore.seedRestore, 'no seed-restore line in the server journal');
+  assert.equal(r.doc.restore.bootstrapLast, 'no [papercusp-hive] line in the server journal');
 });
 
 test('a target that already carries Papercusp voids preflight and installs nothing', opts, () => {

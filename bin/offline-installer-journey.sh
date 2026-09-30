@@ -57,8 +57,16 @@
 #   first-launch         Server started through its supported entry; /api/health
 #                        sha/version equal the candidate; the listening process's
 #                        executable is the installed bin/node, byte-identical.
-#   offline-restore      the seeded hive is present on the offline install
-#                        (pot:list via the installed node and mcp-call.mjs).
+#   offline-restore      the seeded pot ($EXPECT_POT) appears in pot:list on the
+#                        offline install (the installed node + mcp-call.mjs).
+#                        POLLED for up to --restore-timeout seconds (default 180)
+#                        after health, never one read (plan D-088: the offline
+#                        self-admit runs after the join attempt gives up, so a
+#                        read 1s after health measures nothing — run 7). The
+#                        bootstrap's '[papercusp-hive]' journal lines (pre-join
+#                        seed restore, offline self-admit) are recorded as
+#                        DIAGNOSTICS (restore.seedRestore / restore.bootstrapLast)
+#                        and never gate the leg.
 #   restart-reresolve    restart; a NEW pid serves, re-resolved to the same bytes.
 #   join-runtime-match   (plan D-083) this row needs no live peer join only when
 #                        the runtime artifact sha256 (the witness) is the one the
@@ -79,6 +87,7 @@
 #     [--expected-sha SHA] [--ssh-host H] [--ssh-port N] [--ssh-key K] \
 #     [--ssh-option K=V]... [--remote-dir DIR] [--offline enforce|verify] \
 #     [--expect-pot SLUG] [--mcp-call PATH] [--health-timeout SEC] \
+#     [--restore-timeout SEC] \
 #     [--install-timeout SEC] [--keep-offline] [--join-evidence PATH] \
 #     [--expected-health-sha SHA]
 #   --expected-health-sha is the /api/health identity: the release's baked
@@ -103,7 +112,8 @@
 #
 # Test hooks (never set in a real run): PC_SSH / PC_SCP replace ssh/scp,
 # PCOIJ_TARGET_ROOT prefixes every target install path, PCOIJ_HEALTH_POLL sets
-# the health poll interval (default 3s).
+# the health poll interval (default 3s), PCOIJ_RESTORE_POLL the pot:list poll
+# interval (default 5s).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -128,6 +138,7 @@ OFFLINE_MODE=""
 EXPECT_POT="papercusp"
 MCP_CALL="$REPO_ROOT/scripts/mcp-call.mjs"
 HEALTH_TIMEOUT=300
+RESTORE_TIMEOUT=180
 INSTALL_TIMEOUT=1800
 KEEP_OFFLINE=0
 JOIN_EVIDENCE=""
@@ -157,6 +168,7 @@ while [[ $# -gt 0 ]]; do
     --expect-pot) EXPECT_POT="${2:-}"; shift 2 ;;
     --mcp-call) MCP_CALL="${2:-}"; shift 2 ;;
     --health-timeout) HEALTH_TIMEOUT="${2:-}"; shift 2 ;;
+    --restore-timeout) RESTORE_TIMEOUT="${2:-}"; shift 2 ;;
     --install-timeout) INSTALL_TIMEOUT="${2:-}"; shift 2 ;;
     --keep-offline) KEEP_OFFLINE=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -178,7 +190,7 @@ esac
 [[ -n "$SSH_HOST" || -n "${PC_SSH:-}" ]] || die2 "--ssh-host is required"
 [[ -f "$MCP_CALL" ]] || die2 "--mcp-call not found: $MCP_CALL"
 [[ -z "$JOIN_EVIDENCE" || -f "$JOIN_EVIDENCE" ]] || die2 "--join-evidence not found: $JOIN_EVIDENCE"
-[[ "$HEALTH_TIMEOUT" =~ ^[0-9]+$ && "$INSTALL_TIMEOUT" =~ ^[0-9]+$ ]] || die2 "timeouts must be integers"
+[[ "$HEALTH_TIMEOUT" =~ ^[0-9]+$ && "$INSTALL_TIMEOUT" =~ ^[0-9]+$ && "$RESTORE_TIMEOUT" =~ ^[0-9]+$ ]] || die2 "timeouts must be integers"
 if [[ -z "$WITNESS" ]]; then
   [[ "$PLATFORM" == linux ]] || die2 "--witness is required on mac (the Server.app.tar.gz the Mac VM boots)"
   WITNESS="$SERVER_ARTIFACT"
@@ -252,6 +264,7 @@ for o in ${SSH_OPTIONS[@]+"${SSH_OPTIONS[@]}"}; do ssh_args+=(-o "$o"); scp_args
 remote_header() {
   printf 'PCOIJ_ROOT=%q\nREMOTE_DIR=%q\nPLATFORM=%q\n' "${PCOIJ_TARGET_ROOT:-}" "$REMOTE_DIR" "$PLATFORM"
   printf 'HEALTH_TIMEOUT=%q\nHEALTH_POLL=%q\nEXPECT_POT=%q\n' "$HEALTH_TIMEOUT" "${PCOIJ_HEALTH_POLL:-3}" "$EXPECT_POT"
+  printf 'RESTORE_TIMEOUT=%q\nRESTORE_POLL=%q\n' "$RESTORE_TIMEOUT" "${PCOIJ_RESTORE_POLL:-5}"
   printf '%s\n' "$RUNTIME_DIGEST_FN"
   cat <<'PATHS'
 if [ "$PLATFORM" = linux ]; then
@@ -576,11 +589,39 @@ fi
 wait_health launch
 SH
 read -r -d '' RESTORE <<'SH'
-port=$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$OPJSON" | head -1)
-PAPERCUSP_HONO_PORT="$port" "$SIDECAR/bin/node" "$REMOTE_DIR/mcp-call.mjs" pot:list '{}' > "$REMOTE_DIR/pot-list.out" 2>&1
-echo "PCOIJ potListExit=$?"
-if grep -Eq "\"slug\"[[:space:]]*:[[:space:]]*\"$EXPECT_POT\"" "$REMOTE_DIR/pot-list.out"; then echo "PCOIJ potPresent=yes"; else echo "PCOIJ potPresent=no"; fi
+# Plan D-088: the offline self-admit lands only after the first-boot join attempt
+# gives up, so ONE read right after health measures nothing (run 7 read at +1s).
+# Poll until the pot is listed or RESTORE_TIMEOUT elapses.
+start=$(date +%s); deadline=$(( start + RESTORE_TIMEOUT )); n=0; present=no; rc=""
+while :; do
+  n=$((n + 1))
+  port=$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$OPJSON" 2>/dev/null | head -1)
+  PAPERCUSP_HONO_PORT="$port" "$SIDECAR/bin/node" "$REMOTE_DIR/mcp-call.mjs" pot:list '{}' > "$REMOTE_DIR/pot-list.out" 2>&1
+  rc=$?
+  if [ "$rc" = 0 ] && grep -Eq "\"slug\"[[:space:]]*:[[:space:]]*\"$EXPECT_POT\"" "$REMOTE_DIR/pot-list.out"; then present=yes; break; fi
+  [ "$(date +%s)" -ge "$deadline" ] && break
+  sleep "$RESTORE_POLL"
+done
+echo "PCOIJ potListExit=$rc"; echo "PCOIJ potPresent=$present"
+echo "PCOIJ potListAttempts=$n"; echo "PCOIJ potListElapsedSec=$(( $(date +%s) - start ))"
 head -c 1500 "$REMOTE_DIR/pot-list.out" | tr '\n' ' ' | sed 's/^/PCOIJ-LOG /'; echo
+# DIAGNOSTICS only (never gate): the bootstrap's own '[papercusp-hive]' lines —
+# the pre-join seed restore outcome and the offline self-admit / join outcome.
+if [ "$PLATFORM" = linux ]; then
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  journalctl --user -u papercusp-server.service --no-pager -o cat > "$REMOTE_DIR/journal.out" 2> "$REMOTE_DIR/journal.err"
+  echo "PCOIJ journalExit=$?"
+  grep -a '\[papercusp-hive\]' "$REMOTE_DIR/journal.out" | head -40 | sed 's/^/PCOIJ-HIVE /'
+  # The evidence is built from TSV rows: a tab in a journal line must not split one.
+  seed=$(grep -a '\[papercusp-hive\] seed restore' "$REMOTE_DIR/journal.out" | tail -1 | sed 's/.*\[papercusp-hive\] //' | tr '\t' ' ')
+  last=$(grep -a '\[papercusp-hive\]' "$REMOTE_DIR/journal.out" | tail -1 | sed 's/.*\[papercusp-hive\] //' | tr '\t' ' ')
+  echo "PCOIJ seedRestore=${seed:-no seed-restore line in the server journal}"
+  echo "PCOIJ bootstrapLast=${last:-no [papercusp-hive] line in the server journal}"
+else
+  echo "PCOIJ journalExit=unavailable"
+  echo "PCOIJ seedRestore=unmeasured: no server journal on $PLATFORM"
+  echo "PCOIJ bootstrapLast=unmeasured: no server journal on $PLATFORM"
+fi
 SH
 read -r -d '' RESTART <<'SH'
 if [ "$PLATFORM" = linux ]; then
@@ -740,13 +781,18 @@ else
       REASON="not reached: first launch did not pass"; skip_rest offline-restore restart-reresolve
     else
       # ── Leg 9: the seeded hive restored while offline ──────────────────
-      rc=$(remote offline-restore "$RESTORE" 180); RS="$LOG_DIR/offline-restore.log"
-      ident restore potListExit "$(kv potListExit "$RS")"; ident restore expectPot "$EXPECT_POT"
+      rc=$(remote offline-restore "$RESTORE" $((RESTORE_TIMEOUT + 120))); RS="$LOG_DIR/offline-restore.log"
+      ident restore expectPot "$EXPECT_POT"; ident restore timeoutSec "$RESTORE_TIMEOUT"
+      for k in potListExit potListAttempts potListElapsedSec journalExit seedRestore bootstrapLast; do
+        ident restore "$k" "$(kv "$k" "$RS")"
+      done
+      polled="after $(kv potListElapsedSec "$RS")s / $(kv potListAttempts "$RS") pot:list reads"
+      diag="diagnostics: seed restore '$(kv seedRestore "$RS")'; bootstrap '$(kv bootstrapLast "$RS")'"
       if [[ "$(kv potPresent "$RS")" == yes && "$(kv potListExit "$RS")" == 0 ]]; then
-        if [[ "$OFFLINE_OK" == 1 ]]; then leg offline-restore pass "pot '$EXPECT_POT' present on the offline install" "$RS"
-        else leg offline-restore unmeasured "pot '$EXPECT_POT' present, but egress was not denied — not an offline restore" "$RS"; fi
+        if [[ "$OFFLINE_OK" == 1 ]]; then leg offline-restore pass "pot '$EXPECT_POT' listed on the offline install $polled" "$RS"
+        else leg offline-restore unmeasured "pot '$EXPECT_POT' listed $polled, but egress was not denied — not an offline restore" "$RS"; fi
       else
-        leg offline-restore fail "pot '$EXPECT_POT' absent (pot:list exit $(kv potListExit "$RS"))" "$RS"
+        leg offline-restore fail "pot '$EXPECT_POT' absent $polled (last pot:list exit $(kv potListExit "$RS")); $diag" "$RS"
       fi
       # ── Leg 10: restart, a new pid re-resolved to the same bytes ───────
       rc=$(remote restart "$HEALTH_FN"$'\n'"$RESTART" $((HEALTH_TIMEOUT + 120))); RR="$LOG_DIR/restart.log"
