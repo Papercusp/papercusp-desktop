@@ -124,8 +124,31 @@ OUT="$(mktemp "${TMPDIR:-/tmp}/vmcall.XXXXXX")" || {
   echo "MCP_RESULT_CAPTURE_FAILED" >&2
   exit 6
 }
-cleanup() { rm -f "$OUT"; }
+# WI-10004231: mcp-call.mjs stamps epoch-ms here the moment it hands the request to
+# fetch (PAPERCUSP_MCP_CALL_SENT_MARKER). On a timeout that stamp is the difference
+# between "the client never got its request out" and "the operator did not answer":
+# same-box run 8 timed out while the VM later dispatched the call in 15ms, and with
+# no send time the two readings were indistinguishable.
+SENT="$(mktemp "${TMPDIR:-/tmp}/vmcall-sent.XXXXXX")" || {
+  rm -f "$OUT"
+  echo "MCP_RESULT_CAPTURE_FAILED" >&2
+  exit 6
+}
+cleanup() { rm -f "$OUT" "$SENT"; }
 trap cleanup EXIT HUP INT TERM
+
+# Whole seconds from `date +%s`: this also runs on macOS VMs (bash 3.2, BSD date),
+# which have neither EPOCHREALTIME nor %N. A second is plenty against a 30s budget.
+timeout_attribution() {
+  local started_s="$1" sent_ms sent_s
+  sent_ms="$(head -c 32 "$SENT" 2>/dev/null | tr -dc '0-9')"
+  if [ -n "$sent_ms" ]; then
+    sent_s=$((sent_ms / 1000))
+    echo "request sent $((sent_s - started_s))s after start; the operator did not answer in the remaining time (server-side: compare the operator's tool_invocations row)"
+  else
+    echo "request never sent: the client did not reach its POST within the budget (client-side: node start or argument handling)"
+  fi
+}
 
 # `--json -` tells mcp-call.mjs to read the payload from stdin (fd 0), but the MCP
 # child below is BACKGROUNDED (`&`) so the deadline loop can bound it — and bash
@@ -140,7 +163,9 @@ trap cleanup EXIT HUP INT TERM
 exec 3<&0
 
 run_mcp_with_timeout() {
-  PAPERCUSP_HONO_PORT="$PORT" "$NODE" "$MCP" "$@" >"$OUT" <&3 &
+  local started_s
+  started_s="$(date +%s)"
+  PAPERCUSP_HONO_PORT="$PORT" PAPERCUSP_MCP_CALL_SENT_MARKER="$SENT" "$NODE" "$MCP" "$@" >"$OUT" <&3 &
   local child_pid=$!
   local deadline=$((SECONDS + MCP_TIMEOUT_SEC))
 
@@ -150,7 +175,7 @@ run_mcp_with_timeout() {
       # child into a false timeout. SIGKILL is the backstop for a child that
       # ignores TERM; either way, wait reaps it before the temp file is removed.
       if kill -0 "$child_pid" 2>/dev/null; then
-        echo "MCP_RESULT_TIMEOUT: MCP call did not complete within ${MCP_TIMEOUT_SEC}s; the selected operator listener may be alive but unresponsive" >&2
+        echo "MCP_RESULT_TIMEOUT: MCP call did not complete within ${MCP_TIMEOUT_SEC}s; $(timeout_attribution "$started_s")" >&2
         kill -TERM "$child_pid" 2>/dev/null || true
         sleep 0.1
         kill -KILL "$child_pid" 2>/dev/null || true
