@@ -164,7 +164,7 @@ echo "  build stamp: $BUILD_STAMP"
 [ -s "$OUT/serve.mjs" ] || { echo "FATAL: esbuild produced no serve.mjs" >&2; exit 1; }
 
 bundle_host_workers "$REPO_ROOT" "$OUT" || exit 1
-cp "$REPO_ROOT/packages/operator-core/lib/systemd-scope-env-runner.mjs" "$OUT/"
+bundle_host_runtime_siblings "$REPO_ROOT" "$OUT" || exit 1
 
 # Sidecar stamp file: lets you answer the question with a `cat` instead of
 # grepping a 61MB minified file, and the sha256 proves the far side's serve.mjs
@@ -235,7 +235,7 @@ printf 'harnessSuSha256=%s\n' "$HARNESS_SU_SHA256" >> "$OUT/BUILD-STAMP.txt"
 (
   cd "$OUT"
   manifest_tmp="PAYLOAD-MANIFEST.sha256.tmp.$$"
-  find serve.mjs "${HOST_WORKER_OUTPUTS[@]}" systemd-scope-env-runner.mjs BUILD-STAMP.txt db-sql sql prompts harness \
+  find serve.mjs "${HOST_WORKER_OUTPUTS[@]}" "${HOST_RUNTIME_SIBLING_OUTPUTS[@]}" BUILD-STAMP.txt db-sql sql prompts harness \
     node_modules/@papercusp/embedded-postgres-server/package.json \
     node_modules/@papercusp/embedded-postgres-server/src \
     node_modules/@papercusp/embedded-postgres-server/bin \
@@ -264,7 +264,7 @@ if [ "$PUSH" = "1" ]; then
   # sibling directories atomically, and restores the backup if health fails.
   ssh "$VM" "mkdir -p $REMOTE_STAGE_Q/db-sql $REMOTE_STAGE_Q/sql $REMOTE_STAGE_Q/prompts $REMOTE_STAGE_Q/harness $REMOTE_STAGE_Q/node_modules $REMOTE_LAUNCHD_DIR_Q $REMOTE_LAUNCHER_DIR_Q"
   rsync -a "$OUT/serve.mjs" "$VM:$REMOTE_STAGE/serve.mjs"
-  for runtime_sibling in "${HOST_WORKER_OUTPUTS[@]}" systemd-scope-env-runner.mjs; do
+  for runtime_sibling in "${HOST_WORKER_OUTPUTS[@]}" "${HOST_RUNTIME_SIBLING_OUTPUTS[@]}"; do
     rsync -a "$OUT/$runtime_sibling" "$VM:$REMOTE_STAGE/$runtime_sibling"
   done
   rsync -a "$OUT/BUILD-STAMP.txt" "$VM:$REMOTE_STAGE/BUILD-STAMP.txt"
