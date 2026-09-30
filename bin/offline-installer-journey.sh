@@ -45,9 +45,13 @@
 #   offline              egress measured before (positive control) and denied
 #                        after; a target that can still reach the internet voids.
 #   install              real installers, exit status recorded; on linux both
-#                        .debs install with --no-download, the dependency
-#                        closure is simulated first and every package apt would
-#                        still have to DOWNLOAD is named (plus apt's own E: line).
+#                        .debs install through apt with egress DENIED, the
+#                        dependency closure is simulated first and every package
+#                        apt would still have to DOWNLOAD is named (plus apt's own
+#                        E: line), and any remote Get/Err/Ign apt prints fails
+#                        the leg (install.remoteFetches must be 0). Not
+#                        --no-download: apt 2.8 cannot install a local .deb with
+#                        it ("Pathname to install is not absolute").
 #   installed-bytes      runtime digest of the installed tree.
 #   witness-compat       installed digest == witness digest, field by field.
 #   first-launch         Server started through its supported entry; /api/health
@@ -474,8 +478,14 @@ sudo -n apt-get -s install "$SRV" "$GUI" > "$REMOTE_DIR/apt-sim.log" 2>&1; echo 
 need=$(sed -n 's/^Inst \([^ ]*\).*/\1/p' "$REMOTE_DIR/apt-sim.log" | grep -v '^papercusp-' | while read -r p; do
   ls "$PCOIJ_ROOT"/var/cache/apt/archives/"${p}"_*.deb >/dev/null 2>&1 || printf '%s ' "$p"; done)
 echo "PCOIJ needsDownload=$need"
-sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-download "$SRV" "$GUI" > "$REMOTE_DIR/apt-install.log" 2>&1
+# NOT --no-download: apt "fetches" a local .deb argument into its archive through
+# its own acquire step, which --no-download disables, so apt 2.8 aborts with
+# "Internal Error, Pathname to install is not absolute" (measured, 0.0.25 VM run 4).
+# "Fetch nothing" is instead ENFORCED by the egress firewall above and PROVEN
+# below: every remote Get/Err/Ign line apt prints is counted and must be zero.
+sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes "$SRV" "$GUI" > "$REMOTE_DIR/apt-install.log" 2>&1
 echo "PCOIJ installExit=$?"
+echo "PCOIJ remoteFetches=$(grep -cE '^(Get|Err|Ign):[0-9]+ [a-z0-9+.-]+://' "$REMOTE_DIR/apt-install.log")"
 echo "PCOIJ aptError=$(grep -E '^E:' "$REMOTE_DIR/apt-install.log" | head -2 | tr '\n' ' ')"
 tail -n 20 "$REMOTE_DIR/apt-install.log" | sed 's/^/PCOIJ-LOG /'
 st=$(dpkg-query -W -f='${Package}=${db:Status-Abbrev} ' papercusp-server papercusp-gui 2>/dev/null)
@@ -643,15 +653,19 @@ else
     rc=$(remote install "$body" "$INSTALL_TIMEOUT"); IN="$LOG_DIR/install.log"
     ident install needsDownload "$(kv needsDownload "$IN")"
     ident install installExit "$(kv installExit "$IN")"
+    ident install remoteFetches "$(kv remoteFetches "$IN")"
     ident install sshExit "$rc"
     if [[ "$rc" == 124 ]]; then leg install fail "installer exceeded ${INSTALL_TIMEOUT}s" "$IN"; INSTALL_OK=0
     elif [[ "$(kv installExit "$IN")" != 0 ]]; then
       apt_err=""; [[ "$PLATFORM" == linux ]] && apt_err="; apt: $(kv aptError "$IN")"
       leg install fail "installer exit $(kv installExit "$IN"); offline-unsatisfied deps: $(kv needsDownload "$IN")$apt_err" "$IN"; INSTALL_OK=0
+    elif [[ "$PLATFORM" == linux && "$(kv remoteFetches "$IN")" != 0 ]]; then
+      leg install fail "the offline install fetched $(kv remoteFetches "$IN") remote archive(s) — not an offline install" "$IN"; INSTALL_OK=0
     elif [[ "$PLATFORM" == linux && "$(kv dpkgStatus "$IN")" != *papercusp-server=ii* ]] || [[ "$PLATFORM" == linux && "$(kv dpkgStatus "$IN")" != *papercusp-gui=ii* ]]; then
       leg install fail "packages not fully configured: $(kv dpkgStatus "$IN")" "$IN"; INSTALL_OK=0
     else
-      leg install pass "GUI+Server installers exit 0 ($(kv dpkgStatus "$IN"))" "$IN"; INSTALL_OK=1
+      fetched=""; [[ "$PLATFORM" == linux ]] && fetched="; 0 remote fetches"
+      leg install pass "GUI+Server installers exit 0 ($(kv dpkgStatus "$IN"))$fetched" "$IN"; INSTALL_OK=1
     fi
   else
     leg install fail "artifact transfer failed — see $LOG_DIR/push.log" "$LOG_DIR/push.log"; INSTALL_OK=0

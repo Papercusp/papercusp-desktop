@@ -150,6 +150,17 @@ if [ "$sim" = 1 ]; then
   [ -n "$missing" ] && echo "Inst $missing (2.44 Ubuntu:24.04/noble [amd64])"
   exit 0
 fi
+# apt 2.8 copies a local .deb argument in through its acquire step; --no-download
+# disables that, so a real install of local .debs with it always aborts (VM run 4).
+if [ "$nodl" = 1 ] && [ "\${#debs[@]}" -gt 0 ]; then echo "E: Internal Error, Pathname to install is not absolute '$(basename "\${debs[0]}")'"; exit 100; fi
+n=0; for d in "\${debs[@]}"; do n=$((n+1)); echo "Get:$n $d $(dpkg-deb -f "$d" Package) amd64 ${VERSION} [1 B]"; done
+if [ -n "$missing" ]; then
+  if [ -f "$FAKE_STATE/offline" ]; then
+    echo "Err:3 http://archive.ubuntu.com/ubuntu noble/main amd64 $missing amd64 2.44"
+    echo "E: Failed to fetch http://archive.ubuntu.com/ubuntu/pool/main/$missing.deb  Could not connect to archive.ubuntu.com:80"; exit 100
+  fi
+  echo "Get:3 http://archive.ubuntu.com/ubuntu noble/main amd64 $missing amd64 2.44 [1 B]"
+fi
 for d in "\${debs[@]}"; do
   dpkg-deb -x "$d" "$FAKE_ROOT" || exit 1
   printf '%s=ii\\n' "$(dpkg-deb -f "$d" Package)" >> "$FAKE_STATE/dpkg-status"
@@ -273,12 +284,16 @@ test('happy path: every leg passes, installer identity is recorded apart from th
   assert.match(r.calls, /PCOIJ_OFFLINE -p tcp --sport 22 -j RETURN[\s\S]*PCOIJ_OFFLINE -j REJECT/);
   assert.match(r.doc.offline.egressBefore, /^reachable:/);
   assert.equal(existsSync(join(fx.state, 'offline')), false, 'egress firewall removed on exit');
-  assert.match(r.calls, /apt-get install --yes --no-download/);
   // Plan ruling (amends D-083 item 1): the .debs' declared Depends + Recommends are
   // provisioned ONLINE, verbatim from their control fields, BEFORE egress is denied;
-  // the Papercusp packages install afterwards with --no-download. Only that step may
-  // touch the network (apt-get update + satisfy), never the install.
-  assert.match(r.calls, /apt-get update[\s\S]*apt-get satisfy[\s\S]*PCOIJ_OFFLINE -j REJECT[\s\S]*apt-get install --yes --no-download/);
+  // the Papercusp packages install afterwards fetching nothing. Only the
+  // provisioning step may touch the network (apt-get update + satisfy).
+  // The install cannot use --no-download (apt 2.8 aborts on local .debs with it);
+  // egress denial enforces "fetch nothing" and remoteFetches=0 proves it.
+  assert.match(r.calls, /apt-get update[\s\S]*apt-get satisfy[\s\S]*PCOIJ_OFFLINE -j REJECT[\s\S]*apt-get install --yes \S+server\.deb \S+gui\.deb/);
+  assert.doesNotMatch(r.calls, /apt-get install --yes --no-download/);
+  assert.equal(r.doc.install.remoteFetches, '0');
+  assert.match(r.legs.install.detail, /0 remote fetches/);
   const satisfy = r.calls.split('\n').find((l) => l.startsWith('apt-get satisfy'));
   assert.match(satisfy, /libwebkit2gtk-4\.1-0 \(>= 2\.40\) \| libwebkit2gtk-4\.1-0-alt/);
   assert.match(satisfy, /libc6 \(>= 2\.35\)/);
@@ -351,11 +366,23 @@ test('a dependency the install would still have to download fails install and na
   assert.equal(r.legs['os-prerequisites'].status, 'pass');
   assert.equal(r.legs.install.status, 'fail');
   assert.match(r.legs.install.detail, /offline-unsatisfied deps: libgstreamer-gl1\.0-0/);
-  assert.match(r.legs.install.detail, /apt: E: Unable to fetch some archives/);
+  assert.match(r.legs.install.detail, /apt: E: Failed to fetch http:\/\/archive\.ubuntu\.com/);
   assert.match(r.doc.install.needsDownload, /libgstreamer-gl1\.0-0/);
   for (const leg of ['installed-bytes', 'witness-compat', 'first-launch', 'offline-restore', 'restart-reresolve']) {
     assert.equal(r.legs[leg].status, 'unmeasured', leg);
   }
+});
+
+test('an install that fetched anything remote fails install even when apt exits 0', opts, () => {
+  // Egress survives (firewall ineffective), so apt quietly downloads the missing
+  // package: exit 0, both packages ii — and still not an offline install.
+  const r = run(fixture(), { env: { FAKE_FIREWALL_INEFFECTIVE: '1', FAKE_APT_MISSING: 'libgstreamer-gl1.0-0' } });
+  assert.equal(r.status, 1, r.stderr);
+  assert.equal(r.legs.offline.status, 'void');
+  assert.equal(r.doc.install.installExit, '0');
+  assert.equal(r.doc.install.remoteFetches, '1');
+  assert.equal(r.legs.install.status, 'fail');
+  assert.match(r.legs.install.detail, /fetched 1 remote archive/);
 });
 
 test('a declared dependency the distro cannot satisfy FAILS the row — never a skip', opts, () => {
