@@ -140,6 +140,10 @@ run_tower_git_sync() {
     out="$(tower_git_sync_call "$retry_url")" || rc=$?
   fi
   printf '%s\n' "$out"
+  # ptool exits 5 when git-sync:run ANSWERED ok:false (EI-24654733539966460). The
+  # answer is on stdout and every evidence-bearing caller judges it with
+  # require_git_sync_fired, so only a transport failure may abort under set -e.
+  [ "$rc" -ne 5 ] || rc=0
   return "$rc"
 }
 
@@ -246,9 +250,13 @@ require_phase_a_two_host_substrate_ready() {
     fail 'phase A VM substrate readiness gate failed: exact topic has no live, recent remote content peer'
   fi
 
-  if ! tower_raw="$(printf '%s\n' "$PHASE_A_TOWER_STATUS_ARGS" \
+  # Exit 5 is ptool's "the tool answered ok:false" (EI-24654733539966460): the
+  # operator was reached, and the readiness gate below judges the answer.
+  local tower_rc=0
+  tower_raw="$(printf '%s\n' "$PHASE_A_TOWER_STATUS_ARGS" \
     | "$TOWER_CALL" dev:dogfood_substrate_status --json - \
-      --workspace=papercusp-workspace --harness="$TOWER_GIT_SYNC_SLUG")"; then
+      --workspace=papercusp-workspace --harness="$TOWER_GIT_SYNC_SLUG")" || tower_rc=$?
+  if [ "$tower_rc" -ne 0 ] && [ "$tower_rc" -ne 5 ]; then
     fail 'phase A tower substrate readiness probe could not reach the tower operator'
   fi
   if ! tower_evidence="$(phase_a_host_substrate_readiness tower "$TOWER_GIT_SYNC_SLUG" "$tower_raw")"; then
@@ -287,9 +295,10 @@ fail() {
   exit 1
 }
 
-# ptool exits 0 on an ok:false result (EI-24654733539966460), so its exit status
-# cannot tell a refused write from a landed one. Judge the saved result instead:
-# the envelope and every per-item result must be ok.
+# ptool before EI-24654733539966460 exits 0 on an ok:false result, and the tower
+# runs whatever ptool its release checkout carries, so the exit status alone cannot
+# tell a refused write from a landed one. Judge the saved result as well: the
+# envelope and every per-item result must be ok.
 ptool_result_ok() {
   node -e 'const o = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); process.exit(o.ok === true && Array.isArray(o.results) && o.results.length > 0 && o.results.every((r) => r.ok === true) ? 0 : 1)' "$1"
 }
@@ -1802,8 +1811,9 @@ phase_j_apply_outage_replay() {
       | "$TOWER_CALL" work_items:create --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
         >"$phase_dir/tower-create-$w.json" \
       || fail "phase J tower could not author write $w; see $phase_dir/tower-create-$w.json"
-    # ptool exits 0 on an ok:false result: a refused create must fail here, not after the
-    # whole replay bound (WI-10003961 attempt 2 waited 900s for a write B that never existed).
+    # A refused create must fail here, not after the whole replay bound (WI-10003961 attempt 2
+    # waited 900s for a write B that never existed). Current ptool exits 5 on ok:false, but the
+    # tower may run an older one that exits 0 — so judge the saved result too.
     ptool_result_ok "$phase_dir/tower-create-$w.json" \
       || fail "phase J tower refused write $w; see $phase_dir/tower-create-$w.json"
     drill_fixture_register "$phase_dir/tower-create-$w.json" \

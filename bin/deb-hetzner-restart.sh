@@ -257,7 +257,9 @@ printf '{}\n' | "$node_bin" "$ptool_cli" dev:dogfood_substrate_status \
 PCUSP
   } | rig_pcusp_run "$inst" 2>/dev/null)"
   rc=$?
-  if [ "$rc" != 0 ] || [ -z "$raw" ]; then
+  # Exit 5 = ptool reached the operator and the tool answered ok:false
+  # (EI-24654733539966460); that answer is still the snapshot to project.
+  if { [ "$rc" != 0 ] && [ "$rc" != 5 ]; } || [ -z "$raw" ]; then
     echo '{"status":"unavailable","reason":"packaged-ptool-call-failed"}'
     return 0
   fi
