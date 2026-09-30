@@ -1771,11 +1771,17 @@ phase_j_apply_outage_replay() {
       | "$TOWER_CALL" work_items:create --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" \
         >"$phase_dir/tower-create-$w.json" \
       || fail "phase J tower could not author write $w; see $phase_dir/tower-create-$w.json"
+    # ptool exits 0 on an ok:false result: a refused create must fail here, not after the
+    # whole replay bound (WI-10003961 attempt 2 waited 900s for a write B that never existed).
+    node -e 'const o = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); process.exit(o.ok === true && Array.isArray(o.results) && o.results.length > 0 && o.results.every((r) => r.ok === true) ? 0 : 1)' "$phase_dir/tower-create-$w.json" \
+      || fail "phase J tower refused write $w; see $phase_dir/tower-create-$w.json"
   done
   "$TSX" "$PRODUCER" phase-j-observe tower authored "$run_id" >"$phase_dir/tower-authored.json" \
     || fail 'phase J tower authored observation failed'
   feature_a="$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).writes?.A?.row?.featureId ?? ""' "$phase_dir/tower-authored.json")"
   [ -n "$feature_a" ] || fail 'phase J tower has no row for write A'
+  feature_b="$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).writes?.B?.row?.featureId ?? ""' "$phase_dir/tower-authored.json")"
+  [ -n "$feature_b" ] || fail 'phase J tower has no row for write B'
 
   # held: the durable failure names A, past the retired budget and the minimum hold.
   phase_j_await_vm held "$phase_dir/vm-held" "$feature_a"
