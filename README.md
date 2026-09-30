@@ -86,7 +86,16 @@ host, the UI bundle, the embedded Postgres with pgvector, Node, and the runnable
 Installer builds additionally need **kopia** on the build host — the sidecar vendors it for the
 snapshot/backup subsystem. It is not in the Ubuntu/Debian archive: install it from kopia's apt
 repository or release page (<https://kopia.io/docs/installation/>), or `brew install kopia` on
-macOS. The sidecar build checks its host tools up front and names every missing one. A
+macOS. They also need the two bundled embedding models (harrier-oss and embeddinggemma, about
+3.4GB), which `npm ci` does not download. Fetch the exact revisions pinned in
+`src-tauri/distribution-contract.json` (each file is sha256-verified) and point the build at them:
+
+```bash
+bin/lib/transformers-models.sh fetch ~/.cache/papercusp-models
+export PAPERCUSP_TRANSFORMERS_MODEL_CACHE=~/.cache/papercusp-models
+```
+
+The sidecar build checks its host tools and models up front and names every missing one. A
 release cut also needs a signing key (`bin/setup-signing-key.sh`) and the release-identity inputs
 the build's audit checks against; `SHIPPING.md` and `RELEASE-RUNBOOK.md` describe the full flow.
 Bundle configuration lives in `src-tauri/tauri.conf.json`.

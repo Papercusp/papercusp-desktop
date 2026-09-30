@@ -451,6 +451,18 @@ if [[ "$CROSS_BUILD" != "1" && "$TARGET_OS" == "linux" ]]; then
     _missing_host_tools+=("ALSA development headers, alsa.pc (chat-dock pui audio — apt install libasound2-dev / dnf install alsa-lib-devel)")
   fi
 fi
+# Embedding models: the sidecar's fail-closed models guard (WI-5638 / D-178) needs the
+# two contract-pinned transformers models, which `npm ci` never downloads. A host tree
+# carries them only because live use filled the package's `.cache`; a fresh clone
+# (WI-10003960 R-15 build6) died on the guard ~8 minutes in. Refuse here instead, and
+# name the one command that produces them.
+_tf_pkg="$REPO_ROOT/node_modules/@huggingface/transformers"
+if [[ -z "${PAPERCUSP_TRANSFORMERS_MODEL_CACHE:-}" ]] \
+   && ! papercusp_transformers_models_present "$_tf_pkg/.cache" \
+   && ! papercusp_transformers_models_present "$_tf_pkg/models"; then
+  _missing_host_tools+=("embedding models (harrier-oss + embeddinggemma, ~3.4GB) — run: bin/lib/transformers-models.sh fetch ~/.cache/papercusp-models && export PAPERCUSP_TRANSFORMERS_MODEL_CACHE=~/.cache/papercusp-models")
+fi
+unset _tf_pkg
 if [[ "$CROSS_BUILD" == "1" && "$TARGET_OS" == "darwin" ]]; then
   for _t in file curl python3 rcodesign; do
     command -v "$_t" >/dev/null 2>&1 || _missing_host_tools+=("$_t (darwin cross-build vendoring/signing)")

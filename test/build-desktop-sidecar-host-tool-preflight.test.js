@@ -122,6 +122,46 @@ test('a darwin cross-build does not demand host ALSA headers', () => {
   assert.doesNotMatch(output, /ALSA development headers/);
 });
 
+// A REPO_ROOT that is the real tree minus node_modules: every earlier check still sees
+// real sources, but the transformers cache a fresh clone lacks is absent.
+function treeWithoutNodeModules() {
+  const fresh = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-no-models-'));
+  for (const name of fs.readdirSync(repoRoot)) {
+    if (name === 'node_modules') continue;
+    fs.symlinkSync(path.join(repoRoot, name), path.join(fresh, name));
+  }
+  return fresh;
+}
+
+test('a tree with no embedding models fails in the preflight and names the fetch command (build6)', () => {
+  // No PAPERCUSP_TRANSFORMERS_MODEL_CACHE either: the fresh-clone state.
+  const fresh = treeWithoutNodeModules();
+  try {
+    const r = runWithHidden([], { REPO_ROOT: fresh, PAPERCUSP_TRANSFORMERS_MODEL_CACHE: '' });
+    const output = `${r.stdout}${r.stderr}`;
+    assert.equal(r.status, 1, output);
+    assert.match(output, /- embedding models \(harrier-oss \+ embeddinggemma.*transformers-models\.sh fetch/);
+    assert.doesNotMatch(output, /relocated transformers models missing/,
+      'the late models guard must not be the first to notice');
+  } finally {
+    fs.rmSync(fresh, { recursive: true, force: true });
+  }
+});
+
+test('an explicit PAPERCUSP_TRANSFORMERS_MODEL_CACHE satisfies the models preflight (control)', () => {
+  const fresh = treeWithoutNodeModules();
+  try {
+    // kopia hidden so the run still stops in the preflight instead of building.
+    const r = runWithHidden(['kopia'], { REPO_ROOT: fresh, PAPERCUSP_TRANSFORMERS_MODEL_CACHE: fresh });
+    const output = `${r.stdout}${r.stderr}`;
+    assert.equal(r.status, 1, output);
+    assert.match(output, /- kopia \(snapshot subsystem/);
+    assert.doesNotMatch(output, /- embedding models/);
+  } finally {
+    fs.rmSync(fresh, { recursive: true, force: true });
+  }
+});
+
 test('the preflight is placed before the first toolchain step in the script', () => {
   const src = fs.readFileSync(script, 'utf8');
   const preflight = src.indexOf('build host is missing required tool(s)');
