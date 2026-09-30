@@ -497,7 +497,31 @@ test('evidence never carries the operator home path (identity-leak lint would le
   const text = readFileSync(join(fx.root, 'evidence.json'), 'utf8');
   assert.ok(!text.includes(`${fx.root}/`), 'no absolute home path survives in the evidence');
   assert.match(r.doc.command[0], /~\//, 'home-relative paths are written as ~/');
-  assert.equal(r.doc.redactions.length, 1);
+  assert.equal(r.doc.redactions.length, 2);
+});
+
+// WI-10003962 runs 3-8 were quarantined by git-sync's identity-leak lint even
+// after the '/home/<user>/' redaction: the --ledger-json path sat under the
+// client's DASH-ENCODED scratch dir ('/tmp/pcv/…/-home-<user>-…'), and the lint
+// matches the bare username literal. Every spelling must be redacted.
+test('evidence never carries the operator USERNAME in any spelling (dash-encoded scratch paths included)', opts, () => {
+  const fx = fixture();
+  const fakeUser = 'pcoij-leak-probe';
+  const encoded = join(fx.root, `-home-${fakeUser}-papercupai-workspace-papercusp`);
+  mkdirSync(encoded, { recursive: true });
+  const ledger = join(encoded, 'ledger.json');
+  copyFileSync(fx.ledger, ledger);
+  fx.ledger = ledger;
+  const r = run(fx, { env: { HOME: fx.root, USER: fakeUser, LOGNAME: fakeUser } });
+  assert.equal(r.status, 0, r.stderr);
+  const text = readFileSync(join(fx.root, 'evidence.json'), 'utf8');
+  // Positive control: the ledger path really did reach the evidence, so an absence below is a redaction.
+  assert.ok(text.includes('-home-<user>-papercupai-workspace-papercusp'), 'the dash-encoded ledger path is recorded, redacted');
+  assert.ok(!text.includes(fakeUser), 'the env login never survives');
+  // The uid's passwd name is redacted even though HOME/USER were overridden (the fixture's
+  // TMPDIR may itself be a dash-encoded path under the REAL home).
+  const realUser = require('node:os').userInfo().username;
+  if (realUser.length >= 3) assert.ok(!text.includes(realUser), 'the real (passwd) username never survives');
 });
 
 test('no journal lines are recorded as absent, not invented', opts, () => {

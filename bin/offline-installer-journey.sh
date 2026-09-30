@@ -872,17 +872,35 @@ doc = {
     'runDir': run_dir,
     'scopeNote': 'No live peer join here (plan D-083): the Discovery/join row proves joining; this row proves the full installers lay down and serve, offline, the same runtime bytes that row joined with (join-runtime-match).',
 }
-# An absolute /home/<user>/ path trips git-sync's identity-leak content-lint, which
-# then SILENTLY leaves the evidence untracked (runs 3-8 of WI-10003962 never
-# committed). Redact the operator's home dir to '~' in every string, and say so.
+# git-sync's identity-leak content-lint matches the operator's USERNAME literal, and
+# then SILENTLY quarantines the evidence (runs 3-8 of WI-10003962 never committed).
+# The username reaches the evidence in more than one spelling: '/home/<user>/', and
+# the client's dash-encoded scratch dir '/tmp/pcv/…/-home-<user>-…' (a TMPDIR-rooted
+# --ledger-json path), which a '/home/<user>/' replace misses. So redact the home dir
+# to '~', then the username itself as a delimited token, from every source that can
+# name it (HOME's basename, the env login, and the uid's passwd entry, which no env
+# override can hide).
+import getpass, pwd, re
 home = os.path.expanduser('~').rstrip('/')
+users = {os.path.basename(home)}
+try: users.add(getpass.getuser())
+except Exception: pass
+try: users.add(pwd.getpwuid(os.getuid()).pw_name)
+except Exception: pass
+users = sorted((u for u in users if u and len(u) >= 3), key=len, reverse=True)
+user_re = re.compile(r'(?<![A-Za-z0-9_.])(?:' + '|'.join(map(re.escape, users)) + r')(?![A-Za-z0-9_.])') if users else None
+def redact_str(s):
+    if home and home != '/':
+        s = s.replace(home + '/', '~/').replace(home.replace('/', '-') + '-', '-~-')
+    return user_re.sub('<user>', s) if user_re else s
 def redact(v):
-    if isinstance(v, str): return v.replace(home + '/', '~/') if home and home != '/' else v
+    if isinstance(v, str): return redact_str(v)
     if isinstance(v, list): return [redact(x) for x in v]
     if isinstance(v, dict): return {k: redact(x) for k, x in v.items()}
     return v
 doc = redact(doc)
-doc['redactions'] = ["the operator's home directory is written as '~' (identity-leak content-lint)"]
+doc['redactions'] = ["the operator's home directory is written as '~' (identity-leak content-lint)",
+                     "the operator's username is written as '<user>' in every spelling, incl. dash-encoded paths"]
 json.dump(doc, open(out, 'w'), indent=2, sort_keys=False)
 print(verdict)
 PY
