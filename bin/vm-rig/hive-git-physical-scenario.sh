@@ -280,8 +280,14 @@ phase_a_host_substrate_readiness() {
   ' "$host" "$harness_slug" "$raw"
 }
 
-require_phase_a_two_host_substrate_ready() {
-  local vm_raw tower_raw vm_evidence tower_evidence
+# ONE two-host readiness read: probe the VM, then the tower, and print the combined
+# evidence. Both hosts must be ready on one shared topic in THIS read; readiness seen in
+# different reads never combines. The tower is probed only once the VM reads ready, so a
+# not-ready VM costs one ssh round trip per read. Exit codes follow vh_converge: 0 ready,
+# 3 reached but not ready yet (read again), 4 VM operator unreachable, 5 tower operator
+# unreachable. An unreachable operator is a broken read, not lag, so the wait stops at once.
+phase_a_two_host_substrate_observe() {
+  local vm_raw tower_raw vm_evidence='' tower_evidence='' failed_gate=''
   # Exit 5 is mcp-call's "the tool answered ok:false", forwarded by vmcall.sh
   # (EI-24654733539966460): the VM operator was reached, and the readiness gate
   # below judges the answer.
@@ -289,43 +295,114 @@ require_phase_a_two_host_substrate_ready() {
   vm_raw="$(ssh "${SSH_OPTS[@]}" "$VM" \
     "'$VM_CALL' dev:dogfood_substrate_status '$(phase_a_status_args "$VM_GIT_SYNC_SLUG")' --client hive-git-phase-a-readiness --workspace papercusp-workspace --harness '$VM_GIT_SYNC_SLUG'")" || vm_rc=$?
   if [ "$vm_rc" -ne 0 ] && [ "$vm_rc" -ne 5 ]; then
-    fail 'phase A VM substrate readiness probe could not reach the VM operator'
+    echo 'phase A VM substrate readiness probe could not reach the VM operator' >&2
+    return 4
   fi
-  if ! vm_evidence="$(phase_a_host_substrate_readiness vm "$VM_GIT_SYNC_SLUG" "$vm_raw")"; then
-    printf '%s\n' "$vm_evidence"
-    fail 'phase A VM substrate readiness gate failed: exact topic has no live, recent remote content peer'
-  fi
-
-  # Exit 5 is ptool's "the tool answered ok:false" (EI-24654733539966460): the
-  # operator was reached, and the readiness gate below judges the answer.
-  local tower_rc=0
-  tower_raw="$(printf '%s\n' "$(phase_a_status_args "$TOWER_GIT_SYNC_SLUG")" \
-    | "$TOWER_CALL" dev:dogfood_substrate_status --json - \
-      --workspace=papercusp-workspace --harness="$TOWER_GIT_SYNC_SLUG")" || tower_rc=$?
-  if [ "$tower_rc" -ne 0 ] && [ "$tower_rc" -ne 5 ]; then
-    fail 'phase A tower substrate readiness probe could not reach the tower operator'
-  fi
-  if ! tower_evidence="$(phase_a_host_substrate_readiness tower "$TOWER_GIT_SYNC_SLUG" "$tower_raw")"; then
-    printf '%s\n' "$tower_evidence"
-    fail 'phase A tower substrate readiness gate failed: exact topic has no live, recent remote content peer'
+  if vm_evidence="$(phase_a_host_substrate_readiness vm "$VM_GIT_SYNC_SLUG" "$vm_raw")"; then
+    # Exit 5 is ptool's "the tool answered ok:false" (EI-24654733539966460): the
+    # operator was reached, and the readiness gate below judges the answer.
+    local tower_rc=0
+    tower_raw="$(printf '%s\n' "$(phase_a_status_args "$TOWER_GIT_SYNC_SLUG")" \
+      | "$TOWER_CALL" dev:dogfood_substrate_status --json - \
+        --workspace=papercusp-workspace --harness="$TOWER_GIT_SYNC_SLUG")" || tower_rc=$?
+    if [ "$tower_rc" -ne 0 ] && [ "$tower_rc" -ne 5 ]; then
+      echo 'phase A tower substrate readiness probe could not reach the tower operator' >&2
+      return 5
+    fi
+    tower_evidence="$(phase_a_host_substrate_readiness tower "$TOWER_GIT_SYNC_SLUG" "$tower_raw")" \
+      || failed_gate=tower
+  else
+    failed_gate=vm
   fi
 
   node -e '
-    const [towerRaw, vmRaw] = process.argv.slice(1);
-    const tower = JSON.parse(towerRaw);
-    const vm = JSON.parse(vmRaw);
-    const sameTopic = tower.contentTopicHex === vm.contentTopicHex;
+    const [towerRaw, vmRaw, failedGate] = process.argv.slice(1);
+    const parse = (raw, host) => {
+      try { return JSON.parse(raw); } catch { return { host, ready: false, evidence: raw === "" ? "absent" : "unparseable" }; }
+    };
+    const tower = parse(towerRaw, "tower");
+    const vm = parse(vmRaw, "vm");
+    const sameTopic = tower.contentTopicHex === vm.contentTopicHex && typeof vm.contentTopicHex === "string";
     const ready = tower.ready === true && vm.ready === true && sameTopic;
     process.stdout.write(`${JSON.stringify({
-      schemaVersion: "hive-git-phase-a-substrate-readiness/v2",
+      schemaVersion: "hive-git-phase-a-substrate-readiness/v3",
       ready,
       sameTopic,
+      failedGate: ready ? null : failedGate || "topic",
       tower,
       vm,
     })}\n`);
-    if (!ready) process.exit(1);
-  ' "$tower_evidence" "$vm_evidence" \
-    || fail 'phase A two-host substrate readiness gate failed: tower and VM do not share one live content topic'
+    process.exit(ready ? 0 : 3);
+  ' "$tower_evidence" "$vm_evidence" "$failed_gate"
+}
+
+# WI-10004347: this gate used to read both hosts ONCE. The P-521 0.0.26 drill (VH run
+# 20260930T173307Z-1356033) failed it inside a 51s content-channel re-pair that recovered
+# on its own: the VM read contentPeers=0 at 17:50:55Z, and from 17:54Z both hosts read
+# contentPeers=1 on one topic. It now waits for convergence through vh_converge, re-reading
+# both hosts every 10s for up to HIVE_GIT_PHASE_A_READINESS_WAIT_SEC seconds. The default
+# of 300 covers the measured 51s re-pair gap and the ~2m41s from join to first channel
+# after a fresh VM boot; the value is clamped to [0,900], and 0 is one read. When the budget
+# runs out it fails CLOSED with the same messages, because the quarantine that follows is
+# destructive. The evidence it prints records attempts and waitedMs.
+require_phase_a_two_host_substrate_ready() {
+  local work="$1" wait_sec="${HIVE_GIT_PHASE_A_READINESS_WAIT_SEC:-300}" poll_sec=10
+  local obs="$1/two-host-substrate-readiness.last-read.json" rc=0 started_ms waited_ms unreachable=''
+  if [[ "$wait_sec" =~ ^-[0-9]+$ ]]; then
+    wait_sec=0
+  elif [[ "$wait_sec" =~ ^[0-9]+$ ]]; then
+    wait_sec="${wait_sec#"${wait_sec%%[!0]*}"}"
+    [ -n "$wait_sec" ] || wait_sec=0
+    if [ "${#wait_sec}" -gt 3 ] || [ "$wait_sec" -gt 900 ]; then wait_sec=900; fi
+  else
+    fail "HIVE_GIT_PHASE_A_READINESS_WAIT_SEC=$wait_sec is not a whole number of seconds"
+  fi
+  [ -d "$work" ] || fail "phase A readiness work directory is missing: $work"
+
+  started_ms="$(date +%s%3N)"
+  vh_converge --budget "$wait_sec" --poll "$poll_sec" --what 'phase A two-host substrate readiness' \
+    --out "$obs" -- phase_a_two_host_substrate_observe || rc=$?
+  waited_ms=$(( $(date +%s%3N) - started_ms ))
+  case "$rc" in
+    4) unreachable=vm-unreachable ;;
+    5) unreachable=tower-unreachable ;;
+  esac
+
+  node -e '
+    const [file, unreachable, attempts, waitedMs, waitBudgetSec, pollSec] = process.argv.slice(1);
+    let last = null;
+    try { last = JSON.parse(require("fs").readFileSync(file, "utf8")); } catch {}
+    if (unreachable || !last || typeof last !== "object") {
+      last = {
+        schemaVersion: "hive-git-phase-a-substrate-readiness/v3",
+        ready: false,
+        sameTopic: false,
+        failedGate: unreachable || "unknown",
+        tower: null,
+        vm: null,
+      };
+    }
+    process.stdout.write(`${JSON.stringify({
+      ...last,
+      attempts: Number(attempts),
+      waitedMs: Number(waitedMs),
+      waitBudgetSec: Number(waitBudgetSec),
+      pollSec: Number(pollSec),
+    })}\n`);
+  ' "$obs" "$unreachable" "$VH_CONVERGE_READS" "$waited_ms" "$wait_sec" "$poll_sec"
+
+  case "$rc" in
+    0) return 0 ;;
+    3) ;;
+    4) fail 'phase A VM substrate readiness probe could not reach the VM operator' ;;
+    5) fail 'phase A tower substrate readiness probe could not reach the tower operator' ;;
+    *) fail "phase A two-host substrate readiness read failed (exit $rc); see ${obs%.json}.err" ;;
+  esac
+  case "$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).failedGate ?? ""' "$obs" 2>/dev/null || true)" in
+    vm) fail 'phase A VM substrate readiness gate failed: exact topic has no live, recent remote content peer' ;;
+    tower) fail 'phase A tower substrate readiness gate failed: exact topic has no live, recent remote content peer' ;;
+    *) fail 'phase A two-host substrate readiness gate failed: tower and VM do not share one live content topic' ;;
+  esac
 }
 
 # Node-produced observations carry millisecond precision. Truncating the shell
@@ -440,6 +517,11 @@ JSON
 # APPLIED later, once every host value it retargets exists (rig_profile_apply).
 # shellcheck source=lib/rig-profile.sh
 . "$HERE/lib/rig-profile.sh"
+# The shared wait-for-convergence helper (vh_converge, PDS P-004): the Phase A readiness
+# gate waits through it instead of reading both hosts once (WI-10004347). Sourcing only
+# defines the function.
+# shellcheck source=../../../libs/generic/verification-harness/bin/converge.sh
+. "$REPO_ROOT/libs/generic/verification-harness/bin/converge.sh"
 SCENARIO_PHASES="$(physical_phase_list "${HIVE_GIT_PHYSICAL_PHASES:-}")" \
   || fail "HIVE_GIT_PHYSICAL_PHASES=${HIVE_GIT_PHYSICAL_PHASES:-} is not a phase selection ($PHYSICAL_PHASE_RANGE, comma-separated)"
 SCENARIO_FULL_RUN=0
@@ -583,7 +665,7 @@ phase_a_storage_join() {
   mkdir -m 700 "$phase_dir"
   started_at="$(now_iso)"
 
-  require_phase_a_two_host_substrate_ready >"$phase_dir/two-host-substrate-readiness.json"
+  require_phase_a_two_host_substrate_ready "$phase_dir" >"$phase_dir/two-host-substrate-readiness.json"
 
   # single-read: the tower baseline, taken before the quarantine and the bootstrap — nothing is in flight yet
   "$TSX" "$PRODUCER" phase-a-observe tower present "$TOWER_REPO" \
