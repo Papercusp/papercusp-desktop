@@ -157,6 +157,11 @@ kickoff adds mission specifics, never this:
   verbatim in exactly one of `checked` / `notChecked` / `notApplicable`, and keep `residue` as
   a separate explicit string array (`residue: []` or `["none"]` means zero); residue is not a
   fifth partition bucket.
+  **Filing is not disposing: a residue needs an OWNER before the close.** `work_items:create`
+  without `assign_to` leaves the item unclaimed, so no one is accountable for it. File each
+  out-of-scope defect or follow-up with `assign_to` (`"self"` or the owner id) BEFORE closing,
+  then list its id in `coverage.residue`. A close that cites an unowned id (in `residue`,
+  `deferred` or the summary) grades `proposed` and returns `residueUnownedWarning`.
   `assumptions` is required on a terminal close (`'none'` or fact keys). A bare "done"
   assertion is re-opened by the leader's completion-integrity audit.
 - **Read and report by reference.** For an already-started item, use
@@ -245,7 +250,10 @@ there and redo it.
   alternative, decision, dependency, sequence, acceptance condition, unresolved
   question, and promised follow-up; map each to a plan section, D-NNN, or P-NNN;
   repair every omission; then record `plans:audit { phase:'activation', ... }` before
-  activating. A later edit PRESERVES that audit. Read the edit response's
+  activating. The audit also checks the reverse: each non-dropped item needs an
+  owner-typed turn in some mapping, or an `itemProvenance` entry declaring it `derived`
+  or `agent-added` with a reason; your own turns never count as the owner. A later
+  edit PRESERVES that audit. Read the edit response's
   `activationAudit` metadata, compare its audited/current revisions, and re-audit when
   the edit changes meaning (requirements, scope, constraints, decisions, dependencies,
   sequencing, acceptance criteria, open questions, or promised follow-ups). Spelling,
