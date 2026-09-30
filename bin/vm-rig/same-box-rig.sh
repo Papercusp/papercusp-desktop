@@ -263,8 +263,10 @@ EOF
   cat >"$dir/rig.env" <<EOF
 SB_TOWER_HOME=$dir/tower-home
 SB_TOWER_PORT=$tp
+SB_TOWER_PG_PORT=$tpg
 SB_VM_HOME=$dir/vm-home
 SB_VM_PORT=$vp
+SB_VM_PG_PORT=$vpg
 SB_NODE=$(command -v node)
 SB_TSX=$ROOT/node_modules/tsx/dist/cli.mjs
 SB_POT_HOME=$pot

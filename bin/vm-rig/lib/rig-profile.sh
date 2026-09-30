@@ -27,7 +27,7 @@ RIG_PROFILE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RIG_PROFILE_SAME_BOX_HOST='same-box-vm'
 # The only keys rig.env may set. Anything else (or any line that is not KEY=value with a
 # quoted or plain value) refuses the rig: rig.env is sourced, so it must not carry code.
-RIG_PROFILE_SAME_BOX_KEYS='SB_TOWER_HOME SB_TOWER_PORT SB_VM_HOME SB_VM_PORT SB_NODE SB_TSX SB_POT_HOME SB_GIT_SYNC_SLUG SB_REPO_KEY SB_GITHUB_REMOTE SB_WORKSPACE SB_PHYSICAL_ONLY_PHASES'
+RIG_PROFILE_SAME_BOX_KEYS='SB_TOWER_HOME SB_TOWER_PORT SB_TOWER_PG_PORT SB_VM_HOME SB_VM_PORT SB_VM_PG_PORT SB_NODE SB_TSX SB_POT_HOME SB_GIT_SYNC_SLUG SB_REPO_KEY SB_GITHUB_REMOTE SB_WORKSPACE SB_PHYSICAL_ONLY_PHASES'
 
 rig_profile_name() { printf '%s\n' "${HIVE_GIT_RIG:-physical}"; }
 
@@ -60,11 +60,15 @@ rig_profile_load_same_box() {
   done <"$env"
   # shellcheck source=/dev/null
   . "$env"
-  for key in SB_TOWER_HOME SB_TOWER_PORT SB_VM_HOME SB_VM_PORT SB_NODE SB_TSX SB_POT_HOME SB_GIT_SYNC_SLUG SB_REPO_KEY SB_GITHUB_REMOTE SB_WORKSPACE; do
+  for key in SB_TOWER_HOME SB_TOWER_PORT SB_TOWER_PG_PORT SB_VM_HOME SB_VM_PORT SB_VM_PG_PORT SB_NODE SB_TSX SB_POT_HOME SB_GIT_SYNC_SLUG SB_REPO_KEY SB_GITHUB_REMOTE SB_WORKSPACE; do
     [ -n "${!key:-}" ] || { echo "FATAL: $env does not set $key" >&2; return 2; }
   done
-  case "$SB_TOWER_PORT$SB_VM_PORT" in *[!0-9]*) echo "FATAL: $env ports must be numeric" >&2; return 2 ;; esac
+  case "$SB_TOWER_PORT$SB_VM_PORT$SB_TOWER_PG_PORT$SB_VM_PG_PORT" in *[!0-9]*) echo "FATAL: $env ports must be numeric" >&2; return 2 ;; esac
   [ "$SB_TOWER_PORT" != "$SB_VM_PORT" ] || { echo "FATAL: $env gives the tower and the VM the same port" >&2; return 2; }
+  [ "$SB_TOWER_PG_PORT" != "$SB_VM_PG_PORT" ] || { echo "FATAL: $env gives the tower and the VM the same PG port" >&2; return 2; }
+  # The live operator's database is the native :5432; a rig instance must never name it.
+  [ "$SB_TOWER_PG_PORT" != 5432 ] && [ "$SB_VM_PG_PORT" != 5432 ] \
+    || { echo "FATAL: $env names the live operator's PG port 5432 for a rig instance" >&2; return 2; }
   [ "$SB_TOWER_HOME" != "$SB_VM_HOME" ] || { echo "FATAL: $env gives the tower and the VM the same home" >&2; return 2; }
   [ "$SB_TOWER_HOME" != "$HOME" ] && [ "$SB_VM_HOME" != "$HOME" ] \
     || { echo "FATAL: $env points an instance at the real \$HOME ($HOME); the same-box rig must use throwaway homes" >&2; return 2; }
@@ -134,6 +138,10 @@ rig_profile_apply() {
   export SAME_BOX_VM_HOME="$SB_VM_HOME" SAME_BOX_VM_PORT="$SB_VM_PORT" SAME_BOX_RIG_DIR="$dir"
   export SAME_BOX_TOWER_HOME="$SB_TOWER_HOME" SAME_BOX_TOWER_PORT="$SB_TOWER_PORT" \
     SAME_BOX_TSX="$SB_TSX" SAME_BOX_NODE="$SB_NODE"
+  # Each instance's own embedded-PG port. The transports pin PAPERCUSP_PG_PORT to it, so when
+  # an owner is down (the scenario restarts the VM) a producer's DB discovery falls back to the
+  # rig's own dead port, never to the native :5432 live operator database (D-005).
+  export SAME_BOX_TOWER_PG_PORT="$SB_TOWER_PG_PORT" SAME_BOX_VM_PG_PORT="$SB_VM_PG_PORT"
   echo "RIG_PROFILE rig=same-box vm=$VM tower_port=$SB_TOWER_PORT vm_port=$SB_VM_PORT pot=$SB_POT_HOME dir=$dir" >&2
 }
 

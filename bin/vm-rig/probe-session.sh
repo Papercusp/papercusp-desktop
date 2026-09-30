@@ -64,10 +64,24 @@
 # handle.ts:27-31 takes a plan-run handle straight from `plan_run_id` (no
 # validation), and wake-executor.ts:1392-1406 resumes it via
 # resumePlanRunForWake → status='delivered' channel='plan-run-resume'.
-# So: mint a plan run ON THE MAC once, then pass its id here.
+# So: the probe needs a plan run THAT EXISTS ON THE MAC. Name the Mac plan with
+# PCUSP_PROBE_PLAN_SLUG; `start` reads its runs through `plans:runs` and either
+# validates PCUSP_PROBE_PLAN_RUN_ID against them or picks the newest settled run.
 #
-#   /tmp/vmcall.sh plans:new    '{"harness":"papercusp","slug":"…","force":true}'
-#   /tmp/vmcall.sh plans:launch '{"harness":"papercusp","slug":"…","await":false}'
+# ⚠ NO DEFAULT RUN ID (WI-10004115, measured 2026-09-30). This used to default to
+# run 1. After the VM re-joined fresh its plan_runs table was EMPTY, so every
+# probe wake sat status='pending' with last_error 'plan run 1 not found': a red
+# leg 2 indistinguishable from a dead wake bridge. `start` now refuses an id that
+# does not exist on the Mac, instead of arming a handle that can never resume.
+#
+# ⚠ MINTING A FRESH RUN: the old recipe (plans:new then plans:launch) is REFUSED
+# for any new plan — the acceptance-BAR start gate lets only a positively
+# identified LEGACY plan launch without declared BARs
+# (acceptance-bar-lifecycle-evaluator.ts, "Only a positively identified legacy
+# plan may bypass the contract"). plans:new also date-suffixes the slug, so read
+# the slug it RETURNS. Reuse a plan that already has a run on the Mac; with none,
+# run `PCUSP_PROBE_PLAN_RUN_ID=none` (addressable-only, leg 2 parks) and track the
+# fixture-mint gap on its work-item rather than faking a handle.
 #
 # ⚠ The run must NOT be left in status='running': markPlanRunResumed
 # (plans/runs.ts:279-287) claims only `WHERE status <> 'running'`, so a wake
@@ -87,10 +101,13 @@
 #         PCUSP_PROBE_BEAT_SEC     beat interval (default 30)
 #         PCUSP_PROBE_WAIT_SEC     max tower-roster convergence wait (default 180)
 #         PCUSP_PROBE_POLL_SEC     tower-roster poll cadence (default 3)
+#         PCUSP_PROBE_PLAN_SLUG    Mac-side plan whose runs supply the wake handle.
+#                                  Required unless PCUSP_PROBE_PLAN_RUN_ID=none.
 #         PCUSP_PROBE_PLAN_RUN_ID  Mac-side plan_runs id → a plan-run WAKE HANDLE.
-#                                  Unset ⇒ addressable but NOT wakeable (leg 2
-#                                  reds 'parked'). Default 1 (the run minted for
-#                                  plan live1-wake-bridge-probe-2026-08-02).
+#                                  Must exist under PCUSP_PROBE_PLAN_SLUG and not
+#                                  be 'running'; unset ⇒ the newest settled run of
+#                                  that plan. 'none' ⇒ addressable but NOT wakeable
+#                                  (leg 2 reds 'parked'). NO numeric default.
 set -uo pipefail
 
 VM="${PCUSP_VM_SSH:-aviweiss@172.31.44.2}"
@@ -98,7 +115,8 @@ AGENT="${PCUSP_PARITY_PROBE_AGENT:-su-live1-imac-probe}"
 BEAT="${PCUSP_PROBE_BEAT_SEC:-30}"
 WAIT_SEC="${PCUSP_PROBE_WAIT_SEC:-180}"
 POLL_SEC="${PCUSP_PROBE_POLL_SEC:-3}"
-PLAN_RUN="${PCUSP_PROBE_PLAN_RUN_ID:-1}"
+PLAN_RUN="${PCUSP_PROBE_PLAN_RUN_ID:-}"
+PLAN_SLUG="${PCUSP_PROBE_PLAN_SLUG:-}"
 TOWER_DSN="${PCUSP_TOWER_DSN:-postgresql://harness_admin:harness_admin_pwd@127.0.0.1:5432/papercusp}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY="$HERE/deploy.sh"
@@ -122,6 +140,60 @@ tower_row() { # echo "<age_seconds>" for the freshest probe row on the TOWER, el
     "SELECT round(extract(epoch from (now()-last_seen_at)))
        FROM harness_shared.shared_session_presence
       WHERE owner_id='$AGENT' ORDER BY last_seen_at DESC LIMIT 1;" 2>/dev/null | tr -d '[:space:]'
+}
+
+# Resolve PLAN_RUN to a plan run that EXISTS on the Mac and is not 'running'
+# (WI-10004115). Prints the reason and returns non-zero instead of arming a
+# handle that can never resume. Sets PLAN_RUN (empty for the explicit 'none').
+resolve_plan_run() {
+  case "$PLAN_RUN" in
+    none)
+      PLAN_RUN=""
+      echo "probe-session: PCUSP_PROBE_PLAN_RUN_ID=none — addressable but NOT wakeable (leg 2 will park)"
+      return 0 ;;
+    '') ;;
+    0|*[!0-9]*)
+      echo "FATAL: PCUSP_PROBE_PLAN_RUN_ID must be a positive integer or 'none' (got '$PLAN_RUN')" >&2
+      return 2 ;;
+  esac
+  if [ -z "$PLAN_SLUG" ]; then
+    echo "FATAL: PCUSP_PROBE_PLAN_SLUG is unset. Name the Mac plan whose run is the wake handle," >&2
+    echo "       or set PCUSP_PROBE_PLAN_RUN_ID=none to run addressable-only (leg 2 parks)." >&2
+    return 2
+  fi
+  case "$PLAN_SLUG" in
+    -*|*[!a-z0-9-]*)
+      echo "FATAL: PCUSP_PROBE_PLAN_SLUG must be a plan slug [a-z0-9-] (got '$PLAN_SLUG')" >&2
+      return 2 ;;
+  esac
+  local runs_json out
+  runs_json="$("${SSH[@]}" "/tmp/vmcall.sh plans:runs '{\"harness\":\"papercusp\",\"slug\":\"$PLAN_SLUG\"}' --client '$AGENT' --workspace papercusp-workspace --harness papercusp" 2>/dev/null)"
+  if ! out="$(RUNS_JSON="$runs_json" WANT="$PLAN_RUN" SLUG="$PLAN_SLUG" node -e '
+    const raw = process.env.RUNS_JSON || "";
+    const want = process.env.WANT;
+    const slug = process.env.SLUG;
+    const fail = (m) => { console.log("FATAL: " + m); process.exit(1); };
+    let doc;
+    try { doc = JSON.parse(raw.slice(raw.indexOf("{"))); }
+    catch { fail(`could not read plans:runs for "${slug}" on the Mac (reply: ${raw.slice(0, 200) || "<empty>"}); check the VM operator with bin/vm-rig/diag.sh`); }
+    if (doc.error) fail(`plans:runs refused for "${slug}" on the Mac: ${doc.error} ${doc.message || ""}`);
+    const runs = Array.isArray(doc.runs) ? doc.runs : [];
+    const list = runs.map((r) => `${r.id}:${r.status}`).join(", ") || "none";
+    if (want) {
+      const run = runs.find((r) => String(r.id) === want);
+      if (!run) fail(`plan run ${want} does not exist on the Mac under "${slug}" (runs: ${list}); arming it would park every wake with last_error "plan run ${want} not found"`);
+      if (run.status === "running") fail(`plan run ${want} is status=running; markPlanRunResumed claims only a settled run, so every wake would be skipped as already running`);
+      console.log(String(run.id));
+    } else {
+      const run = runs.find((r) => r.status !== "running");
+      if (!run) fail(`plan "${slug}" has no settled run on the Mac (runs: ${list}); set PCUSP_PROBE_PLAN_RUN_ID=none to run addressable-only`);
+      console.log(String(run.id));
+    }
+  ')"; then
+    echo "$out" >&2
+    return 1
+  fi
+  PLAN_RUN="$out"
 }
 
 stop_remote() {
@@ -176,8 +248,6 @@ case "${1:-start}" in
     esac
     WAIT_TRIES=$(( (WAIT_SEC + POLL_SEC - 1) / POLL_SEC ))
 
-    echo "probe-session: agent=$AGENT beat=${BEAT}s vm=$VM plan_run=${PLAN_RUN:-none (NOT wakeable — leg 2 will park)} admission_wait=${WAIT_SEC}s"
-
     # A VM reboot clears /tmp. Restore exact, hash-verified checked-in helpers
     # through the canonical deploy seam before retaining the fatal preflight as
     # the detector for an unreachable VM or a failed/corrupt install.
@@ -189,6 +259,12 @@ case "${1:-start}" in
       echo "FATAL: /tmp/vmcall.sh or /tmp/mcp-call.mjs still missing on $VM after automatic deploy." >&2
       exit 1
     fi
+
+    # Resolve the wake handle BEFORE touching the running loop, so a refusal
+    # leaves any existing probe session as it was.
+    resolve_plan_run || exit $?
+
+    echo "probe-session: agent=$AGENT beat=${BEAT}s vm=$VM plan=${PLAN_SLUG:-none} plan_run=${PLAN_RUN:-none (NOT wakeable — leg 2 will park)} admission_wait=${WAIT_SEC}s"
 
     stop_remote >/dev/null 2>&1
 

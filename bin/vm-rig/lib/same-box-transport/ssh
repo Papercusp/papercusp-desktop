@@ -48,7 +48,16 @@ if [ -n "${SAME_BOX_VM_PORT:-}" ]; then export PAPERCUSP_HONO_PORT="$SAME_BOX_VM
 # HOME in every resolver), so an unscrubbed "VM" producer would read and write the LIVE
 # operator database. Scrub exactly what fed_local_launch_sidecar scrubs for the owner itself.
 unset DATABASE_URL PAPERCUSP_DATABASE_URL HARNESS_DATABASE_URL HARNESS_ADMIN_DATABASE_URL \
-  PAPERCUSP_PG_URL PAPERCUSP_HOME GH_TOKEN GITHUB_TOKEN
+  PAPERCUSP_PG_URL PAPERCUSP_HOME PAPERCUSP_SKIP_PG_DISCOVERY GH_TOKEN GITHUB_TOKEN
+# The VM owner deletes its embedded-pg.json while down (the scenario restarts it), and the
+# resolver then falls back to PAPERCUSP_PG_PORT or the native :5432 — the LIVE operator
+# database. Pin that fallback to the VM instance's own PG port so a down owner fails closed.
+case "${SAME_BOX_VM_PG_PORT:-}" in
+  ''|*[!0-9]*|5432)
+    echo "same-box ssh: SAME_BOX_VM_PG_PORT is unset, not numeric or the live :5432; apply the same-box rig profile first" >&2
+    exit 255 ;;
+esac
+export PAPERCUSP_PG_PORT="$SAME_BOX_VM_PG_PORT"
 if [ "$no_stdin" = 1 ]; then
   HOME="$SAME_BOX_VM_HOME" exec bash -c "$cmd" </dev/null
 fi

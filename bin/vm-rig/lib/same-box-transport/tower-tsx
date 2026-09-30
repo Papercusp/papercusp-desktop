@@ -16,7 +16,18 @@ if [ -z "${SAME_BOX_TSX:-}" ] || [ ! -f "$SAME_BOX_TSX" ]; then
   echo "same-box tower-tsx: SAME_BOX_TSX is unset or missing; apply the same-box rig profile first" >&2
   exit 2
 fi
+# With the DB variables scrubbed, the producer finds its database through the tower home's
+# embedded-pg.json, which the owner deletes on shutdown. Without a pinned PAPERCUSP_PG_PORT the
+# resolver would then fall back to the native :5432 — the LIVE operator database (measured on
+# the r4 rig: a converge run after the owners died reached the live DB). Pin the fallback to the
+# rig's own PG port so a down owner fails closed.
+case "${SAME_BOX_TOWER_PG_PORT:-}" in
+  ''|*[!0-9]*|5432)
+    echo "same-box tower-tsx: SAME_BOX_TOWER_PG_PORT is unset, not numeric or the live :5432; apply the same-box rig profile first" >&2
+    exit 2 ;;
+esac
 exec env -u DATABASE_URL -u PAPERCUSP_DATABASE_URL -u HARNESS_DATABASE_URL -u HARNESS_ADMIN_DATABASE_URL \
-  -u PAPERCUSP_PG_URL -u PAPERCUSP_HOME -u GH_TOKEN -u GITHUB_TOKEN \
+  -u PAPERCUSP_PG_URL -u PAPERCUSP_HOME -u PAPERCUSP_SKIP_PG_DISCOVERY -u GH_TOKEN -u GITHUB_TOKEN \
   HOME="$SAME_BOX_TOWER_HOME" PAPERCUSP_HONO_PORT="${SAME_BOX_TOWER_PORT:-}" \
+  PAPERCUSP_PG_PORT="$SAME_BOX_TOWER_PG_PORT" \
   "${SAME_BOX_NODE:-node}" "$SAME_BOX_TSX" "$@"
