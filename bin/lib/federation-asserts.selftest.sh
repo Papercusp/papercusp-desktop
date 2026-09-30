@@ -372,6 +372,7 @@ fi
 #     EADDRINUSE. A reservation held by another LIVE launcher must be skipped; a dead launcher's
 #     or an expired reservation must be reclaimed; a second pick by one launcher gets a new port.
 RES_DIR="$WORK/port-reservations"
+mkdir -p "$RES_DIR"   # the fixture writes reservations itself; never depend on the subject creating it
 RES_PORT="$((SIDE_PORT + 40))"
 res_a="$(FED_PORT_RESERVE_DIR="$RES_DIR" fed_pick_free_port "$RES_PORT")"
 # A concurrent launcher: a live process other than this shell holds res_a's reservation.
