@@ -97,6 +97,14 @@ physical_phase_is_full "$physical_phases" && physical_full_run=1
 case ",$physical_phases," in
   *,E,*) "$TSX" "$PRODUCER" phase-e-preflight >/dev/null ;;
 esac
+# RIG-PREFLIGHT (physical-drill-iteration-speed P-003, R-5): the P-505 guard-rail facts as
+# read-only checks, before the first rig ssh — committed drill source (the VM stages HEAD),
+# canary mode baseline, no leftover Phase D trust hold, VM payload = the tower-composed build,
+# both owners answering. A refusal names the check (PHYSICAL_PREFLIGHT_FAILED <check>) in
+# seconds instead of surfacing mid-phase. PCUSP_VM_GITHUB_USER_ID overrides the VM user.
+PCUSP_VM_SSH="$VM" "$TSX" "$PRODUCER" rig-preflight \
+  --vm-github-user-id "${PCUSP_VM_GITHUB_USER_ID:-1567022}" >/dev/null \
+  || fail 'rig preflight refused the run (the PHYSICAL_PREFLIGHT_FAILED line above names the check)'
 
 run_dir="$(mktemp -d "${TMPDIR:-/tmp}/hive-git-physical-run.XXXXXX")"
 remote_source="/tmp/hive-git-physical-source.$$"
