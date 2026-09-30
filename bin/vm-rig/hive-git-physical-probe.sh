@@ -471,8 +471,10 @@ if [ "$source_preflight" -eq 1 ]; then
 fi
 
 # The scenario receives the preflighted identities so its topology is pinned
-# before it mutates anything. It must emit fresh, UNATTESTED same-run A-H
-# observations at an absent path; the finalizer rejects pre-banked signatures.
+# before it mutates anything. It must emit fresh, UNATTESTED same-run
+# observations for every leg in the evidence schema's ALL_LEGS (not a fixed
+# A-H span — legs I/J were appended) at an absent path; the finalizer rejects
+# pre-banked signatures.
 HIVE_GIT_PHYSICAL_PLAN="$HIVE_GIT_PHYSICAL_PLAN" \
   HIVE_GIT_PHYSICAL_EXECUTE="$HIVE_GIT_PHYSICAL_PLAN" \
   HIVE_GIT_PHYSICAL_VM_SOURCE="$remote_source" \

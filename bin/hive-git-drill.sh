@@ -88,7 +88,8 @@ REPO_DIR="${PAPERCUSP_REPO_DIR:-/home/marsh-office/papercupai-workspace/papercus
 HGGIT="$REPO_DIR/packages/operator-core/lib/sync/pot-git"
 
 # ── Physical phase re-run (physical-drill-iteration-speed-2026-09-29 P-002, R-3) ──
-# `--only-phase D[,E]` / `--from-phase D` re-runs just those A-H phases of the physical
+# `--only-phase D[,E]` / `--from-phase D` re-runs just those lettered phases (A onward;
+# the set is owned by lib/physical-phase-select.sh, not this comment) of the physical
 # scenario against the rig state the previous run left (the join, the pot repo, the VM
 # install): minutes instead of a full 18-26 minute run. It skips the local single-box
 # legs, needs HIVE_GIT_PHYSICAL_PROBE_CMD, and never produces release evidence — the
