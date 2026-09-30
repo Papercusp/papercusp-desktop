@@ -167,6 +167,20 @@ converge_pot_git() {
   )
 }
 
+# Finish (or redo) the post-join half of `up` on a rig whose owners are up and whose rig.env is
+# written: install the VM driver, then converge the pot mode and both pot-git stores. Also the
+# way to re-converge after a VM owner restart.
+cmd_converge() {
+  [ -n "$dir" ] && [ -f "$dir/rig.env" ] || die "converge needs --dir <rig dir with rig.env>"
+  dir="$(cd "$dir" && pwd)"
+  # Run through bash: the git index tracks lib/same-box-deploy.sh as 100644, so a fresh
+  # checkout has no exec bit (r4 rig `up` died on 'Permission denied' here).
+  SAME_BOX_RIG_DIR="$dir" bash "$HERE/lib/same-box-deploy.sh" same-box-vm >&2 || die "same-box-deploy.sh failed"
+  converge_pot_git || die "the pot-git stores never appeared on both owners (logs: $dir/converge-*.log)"
+  echo "same-box-rig: CONVERGED $dir"
+  echo "HIVE_GIT_SAME_BOX_RIG=$dir"
+}
+
 cmd_up() {
   [ -n "$dir" ] || dir="$HOME/.papercusp-same-box-rigs/$(date -u +%Y%m%dT%H%M%SZ)-$$"
   [ ! -e "$dir/rig.env" ] || die "$dir already holds a rig (rig.env exists); run down first"
@@ -276,7 +290,7 @@ exec bash '$HERE/same-box-rig.sh' start-vm --dir '$dir'
 EOF
   chmod 0755 "$dir/tower-call" "$dir/boot-vm.sh"
   ln -sfn "$ROOT" "$dir/vm-dep-source"
-  SAME_BOX_RIG_DIR="$dir" "$HERE/lib/same-box-deploy.sh" same-box-vm >&2 || die "same-box-deploy.sh failed"
+  SAME_BOX_RIG_DIR="$dir" bash "$HERE/lib/same-box-deploy.sh" same-box-vm >&2 || die "same-box-deploy.sh failed"
   converge_pot_git || die "the pot-git stores never appeared on both owners (logs: $dir/converge-*.log)"
 
   echo "same-box-rig: UP pot=$pot git_sync=$git_sync_slug repo_key=$repo_key tower=:$tp vm=:$vp dht=$dht"
@@ -321,6 +335,7 @@ cmd_down() {
 
 case "$cmd" in
   up) cmd_up ;;
+  converge) cmd_converge ;;
   status) cmd_status ;;
   start-vm) cmd_start_vm ;;
   down) cmd_down ;;
