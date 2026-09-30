@@ -155,7 +155,28 @@ converge_pot_git() {
     while :; do
       bare_repo "$TOWER_REPO" && [ "$(ssh "$VM" "git --git-dir='$VM_REPO' rev-parse --is-bare-repository" 2>/dev/null)" = true ] && {
         echo "same-box-rig: pot-git stores present on both owners after $((SECONDS - start))s" >&2
-        exit 0
+        # UP also means the VM owner ANSWERS the call phase A makes first. Run 20260930T072904Z
+        # declared UP while the VM's converge git-sync fire was still running (its own git-sync:run
+        # had already hit MCP_RESULT_TIMEOUT), and phase A's first VM call timed out after 30s
+        # (WI-10003976 attempt-audit). vmcall exit 0 = answered, 5 = answered ok:false; anything
+        # else (the timeout included) means not answering yet.
+        local status_args vm_rc
+        status_args="{\"targetHarness\":{\"workspaceId\":\"$SB_WORKSPACE\",\"harnessSlug\":\"$SB_GIT_SYNC_SLUG\"}}"
+        while :; do
+          vm_rc=0
+          ssh "$VM" "'$VM_CALL' dev:dogfood_substrate_status '$status_args' --client same-box-rig-up --workspace '$SB_WORKSPACE' --harness '$SB_GIT_SYNC_SLUG'" \
+            >/dev/null 2>>"$dir/converge-responsive.log" || vm_rc=$?
+          if [ "$vm_rc" -eq 0 ] || [ "$vm_rc" -eq 5 ]; then
+            echo "same-box-rig: VM owner answering after $((SECONDS - start))s" >&2
+            exit 0
+          fi
+          echo "same-box-rig: VM owner not answering yet (vmcall rc=$vm_rc, $((SECONDS - start))s)" >&2
+          [ $((SECONDS - start)) -lt "$budget" ] || {
+            echo "same-box-rig: stores are bare but the VM owner did not answer dev:dogfood_substrate_status within ${budget}s (log: $dir/converge-responsive.log)" >&2
+            exit 1
+          }
+          sleep 5
+        done
       }
       [ $((SECONDS - start)) -lt "$budget" ] || break
       printf '{"installSlug":"%s"}' "$SB_GIT_SYNC_SLUG" \
