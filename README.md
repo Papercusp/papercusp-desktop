@@ -1,161 +1,94 @@
 # @papercusp/desktop
 
-Tauri desktop shell for Papercusp. Bundles a webview + Node sidecar into a small native app for macOS, Windows, and Linux.
+Tauri desktop shell for Papercusp. It opens a native webview onto the Papercusp operator and
+starts, on launch, what the operator needs: its own embedded PostgreSQL, the schema migrations
+and the operator's API host. It builds for macOS, Windows and Linux.
 
 ## Install (end users)
 
-Releases land at <https://github.com/Papercusp/papercusp-desktop/releases> as `desktop-vX.Y.Z` tags. Download the artifact for your platform:
+Installers for every published version, with release notes and install instructions, are on the
+Papercusp releases page linked from the repository README. Install both apps: **Papercusp Server**
+runs the operator, its embedded database and your agents on your machine, and **Papercusp GUI** is
+the desktop window onto it. The installers are unsigned today, so macOS asks you to confirm the first
+launch (right-click → **Open**) and Windows shows SmartScreen (**More info → Run anyway**).
 
-| Platform | Artifact | First-launch friction |
-|---|---|---|
-| **macOS** | `Papercusp_*_universal.dmg` (Intel + Apple Silicon in one bundle) | App is unsigned. Open it once via right-click → **Open** instead of double-click; macOS asks "are you sure?" — choose **Open**. After that, normal double-click works. |
-| **Windows** | `Papercusp_*_x64-setup.exe` or `Papercusp_*_x64_en-US.msi` | App is unsigned. Windows shows a SmartScreen "Windows protected your PC" dialog. Click **More info → Run anyway**. |
-| **Linux** | `Papercusp_*_amd64.AppImage` (portable) or `.deb` / `.rpm` for system install | None. AppImage: `chmod +x Papercusp_*.AppImage && ./Papercusp_*.AppImage`. |
+Agents run through the CLIs you already use (for example the `claude` CLI); set provider keys in
+**Settings → API Keys** on first launch. Keys are stored at `~/.papercusp/credentials.json`
+(mode 0600) and never leave your machine.
 
-**Prerequisites on the user's machine** (today; both being bundled in a future release):
+## Prerequisites for building from source
 
-- **Node 20+** — the sidecar runs on Node. Install via [nodejs.org](https://nodejs.org/) or `nvm`/`fnm`.
-- **PostgreSQL 14+ on `localhost:5432`** — local data store. Install via [postgresql.org/download](https://postgresql.org/download/), then `brew services start postgresql` (mac) or `sudo systemctl start postgresql` (Linux).
-- **`claude` CLI** — orchestrator dependency. Install with `npm install -g @anthropic-ai/claude-code`.
+| Platform | Install |
+|---|---|
+| **Ubuntu / Debian** | `sudo apt install build-essential curl wget file pkg-config libssl-dev libxdo-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf` |
+| **Fedora / RHEL** | `sudo dnf install webkit2gtk4.1-devel openssl-devel libappindicator-gtk3-devel librsvg2-devel libxdo-devel` |
+| **macOS** | Xcode Command Line Tools (`xcode-select --install`) |
+| **Windows** | WebView2 (preinstalled on Windows 11) + Visual Studio Build Tools |
 
-**Optional prerequisites:**
+Everywhere: **Rust stable** (1.77 or newer; `rustup default stable`) and **Node.js 25** (the
+repository's `.nvmrc`; native addons are built for that Node ABI).
 
-- **`pi` (oh-my-pi)** — required only for the in-app `pi` tab (interactive coding agent that lives alongside the dashboard; you can drop into it mid-mission to steer manually). Install via `brew install can1357/oh-my-pi/oh-my-pi` or see [github.com/can1357/oh-my-pi](https://github.com/can1357/oh-my-pi). Without pi, every other feature still works; only the pi tab shows a "missing" state.
+You also need **pgvector for PostgreSQL 18**. The embedded Postgres ships without extensions
+beyond the contrib set, and the schema uses the `vector` extension, so the root `npm ci` copies the
+host's pgvector into it (`scripts/install-embedded-pgvector.mjs`). On Debian or Ubuntu install
+`postgresql-18-pgvector` from the PostgreSQL apt repository (<https://wiki.postgresql.org/wiki/Apt>);
+on macOS, `brew install pgvector`. If you install it after `npm ci`, run
+`node scripts/install-embedded-pgvector.mjs` from the repository root. Without it a fresh database
+stops at the first migration that declares a `vector` column.
 
-Set your Anthropic + (optional) GitHub PAT keys in **Settings → API Keys** on first launch. Keys are stored at `~/.papercusp/credentials.json` (mode 0600) and never leave your machine.
+## Build and run
 
-If any prerequisite is missing, the first-launch screen names it and links to the install instructions — you don't have to read this list ahead of time.
+From the repository root:
+
+```sh
+npm ci                                               # dependencies + pgvector into the embedded Postgres
+npm --workspace @papercusp/operator-vite run build   # the UI bundle the window loads
+cd papercusp-desktop
+npm ci
+npm run dev                                          # builds the Rust shell and opens the window
+```
+
+The first `npm run dev` compiles the Rust shell, which takes several minutes; later runs reuse the
+build. The window then creates its embedded database, applies the migrations and serves the
+operator from this working tree, starting at first-run onboarding. `npm run dev:hmr` is the variant
+that points the window at the Vite dev server (port 3055) with hot reload.
+
+To check a build without opening a window (CI, a remote box, or an agent), run the same app on its
+own virtual display with a throwaway database:
+
+```sh
+VERIFY_TAURI_ISOLATED_DB=1 scripts/verify-tauri-headless.sh --boot-only
+```
 
 ## Architecture
 
 ```
-┌──────────────── papercusp.app (~80-100 MB) ───────────────┐
-│  (size dominated by the bundled Node sidecar; ~30-50 MB    │
-│   without the sidecar)                                     │
-│                                                            │
-│  Tauri (Rust) shell                                        │
-│   ├── Native window, menu bar, system integration          │
-│   ├── On launch: spawn Node sidecar on a free port         │
-│   ├── On window-close / quit: kill sidecar                 │
-│   └── Webview points at http://localhost:<sidecarPort>/    │
-│                                                            │
-│  Node sidecar (bundled inside the app)                     │
-│   ├── apps/operator Next.js standalone build               │
-│   ├── Same Hono routes that papercuspai.com cloud uses     │
-│   ├── Owns the local fs (~/.papercusp/)                    │
-│   └── Talks to local Postgres (or pglite later)            │
-│                                                            │
-└────────────────────────────────────────────────────────────┘
+┌──────────────────────── Papercusp desktop ────────────────────────┐
+│  Tauri (Rust) shell                                                │
+│   ├── native window, menus, system integration                     │
+│   ├── starts the sidecar on launch, stops it on quit               │
+│   └── webview onto the operator (desktop IPC for /api/*)           │
+│                                                                    │
+│  Node sidecar                                                      │
+│   ├── embedded PostgreSQL (+ pgvector), migrations on boot         │
+│   ├── operator API host (Hono, apps/operator/bin/hono-host.ts)     │
+│   ├── operator UI (apps/operator-vite build)                       │
+│   └── owns the local data directory (~/.papercusp/)                │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
-The same sidecar Hono code that runs here as a child process is what we'd
-deploy to the cloud later — see PLAN.md "Tauri shell + Node sidecar with
-HTTP API" for the migration story.
+## Release builds
 
-## Prerequisites for local dev
-
-| Platform | Install |
-|---|---|
-| **Ubuntu / Debian** | `sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev pkg-config` |
-| **Fedora / RHEL** | `sudo dnf install webkit2gtk4.1-devel openssl-devel libappindicator-gtk3-devel librsvg2-devel` |
-| **macOS** | Xcode Command Line Tools (`xcode-select --install`) |
-| **Windows** | WebView2 (preinstalled on Win 11) + Visual Studio Build Tools |
-
-Plus everywhere: Rust stable (`rustup default stable`) and Node 20+.
-
-CI installs the Linux system libs in the workflow, so you don't need them
-on a build server — only when developing locally on Linux.
-
-## Develop
-
-Two terminals:
-
-```sh
-# Terminal 1 — start the sidecar (Next.js dev server)
-npm run dev:papercusp     # serves on :3055 with HMR
-
-# Terminal 2 — start the Tauri shell pointing at :3055
-npm run dev:desktop
-```
-
-The Tauri window opens, points at `http://localhost:3055`, and you get the
-full HMR experience inside a native window.
-
-`npm run dev:desktop` runs `tauri dev`, which on first run downloads Rust
-crates (~5 minutes) — subsequent runs are instant.
-
-## Build distributable artifacts
-
-For release builds, the sidecar must be a self-contained bundle Tauri can
-ship as a resource. The build chain:
-
-1. `npm --workspace @papercusp/web run build` (in the sibling `papercup` clone)  
-   → produces `papercup/apps/operator/.next/standalone/` (the runnable Next.js bundle).
-2. `bin/build-desktop-sidecar.sh`  
-   → copies the standalone bundle + node_modules into `src-tauri/sidecar/`.
-3. `npm run build:desktop`  
-   → `tauri build` packages the Rust shell + sidecar into platform installers.
-
-Outputs (per platform):
-
-- macOS — `.dmg`, `.app` in `src-tauri/target/release/bundle/`
-- Windows — `.msi`, `.exe` in `src-tauri/target/release/bundle/`
-- Linux — `.AppImage`, `.deb`, `.rpm` in `src-tauri/target/release/bundle/`
-
-## Cross-platform releases
-
-Builds are run **locally**, not through GitHub Actions. The legacy
-`.github/workflows/desktop-release.yml` was removed; see `SHIPPING.md`
-for the current flow. TL;DR:
-
-```sh
-bin/setup-signing-key.sh       # one-time keypair gen
-bin/release-local.sh 0.0.2 alpha  # build + sign + tag + push + gh release create
-```
-
-Linux x86_64 builds natively from a Linux box. Windows + Linux arm64 are
-opt-in cross-builds (`WITH_WINDOWS=1`, `WITH_ARM64=1`). macOS still
-requires real Mac hardware (Apple notarization tooling is macOS-only).
-
-## What's bundled
-
-Everything the harness needs to run on a fresh machine:
-
-- Next.js standalone build of apps/operator (the UI + API)
-- Node runtime (bundled by the standalone build)
-- Harness substrate (`packages/papercusp-harness/` — run.sh + prompts +
-  identity + templates) — copied to user data dir on first launch
-- The papercusp CLI binary
-
-NOT bundled (yet — Phase 2 of the migration plan):
-
-- Postgres — current builds expect the user to have Docker/Postgres
-  available. Replacing with `pglite` is the next big bundling work item.
-- `claude` CLI — current builds shell out to it. Replacing with the
-  `@anthropic-ai/sdk` direct calls is the second-biggest item.
-
-When both are bundled, the desktop app needs nothing else on the user's
-machine. Total install size after that work: ~50-70 MB.
-
-## Configuration
-
-Bundle config lives in `src-tauri/tauri.conf.json`. The frontend dist
-(`web/`) is a tiny bootstrap page that's shown for ~1 second while the
-sidecar starts up; once ready, the Rust code navigates the webview to
-`http://localhost:<sidecarPort>/`.
-
-## Why Tauri (not Electron)
-
-- ~30-50 MB binary instead of ~150 MB (no bundled Chromium — uses OS webview)
-- ~80-150 MB RAM at idle instead of ~250 MB
-- Cold start <1s instead of 2-3s
-- Same HTTP-based architecture as the cloud port (Linear / Cursor / Granola pattern)
-- AI-codeable Rust glue (~200-500 lines)
+Installers are built locally, not by a hosted CI service. `bin/build-linux-local.sh` builds the
+Linux `.deb` and AppImage (`bin/build-mac-cross.sh` and `bin/build-windows-cross.sh` cover the other
+platforms). `bin/build-desktop-sidecar.sh` assembles the sidecar the installers carry: the operator
+host, the UI bundle, the embedded Postgres with pgvector, Node, and the runnable source tree. A
+release cut also needs a signing key (`bin/setup-signing-key.sh`) and the release-identity inputs
+the build's audit checks against; `SHIPPING.md` and `RELEASE-RUNBOOK.md` describe the full flow.
+Bundle configuration lives in `src-tauri/tauri.conf.json`.
 
 ## Known caveats
 
-- macOS WKWebView, Windows WebView2, Linux WebKitGTK — three different
-  webview engines. WebKitGTK lags on some CSS/JS features. Test all three.
-- First launch on macOS shows Gatekeeper warning (unsigned). Right-click → Open.
-- First launch on Windows shows SmartScreen warning (unsigned). More info → Run anyway.
-- Linux AppImage works on most distros; .deb/.rpm covered for Debian/Ubuntu and Fedora/RHEL.
+- macOS WKWebView, Windows WebView2 and Linux WebKitGTK are three different webview engines.
+  WebKitGTK lags on some CSS/JS features, so test all three.
+- Installers are unsigned: expect the Gatekeeper and SmartScreen prompts described above.
