@@ -164,8 +164,19 @@ converge_pot_git() {
         >>"$dir/converge-git-sync.log" 2>&1 || true
       sleep 10
     done
-    echo "same-box-rig: after ${budget}s tower store $([ -d "$TOWER_REPO" ] && echo present || echo MISSING) ($TOWER_REPO)," \
-      "VM store $([ -d "$VM_REPO" ] && echo present || echo MISSING) ($VM_REPO)" >&2
+    store_state() { # <repo> → bare | EMPTY-DIR | MISSING
+      if bare_repo "$1"; then echo bare; elif [ -d "$1" ]; then echo EMPTY-DIR; else echo MISSING; fi
+    }
+    echo "same-box-rig: after ${budget}s tower store $(store_state "$TOWER_REPO") ($TOWER_REPO)," \
+      "VM store $(store_state "$VM_REPO") ($VM_REPO)" >&2
+    # The reason a store never initialised lives in its OWNER's log, not in the converge logs.
+    # Run 7 (WI-10003976) died here pointing at converge-*.log while the cause — the owner's
+    # 'pot-git: init --bare failed ... refusing local git spawn' — sat unread in vm.log.
+    for role in tower vm; do
+      [ -f "$dir/$role.log" ] || continue
+      { grep -E 'pot-git.*(failed|refus)|git-sync.*(failed|error)' "$dir/$role.log" | tail -n 5 \
+        | sed "s/^/  $role.log: /" >&2; } || true
+    done
     exit 1
   )
 }

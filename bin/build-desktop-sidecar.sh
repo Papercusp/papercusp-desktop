@@ -423,6 +423,35 @@ if [[ "$TARGET_OS" != "$_host_os" || "$TARGET_ARCH" != "$_host_arch" ]]; then
   echo "→ WI-5651 CROSS-baking sidecar for ${TARGET_OS}-${TARGET_ARCH} on a ${_host_os}-${_host_arch} host"
 fi
 
+# HOST-TOOL PREFLIGHT (EI-24668318952454860 follow-up, WI-10003960 R-15): several
+# hard host-tool requirements used to be checked only at their point of use,
+# thousands of lines in, so a fresh build host paid a full multi-minute run per
+# missing tool and discovered them one at a time (a fresh-clone Linux build died
+# on `kopia not found` only after the whole sidecar had been assembled). Decide
+# every host tool that is knowable from the target alone HERE, before the first
+# toolchain or dependency operation, and report ALL missing ones in one failure.
+# The point-of-use checks stay as the authoritative guards; this only moves the
+# discovery forward. Keep the conditions in lock-step with those call sites.
+_missing_host_tools=()
+# kopia: the bundled snapshot subsystem (packages/backup/src/workspace-backup.ts).
+# Local builds copy the host binary; darwin cross-builds read the host version to
+# fetch the matching release. Only vm-release consumes its own pinned build.
+if [[ "${DISTRIBUTION_PROFILE:-}" != "vm-release" ]] \
+   && ! command -v kopia >/dev/null 2>&1; then
+  _missing_host_tools+=("kopia (snapshot subsystem — https://kopia.io/docs/installation/, apt/brew install kopia)")
+fi
+if [[ "$CROSS_BUILD" == "1" && "$TARGET_OS" == "darwin" ]]; then
+  for _t in file curl python3 rcodesign; do
+    command -v "$_t" >/dev/null 2>&1 || _missing_host_tools+=("$_t (darwin cross-build vendoring/signing)")
+  done
+fi
+if (( ${#_missing_host_tools[@]} > 0 )); then
+  echo "ERROR: build host is missing required tool(s) — install them, then re-run:" >&2
+  for _t in "${_missing_host_tools[@]}"; do echo "  - $_t" >&2; done
+  exit 1
+fi
+unset _missing_host_tools _t
+
 # WI-2644 / EI-18751304112302229: the packaged sidecar's serve.mjs runs
 # standalone (no `npm run` context), so process.env.npm_package_version is
 # unset at runtime and build-info.ts / serve.ts fall back to their (differing)
