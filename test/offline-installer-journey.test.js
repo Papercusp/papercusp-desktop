@@ -165,12 +165,22 @@ exit 0
   return { root, stubs, target, home, state, gui, server, ssh, scp, mcp, ledger };
 }
 
-function run(fx, { args = [], env = {}, ledger = true } = {}) {
+// A Discovery/join operational-test-evidence document, shaped like
+// docs/evidence/p505-run34-exact-0025-physical-*.json: it names the runtime
+// (Server .deb) sha256 under subject.debSha256.
+function joinEvidence(fx, debSha256) {
+  const file = join(fx.root, `join-${debSha256.slice(0, 8)}.json`);
+  writeFileSync(file, JSON.stringify({ schemaVersion: 1, kind: 'operational-test-evidence', exitCode: 0, subject: { artifact: 'Papercusp Server_0.0.25_amd64.deb', debSha256 } }));
+  return file;
+}
+
+function run(fx, { args = [], env = {}, ledger = true, joinSha = sha(fx.server) } = {}) {
   const evidence = join(fx.root, 'evidence.json');
   const argv = [
     '--platform', 'linux', '--gui-artifact', fx.gui, '--server-artifact', fx.server,
     '--evidence-out', evidence, '--ssh-host', 'fake@target', '--remote-dir', join(fx.root, 'remote'),
-    '--mcp-call', fx.mcp, '--health-timeout', '20', ...(ledger ? ['--ledger-json', fx.ledger] : []), ...args,
+    '--mcp-call', fx.mcp, '--health-timeout', '20', ...(ledger ? ['--ledger-json', fx.ledger] : []),
+    ...(joinSha ? ['--join-evidence', joinEvidence(fx, joinSha)] : []), ...args,
   ];
   const r = spawnSync('bash', [SCRIPT, ...argv], {
     encoding: 'utf8',
@@ -195,9 +205,24 @@ test('happy path: every leg passes, installer identity is recorded apart from th
   const r = run(fx);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.doc.verdict, 'PASS');
-  for (const leg of ['installer-identity', 'runtime-identity', 'preflight-fresh', 'offline', 'install', 'installed-bytes', 'witness-compat', 'first-launch', 'offline-restore', 'restart-reresolve']) {
+  for (const leg of ['installer-identity', 'join-runtime-match', 'runtime-identity', 'preflight-fresh', 'offline', 'install', 'installed-bytes', 'witness-compat', 'first-launch', 'offline-restore', 'restart-reresolve']) {
     assert.equal(r.legs[leg]?.status, 'pass', `${leg}: ${r.legs[leg]?.detail}`);
   }
+  // The P-521 readiness manifest binds an evidence document only when it is an
+  // operational-test-evidence doc that declares the journey and names a candidate
+  // artifact sha256 under subject (p2p-candidate-evidence.ts). The runtime sha is
+  // under the same key the Discovery/join evidence uses (plan D-083).
+  assert.equal(r.doc.kind, 'operational-test-evidence');
+  assert.equal(r.doc.p521Journey, 'full-installer-compat');
+  assert.equal(r.doc.exitCode, 0);
+  assert.equal(r.doc.subject.debSha256, sha(fx.server));
+  assert.equal(r.doc.subject.artifactSha256, sha(fx.server));
+  assert.equal(r.doc.join.runtimeSha256, sha(fx.server));
+  assert.deepEqual(r.doc.subject.artifacts.map((a) => a.sha256).sort(), [sha(fx.gui), sha(fx.server)].sort());
+  assert.ok(!Number.isNaN(Date.parse(r.doc.finishedAt)));
+  assert.equal(r.doc.physicalRun.legVerdicts.length, r.doc.legs.length);
+  assert.ok(r.doc.physicalRun.legVerdicts.every((l) => l.status === 'pass'));
+  assert.match(r.doc.command[0], /offline-installer-journey\.sh .*--join-evidence/);
   assert.equal(r.doc.installerIdentity.server.sha256, sha(fx.server));
   assert.equal(r.doc.installerIdentity.gui.sha256, sha(fx.gui));
   // The runtime identity is the sidecar bytes, not the installer bytes.
@@ -226,6 +251,26 @@ test('no ledger: installer identity is unmeasured and the run is INCOMPLETE, nev
   assert.equal(r.status, 3, r.stderr);
   assert.equal(r.doc.verdict, 'INCOMPLETE');
   assert.equal(r.legs['installer-identity'].status, 'unmeasured');
+});
+
+test('no discovery-join evidence: join-runtime-match is unmeasured and the run is INCOMPLETE (D-083)', opts, () => {
+  const r = run(fixture(), { joinSha: null });
+  assert.equal(r.status, 3, r.stderr);
+  assert.equal(r.doc.verdict, 'INCOMPLETE');
+  assert.equal(r.doc.exitCode, 3);
+  assert.equal(r.legs['join-runtime-match'].status, 'unmeasured');
+});
+
+test('discovery-join evidence naming a different runtime sha256 fails the row (D-083)', opts, () => {
+  const fx = fixture();
+  const r = run(fx, { joinSha: 'a'.repeat(64) });
+  assert.equal(r.status, 1, r.stderr);
+  assert.equal(r.doc.verdict, 'FAIL');
+  assert.equal(r.doc.exitCode, 1);
+  assert.equal(r.legs['join-runtime-match'].status, 'fail');
+  assert.match(r.legs['join-runtime-match'].detail, new RegExp(`${sha(fx.server)} != discovery-join a{64}`));
+  // The manifest reads this as a fail through physicalRun, not only through exitCode.
+  assert.ok(r.doc.physicalRun.legVerdicts.some((l) => l.leg === 'join-runtime-match' && l.status === 'fail'));
 });
 
 test('ledger mismatch fails the installer-identity leg', opts, () => {

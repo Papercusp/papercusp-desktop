@@ -46,6 +46,17 @@
 #   offline-restore      the seeded hive is present on the offline install
 #                        (pot:list via the installed node and mcp-call.mjs).
 #   restart-reresolve    restart; a NEW pid serves, re-resolved to the same bytes.
+#   join-runtime-match   (plan D-083) this row needs no live peer join only when
+#                        the runtime artifact sha256 (the witness) is the one the
+#                        Discovery/join evidence names for the same candidate
+#                        (its subject.debSha256 / subject.artifactSha256). No
+#                        --join-evidence => unmeasured; a different sha => fail.
+#
+# The evidence is an `operational-test-evidence` document declaring
+# p521Journey 'full-installer-compat', with the runtime sha256 under the same
+# subject keys the Discovery/join evidence uses (subject.debSha256 for a .deb
+# witness, subject.artifactSha256 always), so the P-521 readiness manifest
+# (apps/operator/lib/release/p2p-candidate-evidence.ts) binds and joins it.
 #
 # Usage:
 #   offline-installer-journey.sh --platform linux|mac \
@@ -54,7 +65,9 @@
 #     [--expected-sha SHA] [--ssh-host H] [--ssh-port N] [--ssh-key K] \
 #     [--ssh-option K=V]... [--remote-dir DIR] [--offline enforce|verify] \
 #     [--expect-pot SLUG] [--mcp-call PATH] [--health-timeout SEC] \
-#     [--install-timeout SEC] [--keep-offline]
+#     [--install-timeout SEC] [--keep-offline] [--join-evidence PATH]
+#   --join-evidence is the Discovery/join operational-test-evidence JSON for
+#   the same candidate (e.g. docs/evidence/p505-run34-exact-0025-physical-*.json).
 #   --witness defaults to the Server .deb on linux (the drill's exact bytes);
 #   on mac pass the updater "Papercusp Server.app.tar.gz" the Mac VM boots.
 #   --ledger-json is a JSON array of {name, sha256, size|bytes}, e.g.
@@ -93,10 +106,13 @@ MCP_CALL="$REPO_ROOT/scripts/mcp-call.mjs"
 HEALTH_TIMEOUT=300
 INSTALL_TIMEOUT=1800
 KEEP_OFFLINE=0
+JOIN_EVIDENCE=""
+ORIG_CMD="$(printf '%q ' "$0" "$@")"
 
-usage() { sed -n '2,70p' "$0"; }
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --join-evidence) JOIN_EVIDENCE="${2:-}"; shift 2 ;;
     --platform) PLATFORM="${2:-}"; shift 2 ;;
     --gui-artifact) GUI_ARTIFACT="${2:-}"; shift 2 ;;
     --server-artifact) SERVER_ARTIFACT="${2:-}"; shift 2 ;;
@@ -136,6 +152,7 @@ esac
 [[ -n "$EVIDENCE_OUT" ]] || die2 "--evidence-out PATH is required"
 [[ -n "$SSH_HOST" || -n "${PC_SSH:-}" ]] || die2 "--ssh-host is required"
 [[ -f "$MCP_CALL" ]] || die2 "--mcp-call not found: $MCP_CALL"
+[[ -z "$JOIN_EVIDENCE" || -f "$JOIN_EVIDENCE" ]] || die2 "--join-evidence not found: $JOIN_EVIDENCE"
 [[ "$HEALTH_TIMEOUT" =~ ^[0-9]+$ && "$INSTALL_TIMEOUT" =~ ^[0-9]+$ ]] || die2 "timeouts must be integers"
 if [[ -z "$WITNESS" ]]; then
   [[ "$PLATFORM" == linux ]] || die2 "--witness is required on mac (the Server.app.tar.gz the Mac VM boots)"
@@ -252,7 +269,8 @@ for role in gui server; do
   ident "installer.$role" bytes "$(stat -c %s "$f")"
 done
 ident witness name "$(basename "$WITNESS")"
-ident witness sha256 "$(sha256_local "$WITNESS")"
+WITNESS_SHA="$(sha256_local "$WITNESS")"
+ident witness sha256 "$WITNESS_SHA"
 ident witness bytes "$(stat -c %s "$WITNESS")"
 if [[ -z "$LEDGER_JSON" ]]; then
   leg installer-identity unmeasured "no --ledger-json: installer sha256 recorded but not matched to the release ledger"
@@ -277,6 +295,41 @@ PY
 )"
   if [[ "$ledger_out" == OK ]]; then leg installer-identity pass "GUI+Server installer sha256/bytes match the release ledger"
   else leg installer-identity fail "${ledger_out#BAD }"; fi
+fi
+
+# ── Leg 1b: the runtime sha the Discovery/join evidence names (D-083) ─────────
+# Without a live peer join, this row stands only if its runtime artifact is the
+# exact artifact the discovery-join evidence proved for the same candidate.
+if [[ -z "$JOIN_EVIDENCE" ]]; then
+  leg join-runtime-match unmeasured "no --join-evidence: the runtime sha256 is not compared with the discovery-join evidence (D-083)"
+else
+  ident join evidencePath "$JOIN_EVIDENCE"
+  ident join evidenceSha256 "$(sha256_local "$JOIN_EVIDENCE")"
+  join_out="$(python3 - "$JOIN_EVIDENCE" "$WITNESS_SHA" <<'PY'
+import json, re, sys
+try:
+    doc = json.load(open(sys.argv[1]))
+except Exception as e:  # unreadable evidence cannot vouch for anything
+    print(f"VOID unreadable join evidence: {e}"); sys.exit(0)
+want = sys.argv[2]
+subj = doc.get('subject') if isinstance(doc, dict) and isinstance(doc.get('subject'), dict) else {}
+named = sorted({subj[k] for k in ('debSha256', 'artifactSha256')
+                if isinstance(subj.get(k), str) and re.fullmatch(r'[0-9a-f]{64}', subj[k])})
+if not named:
+    print('VOID join evidence names no runtime sha256 (subject.debSha256 / subject.artifactSha256)')
+elif want in named:
+    print(f'PASS {want}')
+else:
+    print(f"FAIL runtime sha256 {want} != discovery-join {','.join(named)}")
+PY
+)"
+  case "$join_out" in
+    PASS\ *) ident join runtimeSha256 "${join_out#PASS }"
+             leg join-runtime-match pass "runtime sha256 ${WITNESS_SHA:0:16} is the one the discovery-join evidence names" ;;
+    FAIL\ *) leg join-runtime-match fail "${join_out#FAIL }" ;;
+    VOID\ *) leg join-runtime-match void "${join_out#VOID }" ;;
+    *) leg join-runtime-match void "join evidence check produced no verdict" ;;
+  esac
 fi
 
 # ── Leg 2: runtime identity from the WITNESS bytes (local) ───────────────────
@@ -595,9 +648,9 @@ fi
 FINISHED_AT="$(now)"
 for f in "$LOG_DIR"/*.log; do [[ -f "$f" ]] && printf '%s\t%s\n' "$f" "$(sha256_local "$f")"; done > "$RUN_DIR/logs.tsv"
 mkdir -p "$(dirname "$EVIDENCE_OUT")"
-python3 - "$LEGS" "$IDS" "$RUN_DIR/logs.tsv" "$EVIDENCE_OUT" "$SCHEMA" "$PLATFORM" "$STARTED_AT" "$FINISHED_AT" "$RUN_DIR" <<'PY'
-import json, sys
-legs_f, ids_f, logs_f, out, schema, platform, started, finished, run_dir = sys.argv[1:10]
+python3 - "$LEGS" "$IDS" "$RUN_DIR/logs.tsv" "$EVIDENCE_OUT" "$SCHEMA" "$PLATFORM" "$STARTED_AT" "$FINISHED_AT" "$RUN_DIR" "$ORIG_CMD" <<'PY'
+import json, os, sys
+legs_f, ids_f, logs_f, out, schema, platform, started, finished, run_dir, command = sys.argv[1:11]
 legs = []
 for line in open(legs_f):
     name, status, at, detail, log = (line.rstrip('\n').split('\t') + [''] * 5)[:5]
@@ -608,8 +661,42 @@ for line in open(ids_f):
     ids.setdefault(scope, {})[key] = value
 statuses = [l['status'] for l in legs]
 verdict = 'FAIL' if 'fail' in statuses else ('PASS' if statuses and all(s == 'pass' for s in statuses) else 'INCOMPLETE')
+exit_code = {'PASS': 0, 'FAIL': 1, 'INCOMPLETE': 3}[verdict]
+witness = ids.get('witness', {})
+cand = ids.get('candidate', {})
+artifacts, seen = [], set()
+for role, scope in (('gui-installer', 'installer.gui'), ('server-installer', 'installer.server'), ('runtime-witness', 'witness')):
+    a = ids.get(scope, {})
+    if a.get('sha256') and a['sha256'] not in seen:
+        seen.add(a['sha256'])
+        artifacts.append({'role': role, 'name': a.get('name'), 'sha256': a['sha256'], 'bytes': int(a['bytes']) if a.get('bytes', '').isdigit() else None})
+# The runtime sha256 sits under the SAME subject keys the Discovery/join evidence
+# uses, so the readiness manifest binds this document to the candidate and can
+# join the two rows on it (plan D-083).
+subject = {
+    'platform': platform,
+    'artifact': witness.get('name'),
+    'artifactSha256': witness.get('sha256'),
+    'version': cand.get('expectedVersion') or None,
+    'runtimeBuildSha': cand.get('expectedSha') or None,
+    'artifacts': artifacts,
+}
+if (witness.get('name') or '').endswith('.deb'):
+    subject['debSha256'] = witness.get('sha256')
 doc = {
+    'schemaVersion': 1, 'kind': 'operational-test-evidence',
+    'name': f"P-521 full-installer compatibility ({platform}): real GUI+Server installers, offline, serving the minimal-witness bytes",
+    'framework': 'operational', 'testLayer': 'e2e', 'evidencePlane': 'live',
+    'plan': 'p2p-public-release-endgame-2026-09-01', 'planItem': 'P-521', 'workItem': 'WI-10003962',
+    'governingDecisions': ['D-079', 'D-080', 'D-083'], 'p521Journey': 'full-installer-compat',
+    'observer': os.environ.get('PAPERCUSP_SID') or None,
+    'command': [command.strip()], 'exitCode': exit_code, 'subject': subject,
+    'physicalRun': {
+        'schemaVersion': 1, 'window': {'startedAt': started, 'finishedAt': finished},
+        'legVerdicts': [{'leg': l['leg'], 'status': l['status'], 'scope': 'physical', 'observedAt': l['at']} for l in legs],
+    },
     'schema': schema, 'platform': platform, 'startedAt': started, 'finishedAt': finished, 'verdict': verdict,
+    'join': ids.get('join', {}),
     'candidate': ids.get('candidate', {}),
     # Installer identity is recorded SEPARATELY from the runtime artifact (P-521 candidate admission).
     'installerIdentity': {'gui': ids.get('installer.gui', {}), 'server': ids.get('installer.server', {})},
@@ -620,7 +707,7 @@ doc = {
     'restore': ids.get('restore', {}), 'legs': legs,
     'logs': [dict(zip(('path', 'sha256'), l.rstrip('\n').split('\t'))) for l in open(logs_f) if l.strip()],
     'runDir': run_dir,
-    'scopeNote': 'Joining a live peer is the Discovery/join row; this row proves the full installer lays down and serves the minimal witness bytes offline.',
+    'scopeNote': 'No live peer join here (plan D-083): the Discovery/join row proves joining; this row proves the full installers lay down and serve, offline, the same runtime bytes that row joined with (join-runtime-match).',
 }
 json.dump(doc, open(out, 'w'), indent=2, sort_keys=False)
 print(verdict)
