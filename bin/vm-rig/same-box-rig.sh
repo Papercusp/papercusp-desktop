@@ -152,6 +152,37 @@ converge_pot_git() {
     # A store counts only once it is a bare repo: git-sync creates the directory before its init
     # lands, and an existence check here let run 20260930T054405Z reach phase A on an empty store.
     bare_repo() { [ "$(git --git-dir="$1" rev-parse --is-bare-repository 2>/dev/null)" = true ]; }
+    # Phase A's precondition is the physical canary's steady state: the tower's store already
+    # holds the VM's device namespace (the VM announced once and the tower received it). A fresh
+    # rig never had that exchange, so run 20260930T085016Z-2629813 failed phase A on it after a
+    # 20-minute wait. Drive the production git-sync on the VM (announce), then on the tower
+    # (receive), until a tower baseline passes the scenario's own `phase-a-precheck`.
+    # Bounded: SAME_BOX_STEADY_SEC (default 360).
+    device_key() { node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).deviceKey || "")' "$1"; }
+    steady_namespaces() {
+      local tower_key vm_key steady_start=$SECONDS steady_budget="${SAME_BOX_STEADY_SEC:-360}"
+      tower_key="$(device_key "$TOWER_CACHE" 2>/dev/null)"; vm_key="$(device_key "$VM_CACHE" 2>/dev/null)"
+      [ -n "$tower_key" ] && [ -n "$vm_key" ] || {
+        echo "same-box-rig: no device key in $TOWER_CACHE or $VM_CACHE" >&2; return 1; }
+      while :; do
+        "$TSX" "$producer" phase-a-observe tower present "$TOWER_REPO" "$tower_key" "$vm_key" \
+          >"$dir/steady-tower-baseline.json" 2>>"$dir/converge-steady.log" \
+          && "$TSX" "$producer" phase-a-precheck "$dir/steady-tower-baseline.json" "$tower_key" "$vm_key" \
+            >/dev/null 2>>"$dir/converge-steady.log" && {
+          echo "same-box-rig: tower holds both device namespaces after $((SECONDS - steady_start))s" >&2
+          return 0
+        }
+        [ $((SECONDS - steady_start)) -lt "$steady_budget" ] || break
+        ssh "$VM" "PCUSP_VM_CALL_TIMEOUT_SEC=75 '$VM_CALL' git-sync:run '{\"installSlug\":\"$SB_GIT_SYNC_SLUG\"}' --workspace '$SB_WORKSPACE' --harness '$SB_POT_HOME'" \
+          >>"$dir/converge-steady.log" 2>&1 || true
+        printf '{"installSlug":"%s"}' "$SB_GIT_SYNC_SLUG" \
+          | "$TOWER_CALL" git-sync:run --json - >>"$dir/converge-steady.log" 2>&1 || true
+        sleep 5
+      done
+      echo "same-box-rig: after ${steady_budget}s the tower still lacks the VM device namespace (log: $dir/converge-steady.log)" >&2
+      tail -3 "$dir/converge-steady.log" >&2
+      return 1
+    }
     while :; do
       bare_repo "$TOWER_REPO" && [ "$(ssh "$VM" "git --git-dir='$VM_REPO' rev-parse --is-bare-repository" 2>/dev/null)" = true ] && {
         echo "same-box-rig: pot-git stores present on both owners after $((SECONDS - start))s" >&2
@@ -161,6 +192,7 @@ converge_pot_git() {
         local remaining=$((budget - (SECONDS - start)))
         [ "$remaining" -gt 0 ] || remaining=0
         rig_profile_vm_answering "$dir" "$remaining" || exit 1
+        steady_namespaces || exit 1
         exit 0
       }
       [ $((SECONDS - start)) -lt "$budget" ] || break

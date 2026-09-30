@@ -588,6 +588,13 @@ phase_a_storage_join() {
   # single-read: the tower baseline, taken before the quarantine and the bootstrap — nothing is in flight yet
   "$TSX" "$PRODUCER" phase-a-observe tower present "$TOWER_REPO" \
     "$tower_device" "$vm_device" >"$phase_dir/tower-before.json"
+  # The baseline is Phase A's precondition (the tower already holds the VM's device
+  # namespace), and nothing below can change it. Check it before the quarantine mutates
+  # the VM: same-box run 20260930T085016Z-2629813 only learned of a missing VM namespace
+  # from the convergence wait's verifier, 20 minutes later.
+  "$TSX" "$PRODUCER" phase-a-precheck "$phase_dir/tower-before.json" \
+    "$tower_device" "$vm_device" >"$phase_dir/precheck.json" 2>"$phase_dir/precheck.err" \
+    || { cat "$phase_dir/precheck.err" >&2; fail 'phase A precondition: the tower baseline does not hold both device namespaces'; }
 
   # Quarantine and the absence observation MUST be one VM process: the VM's
   # scheduled git-sync bootstrap tick legitimately recreates a missing store,
@@ -654,9 +661,15 @@ fs.writeFileSync(`${dir}/verify-input.json`, JSON.stringify({
   },
 }, null, 2));
 NODE
-      if "$TSX" "$PRODUCER" phase-a-verify "$phase_dir/verify-input.json" \
-        >"$phase_dir/verdict.json" 2>"$phase_dir/verdict.err"; then
-        break
+      local verify_rc=0
+      "$TSX" "$PRODUCER" phase-a-verify "$phase_dir/verify-input.json" \
+        >"$phase_dir/verdict.json" 2>"$phase_dir/verdict.err" || verify_rc=$?
+      [ "$verify_rc" -eq 0 ] && break
+      # Exit 3 = not converged yet (retry). Anything else rejected an input fixed before
+      # this wait, which another observation cannot clear: stop now, not at the deadline.
+      if [ "$verify_rc" -ne 3 ]; then
+        cat "$phase_dir/verdict.err" >&2
+        fail "phase A verifier rejected a frozen input (exit $verify_rc); retrying cannot clear it"
       fi
     fi
     if [ "$SECONDS" -ge "$deadline" ]; then
