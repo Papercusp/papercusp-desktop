@@ -131,6 +131,12 @@ if [ "${HIVE_GIT_RIG:-physical}" = same-box ]; then
     echo "FATAL: REQUIRE_ZERO_SKIPS=1 is release acceptance; a same-box rehearsal can never satisfy it" >&2
     exit 2
   fi
+  # Seconds-cheap precondition before any slow work: every path the profile hands the probe
+  # and scenario exists on this rig (the r5 rehearsal lost a run to a wrong identity path).
+  rig_profile_same_box_paths_ready || {
+    echo "FATAL: the same-box rig at $HIVE_GIT_SAME_BOX_RIG is missing a path the rig profile hands the scenario (RIG_PROFILE_PATH_MISSING above); re-converge it (same-box-rig.sh converge --dir <rig>) or bring up a fresh one" >&2
+    exit 2
+  }
   [ -n "$PHYSICAL_ONLY" ] || PHYSICAL_ONLY="$(physical_phase_select from-phase A)" || exit 2
   : "${HIVE_GIT_PHYSICAL_PROBE_CMD:=$DESKTOP_DIR/bin/vm-rig/hive-git-physical-probe.sh}"
   export HIVE_GIT_PHYSICAL_PROBE_CMD

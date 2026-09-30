@@ -167,6 +167,17 @@ converge_pot_git() {
   )
 }
 
+# Every host path the rig profile hands the probe and scenario exists on this rig
+# (rig-profile.sh rig_profile_same_box_paths_ready — the drill entry runs the same check).
+profile_paths_ready() {
+  (
+    export HIVE_GIT_RIG=same-box HIVE_GIT_SAME_BOX_RIG="$dir"
+    # shellcheck source=lib/rig-profile.sh
+    source "$HERE/lib/rig-profile.sh"
+    rig_profile_same_box_paths_ready
+  )
+}
+
 # Finish (or redo) the post-join half of `up` on a rig whose owners are up and whose rig.env is
 # written: install the VM driver, then converge the pot mode and both pot-git stores. Also the
 # way to re-converge after a VM owner restart.
@@ -177,6 +188,7 @@ cmd_converge() {
   # checkout has no exec bit (r4 rig `up` died on 'Permission denied' here).
   SAME_BOX_RIG_DIR="$dir" bash "$HERE/lib/same-box-deploy.sh" same-box-vm >&2 || die "same-box-deploy.sh failed"
   converge_pot_git || die "the pot-git stores never appeared on both owners (logs: $dir/converge-*.log)"
+  profile_paths_ready || die "the rig profile names a path this rig does not have (RIG_PROFILE_PATH_MISSING above)"
   echo "same-box-rig: CONVERGED $dir"
   echo "HIVE_GIT_SAME_BOX_RIG=$dir"
 }
@@ -294,6 +306,7 @@ EOF
   ln -sfn "$ROOT" "$dir/vm-dep-source"
   SAME_BOX_RIG_DIR="$dir" bash "$HERE/lib/same-box-deploy.sh" same-box-vm >&2 || die "same-box-deploy.sh failed"
   converge_pot_git || die "the pot-git stores never appeared on both owners (logs: $dir/converge-*.log)"
+  profile_paths_ready || die "the rig profile names a path this rig does not have (RIG_PROFILE_PATH_MISSING above)"
 
   echo "same-box-rig: UP pot=$pot git_sync=$git_sync_slug repo_key=$repo_key tower=:$tp vm=:$vp dht=$dht"
   echo "HIVE_GIT_SAME_BOX_RIG=$dir"
