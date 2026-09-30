@@ -546,7 +546,7 @@ copy_gstreamer_plugin_closure || exit 1
 # 2c-gst-ii. GPL LIBRARY GUARD (P-020). Whatever route a library took into the
 #     AppDir (linuxdeploy, the plugin closure, a future copy step), none of the
 #     GPL codec/media libraries dropped in 2c-gst-0 may ship under ELv2.
-GST_GPL_LIB_ERE="${PAPERCUSP_APPIMAGE_GPL_LIB_ERE:-^lib(avcodec|avformat|avfilter|avdevice|postproc|x264|x265|a52|mpeg2|dvdread|dvdnav|mjpegutils|mpeg2encpp|mplex2|sidplay|cdio|faad|slang|gpm|readline|dca|lrdf|zvbi|neon|fftw3|rubberband|xvidcore|vidstab|jbig|tiff|ayatana-indicator3)[.-]}"
+GST_GPL_LIB_ERE="${PAPERCUSP_APPIMAGE_GPL_LIB_ERE:-^lib(avcodec|avformat|avfilter|avdevice|avutil|swresample|swscale|postproc|x264|x265|a52|mpeg2|dvdread|dvdnav|mjpegutils|mpeg2encpp|mplex2|sidplay|cdio|faad|slang|gpm|readline|dca|lrdf|zvbi|neon|fftw3|rubberband|xvidcore|vidstab|jbig|tiff|ayatana-indicator3)[.-]}"
 _gpl_hits="$(find "$APPDIR" \( -type f -o -type l \) -name 'lib*.so*' -printf '%f\n' 2>/dev/null | grep -E "$GST_GPL_LIB_ERE" | sort -u || true)"
 if [ -n "$_gpl_hits" ]; then
   echo "FATAL: GPL-licensed libraries are in the AppDir (incompatible with the Elastic License 2.0):" >&2
