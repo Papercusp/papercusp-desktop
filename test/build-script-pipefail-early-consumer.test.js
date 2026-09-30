@@ -15,7 +15,16 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const script = path.resolve(__dirname, '..', 'bin/build-desktop-sidecar.sh');
+// Every release-build script that runs under `set -o pipefail` (WI-10004186
+// extended the guard from build-desktop-sidecar.sh to the rest of the build path).
+const SCRIPTS = [
+  'bin/build-desktop-sidecar.sh',
+  'bin/build-appimage.sh',
+  'bin/build-and-archive-deb.sh',
+  'bin/build-deb-repacked.sh',
+  'bin/build-mac-cross.sh',
+  'bin/build-windows-cross.sh',
+].map((rel) => path.resolve(__dirname, '..', rel));
 
 // A pipe into an early-exiting consumer. Anchored on `|` so a producer such as
 // `head -c 2 FILE | …` is not flagged.
@@ -26,13 +35,23 @@ function codeLines(src) {
     .filter(({ text }) => !/^\s*#/.test(text));
 }
 
-test('build-desktop-sidecar.sh has no pipe into an early-exiting consumer', () => {
-  const offenders = codeLines(fs.readFileSync(script, 'utf8'))
-    .filter(({ text }) => EARLY_CONSUMER.test(text))
-    .map(({ line, text }) => `${line}: ${text.trim()}`);
-  assert.deepEqual(offenders, [],
-    'use a draining consumer (sed -n 1p / grep -c … >/dev/null / awk latch) instead');
-});
+for (const script of SCRIPTS) {
+  const name = path.basename(script);
+  test(`${name} runs under pipefail (the premise of this guard)`, () => {
+    assert.match(fs.readFileSync(script, 'utf8'), /pipefail/);
+  });
+  test(`${name} has no pipe into an early-exiting consumer`, () => {
+    const offenders = codeLines(fs.readFileSync(script, 'utf8'))
+      .filter(({ text }) => EARLY_CONSUMER.test(text))
+      .map(({ line, text }) => `${line}: ${text.trim()}`);
+    assert.deepEqual(offenders, [],
+      'use a draining consumer (sed -n 1p / grep -c … >/dev/null / awk latch) instead');
+  });
+  test(`${name} still parses`, () => {
+    const r = spawnSync('bash', ['-n', script], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+  });
+}
 
 test('the detector recognises each early-consumer shape (control)', () => {
   for (const bad of [
@@ -58,9 +77,4 @@ test('the class is real: head -1 under pipefail dies 141, sed -n 1p does not', (
   const good = run('sed -n 1p');
   assert.equal(good.status, 0, good.stderr);
   assert.match(good.stdout, /got=1\b/);
-});
-
-test('build-desktop-sidecar.sh still parses', () => {
-  const r = spawnSync('bash', ['-n', script], { encoding: 'utf8' });
-  assert.equal(r.status, 0, r.stderr);
 });
