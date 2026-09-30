@@ -17,7 +17,13 @@
 #   - both the scenario and the probe prefix their messages with
 #       "hive-git-physical-scenario: " / "hive-git-physical-probe: ",
 #     and their fail() exits immediately after printing, so the LAST prefixed
-#     non-marker line is the most specific reason available.
+#     non-marker line is the most specific reason available — EXCEPT for the
+#     lines the probe's EXIT trap prints AFTER fail() (TRAILER_RE below). Real
+#     run 20260930T014309Z summarised as "preserved failed-run diagnostics at
+#     ..." and hid the cause on the line before it; those lines are skipped.
+#   - the rig preflight prints "PHYSICAL_PREFLIGHT_FAILED <check>: <reason>"
+#     (unprefixed) and the probe's own refusal line only points at it, so a
+#     preflight refusal is summarised by its FIRST such line, naming the check.
 #
 # Output (stdout, one line):
 #   phase <X> (<function>): <reason>
@@ -37,10 +43,17 @@ physical_failure_summary() {
   fi
   local marker_re='^hive-git-physical-scenario: PHASE_START '
   local prefix_re='^hive-git-physical-(scenario|probe): '
-  local phase_line phase_letter phase_fn reason
+  # Post-failure housekeeping the probe's EXIT trap prints after fail(): never a cause.
+  local trailer_re='^hive-git-physical-probe: preserved failed-run diagnostics at '
+  local preflight_re='^PHYSICAL_PREFLIGHT_FAILED '
+  local phase_line phase_letter phase_fn reason preflight
   phase_line="$(grep -E "$marker_re" "$err_file" | tail -n 1)"
-  reason="$(grep -E "$prefix_re" "$err_file" | grep -vE "$marker_re" | tail -n 1 \
-    | sed -E "s/$prefix_re//")"
+  reason="$(grep -E "$prefix_re" "$err_file" | grep -vE "$marker_re" | grep -vE "$trailer_re" \
+    | tail -n 1 | sed -E "s/$prefix_re//")"
+  preflight="$(grep -E "$preflight_re" "$err_file" | head -n 1)"
+  if [ -z "$phase_line" ] && [ -n "$preflight" ]; then
+    reason="rig preflight refused the run: ${preflight}"
+  fi
   # Keep the summary to one readable line.
   reason="$(printf '%s' "$reason" | tr -d '\r' | cut -c1-400)"
   if [ -n "$phase_line" ]; then
