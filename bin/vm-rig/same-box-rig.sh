@@ -130,6 +130,43 @@ preflight_natives() { # <sidecar dir>
   return 1
 }
 
+# Put the rig's pot in the canary's steady mode and let git-sync create both pot-git stores.
+# The canary runs `bridged` (since 2026-07-17), and git-sync creates a pot-git store only in a
+# non-legacy mode. Everything here goes through the rig's OWN profile — the tower-tsx and ssh
+# transports and the tower-call / vmcall.sh doors the scenario uses — so a profile defect fails
+# `up`, in seconds, instead of the first phase. Bounded: SAME_BOX_CONVERGE_SEC (default 300).
+converge_pot_git() {
+  (
+    export HIVE_GIT_RIG=same-box HIVE_GIT_SAME_BOX_RIG="$dir"
+    # shellcheck source=lib/rig-profile.sh
+    source "$HERE/lib/rig-profile.sh"
+    rig_profile_apply 2>>"$dir/converge-profile.log" || exit 2
+    local producer="$ROOT/packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts"
+    local vm_producer="$VM_DEP_SOURCE/packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts"
+    local budget="${SAME_BOX_CONVERGE_SEC:-300}" start=$SECONDS
+    "$TSX" "$producer" same-box-pot-mode bridged >"$dir/converge-mode-tower.json" 2>>"$dir/converge-mode.log" \
+      || { echo "same-box-rig: could not set the tower pot mode (log: $dir/converge-mode.log)" >&2; exit 1; }
+    ssh "$VM" "'$VM_NODE' '$VM_TSX' '$vm_producer' same-box-pot-mode bridged" \
+      >"$dir/converge-mode-vm.json" 2>>"$dir/converge-mode.log" \
+      || { echo "same-box-rig: could not set the VM pot mode (log: $dir/converge-mode.log)" >&2; exit 1; }
+    while :; do
+      [ -d "$TOWER_REPO" ] && [ -d "$VM_REPO" ] && {
+        echo "same-box-rig: pot-git stores present on both owners after $((SECONDS - start))s" >&2
+        exit 0
+      }
+      [ $((SECONDS - start)) -lt "$budget" ] || break
+      printf '{"installSlug":"%s"}' "$SB_GIT_SYNC_SLUG" \
+        | "$TOWER_CALL" git-sync:run --json - >>"$dir/converge-git-sync.log" 2>&1 || true
+      ssh "$VM" "'$VM_CALL' git-sync:run '{\"installSlug\":\"$SB_GIT_SYNC_SLUG\"}' --workspace '$SB_WORKSPACE' --harness '$SB_POT_HOME'" \
+        >>"$dir/converge-git-sync.log" 2>&1 || true
+      sleep 10
+    done
+    echo "same-box-rig: after ${budget}s tower store $([ -d "$TOWER_REPO" ] && echo present || echo MISSING) ($TOWER_REPO)," \
+      "VM store $([ -d "$VM_REPO" ] && echo present || echo MISSING) ($VM_REPO)" >&2
+    exit 1
+  )
+}
+
 cmd_up() {
   [ -n "$dir" ] || dir="$HOME/.papercusp-same-box-rigs/$(date -u +%Y%m%dT%H%M%SZ)-$$"
   [ ! -e "$dir/rig.env" ] || die "$dir already holds a rig (rig.env exists); run down first"
@@ -200,9 +237,14 @@ EOF
     case "$gh_id" in ''|*[!0-9]*) ;; *) repo_key="gh-$gh_id" ;; esac
   fi
   [ -n "$repo_key" ] || die "create-from-repo returned neither repoKey nor githubRepositoryId (see $dir/create-from-repo.json)"
-  vm_repo="$dir/vm-home/.papercusp/pot-git/$pot/$repo_key.git"
-  # pot-git stores appear only once git-sync runs in a non-legacy hive-git mode.
-  [ -d "$vm_repo" ] || echo "same-box-rig: NOTE the VM has no $vm_repo yet — git-sync creates it in a non-legacy hive-git mode" >&2
+  # create-from-repo makes a pot home plus a member checkout; the member owns git-sync and the
+  # working tree on the tower, and the VM's join must register the same member slug.
+  local git_sync_slug vm_member
+  git_sync_slug="$(fed_json "$created" "d['created'].get('memberSlug') or ''")"
+  vm_member="$(fed_json "$joined" "((d.get('members') or [{}])[0]).get('slug') or ''")"
+  [ -n "$git_sync_slug" ] || die "create-from-repo returned no memberSlug (see $dir/create-from-repo.json)"
+  [ "$vm_member" = "$git_sync_slug" ] \
+    || die "the VM joined member '$vm_member', the tower's member is '$git_sync_slug' (see $dir/join.json)"
 
   cat >"$dir/rig.env" <<EOF
 SB_TOWER_HOME=$dir/tower-home
@@ -212,6 +254,7 @@ SB_VM_PORT=$vp
 SB_NODE=$(command -v node)
 SB_TSX=$ROOT/node_modules/tsx/dist/cli.mjs
 SB_POT_HOME=$pot
+SB_GIT_SYNC_SLUG=$git_sync_slug
 SB_REPO_KEY=$repo_key
 SB_GITHUB_REMOTE=${repo%.git}
 SB_WORKSPACE=papercusp-workspace
@@ -234,8 +277,9 @@ EOF
   chmod 0755 "$dir/tower-call" "$dir/boot-vm.sh"
   ln -sfn "$ROOT" "$dir/vm-dep-source"
   SAME_BOX_RIG_DIR="$dir" "$HERE/lib/same-box-deploy.sh" same-box-vm >&2 || die "same-box-deploy.sh failed"
+  converge_pot_git || die "the pot-git stores never appeared on both owners (logs: $dir/converge-*.log)"
 
-  echo "same-box-rig: UP pot=$pot repo_key=$repo_key tower=:$tp vm=:$vp dht=$dht"
+  echo "same-box-rig: UP pot=$pot git_sync=$git_sync_slug repo_key=$repo_key tower=:$tp vm=:$vp dht=$dht"
   echo "HIVE_GIT_SAME_BOX_RIG=$dir"
 }
 
