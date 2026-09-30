@@ -166,7 +166,10 @@ converge_pot_git() {
       [ $((SECONDS - start)) -lt "$budget" ] || break
       printf '{"installSlug":"%s"}' "$SB_GIT_SYNC_SLUG" \
         | "$TOWER_CALL" git-sync:run --json - >>"$dir/converge-git-sync.log" 2>&1 || true
-      ssh "$VM" "'$VM_CALL' git-sync:run '{\"installSlug\":\"$SB_GIT_SYNC_SLUG\"}' --workspace '$SB_WORKSPACE' --harness '$SB_POT_HOME'" \
+      # 75s = the server's 60s git-sync:run budget plus margin; vmcall's 30s default cut the
+      # converge fire off mid-flight (run 8, WI-10004195). Same value as the scenario's
+      # VM_GIT_SYNC_CALL_TIMEOUT_SEC, pinned by hive-git-vm-git-sync-deadline.test.ts.
+      ssh "$VM" "PCUSP_VM_CALL_TIMEOUT_SEC=75 '$VM_CALL' git-sync:run '{\"installSlug\":\"$SB_GIT_SYNC_SLUG\"}' --workspace '$SB_WORKSPACE' --harness '$SB_POT_HOME'" \
         >>"$dir/converge-git-sync.log" 2>&1 || true
       sleep 10
     done

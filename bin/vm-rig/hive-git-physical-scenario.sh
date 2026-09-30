@@ -153,11 +153,38 @@ run_tower_git_sync() {
   return "$rc"
 }
 
+# The VM git-sync:run client deadline. vmcall.sh bounds every call at 30s by
+# default, but the server's own git-sync:run budget is 60s (the same breakdown
+# as the tower note above: a 45s fire, two 5s HEAD reads, 5s MCP settlement).
+# Same-box run 9 (WI-10004195) lost phase A to exactly that gap: the bootstrap
+# fire's result file was empty and vmcall printed MCP_RESULT_TIMEOUT at 30s,
+# while the same VM owner answered ten other calls in about 1s each, eight of
+# them with a git-sync fire in flight. So the VM call gets the full server
+# budget plus margin, and an unknown outcome is replayed under the call's own
+# idempotency key (at most twice), exactly like tower_git_sync_call.
+VM_GIT_SYNC_CALL_TIMEOUT_SEC=75
+
 run_vm_git_sync() {
-  local rc=0
-  ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_CALL' git-sync:run '{\"installSlug\":\"$VM_GIT_SYNC_SLUG\"}' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
-    || rc=$?
+  local rc=0 key errf out="" attempt
+  local wait_sec="${VM_GIT_SYNC_REPLAY_WAIT_SEC:-30}"
+  key="$(node -e 'process.stdout.write(require("crypto").randomUUID())')"
+  errf="$(mktemp)"
+  for attempt in 0 1 2; do
+    if [ "$attempt" -gt 0 ]; then
+      echo "hive-git-physical-scenario: VM git-sync:run outcome unknown (rc=$rc); replaying idempotency key $key in ${wait_sec}s (replay $attempt/2)" >&2
+      sleep "$wait_sec"
+    fi
+    rc=0
+    out="$(ssh "${SSH_OPTS[@]}" "$VM" \
+      "PCUSP_VM_CALL_TIMEOUT_SEC='$VM_GIT_SYNC_CALL_TIMEOUT_SEC' '$VM_CALL' git-sync:run '{\"installSlug\":\"$VM_GIT_SYNC_SLUG\"}' --idempotency-key '$key' --workspace papercusp-workspace --harness '$PHASE_A_POT_HOME'" \
+      2>"$errf")" || rc=$?
+    cat "$errf" >&2
+    # Only vmcall's client deadline leaves the outcome unknown; every other
+    # exit (an answer, a refusal, a transport failure) is final.
+    if [ "$rc" -eq 0 ] || ! grep -q 'MCP_RESULT_TIMEOUT' "$errf"; then break; fi
+  done
+  rm -f "$errf"
+  printf '%s\n' "$out"
   # mcp-call (forwarded by vmcall.sh and ssh) exits 5 when git-sync:run
   # ANSWERED ok:false (EI-24654733539966460). Same rule as the tower side: the
   # answer is on stdout for require_git_sync_fired to judge, so only a transport
