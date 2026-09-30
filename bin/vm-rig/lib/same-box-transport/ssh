@@ -44,6 +44,11 @@ cd "$SAME_BOX_VM_HOME" || exit 255
 # operator record; on this shared box both would be someone else's. Pin them to the rig.
 if [ -n "${SAME_BOX_RIG_DIR:-}" ]; then export PCUSP_MCP_CALL="$SAME_BOX_RIG_DIR/mcp-call.mjs"; fi
 if [ -n "${SAME_BOX_VM_PORT:-}" ]; then export PAPERCUSP_HONO_PORT="$SAME_BOX_VM_PORT"; fi
+# The caller's session carries its own operator's database and home (PAPERCUSP_HOME wins over
+# HOME in every resolver), so an unscrubbed "VM" producer would read and write the LIVE
+# operator database. Scrub exactly what fed_local_launch_sidecar scrubs for the owner itself.
+unset DATABASE_URL PAPERCUSP_DATABASE_URL HARNESS_DATABASE_URL HARNESS_ADMIN_DATABASE_URL \
+  PAPERCUSP_PG_URL PAPERCUSP_HOME GH_TOKEN GITHUB_TOKEN
 if [ "$no_stdin" = 1 ]; then
   HOME="$SAME_BOX_VM_HOME" exec bash -c "$cmd" </dev/null
 fi

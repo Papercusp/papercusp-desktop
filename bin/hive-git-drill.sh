@@ -160,16 +160,23 @@ if [ -z "$PHYSICAL_ONLY" ]; then
     # Select by the writer-owned Debian Package field, not the ambiguous filename
     # family or newest mtime (WI-40905). Preserve spaces in product names while
     # passing every candidate to the shared identity-aware selector.
+    # Ask Cargo where it writes bundles; never a hard-coded ~/.cargo-target
+    # (WI-10003499 — the box's target-dir moved to /mnt/data on 2026-09-03).
+    # shellcheck source=lib/cargo-target-root.sh
+    source "$DESKTOP_DIR/bin/lib/cargo-target-root.sh"
+    DEB_CARGO_TARGET="$(papercusp_cargo_target_root "$DESKTOP_DIR/src-tauri")" || DEB_CARGO_TARGET=""
     DEB_CANDIDATES=()
-    while IFS= read -r candidate; do
-      DEB_CANDIDATES+=("$candidate")
-    done < <(ls -1t "${CARGO_TARGET_DIR:-$HOME/.cargo-target}"/release/bundle/deb/Papercusp*_amd64.deb 2>/dev/null || true)
+    if [ -n "$DEB_CARGO_TARGET" ]; then
+      while IFS= read -r candidate; do
+        DEB_CANDIDATES+=("$candidate")
+      done < <(ls -1t "$DEB_CARGO_TARGET"/release/bundle/deb/Papercusp*_amd64.deb 2>/dev/null || true)
+    fi
     if [ "${#DEB_CANDIDATES[@]}" -gt 0 ]; then
       DEB="$(fed_select_newest_deb_by_package "$EXPECTED_DEB_PACKAGE" "${DEB_CANDIDATES[@]}")" || exit 2
     fi
   fi
   DEB="$(readlink -f "$DEB" 2>/dev/null || echo "${DEB:-}")"
-  [ -f "$DEB" ] || { echo "FATAL: no .deb found (pass one; tried .cargo-target bundle dir)"; exit 2; }
+  [ -f "$DEB" ] || { echo "FATAL: no .deb found (pass one; tried Cargo target bundle dir '${DEB_CARGO_TARGET:-unresolved}')"; exit 2; }
   DEB_PACKAGE="$(dpkg-deb -f "$DEB" Package 2>/dev/null || true)"
   if [ "$DEB_PACKAGE" != "$EXPECTED_DEB_PACKAGE" ]; then
     echo "FATAL: selected .deb '$DEB' has Package='${DEB_PACKAGE:-unknown}', expected Package='$EXPECTED_DEB_PACKAGE' (wrong Papercusp product); pass a Server .deb explicitly."
