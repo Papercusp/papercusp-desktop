@@ -331,6 +331,24 @@ phase_h_contract() {
 JSON
 }
 
+# Phase selection (plan physical-drill-iteration-speed-2026-09-29 P-002). Unset means every
+# phase: the release run. A subset is a diagnostic re-run against the rig state the last
+# run left behind, and never emits release evidence (see the end of this file).
+# shellcheck source=../lib/physical-phase-select.sh
+. "$HERE/../lib/physical-phase-select.sh"
+SCENARIO_PHASES="$(physical_phase_list "${HIVE_GIT_PHYSICAL_PHASES:-}")" \
+  || fail "HIVE_GIT_PHYSICAL_PHASES=${HIVE_GIT_PHYSICAL_PHASES:-} is not a phase selection (A-H, comma-separated)"
+SCENARIO_FULL_RUN=0
+physical_phase_is_full "$SCENARIO_PHASES" && SCENARIO_FULL_RUN=1
+
+# Offline: which phases this invocation would run, without touching the rig.
+if [ "${1:-}" = '--phase-plan' ]; then
+  printf '{"schemaVersion":"hive-git-physical-phase-plan/v1","phases":"%s","fullRun":%s,"releaseEvidence":%s}\n' \
+    "$SCENARIO_PHASES" "$([ "$SCENARIO_FULL_RUN" = 1 ] && echo true || echo false)" \
+    "$([ "$SCENARIO_FULL_RUN" = 1 ] && echo true || echo false)"
+  exit 0
+fi
+
 if [ "${1:-}" = '--contract-check' ]; then
   printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":true,"phases":["A","B","C","D","E","F","G","H"],"phaseContracts":{"A":"executor-installed","B":"executor-installed","C":"executor-installed","D":"executor-installed","E":"executor-installed","F":"executor-installed","G":"executor-installed","H":"executor-installed"}}\n' \
     "$IMPLEMENTATION_STATE"
@@ -1613,19 +1631,31 @@ NODE
 # marker to name the phase a failed run died in (bin/lib/physical-failure-summary.sh,
 # plan physical-drill-iteration-speed-2026-09-29 P-001). Informational only:
 # nothing parses it as evidence, and it never touches stdout.
+#
+# A phase-selective run (HIVE_GIT_PHYSICAL_PHASES, plan P-002) announces a phase it will
+# not run as PHASE_SKIP and returns 1, so its executor never starts; the failure summary
+# reads only PHASE_START, so a skip can never be named as the phase a run died in.
 phase_start() {
-  echo "hive-git-physical-scenario: PHASE_START $1 $2 $(now_iso)" >&2
+  case ",${SCENARIO_PHASES:-A,B,C,D,E,F,G,H}," in
+    *",$1,"*)
+      echo "hive-git-physical-scenario: PHASE_START $1 $2 $(now_iso)" >&2
+      return 0
+      ;;
+  esac
+  echo "hive-git-physical-scenario: PHASE_SKIP $1 $2 (not selected)" >&2
+  return 1
 }
 
 run_all_phases() {
-  phase_start A phase_a_storage_join;             phase_a_storage_join
-  phase_start B phase_b_ref_announce;             phase_b_ref_announce
-  phase_start C phase_c_trust_negative_controls;  phase_c_trust_negative_controls
-  phase_start D phase_d_worktree_materialization; phase_d_worktree_materialization
-  phase_start E phase_e_github_bridge;            phase_e_github_bridge
-  phase_start F phase_f_lifecycle_safety;         phase_f_lifecycle_safety
-  phase_start G phase_g_owner_authority_chaos;    phase_g_owner_authority_chaos
-  phase_start H phase_h_serving_identity;         phase_h_serving_identity
+  phase_start A phase_a_storage_join             && phase_a_storage_join
+  phase_start B phase_b_ref_announce             && phase_b_ref_announce
+  phase_start C phase_c_trust_negative_controls  && phase_c_trust_negative_controls
+  phase_start D phase_d_worktree_materialization && phase_d_worktree_materialization
+  phase_start E phase_e_github_bridge            && phase_e_github_bridge
+  phase_start F phase_f_lifecycle_safety         && phase_f_lifecycle_safety
+  phase_start G phase_g_owner_authority_chaos    && phase_g_owner_authority_chaos
+  phase_start H phase_h_serving_identity         && phase_h_serving_identity
+  return 0
 }
 
 verify_physical_vm_source() {
@@ -1706,5 +1736,12 @@ ensure_vm_driver_current
 scenario_started_at="$(now_iso)"
 run_all_phases
 scenario_finished_at="$(now_iso)"
+if [ "$SCENARIO_FULL_RUN" != 1 ]; then
+  # A partial run reached here only if every selected phase passed. It writes NO
+  # unsigned evidence: the manifest needs A-H from one run, and the probe must see
+  # the absence to know not to sign anything.
+  echo "hive-git-physical-scenario: PARTIAL_RUN phases=$SCENARIO_PHASES passed $scenario_started_at..$scenario_finished_at (diagnostic only; no release evidence)" >&2
+  exit 0
+fi
 assemble_unsigned_evidence "$scenario_started_at" "$scenario_finished_at"
 [ -s "$unsigned_out" ] || fail 'all phases returned without emitting the required unsigned evidence manifest'
