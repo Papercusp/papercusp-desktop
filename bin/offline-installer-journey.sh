@@ -63,10 +63,12 @@
 #                        after health, never one read (plan D-088: the offline
 #                        self-admit runs after the join attempt gives up, so a
 #                        read 1s after health measures nothing — run 7). The
-#                        bootstrap's '[papercusp-hive]' journal lines (pre-join
-#                        seed restore, offline self-admit) are recorded as
-#                        DIAGNOSTICS (restore.seedRestore / restore.bootstrapLast)
-#                        and never gate the leg.
+#                        bootstrap's '[papercusp-hive]' lines (pre-join seed
+#                        restore, offline self-admit) — read from the sidecar's
+#                        ~/.papercusp/logs/serve.log, the unit journal only as a
+#                        fallback (restore.hiveLogSource names which) — are
+#                        recorded as DIAGNOSTICS (restore.seedRestore /
+#                        restore.bootstrapLast) and never gate the leg.
 #   restart-reresolve    restart; a NEW pid serves, re-resolved to the same bytes.
 #   join-runtime-match   (plan D-083) this row needs no live peer join only when
 #                        the runtime artifact sha256 (the witness) is the one the
@@ -607,20 +609,44 @@ echo "PCOIJ potListAttempts=$n"; echo "PCOIJ potListElapsedSec=$(( $(date +%s) -
 head -c 1500 "$REMOTE_DIR/pot-list.out" | tr '\n' ' ' | sed 's/^/PCOIJ-LOG /'; echo
 # DIAGNOSTICS only (never gate): the bootstrap's own '[papercusp-hive]' lines —
 # the pre-join seed restore outcome and the offline self-admit / join outcome.
+# SOURCE (WI-10004100): they are console.log lines of the node sidecar, whose
+# stdout+stderr the host routes to <home>/.papercusp/logs/serve.log in release
+# builds (main.rs spawn_serve -> rotating_log_stdio) — on BOTH platforms, for the
+# headless Server unit and the GUI alike. journald never sees them, so reading
+# the unit journal alone recorded "no line" on every packaged install (run 8).
+# The journal stays a SECONDARY source (a build that logs to stdout); the source
+# actually read is named, and a missing log reads 'absent', never an invented line.
+HIVE_LOG="$(dirname "$OPJSON")/logs/serve.log"; HIVE_OUT="$REMOTE_DIR/hive.out"; src=""
+: > "$HIVE_OUT"
+if [ -r "$HIVE_LOG" ] && grep -aq '\[papercusp-hive\]' "$HIVE_LOG"; then
+  grep -a '\[papercusp-hive\]' "$HIVE_LOG" > "$HIVE_OUT"; src="$HIVE_LOG"
+fi
 if [ "$PLATFORM" = linux ]; then
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
   journalctl --user -u papercusp-server.service --no-pager -o cat > "$REMOTE_DIR/journal.out" 2> "$REMOTE_DIR/journal.err"
   echo "PCOIJ journalExit=$?"
-  grep -a '\[papercusp-hive\]' "$REMOTE_DIR/journal.out" | head -40 | sed 's/^/PCOIJ-HIVE /'
-  # The evidence is built from TSV rows: a tab in a journal line must not split one.
-  seed=$(grep -a '\[papercusp-hive\] seed restore' "$REMOTE_DIR/journal.out" | tail -1 | sed 's/.*\[papercusp-hive\] //' | tr '\t' ' ')
-  last=$(grep -a '\[papercusp-hive\]' "$REMOTE_DIR/journal.out" | tail -1 | sed 's/.*\[papercusp-hive\] //' | tr '\t' ' ')
-  echo "PCOIJ seedRestore=${seed:-no seed-restore line in the server journal}"
-  echo "PCOIJ bootstrapLast=${last:-no [papercusp-hive] line in the server journal}"
+  if [ -z "$src" ] && grep -aq '\[papercusp-hive\]' "$REMOTE_DIR/journal.out"; then
+    grep -a '\[papercusp-hive\]' "$REMOTE_DIR/journal.out" > "$HIVE_OUT"; src="journal:papercusp-server.service"
+  fi
 else
   echo "PCOIJ journalExit=unavailable"
-  echo "PCOIJ seedRestore=unmeasured: no server journal on $PLATFORM"
-  echo "PCOIJ bootstrapLast=unmeasured: no server journal on $PLATFORM"
+fi
+if [ -n "$src" ]; then
+  echo "PCOIJ hiveLogSource=$src"
+  head -40 "$HIVE_OUT" | sed 's/^/PCOIJ-HIVE /'
+  # The evidence is built from TSV rows: a tab in a log line must not split one.
+  seed=$(grep -a '\[papercusp-hive\] seed restore' "$HIVE_OUT" | tail -1 | sed 's/.*\[papercusp-hive\] //' | tr '\t' ' ')
+  last=$(tail -1 "$HIVE_OUT" | sed 's/.*\[papercusp-hive\] //' | tr '\t' ' ')
+  echo "PCOIJ seedRestore=${seed:-no seed-restore line in $src}"
+  echo "PCOIJ bootstrapLast=$last"
+elif [ -r "$HIVE_LOG" ]; then
+  echo "PCOIJ hiveLogSource=$HIVE_LOG"
+  echo "PCOIJ seedRestore=no seed-restore line in $HIVE_LOG"
+  echo "PCOIJ bootstrapLast=no [papercusp-hive] line in $HIVE_LOG"
+else
+  echo "PCOIJ hiveLogSource=absent"
+  echo "PCOIJ seedRestore=absent: $HIVE_LOG missing or unreadable"
+  echo "PCOIJ bootstrapLast=absent: $HIVE_LOG missing or unreadable"
 fi
 SH
 read -r -d '' RESTART <<'SH'
@@ -783,7 +809,7 @@ else
       # ── Leg 9: the seeded hive restored while offline ──────────────────
       rc=$(remote offline-restore "$RESTORE" $((RESTORE_TIMEOUT + 120))); RS="$LOG_DIR/offline-restore.log"
       ident restore expectPot "$EXPECT_POT"; ident restore timeoutSec "$RESTORE_TIMEOUT"
-      for k in potListExit potListAttempts potListElapsedSec journalExit seedRestore bootstrapLast; do
+      for k in potListExit potListAttempts potListElapsedSec journalExit hiveLogSource seedRestore bootstrapLast; do
         ident restore "$k" "$(kv "$k" "$RS")"
       done
       polled="after $(kv potListElapsedSec "$RS")s / $(kv potListAttempts "$RS") pot:list reads"
