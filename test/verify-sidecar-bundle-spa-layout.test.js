@@ -135,11 +135,55 @@ test('a sidecar with no spa/ fails', () => {
   assert.match(r.out, /spa\/ missing under/);
 });
 
-test('the check is wired into the script verdict, after its definition and before the FAIL exit', () => {
-  const def = script.indexOf('check_spa_runtime_layout() {');
-  const call = script.indexOf('check_spa_runtime_layout "$SIDECAR" || FAIL=1');
+test('both spa checks are wired into the script verdict, after their definitions and before the FAIL exit', () => {
   const verdict = script.lastIndexOf('if [[ "$FAIL" != 0 ]]; then');
-  assert.ok(def >= 0, 'definition missing');
-  assert.ok(call > def, 'the call must follow the definition and fold into FAIL');
-  assert.ok(verdict > call, 'the call must run before the final FAIL verdict');
+  for (const fn of ['check_spa_runtime_layout', 'check_spa_no_baked_flag_seed']) {
+    const def = script.indexOf(`${fn}() {`);
+    const call = script.indexOf(`${fn} "$SIDECAR" || FAIL=1`);
+    assert.ok(def >= 0, `${fn}: definition missing`);
+    assert.ok(call > def, `${fn}: the call must follow the definition and fold into FAIL`);
+    assert.ok(verdict > call, `${fn}: the call must run before the final FAIL verdict`);
+  }
+});
+
+// WI-10004079 — a built index.html must not bake a flag seed. The shipped 0.0.25
+// shell carried `<head><script>window.__PAPERCUSP_FLAGS__={…}</script>`, which
+// ran after the installed app's own host-injected seed and overwrote it.
+const CHECK_NO_BAKED_FLAG_SEED = extractFunction('check_spa_no_baked_flag_seed');
+
+function runSeedCheck(indexHtml) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-spa-seed-'));
+  try {
+    const sidecar = path.join(tmp, 'sidecar');
+    fs.mkdirSync(sidecar);
+    if (indexHtml !== null) {
+      fs.mkdirSync(path.join(sidecar, 'spa'));
+      fs.writeFileSync(path.join(sidecar, 'spa', 'index.html'), indexHtml);
+    }
+    const program = `set -uo pipefail\n${CHECK_NO_BAKED_FLAG_SEED}\ncheck_spa_no_baked_flag_seed "$1"\n`;
+    const res = spawnSync('bash', ['-c', program, 'check', sidecar], { encoding: 'utf8' });
+    return { status: res.status, out: `${res.stdout}${res.stderr}` };
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+test('an index.html with no baked flag seed passes', () => {
+  const r = runSeedCheck('<!doctype html><html><head><title>Papercusp</title></head><body></body></html>');
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /✓ spa\/index.html carries no baked flag seed/);
+});
+
+test('the shipped 0.0.25 shape (a baked build-host seed right after <head>) fails', () => {
+  const baked =
+    '<!doctype html><html><head><script>window.__PAPERCUSP_FLAGS__={"flags":{"papercusp-accept-delegated-seats":false},"evaluatedAt":1790690000000,"source":"posthog"};</script><title>Papercusp</title></head></html>';
+  const r = runSeedCheck(baked);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /bakes window.__PAPERCUSP_FLAGS__/);
+});
+
+test('a missing spa/index.html fails', () => {
+  const r = runSeedCheck(null);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /spa\/index.html missing/);
 });

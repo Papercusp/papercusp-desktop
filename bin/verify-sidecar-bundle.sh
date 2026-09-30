@@ -713,6 +713,28 @@ check_spa_runtime_layout() {
 echo "[spa] ONNX runtime layout (WI-10004073)"
 check_spa_runtime_layout "$SIDECAR" || FAIL=1
 
+# WI-10004079: the installed app's host (apps/operator/bin/host-spa.ts) injects
+# its OWN flag seed after <head> on every request. A seed baked into the built
+# index.html also sits after <head>, runs second, and overwrites it with the
+# BUILD MACHINE's flag snapshot; its evaluatedAt also makes the file differ
+# between two builds of one commit. The shipped shell must carry no seed.
+check_spa_no_baked_flag_seed() {
+  _index="$1/spa/index.html"
+  if [[ ! -f "$_index" ]]; then
+    echo "  ✗ spa/index.html missing under $1"
+    return 1
+  fi
+  if grep -q 'window\.__PAPERCUSP_FLAGS__=' "$_index"; then
+    echo "  ✗ spa/index.html bakes window.__PAPERCUSP_FLAGS__ (a build-host flag snapshot; the operator-vite flag seed must be apply:'serve')"
+    return 1
+  fi
+  echo "  ✓ spa/index.html carries no baked flag seed"
+  return 0
+}
+
+echo "[spa] no baked flag seed (WI-10004079)"
+check_spa_no_baked_flag_seed "$SIDECAR" || FAIL=1
+
 echo
 if [[ "$FAIL" != 0 ]]; then
   echo "verify-sidecar-bundle: FAILED — the bundle depends on build-host state that will not ship." >&2
