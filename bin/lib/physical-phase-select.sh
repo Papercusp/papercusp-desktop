@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# physical-phase-select.sh — which A-H phases of the hive-git physical scenario to run.
+# physical-phase-select.sh — which phases (PHYSICAL_PHASES_ALL) of the hive-git physical scenario to run.
 #
 # physical-drill-iteration-speed-2026-09-29 P-002 (R-3). A full physical run is 18-26
 # minutes; a fix to one phase should be verified in minutes. The drill takes
@@ -13,19 +13,23 @@
 # One parser for all three scripts, so they cannot disagree about what a selection means.
 # Sourced; defines functions only.
 
-PHYSICAL_PHASES_ALL='A,B,C,D,E,F,G,H'
+PHYSICAL_PHASES_ALL='A,B,C,D,E,F,G,H,I,J'
+# The accepted letters and their A-<last> label are DERIVED from PHYSICAL_PHASES_ALL, so
+# adding a phase is one edit to that list, never a second hard-coded range to keep in sync.
+PHYSICAL_PHASE_LETTERS="${PHYSICAL_PHASES_ALL//,/}"
+PHYSICAL_PHASE_RANGE="${PHYSICAL_PHASE_LETTERS:0:1}-${PHYSICAL_PHASE_LETTERS: -1}"
 
 # physical_phase_select only-phase|from-phase <spec>
 #   only-phase D      -> D          only-phase e,d  -> D,E   (canonical order, deduped)
-#   from-phase D      -> D,E,F,G,H
+#   from-phase D      -> D through the last phase in PHYSICAL_PHASES_ALL
 # Prints the canonical list; exits 2 with a reason on stderr for anything else.
 physical_phase_select() {
   local mode="${1:-}" spec p out=''
   spec="$(printf '%s' "${2:-}" | tr '[:lower:]' '[:upper:]' | tr -d ' ')"
   case "$mode" in
     only-phase)
-      [[ "$spec" =~ ^[A-H](,[A-H])*$ ]] || {
-        printf 'physical phase selection: --only-phase wants A-H letters, comma-separated (got %s)\n' "${2:-<empty>}" >&2
+      [[ "$spec" =~ ^[$PHYSICAL_PHASE_LETTERS](,[$PHYSICAL_PHASE_LETTERS])*$ ]] || {
+        printf 'physical phase selection: --only-phase wants %s letters, comma-separated (got %s)\n' "$PHYSICAL_PHASE_RANGE" "${2:-<empty>}" >&2
         return 2
       }
       for p in ${PHYSICAL_PHASES_ALL//,/ }; do
@@ -33,8 +37,8 @@ physical_phase_select() {
       done
       ;;
     from-phase)
-      [[ "$spec" =~ ^[A-H]$ ]] || {
-        printf 'physical phase selection: --from-phase wants one letter A-H (got %s)\n' "${2:-<empty>}" >&2
+      [[ "$spec" =~ ^[$PHYSICAL_PHASE_LETTERS]$ ]] || {
+        printf 'physical phase selection: --from-phase wants one letter %s (got %s)\n' "$PHYSICAL_PHASE_RANGE" "${2:-<empty>}" >&2
         return 2
       }
       out="${PHYSICAL_PHASES_ALL#*"${spec}"}"

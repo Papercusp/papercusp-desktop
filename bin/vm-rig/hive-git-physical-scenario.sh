@@ -2,7 +2,7 @@
 # hive-git-physical-scenario.sh — checked-in mutation/observation driver for
 # the P-505 two-machine hive-git release drill.
 #
-# This driver pins the invocation, topology, output, ordered A-H phase contract,
+# This driver pins the invocation, topology, output, ordered A-J phase contract,
 # and every fixed executor. It remains fail-closed at two independent edges:
 # the caller must opt into the canonical plan and the destructive execution
 # grant, and the producer will not sign or finalize anything unless every phase
@@ -16,7 +16,7 @@
 #
 # Offline inspection:
 #   hive-git-physical-scenario.sh --contract-check
-#   hive-git-physical-scenario.sh --phase-contract A|B|C|D|E|F|G
+#   hive-git-physical-scenario.sh --phase-contract A|B|C|D|E|F|G|H|I|J
 # Wrapper readiness gate:
 #   hive-git-physical-scenario.sh --require-ready
 set -euo pipefail
@@ -331,13 +331,25 @@ phase_h_contract() {
 JSON
 }
 
+phase_i_contract() {
+  cat <<'JSON'
+{"schemaVersion":"hive-git-physical-phase-contract/v1","phase":"I","planItem":"P-521","state":"executor-installed","ready":true,"missingAssertions":[],"target":{"topology":"two-host-divergent-advisory-views-single-vm-owning-hive","owner":"separate-vm-drill-owner-process","targets":"disposable-per-host-stand-ins"},"causalOrder":["vmOwnerStartedWithFreshRunBoundHiveKey","vmOwnerAuthorizedEveryProtectedEffect","staleScopeOwnerKeyRefused","towerMissingDeviceOnlyReplayedAndForeignAuthorityRefused","ownerKilledBetweenAuthorizedPushAndPrOpen","nextPushAndSubmodulePublicationRefused","outageRefusedBothHostsWithoutFailover","localCommitsAndSignedDeviceHeadExchangeContinued","ownerRelaunchedWithSameKey","restoredOwnerMadeFreshProgressTowerStillRefused"],"requiredObservations":["protectedTargetSnapshotsBeforeAndAfterEveryAttempt","everySinkPushArgv","capturedGenuineOwnerSignature","ownerProcessGoneAfterLoss","noForcePush"],"forbiddenEvidence":["sharedRealRemoteAsTarget","ownerKeyOnTower","automaticOwnershipFailover","attemptInsideOwnerProcess","summaryOnlyLegPass"],"productionSurfaces":["integrateMemberHeads","promoteRelease","egressCanonicalRefs","runGitSync","egressRatifiedRequestAsForkPr","requireHiveEffectAuthority","electFleetLeader","buildSigrefs","acceptFetchedSigrefs"],"externalCommandOverrides":false}
+JSON
+}
+
+phase_j_contract() {
+  cat <<'JSON'
+{"schemaVersion":"hive-git-physical-phase-contract/v1","phase":"J","planItem":"P-521","state":"executor-installed","ready":true,"missingAssertions":[],"target":{"potHomeSlug":"hello-world-3-pot","applyTarget":"vm-read-merge-into-vm-postgres","fault":"vm-scoped-57P03-trigger-on-run-bound-write-A","towerRole":"author-only-never-frozen-restarted-or-faulted"},"causalOrder":["baselineNeitherWriteAndNoFault","vmOutageFaultInstalledBeforeAnyWrite","towerAuthoredWritesAAndBThroughProductionVerb","vmCursorHeldAtWriteAPastRetiredRetryBudget","holdSurvivedVmOwnerRestartOnSameArtifact","faultRemovedAndTowerExactWritesReplayed"],"requiredObservations":["durableRetryableApplyFailureNamingWriteA","everyHeldSample","vmOwnerIdentityBeforeAndAfterRestart","faultMeasuredPresentAfterInstallAndAbsentAfterRemove","towerAuthoredContentDigests"],"forbiddenEvidence":["towerBgHostFrozenRestartedOrFaulted","cursorAdvancedPastWriteAUnderFault","unboundedOutage","faultOutlivesScenario"],"productionSurfaces":["work_items:create","mergeAdmittedLogsIncremental","substrate_merge_cursor.apply_failure"],"externalCommandOverrides":false}
+JSON
+}
+
 # Phase selection (plan physical-drill-iteration-speed-2026-09-29 P-002). Unset means every
 # phase: the release run. A subset is a diagnostic re-run against the rig state the last
 # run left behind, and never emits release evidence (see the end of this file).
 # shellcheck source=../lib/physical-phase-select.sh
 . "$HERE/../lib/physical-phase-select.sh"
 SCENARIO_PHASES="$(physical_phase_list "${HIVE_GIT_PHYSICAL_PHASES:-}")" \
-  || fail "HIVE_GIT_PHYSICAL_PHASES=${HIVE_GIT_PHYSICAL_PHASES:-} is not a phase selection (A-H, comma-separated)"
+  || fail "HIVE_GIT_PHYSICAL_PHASES=${HIVE_GIT_PHYSICAL_PHASES:-} is not a phase selection ($PHYSICAL_PHASE_RANGE, comma-separated)"
 SCENARIO_FULL_RUN=0
 physical_phase_is_full "$SCENARIO_PHASES" && SCENARIO_FULL_RUN=1
 
@@ -350,12 +362,12 @@ if [ "${1:-}" = '--phase-plan' ]; then
 fi
 
 if [ "${1:-}" = '--contract-check' ]; then
-  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":true,"phases":["A","B","C","D","E","F","G","H"],"phaseContracts":{"A":"executor-installed","B":"executor-installed","C":"executor-installed","D":"executor-installed","E":"executor-installed","F":"executor-installed","G":"executor-installed","H":"executor-installed"}}\n' \
+  printf '{"schemaVersion":"hive-git-physical-scenario-contract/v1","implementationState":"%s","ready":true,"phases":["A","B","C","D","E","F","G","H","I","J"],"phaseContracts":{"A":"executor-installed","B":"executor-installed","C":"executor-installed","D":"executor-installed","E":"executor-installed","F":"executor-installed","G":"executor-installed","H":"executor-installed","I":"executor-installed","J":"executor-installed"}}\n' \
     "$IMPLEMENTATION_STATE"
   exit 0
 fi
 if [ "${1:-}" = '--phase-contract' ]; then
-  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-scenario.sh --phase-contract A|B|C|D|E|F|G|H'
+  [ "$#" -eq 2 ] || fail 'usage: hive-git-physical-scenario.sh --phase-contract A|B|C|D|E|F|G|H|I|J'
   case "$2" in
     A) phase_a_contract ;;
     B) phase_b_contract ;;
@@ -365,13 +377,15 @@ if [ "${1:-}" = '--phase-contract' ]; then
     F) phase_f_contract ;;
     G) phase_g_contract ;;
     H) phase_h_contract ;;
+    I) phase_i_contract ;;
+    J) phase_j_contract ;;
     *) fail "phase $2 has no installed offline contract" ;;
   esac
   exit 0
 fi
 if [ "${1:-}" = '--require-ready' ]; then
   [ "$IMPLEMENTATION_STATE" = 'ready-v1' ] \
-    || fail "scenario is not execution-ready ($IMPLEMENTATION_STATE); A-H phase executors have not all landed"
+    || fail "scenario is not execution-ready ($IMPLEMENTATION_STATE); A-J phase executors have not all landed"
   exit 0
 fi
 
@@ -570,7 +584,7 @@ phase_b_ref_announce() {
   [ -x "$TSX" ] && [ -f "$PRODUCER" ] && [ -x "$TOWER_CALL" ] \
     || fail 'phase B local producer or canonical ptool is unavailable'
 
-  # Like Phase A, this remains unreachable until every A-H executor exists.
+  # Like Phase A, this remains unreachable until every A-I executor exists.
   # Once enabled it creates only two run-bound refs in the fixed test repo and
   # drives only the production git-sync action. The destination action owns the
   # signed ref-announcement receive path and its Protomux git-upload-pack v2
@@ -1577,6 +1591,114 @@ NODE
     >"$phase_dir/verdict.json"
 }
 
+# Phase I (P-521 F6, D-022/D-082): protected-effect fencing beyond canonical staging.
+# The single owning hive key is minted once by a drill owner process on the VM
+# (phase-i-owner) and never leaves it: the tower gets only its public key and one
+# captured owner signature. Both hosts' advisory elections name themselves at one
+# roster epoch; only the owner may authorize canonical staging, release promotion,
+# the GitHub push, the submodule-origin push and fork/PR publication. Every effect
+# runs through its production sink against disposable stand-in targets in the host's
+# own private phase directory, never a shared remote. The VM attempt SIGKILLs the
+# owner between pushes (lost); it stays down (outage); the scenario relaunches it
+# with the same key file (restored). phase-i-verify judges the whole record.
+PHASE_I_VM_DIR=''
+phase_i_producer_vm() {
+  local quoted="" a
+  for a in "$@"; do quoted="$quoted '$a'"; done
+  ssh "${SSH_OPTS[@]}" "$VM" "PAPERCUSP_IDENTITY_DIR='$VM_OWNER_IDENTITY_DIR' '$VM_NODE' '$VM_TSX' '$VM_PRODUCER'$quoted"
+}
+# Starts the owner detached on the VM and prints its start record once it serves.
+phase_i_start_owner() {
+  local log="$PHASE_I_VM_DIR/owner-$1.log"
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "nohup '$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-i-owner '$PHASE_I_VM_DIR' '$physical_run_id' >'$log' 2>&1 </dev/null & for i in \$(seq 120); do r=\$(grep -m1 'hive-git-physical-phase-i-owner/v1' '$log' 2>/dev/null) && { printf '%s\n' \"\$r\"; exit 0; }; sleep 0.5; done; cat '$log' >&2; exit 5"
+}
+# Kills whichever owner the VM phase directory last recorded (only if that pid is
+# still a phase-i-owner process), then removes the directory with its hive key.
+# The owner must never outlive the scenario (same EXIT rule as phase H).
+phase_i_remove_vm_state() {
+  [ -n "$PHASE_I_VM_DIR" ] || return 0
+  ssh "${SSH_OPTS[@]}" "$VM" \
+    "p=\$(sed -n 's/.*\"pid\":\\([0-9][0-9]*\\).*/\\1/p' '$PHASE_I_VM_DIR/owner/owner.json' 2>/dev/null); if [ -n \"\$p\" ] && ps -o command= -p \"\$p\" | grep -q phase-i-owner; then kill -9 \"\$p\"; fi; rm -rf '$PHASE_I_VM_DIR'" \
+    || return 1
+  PHASE_I_VM_DIR=''
+}
+phase_i_restore_on_exit() {
+  local dir="$PHASE_I_VM_DIR"
+  phase_i_remove_vm_state \
+    || echo "hive-git-physical-scenario: WARNING phase I could not stop the VM drill owner; inspect $VM:$dir/owner/owner.json and remove $dir" >&2
+}
+phase_i_protected_effects() {
+  [ -x "$TSX" ] && [ -f "$PRODUCER" ] \
+    || fail 'phase I local producer is unavailable'
+
+  local phase_dir="$run_dir/phase-i"
+  local run_id="$physical_run_id"
+  local started_at finished_at tower_keychain vm_keychain hive_id first_pid gone
+  mkdir -m 700 "$phase_dir" "$phase_dir/tower-work"
+  tower_keychain="$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).keychainId ?? ""' "$tower_identity")"
+  vm_keychain="$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).keychainId ?? ""' "$vm_identity")"
+  [ -n "$tower_keychain" ] && [ -n "$vm_keychain" ] \
+    || fail 'phase I host identities name no device keychain'
+  started_at="$(now_iso)"
+
+  PHASE_I_VM_DIR="$(ssh "${SSH_OPTS[@]}" "$VM" 'mktemp -d /tmp/hive-git-physical-phase-i.XXXXXX')" \
+    && [ -n "$PHASE_I_VM_DIR" ] || fail 'phase I could not create the VM phase directory'
+  trap phase_i_restore_on_exit EXIT
+  phase_i_start_owner first >"$phase_dir/owner-first.json" \
+    || fail 'phase I could not start the VM drill owner'
+  hive_id="$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).hiveId' "$phase_dir/owner-first.json")"
+  first_pid="$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).pid' "$phase_dir/owner-first.json")"
+
+  local vm_args=("$PHASE_I_VM_DIR" "$run_id" "$vm_device" "$vm_keychain" "$hive_id")
+  local tower_args=("$phase_dir/tower-work" "$run_id" "$tower_device" "$tower_keychain" "$hive_id")
+  phase_i_producer_vm phase-i-attempt vm live "${vm_args[@]}" >"$phase_dir/vm-live.json" \
+    || fail 'phase I VM live attempt failed'
+  "$TSX" "$PRODUCER" phase-i-attempt tower live "${tower_args[@]}" "$phase_dir/vm-live.json" \
+    >"$phase_dir/tower-live.json" || fail 'phase I tower live attempt failed'
+  phase_i_producer_vm phase-i-attempt vm lost "${vm_args[@]}" >"$phase_dir/vm-lost.json" \
+    || fail 'phase I VM lost-authority attempt failed'
+  # Independent of the attempt's own check: the first owner pid is gone.
+  gone=false
+  ssh "${SSH_OPTS[@]}" "$VM" "! kill -0 '$first_pid' 2>/dev/null" && gone=true
+  phase_i_producer_vm phase-i-attempt vm outage "${vm_args[@]}" >"$phase_dir/vm-outage.json" \
+    || fail 'phase I VM outage attempt failed'
+  "$TSX" "$PRODUCER" phase-i-attempt tower outage "${tower_args[@]}" "$phase_dir/vm-live.json" "$phase_dir/vm-outage.json" \
+    >"$phase_dir/tower-outage.json" || fail 'phase I tower outage attempt failed'
+  phase_i_start_owner restored >"$phase_dir/owner-restored.json" \
+    || fail 'phase I could not relaunch the VM drill owner'
+  phase_i_producer_vm phase-i-attempt vm restored "${vm_args[@]}" >"$phase_dir/vm-restored.json" \
+    || fail 'phase I VM restored attempt failed'
+  "$TSX" "$PRODUCER" phase-i-attempt tower restored "${tower_args[@]}" "$phase_dir/vm-live.json" \
+    >"$phase_dir/tower-restored.json" || fail 'phase I tower restored attempt failed'
+  phase_i_remove_vm_state || fail "phase I could not stop the VM drill owner in $PHASE_I_VM_DIR"
+  trap - EXIT
+  rm -rf "$phase_dir/tower-work"
+  finished_at="$(now_iso)"
+
+  node - "$phase_dir" "$run_id" "$started_at" "$finished_at" "$tower_device" "$vm_device" "$gone" <<'NODE'
+const fs = require('node:fs');
+const [dir, runId, startedAt, finishedAt, towerDeviceKey, vmDeviceKey, gone] = process.argv.slice(2);
+const read = (name) => JSON.parse(fs.readFileSync(`${dir}/${name}.json`, 'utf8'));
+const input = {
+  schemaVersion: 'hive-git-physical-phase-i-input/v1',
+  runId,
+  window: { startedAt, finishedAt },
+  identities: { towerDeviceKey, vmDeviceKey },
+  owner: { first: read('owner-first'), restored: read('owner-restored'), goneAfterLost: gone === 'true' },
+  steps: {
+    live: { vm: read('vm-live'), tower: read('tower-live') },
+    lost: { vm: read('vm-lost') },
+    outage: { vm: read('vm-outage'), tower: read('tower-outage') },
+    restored: { vm: read('vm-restored'), tower: read('tower-restored') },
+  },
+};
+fs.writeFileSync(`${dir}/verify-input.json`, `${JSON.stringify(input, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+NODE
+  "$TSX" "$PRODUCER" phase-i-verify "$phase_dir/verify-input.json" \
+    >"$phase_dir/verdict.json"
+}
+
 # Phase J (P-521 F4, D-082): bounded target-apply outage, preserved cursor, replay.
 # The VM is the target and the only mutated host: a scoped fault on its Postgres
 # (phase-j-fault) makes the production read-merge apply of the tower's write A
@@ -1713,7 +1835,7 @@ const fs = require('node:fs');
 const [dir, output, runId, startedAt, finishedAt, towerDeviceKey, vmDeviceKey] = process.argv.slice(2);
 const readJson = (path) => JSON.parse(fs.readFileSync(path, 'utf8'));
 const phaseInput = (phase) => readJson(`${dir}/phase-${phase.toLowerCase()}/verify-input.json`);
-const inputs = Object.fromEntries([...'ABCDEFGH'].map((phase) => [phase, phaseInput(phase)]));
+const inputs = Object.fromEntries([...'ABCDEFGHIJ'].map((phase) => [phase, phaseInput(phase)]));
 const witness = (host, path) => {
   const bytes = fs.readFileSync(path);
   return {
@@ -1726,7 +1848,7 @@ const observedAt = (phase) => phase === 'G'
   ? inputs.G.result.observedAt
   : inputs[phase].window.finishedAt;
 const evidence = {
-  schemaVersion: 'hive-git-physical-evidence/v2',
+  schemaVersion: 'hive-git-physical-evidence/v3',
   plan: 'p2p-git-live-activation-2026-07-09',
   runId,
   window: { startedAt, finishedAt },
@@ -1741,7 +1863,7 @@ const evidence = {
     witness('tower', `${dir}/phase-f/tower-lifecycle.json`),
     witness('vm', `${dir}/phase-f/vm-lifecycle.json`),
   ],
-  legVerdicts: [...'ABCDEFGH'].map((leg) => ({
+  legVerdicts: [...'ABCDEFGHIJ'].map((leg) => ({
     leg,
     status: 'pass',
     scope: 'physical',
@@ -1752,6 +1874,8 @@ const evidence = {
   legF: inputs.F,
   legG: inputs.G,
   legH: inputs.H,
+  legI: inputs.I,
+  legJ: inputs.J,
 };
 fs.writeFileSync(output, `${JSON.stringify(evidence, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
 NODE
@@ -1766,7 +1890,7 @@ NODE
 # not run as PHASE_SKIP and returns 1, so its executor never starts; the failure summary
 # reads only PHASE_START, so a skip can never be named as the phase a run died in.
 phase_start() {
-  case ",${SCENARIO_PHASES:-A,B,C,D,E,F,G,H}," in
+  case ",${SCENARIO_PHASES:-$PHYSICAL_PHASES_ALL}," in
     *",$1,"*)
       echo "hive-git-physical-scenario: PHASE_START $1 $2 $(now_iso)" >&2
       return 0
@@ -1785,6 +1909,8 @@ run_all_phases() {
   phase_start F phase_f_lifecycle_safety         && phase_f_lifecycle_safety
   phase_start G phase_g_owner_authority_chaos    && phase_g_owner_authority_chaos
   phase_start H phase_h_serving_identity         && phase_h_serving_identity
+  phase_start I phase_i_protected_effects        && phase_i_protected_effects
+  phase_start J phase_j_apply_outage_replay      && phase_j_apply_outage_replay
   return 0
 }
 
@@ -1833,7 +1959,7 @@ ensure_vm_driver_current() {
 # before any future ssh/mutation primitive until all eight fixed executors and
 # their focused falsifiability tests are checked in.
 [ "$IMPLEMENTATION_STATE" = 'ready-v1' ] \
-  || fail "scenario is not execution-ready ($IMPLEMENTATION_STATE); A-H phase executors have not all landed"
+  || fail "scenario is not execution-ready ($IMPLEMENTATION_STATE); A-J phase executors have not all landed"
 [ "${HIVE_GIT_PHYSICAL_EXECUTE:-}" = "$EXPECTED_PLAN" ] \
   || fail 'destructive physical run requires HIVE_GIT_PHYSICAL_EXECUTE to equal the canonical plan slug'
 
@@ -1868,7 +1994,7 @@ run_all_phases
 scenario_finished_at="$(now_iso)"
 if [ "$SCENARIO_FULL_RUN" != 1 ]; then
   # A partial run reached here only if every selected phase passed. It writes NO
-  # unsigned evidence: the manifest needs A-H from one run, and the probe must see
+  # unsigned evidence: the manifest needs A-I from one run, and the probe must see
   # the absence to know not to sign anything.
   echo "hive-git-physical-scenario: PARTIAL_RUN phases=$SCENARIO_PHASES passed $scenario_started_at..$scenario_finished_at (diagnostic only; no release evidence)" >&2
   exit 0
