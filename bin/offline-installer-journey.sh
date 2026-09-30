@@ -476,8 +476,11 @@ GUI="$REMOTE_DIR/gui.deb"; SRV="$REMOTE_DIR/server.deb"
 # Declared Depends + Recommends of BOTH .debs, from their control fields. An entry
 # naming a Papercusp package (alternatives included) is dropped: this step must
 # never install Papercusp itself.
-decl=""
+decl=""; unreadable=""
 for d in "$SRV" "$GUI"; do
+  # An empty Depends read is only "declares nothing" once the control file itself
+  # was readable; a failed read must never pass as an empty declaration.
+  dpkg-deb -f "$d" Package >/dev/null 2>&1 || unreadable="$unreadable $(basename "$d")"
   for f in Depends Recommends; do
     v=$(dpkg-deb -f "$d" "$f" 2>/dev/null | tr '\n' ' ')
     echo "PCOIJ declared.$(basename "$d" .deb).$f=$v"
