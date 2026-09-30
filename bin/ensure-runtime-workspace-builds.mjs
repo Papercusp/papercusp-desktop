@@ -83,10 +83,12 @@ export function findMissingRuntimeBuilds(root) {
 function main(argv) {
   const root = argv[0];
   const checkOnly = argv.includes('--check');
-  if (!root || !existsSync(join(root, 'package.json'))) {
+  if (!root || !existsSync(root)) {
     console.error(`[runtime-builds] FATAL: pass the repository root (got ${root ?? '<none>'})`);
     return 2;
   }
+  // A root without installed workspaces (e.g. a frozen verifier snapshot that
+  // runs a pre-bundled host) has nothing to build: findMissing returns [].
   const missing = findMissingRuntimeBuilds(root);
   if (missing.length === 0) return 0;
   for (const m of missing) {
