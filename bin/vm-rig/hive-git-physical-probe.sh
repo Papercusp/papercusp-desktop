@@ -327,6 +327,11 @@ PRODUCER="$tower_source/packages/operator-core/lib/sync/pot-git/physical-drill-p
 # Repo-aware producer code (the rig preflight's git reads) must still inspect
 # the LIVE repository, not the snapshot its own import.meta.url now points into.
 export PAPERCUSP_REPO_DIR="$REPO_ROOT"
+# D-086 (p2p-public-release-endgame-2026-09-01): the rig preflight's
+# drill-source-committed check verifies the code the run EXECUTES (this snapshot
+# against this commit), not the live tree's dirt, which is not part of the run.
+export PHYSICAL_DRILL_SOURCE_SHA="$source_sha"
+export PHYSICAL_DRILL_TOWER_SOURCE="$tower_source"
 uncommitted_drill_sources="$(git -C "$REPO_ROOT" status --porcelain -- \
   packages/operator-core/lib/sync/pot-git 2>/dev/null || true)"
 printf 'hive-git-physical-run: pinned source %s (+%d submodules) on tower and VM\n' \
@@ -345,7 +350,7 @@ case ",$physical_phases," in
   *,E,*) "$TSX" "$PRODUCER" phase-e-preflight >/dev/null ;;
 esac
 # RIG-PREFLIGHT (physical-drill-iteration-speed P-003, R-5): the P-505 guard-rail facts as
-# read-only checks, before the first rig ssh — committed drill source (the VM stages HEAD),
+# read-only checks, before the first rig ssh — pinned drill source (the tower snapshot equals the pinned commit; D-086),
 # canary mode baseline, no leftover Phase D trust hold, VM payload = the tower-composed build,
 # both owners answering. A refusal names the check (PHYSICAL_PREFLIGHT_FAILED <check>) in
 # seconds instead of surfacing mid-phase. PCUSP_VM_GITHUB_USER_ID overrides the VM user.
