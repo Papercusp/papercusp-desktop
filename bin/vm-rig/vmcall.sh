@@ -115,9 +115,14 @@ MCP_TIMEOUT_SEC=$((10#$MCP_TIMEOUT_SEC))
 # operator returned no MCP result at all: a silent child stdout is not proof of
 # reachability, and a non-JSON result is not proof that the call completed.
 # Capture stdout so we can validate the actual result before returning success.
+#
+# Exit 5 is reserved for mcp-call.mjs's "the tool ANSWERED ok:false"
+# (EI-24654733539966460), forwarded below with its JSON result on stdout. This
+# driver's own "no usable result" failures therefore use 6, so a caller can
+# tell a refusal (5, judge the answer) from a missing result (6).
 OUT="$(mktemp "${TMPDIR:-/tmp}/vmcall.XXXXXX")" || {
   echo "MCP_RESULT_CAPTURE_FAILED" >&2
-  exit 5
+  exit 6
 }
 cleanup() { rm -f "$OUT"; }
 trap cleanup EXIT HUP INT TERM
@@ -167,6 +172,8 @@ if [ "$rc" -eq 124 ]; then
   exit "$rc"
 fi
 
+# Any other failure, including 5 (the tool answered ok:false), forwards the
+# child's stdout and its exit code unchanged.
 if [ "$rc" -ne 0 ]; then
   cat "$OUT"
   exit "$rc"
@@ -183,7 +190,7 @@ if ! "$NODE" -e '
 ' "$OUT"; then
   cat "$OUT"
   echo "MCP_RESULT_INVALID: expected a non-empty JSON result" >&2
-  exit 5
+  exit 6
 fi
 
 cat "$OUT"

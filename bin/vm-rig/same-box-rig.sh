@@ -57,10 +57,17 @@ done
 state_get() { sed -n "s/^$1=//p" "$dir/rig.state" 2>/dev/null | tail -1; }
 
 wait_health() { # <port> <label> [seconds]
-  local port="$1" label="$2" secs="${3:-300}" i code
+  local port="$1" label="$2" secs="${3:-300}" logf="${4:-}" i code
   for i in $(seq 1 "$secs"); do
     code="$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$port/api/health" 2>/dev/null || true)"
     [ "$code" = 200 ] && { echo "same-box-rig: $label owner :$port healthy after ${i}s" >&2; return 0; }
+    # Node prints a "Node.js v<N>" trailer only when the process died on an uncaught error,
+    # so a crashed owner fails here in seconds instead of after the whole health budget.
+    if [ -n "$logf" ] && grep -q '^Node\.js v[0-9]' "$logf" 2>/dev/null; then
+      echo "same-box-rig: $label owner :$port CRASHED after ${i}s — last lines of $logf:" >&2
+      tail -n 15 "$logf" >&2
+      return 1
+    fi
     [ $((i % 30)) -eq 0 ] && echo "  … $label owner :$port not healthy yet (last=$code, ${i}s)" >&2
     sleep 1
   done
@@ -76,10 +83,51 @@ launch_owner() { # <tower|vm>
   side="$(state_get sidecar)"; dht="$(state_get dht_bootstrap)"; real="$(state_get real_home)"
   [ -n "$home" ] && [ -n "$port" ] && [ -n "$pg" ] && [ -f "$side/serve.mjs" ] && [ -n "$dht" ] \
     || die "rig.state in $dir is incomplete for $role"
+  preflight_natives "$side" || return 1
   HOME="$real" FED_SMOKE_SCOPE="$dir" \
     fed_local_launch_sidecar "$home" "$dir/$role.log" "$side" "$port" "$pg" \
       PAPERCUSP_DHT_BOOTSTRAP="$dht" || return 1
-  wait_health "$port" "$role"
+  wait_health "$port" "$role" 300 "$dir/$role.log"
+}
+
+# The composed payload carries serve.mjs plus its own embedded-postgres-server copy only.
+# Every externalized package (NATIVE_PKGS, @lydell/*, @embedded-postgres/<host>, ...) must
+# resolve from sidecar/node_modules. On the physical VM those entries are symlinks into the
+# installed app's node_modules (boot-headless-current.sh); here they link into the repo
+# root's node_modules — the same tree vm-dep-source names. Only MISSING entries are added,
+# so the composed embedded-postgres-server is never shadowed.
+link_natives() { # <sidecar dir>
+  local side="$1" src="$ROOT/node_modules" e child name n=0
+  [ -d "$src" ] || { echo "same-box-rig: no $src to link natives from" >&2; return 1; }
+  mkdir -p "$side/node_modules" || return 1
+  for e in "$src"/*; do
+    name="$(basename "$e")"
+    case "$name" in
+      @*)
+        mkdir -p "$side/node_modules/$name" || return 1
+        for child in "$e"/*; do
+          [ -e "$side/node_modules/$name/${child##*/}" ] || [ -L "$side/node_modules/$name/${child##*/}" ] && continue
+          ln -s "$child" "$side/node_modules/$name/${child##*/}" && n=$((n + 1))
+        done ;;
+      *)
+        [ -e "$side/node_modules/$name" ] || [ -L "$side/node_modules/$name" ] && continue
+        ln -s "$e" "$side/node_modules/$name" && n=$((n + 1)) ;;
+    esac
+  done
+  echo "same-box-rig: linked $n package entries from $src into $side/node_modules" >&2
+}
+
+# Fail in seconds, naming the package, instead of an owner that dies on ERR_MODULE_NOT_FOUND.
+preflight_natives() { # <sidecar dir>
+  local side="$1" p missing=()
+  for p in @lydell/node-pty @papercusp/embedded-postgres-server @embedded-postgres/linux-x64 \
+           better-sqlite3 sodium-native udx-native; do
+    [ -f "$side/node_modules/$p/package.json" ] || missing+=("$p")
+  done
+  [ ${#missing[@]} -eq 0 ] && return 0
+  echo "same-box-rig: sidecar $side cannot resolve: ${missing[*]}" >&2
+  echo "  (a rig-composed sidecar gets them from link_natives; a --sidecar you pass must carry them)" >&2
+  return 1
 }
 
 cmd_up() {
@@ -94,8 +142,10 @@ cmd_up() {
     echo "same-box-rig: composing a current sidecar into $sidecar (not the shared cache)" >&2
     PCUSP_RIG_COMPOSE_OUT="$sidecar" "$HERE/compose-rig-sidecar-current.sh" --no-push >"$dir/compose.log" 2>&1 \
       || { tail -20 "$dir/compose.log" >&2; die "compose-rig-sidecar-current.sh failed (log: $dir/compose.log)"; }
+    link_natives "$sidecar" || die "could not link native packages into $sidecar"
   fi
   [ -f "$sidecar/serve.mjs" ] || die "no serve.mjs in $sidecar"
+  preflight_natives "$sidecar" || die "the sidecar cannot boot (missing packages above)"
 
   local dht tp tpg vp vpg
   dht="$(fed_start_testnet_dht "$ROOT" "$dir" "" 1)" || die "testnet DHT did not start (log: $dir/dht.log)"

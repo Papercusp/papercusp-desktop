@@ -451,13 +451,23 @@ test('no health identity (empty witness buildSha, no --expected-health-sha) refu
   assert.equal(r.calls, '', 'nothing ran on the target');
 });
 
-// The bootstrap lines a real 0.0.25 first boot writes to the server journal.
+// The bootstrap lines a real 0.0.25 first boot writes. They are console.log lines of
+// the node sidecar, which the host routes to <home>/.papercusp/logs/serve.log in
+// release builds (main.rs spawn_serve -> rotating_log_stdio) — NOT to the unit's
+// journal, which is why run 8 recorded "no line" (WI-10004100).
 const SEED_LINE = '[papercusp-hive] seed restore: restored=[corestore] deferred=[git]';
 const ADMIT_LINE = '[papercusp-hive] offline git seed still deferred — self-admitting DATA-only; git code back-fills via retry/online';
 
+function serveLog(fx, text) {
+  const dir = join(fx.home, '.papercusp', 'logs');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'serve.log'), text);
+}
+const SERVE_LOG_SOURCE = /\/\.papercusp\/logs\/serve\.log$/;
+
 test('an absent seeded pot fails offline-restore only after polling the whole window, naming the diagnostics', opts, () => {
   const fx = fixture();
-  writeFileSync(join(fx.state, 'journal'), `boot\n${SEED_LINE}\n${ADMIT_LINE}\n`);
+  serveLog(fx, `boot\n${SEED_LINE}\n${ADMIT_LINE}\n`);
   const r = run(fx, { args: ['--restore-timeout', '1'], env: { FAKE_POT_SLUG: 'something-else' } });
   assert.equal(r.status, 1);
   const leg = r.legs['offline-restore'];
@@ -476,17 +486,31 @@ test('a pot the offline self-admit lists only after several reads PASSES — pol
   assert.equal(r.doc.restore.timeoutSec, '180');
 });
 
-test('bootstrap journal lines are recorded as diagnostics and never gate the leg', opts, () => {
+test('bootstrap serve.log lines are recorded as diagnostics and never gate the leg', opts, () => {
   const fx = fixture();
-  // Even a FAILED seed restore in the journal does not fail a leg whose pot is listed:
-  // the row is the pot:list observation; the journal only explains it.
-  writeFileSync(join(fx.state, 'journal'), `${SEED_LINE}\n[papercusp-hive] seed restore FAILED for corestore — cold-pathing\n`);
+  // Even a FAILED seed restore does not fail a leg whose pot is listed: the row is
+  // the pot:list observation; the bootstrap lines only explain it.
+  serveLog(fx, `${SEED_LINE}\n[papercusp-hive] seed restore FAILED for corestore — cold-pathing\n`);
+  // serve.log is the PRIMARY source: a journal line must not displace it.
+  writeFileSync(join(fx.state, 'journal'), '[papercusp-hive] seed restore: from-the-journal\n');
   const r = run(fx);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.legs['offline-restore'].status, 'pass');
+  assert.match(r.doc.restore.hiveLogSource, SERVE_LOG_SOURCE);
   assert.equal(r.doc.restore.seedRestore, 'seed restore FAILED for corestore — cold-pathing');
   assert.equal(r.doc.restore.bootstrapLast, 'seed restore FAILED for corestore — cold-pathing');
   assert.equal(r.doc.restore.journalExit, '0');
+});
+
+test('the unit journal is only a FALLBACK source, used when serve.log carries no bootstrap line', opts, () => {
+  const fx = fixture();
+  serveLog(fx, 'boot\nno bootstrap lines here\n');
+  writeFileSync(join(fx.state, 'journal'), `${SEED_LINE}\n${ADMIT_LINE}\n`);
+  const r = run(fx);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.doc.restore.hiveLogSource, 'journal:papercusp-server.service');
+  assert.equal(r.doc.restore.seedRestore, 'seed restore: restored=[corestore] deferred=[git]');
+  assert.match(r.doc.restore.bootstrapLast, /^offline git seed still deferred/);
   assert.match(r.calls, /journalctl --user -u papercusp-server\.service/);
 });
 
@@ -524,11 +548,22 @@ test('evidence never carries the operator USERNAME in any spelling (dash-encoded
   if (realUser.length >= 3) assert.ok(!text.includes(realUser), 'the real (passwd) username never survives');
 });
 
-test('no journal lines are recorded as absent, not invented', opts, () => {
+test('a missing serve.log (and an empty journal) is recorded as absent, not invented', opts, () => {
   const r = run(fixture());
   assert.equal(r.legs['offline-restore'].status, 'pass');
-  assert.equal(r.doc.restore.seedRestore, 'no seed-restore line in the server journal');
-  assert.equal(r.doc.restore.bootstrapLast, 'no [papercusp-hive] line in the server journal');
+  assert.equal(r.doc.restore.hiveLogSource, 'absent');
+  assert.match(r.doc.restore.seedRestore, /^absent: \S*\/\.papercusp\/logs\/serve\.log missing or unreadable$/);
+  assert.match(r.doc.restore.bootstrapLast, /^absent: \S*\/\.papercusp\/logs\/serve\.log missing or unreadable$/);
+});
+
+test('a readable serve.log with no bootstrap line names that file, and invents nothing', opts, () => {
+  const fx = fixture();
+  serveLog(fx, 'boot\nlistening\n');
+  const r = run(fx);
+  assert.equal(r.legs['offline-restore'].status, 'pass');
+  assert.match(r.doc.restore.hiveLogSource, SERVE_LOG_SOURCE);
+  assert.match(r.doc.restore.seedRestore, /^no seed-restore line in \S*\/\.papercusp\/logs\/serve\.log$/);
+  assert.match(r.doc.restore.bootstrapLast, /^no \[papercusp-hive\] line in \S*\/\.papercusp\/logs\/serve\.log$/);
 });
 
 test('a target that already carries Papercusp voids preflight and installs nothing', opts, () => {

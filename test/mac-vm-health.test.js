@@ -542,9 +542,28 @@ test('vm-rig driver rejects an empty MCP result even when the child exits 0', as
   const { dir, env } = await vmcallFixture('');
   try {
     const result = spawnSync('bash', [vmcall, 'coord:whoami', '{}'], { env, encoding: 'utf8' });
-    assert.equal(result.status, 5);
+    // 6, not 5: exit 5 is reserved for mcp-call's "the tool answered ok:false".
+    assert.equal(result.status, 6);
     assert.match(result.stderr, /MCP_RESULT_INVALID/);
     assert.equal(result.stdout, '');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('vm-rig driver forwards an ok:false answer with mcp-call exit 5 and its JSON on stdout', async () => {
+  // mcp-call.mjs prints the complete result, then exits 5 when the tool
+  // answered ok:false (EI-24654733539966460). The driver must keep both, so a
+  // caller can fail a refused write or judge the answer itself.
+  const refusal = '{"ok":false,"results":[{"ok":false,"error":"duplicate key"}]}';
+  const { dir, env } = await vmcallFixture(refusal, {
+    source: "process.stdout.write(process.env.VM_RIG_FAKE_RESULT ?? ''); process.exitCode = 5;\n",
+  });
+  try {
+    const result = spawnSync('bash', [vmcall, 'work_items:create', '{}'], { env, encoding: 'utf8' });
+    assert.equal(result.status, 5, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), JSON.parse(refusal));
+    assert.doesNotMatch(result.stderr, /MCP_RESULT_INVALID/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
