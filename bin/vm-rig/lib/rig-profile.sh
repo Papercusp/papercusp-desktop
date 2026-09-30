@@ -148,6 +148,27 @@ rig_profile_apply() {
   echo "RIG_PROFILE rig=same-box vm=$VM tower_port=$SB_TOWER_PORT vm_port=$SB_VM_PORT pot=$SB_POT_HOME dir=$dir" >&2
 }
 
+# Pre-run precondition for the same-box rig: every host path the profile hands the probe and
+# scenario must exist on the rig. A profile path that does not match what the rig's owners
+# actually wrote (the r5 rehearsal's announce-identity cache) otherwise surfaces only after
+# the slow run has started. Runs apply in a subshell so the caller's globals stay untouched.
+# Prints one MISSING line per absent path; exit 0 ready, 1 not ready, 2 profile unusable.
+RIG_PROFILE_SAME_BOX_PATHS='TOWER_CACHE TOWER_REPO VM_CACHE VM_IDENTITY_DIR VM_OWNER_IDENTITY_DIR VM_REPO VM_CALL VM_MCP_CALL VM_OWNER_LAUNCHER VM_DEP_SOURCE'
+rig_profile_same_box_paths_ready() {
+  [ "$(rig_profile_name)" = same-box ] || return 0
+  (
+    rig_profile_apply 2>/dev/null || exit 2
+    missing=0
+    for var in $RIG_PROFILE_SAME_BOX_PATHS; do
+      if [ -z "${!var:-}" ] || [ ! -e "${!var}" ]; then
+        echo "RIG_PROFILE_PATH_MISSING $var=${!var:-<unset>}" >&2
+        missing=1
+      fi
+    done
+    exit "$missing"
+  )
+}
+
 # Extra `physical-drill-producer rig-preflight` arguments for the active profile, one per line
 # (read them with mapfile). The physical profile adds nothing: every check, both owners on
 # :3070. The same-box profile points hosts-answering at the two throwaway owners' ports — the
