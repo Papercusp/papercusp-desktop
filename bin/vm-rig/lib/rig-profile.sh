@@ -82,8 +82,11 @@ rig_profile_apply() {
   rig_profile_load_same_box || return 2
   local dir shared_vm shared_tower
   dir="$(cd "$HIVE_GIT_SAME_BOX_RIG" && pwd)"
-  shared_vm="$SB_VM_HOME/.papercusp-workspaces/.shared"
-  shared_tower="$SB_TOWER_HOME/.papercusp-workspaces/.shared"
+  # The physical desktop writes its identity under ~/.papercusp-workspaces/.shared/.papercusp;
+  # a same-box owner runs with HOME=<rig home> and PAPERCUSP_HOME scrubbed, so it writes
+  # <rig home>/.papercusp (r5 rehearsal: the .shared path failed the host receipt).
+  shared_vm="$SB_VM_HOME"
+  shared_tower="$SB_TOWER_HOME"
 
   PHASE_A_POT_HOME="$SB_POT_HOME"
   PHASE_A_REPO_KEY="$SB_REPO_KEY"
