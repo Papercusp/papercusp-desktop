@@ -287,6 +287,34 @@ fail() {
   exit 1
 }
 
+# ptool exits 0 on an ok:false result (EI-24654733539966460), so its exit status
+# cannot tell a refused write from a landed one. Judge the saved result instead:
+# the envelope and every per-item result must be ok.
+ptool_result_ok() {
+  node -e 'const o = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); process.exit(o.ok === true && Array.isArray(o.results) && o.results.length > 0 && o.results.every((r) => r.ok === true) ? 0 : 1)' "$1"
+}
+
+# A work-item a phase creates only to observe it (a FIXTURE) is not work: it must
+# not outlive the run as an open, claimable item in the drill pot (WI-10004116 —
+# phase J leaked its writes A and B this way on every run). Register each id the
+# moment its create is accepted; drop the registered set on the phase's success
+# path AND from its EXIT trap, so a failed run cannot leak one either.
+DRILL_FIXTURES=()
+drill_fixture_register() {
+  local id
+  id="$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).results?.[0]?.id ?? ""' "$1")" || return 1
+  [ -n "$id" ] || return 1
+  DRILL_FIXTURES+=("$id")
+}
+drill_fixtures_drop() {
+  [ "${#DRILL_FIXTURES[@]}" -gt 0 ] || return 0
+  node -e 'process.stdout.write(JSON.stringify({ ids: process.argv.slice(2), state: "dropped", assumptions: "none", reason: `Physical drill fixture from run ${process.argv[1]}; not work (WI-10004116).` }))' "$physical_run_id" "${DRILL_FIXTURES[@]}" \
+    | "$TOWER_CALL" work_items:set_state --json - --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" >"$1" \
+    || return 1
+  ptool_result_ok "$1" || return 1
+  DRILL_FIXTURES=()
+}
+
 phase_a_contract() {
   cat <<'JSON'
 {"schemaVersion":"hive-git-physical-phase-contract/v1","phase":"A","planItem":"P-302","state":"executor-installed","ready":true,"missingAssertions":[],"target":{"potHomeSlug":"hello-world-3-pot","repoKey":"gh-1303510992","topology":"tower-to-vm-cold-join"},"causalOrder":["towerStoreObserved","vmStoreQuarantinedByScenario","vmStoreAbsenceObserved","canonicalGitSyncBootstrapTriggered","vmStoreRecreatedAfterBootstrap","twoHostNamespaceAndObjectParityObserved"],"requiredObservations":["towerBareRepo","vmBareRepo","bothPhysicalDeviceNamespacesOnBothHosts","namespaceRefOidsMatch","referencedObjectsExistOnBothHosts","oneObjectDatabasePerRepo","deviceSignedExactNamespaceSnapshots","freshVmOwnNamespaceSignature","bootstrapCompletedAfterObservedAbsence"],"forbiddenEvidence":["preExistingVmStoreAsColdJoinProof","singleHostObservation","preAuthoredManifest","environmentSuppliedCommand"],"externalCommandOverrides":false}
@@ -1723,10 +1751,13 @@ phase_j_remove_fault() {
   phase_j_producer_vm phase-j-fault vm remove "$PHASE_J_FAULT_RUN" >"$1" || return 1
   PHASE_J_FAULT_RUN=''
 }
-# The fault must never outlive the scenario (same EXIT rule as phase H).
+# Neither the fault nor the fixture writes may outlive the scenario (same EXIT
+# rule as phase H). The fault goes first: a drop must not queue behind it.
 phase_j_restore_on_exit() {
   phase_j_remove_fault "$run_dir/phase-j/exit-fault-remove.json" 2>"$run_dir/phase-j/exit-fault-remove.err" \
     || echo "hive-git-physical-scenario: WARNING phase J could not remove the VM outage fault; run: ssh $VM '$VM_NODE' '$VM_TSX' '$VM_PRODUCER' phase-j-fault vm sweep" >&2
+  drill_fixtures_drop "$run_dir/phase-j/exit-fixtures-drop.json" 2>"$run_dir/phase-j/exit-fixtures-drop.err" \
+    || echo "hive-git-physical-scenario: WARNING phase J could not drop its fixture work-items ${DRILL_FIXTURES[*]} in $PHASE_A_POT_HOME; drop them with work_items:set_state (see $run_dir/phase-j/exit-fixtures-drop.json)" >&2
 }
 # Samples the VM until the step's lag contract is met (producer exit 0). Exit 3
 # is a valid observation that has not reached the step yet; anything else fails.
@@ -1773,8 +1804,10 @@ phase_j_apply_outage_replay() {
       || fail "phase J tower could not author write $w; see $phase_dir/tower-create-$w.json"
     # ptool exits 0 on an ok:false result: a refused create must fail here, not after the
     # whole replay bound (WI-10003961 attempt 2 waited 900s for a write B that never existed).
-    node -e 'const o = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); process.exit(o.ok === true && Array.isArray(o.results) && o.results.length > 0 && o.results.every((r) => r.ok === true) ? 0 : 1)' "$phase_dir/tower-create-$w.json" \
+    ptool_result_ok "$phase_dir/tower-create-$w.json" \
       || fail "phase J tower refused write $w; see $phase_dir/tower-create-$w.json"
+    drill_fixture_register "$phase_dir/tower-create-$w.json" \
+      || fail "phase J tower create for write $w returned no work-item id; see $phase_dir/tower-create-$w.json"
   done
   "$TSX" "$PRODUCER" phase-j-observe tower authored "$run_id" >"$phase_dir/tower-authored.json" \
     || fail 'phase J tower authored observation failed'
@@ -1803,7 +1836,7 @@ process.stdout.write(`${c.logKeyHex} ${c.applyFailure.position}\n`);
   # Outage off, then replay.
   phase_j_remove_fault "$phase_dir/fault-remove.json" \
     || fail "phase J could not remove the VM outage fault; see $phase_dir/fault-remove.json"
-  trap - EXIT
+  # The EXIT trap stays armed until the fixtures are dropped below.
   phase_j_await_vm replayed "$phase_dir/vm-replayed" "$feature_a" "$log_key" "$held_pos"
   cp "$PHASE_J_LAST" "$phase_dir/vm-replayed.json"
   finished_at="$(now_iso)"
@@ -1834,6 +1867,9 @@ fs.writeFileSync(`${dir}/verify-input.json`, `${JSON.stringify(input, null, 2)}\
 NODE
   "$TSX" "$PRODUCER" phase-j-verify "$phase_dir/verify-input.json" \
     >"$phase_dir/verdict.json"
+  drill_fixtures_drop "$phase_dir/fixtures-drop.json" \
+    || fail "phase J could not drop its fixture work-items ${DRILL_FIXTURES[*]}; see $phase_dir/fixtures-drop.json"
+  trap - EXIT
 }
 
 assemble_unsigned_evidence() {
