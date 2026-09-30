@@ -398,6 +398,11 @@ if [ "\$PLATFORM" = linux ] && [ "$OFFLINE_MODE" = enforce ]; then
       command -v \$t >/dev/null 2>&1 || continue
       sudo -n \$t -N PCOIJ_OFFLINE 2>/dev/null || sudo -n \$t -F PCOIJ_OFFLINE
       sudo -n \$t -A PCOIJ_OFFLINE -o lo -j RETURN
+      # Keep the driver's own control session alive: the conntrack match below loads
+      # nf_conntrack mid-session, so this ssh flow's next reply is first seen as NEW
+      # and would hit REJECT (measured on the Linux clean-room VM, 0.0.25 run).
+      # Replies FROM the guest's sshd are not egress; outbound ssh uses --dport 22.
+      sudo -n \$t -A PCOIJ_OFFLINE -p tcp --sport 22 -j RETURN
       sudo -n \$t -A PCOIJ_OFFLINE -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
       sudo -n \$t -A PCOIJ_OFFLINE -j REJECT
       sudo -n \$t -C OUTPUT -j PCOIJ_OFFLINE 2>/dev/null || sudo -n \$t -I OUTPUT 1 -j PCOIJ_OFFLINE
@@ -547,7 +552,9 @@ else
   before="$(kv egressBefore "$OF")"; after="$(kv egressAfter "$OF")"
   ident offline mode "$OFFLINE_MODE"; ident offline egressBefore "$before"; ident offline egressAfter "$after"
   ident offline firewall "$(kv firewall "$OF")"
-  if [[ "$after" == denied ]]; then
+  if [[ -z "$after" ]]; then
+    leg offline void "offline script returned no egressAfter (ssh rc=$rc): the control session was lost while enforcing — not a measurement of egress" "$OF"; OFFLINE_OK=0
+  elif [[ "$after" == denied ]]; then
     leg offline pass "egress before=$before; after=denied (mode=$OFFLINE_MODE, firewall=$(kv firewall "$OF"))" "$OF"; OFFLINE_OK=1
   elif [[ "$OFFLINE_MODE" == enforce ]]; then
     leg offline void "egress still $after after enforcement (firewall=$(kv firewall "$OF")) — the run cannot claim offline" "$OF"; OFFLINE_OK=0

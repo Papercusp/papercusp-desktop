@@ -238,6 +238,9 @@ test('happy path: every leg passes, installer identity is recorded apart from th
   assert.notEqual(r.doc.serving.restart.pid, r.doc.serving.launch.pid);
   // Offline was enforced and then removed again; the install never downloaded.
   assert.equal(r.doc.offline.egressAfter, 'denied');
+  // The driver's own ssh replies are exempted BEFORE the REJECT, or enforcing
+  // offline cuts the control session (measured on the real Linux VM).
+  assert.match(r.calls, /PCOIJ_OFFLINE -p tcp --sport 22 -j RETURN[\s\S]*PCOIJ_OFFLINE -j REJECT/);
   assert.match(r.doc.offline.egressBefore, /^reachable:/);
   assert.equal(existsSync(join(fx.state, 'offline')), false, 'egress firewall removed on exit');
   assert.match(r.calls, /apt-get install --yes --no-download/);
