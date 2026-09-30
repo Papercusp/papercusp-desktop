@@ -35,6 +35,31 @@ SPICE 127.0.0.1:5935.
 ./vmctl down clean           # power off
 ```
 
+For scripts that drive the VM, three subcommands give machine-readable answers:
+
+```sh
+./vmctl endpoint clean       # ssh_port= / ssh_key= / ssh_host= (the single source for callers)
+./vmctl is-running clean     # exit 0 if the instance is up, 1 if not
+./vmctl wait-ssh clean 300   # wait up to 300 s for SSH; non-zero on timeout (a hard verdict)
+```
+
+An instance name other than `clean`/`fed-a`/`fed-b`/`updater` gets its own
+overlay on the shared ad-hoc slot (SSH 2233, SPICE 127.0.0.1:5941), so only one
+ad-hoc instance can run at a time.
+
+## Release platform smoke: the Linux leg
+
+The release gate's Linux installed-update proof runs on this VM.
+`release_artifacts_run_platform_smoke` (`bin/lib/release-artifacts.sh`) resets
+`clean` (or `$PAPERCUSP_LINUX_SMOKE_VM`), boots it, installs the **previous**
+release as the running baseline, runs `bin/install-and-relaunch-verify.sh
+--platform linux` against the endpoint `vmctl endpoint` prints, and always powers
+the VM down. It holds `$TMPDIR/papercusp-linux-smoke-<vm>.lock` and refuses an
+instance that is already running, so **it never takes over a VM you booted
+yourself**. Pass the previous release's debs as
+`PAPERCUSP_LINUX_SMOKE_BASELINE_GUI` + `PAPERCUSP_LINUX_SMOKE_BASELINE_SERVER` (or
+`PAPERCUSP_LINUX_SMOKE_BASELINE_DIR`). Full procedure: `RELEASE-RUNBOOK.md` §4.
+
 ## Update / Revert E2E: VM only
 
 Destructive updater testing must use the dedicated VM lane; never copy a live

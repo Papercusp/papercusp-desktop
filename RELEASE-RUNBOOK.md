@@ -199,6 +199,44 @@ explicit and logged: set `PAPERCUSP_SKIP_PLATFORM_SMOKE=1` together with a
 non-empty `PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON`. The flag without a reason is
 itself rejected. This is an exception record, not a smoke PASS.
 
+**Each platform has its own VM endpoint (WI-10004052).** The verifier resolves
+its SSH endpoint per platform, in the order `--ssh-*` flags > `VM_SSH_*` env >
+platform default: `windows` → `127.0.0.1:2223` with `~/.ssh/papercup-vm-win`;
+`mac` → `127.0.0.1:2222` with `~/.ssh/papercup-vm-mac` (`MAC_VM_SSH_HOST`
+overrides the host); `linux` → the Linux clean-room VM, read from
+`scripts/linux-test-vm/vmctl endpoint ${PAPERCUSP_LINUX_SMOKE_VM:-clean}`
+(`tester@127.0.0.1:2224`, `~/.ssh/papercup-vm-linux`). Before this, the Linux
+leg dialled the Windows endpoint, so every release reported "no Linux smoke VM"
+even though the clean-room VM existed.
+
+**The Linux leg manages its own VM.** When `release_artifacts_run_platform_smoke`
+(`bin/lib/release-artifacts.sh`) runs the default verifier for `linux`, it:
+takes `$TMPDIR/papercusp-linux-smoke-<vm>.lock`; refuses a VM that is already
+running (it belongs to someone else's fresh-install or federation work);
+`vmctl reset` → `up` → `wait-ssh`; installs the **previous release** as the
+running baseline; starts `papercusp-server.service` and waits for
+`/api/health`; runs the verifier against the vmctl endpoint; and **always**
+`vmctl down`. The verifier proves an in-place update (the sha must flip), so a
+pristine overlay alone has nothing to flip — give it the previous release's
+debs:
+
+```
+source bin/lib/release-artifacts.sh
+PAPERCUSP_LINUX_SMOKE_BASELINE_GUI=<previous GUI .deb> \
+PAPERCUSP_LINUX_SMOKE_BASELINE_SERVER=<previous Server .deb> \
+  release_artifacts_run_platform_smoke <tag> <version> linux <linux ledger rows>
+```
+
+`PAPERCUSP_LINUX_SMOKE_BASELINE_DIR` (a directory holding exactly one GUI and one
+Server `.deb`) is the alternative. A baseline with the cut's own version is
+refused. Every step is `timeout(1)`-bounded; budgets are
+`PAPERCUSP_LINUX_SMOKE_{RESET,UP,SSH,BASELINE,BASELINE_START,VERIFY,DOWN}_TIMEOUT`.
+`PAPERCUSP_LINUX_SMOKE_VM` picks another vmctl instance,
+`PAPERCUSP_LINUX_SMOKE_RESET=0` boots the existing overlay without a reset or a
+baseline install (it must already hold one), and
+`PAPERCUSP_LINUX_SMOKE_VM_MANAGED=0` skips the lifecycle for a VM you prepared by
+hand.
+
 > ⚠ This **touches the VM** (scp + install + relaunch). Only run it when a build
 > VM is genuinely free to be mutated. Validate the argument surface without VM
 > contact with `bash bin/install-and-relaunch-verify.sh --help`; the script's

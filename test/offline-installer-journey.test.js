@@ -140,7 +140,7 @@ exit 0
   const fw = `#!/usr/bin/env bash
 echo "$(basename "$0") $*" >> "$FAKE_STATE/calls.log"
 case "$*" in
-  "-C OUTPUT -j PCOIJ_OFFLINE") [ -f "$FAKE_STATE/offline" ] ;;
+  "-C OUTPUT -j PCOIJ_OFFLINE") [ -f "$FAKE_STATE/offline" ]; exit $? ;;
   "-I OUTPUT 1 -j PCOIJ_OFFLINE") [ -n "\${FAKE_FIREWALL_INEFFECTIVE:-}" ] || touch "$FAKE_STATE/offline" ;;
   "-D OUTPUT -j PCOIJ_OFFLINE") rm -f "$FAKE_STATE/offline" ;;
 esac

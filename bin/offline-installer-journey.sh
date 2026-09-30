@@ -163,7 +163,8 @@ leg() {
   printf '  %-8s %-18s %s\n' "$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')" "$1" "$3" >&2
 }
 ident() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$IDS"; }   # SCOPE KEY VALUE
-kv() { sed -n "s/^PCOIJ $1=//p" "$2" | tail -1; }            # KEY FILE
+# KEY FILE. Keys carry '/' (bin/node), so the sed delimiter is '|'.
+kv() { [[ -f "$2" ]] || return 0; sed -n "s|^PCOIJ $1=||p" "$2" | tail -1; }
 
 sha256_local() { sha256sum "$1" | awk '{print $1}'; }
 
@@ -535,7 +536,15 @@ else
       diffs=""
       for k in $RUNTIME_FIELDS; do
         w="$(kv "witness.$k" "$RUN_DIR/witness.kv")"; i="$(kv "installed.$k" "$IB")"
-        [[ "$w" == "$i" ]] || diffs+="$k(witness=${w:0:16} installed=${i:0:16}) "
+        # An unmeasured field on either side is a difference, never a match:
+        # empty == empty would otherwise pass a comparison that read nothing.
+        if [[ -z "$w" || -z "$i" || "$w" == MISSING || "$i" == MISSING ]]; then
+          # buildSha is legitimately empty in shipped provenance (gitHead carries it).
+          [[ "$k" == buildSha && "$w" == "$i" ]] && continue
+          diffs+="$k(unmeasured: witness='${w:0:16}' installed='${i:0:16}') "
+        elif [[ "$w" != "$i" ]]; then
+          diffs+="$k(witness=${w:0:16} installed=${i:0:16}) "
+        fi
       done
       if [[ -z "$diffs" ]]; then leg witness-compat pass "installed runtime == minimal-witness runtime on all $(wc -w <<<"$RUNTIME_FIELDS") fields"
       else leg witness-compat fail "installed runtime differs from the witness: $diffs"; fi
