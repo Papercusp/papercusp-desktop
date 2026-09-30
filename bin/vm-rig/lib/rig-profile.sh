@@ -116,16 +116,9 @@ rig_profile_apply() {
   TOWER_CACHE="$shared_tower/.papercusp/local-announce-identity.json"
   DEPLOY="$RIG_PROFILE_LIB_DIR/same-box-deploy.sh"
 
-  # The scenario's status probes name the pot and workspace; retarget them at the same-box
-  # pot. The probe has no such variables, and runs under set -u, so only rewrite what exists.
-  if [ -n "${PHASE_A_TOWER_STATUS_ARGS:-}" ]; then
-    PHASE_A_TOWER_STATUS_ARGS="${PHASE_A_TOWER_STATUS_ARGS//\"harnessSlug\":\"hello-world-3-pot\"/\"harnessSlug\":\"$SB_POT_HOME\"}"
-    PHASE_A_TOWER_STATUS_ARGS="${PHASE_A_TOWER_STATUS_ARGS//\"workspaceId\":\"papercusp-workspace\"/\"workspaceId\":\"$SB_WORKSPACE\"}"
-  fi
-  if [ -n "${PHASE_A_VM_STATUS_ARGS:-}" ]; then
-    PHASE_A_VM_STATUS_ARGS="${PHASE_A_VM_STATUS_ARGS//\"harnessSlug\":\"hello-world-3-pot\"/\"harnessSlug\":\"$SB_POT_HOME\"}"
-    PHASE_A_VM_STATUS_ARGS="${PHASE_A_VM_STATUS_ARGS//\"workspaceId\":\"papercusp-workspace\"/\"workspaceId\":\"$SB_WORKSPACE\"}"
-  fi
+  # No status-query rewrite here: the scenario builds its phase A status query from the
+  # git-sync slug set above (phase_a_status_args), the same slug its readiness gate matches.
+  # A string rewrite to the pot home split the two (same-box run 20260930T050610Z).
 
   # The producer's target (physicalDrillTarget in physical-drill-phase-a.ts): it reads these
   # only under HIVE_GIT_RIG=same-box and marks the run diagnostic, so it can never sign.

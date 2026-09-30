@@ -490,8 +490,18 @@ done
 keep=$(printf '%s' "$decl" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | grep -v 'papercusp' | paste -sd, - | sed 's/,/, /g')
 echo "PCOIJ satisfy=$keep"
 dpkg-query -W -f='${Package}=${Version}\n' 2>/dev/null | LC_ALL=C sort > "$REMOTE_DIR/dpkg-before.txt"
+if [ -n "$unreadable" ]; then
+  # One unreadable .deb FAILS the leg even when the other declares dependencies:
+  # its own were never provisioned, so "both .debs" would be a false claim (WI-10004154).
+  echo "PCOIJ satisfyRefused=control fields unreadable:$unreadable"
+  exit 1
+fi
 if [ -z "$keep" ]; then
-  echo "PCOIJ satisfyExit=0"
+  # Never "nothing to provision": the real GUI .deb declares its webkit/gtk/indicator
+  # runtime, so an empty list from READABLE control files means the packaging lost its
+  # declared dependencies. This leg then measured nothing, so it FAILS (WI-10004154).
+  echo "PCOIJ satisfyRefused=neither .deb declares a non-Papercusp Depends/Recommends"
+  exit 1
 else
   sudo -n apt-get update > "$REMOTE_DIR/apt-update.log" 2>&1; echo "PCOIJ aptUpdateExit=$?"
   sudo -n env DEBIAN_FRONTEND=noninteractive apt-get satisfy --yes "$keep" > "$REMOTE_DIR/apt-satisfy.log" 2>&1
@@ -707,7 +717,10 @@ else
         ident osPrerequisites "$k" "$(kv "$k" "$PR")"
       done
       ident osPrerequisites satisfyExit "$(kv satisfyExit "$PR")"
+      ident osPrerequisites satisfyRefused "$(kv satisfyRefused "$PR")"
       if [[ "$rc" == 124 ]]; then leg os-prerequisites fail "provisioning exceeded ${INSTALL_TIMEOUT}s" "$PR"
+      elif [[ -n "$(kv satisfyRefused "$PR")" ]]; then
+        leg os-prerequisites fail "provisioning refused: $(kv satisfyRefused "$PR")" "$PR"
       elif [[ -z "$(kv satisfyExit "$PR")" ]]; then
         leg os-prerequisites void "provisioning script returned no satisfyExit (ssh rc=$rc) — not a measurement" "$PR"
       elif [[ "$(kv satisfyExit "$PR")" != 0 ]]; then

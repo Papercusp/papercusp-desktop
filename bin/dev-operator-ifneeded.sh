@@ -259,6 +259,16 @@ if in_use; then
   fi
 fi
 
+# A fresh clone has no gitignored dist/ for workspaces whose runtime entry
+# points there (@papercusp/sse), so the operator would crash-loop on
+# "Cannot find module .../dist/index.js". Build exactly those, once; a no-op
+# on a warm tree (open-source-release-2026-09-29 R-18).
+RUNTIME_BUILD_ROOT="${DEV_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
+node "$SCRIPT_DIR/ensure-runtime-workspace-builds.mjs" "$RUNTIME_BUILD_ROOT" || {
+  echo "[tauri] FATAL: could not build runtime workspace outputs under $RUNTIME_BUILD_ROOT" >&2
+  exit 1
+}
+
 echo "[tauri] starting operator dev server on :$PORT"
 # New session + process group so the whole npm → node → tsx tree is a
 # single kill target (`kill -- -$GROUP`). Do NOT trust `$!` as the group id:

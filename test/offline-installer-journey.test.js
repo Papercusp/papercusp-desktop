@@ -67,10 +67,10 @@ const DEPENDS = {
   'papercusp-gui': { depends: 'libwebkit2gtk-4.1-0 (>= 2.40) | libwebkit2gtk-4.1-0-alt, papercusp-server (= 0.0.25)', recommends: 'xdg-desktop-portal-gtk' },
 };
 
-function buildDeb(root, name, pkg, { serve = SERVE, migrations = ['1236-a.sql', '1237-b.sql'] } = {}) {
+function buildDeb(root, name, pkg, { serve = SERVE, migrations = ['1236-a.sql', '1237-b.sql'], depends = DEPENDS } = {}) {
   const dir = join(root, 'build', name);
   mkdirSync(join(dir, 'DEBIAN'), { recursive: true });
-  const rel = DEPENDS[pkg] ?? {};
+  const rel = depends[pkg] ?? {};
   writeFileSync(join(dir, 'DEBIAN', 'control'), `Package: ${pkg}\nVersion: ${VERSION}\nArchitecture: amd64\nMaintainer: t\n${rel.depends ? `Depends: ${rel.depends}\n` : ''}${rel.recommends ? `Recommends: ${rel.recommends}\n` : ''}Description: t\n`);
   if (pkg === 'papercusp-server') {
     const side = join(dir, 'usr', 'lib', 'Papercusp Server', 'sidecar');
@@ -94,7 +94,7 @@ function buildDeb(root, name, pkg, { serve = SERVE, migrations = ['1236-a.sql', 
   return out;
 }
 
-function fixture() {
+function fixture({ depends = DEPENDS } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pcoij-test-'));
   roots.push(root);
   const stubs = join(root, 'stubs');
@@ -103,8 +103,8 @@ function fixture() {
   const state = join(root, 'state');
   for (const d of [stubs, target, home, state]) mkdirSync(d, { recursive: true });
 
-  const gui = buildDeb(root, 'Papercusp GUI_0.0.25_amd64', 'papercusp-gui');
-  const server = buildDeb(root, 'Papercusp Server_0.0.25_amd64', 'papercusp-server');
+  const gui = buildDeb(root, 'Papercusp GUI_0.0.25_amd64', 'papercusp-gui', { depends });
+  const server = buildDeb(root, 'Papercusp Server_0.0.25_amd64', 'papercusp-server', { depends });
 
   // ssh: run the real remote script locally, in the sandbox, behind the stubs.
   const ssh = join(stubs, 'ssh-shim');
@@ -119,6 +119,15 @@ printf 'SCP %s -> %s\\n' "$src" "$dst" >> "$FAKE_STATE/transport.log"
 mkdir -p "$(dirname "$dst")" && cp "$src" "$dst"
 `);
   exe(join(stubs, 'sudo'), '#!/usr/bin/env bash\n[ "$1" = -n ] && shift\nexec "$@"\n');
+  // dpkg-deb: the real binary, except FAKE_DPKG_UNREADABLE=<artifact basename> makes
+  // a control-field read (-f) of that artifact fail, as a corrupt control member would.
+  const realDpkgDeb = spawnSync('bash', ['-c', 'command -v dpkg-deb'], { encoding: 'utf8' }).stdout.trim();
+  exe(join(stubs, 'dpkg-deb'), `#!/usr/bin/env bash
+if [ "$1" = -f ] && [ -n "\${FAKE_DPKG_UNREADABLE:-}" ] && [ "$(basename "$2")" = "$FAKE_DPKG_UNREADABLE" ]; then
+  echo "dpkg-deb: error: '$2' is not a Debian format archive" >&2; exit 2
+fi
+exec '${realDpkgDeb}' "$@"
+`);
   exe(join(stubs, 'loginctl'), '#!/usr/bin/env bash\necho "loginctl $*" >> "$FAKE_STATE/calls.log"\n');
   // dpkg-query: the Papercusp status query reads dpkg-status; the whole-system
   // package=version listing (the provisioning before/after diff) reads dpkg-all.
@@ -415,6 +424,28 @@ test('a declared dependency the distro cannot satisfy FAILS the row — never a 
   assert.equal(r.legs['os-prerequisites'].status, 'fail');
   assert.match(r.legs['os-prerequisites'].detail, /cannot satisfy a declared dependency: apt-get satisfy exit 100: E: Unable to satisfy dependencies/);
   assert.equal(r.doc.osPrerequisites.provisionedCount, '0');
+});
+
+// WI-10004154 (check-assert-integrity R4): an empty provisioning list is a failed or
+// missing measurement, never "nothing to provision" — the real GUI .deb always declares
+// its webkit/gtk runtime, so the empty branch must FAIL the leg, not report satisfyExit=0.
+test('.debs that declare no non-Papercusp dependency FAIL os-prerequisites — never a vacuous pass', opts, () => {
+  const r = run(fixture({ depends: { 'papercusp-gui': { depends: 'papercusp-server (= 0.0.25)' } } }));
+  assert.equal(r.status, 1, r.stderr);
+  assert.equal(r.doc.verdict, 'FAIL');
+  assert.equal(r.legs['os-prerequisites'].status, 'fail');
+  assert.equal(r.legs['os-prerequisites'].detail, 'provisioning refused: neither .deb declares a non-Papercusp Depends/Recommends');
+  assert.equal(r.doc.osPrerequisites.satisfyExit, '', 'no satisfy ran, so no exit is reported');
+  assert.doesNotMatch(r.calls, /apt-get satisfy/);
+});
+
+test('one .deb whose control fields cannot be read FAILS os-prerequisites even when the other declares dependencies', opts, () => {
+  const r = run(fixture(), { env: { FAKE_DPKG_UNREADABLE: 'server.deb' } });
+  assert.equal(r.status, 1, r.stderr);
+  assert.equal(r.doc.verdict, 'FAIL');
+  assert.equal(r.legs['os-prerequisites'].status, 'fail');
+  assert.equal(r.legs['os-prerequisites'].detail, 'provisioning refused: control fields unreadable: server.deb');
+  assert.doesNotMatch(r.calls, /apt-get satisfy/);
 });
 
 test('installed runtime that differs from the minimal witness fails witness-compat', opts, () => {
