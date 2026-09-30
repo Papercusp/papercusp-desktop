@@ -202,9 +202,15 @@ converge_pot_git() {
       local user users integrate_start=$SECONDS integrate_budget="${SAME_BOX_INTEGRATE_SEC:-300}"
       users="$( { github_user "$TOWER_CACHE"; echo; github_user "$VM_CACHE"; echo; } 2>/dev/null | grep -E '^[1-9][0-9]*$' | sort -u)"
       [ -n "$users" ] || { echo "same-box-rig: no githubUserId in $TOWER_CACHE or $VM_CACHE" >&2; return 1; }
+      # trust:comms is a cross-workspace tool: a workspace-scoped ptool session is refused with
+      # workspace_forbidden (measured on rig r13), hence --all-workspaces. ptool prints a tool
+      # refusal as text, so success is the tool's own ok:true, not the exit code.
+      local out
       for user in $users; do
-        printf '{"action":"set","githubUserId":%s,"tier":"steer","note":"same-box rig baseline: canary members integrate at steer"}' "$user" \
-          | "$TOWER_CALL" trust:comms --json - >>"$dir/converge-trust.log" 2>&1 \
+        out="$(printf '{"action":"set","githubUserId":%s,"tier":"steer","note":"same-box rig baseline: canary members integrate at steer"}' "$user" \
+          | "$TOWER_CALL" trust:comms --json - --all-workspaces 2>&1)"
+        printf '%s\n' "$out" >>"$dir/converge-trust.log"
+        printf '%s' "$out" | grep -q '"ok": *true' \
           || { echo "same-box-rig: could not pin github user $user at steer on the tower (log: $dir/converge-trust.log)" >&2; return 1; }
       done
       while :; do
