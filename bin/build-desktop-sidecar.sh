@@ -114,11 +114,14 @@ unset _release_owner_name
 # pruned and audited below. Validate the profile before source capture so a
 # misspelled knob or missing vm-release artifact identity cannot be masked by a
 # missing/unreadable repo path.
-DISTRIBUTION_PROFILE="${PAPERCUSP_DISTRIBUTION_PROFILE:-dogfood}"
+# shellcheck source=lib/distribution-profile.sh
+. "$HERE/lib/distribution-profile.sh"
+DISTRIBUTION_PROFILE="${PAPERCUSP_DISTRIBUTION_PROFILE:-$(default_distribution_profile "$ROOT")}"
+export PAPERCUSP_DISTRIBUTION_PROFILE="$DISTRIBUTION_PROFILE"
 case "$DISTRIBUTION_PROFILE" in
-  dogfood|vm-release) ;;
+  dogfood|public|vm-release) ;;
   *)
-    echo "ERROR: PAPERCUSP_DISTRIBUTION_PROFILE must be dogfood or vm-release (got '$DISTRIBUTION_PROFILE')" >&2
+    echo "ERROR: PAPERCUSP_DISTRIBUTION_PROFILE must be dogfood, public or vm-release (got '$DISTRIBUTION_PROFILE')" >&2
     exit 2
     ;;
 esac

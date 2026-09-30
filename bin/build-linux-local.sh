@@ -77,9 +77,13 @@ cd "$ROOT"
 # roles, staged environment sidecars, editable source and the broad Server
 # overlay. The vm-release profile is deliberately fail-closed; no caller can
 # accidentally widen it back to GUI/dev payloads through PAPERCUSP_BUILD_ROLES.
-DISTRIBUTION_PROFILE="${PAPERCUSP_DISTRIBUTION_PROFILE:-dogfood}"
+# shellcheck source=lib/distribution-profile.sh
+. "$HERE/lib/distribution-profile.sh"
+DISTRIBUTION_PROFILE="${PAPERCUSP_DISTRIBUTION_PROFILE:-$(default_distribution_profile "$ROOT")}"
+# Exported so cargo's option_env!("PAPERCUSP_DISTRIBUTION_PROFILE") bakes it into the shell.
+export PAPERCUSP_DISTRIBUTION_PROFILE="$DISTRIBUTION_PROFILE"
 case "$DISTRIBUTION_PROFILE" in
-  dogfood)
+  dogfood|public)
     ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
     ;;
   vm-release)
@@ -92,7 +96,7 @@ case "$DISTRIBUTION_PROFILE" in
     export PAPERCUSP_STAGE_SOURCE=0
     ;;
   *)
-    echo "ERROR: PAPERCUSP_DISTRIBUTION_PROFILE must be dogfood or vm-release (got '$DISTRIBUTION_PROFILE')" >&2
+    echo "ERROR: PAPERCUSP_DISTRIBUTION_PROFILE must be dogfood, public or vm-release (got '$DISTRIBUTION_PROFILE')" >&2
     exit 2
     ;;
 esac
