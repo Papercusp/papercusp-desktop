@@ -20,6 +20,10 @@ const { test, after } = require('node:test');
 const SCRIPT = process.env.PCOIJ_SCRIPT || join(__dirname, '..', 'bin', 'offline-installer-journey.sh');
 const VERSION = '0.0.25';
 const GIT_HEAD = '93f1c72063bb422583c9c24e7092f1bed767f64f';
+// What the real Tauri binary compiles in (option_env!("PAPERCUSP_BUILD_SHA")) and
+// hands its sidecar, so /api/health reports it: the desktop head, which is NOT the
+// workspace source sha above (0.0.25: health cddbd8d5, source 93f1c720).
+const BAKED_SHA = 'cddbd8d530d8d3a7c49f22a371347d601a24ba47';
 const PY = ['/usr/bin/python3.12', '/usr/bin/python3'].find((p) => existsSync(p));
 const HAVE_TOOLS = Boolean(PY) && spawnSync('bash', ['-c', 'command -v dpkg-deb && command -v ss'], { encoding: 'utf8' }).status === 0;
 const roots = [];
@@ -43,7 +47,7 @@ const SERVE = `
 import http.server, json, os, sys
 side = os.path.dirname(os.path.abspath(__file__))
 prov = json.load(open(os.path.join(side, 'build-provenance.json')))
-sha = os.environ.get('FAKE_HEALTH_SHA') or (prov.get('buildSha') or prov.get('gitHead'))[:10]
+sha = os.environ.get('FAKE_HEALTH_SHA') or os.environ.get('FAKE_BAKED_BUILD_SHA', '')[:8]
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         body = json.dumps({'ok': True, 'sha': sha, 'version': prov['version']}).encode()
@@ -215,13 +219,14 @@ function joinEvidence(fx, debSha256) {
   return file;
 }
 
-function run(fx, { args = [], env = {}, ledger = true, joinSha = sha(fx.server) } = {}) {
+function run(fx, { args = [], env = {}, ledger = true, joinSha = sha(fx.server), healthSha = BAKED_SHA } = {}) {
   const evidence = join(fx.root, 'evidence.json');
   const argv = [
     '--platform', 'linux', '--gui-artifact', fx.gui, '--server-artifact', fx.server,
     '--evidence-out', evidence, '--ssh-host', 'fake@target', '--remote-dir', join(fx.root, 'remote'),
     '--mcp-call', fx.mcp, '--health-timeout', '20', ...(ledger ? ['--ledger-json', fx.ledger] : []),
-    ...(joinSha ? ['--join-evidence', joinEvidence(fx, joinSha)] : []), ...args,
+    ...(joinSha ? ['--join-evidence', joinEvidence(fx, joinSha)] : []),
+    ...(healthSha ? ['--expected-health-sha', healthSha] : []), ...args,
   ];
   const r = spawnSync('bash', [SCRIPT, ...argv], {
     encoding: 'utf8',
@@ -230,6 +235,7 @@ function run(fx, { args = [], env = {}, ledger = true, joinSha = sha(fx.server) 
       ...process.env,
       PC_SSH: fx.ssh, PC_SCP: fx.scp, PCOIJ_TARGET_ROOT: fx.target, PCOIJ_HEALTH_POLL: '0.3',
       FAKE_ROOT: fx.target, FAKE_HOME: fx.home, FAKE_STATE: fx.state, FAKE_STUBS: fx.stubs,
+      FAKE_BAKED_BUILD_SHA: BAKED_SHA,
       ...env,
     },
   });
@@ -273,6 +279,9 @@ test('happy path: every leg passes, installer identity is recorded apart from th
   assert.notEqual(r.doc.witness.runtime['serve.mjs'], r.doc.installerIdentity.server.sha256);
   assert.equal(r.doc.installedRuntime['db-sql.head'], '1237-b.sql');
   assert.equal(r.doc.candidate.expectedSha, GIT_HEAD, 'empty buildSha falls back to gitHead');
+  // The health identity is kept apart from the source identity.
+  assert.equal(r.doc.candidate.expectedHealthSha, BAKED_SHA);
+  assert.equal(r.doc.serving.launch.sha, BAKED_SHA.slice(0, 8), 'a short health sha matches a full expected sha');
   // The serving process is the installed node, and a restart replaced it.
   assert.match(r.doc.serving.launch.exe, /sidecar\/bin\/node$/);
   assert.equal(r.doc.serving.launch.exeSha, r.doc.installedRuntime['bin/node']);
@@ -409,6 +418,23 @@ test('a health sha that is not the candidate fails first launch', opts, () => {
   assert.equal(r.status, 1);
   assert.equal(r.legs['first-launch'].status, 'fail');
   assert.match(r.legs['first-launch'].detail, /deadbeef00/);
+});
+
+test('a health sha equal to the SOURCE gitHead is not the candidate (health reports the baked buildSha)', opts, () => {
+  // Pre-fix, an empty witness buildSha made the driver expect gitHead here, so a real
+  // 0.0.25 install (health cddbd8d5) false-FAILED and this case would have PASSED.
+  const r = run(fixture(), { env: { FAKE_HEALTH_SHA: GIT_HEAD.slice(0, 10) } });
+  assert.equal(r.status, 1);
+  assert.equal(r.legs['first-launch'].status, 'fail');
+  assert.match(r.legs['first-launch'].detail, /baked buildSha cddbd8d530d8/);
+});
+
+test('no health identity (empty witness buildSha, no --expected-health-sha) refuses before touching the target', opts, () => {
+  const r = run(fixture(), { healthSha: null });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /no \/api\/health identity/);
+  assert.equal(r.doc, null, 'no evidence is written for a refused run');
+  assert.equal(r.calls, '', 'nothing ran on the target');
 });
 
 test('an absent seeded pot fails offline-restore', opts, () => {

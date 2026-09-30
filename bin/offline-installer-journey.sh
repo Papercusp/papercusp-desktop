@@ -79,7 +79,16 @@
 #     [--expected-sha SHA] [--ssh-host H] [--ssh-port N] [--ssh-key K] \
 #     [--ssh-option K=V]... [--remote-dir DIR] [--offline enforce|verify] \
 #     [--expect-pot SLUG] [--mcp-call PATH] [--health-timeout SEC] \
-#     [--install-timeout SEC] [--keep-offline] [--join-evidence PATH]
+#     [--install-timeout SEC] [--keep-offline] [--join-evidence PATH] \
+#     [--expected-health-sha SHA]
+#   --expected-health-sha is the /api/health identity: the release's baked
+#   buildSha. The Tauri binary compiles in PAPERCUSP_BUILD_SHA and hands it to
+#   the sidecar (src-tauri/src/main.rs), and verify-provenance.sh checks the
+#   same equality. It defaults to the witness provenance buildSha. Shipped
+#   sidecar provenance leaves that empty, and its gitHead is the workspace
+#   SOURCE sha, which is never the health identity. With neither, the run
+#   refuses (exit 2) before touching a target. --expected-sha is the source
+#   identity; it is recorded, not compared against /api/health.
 #   --join-evidence is the Discovery/join operational-test-evidence JSON for
 #   the same candidate (e.g. docs/evidence/p505-run34-exact-0025-physical-*.json).
 #   --witness defaults to the Server .deb on linux (the drill's exact bytes);
@@ -109,6 +118,7 @@ EVIDENCE_OUT=""
 LEDGER_JSON=""
 EXPECTED_VERSION=""
 EXPECTED_SHA=""
+EXPECTED_HEALTH_SHA=""
 SSH_HOST="${PCOIJ_SSH_HOST:-}"
 SSH_PORT="${PCOIJ_SSH_PORT:-22}"
 SSH_KEY="${PCOIJ_SSH_KEY:-}"
@@ -135,6 +145,7 @@ while [[ $# -gt 0 ]]; do
     --ledger-json) LEDGER_JSON="${2:-}"; shift 2 ;;
     --expected-version) EXPECTED_VERSION="${2:-}"; shift 2 ;;
     --expected-sha) EXPECTED_SHA="${2:-}"; shift 2 ;;
+    --expected-health-sha) EXPECTED_HEALTH_SHA="${2:-}"; shift 2 ;;
     --ssh-host) SSH_HOST="${2:-}"; shift 2 ;;
     --ssh-port) SSH_PORT="${2:-}"; shift 2 ;;
     --ssh-key) SSH_KEY="${2:-}"; shift 2 ;;
@@ -196,6 +207,9 @@ leg() {
 ident() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$IDS"; }   # SCOPE KEY VALUE
 # KEY FILE. Keys carry '/' (bin/node), so the sed delimiter is '|'.
 kv() { [[ -f "$2" ]] || return 0; sed -n "s|^PCOIJ $1=||p" "$2" | tail -1; }
+# Two spellings name the same commit when both are >= 7 chars and one is a
+# prefix of the other: /api/health reports a short sha, provenance a full one.
+sha_matches() { local a="$1" b="$2"; [[ ${#a} -ge 7 && ${#b} -ge 7 ]] || return 1; [[ "$a" == "$b"* || "$b" == "$a"* ]]; }
 
 sha256_local() { sha256sum "$1" | awk '{print $1}'; }
 
@@ -383,6 +397,11 @@ else
 fi
 ident candidate expectedVersion "$EXPECTED_VERSION"
 ident candidate expectedSha "$EXPECTED_SHA"
+# /api/health reports the release's baked buildSha, never the source gitHead
+# (run 6 of WI-10003962 false-failed first-launch by comparing against it).
+[[ -n "$EXPECTED_HEALTH_SHA" ]] || EXPECTED_HEALTH_SHA="$(kv witness.buildSha "$RUN_DIR/witness.kv")"
+[[ -n "$EXPECTED_HEALTH_SHA" ]] || die2 "no /api/health identity: the witness provenance buildSha is empty and --expected-health-sha was not passed. Pass the release's baked buildSha (e.g. from the candidate provenance evidence); gitHead is the source sha, not the health identity."
+ident candidate expectedHealthSha "$EXPECTED_HEALTH_SHA"
 
 # ── Remote scripts ───────────────────────────────────────────────────────────
 read -r -d '' PREFLIGHT <<'SH'
@@ -706,7 +725,7 @@ else
       local L="$1" F="$2" sha ver exe exesha problems=""
       sha="$(kv "$L.sha" "$F")"; ver="$(kv "$L.version" "$F")"; exe="$(kv "$L.exe" "$F")"; exesha="$(kv "$L.exeSha" "$F")"
       [[ -n "$(kv "$L.timeout" "$F")" ]] && problems+="no /api/health within ${HEALTH_TIMEOUT}s; "
-      [[ -n "$sha" && "$EXPECTED_SHA" == "$sha"* ]] || problems+="health sha '$sha' is not candidate ${EXPECTED_SHA:0:12}; "
+      sha_matches "$sha" "$EXPECTED_HEALTH_SHA" || problems+="health sha '$sha' is not the candidate's baked buildSha ${EXPECTED_HEALTH_SHA:0:12}; "
       [[ "$ver" == "$EXPECTED_VERSION" ]] || problems+="health version '$ver' != $EXPECTED_VERSION; "
       case "$exe" in */sidecar/bin/node) ;; *) problems+="listener exe '$exe' is not the installed sidecar node; " ;; esac
       [[ -n "$exesha" && "$exesha" == "$node_sha" ]] || problems+="listener exe sha ${exesha:0:16} != installed bin/node ${node_sha:0:16}; "
