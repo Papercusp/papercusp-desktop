@@ -763,12 +763,27 @@ def print_coverage_gaps(gaps, indent="    "):
         print(f"{indent}⚠ PARTIAL COVERAGE: {g}")
 
 
+#: Unix logins that identify NOBODY, so the build box's login is not hunted when it is
+#: one of these (its home PATH still is, as build-home-path). MUST equal
+#: GENERIC_ACCOUNTS in scripts/lib/identity-leak-patterns.mjs — pinned by
+#: papercusp-desktop/test/audit-identity-literal-shape.test.js. A generic login that is
+#: also a word the product uses is the failure this exists for: a fresh VM whose login
+#: was `tester` red-ed the Server deb on 17 files that name the `tester` agent role
+#: (prompts, blueprints, SQL) and on vendor prose (open-source-release-2026-09-29 R-15,
+#: build8). A personal login stays hunted, as a whole token.
+GENERIC_ACCOUNTS = frozenset({
+    "root", "runner", "build", "ubuntu", "node", "vscode", "codespace", "ci", "agent",
+    "linuxbrew", "dev", "user", "shared", "Shared", "pcusp", "papercusp", "papercup",
+    "tester", "test", "admin", "builder", "vagrant",
+})
+
+
 def identity_literals():
     """Machine identity as LITERAL strings, resolved from the box doing the build."""
     lits = {}
     try:
         user = pwd.getpwuid(os.getuid()).pw_name
-        if user and user not in ("root", "runner", "build", "ubuntu"):
+        if user and user not in GENERIC_ACCOUNTS:
             lits["build-user-name"] = user
             # A unix login leaks as a whole TOKEN ("tester@host", "-u tester"); the
             # path form is build-home-path's job and stays a substring hunt. Matched
@@ -3619,7 +3634,12 @@ def scan_artifact(paths):
     """
     require_windows_runtime = "--require-windows-server-runtime" in paths
     want_licenses = "--licenses" in paths
-    paths = [path for path in paths if path not in ("--require-windows-server-runtime", "--licenses")]
+    # Absolute from here on: expanders run their tools with cwd=<scratch dir> (the
+    # AppImage runtime MUST, it writes a fixed squashfs-root/), so a caller-relative
+    # path resolved there is ENOENT — a manual `--scan-artifact bundle/appimage/X`
+    # crashed with a traceback instead of a verdict (R-15, 2026-09-30).
+    paths = [os.path.abspath(path) for path in paths
+             if path not in ("--require-windows-server-runtime", "--licenses")]
     if not paths:
         print("AUDIT ERROR: --scan-artifact needs at least one artifact", file=sys.stderr)
         return 2

@@ -37,7 +37,18 @@ function tmp(tag) {
 }
 
 const LOGIN = os.userInfo().username;
-const LOGIN_EXEMPT = ['root', 'runner', 'build', 'ubuntu'].includes(LOGIN);
+function pyGenericAccounts(script) {
+  const r = spawnSync('python3', ['-c', [
+    'import importlib.util, json, sys',
+    's = importlib.util.spec_from_file_location("arb", sys.argv[1])',
+    'm = importlib.util.module_from_spec(s); s.loader.exec_module(m)',
+    'print(json.dumps(sorted(m.GENERIC_ACCOUNTS)))',
+  ].join('\n'), script], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout);
+}
+
+const LOGIN_EXEMPT = pyGenericAccounts(AUDIT).includes(LOGIN);
 
 function embedInIdentifier(login) {
   // Word characters on BOTH sides, with the login case-shifted the way a vendor
@@ -114,4 +125,48 @@ test('a public-cut copy (denylist scrubbed to placeholders) passes already-redac
     "the scrubber's own placeholders are not identities to hunt");
   assert.equal(run(AUDIT, '--scan-dir', dir).status, 0,
     'the in-tree script agrees');
+});
+
+// 3. (build8) A GENERIC login that is also a product word. Word-bounding (fix 1) is not
+//    enough when the login is `tester`: the Server deb names the `tester` agent role as a
+//    whole word in prompts, blueprints and SQL, and the gate refused 17 files. A generic
+//    login identifies nobody; its home PATH is still hunted as build-home-path.
+function literalsForLogin(script, login) {
+  const r = spawnSync('python3', ['-c', [
+    'import importlib.util, json, sys, types',
+    's = importlib.util.spec_from_file_location("arb", sys.argv[1])',
+    'm = importlib.util.module_from_spec(s); s.loader.exec_module(m)',
+    'm.pwd.getpwuid = lambda _uid: types.SimpleNamespace(pw_name=sys.argv[2])',
+    'print(json.dumps(m.identity_literals()))',
+  ].join('\n'), script, login], { encoding: 'utf8', env: ENV });
+  assert.equal(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout);
+}
+
+test('a generic login (tester) is not hunted; a personal login still is', () => {
+  assert.equal(literalsForLogin(AUDIT, 'tester')['build-user-name'], undefined,
+    'a generic login must not become an identity literal');
+  assert.equal(literalsForLogin(AUDIT, 'zzpersonallogin')['build-user-name'], 'zzpersonallogin',
+    'a personal login is still hunted');
+});
+
+test('GENERIC_ACCOUNTS is identical in the Python gate and the JS lint', async () => {
+  const js = await import(require('node:url').pathToFileURL(
+    path.join(__dirname, '..', '..', 'scripts', 'lib', 'identity-leak-patterns.mjs')).href);
+  assert.deepEqual(pyGenericAccounts(AUDIT), [...js.GENERIC_ACCOUNTS].sort(),
+    'the two generic-login sets drifted; keep them equal');
+});
+
+// 4. (build8) `--scan-artifact` with a caller-RELATIVE AppImage path crashed with a
+//    FileNotFoundError traceback: the AppImage runtime runs with cwd=<scratch dir>.
+test('--scan-artifact accepts a relative AppImage path', () => {
+  const dir = tmp('relpath');
+  const name = 'Fake_0.0.0_amd64.AppImage';
+  fs.writeFileSync(path.join(dir, name),
+    // payload > container: the gate refuses an expansion under its 10% coverage floor
+    '#!/bin/sh\nmkdir -p squashfs-root && printf "%0400d\\n" 0 > squashfs-root/readme.txt\n', { mode: 0o755 });
+  const r = spawnSync('python3', [path.resolve(AUDIT), '--scan-artifact', name],
+    { encoding: 'utf8', env: ENV, cwd: dir });
+  assert.doesNotMatch(r.stderr, /Traceback|FileNotFoundError/, r.stderr);
+  assert.equal(r.status, 0, `expected a CLEAN verdict\n${r.stdout}\n${r.stderr}`);
 });
