@@ -453,7 +453,9 @@ test('support publishing examples never embed the owner identity in shipped SPA 
     const content = fs.readFileSync(source, 'utf8');
     assert.doesNotMatch(
       content,
-      /@avi\//i,
+      // Any personal scope on the template example — generic, so this file never has to
+      // name the owner (it ships in the public export).
+      /@(?!yourname\/)[\w-]+\/my-template/i,
       `${path.relative(repoRoot, source)} must use a generic namespace example`,
     );
     assert.match(content, /@yourname\/my-template/);
