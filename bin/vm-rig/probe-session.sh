@@ -74,14 +74,27 @@
 # leg 2 indistinguishable from a dead wake bridge. `start` now refuses an id that
 # does not exist on the Mac, instead of arming a handle that can never resume.
 #
-# ⚠ MINTING A FRESH RUN: the old recipe (plans:new then plans:launch) is REFUSED
-# for any new plan — the acceptance-BAR start gate lets only a positively
-# identified LEGACY plan launch without declared BARs
-# (acceptance-bar-lifecycle-evaluator.ts, "Only a positively identified legacy
-# plan may bypass the contract"). plans:new also date-suffixes the slug, so read
-# the slug it RETURNS. Reuse a plan that already has a run on the Mac; with none,
-# run `PCUSP_PROBE_PLAN_RUN_ID=none` (addressable-only, leg 2 parks) and track the
-# fixture-mint gap on its work-item rather than faking a handle.
+# ⚠ MINTING A FRESH RUN (WI-10004140, measured on the Mac 2026-09-30). A bare
+# plans:new then plans:launch is REFUSED: the acceptance-BAR start gate lets only
+# a positively identified LEGACY plan launch without a complete BAR contract
+# (acceptance-bar-lifecycle-evaluator.ts). Give the probe plan a real minimal
+# contract instead; no gate is bypassed. Run all three steps ON THE MAC (vmcall.sh):
+#   1. plans:set-content — a draft body with ONE fully specified R-1 (a
+#      ```requirement JSON block with verification.method, verification.check and
+#      acceptance.requiredTestLayers), a "Bar-to-work map" table (R-1 | P-001 |
+#      tree) and a single P-001. plans:new date-suffixes the slug: read the slug
+#      it RETURNS.
+#   2. plans:migrate-acceptance-bars { planSlug, dryRun:false } — strict
+#      post-epoch seed for a draft (rubric, BAR, R-1→P-001 edge). Dry-run first.
+#   3. plans:launch { slug, await:false } — mints the run. It settles to `failed`
+#      while the Mac's Claude login is out, and a failed run is still claimable.
+# Why not plans:audit {phase:'activation'}: on the Mac it refuses
+# source_refs_unresolved unless the source transcript is indexed THERE. An audit
+# run on another node does not help: the plan body and rubric federate, but the
+# seed columns and mapping edges do not. Current fixture:
+# live1-probe-wake-handle-20260930-2026-09-30, run 1. A fresh re-join wipes
+# plan_runs, so re-run steps 1-3 on the new install. With no run at all, run
+# `PCUSP_PROBE_PLAN_RUN_ID=none` (addressable-only, leg 2 parks); never fake a handle.
 #
 # ⚠ The run must NOT be left in status='running': markPlanRunResumed
 # (plans/runs.ts:279-287) claims only `WHERE status <> 'running'`, so a wake
