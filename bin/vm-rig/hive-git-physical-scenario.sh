@@ -402,6 +402,11 @@ JSON
 # run left behind, and never emits release evidence (see the end of this file).
 # shellcheck source=../lib/physical-phase-select.sh
 . "$HERE/../lib/physical-phase-select.sh"
+# The rig profile (P-005, D-003) is SOURCED here, before the first profile-dependent check
+# (the identity contract below); sourcing only defines constants and functions. It is
+# APPLIED later, once every host value it retargets exists (rig_profile_apply).
+# shellcheck source=lib/rig-profile.sh
+. "$HERE/lib/rig-profile.sh"
 SCENARIO_PHASES="$(physical_phase_list "${HIVE_GIT_PHYSICAL_PHASES:-}")" \
   || fail "HIVE_GIT_PHYSICAL_PHASES=${HIVE_GIT_PHYSICAL_PHASES:-} is not a phase selection ($PHYSICAL_PHASE_RANGE, comma-separated)"
 SCENARIO_FULL_RUN=0
@@ -514,8 +519,13 @@ tower_machine="${tower_fields#*$'\t'}"
 vm_machine="${vm_fields#*$'\t'}"
 [ "$tower_device" != "$vm_device" ] \
   || fail 'tower and vm identities resolve to the same device key'
-[ "$tower_machine" != "$vm_machine" ] \
-  || fail 'tower and vm identities resolve to the same physical machine'
+# Two machines are a release-evidence property. The same-box rig runs both owners on ONE
+# machine by construction, and a diagnostic run never emits signable evidence (D-005 (5)),
+# so only the physical rig demands distinct machines. Distinct owners are required always.
+if ! rig_profile_is_diagnostic; then
+  [ "$tower_machine" != "$vm_machine" ] \
+    || fail 'tower and vm identities resolve to the same physical machine'
+fi
 
 # The order is part of D-002: G may run only after the same physical run has
 # observed A-F. These fixed functions are intentionally not replaceable via env.
@@ -2052,8 +2062,7 @@ ensure_vm_driver_current() {
 # every host value defined above (tower, VM, pot, owner launcher) at the same-box
 # two-instance rig, after all of them exist and before the first host access. The default
 # profile changes nothing. A same-box run is diagnostic: it never emits unsigned evidence.
-# shellcheck source=lib/rig-profile.sh
-. "$HERE/lib/rig-profile.sh"
+# (The profile library was sourced next to physical-phase-select.sh above.)
 rig_profile_apply || fail "rig profile '$(rig_profile_name)' could not be applied"
 if rig_profile_is_diagnostic; then SCENARIO_FULL_RUN=0; fi
 
