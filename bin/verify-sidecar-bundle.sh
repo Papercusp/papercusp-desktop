@@ -679,6 +679,40 @@ else
   fi
 fi
 
+# WI-10004073: the SPA serves the ONNX runtime from /wake-runtime/ and
+# /vad-runtime/ (wasmPaths), so the files must sit at the TOP LEVEL of those
+# dirs. A cross-filesystem release checkout once shipped them nested one level
+# down (spa/wake-runtime/wake-runtime/…); wake-word + VAD 404'd and every check
+# here still passed. Assert the served layout, and refuse any self-nested
+# runtime dir (spa/<d>/<d>), which is the signature of that copy bug.
+check_spa_runtime_layout() {
+  _spa="$1/spa"
+  _layout_fail=0
+  if [[ ! -d "$_spa" ]]; then
+    echo "  ✗ spa/ missing under $1"
+    return 1
+  fi
+  for _rt in wake-runtime vad-runtime; do
+    for _f in ort-wasm-simd-threaded.jsep.mjs ort-wasm-simd-threaded.jsep.wasm ort-wasm-simd-threaded.mjs ort-wasm-simd-threaded.wasm; do
+      if [[ ! -f "$_spa/$_rt/$_f" ]]; then
+        echo "  ✗ spa/$_rt/$_f missing at the served top level (the SPA loads /$_rt/$_f)"
+        _layout_fail=1
+      fi
+    done
+  done
+  for _d in wake-runtime vad-runtime vditor porcupine monaco; do
+    if [[ -d "$_spa/$_d/$_d" ]]; then
+      echo "  ✗ spa/$_d/$_d exists: a runtime asset dir was copied INTO itself (cross-filesystem provisioning bug)"
+      _layout_fail=1
+    fi
+  done
+  [[ "$_layout_fail" == 0 ]] && echo "  ✓ spa ONNX runtime at the served top level; no self-nested runtime dirs"
+  return "$_layout_fail"
+}
+
+echo "[spa] ONNX runtime layout (WI-10004073)"
+check_spa_runtime_layout "$SIDECAR" || FAIL=1
+
 echo
 if [[ "$FAIL" != 0 ]]; then
   echo "verify-sidecar-bundle: FAILED — the bundle depends on build-host state that will not ship." >&2
