@@ -2686,7 +2686,7 @@ fi
 # probe). Opt out only for a deliberate diagnostic cut: PAPERCUSP_SKIP_BOOT_GATE=1.
 if [[ "${PAPERCUSP_SKIP_BOOT_GATE:-0}" != "1" ]]; then
   echo "==> boot gate: verifying the staged sidecar actually starts (pre-pack)"
-  bash "$ROOT/bin/gate-sidecar-boots.sh" "$ROOT/src-tauri/sidecar" \
+  bash "$ORCHESTRATOR_HERE/gate-sidecar-boots.sh" "$ROOT/src-tauri/sidecar" \
     || { echo "ERROR: staged sidecar failed the boot gate — refusing to pack a DOA bundle. See the boot log above."; exit 1; }
 else
   echo "==> ⚠ boot gate SKIPPED (PAPERCUSP_SKIP_BOOT_GATE=1) — diagnostic cut only"

@@ -20,6 +20,12 @@ function section(text, start, end) {
   return text.slice(from, to);
 }
 
+function shellFunction(text, name) {
+  const definition = text.match(new RegExp(`^${name}\\(\\) \\{\\n[\\s\\S]*?^\\}\\n`, 'm'))?.[0];
+  assert.ok(definition, `missing shell function: ${name}`);
+  return definition;
+}
+
 const calls = {
   linux: section(release, 'export PAPERCUSP_RELEASE_AUDIT=1\n', '# P-004: the exact sha'),
   mac: section(release, '    env \\\n      TARGET_OS=darwin', '    # 2) universal .app'),
@@ -45,6 +51,14 @@ test('Linux AppImage exact-source salvage runs current producer logic against th
   assert.match(release, /APPIMAGE_PRODUCER="\$ORCHESTRATOR_HERE\/build-appimage\.sh"/);
   assert.match(release, /PAPERCUSP_DESKTOP_TARGET_ROOT="\$ROOT"/);
   assert.match(release, /bash "\$APPIMAGE_PRODUCER"/);
+});
+
+test('packed-sidecar boot gate runs current producer logic against the frozen target root', () => {
+  assert.match(
+    release,
+    /bash "\$ORCHESTRATOR_HERE\/gate-sidecar-boots\.sh" "\$ROOT\/src-tauri\/sidecar"/,
+  );
+  assert.doesNotMatch(release, /bash "\$ROOT\/bin\/gate-sidecar-boots\.sh"/);
 });
 
 test('release sidecar skips unused dependency generation before invoking the current producer', () => {
@@ -94,6 +108,64 @@ test('packed-sidecar boot gate keeps mutable database state off the bundle-isola
 
   assert.doesNotMatch(bootGate, /PAPERCUSP_PG_DATA_DIR="\$ISO\//);
   assert.doesNotMatch(bootGate, /> "\$ISO\/boot\.log" 2>&1/);
+});
+
+test('packed-sidecar boot gate discards a partial hardlink tree before fallback copy', (context) => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'boot-gate-copy-'));
+  context.after(() => fs.rmSync(fixture, { recursive: true, force: true }));
+
+  const source = path.join(fixture, 'source sidecar');
+  const iso = path.join(fixture, 'isolated root');
+  const destination = path.join(iso, 'sidecar');
+  const fakeBin = path.join(fixture, 'fake-bin');
+  fs.mkdirSync(path.join(source, 'bin'), { recursive: true });
+  fs.mkdirSync(iso, { recursive: true });
+  fs.mkdirSync(fakeBin, { recursive: true });
+  fs.writeFileSync(path.join(source, 'bin', 'node'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+
+  // Model GNU cp's real EXDEV shape: mkdirs and some entries exist before the
+  // hardlink attempt returns non-zero. A fallback that copies into this tree
+  // would create sidecar/sidecar/bin/node and leave top-level bin/node absent.
+  const fakeCp = path.join(fakeBin, 'cp');
+  fs.writeFileSync(fakeCp, [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    'if [[ "${1:-}" == "-al" ]]; then',
+    '  source=$2',
+    '  destination=$3',
+    '  mkdir -p "$destination/bin"',
+    '  /bin/cp "$source/bin/node" "$destination/bin/partial"',
+    '  echo "forced partial hardlink failure" >&2',
+    '  exit 18',
+    'fi',
+    'exec /bin/cp "$@"',
+    '',
+  ].join('\n'), { mode: 0o755 });
+
+  const result = spawnSync('bash', ['-c', [
+    'set -euo pipefail',
+    shellFunction(bootGate, 'stage_isolated_bundle'),
+    'HARDLINKED=0',
+    'stage_isolated_bundle "$SOURCE" "$DESTINATION"',
+    'printf "hardlinked=%s\\n" "$HARDLINKED"',
+  ].join('\n')], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      SOURCE: source,
+      DESTINATION: destination,
+    },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /hardlinked=0/);
+  assert.match(result.stderr, /forced partial hardlink failure/);
+  assert.ok(fs.statSync(path.join(destination, 'bin', 'node')).mode & 0o111);
+  assert.equal(fs.existsSync(path.join(destination, 'sidecar')), false, 'fallback nested the source');
+  assert.equal(fs.existsSync(path.join(destination, 'bin', 'partial')), false, 'partial tree survived');
+  assert.deepEqual(fs.readdirSync(iso).sort(), ['sidecar'], 'staging residue survived publication');
+  assert.match(bootGate, /stage_isolated_bundle "\$SIDECAR" "\$ISO\/sidecar"/);
 });
 
 test('packed-sidecar boot gate passes every product resource path into the isolated sidecar', () => {
