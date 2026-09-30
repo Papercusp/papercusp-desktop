@@ -86,16 +86,97 @@ run_testvm_scoped() {  # <name> <guest-ram-mib> <qemu> [args...]
 # `vm-federation.sh --vms=1` run while the green operator was up. Moved the
 # default base to 3090+, clear of the operator's :3070/:3073 neighborhood and
 # staging's :3170, so this collision can't recur by default.)
+#
+# AD-HOC NAMES (WI-10004354). Every name outside the four fixed ones below USED to
+# share ONE slot (idx 9 → ssh 2233), so `vmctl ssh|endpoint <a>` silently reached
+# whichever ad-hoc VM <b> another agent had booted there, and a mutating driver could
+# run against the wrong machine. Two rules now close that:
+#   1. A RUNNING instance's ports are READ from its own qemu argv (vm_live_ports), never
+#      recomputed. That is the truth even when the VM was booted with VM_*_BASE
+#      overrides the caller doesn't know about, and it rejects a recycled pid by name.
+#   2. An ad-hoc instance gets its OWN slot at boot (vm_ports_allocate, 10+), chosen
+#      under a lock among ports nobody holds. A STOPPED ad-hoc name has no ports, and
+#      ports_for says so loudly instead of guessing a slot that may be someone else's.
+_testvm_fixed_slot() {
+  case "$1" in
+    clean) echo 0 ;;
+    fed-a) echo 1 ;;
+    fed-b) echo 2 ;;
+    updater) echo 3 ;;
+    *) return 1 ;;
+  esac
+}
+_testvm_ports_at() {  # _testvm_ports_at <slot>
+  echo "$(( ${VM_SSH_BASE:-2224} + $1 )) $(( ${VM_SPICE_BASE:-5932} + $1 )) $(( ${VM_OP_BASE:-3090} + $1 ))"
+}
+vm_portsfile() { echo "$RUN_DIR/$1/ports"; }   # an in-flight boot's slot claim
+
+# vm_live_ports <name> → "<ssh> <spice> <op|->" for a RUNNING instance, read from its
+# qemu argv; returns 1 when it is not running or the pid is not this instance's qemu.
+vm_live_ports() {
+  local name="$1" pid argv line prev="" ssh="" spice="" op=""
+  pid="$(vm_pid "$name")"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ -r "/proc/$pid/cmdline" ] || return 1
+  argv="$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null)" || return 1
+  case $'\n'"$argv"$'\n' in
+    *$'\n'"papercusp-testvm-$name"$'\n'*) ;;
+    *) return 1 ;;   # a recycled pid, or not a vmctl-booted qemu
+  esac
+  local re_ssh='hostfwd=tcp::([0-9]+)-:22(,|$)' re_op='hostfwd=tcp::([0-9]+)-:3070(,|$)' re_spice='(^|,)port=([0-9]+)(,|$)'
+  while IFS= read -r line; do
+    [[ $line =~ $re_ssh ]] && ssh="${BASH_REMATCH[1]}"
+    [[ $line =~ $re_op ]] && op="${BASH_REMATCH[1]}"
+    [ "$prev" = "-spice" ] && [[ $line =~ $re_spice ]] && spice="${BASH_REMATCH[2]}"
+    prev="$line"
+  done <<<"$argv"
+  [ -n "$ssh" ] || return 1
+  echo "$ssh ${spice:--} ${op:--}"
+}
+
 ports_for() {
   local name="$1" idx
-  case "$name" in
-    clean) idx=0 ;;
-    fed-a) idx=1 ;;
-    fed-b) idx=2 ;;
-    updater) idx=3 ;;
-    *)     idx=9 ;;   # ad-hoc instances share a high slot; override via env if needed
-  esac
-  echo "$(( ${VM_SSH_BASE:-2224} + idx )) $(( ${VM_SPICE_BASE:-5932} + idx )) $(( ${VM_OP_BASE:-3090} + idx ))"
+  vm_live_ports "$name" && return 0
+  if idx="$(_testvm_fixed_slot "$name")"; then _testvm_ports_at "$idx"; return 0; fi
+  echo "[testvm] ports_for: '$name' is an ad-hoc test VM that is not running, so it has no ports." \
+       "Ad-hoc names get their own slot when booted (WI-10004354); run: vmctl up $name" >&2
+  return 1
+}
+
+# vm_ports_allocate <name> → "<ssh> <spice> <op>" for a boot. Fixed names keep their
+# slot. An ad-hoc name takes the first slot (starting from a hash of its name) whose
+# three ports are not listening on the host and not claimed by another boot still in
+# flight, and records the claim in its ports file before qemu binds them.
+vm_ports_allocate() {
+  local name="$1" idx
+  if idx="$(_testvm_fixed_slot "$name")"; then _testvm_ports_at "$idx"; return 0; fi
+  mkdir -p "$(vm_rundir "$name")" || return 1
+  (
+    command -v flock >/dev/null 2>&1 && { flock -w 60 9 || { echo "[testvm] port-allocation lock busy for 60s" >&2; exit 1; }; }
+    local taken="" f other now mtime h n i s p o
+    taken=" $(ss -Hltn 2>/dev/null | awk '{sub(/.*:/, "", $4); print $4}' | tr '\n' ' ') "
+    now="$(date +%s)"
+    for f in "$RUN_DIR"/*/ports; do
+      [ -f "$f" ] || continue
+      other="$(basename "$(dirname "$f")")"
+      [ "$other" = "$name" ] && continue
+      mtime="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
+      # A claim counts while its boot may still be binding; a booted VM's ports are
+      # already in `taken` because qemu is listening on them.
+      [ $(( now - mtime )) -lt "${VM_PORT_CLAIM_TTL_SEC:-300}" ] && taken+="$(tr '\n' ' ' < "$f") "
+    done
+    h="$(printf '%s' "$name" | cksum | awk '{print $1}')"
+    n="${VM_ADHOC_SLOTS:-40}"
+    for (( i = 0; i < n; i++ )); do
+      idx=$(( 10 + (h + i) % n ))
+      read -r s p o <<<"$(_testvm_ports_at "$idx")"
+      case "$taken" in *" $s "*|*" $p "*|*" $o "*) continue ;; esac
+      echo "$s $p $o" > "$(vm_portsfile "$name")"
+      echo "$s $p $o"
+      exit 0
+    done
+    echo "[testvm] no free ad-hoc test-VM port slot among $n (set VM_SSH_BASE/VM_SPICE_BASE/VM_OP_BASE or VM_ADHOC_SLOTS)" >&2
+    exit 1
+  ) 9>"$RUN_DIR/.port-alloc.lock"
 }
 
 # ── Per-instance file paths ────────────────────────────────────────────────

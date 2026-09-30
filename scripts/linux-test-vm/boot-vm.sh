@@ -18,7 +18,6 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 NAME="${1:?usage: boot-vm.sh <name>}"
-read -r SSH_PORT SPICE_PORT OP_PORT <<<"$(ports_for "$NAME")"
 
 RUNDIR="$(vm_rundir "$NAME")"; mkdir -p "$RUNDIR"
 DISK="${BOOT_DISK:-$(vm_overlay "$NAME")}"
@@ -28,6 +27,10 @@ if vm_running "$NAME"; then
   log "$NAME already running (pid $(vm_pid "$NAME")) — nothing to do"; exit 0
 fi
 rm -f "$(vm_monitor "$NAME")" "$(vm_pidfile "$NAME")"
+# Fixed names keep their slot; an ad-hoc name gets its own free slot, claimed before
+# qemu binds it (WI-10004354 — they all used to share ssh 2233).
+PORTS="$(vm_ports_allocate "$NAME")" || die "could not allocate ports for test VM '$NAME'"
+read -r SSH_PORT SPICE_PORT OP_PORT <<<"$PORTS"
 
 seed_args=()
 [ -n "${BOOT_SEED:-}" ] && seed_args=(-drive "if=virtio,format=raw,file=$BOOT_SEED,readonly=on")

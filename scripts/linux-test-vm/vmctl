@@ -654,7 +654,8 @@ cmd_verify() {
 # ── status ─────────────────────────────────────────────────────────────────
 cmd_status() {
   local name="${1:-clean}"
-  read -r ssh_port spice_port op_port <<<"$(ports_for "$name")"
+  # A stopped ad-hoc instance has no ports (WI-10004354); status only prints them when running.
+  read -r ssh_port spice_port op_port <<<"$(ports_for "$name" 2>/dev/null || true)"
   echo "instance:   $name"
   echo "golden:     $([ -f "$GOLDEN" ] && echo present || echo MISSING)"
   echo "overlay:    $([ -f "$(vm_overlay "$name")" ] && echo present || echo none)"
