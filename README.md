@@ -82,7 +82,11 @@ VERIFY_TAURI_ISOLATED_DB=1 scripts/verify-tauri-headless.sh --boot-only
 Installers are built locally, not by a hosted CI service. `bin/build-linux-local.sh` builds the
 Linux `.deb` and AppImage (`bin/build-mac-cross.sh` and `bin/build-windows-cross.sh` cover the other
 platforms). `bin/build-desktop-sidecar.sh` assembles the sidecar the installers carry: the operator
-host, the UI bundle, the embedded Postgres with pgvector, Node, and the runnable source tree. A
+host, the UI bundle, the embedded Postgres with pgvector, Node, and the runnable source tree.
+Installer builds additionally need **kopia** on the build host — the sidecar vendors it for the
+snapshot/backup subsystem. It is not in the Ubuntu/Debian archive: install it from kopia's apt
+repository or release page (<https://kopia.io/docs/installation/>), or `brew install kopia` on
+macOS. The sidecar build checks its host tools up front and names every missing one. A
 release cut also needs a signing key (`bin/setup-signing-key.sh`) and the release-identity inputs
 the build's audit checks against; `SHIPPING.md` and `RELEASE-RUNBOOK.md` describe the full flow.
 Bundle configuration lives in `src-tauri/tauri.conf.json`.
