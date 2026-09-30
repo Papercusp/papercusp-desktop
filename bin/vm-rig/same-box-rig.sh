@@ -186,6 +186,43 @@ converge_pot_git() {
       tail -3 "$dir/converge-steady.log" >&2
       return 1
     }
+    # The canary's steady state also has every member head already absorbed into canonical
+    # staging: its members sit at 'steer' in the tower's comms trust (the row Phase D's tier hold
+    # snapshots and restores, physical-drill-phase-d.ts holdPhysicalPhaseDBelowSteer). A fresh
+    # rig's GitHub user sits at the policy default, below steer, so the integrator queued both
+    # owners' rig-up heads as below-steer-tier and never absorbed them; run 12 (WI-10003976)
+    # then spent Phase D's whole 20-minute convergence budget on a tower worktree staging could
+    # never reach. Pin every rig user at steer through the production comms-trust surface, then
+    # drive git-sync until the probe's own `rig-preflight --check integration-queue-clear`
+    # passes. Both owners share one GitHub user here, so Phase D's hold also demotes the tower's
+    # own author for its few minutes (the physical rig's VM user is a different account).
+    # Bounded: SAME_BOX_INTEGRATE_SEC (default 300).
+    github_user() { node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).githubUserId || ""))' "$1"; }
+    integrated_baseline() {
+      local user users integrate_start=$SECONDS integrate_budget="${SAME_BOX_INTEGRATE_SEC:-300}"
+      users="$( { github_user "$TOWER_CACHE"; echo; github_user "$VM_CACHE"; echo; } 2>/dev/null | grep -E '^[1-9][0-9]*$' | sort -u)"
+      [ -n "$users" ] || { echo "same-box-rig: no githubUserId in $TOWER_CACHE or $VM_CACHE" >&2; return 1; }
+      for user in $users; do
+        printf '{"action":"set","githubUserId":%s,"tier":"steer","note":"same-box rig baseline: canary members integrate at steer"}' "$user" \
+          | "$TOWER_CALL" trust:comms --json - >>"$dir/converge-trust.log" 2>&1 \
+          || { echo "same-box-rig: could not pin github user $user at steer on the tower (log: $dir/converge-trust.log)" >&2; return 1; }
+      done
+      while :; do
+        "$TSX" "$producer" rig-preflight --check integration-queue-clear >/dev/null 2>>"$dir/converge-integrate.log" && {
+          echo "same-box-rig: every member head is in canonical staging after $((SECONDS - integrate_start))s" >&2
+          return 0
+        }
+        [ $((SECONDS - integrate_start)) -lt "$integrate_budget" ] || break
+        printf '{"installSlug":"%s"}' "$SB_GIT_SYNC_SLUG" \
+          | "$TOWER_CALL" git-sync:run --json - >>"$dir/converge-integrate.log" 2>&1 || true
+        ssh "$VM" "PCUSP_VM_CALL_TIMEOUT_SEC=75 '$VM_CALL' git-sync:run '{\"installSlug\":\"$SB_GIT_SYNC_SLUG\"}' --workspace '$SB_WORKSPACE' --harness '$SB_POT_HOME'" \
+          >>"$dir/converge-integrate.log" 2>&1 || true
+        sleep 5
+      done
+      echo "same-box-rig: after ${integrate_budget}s the tower still holds member heads outside staging (log: $dir/converge-integrate.log)" >&2
+      grep 'PHYSICAL_PREFLIGHT_FAILED' "$dir/converge-integrate.log" | tail -1 >&2
+      return 1
+    }
     while :; do
       bare_repo "$TOWER_REPO" && [ "$(ssh "$VM" "git --git-dir='$VM_REPO' rev-parse --is-bare-repository" 2>/dev/null)" = true ] && {
         echo "same-box-rig: pot-git stores present on both owners after $((SECONDS - start))s" >&2
@@ -196,6 +233,7 @@ converge_pot_git() {
         [ "$remaining" -gt 0 ] || remaining=0
         rig_profile_vm_answering "$dir" "$remaining" || exit 1
         steady_namespaces || exit 1
+        integrated_baseline || exit 1
         exit 0
       }
       [ $((SECONDS - start)) -lt "$budget" ] || break
