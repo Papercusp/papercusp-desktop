@@ -441,6 +441,96 @@ test('frozen host entry: runs the validated plain-node bundle inside the frozen 
   }
 });
 
+// EI-24688600845424660: the inner `.env.local` source runs under `set -a`, so a
+// verifier's explicit PAPERCUSP_CUPBOARD_URL (a local `wrangler dev` worker) was
+// silently replaced by the dev file's origin and the headless assertions read
+// live listings. A caller value must survive; with no caller value the dev file
+// still applies, and unrelated dev-file values are untouched.
+async function hostEnvAfterLaunch(callerEnv) {
+  const port = await testPort();
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-dev-operator-env-'));
+  const sourceRoot = path.join(tmp, 'source');
+  const operatorDir = path.join(sourceRoot, 'apps/operator');
+  const bundle = path.join(operatorDir, 'dist-verify/hono-host.mjs');
+  const marker = path.join(tmp, 'env.json');
+  let wrapper;
+  try {
+    fs.mkdirSync(path.dirname(bundle), { recursive: true });
+    fs.mkdirSync(path.join(sourceRoot, 'libs/papercusp'), { recursive: true });
+    fs.writeFileSync(path.join(operatorDir, 'package.json'), '{}\n');
+    fs.writeFileSync(path.join(sourceRoot, 'libs/papercusp/package.json'), '{}\n');
+    fs.writeFileSync(
+      path.join(operatorDir, '.env.local'),
+      [
+        'PAPERCUSP_CUPBOARD_URL=https://dev-file.example',
+        'PAPERCUSP_BIND_HOST=0.0.0.0',
+        'PAPERCUSP_DEV_FILE_ONLY=from-dev-file',
+        '',
+      ].join('\n'),
+    );
+    fs.writeFileSync(
+      bundle,
+      [
+        "import { writeFileSync } from 'node:fs';",
+        `const keys = ['PAPERCUSP_CUPBOARD_URL', 'PAPERCUSP_BIND_HOST', 'PAPERCUSP_DEV_FILE_ONLY'];`,
+        `writeFileSync(${JSON.stringify(marker)}, JSON.stringify(Object.fromEntries(keys.map((k) => [k, process.env[k] ?? null]))));`,
+        'setInterval(() => {}, 1000);',
+        '',
+      ].join('\n'),
+    );
+    const env = { ...process.env };
+    delete env.PAPERCUSP_CUPBOARD_URL;
+    delete env.PAPERCUSP_BIND_HOST;
+    delete env.PAPERCUSP_DEV_FILE_ONLY;
+    wrapper = spawn('bash', [script], {
+      env: {
+        ...env,
+        ...callerEnv,
+        OPERATOR_DEV_PORT: String(port),
+        PAPERCUSP_DEV_SOURCE_ROOT: sourceRoot,
+        PAPERCUSP_DEV_HOST_ENTRY: bundle,
+      },
+      stdio: 'ignore',
+    });
+    const seen = await waitFor(
+      () => (fs.existsSync(marker) ? JSON.parse(fs.readFileSync(marker, 'utf8')) : undefined),
+      { timeoutMs: 10_000 },
+    );
+    assert(seen, 'plain-node host entry never started');
+    return seen;
+  } finally {
+    if (wrapper) {
+      try {
+        wrapper.kill('SIGTERM');
+      } catch {
+        /* already gone */
+      }
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+test('caller overrides: an explicit Cupboard URL and bind host survive the .env.local source', async () => {
+  const seen = await hostEnvAfterLaunch({
+    PAPERCUSP_CUPBOARD_URL: 'http://127.0.0.1:8797',
+    PAPERCUSP_BIND_HOST: '127.0.0.1',
+  });
+  assert.deepEqual(seen, {
+    PAPERCUSP_CUPBOARD_URL: 'http://127.0.0.1:8797',
+    PAPERCUSP_BIND_HOST: '127.0.0.1',
+    PAPERCUSP_DEV_FILE_ONLY: 'from-dev-file',
+  });
+});
+
+test('caller overrides: with no caller value the .env.local values still apply', async () => {
+  const seen = await hostEnvAfterLaunch({});
+  assert.deepEqual(seen, {
+    PAPERCUSP_CUPBOARD_URL: 'https://dev-file.example',
+    PAPERCUSP_BIND_HOST: '0.0.0.0',
+    PAPERCUSP_DEV_FILE_ONLY: 'from-dev-file',
+  });
+});
+
 // WI-41422: the live npx → tsx launcher normalised a signalled Hono child to
 // exit 0. The old loop treated that as an intentional stop and ended the whole
 // wrapper, so dev:restart returned success while :3270 stayed down. Wrapper
