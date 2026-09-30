@@ -37,6 +37,12 @@ SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no)
 # shellcheck source=lib/rig-profile.sh
 . "$HERE/lib/rig-profile.sh"
 rig_profile_apply || exit 2
+# WI-10004352: the scenario runs under a shared bg-host lease so a peer's
+# dev:restart { target:'bg-host' } cannot bounce the tower bg-host mid-phase.
+# The tower is reached through the same ptool the scenario's TOWER_CALL uses.
+# shellcheck source=lib/bg-host-fence.sh
+. "$HERE/lib/bg-host-fence.sh"
+BG_HOST_FENCE_CALL="$HOME/.local/bin/ptool"
 
 source_preflight=0
 if [ "${1:-}" = '--source-preflight' ]; then
@@ -511,6 +517,7 @@ NODE
 cleanup() {
   local exit_status=$?
   trap - EXIT HUP INT TERM
+  bg_host_fence_release || true
   ssh "${SSH_OPTS[@]}" "$VM" \
     "case '$remote_source' in /tmp/hive-git-physical-source.[0-9]*) rm -rf -- '$remote_source' ;; esac" \
     >/dev/null 2>&1 || true
@@ -621,11 +628,18 @@ fi
 # observations for every leg in the evidence schema's ALL_LEGS (not a fixed
 # A-H span — legs I/J were appended) at an absent path; the finalizer rejects
 # pre-banked signatures.
+#
+# WI-10004352: fence the tower bg-host for exactly the scenario's lifetime.
+# Refusing to start is correct when the lease cannot be had: a restart draining
+# bg-host right now is the collision that failed P-521 0.0.26 drill run 2.
+bg_host_fence_acquire "hive-git physical drill $(basename "$run_dir") (WI-10004352): do not restart the tower bg-host until this run releases the lease" \
+  || fail 'could not take the shared bg-host lease that fences the tower bg-host for this run (see the bg-host-fence lines above)'
 HIVE_GIT_PHYSICAL_PLAN="$HIVE_GIT_PHYSICAL_PLAN" \
   HIVE_GIT_PHYSICAL_EXECUTE="$HIVE_GIT_PHYSICAL_PLAN" \
   HIVE_GIT_PHYSICAL_VM_SOURCE="$remote_source" \
   HIVE_GIT_PHYSICAL_TOWER_SOURCE="$tower_source" \
   "$SCENARIO" "$unsigned_evidence" "$tower_identity" "$vm_identity"
+bg_host_fence_release
 # PARTIAL-RUN-EXIT (P-002): a partial run is a diagnostic. The scenario writes no
 # unsigned evidence for it, and nothing here may sign or finalize one: release
 # evidence needs every phase from ONE run. Report what ran and stop before `sign`.

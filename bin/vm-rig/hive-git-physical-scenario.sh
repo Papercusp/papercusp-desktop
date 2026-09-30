@@ -111,25 +111,49 @@ git_sync_refusal_retry_url() {
 # instead of abandoning the phase. Never share one key between the
 # request-only attempt and the re-fire: both hosts share the replay store, so a
 # shared key would replay the refusal.
+#
+# An UNREACHABLE operator is the other retryable outcome (WI-10004352). P-521
+# 0.0.26 drill run 2 lost phase B when a peer's dev:restart bounced the tower
+# bg-host: the :3271 re-fire got ECONNREFUSED, ptool exited 1 with "could not
+# reach the operator", and set -e aborted the phase. A refused connection never
+# reached the server, so the same key is re-sent (safe even if it had: the key
+# replays) until the host answers or HIVE_GIT_TOWER_TRANSPORT_RETRY_SEC runs out.
+# Its 300s default covers the listener gap of a bg-host restart (ExecStartPre
+# re-bundles the working tree, then boot) under fleet load. It does NOT make a
+# restart harmless: the cross-machine peer-log rails still freeze ~13min after
+# one (EI-13307), so the probe's shared bg-host lease is the fix and this retry
+# only covers what the lease cannot, such as a crash-restart.
 tower_git_sync_call() {
-  local url="$1" args key errf out="" rc=0 attempt
+  local url="$1" args key errf out="" rc=0 replays=0 transport_retries=0
   local wait_sec="${TOWER_GIT_SYNC_REPLAY_WAIT_SEC:-30}"
+  local transport_window="${HIVE_GIT_TOWER_TRANSPORT_RETRY_SEC:-300}"
+  local transport_poll="${HIVE_GIT_TOWER_TRANSPORT_POLL_SEC:-10}"
+  local transport_deadline=$((SECONDS + transport_window))
   local url_flags=()
   [ -z "$url" ] || url_flags=("--url=$url")
   args="$(printf '{"installSlug":"%s"}' "$TOWER_GIT_SYNC_SLUG")"
   key="$(node -e 'process.stdout.write(require("crypto").randomUUID())')"
   errf="$(mktemp)"
-  for attempt in 0 1 2; do
-    if [ "$attempt" -gt 0 ]; then
-      echo "hive-git-physical-scenario: tower git-sync:run outcome unknown (rc=$rc); replaying idempotency key $key in ${wait_sec}s (replay $attempt/2)" >&2
-      sleep "$wait_sec"
-    fi
+  while :; do
     rc=0
     out="$(printf '%s\n' "$args" \
       | "$TOWER_CALL" git-sync:run --json - ${url_flags[@]+"${url_flags[@]}"} --idempotency-key="$key" \
           --workspace=papercusp-workspace --harness="$PHASE_A_POT_HOME" 2>"$errf")" || rc=$?
     cat "$errf" >&2
-    if [ "$rc" -eq 0 ] || ! grep -q 'outcome=unknown' "$errf"; then break; fi
+    [ "$rc" -ne 0 ] || break
+    if grep -q 'outcome=unknown' "$errf" && [ "$replays" -lt 2 ]; then
+      replays=$((replays + 1))
+      echo "hive-git-physical-scenario: tower git-sync:run outcome unknown (rc=$rc); replaying idempotency key $key in ${wait_sec}s (replay $replays/2)" >&2
+      sleep "$wait_sec"
+      continue
+    fi
+    if grep -Eq 'could not reach the operator|ECONNREFUSED' "$errf" && [ "$SECONDS" -lt "$transport_deadline" ]; then
+      transport_retries=$((transport_retries + 1))
+      echo "hive-git-physical-scenario: tower operator unreachable (rc=$rc; a bg-host restart?); re-sending idempotency key $key in ${transport_poll}s (transport retry $transport_retries, window ${transport_window}s)" >&2
+      sleep "$transport_poll"
+      continue
+    fi
+    break
   done
   rm -f "$errf"
   printf '%s\n' "$out"
