@@ -54,6 +54,37 @@ fn bridge_token_path_in(temp_dir: impl AsRef<Path>, pid: u32) -> PathBuf {
         .join(format!("tauri-dev-bridge-{pid}.token"))
 }
 
+/// Write the bridge discovery token readable by the owning user ONLY.
+///
+/// The token authorizes `eval` inside the webview (which can invoke Tauri
+/// commands), and it lives in the shared temp directory. `fs::write` would
+/// create it under the process umask — 0644 on a typical box — so any other
+/// local account could read it and drive the app (open-source-release P-010).
+/// On unix the file is created fresh with O_EXCL + mode 0600: a stale file is
+/// removed first, and `create_new` refuses to follow a pre-planted symlink.
+fn write_private_token_file(path: &Path, contents: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(contents.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, contents)
+    }
+}
+
 fn bridge_token_path(pid: u32) -> PathBuf {
     bridge_token_path_in(std::env::temp_dir(), pid)
 }
@@ -1190,6 +1221,27 @@ mod tests {
             !path.exists(),
             "dropping application state must remove the discovery token"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_token_file_is_owner_only_and_replaces_stale_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "papercusp-dev-bridge-token-mode-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        // A stale, world-readable file from an earlier run must not keep its mode.
+        fs::write(&path, "stale").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_private_token_file(&path, "{\"token\":\"t\"}").unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "bridge token must be readable by its owner only");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"token\":\"t\"}");
+        let _ = fs::remove_file(&path);
     }
 
     #[test]

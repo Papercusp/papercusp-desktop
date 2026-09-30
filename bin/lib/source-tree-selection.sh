@@ -46,6 +46,7 @@
 # (.env* .bashrc .gitconfig .npmrc .mcp.json*), which git happens to TRACK here,
 # so "tracked" was never a safety signal either.
 SOURCE_TREE_ALLOWLIST="package.json package-lock.json tsconfig.base.json .nvmrc
+tsconfig.declarations.json vitest.config.ts vitest.config.test.ts
 eslint.config.mjs knip.json bunfig.toml .gitignore
 CLAUDE.md AGENTS.md BORROWABLE.md
 node_modules apps libs packages
@@ -101,9 +102,14 @@ source_tree_selection() {
   # (plan open-source-release-2026-09-29 P-020). npm tolerates the now-missing
   # workspace directory under both `npm install` and `npm ci`; the installer's
   # node_modules symlink to it goes too so nothing dangles.
+  # Its patch-package patch goes with it: gitnexus-vendor is installed only as
+  # that workspace's dependency, and `patch-package` FAILS the root postinstall
+  # (so a stranger's `npm ci`) on a patch for a package that is not installed
+  # (open-source-release P-008/P-009, measured on the public export).
   SELECTION_EXCLUDES+=(
     --exclude='./libs/papercusp/plugins/gitnexus-bridge'
     --exclude='./node_modules/@papercupai/gitnexus-bridge'
+    --exclude='./patches/gitnexus-vendor+*'
   )
 
   # (4) closed / internal content — not part of the open-source product (plan
