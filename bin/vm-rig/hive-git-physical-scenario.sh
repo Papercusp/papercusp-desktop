@@ -51,8 +51,14 @@ DEPLOY="$HERE/deploy.sh"
 # can cross the transport result door.  Pin the dispatch-level projection at
 # the call site so this destructive gate always receives the direct readiness
 # shape rather than a {summary,_projection} spill wrapper.
-PHASE_A_TOWER_STATUS_ARGS='{"targetHarness":{"workspaceId":"papercusp-workspace","harnessSlug":"hello-world-3-pot"},"projection":{"pick":["substrateActive","reachedSubstrateOwner","healthInputsObserved","bootedCount","harnesses[].workspaceId","harnesses[].harnessSlug","harnesses[].verdict","harnesses[].reasons","contentConnectivity[].workspaceId","contentConnectivity[].harnessSlug","contentConnectivity[].topicHex","contentConnectivity[].contentPeers","contentConnectivity[].lastContentAnnounceRecvMs"]}}'
-PHASE_A_VM_STATUS_ARGS='{"targetHarness":{"workspaceId":"papercusp-workspace","harnessSlug":"hello-world-3-pot"},"projection":{"pick":["substrateActive","reachedSubstrateOwner","healthInputsObserved","bootedCount","harnesses[].workspaceId","harnesses[].harnessSlug","harnesses[].verdict","harnesses[].reasons","contentConnectivity[].workspaceId","contentConnectivity[].harnessSlug","contentConnectivity[].topicHex","contentConnectivity[].contentPeers","contentConnectivity[].lastContentAnnounceRecvMs"]}}'
+# Phase A readiness status query. Its target is the git-sync slug the readiness gate matches
+# rows on (phase_a_host_substrate_readiness), so the query and the gate always name the same
+# harness. On the physical rig that slug is the pot home; on the same-box rig it is the pot
+# member (rig-profile.sh). Same-box run 20260930T050610Z failed in 40s when a string rewrite
+# pointed the query at the pot home while the gate matched the member.
+phase_a_status_args() {
+  printf '{"targetHarness":{"workspaceId":"papercusp-workspace","harnessSlug":"%s"},"projection":{"pick":["substrateActive","reachedSubstrateOwner","healthInputsObserved","bootedCount","harnesses[].workspaceId","harnesses[].harnessSlug","harnesses[].verdict","harnesses[].reasons","contentConnectivity[].workspaceId","contentConnectivity[].harnessSlug","contentConnectivity[].topicHex","contentConnectivity[].contentPeers","contentConnectivity[].lastContentAnnounceRecvMs"]}}' "$1"
+}
 TOWER_CALL="$HOME/.local/bin/ptool"
 TOWER_REPO="$HOME/.papercusp/pot-git/$PHASE_A_POT_HOME/$PHASE_A_REPO_KEY.git"
 VM_REPO="/Users/aviweiss/.papercusp/pot-git/$PHASE_A_POT_HOME/$PHASE_A_REPO_KEY.git"
@@ -254,7 +260,7 @@ require_phase_a_two_host_substrate_ready() {
   # below judges the answer.
   local vm_rc=0
   vm_raw="$(ssh "${SSH_OPTS[@]}" "$VM" \
-    "'$VM_CALL' dev:dogfood_substrate_status '$PHASE_A_VM_STATUS_ARGS' --client hive-git-phase-a-readiness --workspace papercusp-workspace --harness '$VM_GIT_SYNC_SLUG'")" || vm_rc=$?
+    "'$VM_CALL' dev:dogfood_substrate_status '$(phase_a_status_args "$VM_GIT_SYNC_SLUG")' --client hive-git-phase-a-readiness --workspace papercusp-workspace --harness '$VM_GIT_SYNC_SLUG'")" || vm_rc=$?
   if [ "$vm_rc" -ne 0 ] && [ "$vm_rc" -ne 5 ]; then
     fail 'phase A VM substrate readiness probe could not reach the VM operator'
   fi
@@ -266,7 +272,7 @@ require_phase_a_two_host_substrate_ready() {
   # Exit 5 is ptool's "the tool answered ok:false" (EI-24654733539966460): the
   # operator was reached, and the readiness gate below judges the answer.
   local tower_rc=0
-  tower_raw="$(printf '%s\n' "$PHASE_A_TOWER_STATUS_ARGS" \
+  tower_raw="$(printf '%s\n' "$(phase_a_status_args "$TOWER_GIT_SYNC_SLUG")" \
     | "$TOWER_CALL" dev:dogfood_substrate_status --json - \
       --workspace=papercusp-workspace --harness="$TOWER_GIT_SYNC_SLUG")" || tower_rc=$?
   if [ "$tower_rc" -ne 0 ] && [ "$tower_rc" -ne 5 ]; then
@@ -601,6 +607,8 @@ NODE
 const fs = require('node:fs');
 const [dir, runId, startedAt, bootstrapStarted, bootstrapFinished, finishedAt, towerDeviceKey, vmDeviceKey] = process.argv.slice(2);
 const read = (name) => JSON.parse(fs.readFileSync(`${dir}/${name}.json`, 'utf8'));
+const vmGitSyncSlug = process.env.VM_GIT_SYNC_SLUG;
+if (!vmGitSyncSlug) throw new Error('vm git-sync slug is not exported by the scenario');
 fs.writeFileSync(`${dir}/verify-input.json`, JSON.stringify({
   schemaVersion: 'hive-git-physical-phase-a-input/v1',
   runId,
@@ -608,7 +616,7 @@ fs.writeFileSync(`${dir}/verify-input.json`, JSON.stringify({
   identities: { towerDeviceKey, vmDeviceKey },
   quarantine: read('quarantine'),
   bootstrap: {
-    tool: 'git-sync:run', installSlug: 'hello-world-3-pot', targetHost: 'vm', fired: true,
+    tool: 'git-sync:run', installSlug: vmGitSyncSlug, targetHost: 'vm', fired: true,
     startedAt: bootstrapStarted, finishedAt: bootstrapFinished,
   },
   observations: {
@@ -804,7 +812,11 @@ const [
   reverseReceiveStarted, reverseReceiveFinished, reverseFinished,
 ] = process.argv.slice(2);
 const read = (direction, name) => JSON.parse(fs.readFileSync(`${dir}/${direction}/${name}.json`, 'utf8'));
-const gitSyncSlug = (host) => host === 'tower' ? 'hello-world-3-pot' : 'hello-world-3-pot';
+const gitSyncSlug = (host) => {
+  const slug = process.env[host === 'tower' ? 'TOWER_GIT_SYNC_SLUG' : 'VM_GIT_SYNC_SLUG'];
+  if (!slug) throw new Error(`${host} git-sync slug is not exported by the scenario`);
+  return slug;
+};
 const direction = ({ name, sourceHost, destinationHost, sourceDeviceKey, destinationDeviceKey,
   windowStarted, publishStarted, publishFinished, receiveStarted, receiveFinished, windowFinished }) => {
   const observations = {
@@ -1113,7 +1125,11 @@ const [
   dirtyIntegrateStarted, dirtyIntegrateFinished, dirtyBridgeStarted, dirtyBridgeFinished,
 ] = process.argv.slice(2);
 const read = (path) => JSON.parse(fs.readFileSync(`${dir}/${path}.json`, 'utf8'));
-const gitSyncSlug = (host) => host === 'tower' ? 'hello-world-3-pot' : 'hello-world-3-pot';
+const gitSyncSlug = (host) => {
+  const slug = process.env[host === 'tower' ? 'TOWER_GIT_SYNC_SLUG' : 'VM_GIT_SYNC_SLUG'];
+  if (!slug) throw new Error(`${host} git-sync slug is not exported by the scenario`);
+  return slug;
+};
 const trigger = (host, role, triggerStartedAt, triggerFinishedAt) => ({
   tool: 'git-sync:run', installSlug: gitSyncSlug(host), host, role, fired: true,
   startedAt: triggerStartedAt, finishedAt: triggerFinishedAt,
@@ -1329,7 +1345,11 @@ const [
   rollbackTowerStarted, rollbackTowerFinished, rollbackVmStarted, rollbackVmFinished,
 ] = process.argv.slice(2);
 const read = (name) => JSON.parse(fs.readFileSync(`${dir}/${name}.json`, 'utf8'));
-const gitSyncSlug = (host) => host === 'tower' ? 'hello-world-3-pot' : 'hello-world-3-pot';
+const gitSyncSlug = (host) => {
+  const slug = process.env[host === 'tower' ? 'TOWER_GIT_SYNC_SLUG' : 'VM_GIT_SYNC_SLUG'];
+  if (!slug) throw new Error(`${host} git-sync slug is not exported by the scenario`);
+  return slug;
+};
 const trigger = (host, role, triggerStartedAt, triggerFinishedAt) => ({
   tool: 'git-sync:run', installSlug: gitSyncSlug(host), host, role, fired: true,
   startedAt: triggerStartedAt, finishedAt: triggerFinishedAt,
@@ -2064,6 +2084,9 @@ ensure_vm_driver_current() {
 # profile changes nothing. A same-box run is diagnostic: it never emits unsigned evidence.
 # (The profile library was sourced next to physical-phase-select.sh above.)
 rig_profile_apply || fail "rig profile '$(rig_profile_name)' could not be applied"
+# The phase record writers (embedded node) read the applied git-sync slugs from the
+# environment, so a record can never name a slug the rig does not use.
+export TOWER_GIT_SYNC_SLUG VM_GIT_SYNC_SLUG
 if rig_profile_is_diagnostic; then SCENARIO_FULL_RUN=0; fi
 
 # The staged VM source root is EPHEMERAL by design: hive-git-physical-probe.sh
