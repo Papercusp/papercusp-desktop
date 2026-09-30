@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# ssh for the same-box rig (plan physical-drill-iteration-speed-2026-09-29 D-003).
+#
+# rig-profile.sh puts this directory first on PATH when HIVE_GIT_RIG=same-box. Every
+# `ssh … "$VM" '<command>'` in the probe, the scenario and the producer then runs <command>
+# locally as the same-box "VM" instance: HOME is the VM instance's throwaway home and the
+# working directory is that home, exactly as a login over ssh would give.
+#
+# It accepts ONE host, $SAME_BOX_HOST (default same-box-vm), and refuses every other with
+# ssh's own connection-failure status 255. That refusal is the guarantee that a same-box run
+# can never reach the physical rig, however a caller spells the target.
+set -uo pipefail
+host_ok="${SAME_BOX_HOST:-same-box-vm}"
+no_stdin=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --) shift; break ;;
+    -[BbcDEeFIiJLlmOoPpRSWw]) shift; [ $# -gt 0 ] && shift ;;
+    -[BbcDEeFIiJLlmOoPpRSWw]?*) shift ;;
+    -n) no_stdin=1; shift ;;
+    -*) case "$1" in *n*) no_stdin=1 ;; esac; shift ;;
+    *) break ;;
+  esac
+done
+target="${1:-}"
+[ $# -gt 0 ] && shift
+host="${target#*@}"
+if [ "$host" != "$host_ok" ]; then
+  echo "same-box ssh: refusing host '${target:-<none>}' — the same-box rig only reaches '$host_ok' (a same-box run must never touch another machine)" >&2
+  exit 255
+fi
+if [ -z "${SAME_BOX_VM_HOME:-}" ] || [ ! -d "$SAME_BOX_VM_HOME" ]; then
+  echo "same-box ssh: SAME_BOX_VM_HOME is unset or missing; apply the same-box rig profile first" >&2
+  exit 255
+fi
+if [ $# -eq 0 ]; then
+  echo "same-box ssh: an interactive session is not supported; pass a command" >&2
+  exit 255
+fi
+# ssh joins the remote argv with spaces and hands it to the remote shell.
+cmd="$*"
+cd "$SAME_BOX_VM_HOME" || exit 255
+# vmcall.sh on the VM finds mcp-call.mjs in /tmp and the operator port from the VM's
+# operator record; on this shared box both would be someone else's. Pin them to the rig.
+if [ -n "${SAME_BOX_RIG_DIR:-}" ]; then export PCUSP_MCP_CALL="$SAME_BOX_RIG_DIR/mcp-call.mjs"; fi
+if [ -n "${SAME_BOX_VM_PORT:-}" ]; then export PAPERCUSP_HONO_PORT="$SAME_BOX_VM_PORT"; fi
+if [ "$no_stdin" = 1 ]; then
+  HOME="$SAME_BOX_VM_HOME" exec bash -c "$cmd" </dev/null
+fi
+HOME="$SAME_BOX_VM_HOME" exec bash -c "$cmd"

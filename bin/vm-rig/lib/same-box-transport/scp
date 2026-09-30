@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# scp for the same-box rig (plan physical-drill-iteration-speed-2026-09-29 D-003).
+#
+# Copies between this box and the same-box "VM" instance, which lives on this box. A remote
+# operand must name the host $SAME_BOX_HOST (default same-box-vm); any other host is refused
+# with status 1 so a same-box run can never copy to or from the physical rig. A relative
+# remote path resolves against the VM instance's home, as scp resolves it against the
+# remote login directory.
+set -uo pipefail
+host_ok="${SAME_BOX_HOST:-same-box-vm}"
+recursive=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --) shift; break ;;
+    -[cFiJloPS]) shift; [ $# -gt 0 ] && shift ;;
+    -[cFiJloPS]?*) shift ;;
+    -*) case "$1" in *r*) recursive=1 ;; esac; shift ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 2 ] || { echo "same-box scp: need at least one source and a destination" >&2; exit 1; }
+resolve() { # <operand> → local path, or refuse a foreign host
+  local op="$1" host path
+  case "$op" in
+    /*|./*|../*) printf '%s\n' "$op"; return 0 ;;
+    *:*)
+      host="${op%%:*}"; host="${host#*@}"; path="${op#*:}"
+      if [ "$host" != "$host_ok" ]; then
+        echo "same-box scp: refusing host '$host' — the same-box rig only reaches '$host_ok'" >&2
+        return 1
+      fi
+      [ -n "${SAME_BOX_VM_HOME:-}" ] || { echo "same-box scp: SAME_BOX_VM_HOME is unset" >&2; return 1; }
+      case "$path" in /*) ;; *) path="$SAME_BOX_VM_HOME/$path" ;; esac
+      printf '%s\n' "$path" ;;
+    *) printf '%s\n' "$op" ;;
+  esac
+}
+args=("$@")
+dest="$(resolve "${args[$((${#args[@]} - 1))]}")" || exit 1
+unset 'args[${#args[@]}-1]'
+srcs=()
+for s in "${args[@]}"; do srcs+=("$(resolve "$s")") || exit 1; done
+for s in "${srcs[@]}"; do [ -n "$s" ] || exit 1; done
+if [ "$recursive" = 1 ]; then exec cp -R -- "${srcs[@]}" "$dest"; fi
+exec cp -- "${srcs[@]}" "$dest"
