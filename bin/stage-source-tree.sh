@@ -96,14 +96,11 @@ fi
 [[ -f "$MONO/package-lock.json" ]] \
   || { echo "ERROR: $MONO/package-lock.json missing — refusing to stage without a committed lockfile member" >&2; exit 1; }
 
-# ── OWNER-NAME PREFLIGHT (EI-20976222603137006). The final bundle audit is
-# intentionally fail-closed when no explicit owner name is available, but that
-# check used to happen only after this script had scrubbed, tarred, and zstd-
-# compressed roughly 1 GiB of source. Run the same audit-owned resolver before
-# opening the sidecar lock or creating an archive so an automation Git identity
-# cannot turn an expensive, doomed staging attempt into the first signal.
+# ── IDENTITY-POLICY COMPATIBILITY PREFLIGHT. D-112 makes the release identity
+# policy machine-only, so owner name/email are not required. Keep this audit-owned
+# entrypoint in place for older cutters and future early policy checks.
 python3 "$HERE/audit-release-bundle.py" --owner-preflight \
-  || { echo "ERROR: owner-name preflight failed — refusing to start source staging" >&2; exit 2; }
+  || { echo "ERROR: identity-policy preflight failed — refusing to start source staging" >&2; exit 2; }
 
 OUT="$SIDECAR/source.tar.zst"
 
@@ -398,10 +395,8 @@ set -e
 if [[ $_audit_rc -eq 2 ]]; then
   echo "" >&2
   echo "ERROR: release bundle audit COULD NOT CHECK — it did NOT find a leak (WI-4419)." >&2
-  echo "  Almost always: no owner-name literal resolved, because git user.name is unset" >&2
-  echo "  or belongs to an automation. Export PAPERCUSP_RELEASE_OWNER_NAME (and" >&2
-  echo "  PAPERCUSP_RELEASE_OWNER_EMAIL; both take a comma-separated list) and re-run." >&2
-  echo "  Read at run time — never write either into a file." >&2
+  echo "  Inspect the audit's preceding coverage error (missing tool, unreadable archive," >&2
+  echo "  or empty/missing scan target), fix that condition, and re-run." >&2
   exit 2
 elif [[ $_audit_rc -ne 0 ]]; then
   echo "" >&2
