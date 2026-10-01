@@ -445,7 +445,7 @@ __pc_reap_private_target_slots() {
     return 0
   fi
 
-  local now dir name last lease_status
+  local now dir name last lease_status reap_lease_tags
   local -a eligible=()
   now="$(date +%s)"
   while IFS=$'\t' read -r dir name; do
@@ -453,9 +453,12 @@ __pc_reap_private_target_slots() {
     __pc_private_slot_unclaimed "$name" || continue
     last="$(__pc_private_slot_last_active "$dir")"
     (( now - last >= grace )) || continue
-    # 0 = leased, 2 = unreadable retention marker: both keep the root.
+    # 0 = leased, 2 = unreadable retention marker: both keep the root. ANY lease
+    # keeps a private root (a reaper is no cut, so no own-cut exemption applies);
+    # the tags are captured, not discarded to /dev/null, which the release-artifacts
+    # selftest forbids for every caller in this file.
     lease_status=0
-    release_artifacts_retention_path_is_leased "$dir" >/dev/null 2>&1 || lease_status=$?
+    reap_lease_tags="$(release_artifacts_retention_path_is_leased "$dir" 2>/dev/null)" || lease_status=$?
     (( lease_status == 1 )) || continue
     eligible+=("$last"$'\t'"$dir"$'\t'"$name")
   done < <(__pc_private_slot_candidates "$shared")
