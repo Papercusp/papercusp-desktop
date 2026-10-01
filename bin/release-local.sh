@@ -2461,6 +2461,44 @@ cut_release_seed() {
   fi
 }
 
+# Precomputed doc_sections vectors (plan ship-precomputed-doc-vectors-2026-10-01,
+# P-003). Without them every fresh Server install embeds all ~15k doc sections
+# itself on first boot (~1 CPU core for 45+ min, WI-10004455). Its OWN step,
+# separate from the hive-seed cut, so a seed/sidecar rerun never redoes it and a
+# failure here never fails the release: the install then embeds the uncovered
+# sections itself, exactly as before. Incremental: the previous release's seed is
+# applied first, so only sections whose page_sha changed are re-embedded. The
+# manifest holds only (source_key, slug, anchor, page_sha) keys — no build-box
+# paths for the bundle audit to refuse. Bundled via tauri.server.conf.json
+# `doc-vector-seed/**/*`; found at runtime by doc-vector-seed-dir.ts.
+cut_doc_vector_seed() {
+  local out="$ROOT/src-tauri/doc-vector-seed"
+  if [[ "${PAPERCUSP_SKIP_DOC_VECTOR_SEED:-0}" == "1" ]]; then
+    echo "==> doc-vector-seed: PAPERCUSP_SKIP_DOC_VECTOR_SEED=1 — leaving $out as-is"
+    return 0
+  fi
+  local tmp="$out.new" prev=""
+  local -a prev_args=()
+  rm -rf "$tmp"
+  if [[ -f "$out/manifest.json" ]]; then
+    prev="$(mktemp -d)"
+    cp -a "$out/." "$prev/"
+    prev_args=(--previous "$prev")
+  fi
+  if ( cd "$ROOT/.." && npx tsx scripts/export-doc-vector-seed.mts --out "$tmp" --allow-uncovered "${prev_args[@]}" ); then
+    rm -rf "$out" && mv "$tmp" "$out"
+    echo "==> doc-vector-seed: wrote $out"
+  else
+    rm -rf "$tmp"
+    local ships="no precomputed doc vectors"
+    [[ -f "$out/manifest.json" ]] && ships="the previous release's doc-vector seed"
+    echo "WARNING: doc-vector-seed export failed — the Server ships $ships; fresh installs embed the rest on first boot." >&2
+  fi
+  [[ -n "$prev" ]] && rm -rf "$prev"
+  return 0
+}
+
+cut_doc_vector_seed
 cut_release_seed
 
 # Belt-and-braces (0.0.11 cut r3, WI-4736): cut-seed-cli now prunes RocksDB's
