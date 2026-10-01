@@ -166,6 +166,15 @@ DESK
   fi
 fi
 
+# ── Codex system skills root — inert, removes an idle CPU drain ─────────────
+# Codex's skills watcher watches /etc/codex/skills; when that dir is missing it
+# watches /etc itself with IN_OPEN, so every process start on the host (each
+# opens /etc/ld.so.cache) wakes every Codex agent session the Server runs
+# (EI-21417256075155406, measured 2026-10-01: ~5-30% of a core per idle session
+# under agent load, 0.1% once the dir existed). An empty dir is inert: Codex
+# loads no skills from it.
+mkdir -p "${DPKG_ROOT:-}/etc/codex/skills" >/dev/null 2>&1 || true
+
 # ── (2) ghostty — deferred, best-effort ─────────────────────────────────────
 # A postinst CANNOT call apt directly (dpkg holds the apt lock for THIS
 # transaction → deadlock), so defer the PPA-add + install to a detached worker

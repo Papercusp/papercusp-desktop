@@ -614,6 +614,20 @@ test('Linux Server ships an opt-in boot-start helper, because a user unit alone 
   assert.equal(childProcess.spawnSync('bash', ['-n', helperPath]).status, 0);
 });
 
+// EI-21417256075155406: without /etc/codex/skills, Codex's skills watcher watches /etc with
+// IN_OPEN, so every process start on the host wakes every Codex agent session.
+test('deb postinstall provisions the Codex system skills root for the Server package only', () => {
+  const postinstallPath = path.join(desktopRoot, 'src-tauri/deb/postinstall.sh');
+  const postinstall = fs.readFileSync(postinstallPath, 'utf8');
+  const lines = postinstall.split('\n');
+  const serverGate = lines.findIndex((l) => l.includes('DPKG_MAINTSCRIPT_PACKAGE') && l.includes('papercusp-server') && l.includes('exit 0'));
+  const mkdir = lines.findIndex((l) => /^mkdir -p "\$\{DPKG_ROOT:-\}\/etc\/codex\/skills"/.test(l));
+  assert.ok(serverGate >= 0, 'postinstall keeps its Server-only gate');
+  assert.ok(mkdir > serverGate, 'the skills root is created after the Server-only gate, so the GUI package never creates it');
+  assert.match(lines[mkdir], /\|\| true$/, 'creating the skills root can never fail the package install');
+  assert.equal(childProcess.spawnSync('sh', ['-n', postinstallPath]).status, 0);
+});
+
 test('Linux Server deb installs and package-enables one systemd user service', () => {
   const baseConfig = require(path.join(desktopRoot, 'src-tauri/tauri.conf.json'));
   const serverConfig = require(path.join(desktopRoot, 'src-tauri/tauri.server.conf.json'));
