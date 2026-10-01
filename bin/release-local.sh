@@ -2671,7 +2671,7 @@ fi
 # ── ASSEMBLED-BUNDLE GITLEAKS GATE (EI-21546652106775901) ─────────────────────
 # The Python audit above owns build-box/identity literals. Gitleaks is a
 # supplementary credential detector: run it after every staging step, over the
-# same two resource roots, with a release-local config whose generated-byte
+# same resource roots plus the D-112 shipped seed, with a release-local config whose generated-byte
 # exceptions require BOTH a known path and a known line marker. Keep values
 # fully redacted in release logs; a finding still fails the cut. The report is
 # retained in a private run-scoped directory long enough to print only its
@@ -2683,7 +2683,7 @@ fi
 _GITLEAKS_REPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-release-gitleaks.XXXXXX")"
 _GITLEAKS_STATUS=0
 _GITLEAKS_FAILED_ROOTS=()
-for _gitleaks_root in "src-tauri/sidecar" "src-tauri/resources"; do
+for _gitleaks_root in "src-tauri/sidecar" "src-tauri/resources" "src-tauri/seed"; do
   _gitleaks_report_path="$_GITLEAKS_REPORT_DIR/$(basename "$_gitleaks_root").json"
   if ! ( cd "$ROOT" && gitleaks dir "$_gitleaks_root" \
       --config "$ORCHESTRATOR_HERE/release-gitleaks.toml" \
