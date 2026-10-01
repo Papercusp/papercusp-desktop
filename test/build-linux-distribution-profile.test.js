@@ -92,7 +92,8 @@ test('dogfood remains the absent-knob default with both roles and developer stag
 
 test('vm-release is fail-closed, Server-only and disables source staging', () => {
   const blockStart = linuxScript.indexOf(PROFILE_DEFAULT_LINE);
-  const blockEnd = linuxScript.indexOf('# ── OWNER-NAME PREFLIGHT');
+  // D-112 renamed the section that follows the profile block.
+  const blockEnd = linuxScript.indexOf('# ── IDENTITY-POLICY COMPATIBILITY PREFLIGHT');
   // A moved anchor must fail HERE, loudly — a -1 start silently slices to '' and every
   // assertion below then reads as "the block lost its vm-release arm".
   assert.ok(blockStart >= 0 && blockEnd > blockStart, 'profile block anchors not found');

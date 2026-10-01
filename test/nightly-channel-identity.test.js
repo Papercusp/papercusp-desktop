@@ -395,12 +395,18 @@ test('(C) the chokepoint emits both halves, and they agree with release.config.t
 const ENV_EXPANSION = new RegExp(`"?\\$\\{${ENV_ARRAY}\\[@\\]\\}"?`, 'g');
 
 /** Expansions of the stamp array that are not the arguments of `env`. */
+const ENV_ASSIGNMENT = String.raw`[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"';&|()])*`;
+const ENV_PREFIX = new RegExp(String.raw`(?:^|[\s;&|(])env(?:\s+${ENV_ASSIGNMENT})*\s+$`);
+
 function scanForStampsNotViaEnv(files) {
   const bad = [];
   for (const { name, text } of files) {
     for (const l of logicalLines(text)) {
       for (const m of l.text.matchAll(ENV_EXPANSION)) {
-        if (/(?:^|[\s;&|(])env\s+$/.test(l.text.slice(0, m.index))) continue;
+        // `env` may be followed by NAME=value operands before the array
+        // (`env RUSTFLAGS="$X" "${ARR[@]}" cmd`): env treats every leading
+        // NAME=value word — the array's entries included — as an assignment.
+        if (ENV_PREFIX.test(l.text.slice(0, m.index))) continue;
         bad.push({ name, line: l.line, text: l.text });
       }
     }
@@ -435,6 +441,11 @@ test('(D) every build site applies the channel stamps through `env`', () => {
   assert.equal(scanForStampsNotViaEnv([{ name: 'ctl', text: bareSite }]).length, 1);
   assert.equal(scanForStampsNotViaEnv([{ name: 'ctl', text: continuedBare }]).length, 1);
   assert.deepEqual(scanForStampsNotViaEnv([{ name: 'ctl', text: envSite }]), []);
+  // env with NAME=value operands ahead of the array is still env.
+  const envAssignSite = `(cd "$ROOT" && lock env RUSTFLAGS="$X" SHA=$Y "\${${ENV_ARRAY}[@]}" npx tauri build)`;
+  assert.deepEqual(scanForStampsNotViaEnv([{ name: 'ctl', text: envAssignSite }]), []);
+  const envThenCommand = `env RUSTFLAGS="$X" nice "\${${ENV_ARRAY}[@]}" npx tauri build`;
+  assert.equal(scanForStampsNotViaEnv([{ name: 'ctl', text: envThenCommand }]).length, 1);
   // Printing or recording the array ([*]) applies nothing, so it is not a site.
   assert.deepEqual(scanForStampsNotViaEnv([{ name: 'ctl', text: `echo "\${${ENV_ARRAY}[*]}"` }]), []);
   // `environment` is not `env`.

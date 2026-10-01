@@ -334,7 +334,9 @@ function ppmVisible(file) {
 
 test("updater E2E is pinned to a dedicated disposable VM lane", () => {
   const fn = updaterFunction();
-  assert.match(common, /updater\) idx=3/);
+  // Fixed lanes are resolved by _testvm_fixed_slot (`updater) echo 3 ;;`).
+  assert.match(common, /_testvm_fixed_slot\(\)/);
+  assert.match(common, /updater\) echo 3 ;;/);
   assert.match(fn, /updater\|updater-/);
   assert.match(fn, /cmd_reset "\$name"/);
   assert(fn.indexOf('cmd_reset "$name"') < fn.indexOf('cmd_up "$name"'));

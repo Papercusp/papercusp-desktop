@@ -380,13 +380,13 @@ for (const r of hits) process.stdout.write(r + "\n");
 # root-output outside this root marks a root that was moved. It may only be reaped.
 __pc_private_slot_paths_anchored() {
   local dir="$1" real f stray
-  real="$(realpath -- "$dir" 2>/dev/null)" || real="$dir"
   local -a outs=()
   for f in "$dir"/debug/build/*/root-output "$dir"/release/build/*/root-output \
            "$dir"/*/debug/build/*/root-output "$dir"/*/release/build/*/root-output; do
     [[ -f "$f" ]] && outs+=("$f")
   done
   ((${#outs[@]} > 0)) || return 0
+  real="$(realpath -- "$dir" 2>/dev/null)" || real="$dir"
   stray="$(printf '%s\0' "${outs[@]}" | xargs -0 grep -L -F -e "$dir/" -e "$real/" -- 2>/dev/null)"
   [[ -z "$stray" ]]
 }

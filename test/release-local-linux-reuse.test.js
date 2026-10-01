@@ -47,7 +47,9 @@ const seedFallbackHarness = sliceBetween(
   'cut_release_seed() {',
 );
 const cutReleaseSeedHarness =
-  sliceBetween('cut_release_seed() {', '\n}\n\ncut_release_seed') + '\n}';
+  // End at the function's own column-0 closing brace, not at whatever follows it
+  // (cut_doc_vector_seed was later inserted between the definition and its call).
+  sliceBetween('cut_release_seed() {', '\n}\n') + '\n}';
 const cutStartHarness = sliceBetween(
   '# EI-20551860898590077: bind every artifact',
   'echo "==> bumping version in manifests"',
