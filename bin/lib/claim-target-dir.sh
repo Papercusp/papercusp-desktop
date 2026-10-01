@@ -560,8 +560,33 @@ __pc_claim_target_dir() {
   fi
   mkdir -p "$__pc_slot_lockdir"
 
-  local i dir lockfile preferred_dir lease_tags
+  local i j dir lockfile preferred_dir lease_tags
+  local slot_count=0 own_slot_index_set=','
+  local -a slot_order
+
+  # A resumed cut's own lease identifies where its reusable artifacts live.
+  # Prioritize those roots before ordinary free slots, or the first-free scan
+  # can send a reuse leg to an empty cache even though its artifacts are leased
+  # under a later slot (WI-10003548).
   for ((i = 0; i < slots; i++)); do
+    if ((i == 0)); then dir="$shared"; else dir="${shared}-dev$((i + 1))"; fi
+    if lease_tags="$(release_artifacts_retention_path_is_leased "$dir" 2>/dev/null)" \
+      && release_artifacts_retention_matches_are_own_cut "$lease_tags"; then
+      slot_order[$slot_count]="$i"
+      slot_count=$((slot_count + 1))
+      own_slot_index_set+="$i,"
+    fi
+  done
+  for ((i = 0; i < slots; i++)); do
+    case "$own_slot_index_set" in
+      *,"$i",*) continue ;;
+    esac
+    slot_order[$slot_count]="$i"
+    slot_count=$((slot_count + 1))
+  done
+
+  for ((j = 0; j < slot_count; j++)); do
+    i="${slot_order[$j]}"
     # Slot 0 IS Cargo's configured shared dir. Keep its existing warm cache,
     # and derive every extra slot on the same configured filesystem.
     if ((i == 0)); then dir="$shared"; else dir="${shared}-dev$((i + 1))"; fi

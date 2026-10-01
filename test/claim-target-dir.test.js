@@ -77,6 +77,20 @@ function claim(env = {}) {
   );
 }
 
+function writeRetentionLease(tag, targetPath) {
+  const retentionRoot = join(home, 'retention');
+  mkdirSync(retentionRoot, { recursive: true });
+  writeFileSync(join(retentionRoot, `lease-${tag}.tsv`), [
+    'schema=papercusp-release-retention/v1',
+    `tag=${tag}`,
+    'created_ns=1',
+    'expires_ns=0',
+    `path=${targetPath}`,
+    '',
+  ].join('\n'));
+  return retentionRoot;
+}
+
 function prepareCollectionTarget(root) {
   return execFileSync(
     'bash',
@@ -116,6 +130,34 @@ test('slot zero honors Cargo-configured relocation instead of forcing the home f
   const relocated = join(home, 'data disk', 'cargo-target');
   configureTarget(relocated);
   assert.strictEqual(claim(), relocated);
+});
+
+test('a resumed release cut prefers the target slot holding its own leased artifacts', async () => {
+  const held = await holdSlotViaExec();
+  try {
+    const ownSlot = join(home, '.cargo-target-dev3');
+    const retentionRoot = writeRetentionLease('resume-cut', join(ownSlot, 'release', 'bundle'));
+    assert.strictEqual(claim({
+      PAPERCUSP_RELEASE_TAG: 'resume-cut',
+      PAPERCUSP_RELEASE_RETENTION_ROOT: retentionRoot,
+    }), ownSlot);
+  } finally {
+    held.child.kill();
+  }
+});
+
+test('a resumed cut still skips another cut\'s leased target slot', async () => {
+  const held = await holdSlotViaExec();
+  try {
+    const foreignSlot = join(home, '.cargo-target-dev2');
+    const retentionRoot = writeRetentionLease('other-cut', join(foreignSlot, 'release', 'bundle'));
+    assert.strictEqual(claim({
+      PAPERCUSP_RELEASE_TAG: 'resume-cut',
+      PAPERCUSP_RELEASE_RETENTION_ROOT: retentionRoot,
+    }), join(home, '.cargo-target-dev3'));
+  } finally {
+    held.child.kill();
+  }
 });
 
 test('relocated target slots retain concurrency isolation on the configured filesystem', async () => {
