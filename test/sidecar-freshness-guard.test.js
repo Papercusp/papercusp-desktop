@@ -161,10 +161,8 @@ test('a required release audit fails closed without a successful sidecar attesta
   assert.equal(blocksBuild(r.verdict), true);
   assert.match(describe(r), /UNAUDITED SIDECAR/);
   assert.match(describe(r), /PAPERCUSP_RELEASE_AUDIT=1/);
-  // EI-22084619262074810: the FATAL text used to name only the env var, not WHERE
-  // to get its value — a caller who already knows they need PAPERCUSP_RELEASE_AUDIT=1
-  // still has to go find PAPERCUSP_RELEASE_OWNER_NAME's canonical source by hand.
-  assert.match(describe(r), /~\/\.papercusp\/release-identity\.env/);
+  assert.match(describe(r), /PAPERCUSP_RELEASE_AUDIT=1/);
+  assert.doesNotMatch(describe(r), /PAPERCUSP_RELEASE_OWNER|release-identity\.env/);
 });
 
 test('a required release audit passes only with the final-scan attestation', () => {
@@ -591,14 +589,15 @@ test('build-desktop-sidecar.sh WARNS upfront when building without a release ide
   const ownerNameCheckAt = src.indexOf('PAPERCUSP_RELEASE_AUDIT=1 requires a non-empty PAPERCUSP_RELEASE_OWNER_NAME');
   const advisoryAt = src.indexOf('building WITHOUT a release identity audit');
   const firstExpensiveWorkAt = src.indexOf('emit-build-provenance.sh');
-  assert.ok(ownerNameCheckAt > 0, 'the existing AUDIT=1-requires-owner-name refusal must still exist');
+  assert.equal(ownerNameCheckAt, -1, 'D-112 must not require owner name for a release audit');
   assert.ok(advisoryAt > 0, 'an unaudited build must print an upfront advisory that downstream consumers will refuse it');
   assert.ok(
     advisoryAt < firstExpensiveWorkAt,
     'the advisory must print before the first expensive/toolchain work, not after — that is the whole point',
   );
   assert.match(src, /build-mac-cross\.sh/, 'the advisory must name the actual downstream consumer that will refuse this sidecar');
-  assert.match(src, /~\/\.papercusp\/release-identity\.env/, 'the advisory must point at the canonical identity source, not just the env var name');
+  assert.match(src, /PAPERCUSP_RELEASE_AUDIT=1/, 'the advisory must show the complete D-112 audit invocation');
+  assert.doesNotMatch(src.slice(advisoryAt, firstExpensiveWorkAt), /PAPERCUSP_RELEASE_OWNER_NAME|release-identity\.env/);
 });
 
 for (const script of ['build-mac-cross.sh', 'build-windows-cross.sh', 'build-and-archive-deb.sh']) {

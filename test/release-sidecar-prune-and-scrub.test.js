@@ -35,22 +35,9 @@ const AUDIT = path.join(root, 'bin/audit-release-bundle.py');
 const TRUST_TOOLCHAIN = path.join(root, 'bin/lib/vm-release-trust-toolchain.sh');
 const SOURCE_NOTE_HELPER = path.join(root, 'bin/lib/sidecar-source-note.sh');
 
-/**
- * A SYNTHETIC owner name, asserted for every AUDIT invocation.
- *
- * The certify path REFUSES TO CERTIFY (exit 2) unless an owner-name literal is
- * ASSERTED via this env var — `has_owner_name_literal` deliberately ignores git,
- * because git names the COMMITTER and on an automated build box that is not the
- * owner. That refusal is correct, and it is a PRECONDITION of certifying rather
- * than anything to do with the prune/scrub behaviour measured here: without the
- * env, `--scan-dir` exits 2 before it reads a byte, so the post-scrub assertion
- * "the gate must pass after the scrub" sees 2 instead of 0.
- *
- * Must stay SYNTHETIC: a real identity in tracked source is the exact leak this
- * gate exists to prevent.
- */
+/** A synthetic owner value used only to prove D-112 does not require or reject it. */
 const SYNTHETIC_OWNER = 'Zzsynthetic Gateowner';
-const AUDIT_ENV = { ...process.env, PAPERCUSP_RELEASE_OWNER_NAME: SYNTHETIC_OWNER };
+const AUDIT_ENV = { ...process.env };
 
 function audit(...args) {
   return spawnSync('python3', [AUDIT, ...args], { encoding: 'utf8', env: AUDIT_ENV });
@@ -597,19 +584,18 @@ test('vm-release sidecar identity preflight admits an explicit immutable SHA and
   assert.doesNotMatch(output, /vm-release requires non-empty PAPERCUSP_BUILD_SHA/);
 });
 
-test('release-audited sidecar build rejects a missing owner name before toolchain work', () => {
+test('release-audited sidecar build accepts a missing owner name under D-112', () => {
   for (const owner of [undefined, '', ' , ; \t ']) {
-    const r = runBuilderOwnerPreflight({ audit: '1', owner });
+    const r = runBuilderOwnerPreflight({ audit: '1', owner, advance: true });
     const output = `${r.stdout}${r.stderr}`;
-    assert.equal(r.status, 2, `owner=${JSON.stringify(owner)}\n${output}`);
-    assert.match(output, /PAPERCUSP_RELEASE_AUDIT=1 requires a non-empty PAPERCUSP_RELEASE_OWNER_NAME/);
-    assert.match(output, /final identity audit cannot certify/);
-    assert.doesNotMatch(output, /could not read the repo-pinned Node major/,
-      'the owner-name rejection must precede the first toolchain/runtime preflight');
+    assert.equal(r.status, 1, `owner=${JSON.stringify(owner)}\n${output}`);
+    assert.match(output, /papercusp not found at/,
+      'audit=1 must advance past the removed owner-name gate to the safe missing dependency');
+    assert.doesNotMatch(output, /requires a non-empty PAPERCUSP_RELEASE_OWNER_NAME|final identity audit cannot certify/);
   }
 });
 
-test('sidecar owner-name preflight leaves dev builds and asserted release builds unchanged', () => {
+test('sidecar audit selection leaves dev builds and asserted release builds unchanged', () => {
   for (const input of [
     { audit: '0', owner: undefined, advance: true, label: 'dev build' },
     { audit: '1', owner: SYNTHETIC_OWNER, advance: true, label: 'asserted release build' },
@@ -618,7 +604,7 @@ test('sidecar owner-name preflight leaves dev builds and asserted release builds
     const output = `${r.stdout}${r.stderr}`;
     assert.equal(r.status, 1, `${input.label}\n${output}`);
     assert.match(output, /papercusp not found at/,
-      `${input.label} must advance past the owner-name guard`);
+      `${input.label} must advance to the safe missing dependency`);
     assert.doesNotMatch(output, /requires a non-empty PAPERCUSP_RELEASE_OWNER_NAME/);
   }
 });

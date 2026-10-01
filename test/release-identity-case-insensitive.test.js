@@ -1,9 +1,8 @@
-// EI-20589264759185712 — the identity gate must hunt the owner's name CASE-INSENSITIVELY.
+// EI-20589264759185712 / D-112 — machine identity must be hunted case-insensitively.
 //
 // WHY THIS TEST EXISTS
-// The owner's name reached the PUBLISHED 0.0.17 Linux deb in lowercase, inside a SQL
-// comment ("Surfaced for <name>:", all lowercase), while every gate reported CLEAN. The
-// matcher built `\b<Name>\b` from the capitalised name, and `zed` is not `Zed`.
+// Generated text can re-case build-home or host values while still identifying the same
+// machine. One shared rule (lit_ere) feeds the scan, source-leaker selection and scrub.
 //
 // What makes it worth a permanent guard is that ONE rule (lit_ere) feeds THREE legs,
 // so a single blind spot produced three independent-looking proofs of cleanliness:
@@ -17,10 +16,8 @@
 // check exit codes and output, rather than grepping the source for a flag. A
 // flag-grep would pass against a rewrite that reintroduced the hole by another route.
 //
-// NOTE ON THE FIXTURE NAME: never the owner's real name. It is supplied through
-// PAPERCUSP_RELEASE_OWNER_NAME, which is exactly how a box whose git identity is an
-// automation supplies it in production — writing the real name into a test file to
-// search for it would BE the leak, committed to git forever.
+// The fixture HOME is synthetic. Owner name/email are intentionally absent because D-112
+// permits them and removes them from the release identity literal set.
 
 const assert = require('node:assert/strict');
 const { execFileSync, spawnSync } = require('node:child_process');
@@ -34,10 +31,8 @@ const test = require('node:test');
 // race git-sync, which sweeps and commits the whole working tree on a timer.
 const AUDIT = process.env.PROBE_SCRIPT || path.join(__dirname, '..', 'bin', 'audit-release-bundle.py');
 
-// A short, alnum, <6-char name: the class that takes the word-boundary branch, which
-// is the branch that was case-sensitive. "Zed" stands in for the real 3-letter name.
-const OWNER = 'Zed';
-const env = { ...process.env, PAPERCUSP_RELEASE_OWNER_NAME: OWNER };
+const MACHINE_HOME = '/tmp/ZzSyntheticMachineHome';
+const env = { ...process.env, HOME: MACHINE_HOME };
 
 function identityLiteralRow(name) {
   const out = execFileSync('python3', [AUDIT, '--identity-literals'], {
@@ -81,59 +76,55 @@ function auditArchive(files) {
   return result;
 }
 
-test('--identity-literals emits a case-folded pattern for the owner name', () => {
-  const row = identityLiteralRow(OWNER);
-  assert.ok(row, `no --identity-literals row for ${OWNER}`);
+test('--identity-literals emits a case-folded pattern for build HOME', () => {
+  const row = identityLiteralRow(MACHINE_HOME);
+  assert.ok(row, 'no --identity-literals row for synthetic build HOME');
 
   const [, , wordBoundary, sedEre] = row;
-  assert.equal(wordBoundary, '1', 'a short alnum name must take the word-boundary branch');
+  assert.equal(wordBoundary, '0', 'a home path must remain a substring hunt');
   assert.ok(sedEre, 'column 4 (the ready sed -E pattern) must be emitted');
 
   // The whole point: the letters are folded into classes, so every consumer of this
   // pattern is case-insensitive without needing a flag it may not support.
   assert.match(sedEre, /\[zZ\]/, 'expected a folded character class, got a bare literal');
   assert.ok(
-    !sedEre.includes(OWNER),
-    'the pattern still carries the literal cased name — it will miss the lowercase form',
+    !sedEre.includes(MACHINE_HOME),
+    'the pattern still carries the literal-cased path — it will miss a re-cased form',
   );
 });
 
-test('the emitted pattern matches the LEAK shape and not a longer word', () => {
-  const [, , , sedEre] = identityLiteralRow(OWNER);
+test('the emitted pattern matches a re-cased build-home leak', () => {
+  const [, , , sedEre] = identityLiteralRow(MACHINE_HOME);
   const dir = mkfixture({
-    // The exact shape that shipped in the 0.0.17 deb.
-    'leak.sql': '--      explicit follow-on. Surfaced for zed: this defers\n',
-    // The cry-wolf case the original case-sensitivity was chosen to avoid. The word
-    // boundary — not case-sensitivity — is what keeps this clean, which is why
-    // dropping case-sensitivity is safe.
-    'innocent.txt': 'video.zedx and zedediah are not the owner\n',
+    'leak.sql': `-- built from ${MACHINE_HOME.toLowerCase()}/workspace\n`,
+    'innocent.txt': 'video.avi and unrelated text\n',
   });
 
   const hit = spawnSync('grep', ['-nE', sedEre, path.join(dir, 'leak.sql')], { encoding: 'utf8' });
-  assert.equal(hit.status, 0, 'the gate pattern must match the lowercase name');
+  assert.equal(hit.status, 0, 'the gate pattern must match the re-cased HOME');
 
   const miss = spawnSync('grep', ['-nE', sedEre, path.join(dir, 'innocent.txt')], {
     encoding: 'utf8',
   });
-  assert.equal(miss.status, 1, `pattern fired inside a longer word: ${miss.stdout}`);
+  assert.equal(miss.status, 1, `pattern fired on unrelated text: ${miss.stdout}`);
 
   // And it must survive the round trip into the stager's `sed -E` scrub, which is a
   // different ERE engine from grep's and must agree about the folded class.
-  const scrubbed = execFileSync('sed', ['-E', `s/${sedEre}/[owner]/g`, path.join(dir, 'leak.sql')], {
+  const scrubbed = execFileSync('sed', ['-E', `s/${sedEre}/[buildhome]/g`, path.join(dir, 'leak.sql')], {
     encoding: 'utf8',
   });
-  assert.ok(scrubbed.includes('[owner]'), `sed did not redact: ${scrubbed}`);
-  assert.ok(!/\bzed\b/i.test(scrubbed), `name survived the scrub: ${scrubbed}`);
+  assert.ok(scrubbed.includes('[buildhome]'), `sed did not redact: ${scrubbed}`);
+  assert.ok(!scrubbed.toLowerCase().includes(MACHINE_HOME.toLowerCase()), `HOME survived the scrub: ${scrubbed}`);
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('--source-leakers nominates a file whose ONLY hit is lowercase', () => {
+test('--source-leakers nominates a file whose only hit is re-cased build HOME', () => {
   // This is the leg that decides WHICH files the stager rewrites. It failing is what
   // made the leak unreachable: the file was never handed to the scrub at all, so no
   // amount of correctness in the replacement step could have saved it.
   const dir = mkfixture({
-    'packages/thing/notes.sql': '-- Surfaced for zed: a provenance comment\n',
+    'packages/thing/notes.sql': `-- generated under ${MACHINE_HOME.toLowerCase()}/src\n`,
   });
 
   const out = execFileSync('python3', [AUDIT, '--source-leakers', dir, 'packages'], {
@@ -144,16 +135,16 @@ test('--source-leakers nominates a file whose ONLY hit is lowercase', () => {
   assert.match(
     out,
     /packages\/thing\/notes\.sql/,
-    `the lowercase-only leaker was not nominated for scrubbing:\n${out}`,
+    `the re-cased machine leaker was not nominated for scrubbing:\n${out}`,
   );
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('occurrence-aware scrub removes identity but preserves AVI media and opaque hashes', () => {
+test('occurrence-aware scrub removes machine HOME but preserves media and opaque hashes', () => {
   const dir = mkfixture({
     'mixed.js': [
-      'const owner = "zed";',
+      `const buildHome = "${MACHINE_HOME.toLowerCase()}";`,
       'const formats = ["mp4", "webm", "avi", "wmv"];',
       'const chunk = "factor-zED-w_hC.js";',
     ].join('\n'),
@@ -161,12 +152,12 @@ test('occurrence-aware scrub removes identity but preserves AVI media and opaque
   const file = path.join(dir, 'mixed.js');
 
   const before = spawnSync('python3', [AUDIT, '--scan-dir', dir], { encoding: 'utf8', env });
-  assert.equal(before.status, 1, `real identity must fail before scrub:\n${before.stdout}`);
+  assert.equal(before.status, 1, `machine identity must fail before scrub:\n${before.stdout}`);
   const scrub = spawnSync('python3', [AUDIT, '--scrub-text', file], { encoding: 'utf8', env });
   assert.equal(scrub.status, 0, `${scrub.stdout}${scrub.stderr}`);
 
   const body = fs.readFileSync(file, 'utf8');
-  assert.doesNotMatch(body, /owner = "zed"/i, 'authored identity must be redacted');
+  assert.ok(!body.toLowerCase().includes(MACHINE_HOME.toLowerCase()), 'machine HOME must be redacted');
   assert.match(body, /"avi"/, 'AVI media support must survive');
   assert.match(body, /factor-zED-w_hC\.js/, 'opaque Vite reference must survive byte-for-byte');
   const after = spawnSync('python3', [AUDIT, '--scan-dir', dir], { encoding: 'utf8', env });
@@ -174,50 +165,11 @@ test('occurrence-aware scrub removes identity but preserves AVI media and opaque
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('--source-leakers ignores benign-only short-name collisions but keeps a mixed leaker', () => {
-  const dir = mkfixture({
-    'packages/media.js': 'const formats = ["mp4", "webm", "zed", "wmv"];\n',
-    'packages/hash.js': 'import("./factor-zED-w_hC.js");\n',
-    'packages/mixed.js': 'const formats = ["mp4", "webm", "avi", "wmv"]; // owner zed\n',
-  });
-  // The media fixture uses the synthetic name and is therefore intentionally NOT
-  // an AVI exception; only the opaque hash is generic. The mixed file must remain.
-  const out = execFileSync('python3', [AUDIT, '--source-leakers', dir, 'packages'], {
-    encoding: 'utf8', env,
-  });
-  assert.doesNotMatch(out, /hash\.js/, `opaque hash was wrongly nominated:\n${out}`);
-  assert.match(out, /media\.js/, 'a non-AVI quoted owner token is still identity');
-  assert.match(out, /mixed\.js/, 'a genuine prose occurrence must keep a mixed file nominated');
-  fs.rmSync(dir, { recursive: true, force: true });
-});
-
-test('opaque asset fingerprints and binary bytes do not convict a short owner name', () => {
+test('archive scanning convicts a re-cased build-home literal', () => {
   const result = auditArchive({
-    // zED-w_hC is an eight-character Vite fingerprint. It happens to contain the
-    // whole-word case-folded owner token, but carries no semantic identity.
-    'apps/operator-vite/dist/assets/factor-zED-w_hC.js': 'export const factor = 1;\n',
-    // The old tar-stream pass forced binary-as-text and convicted this chance hit.
-    'apps/operator-vite/dist/assets/random.bin': Buffer.from([0, 122, 69, 100, 0]),
+    'apps/operator-vite/dist/assets/provenance.js':
+      `export const buildRoot = "${MACHINE_HOME.toLowerCase()}/workspace";\n`,
   });
-  assert.equal(
-    result.status,
-    0,
-    `hash/binary noise must not block a release:\n${result.stdout}\n${result.stderr}`,
-  );
-});
-
-test('semantic owner paths and textual owner mentions remain release-blocking controls', () => {
-  const pathLeak = auditArchive({
-    // Only the opaque suffix is removed. The semantic stem remains searchable.
-    'apps/operator-vite/dist/assets/Zed-abcdefgh.js': 'export const clean = true;\n',
-  });
-  assert.equal(pathLeak.status, 1, `semantic owner path escaped:\n${pathLeak.stdout}`);
-  assert.match(pathLeak.stdout, /Zed-abcdefgh\.js/);
-
-  const textLeak = auditArchive({
-    'apps/operator-vite/dist/assets/factor-abcdefgh.js':
-      '-- Surfaced for zed: this is genuine authored text, not random bytes\n',
-  });
-  assert.equal(textLeak.status, 1, `text owner mention escaped:\n${textLeak.stdout}`);
-  assert.match(textLeak.stdout, /IN FILE CONTENT/);
+  assert.equal(result.status, 1, `machine HOME escaped archive scan:\n${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /IN FILE CONTENT|build-home-path/);
 });

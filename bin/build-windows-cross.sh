@@ -729,7 +729,7 @@ exclusive — see the _WIN_CRT_STATIC comment above)."
   _audit_rc=$?
   set -e
   if [[ $_audit_rc -eq 2 ]]; then
-    fail "[$role] identity audit COULD NOT CHECK — it did NOT find a leak. Almost always: no owner-name literal resolved, because git user.name is unset or belongs to an automation. Export PAPERCUSP_RELEASE_OWNER_NAME (and PAPERCUSP_RELEASE_OWNER_EMAIL; both take a comma-separated list) and re-run. Read at run time — never write either into a file."
+    fail "[$role] identity audit COULD NOT CHECK — it did NOT find a leak. Inspect the preceding coverage error (missing tool, unreadable archive, or empty/missing scan target), fix it, and re-run."
   elif [[ $_audit_rc -ne 0 ]]; then
     fail "[$role] assembled Windows payload carries sensitive identity (see scan above) — refusing to package a leaky installer"
   fi

@@ -718,7 +718,7 @@ python3 "$HERE/audit-release-bundle.py" --scan-artifact "${PROV_ARTIFACTS[@]}"
 _artifact_rc=$?
 set -e
 if [[ $_artifact_rc -eq 2 ]]; then
-  fail "finished-artifact identity audit COULD NOT CHECK — it did NOT find a leak. Either no owner-name literal resolved (export PAPERCUSP_RELEASE_OWNER_NAME), or a container could not be expanded (7z missing / unreadable dmg). Refusing to publish bytes nobody read."
+  fail "finished-artifact identity audit COULD NOT CHECK — it did NOT find a leak. A container could not be expanded or the scan target was unreadable/missing; inspect the preceding coverage error. Refusing to publish bytes nobody read."
 elif [[ $_artifact_rc -ne 0 ]]; then
   fail "finished mac artifact carries sensitive identity (see scan above) — refusing to publish it"
 fi

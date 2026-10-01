@@ -275,37 +275,33 @@ test('each Windows role scans the assembled payload before ISCC packs it', () =>
   );
 });
 
-test('source staging runs the owner-name preflight before creating or compressing the archive', () => {
+test('source staging keeps the identity-policy compatibility preflight before archive work', () => {
   const preflightAt = stageSource.indexOf(
     'python3 "$HERE/audit-release-bundle.py" --owner-preflight',
   );
   const outputAt = stageSource.indexOf('OUT_TMP="$(mktemp "${OUT}.tmp.XXXXXX")"');
   const tarAt = stageSource.indexOf('"$TAR_BIN" --numeric-owner');
 
-  assert.ok(preflightAt >= 0, 'stage-source-tree.sh must invoke --owner-preflight');
+  assert.ok(preflightAt >= 0, 'stage-source-tree.sh must retain the compatibility preflight');
   assert.ok(outputAt >= 0, 'stage-source-tree.sh must still create its temporary archive');
   assert.ok(tarAt >= 0, 'stage-source-tree.sh must still invoke the archive producer');
-  assert.ok(preflightAt < outputAt, 'owner preflight must run before OUT_TMP is created');
-  assert.ok(preflightAt < tarAt, 'owner preflight must run before tar/zstd archive work');
+  assert.ok(preflightAt < outputAt, 'identity preflight must run before OUT_TMP is created');
+  assert.ok(preflightAt < tarAt, 'identity preflight must run before tar/zstd archive work');
 });
 
-test('the Linux local release entrypoint runs owner-name preflight before sidecar assembly', () => {
+test('the Linux local release entrypoint keeps the identity preflight before sidecar assembly', () => {
   const preflightAt = linuxScript.indexOf(
     'python3 "$HERE/audit-release-bundle.py" --owner-preflight',
   );
   const sidecarAt = linuxScript.indexOf('bash "$ROOT/bin/build-desktop-sidecar.sh"');
 
-  assert.ok(preflightAt >= 0, 'build-linux-local.sh must invoke --owner-preflight');
+  assert.ok(preflightAt >= 0, 'build-linux-local.sh must retain --owner-preflight compatibility');
   assert.ok(sidecarAt >= 0, 'build-linux-local.sh must retain sidecar assembly');
   assert.ok(
     preflightAt < sidecarAt,
-    'Linux must reject a missing owner assertion before sidecar assembly starts; the shared stage guard is too late',
+    'Linux must keep the compatibility boundary before sidecar assembly starts',
   );
-  assert.match(
-    linuxScript.slice(0, preflightAt),
-    /PAPERCUSP_RELEASE_OWNER_NAME/,
-    'the Linux entrypoint header must document the required runtime-only owner-name contract',
-  );
+  assert.match(linuxScript.slice(0, preflightAt), /D-112/, 'the entrypoint must document the machine-only policy');
 });
 
 test('the Linux local release entrypoint restores Cargo from CARGO_HOME before build work', () => {
@@ -316,7 +312,7 @@ test('the Linux local release entrypoint restores Cargo from CARGO_HOME before b
   const sidecarAt = linuxScript.indexOf('bash "$ROOT/bin/build-desktop-sidecar.sh"');
   const metadataAt = linuxScript.indexOf('cargo metadata --no-deps --format-version 1');
 
-  assert.ok(cargoGuardAt > preflightAt, 'Cargo resolution must preserve owner-preflight ordering');
+  assert.ok(cargoGuardAt > preflightAt, 'Cargo resolution must preserve identity-preflight ordering');
   assert.ok(sidecarAt > cargoGuardAt, 'Cargo must fail closed before sidecar assembly starts');
   assert.ok(metadataAt > cargoGuardAt, 'Cargo must be resolved before parent target discovery');
   const guard = linuxScript.slice(cargoGuardAt, sidecarAt);
@@ -399,7 +395,7 @@ test('the Linux local release entrypoint self-snapshots before long-running work
 
   assert.ok(snapshotAt >= 0, 'build-linux-local.sh must declare its immutable self-snapshot guard');
   assert.ok(reexecAt >= 0, 'build-linux-local.sh must re-exec the private snapshot');
-  assert.ok(preflightAt >= 0, 'build-linux-local.sh must retain the owner preflight');
+  assert.ok(preflightAt >= 0, 'build-linux-local.sh must retain the identity compatibility preflight');
   assert.ok(
     reexecAt < preflightAt,
     'the immutable re-exec must happen before any long-running release work can observe a live-tree rewrite',
@@ -495,22 +491,22 @@ test('the Linux AppImage producer removes Tauri intermediates before audited pac
   );
 });
 
-test('the Linux AppImage producer preflights owner identity before toolchain work', () => {
+test('the Linux AppImage producer keeps the identity-policy preflight before toolchain work', () => {
   const preflightAt = appimageScript.indexOf('python3 "$AUDIT_PY" --owner-preflight');
   const metadataAt = appimageScript.indexOf('cargo metadata --no-deps --format-version 1');
   const tauriAt = appimageScript.indexOf(
     'npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles appimage',
   );
 
-  assert.ok(preflightAt >= 0, 'build-appimage.sh must fail fast on a missing owner-name assertion');
+  assert.ok(preflightAt >= 0, 'build-appimage.sh must retain the shared compatibility preflight');
   assert.ok(metadataAt >= 0, 'build-appimage.sh must retain Cargo target discovery');
   assert.ok(tauriAt >= 0, 'build-appimage.sh must retain the Tauri AppDir producer');
-  assert.ok(preflightAt < metadataAt, 'owner-name preflight must precede Cargo metadata/toolchain work');
-  assert.ok(preflightAt < tauriAt, 'owner-name preflight must precede Tauri packaging');
+  assert.ok(preflightAt < metadataAt, 'identity preflight must precede Cargo metadata/toolchain work');
+  assert.ok(preflightAt < tauriAt, 'identity preflight must precede Tauri packaging');
   assert.match(
     appimageScript.slice(preflightAt, metadataAt),
-    /owner-name preflight failed.*AppImage build/i,
-    'the direct AppImage failure must identify the early owner-name boundary',
+    /identity-policy preflight failed.*AppImage build/i,
+    'the direct AppImage failure must identify the shared policy boundary',
   );
 });
 
@@ -547,7 +543,7 @@ test('the Linux local release entrypoint pins one immutable sidecar snapshot thr
   );
 });
 
-test('owner preflight fails closed for an automation Git identity without an asserted owner name', () => {
+test('owner-preflight compatibility accepts missing or asserted owner identity under D-112', () => {
   const env = { ...process.env,
     GIT_CONFIG_COUNT: '2',
     GIT_CONFIG_KEY_0: 'user.name',
@@ -566,10 +562,10 @@ test('owner preflight fails closed for an automation Git identity without an ass
   });
   assert.equal(
     missing.status,
-    2,
-    `automation identity without an owner assertion must refuse staging:\n${missing.stdout}\n${missing.stderr}`,
+    0,
+    `owner identity is no longer required:\n${missing.stdout}\n${missing.stderr}`,
   );
-  assert.match(`${missing.stdout}\n${missing.stderr}`, /no owner-name literal resolved/i);
+  assert.match(`${missing.stdout}\n${missing.stderr}`, /not required.*machine-only policy/i);
 
   const asserted = spawnSync('python3', [audit, '--owner-preflight'], {
     cwd: root,
@@ -579,7 +575,7 @@ test('owner preflight fails closed for an automation Git identity without an ass
   assert.equal(
     asserted.status,
     0,
-    `an explicit owner assertion must satisfy the preflight:\n${asserted.stdout}\n${asserted.stderr}`,
+    `an explicit owner value remains compatible:\n${asserted.stdout}\n${asserted.stderr}`,
   );
 });
 

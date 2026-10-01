@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# release-identity-env.sh — give a desktop release cut the owner's FULL identity literals.
+# release-identity-env.sh — compatibility loader for historical owner identity inputs.
 #
 # WHY THIS EXISTS (WI-10004349)
 # -----------------------------
-# The finished-byte identity audit (audit-release-bundle.py) and the sidecar docs scrub
-# redact exactly the owner literals they are handed in PAPERCUSP_RELEASE_OWNER_NAME and
-# PAPERCUSP_RELEASE_OWNER_EMAIL, and nothing else. A desktop cut got those two values
-# ONLY from whoever launched it: release:cut takes them as tool arguments, and a manual
-# `bin/release-local.sh` run inherits whatever the invoking shell exported.
+# Older finished-byte audit and source-scrub paths treated owner name/email as release
+# leaks and consumed PAPERCUSP_RELEASE_OWNER_NAME / _EMAIL. D-112 deliberately permits
+# those values across the release bundle: a full-history seed legitimately carries
+# authorship, while machine user/home/hostname and credentials remain forbidden.
 #
 # Measured 2026-09-30: every release:cut call over the previous five days passed a single
 # hand-typed name and, with one exception, no email. The owner-provisioned
@@ -23,10 +22,9 @@
 #   uses for the record/gate CLIs): for a redaction list more literals are strictly safer,
 #   and a partial explicit value must never hide the rest. Values are parsed with Node's
 #   util.parseEnv, the same parser owner-identity-env.ts uses; the file is never executed.
-# papercusp_require_release_owner_identity  refuses (return 2) unless BOTH a name and an
-#   email literal resolved. The email class has no shape rule in the audit, so an absent
-#   email means ZERO email coverage behind a CLEAN verdict; a release cut must not proceed
-#   on that.
+# papercusp_require_release_owner_identity  remains as a successful compatibility
+#   preflight so older release-local.sh callers do not break. It intentionally requires
+#   nothing under D-112's machine-only policy.
 #
 # It prints counts only. Owner literals are never echoed, logged or written to a file:
 # runtime-only is the rule that keeps the audit from manufacturing the leak it hunts.
@@ -100,16 +98,8 @@ papercusp_union_release_identity_env() {
 }
 
 papercusp_require_release_owner_identity() {
-  local name="${PAPERCUSP_RELEASE_OWNER_NAME:-}" email="${PAPERCUSP_RELEASE_OWNER_EMAIL:-}"
-  if [[ -z "${name//[[:space:],;]/}" ]]; then
-    echo "ERROR: release cut requires PAPERCUSP_RELEASE_OWNER_NAME at run time before any seed/build work." >&2
-    echo "       Provide it in $(papercusp_release_identity_env_path) or pass it through release:cut; never write it into a tracked file." >&2
-    return 2
-  fi
-  if [[ -z "${email//[[:space:],;]/}" ]]; then
-    echo "ERROR: release cut requires PAPERCUSP_RELEASE_OWNER_EMAIL at run time before any seed/build work (WI-10004349)." >&2
-    echo "       Without it the identity audit hunts NO owner address and still prints CLEAN." >&2
-    echo "       Provide it in $(papercusp_release_identity_env_path) or pass ownerEmail through release:cut." >&2
-    return 2
-  fi
+  # Compatibility surface only. Do not delete the function: release-local.sh and older
+  # cutters call it before their first write. Owner values may still be unioned above for
+  # callers that use them as metadata, but their absence is not a privacy failure.
+  return 0
 }

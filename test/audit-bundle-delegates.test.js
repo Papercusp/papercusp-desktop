@@ -27,10 +27,9 @@ const WRAPPER = path.join(root, 'bin/audit-bundle.sh');
 const AUDIT = path.join(root, 'bin/audit-release-bundle.py');
 const RELEASE_LOCAL = path.join(root, 'bin/release-local.sh');
 
-// Synthetic, per release-identity-scan-archives.test.js: the certify path refuses
-// (exit 2) without an asserted owner-name literal, and a real identity in tracked
-// source is the exact leak this gate exists to prevent.
-const AUDIT_ENV = { ...process.env, PAPERCUSP_RELEASE_OWNER_NAME: 'Zzsynthetic Gateowner' };
+// D-112 makes owner name/email legitimate release content; the canonical gate needs
+// no owner assertion to certify its machine-identity and credential checks.
+const AUDIT_ENV = { ...process.env };
 
 // Shaped like a real project key (the gate's regex is phc_ + 30+ [A-Za-z0-9_]) but
 // on no allowlist. Built at runtime so no key-shaped literal sits in tracked source.

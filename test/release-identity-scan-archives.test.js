@@ -32,26 +32,9 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const AUDIT = path.join(root, 'bin/audit-release-bundle.py');
 
-/**
- * A SYNTHETIC owner name, asserted for every AUDIT invocation below.
- *
- * `--scan-dir` REFUSES TO CERTIFY (exit 2) unless an owner-name literal is
- * ASSERTED via this env var: `has_owner_name_literal` deliberately ignores git,
- * because git names the COMMITTER and on an automated build box that is not the
- * owner. The refusal is correct and is a PRECONDITION of the certify path — it
- * has nothing to do with the archive-traversal behaviour measured here, so the
- * value is supplied rather than inherited from whatever identity the box carries.
- *
- * Applied to `--identity-literals` TOO, not only `--scan-dir`: an explicit value
- * REPLACES the whole `build-git-name` class rather than adding to it, so a bare
- * enumeration and an asserted scan would disagree about which literals exist —
- * and `identityLiteral()` below picks the very value the scan is expected to hunt.
- *
- * Must stay SYNTHETIC: a real identity in tracked source is the exact leak this
- * gate exists to prevent.
- */
 const SYNTHETIC_OWNER = 'Zzsynthetic Gateowner';
-const AUDIT_ENV = { ...process.env, PAPERCUSP_RELEASE_OWNER_NAME: SYNTHETIC_OWNER };
+const SYNTHETIC_OWNER_EMAIL = 'gateowner@example.invalid';
+const AUDIT_ENV = { ...process.env };
 
 /** A real high-entropy identity literal, from the gate's OWN source of truth. */
 function identityLiteral() {
@@ -201,11 +184,15 @@ function auditSourceBundle(name, files, tarOptions = [
   return result;
 }
 
-test('tar-header ownership findings point at the archive producer, not the staging allowlist', () => {
+test('tar-header ownership findings point at the archive producer, not the staging allowlist', (t) => {
+  const buildUser = os.userInfo().username;
+  if (!gateLiterals().includes(buildUser)) {
+    return t.skip('this host uses a generic login that is intentionally not an identity literal');
+  }
   const result = auditSourceBundle(
     'header-remediation',
     { 'ok.txt': 'clean payload\n' },
-    [`--owner=${SYNTHETIC_OWNER}`, `--group=${SYNTHETIC_OWNER}`],
+    [`--owner=${buildUser}`, `--group=${buildUser}`],
   );
   assert.equal(
     result.status,
@@ -468,7 +455,7 @@ test('CodeResources treats a short-name collision inside fixed-width signature d
   }
 });
 
-test('THE FALSIFIER: authored owner identity in CodeResources still fails', () => {
+test('D-112 allows authored owner name/email in shipped bytes', () => {
   const dir = fixture('code-resources-authored');
   try {
     const signatureDir = path.join(dir, 'bundle/Papercusp.app/Contents/_CodeSignature');
@@ -479,13 +466,42 @@ test('THE FALSIFIER: authored owner identity in CodeResources still fails', () =
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<plist><dict>',
         '<key>build-owner</key><string>Zed</string>',
+        `<key>owner-email</key><string>${SYNTHETIC_OWNER_EMAIL}</string>`,
         '<key>hash2</key><data>hUSGV/Sl+8CAOep3WxHcDhWiRQi1iEP2rDbnpR/ZEDA=</data>',
         '</dict></plist>',
       ].join('\n'),
     );
-    const r = scanDir(path.join(dir, 'bundle'), { PAPERCUSP_RELEASE_OWNER_NAME: 'Zed' });
-    assert.equal(r.status, 1, `authored CodeResources identity must remain blocking:\n${r.stdout}`);
-    assert.match(r.stdout, /CodeResources/);
+    const r = scanDir(path.join(dir, 'bundle'), {
+      PAPERCUSP_RELEASE_OWNER_NAME: 'Zed',
+      PAPERCUSP_RELEASE_OWNER_EMAIL: SYNTHETIC_OWNER_EMAIL,
+    });
+    assert.equal(r.status, 0, `owner authorship is legitimate release content under D-112:\n${r.stdout}${r.stderr}`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('D-112 still rejects a resolved build-machine literal', (t) => {
+  const probe = spawnSync('python3', ['-c', [
+    'import importlib.util, json, sys',
+    's = importlib.util.spec_from_file_location("arb", sys.argv[1])',
+    'm = importlib.util.module_from_spec(s); s.loader.exec_module(m)',
+    'v = m.identity_literals()',
+    'print(json.dumps([v[k] for k in ("build-home-path", "build-user-name", "build-hostname") if k in v]))',
+  ].join('\n'), AUDIT], { encoding: 'utf8', env: AUDIT_ENV });
+  assert.equal(probe.status, 0, probe.stderr);
+  const [machineLiteral] = JSON.parse(probe.stdout);
+  if (!machineLiteral) return t.skip('this host resolves no personal machine literal');
+
+  const dir = fixture('d112-machine-only');
+  try {
+    fs.writeFileSync(path.join(dir, 'bundle/machine.txt'), `built at ${machineLiteral}\n`);
+    const r = scanDir(path.join(dir, 'bundle'), {
+      PAPERCUSP_RELEASE_OWNER_NAME: SYNTHETIC_OWNER,
+      PAPERCUSP_RELEASE_OWNER_EMAIL: SYNTHETIC_OWNER_EMAIL,
+    });
+    assert.equal(r.status, 1, `machine identity must remain blocking under D-112:\n${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /machine\.txt/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

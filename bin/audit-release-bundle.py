@@ -15,19 +15,21 @@ is measuring the wrong object.
 
 WHY IT MUST SCAN CONTENT, NOT JUST PATHS
 ----------------------------------------
-The mac Server bundle leaked the owner's home path in the CONTENT of 7 files and
-an email in 1 — with nothing in the filenames and no credentials anywhere. A
-path-only scan passes that bundle. Absolute build paths get baked into vendored
+The mac Server bundle leaked the owner's home path in the CONTENT of 7 files —
+with nothing in the filenames and no credentials anywhere. A path-only scan
+passes that bundle. Absolute build paths get baked into vendored
 trees constantly (.bin shims, sourcemaps, .package-lock.json, compile caches), so
 node_modules is exactly where machine identity hides — it is scanned, not skipped.
 
 WHY IDENTITY IS A SET OF LITERALS
 ---------------------------------
-"Personal information" here means THIS BUILD BOX: its unix user, its home path,
-its hostname, its git identity. Those are literal strings, resolved at run time,
-so a build on anyone's machine scrubs THAT machine. Deliberately NOT a generic
-email/name regex: that matches a maintainer address in every vendor package.json,
-and a gate that cries wolf on every build is a gate someone switches off.
+"Build identity" here means THIS BUILD BOX: its unix user, its home path and its
+hostname. Those are literal strings, resolved at run time, so a build on anyone's
+machine scrubs THAT machine. D-112 deliberately excludes owner names and email
+addresses from this policy: full release history legitimately carries authorship,
+and treating authorship as a build-host leak made the required seeded release
+impossible. Credential patterns and the retained cross-box denylist remain separate
+fail-closed checks below.
 
 PERFORMANCE — why this shells out instead of using Python's tarfile
 -------------------------------------------------------------------
@@ -560,8 +562,6 @@ REDACTION_BY_KEY = {
     "build-user-name": "builduser",
     "build-home-path": "/home/builduser",
     "build-hostname": "buildhost",
-    "build-git-email": "owner@example.invalid",
-    "build-git-name": "owner",
     "known-sensitive:mac-vm-user": "macuser",
     "known-sensitive:mac-vm-login": "maclogin",
     "known-sensitive:linux-build-user": "builduser",
@@ -595,173 +595,9 @@ def _drop_placeholders(lits):
 KNOWN_SENSITIVE_IDENTITIES = _drop_placeholders(KNOWN_SENSITIVE_IDENTITIES)
 
 
-# ── The owner's NAME when git can no longer supply it ────────────────────────
-# DELIBERATELY the same variable the TS site gate reads
-# (apps/operator/lib/release/release-content-scrub.ts, OWNER_NAME_ENV): two gates
-# guarding one release must not need two different answers to the same question.
-# Read at run time and never stored — writing the owner's name into a source file
-# so we can search for it would BE the leak, committed to git forever.
-OWNER_NAME_ENV = "PAPERCUSP_RELEASE_OWNER_NAME"
-
-# The owner's EMAIL, same contract as the name. Needed because — unlike the TS scrub,
-# which catches any address by SHAPE via IDENTITY_PATTERNS — this audit has no shape rule
-# for email: `build-git-email` is its ONLY email detection. So dropping an automation
-# address below without offering this would silently zero out the email class entirely.
-OWNER_EMAIL_ENV = "PAPERCUSP_RELEASE_OWNER_EMAIL"
-
-# Git identities belonging to AUTOMATION rather than to a person. Mirrors
-# AUTOMATION_NAME_RE in release-content-scrub.ts — keep the two in step.
-AUTOMATION_NAME_RE = re.compile(
-    r"(^|[-_ ])(agent|bot|ci|runner|automation|service|actions|daemon|noreply)([-_ ]|$)|\[bot\]",
-    re.I,
-)
-
-
-def looks_like_automation_identity(value):
-    """True when a git identity is a machine's, not a person's."""
-    return bool(AUTOMATION_NAME_RE.search(value.strip()))
-
-
-# An ADDRESS needs its own test, and finding that out cost a wrong fix: AUTOMATION_NAME_RE
-# anchors on [-_ ] boundaries, but in a `<user>@users.noreply.github.com` form the
-# separators are DOTS, so `noreply` never matched and the address sailed through unchanged.
-# (The first attempt at this fix shipped that regex, and the scan still exited 1.)
-#
-# Deliberately NOT solved by adding `.`/`@` to that name regex: widening it would start
-# eating real people (`alice.service@…` would match `service` between a dot and an at-sign)
-# and a false DROP on the email class is a silent loss of coverage — the failure direction
-# this whole item is about. So: a targeted test for the actual conventions automation
-# addresses use, leaving human-name matching untouched.
-AUTOMATION_EMAIL_RE = re.compile(
-    r"(^|[-_.+])(no-?reply|bot|ci|build|actions|automation|daemon|jenkins|dependabot|renovate)([-_.+]|@)"
-    r"|\bnoreply\b"
-    r"|users\.noreply\.github\.com$"
-    r"|\[bot\]",
-    re.I,
-)
-
-
-def looks_like_automation_email(value):
-    """True when an address belongs to automation rather than to the human owner.
-
-    A bot's public noreply address is not a private identity: it is in every commit on the
-    public repo by construction, so redacting it protects nobody while guaranteeing a
-    permanent false positive wherever the project legitimately hardcodes it.
-    """
-    return bool(AUTOMATION_EMAIL_RE.search(value.strip()))
-
-
-def explicit_owner_values(env_var):
-    """The owner literals ASSERTED for this run, parsed from one env var. ONE rule.
-
-    SEPARATOR IS COMMA/SEMICOLON ONLY — deliberately NOT whitespace. A first draft split on
-    \\s too and tore "Jane Doe" into "Jane" + "Doe", which is wrong twice: it never hunts
-    the full name, and it injects a bare surname as its own low-entropy literal that then
-    matches innocent words across the bundle. Names contain spaces; addresses do not, so
-    nothing is lost by dropping whitespace as a separator.
-    """
-    raw = os.environ.get(env_var, "")
-    return list(dict.fromkeys(v.strip() for v in re.split(r"[,;]", raw) if v.strip()))
-
-
-def has_owner_name_literal(lits):
-    """Can this literal set actually detect the owner's NAME?
-
-    The name is the one identity class with NO SHAPE to fall back on. A home path or
-    an email is still caught structurally even when no literal knows it; a bare first
-    name is only ever a literal. So when this is false the scan cannot see the name at
-    all, and a CLEAN verdict degrades to "I looked for nothing" while still reading as
-    proof. Callers that SHIP must fail closed on false.
-
-    ⚠ REQUIRES THE **EXPLICIT** VALUE, and deliberately ignores anything git supplied.
-    An earlier version of this fix accepted a git-derived name so long as it did not match
-    looks_like_automation_identity(). That is a DENYLIST, and a denylist fails OPEN for
-    every identity nobody thought of — which stopped being hypothetical within the hour:
-    this box's user.name changed from one automation identity to a differently-spelled one
-    ("…-agent" → "…-buildbox"), the pattern list did not carry the new token, the bot read
-    as a person, and this function returned True again while the scan hunted a machine's
-    name. The same defect, one level up, with the fix already in place.
-
-    git config names the COMMITTER. On an automated box that is by construction not the
-    owner, and no pattern list can reliably separate the two. So the gate stops guessing:
-    the owner identity must be ASSERTED by whoever runs the release. The heuristic is still
-    worth keeping — it stops a bot's name being hunted uselessly and keeps redaction honest
-    — but it is a convenience, never the thing a CLEAN verdict is allowed to rest on.
-    """
-    return bool(explicit_owner_values(OWNER_NAME_ENV))
-
-
-def _owner_values(lits, base):
-    """Every non-empty literal for one owner class — `base`, `base-2`, `base-3`, ...
-
-    The owner side is PLURAL because a person is: measured on this repo's own history,
-    three distinct non-automation addresses match the owner's name pattern. A single-value
-    argument would let one invocation hunt one of them and still print an unqualified
-    CLEAN — certifying the class while leaving the rest unhunted, which is the very shape
-    of defect this file is being hardened against. The alternative (re-run the audit once
-    per address) is an unenforceable process convention, and the next person will not know
-    to follow it. Put it in the data model instead.
-    """
-    out = []
-    for k, v in lits.items():
-        if k == base or k.startswith(base + "-"):
-            v = str(v).strip()
-            if v:
-                out.append(v)
-    return out
-
-
 def redaction_key(key):
-    """REDACTION_BY_KEY lookup key, with the plural `-2`, `-3` suffix normalised off.
-
-    All of one owner's addresses share a single placeholder ON PURPOSE — they are one
-    identity, and the fallback's warning about distinct identities collapsing to the same
-    token does not apply within a class.
-    """
+    """Return the stable redaction key for a literal emitted by this gate."""
     return re.sub(r"-\d+$", "", key)
-
-
-def identity_coverage_gaps(lits):
-    """Identity classes a CLEAN verdict from this run does NOT cover.
-
-    A pass must never claim more than it checked. The NAME class is fail-closed at both
-    entry points, so reaching CLEAN proves the name was hunted. The EMAIL class is not:
-    this audit has no shape-based email rule (unlike the TS scrub's IDENTITY_PATTERNS),
-    so if no email literal resolves, email coverage is simply ZERO and every downstream
-    reader still sees an unqualified "✓ CLEAN".
-
-    That silence is the exact mechanism of EI-20583328178472869 — the verdict outliving
-    the evidence it was based on. This file already argues the case for coverage of FILES
-    ("a scan that inspects nothing is indistinguishable from a scan that found nothing");
-    it had simply never applied it to the CLASSES. Call it out IN the verdict.
-
-    Returns a list of human-readable gaps; empty means the verdict is unqualified.
-    """
-    gaps = []
-    # Counts ASSERTED addresses only, for the same reason has_owner_name_literal does: a
-    # git-derived address identifies the committer, and on this box that has twice been an
-    # automation. Counting it would inflate the coverage claim with a value nobody vouched.
-    emails = explicit_owner_values(OWNER_EMAIL_ENV)
-    if not emails:
-        gaps.append(
-            f"EMAIL not covered — no owner-email literal resolved "
-            f"(git user.email is unset or an automation address). "
-            f"Set {OWNER_EMAIL_ENV} to hunt it (accepts a comma-separated list)."
-        )
-    else:
-        # State the COUNT, not just "covered". A person can have several addresses, and
-        # "email: covered" over one of three reads as a full pass to anyone downstream.
-        gaps.append(
-            f"EMAIL covered for {len(emails)} address(es) — a CLEAN result says nothing "
-            f"about any owner address NOT supplied via {OWNER_EMAIL_ENV}."
-        )
-    return gaps
-
-
-def print_coverage_gaps(gaps, indent="    "):
-    """Print coverage caveats beside a CLEAN verdict, or nothing when there are none."""
-    for g in gaps:
-        print(f"{indent}⚠ PARTIAL COVERAGE: {g}")
 
 
 #: Unix logins that identify NOBODY, so the build box's login is not hunted when it is
@@ -809,79 +645,18 @@ def identity_literals():
     neutral_host = os.environ.get("PAPERCUSP_SEED_BUILD_HOSTNAME") or "papercusp-build"
     if host and host != neutral_host and not host.startswith(("runner", "ci-", "localhost")):
         lits["build-hostname"] = host
-    for key, cfg in (("build-git-email", "user.email"), ("build-git-name", "user.name")):
-        try:
-            v = subprocess.run(["git", "config", "--get", cfg], capture_output=True,
-                               text=True, timeout=5).stdout.strip()
-            if not v:
-                continue
-            # EI-20583328178472869: `user.name` became the git-sync bot, so this gate
-            # spent every build hunting a bot's name — useless — while the owner's real
-            # name went unhunted and the bundle still printed CLEAN. Recording the bot
-            # would ALSO leave has_owner_name_literal() true, so the blindness would stay
-            # invisible. Dropping it makes the gap loud, and main() fails closed on it.
-            if key == "build-git-name" and looks_like_automation_identity(v):
-                continue
-            # The EMAIL class, same rule, and it fails the OPPOSITE way — which is how it
-            # was found. This box's user.email is the git-sync bot's noreply address, and
-            # that exact string is ALSO a hardcoded public constant in the project's own
-            # source (run-git-sync.ts's committer identity), which vite bundles into
-            # apps/operator-vite/dist. So the "private box identity" oracle collided with a
-            # deliberate public constant and the gate could never pass: a permanent FALSE
-            # POSITIVE, where the name class was a permanent FALSE NEGATIVE. One cause —
-            # the box's git identity repointed at shared automation — two opposite failures.
-            #
-            # Redacting a bot's public noreply address protects nobody: it is in every
-            # commit on the public repo by construction. Do NOT "fix" this by allowlisting
-            # the address or by excluding the dist directory it happened to surface in —
-            # the constant lives in SOURCE and will reappear in any other build output.
-            if key == "build-git-email" and looks_like_automation_email(v):
-                continue
-            lits[key] = v
-        except Exception:
-            pass
-    # Explicit answers outrank whatever the box guesses (CI, a container, or a box whose
-    # git identity an automation has taken over). Read at run time, never stored.
-    # BOTH accept a LIST. A person has more than one address, and often more than one
-    # spelling of their name; a single-value argument silently covers the first and
-    # certifies the class anyway.
-    #
-    for env_var, base in ((OWNER_NAME_ENV, "build-git-name"), (OWNER_EMAIL_ENV, "build-git-email")):
-        values = explicit_owner_values(env_var)
-        if not values:
-            continue
-        # Explicit answers REPLACE the box's guess for that class rather than adding to it
-        # — otherwise a stale git identity would linger beside the supplied truth.
-        for k in [k for k in lits if k == base or k.startswith(base + "-")]:
-            del lits[k]
-        for i, v in enumerate(dict.fromkeys(values)):  # de-dup, order preserved
-            lits[base if i == 0 else f"{base}-{i + 1}"] = v.strip()
     return _drop_placeholders(lits)
 
 
 def owner_preflight():
-    """Fail before expensive staging when the owner name is not asserted.
+    """Compatibility surface retained for producers that still call this early gate.
 
-    The archive audit already refuses to certify a bundle without this literal,
-    but that check runs only after tar/zstd have spent minutes producing the
-    candidate. Keep this as a cheap entrypoint over the same resolver and
-    predicate used by the final audit so the producer can fail before it starts
-    archive work without creating a second identity policy.
+    D-112 makes the release identity policy machine-only. Owner name/email are legitimate
+    release content, so their absence is no longer a reason to refuse staging. Keep the
+    command successful rather than deleting it out from under older producer scripts.
     """
-    lits = identity_literals()
-    if has_owner_name_literal(lits):
-        count = len(explicit_owner_values(OWNER_NAME_ENV))
-        print(f"==> owner-name preflight: {count} explicit owner-name literal(s) resolved")
-        return 0
-
-    print(
-        "✗ REFUSING TO STAGE — no owner-name literal resolved, so the release "
-        "audit cannot detect the owner's name.\n"
-        "  Cause: `git config user.name` is unset or belongs to automation.\n"
-        f"  Fix:   export {OWNER_NAME_ENV}='<the owner's name>' for this build.",
-        file=sys.stderr,
-    )
-    return 2
+    print("==> owner-identity compatibility preflight: not required (D-112 machine-only policy)")
+    return 0
 
 
 #: Literals matched on word boundaries REGARDLESS of length — populated by
@@ -894,13 +669,9 @@ _WORD_BOUNDED_LITERALS = set()
 def needs_word_boundary(lit):
     """A SHORT literal must match as a whole word or it matches half the bundle.
 
-    The owner's git user.name here is literally "Avi" — the exact thing they asked
-    us to keep out of a public build ("my name is avi on this machine"). An earlier
-    cut of this gate skipped any literal under 4 chars, which silently made the
-    owner's own example the ONE identity it could not catch. Substring-matching
-    "Avi" instead would fire on every .avi/AVI/Avicenna in vendored code and get
-    the gate switched off, so short literals match on a word boundary:
-    \\bAvi\\b hits "Avi Weiss", not "video.avi".
+    A short personal build login or retained cross-box alias must still be caught,
+    while ordinary longer words that merely contain it must stay clean. Short
+    alphanumeric literals therefore match on a word boundary.
     """
     return len(lit) < 6 and lit.isalnum()
 
@@ -926,10 +697,8 @@ def case_fold_ere(pat):
 def lit_ere(lit):
     """The ERE this identity literal is searched with (GNU grep supports \\b).
 
-    CASE-INSENSITIVE — and it must be, which cost us a shipped leak to learn
-    (EI-20589264759185712). The owner's name reached the PUBLISHED 0.0.17 Linux
-    deb in lowercase, inside a SQL comment ("Surfaced for avi:"), while this gate
-    read the bundle CLEAN: it was hunting \\bAvi\\b, and `avi` is not `Avi`.
+    CASE-INSENSITIVE — and it must be, because build-user, home and host values can
+    be re-cased by generated text while still identifying the same machine.
 
     Because this ONE rule feeds all three legs — the gate's own scan, the
     --source-leakers set (WHICH files the stager scrubs) and the --identity-literals
@@ -940,7 +709,7 @@ def lit_ere(lit):
 
     The 'it would cry wolf on vendored .avi/AVI' worry that justified case-sensitivity
     is handled by a DIFFERENT mechanism that already exists: is_low_entropy() scopes
-    a bare first name to OUR source via is_vendor(), so node_modules is out of scope
+    a short literal to OUR source via is_vendor(), so node_modules is out of scope
     before case ever matters. Measured over the real non-vendor corpus at the time of
     the fix: 69 files gained, 54 of them carrying genuine identity (test fixtures with
     `username: 'avi'`, `--account avi-storewolf`, the box hostname `avi-dev`), and the
@@ -1254,9 +1023,9 @@ def phase_b_content(bundle, lits):
       • BROAD  — credentials + high-entropy identity, over the WHOLE bundle.
                  A hit in node_modules is real: only a build on this box could
                  have put it there.
-      • NARROW — low-entropy identity (a bare first name), over OUR TEXT SOURCE
-                 ONLY. Vendored dictionaries and binary/compressed bytes are full
-                 of chance three-letter matches that are not our owner.
+      • NARROW — low-entropy machine/cross-box aliases, over OUR TEXT SOURCE ONLY.
+                 Vendored dictionaries and binary/compressed bytes are full of
+                 chance short-token matches that are not machine identity.
     """
     rev = {v: k for k, v in lits.items()}
     benign = " ".join(f"-e {q(b)}" for b in BENIGN_ERE)
@@ -2817,31 +2586,6 @@ def scan_dir(dirs):
 
     lits = identity_literals()
 
-    # ── THE QUERY SET MUST BE PROVEN TOO, NOT JUST THE CORPUS ──────────────────
-    # This function already refuses to call CLEAN on a missing directory, on 0 files,
-    # and on bytes nobody read — three hard-won guards, all asserting that the scan
-    # READ everything. None of them asserts that it KNEW WHAT TO LOOK FOR.
-    #
-    # That is the gap EI-20583328178472869 fell through: git `user.name` became the
-    # git-sync bot, so the owner's bare first name silently left `low` below, and this
-    # backstop then read every byte, matched nothing, and reported CLEAN — passing all
-    # three coverage guards on the way. Full corpus coverage, empty query.
-    #
-    # The name is the ONLY literal with no shape to fall back on (a home path or an
-    # address is still caught structurally), so its absence cannot be recovered
-    # downstream. Same principle as grep_l's "a scan that inspects nothing is
-    # indistinguishable from a scan that found nothing" — applied to the NEEDLES.
-    #
-    # NOTE this runs BEFORE the KNOWN_SENSITIVE_IDENTITIES merge on purpose: that
-    # denylist carries a github handle and VM logins but NO name entry, so merging
-    # first would make a blind scan look equipped.
-    if not has_owner_name_literal(lits):
-        print("\n    ✗ REFUSING TO CERTIFY — no owner-name literal resolved, so this\n"
-              "      backstop cannot hunt the owner's name and CLEAN would be meaningless.\n"
-              f"      Fix: export {OWNER_NAME_ENV}='<the owner's name>' for this build.\n",
-              file=sys.stderr)
-        return 2
-
     lits.update(KNOWN_SENSITIVE_IDENTITIES)
     high = sorted({v for v in lits.values() if not is_low_entropy(v)})
     low = sorted({v for v in lits.values() if is_low_entropy(v)})
@@ -3051,10 +2795,11 @@ def scan_dir(dirs):
     #     if that is possible" resolves to "not yet" rather than "never".
     # Accepts ONLY those two literals, ONLY under a seed corestore path, and
     # NEVER inside an archive member (which we cannot re-read to prove the
-    # negative). Every other identity literal still hard-fails there — a home
-    # path, git email or git name in the seed is a real leak and is NOT covered
-    # by the owner's ruling. Measured on the 0.0.14 seed those three are at ZERO,
-    # so this keeps genuine power instead of blanket-excluding the directory,
+    # negative). Every other retained identity literal still hard-fails there —
+    # a home path, a different machine account/hostname, or a retained cross-box
+    # identifier is NOT covered by the acceptance. Owner name/email are legitimate
+    # release history under D-112 and are not in this literal set at all. This keeps
+    # genuine power instead of blanket-excluding the directory,
     # which is what the "never add an exclude" rule below exists to prevent.
     seed_ok = {lits[k] for k in ("build-hostname", "build-user-name") if k in lits}
     accepted = []
@@ -3161,7 +2906,6 @@ def scan_dir(dirs):
         print("    ✓ CLEAN — no sensitive/build-box identity or credential in the assembled bundle "
               f"({covered:,} file(s), {len(links):,} link target(s), "
               f"{len(archives)} archive(s) expanded and scanned)")
-        print_coverage_gaps(identity_coverage_gaps(lits))
         return 0
     if files:
         print(f"\n    ✗ ASSEMBLED BUNDLE CARRIES SENSITIVE IDENTITY — MUST NOT SHIP "
@@ -4104,7 +3848,7 @@ def source_leakers(argv):
     known-sensitive identity literal, for the stager to redact-overlay at tar time.
 
     Same scoping the gate convicts with, so the stager scrubs exactly the set that
-    would otherwise red the cut: low-entropy literals (a bare first name) are hunted
+    would otherwise red the cut: low-entropy machine/cross-box aliases are hunted
     in OUR source only; high-entropy literals everywhere EXCEPT node_modules — a
     vendored high-entropy hit is a delete-exclude class (build caches, handled by
     --tar-excludes), never something we rewrite inside a third-party package. Paths
@@ -4218,30 +3962,6 @@ def main():
     print(f"==> auditing {os.path.basename(bundle)}")
     print(f"    identity of this build box: {', '.join(sorted(lits)) or '(none resolved)'}")
 
-    # FAIL CLOSED when the owner's NAME cannot be resolved (EI-20583328178472869).
-    #
-    # This audit's whole value is that a CLEAN verdict is EVIDENCE. Without a name
-    # literal it cannot hunt the one identity class with no shape to fall back on, so
-    # "✓ CLEAN" degrades to "I looked for nothing" while still reading as proof to the
-    # human and to the publish script's `|| exit`. That is strictly worse than no gate:
-    # it turns an unverified bundle into an apparently-verified one.
-    #
-    # The KNOWN_SENSITIVE_IDENTITIES denylist below does NOT cover this: it carries the
-    # owner's github handle and some VM logins, but no name entry — so with git blind,
-    # nothing whatsoever hunts the bare first name that `needs_word_boundary` exists for.
-    #
-    # Exit 2 (cannot check), never 1 (found leaks): a caller must be able to tell a blind
-    # gate from a clean one.
-    if not has_owner_name_literal(lits):
-        print(
-            "    ✗ REFUSING TO CERTIFY — no owner-name literal resolved, so this scan\n"
-            "      cannot detect the owner's name in the bundle and a CLEAN verdict would\n"
-            "      be meaningless.\n"
-            f"      Cause: `git config user.name` is unset or belongs to an automation.\n"
-            f"      Fix:   export {OWNER_NAME_ENV}='<the owner's name>' for this build.",
-            file=sys.stderr,
-        )
-        return 2
     # Cross-box blind-spot backstop (WI-4419): hunt the KNOWN leaked identities on
     # EVERY build, not just the ones belonging to the box running this scan.
     lits.update(KNOWN_SENSITIVE_IDENTITIES)
@@ -4256,7 +3976,6 @@ def main():
 
     if not path_hits and not content_hits:
         print("    ✓ CLEAN — no forbidden paths, no build-box identity, no credentials")
-        print_coverage_gaps(identity_coverage_gaps(lits))
         return 0
 
     print(f"\n    ✗ THIS BUNDLE MUST NOT SHIP\n")

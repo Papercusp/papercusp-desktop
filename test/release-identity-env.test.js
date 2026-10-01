@@ -1,4 +1,5 @@
-// WI-10004349 — the desktop release cut must certify against the owner's FULL identity.
+// WI-10004349 / D-112 — preserve the historical owner-identity loader without making
+// owner name/email a release privacy requirement.
 //
 // 0.0.25 (published) and 0.0.26 (signed) shipped six docs files carrying an owner name
 // unscrubbed. release:cut had been handed ONE hand-typed name and no email, while the
@@ -6,11 +7,10 @@
 // nothing in the cut path read that file, so the partial caller value silently won and the
 // identity audit printed "✓ CLEAN" with only a PARTIAL COVERAGE caveat.
 //
-// bin/lib/release-identity-env.sh closes that: release-local.sh unions the file into the
-// environment, then refuses unless a name AND an email resolved. These tests run the real
-// library in bash against synthetic identity files, never the developer's own: HOME and
-// PAPERCUSP_RELEASE_IDENTITY_ENV are always pointed at a fixture, so the verdict cannot
-// depend on whose box runs it.
+// The loader still unions configured values for compatibility and never executes the file.
+// D-112 changes only the policy boundary: the require helper now accepts missing owner
+// values because the enforced release-leak set is build user/home/hostname plus credentials.
+// These tests run the real library against synthetic fixtures, never the developer's own.
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -116,25 +116,35 @@ test('a missing file is not an error by itself: the environment may carry the id
   assert.match(r.stderr, /owner identity comes from the environment alone/);
 });
 
-test('an absent owner EMAIL refuses the cut (exit 2) — zero email coverage is not CLEAN', () => {
+test('an absent owner EMAIL is accepted by the D-112 compatibility preflight', () => {
   const fx = fixture();
   fs.writeFileSync(fx.file, 'PAPERCUSP_RELEASE_OWNER_NAME=Name Only\n');
   const r = run('papercusp_union_release_identity_env && papercusp_require_release_owner_identity', {
     fx,
     env: { PAPERCUSP_RELEASE_IDENTITY_ENV: fx.file },
   });
-  assert.equal(r.status, 2);
-  assert.match(r.stderr, /requires PAPERCUSP_RELEASE_OWNER_EMAIL/);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.name, 'Name Only');
+  assert.equal(r.email, '');
 });
 
-test('an absent owner NAME refuses the cut (exit 2), separators-only counts as absent', () => {
+test('an absent owner NAME is accepted by the D-112 compatibility preflight', () => {
   const fx = fixture();
   const r = run('papercusp_require_release_owner_identity', {
     fx,
     env: { PAPERCUSP_RELEASE_OWNER_NAME: ' , ; ', PAPERCUSP_RELEASE_OWNER_EMAIL: 'e@example.test' },
   });
-  assert.equal(r.status, 2);
-  assert.match(r.stderr, /requires PAPERCUSP_RELEASE_OWNER_NAME/);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.name, ' , ; ');
+  assert.equal(r.email, 'e@example.test');
+});
+
+test('the compatibility preflight accepts a completely absent owner identity', () => {
+  const fx = fixture();
+  const r = run('papercusp_require_release_owner_identity', { fx });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.name, '');
+  assert.equal(r.email, '');
 });
 
 test('an unreadable identity file refuses rather than cutting with a partial identity', { skip: process.getuid?.() === 0 }, () => {
@@ -165,7 +175,7 @@ test('the file is parsed, never executed', () => {
   assert.equal(fs.existsSync(marker), false, 'a line in the identity file was executed');
 });
 
-test('release-local.sh sources the library from the orchestrator and calls union THEN require', () => {
+test('release-local.sh retains union THEN compatibility preflight ordering', () => {
   const text = fs.readFileSync(path.join(root, 'bin/release-local.sh'), 'utf8');
   const lines = text.split('\n');
   const at = (re) => lines.findIndex((l) => re.test(l));
@@ -174,5 +184,5 @@ test('release-local.sh sources the library from the orchestrator and calls union
   const require_ = at(/^papercusp_require_release_owner_identity \|\| exit 2$/);
   assert(sourced >= 0, 'release-local.sh no longer sources bin/lib/release-identity-env.sh');
   assert(union > sourced, 'the union runs before the library is sourced');
-  assert(require_ > union, 'the owner-identity requirement must run AFTER the file union');
+  assert(require_ > union, 'the compatibility preflight must run AFTER the file union');
 });

@@ -68,33 +68,10 @@ REPO_ROOT="$(papercusp_repo_root "$ROOT")"
 PAPERCUSP_ROOT="${PAPERCUSP_ROOT:-$REPO_ROOT/libs/papercusp}"
 WEB_DIR="$REPO_ROOT/apps/operator"
 
-# EI-20971912793028056: the final assembled-sidecar identity audit deliberately
-# refuses to certify unless the owner's NAME is asserted at run time. Git cannot
-# supply it: release builders use automation identities, and accepting those would
-# turn a clean verdict into false evidence. This used to fail only after the entire
-# sidecar had been assembled. Mirror audit-release-bundle.py's exact non-empty rule
-# here (comma/semicolon-separated values, surrounding whitespace ignored) so a
-# release-audited build fails before the first toolchain or dependency operation.
-# Keep the value runtime-only — writing it into tracked source would create the
-# identity leak this gate exists to prevent.
-#
-# ORDERING (must stay above the source-provenance capture below): this is a pure
-# environment check with no I/O, while the capture shells out to git through
-# REPO_ROOT and FAILS CLOSED to gitDirty=true when that root is absent or
-# unreadable. Sitting after it, the clean-source-tree guard exited 1 on a missing
-# REPO_ROOT before this rejection could ever be reached — contradicting the
-# "fails before the first toolchain or dependency operation" contract above and
-# breaking `rejects a missing owner name before toolchain work`, which asserts
-# exit 2. A missing owner name is knowable from the environment alone, so it is
-# decided here, before anything touches the filesystem.
-_release_owner_name="${PAPERCUSP_RELEASE_OWNER_NAME:-}"
-if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" \
-   && -z "${_release_owner_name//[[:space:],;]/}" ]]; then
-  echo "ERROR: PAPERCUSP_RELEASE_AUDIT=1 requires a non-empty PAPERCUSP_RELEASE_OWNER_NAME before building." >&2
-  echo "       Export it at run time (never write it into a tracked file), then re-run." >&2
-  echo "       Refusing now because the final identity audit cannot certify without it." >&2
-  exit 2
-elif [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" != "1" ]]; then
+# D-112 makes the final release identity audit machine-only. Owner name/email are
+# legitimate release content (especially inside the required full-history seed), so
+# PAPERCUSP_RELEASE_AUDIT=1 must not depend on either owner-identity variable.
+if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" != "1" ]]; then
   # EI-22084619262074810: this fail-late gap cost a full ~35min sidecar bake before
   # build-mac-cross.sh's downstream [sidecar-freshness:darwin] gate discovered the
   # missing attestation (build-mac-cross.sh:sidecar-freshness.js:release-audit-unattested).
@@ -104,10 +81,8 @@ elif [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" != "1" ]]; then
   echo "      This sidecar will be REFUSED by build-mac-cross.sh's sidecar-freshness gate" >&2
   echo "      and by release cuts, which both require a releaseIdentityAudit attestation." >&2
   echo "      If this build feeds a cross-build or release cut, stop now and re-run with:" >&2
-  echo "        PAPERCUSP_RELEASE_AUDIT=1 PAPERCUSP_RELEASE_OWNER_NAME=<name>" >&2
-  echo "      (canonical supply: source ~/.papercusp/release-identity.env, set -a, at runtime)." >&2
+  echo "        PAPERCUSP_RELEASE_AUDIT=1" >&2
 fi
-unset _release_owner_name
 
 # D-043 / P-052: dogfood remains the historical source-rich developer bundle.
 # vm-release is a separate fail-closed build profile whose final sidecar is

@@ -26,7 +26,7 @@ const { spawnSync } = require('node:child_process');
 
 // PROBE_SCRIPT lets scripts/mutation-probe.sh point this at a mutated COPY.
 const AUDIT = process.env.PROBE_SCRIPT || path.join(__dirname, '..', 'bin', 'audit-release-bundle.py');
-const ENV = { ...process.env, PAPERCUSP_RELEASE_OWNER_NAME: 'Zzsynthetic Gateowner' };
+const ENV = { ...process.env };
 
 function run(script, ...args) {
   return spawnSync('python3', [script, ...args], { encoding: 'utf8', env: ENV });

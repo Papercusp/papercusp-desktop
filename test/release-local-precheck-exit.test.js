@@ -111,9 +111,9 @@ const WRITTEN_MANIFESTS = ['package.json', 'src-tauri/Cargo.toml', 'src-tauri/ta
 /** The line of the actual `if` branch — NOT the header comment that names it. */
 const PRECHECK_BRANCH = /if \[\[ "\$\{PAPERCUSP_RELEASE_PRECHECK_ONLY:-0\}" == "1" \]\]/;
 const PREPARE_TAG_BRANCH = /if \[\[ -n "\$\{PAPERCUSP_RELEASE_PREPARE_TAG_SHA:-\}" \]\]/;
-// WI-10004349: the fail-fast guard is now a call into bin/lib/release-identity-env.sh, which
-// refuses unless BOTH an owner name and an owner email resolved after the owner-provisioned
-// identity file is unioned in (release-identity-env.test.js pins the behaviour itself).
+// WI-10004349 / D-112: keep the compatibility preflight call after the optional
+// release-identity.env union. The helper no longer requires owner name/email; the
+// release-identity-env suite pins that behaviour directly.
 const OWNER_IDENTITY_BRANCH = /^papercusp_require_release_owner_identity \|\| exit 2$/;
 const OWNER_IDENTITY_UNION = /^papercusp_union_release_identity_env \|\| exit 2$/;
 
@@ -215,7 +215,7 @@ test('the version bump really is the first write, and it writes what we think', 
   }
 });
 
-test('missing runtime owner identity refuses before every seed or manifest write', () => {
+test('owner-identity compatibility loading remains before every seed or manifest write', () => {
   const text = src();
   const guard = firstLine(text, OWNER_IDENTITY_BRANCH);
   const bump = firstLine(text, /^echo "==> bumping version in manifests"/);
@@ -223,18 +223,14 @@ test('missing runtime owner identity refuses before every seed or manifest write
 
   const union = firstLine(text, OWNER_IDENTITY_UNION);
 
-  assert(guard > 0, 'the owner-identity fail-fast guard was removed or reworded');
+  assert(guard > 0, 'the owner-identity compatibility preflight was removed or reworded');
   assert(
     union > 0 && union < guard,
     `the release-identity.env union (line ${union}) must run before the owner-identity guard (line ${guard}) — ` +
-      'otherwise a partial caller-supplied identity is certified as complete (WI-10004349)',
+      'the compatibility file must be merged before the stable preflight surface runs',
   );
-  assert(guard < bump, `owner identity guard (line ${guard}) drifted below the version bump (line ${bump})`);
-  assert(guard < seed, `owner identity guard (line ${guard}) drifted below the seed cut (line ${seed})`);
-  assert(
-    /exit 2/.test(text.split('\n').slice(guard - 1, guard + 8).join('\n')),
-    'the missing-owner guard no longer refuses the cut',
-  );
+  assert(guard < bump, `identity compatibility preflight (line ${guard}) drifted below the version bump (line ${bump})`);
+  assert(guard < seed, `identity compatibility preflight (line ${guard}) drifted below the seed cut (line ${seed})`);
 });
 
 test('the header warns that this script is not read-only', () => {
