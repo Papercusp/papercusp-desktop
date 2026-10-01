@@ -78,7 +78,7 @@ test('Windows packaging explicitly requires the stamp consumed before WSL runtim
   const closure = builder.indexOf('_runtime_scan_args+=(--require-windows-server-runtime)');
   const signing = builder.indexOf('echo "==> signing installers"');
   assert.ok(closure >= 0 && closure < signing, 'finished runtime closure must gate updater signing');
-  assert.match(builder, /--scan-artifact "\$\{_runtime_scan_args\[@\]\}" "\$_finished_installer"/);
+  assert.match(builder, /--scan-artifact (?:--licenses )?"\$\{_runtime_scan_args\[@\]\}" "\$_finished_installer"/);
 });
 
 // Explicit native-producer leg: ordinary unit runs do not start Wine, but a
