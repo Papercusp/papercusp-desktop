@@ -628,6 +628,120 @@ test('deb postinstall provisions the Codex system skills root for the Server pac
   assert.equal(childProcess.spawnSync('sh', ['-n', postinstallPath]).status, 0);
 });
 
+// WI-10004618: on Ubuntu 23.10+ (apparmor_restrict_unprivileged_userns=1) Codex's
+// bwrap sandbox cannot create a user namespace without an AppArmor grant, so every
+// Codex command fails while the run reports success. Drive the REAL postinst
+// function against a temp /etc/apparmor.d with a fake apparmor_parser.
+function bwrapProfileHarness() {
+  // Overridable so scripts/mutation-probe.sh can point it at a mutated copy.
+  const subject = process.env.PAPERCUSP_POSTINSTALL_UNDER_TEST
+    || path.join(desktopRoot, 'src-tauri/deb/postinstall.sh');
+  const postinstall = fs.readFileSync(subject, 'utf8');
+  const lines = postinstall.split('\n');
+  const start = lines.findIndex((l) => l.startsWith('papercusp_install_bwrap_userns_profile() {'));
+  assert.ok(start >= 0, 'postinstall defines papercusp_install_bwrap_userns_profile');
+  // The heredoc'd AppArmor profile has its own bare `}` line, so the function ends at
+  // the `}` that follows its final `return 0`, not at the first `}`.
+  const end = lines.findIndex((l, i) => i > start && l === '}' && lines[i - 1] === '  return 0');
+  assert.ok(end > start, 'found the end of papercusp_install_bwrap_userns_profile');
+  const fn = lines.slice(start, end + 1).join('\n');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-bwrap-profile-'));
+  const aaDir = path.join(tmp, 'apparmor.d');
+  const binDir = path.join(tmp, 'bin');
+  fs.mkdirSync(aaDir);
+  fs.mkdirSync(binDir);
+  const sysctl = path.join(tmp, 'apparmor_restrict_unprivileged_userns');
+  const bwrap = path.join(tmp, 'bwrap');
+  fs.writeFileSync(bwrap, '#!/bin/sh\n', { mode: 0o755 });
+  const parserLog = path.join(tmp, 'parser.log');
+  fs.writeFileSync(
+    path.join(binDir, 'apparmor_parser'),
+    `#!/bin/sh\necho "$@" >> '${parserLog}'\nexit "\${FAKE_PARSER_RC:-0}"\n`,
+    { mode: 0o755 },
+  );
+  const script = path.join(tmp, 'run.sh');
+  fs.writeFileSync(script, `set -e\n${fn}\npapercusp_install_bwrap_userns_profile "$1" "$2" "$3"\necho RC=$?\n`);
+  const run = (env = {}) => childProcess.spawnSync('sh', [script, aaDir, sysctl, bwrap], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${binDir}:/usr/bin:/bin`, ...env },
+  });
+  const profile = path.join(aaDir, 'bwrap');
+  const parserCalls = () => (fs.existsSync(parserLog) ? fs.readFileSync(parserLog, 'utf8').trim().split('\n') : []);
+  return { tmp, aaDir, sysctl, bwrap, profile, run, parserCalls };
+}
+
+test('deb postinstall grants /usr/bin/bwrap userns only on AppArmor-restricted kernels, scoped and reversible', () => {
+  const h = bwrapProfileHarness();
+  try {
+    // Kernel without the restriction: nothing to grant, nothing written.
+    let r = h.run();
+    assert.match(r.stdout, /RC=0/);
+    assert.equal(fs.existsSync(h.profile), false, 'no profile without the restriction sysctl');
+    assert.deepEqual(h.parserCalls(), []);
+
+    // Restricted kernel: a profile scoped to the bwrap binary, loaded with -r.
+    fs.writeFileSync(h.sysctl, '1\n');
+    r = h.run();
+    assert.match(r.stdout, /RC=0/);
+    const body = fs.readFileSync(h.profile, 'utf8');
+    assert.match(body, /^# Managed by the papercusp-server package \(WI-10004618\)\./);
+    assert.ok(body.includes(`profile bwrap ${h.bwrap} flags=(unconfined) {`), 'attaches to exactly the bwrap binary');
+    assert.match(body, /^\s+userns,$/m);
+    assert.match(body, /include if exists <local\/bwrap>/);
+    assert.deepEqual(h.parserCalls(), [`-r ${h.profile}`]);
+
+    // Upgrade: our own profile is rewritten in place.
+    fs.appendFileSync(h.profile, '# stale\n');
+    h.run();
+    assert.equal(fs.readFileSync(h.profile, 'utf8').includes('# stale'), false, 'our profile is refreshed on upgrade');
+
+    // A parser that rejects the profile (AppArmor without userns rules) leaves NO file behind.
+    fs.rmSync(h.profile);
+    r = h.run({ FAKE_PARSER_RC: '1' });
+    assert.match(r.stdout, /RC=0/, 'a rejected profile never fails the install');
+    assert.equal(fs.existsSync(h.profile), false, 'an unloadable profile is removed so apparmor.service cannot fail at boot');
+
+    // An administrator-owned /etc/apparmor.d/bwrap is never touched.
+    fs.writeFileSync(h.profile, 'profile bwrap /usr/bin/bwrap { }\n');
+    const callsBefore = h.parserCalls().length;
+    h.run();
+    assert.equal(fs.readFileSync(h.profile, 'utf8'), 'profile bwrap /usr/bin/bwrap { }\n');
+    assert.equal(h.parserCalls().length, callsBefore, 'parser not invoked for a foreign profile');
+
+    // Another package's profile already attaching to bwrap: we stay out.
+    fs.rmSync(h.profile);
+    fs.writeFileSync(path.join(h.aaDir, 'bwrap-userns-restrict'), `profile bwrap ${h.bwrap} flags=(unconfined) {\n  userns,\n}\n`);
+    h.run();
+    assert.equal(fs.existsSync(h.profile), false, 'no second profile for the same attachment');
+  } finally {
+    fs.rmSync(h.tmp, { recursive: true, force: true });
+  }
+});
+
+test('deb packaging wires the bwrap grant for the Server only: call site, Depends, and removal', () => {
+  const postinstallPath = path.join(desktopRoot, 'src-tauri/deb/postinstall.sh');
+  const lines = fs.readFileSync(postinstallPath, 'utf8').split('\n');
+  const serverGate = lines.findIndex((l) => l.includes('DPKG_MAINTSCRIPT_PACKAGE') && l.includes('papercusp-server') && l.includes('exit 0'));
+  const call = lines.findIndex((l) => /^\s+papercusp_install_bwrap_userns_profile \/etc\/apparmor\.d \\$/.test(l));
+  assert.ok(call > serverGate && serverGate >= 0, 'the grant is installed after the Server-only gate');
+  assert.match(lines[call + 1], /\/proc\/sys\/kernel\/apparmor_restrict_unprivileged_userns \/usr\/bin\/bwrap \|\| true$/);
+  assert.match(lines[call - 1], /^if \[ -z "\$\{DPKG_ROOT:-\}" \]; then$/, 'never touches the live kernel during a DPKG_ROOT bootstrap');
+  assert.equal(childProcess.spawnSync('sh', ['-n', postinstallPath]).status, 0);
+
+  const base = require(path.join(desktopRoot, 'src-tauri/tauri.conf.json'));
+  assert.deepEqual(base.bundle.linux.deb.depends, [], 'the thin GUI does not pull bubblewrap');
+  for (const overlay of ['tauri.server.conf.json', 'tauri.vm-release.conf.json']) {
+    const cfg = require(path.join(desktopRoot, 'src-tauri', overlay));
+    assert.ok(cfg.bundle.linux.deb.depends.includes('bubblewrap'), `${overlay} depends on bubblewrap (Codex runs /usr/bin/bwrap)`);
+  }
+
+  const postremovePath = path.join(desktopRoot, 'src-tauri/deb/postremove.sh');
+  const postremove = fs.readFileSync(postremovePath, 'utf8');
+  assert.match(postremove, /grep -qF '# Managed by the papercusp-server package \(WI-10004618\)\.' \/etc\/apparmor\.d\/bwrap/, 'only our marked profile is removed');
+  assert.match(postremove, /apparmor_parser -R \/etc\/apparmor\.d\/bwrap/, 'the grant is unloaded from the kernel, not just deleted');
+  assert.equal(childProcess.spawnSync('sh', ['-n', postremovePath]).status, 0);
+});
+
 test('Linux Server deb installs and package-enables one systemd user service', () => {
   const baseConfig = require(path.join(desktopRoot, 'src-tauri/tauri.conf.json'));
   const serverConfig = require(path.join(desktopRoot, 'src-tauri/tauri.server.conf.json'));
