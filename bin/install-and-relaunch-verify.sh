@@ -369,15 +369,11 @@ linux_endpoint() {
 }
 DERIVED_LINUX_ENDPOINT=0
 case "$PLATFORM" in
-  windows)
-    SSH_PORT="${SSH_PORT:-2223}"
-    SSH_KEY="${SSH_KEY:-$HOME/.ssh/papercup-vm-win}"
-    SSH_HOST="${SSH_HOST:-user@127.0.0.1}"
-    ;;
-  mac)
-    SSH_PORT="${SSH_PORT:-2222}"
-    SSH_KEY="${SSH_KEY:-$HOME/.ssh/papercup-vm-mac}"
-    SSH_HOST="${SSH_HOST:-${MAC_VM_SSH_HOST:-aviweiss@127.0.0.1}}"
+  windows|mac)
+    # One source with bin/smoke-target-preflight.sh (WI-10004346).
+    # shellcheck source=lib/smoke-endpoints.sh
+    source "$HERE/lib/smoke-endpoints.sh"
+    smoke_endpoint_defaults "$PLATFORM"
     ;;
   linux)
     if [[ -z "$SSH_PORT" || -z "$SSH_KEY" || -z "$SSH_HOST" ]]; then
@@ -685,52 +681,9 @@ fi
 # alter that supervisor here: fixture repair must precede a NEW honest baseline,
 # and this verifier must not stop an operator to manufacture the update flip.
 if [[ "$PLATFORM" == "mac" ]]; then
-  MAC_PREFLIGHT_CMD="$(cat <<'MAC_PREFLIGHT'
-set -eu
-# PAPERCUSP_NATIVE_MAC_PREFLIGHT
-console_user="$(stat -f %Su /dev/console)"
-login_user="$(id -un)"
-login_uid="$(id -u)"
-if [ "$console_user" = root ] || [ "$console_user" = loginwindow ] || [ "$console_user" != "$login_user" ]; then
-  echo "macOS native preflight: SSH user must own the logged-in GUI console" >&2
-  exit 2
-fi
-if ! launchctl print "gui/$login_uid" >/dev/null 2>&1; then
-  echo "macOS native preflight: logged-in GUI launch domain is unavailable" >&2
-  exit 2
-fi
-if launchctl print system/com.papercusp.server >/dev/null 2>&1; then
-  echo "macOS native preflight: competing system/com.papercusp.server is loaded; repair test supervision and establish a genuine native pre-update baseline before retrying" >&2
-  exit 2
-fi
-# `open -n` bypasses LaunchServices reuse, NOT Tauri's per-role singleton.
-# A live old shell rejects the candidate before its --ensure can run. Do not
-# quit that Server here: normal quit tears down its owned operator, fabricating
-# the stale-operator replacement this test is meant to prove. Prepare a genuine
-# older bundled runtime via the supported detached/headless launch first.
-native_shells="$(ps -axo pid=,comm=)" || {
-  echo "macOS native preflight: cannot inspect native single-instance shells" >&2
-  exit 2
-}
-while read -r native_pid executable; do
-  case "$executable" in
-    */Papercusp\ Server.app*/Contents/MacOS/papercusp-desktop|*/Papercusp\ GUI.app*/Contents/MacOS/papercusp-desktop)
-      native_args="$(ps -p "$native_pid" -o args=)" || {
-        echo "macOS native preflight: native process changed during inspection; retry the baseline check" >&2
-        exit 2
-      }
-      if [ "$native_args" = "$executable --headless-service" ]; then
-        # This supported service branch runs BEFORE Tauri's singleton plugin.
-        continue
-      fi
-      echo "macOS native preflight: a native Papercusp shell holds the single-instance lock; prepare a headless older bundled-runtime baseline before retrying (no operator termination inside acceptance)" >&2
-      exit 2
-      ;;
-  esac
-done <<< "$native_shells"
-printf 'PAPERCUSP_NATIVE_MAC_PREFLIGHT_OK\n'
-MAC_PREFLIGHT
-)"
+  # The remote predicate body lives in ONE file shared with
+  # bin/smoke-target-preflight.sh (the pre-build target check, WI-10004346).
+  MAC_PREFLIGHT_CMD="$(cat "$HERE/lib/mac-native-preflight.sh")"
   MAC_PREFLIGHT_OUT=""
   MAC_PREFLIGHT_RC=0
   MAC_PREFLIGHT_OUT="$(timeout 30 "${SSH[@]}" "$MAC_PREFLIGHT_CMD" 2>&1 | tr -d '\r\0')" || MAC_PREFLIGHT_RC=$?
