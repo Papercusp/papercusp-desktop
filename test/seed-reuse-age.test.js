@@ -33,7 +33,10 @@ function check(cutTs, env = {}) {
 const HOUR = 3_600_000;
 
 test('a fresh reused corestore passes and reports its age', () => {
-  const r = check(Date.now() - 2 * HOUR);
+  // Mid-hour on purpose (EI-24759293506933965): the helper floors `date +%s` to whole seconds
+  // while Date.now() carries milliseconds, so a fixture exactly 2h old measures a few hundred
+  // ms short of 2h whenever both clocks read the same second, and the integer hour floors to 1.
+  const r = check(Date.now() - 2 * HOUR - HOUR / 2);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /reused corestore age 2h \(max 72h\)/);
 });
