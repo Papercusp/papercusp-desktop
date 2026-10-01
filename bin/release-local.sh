@@ -2276,7 +2276,9 @@ cut_release_seed() {
   local seed_origin="${PAPERCUSP_SEED_ORIGIN:-https://github.com/Papercusp/papercup}"
   local seed_rev="${PAPERCUSP_SEED_REV:-HEAD}"
   local seed_depth="${PAPERCUSP_SEED_DEPTH-1}"
-  local operator_dir="$MONOREPO/apps/operator"
+  # Cutter and audit policy follow the current orchestrator; --repo below
+  # still pins the Git payload to the immutable product source.
+  local operator_dir="$(cd "$ORCHESTRATOR_HERE/../../apps/operator" && pwd)"
   local seed_out="$ROOT/src-tauri/seed"
   if [[ ! -d "$operator_dir" ]]; then
     echo "ERROR: seed cutter not found at $operator_dir"
@@ -2387,7 +2389,7 @@ cut_release_seed() {
     # spawns with inherited env, so this reaches the bwrap re-exec. Mirrors
     # cut-seed-quiesced.sh:100; a NODE_OPTIONS from the .env.local sourced above still wins.
     export NODE_OPTIONS="${NODE_OPTIONS:-${SEED_CUT_NODE_OPTIONS:---max-old-space-size=24576}}"
-    PAPERCUSP_ALLOW_DEV_RESTART=1 PAPERCUSP_WORKSPACE_ROOT="$MONOREPO" \
+    PAPERCUSP_ALLOW_DEV_RESTART=1 PAPERCUSP_WORKSPACE_ROOT="$(cd "$operator_dir/../.." && pwd)" \
       npx tsx lib/release/cut-seed-cli.ts \
         --out "$seed_out" \
         --repo "$MONOREPO" \
@@ -2659,7 +2661,7 @@ fi
 # in 136s — ONE file off the per-leg AppDir gate's 17,560 / 3, for ~2 minutes
 # against the ~40 minutes of builds it now front-runs.
 echo "==> assembled-bundle identity gate (EI-20304355477263736): scanning the FULLY-staged bundle (scope-identical to the per-leg gate, ~40min earlier)"
-if ! python3 "$ROOT/bin/audit-release-bundle.py" --scan-dir "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/resources"; then
+if ! python3 "$ORCHESTRATOR_HERE/audit-release-bundle.py" --scan-dir "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/resources"; then
   echo "ERROR: the fully-assembled bundle (sidecar + bundled resources) carries a sensitive/build-box identity — refusing to launch the platform legs (EI-20304355477263736)." >&2
   echo "       This is the SAME rule the per-leg AppDir/.app gate enforces; it now fires BEFORE ~40 minutes of Rust builds instead of after them." >&2
   echo "       Fix the leak at its SOURCE in the monorepo (not in src-tauri/sidecar — that is regenerated build output), then re-run the cut." >&2
@@ -3126,8 +3128,8 @@ for linux_artifact in \
   "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/deb/*_"$VERSION"_*.deb; do
   [[ -f "$linux_artifact" ]] || continue
   case "${linux_artifact##*/}" in
-    *Server*) python3 "$ROOT/bin/audit-release-bundle.py" --scan-artifact --require-source-archive "$linux_artifact" ;;
-    *)        python3 "$ROOT/bin/audit-release-bundle.py" --scan-artifact "$linux_artifact" ;;
+    *Server*) python3 "$ORCHESTRATOR_HERE/audit-release-bundle.py" --scan-artifact --require-source-archive "$linux_artifact" ;;
+    *)        python3 "$ORCHESTRATOR_HERE/audit-release-bundle.py" --scan-artifact "$linux_artifact" ;;
   esac
 done
 
@@ -3161,7 +3163,7 @@ elif [[ "$WITH_MAC" == "1" ]]; then
   # retire). Mirrors the Windows cross leg above. mac-vm-build.sh + the VM
   # systemd/disk are intentionally LEFT IN PLACE (dormant, for on-device TESTING);
   # this leg no longer touches them.
-  MAC_PRODUCER="$ROOT/bin/build-mac-cross.sh"
+  MAC_PRODUCER="$ORCHESTRATOR_HERE/build-mac-cross.sh"
   MAC_OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
   # build-mac-cross bundles a fully-DARWIN sidecar (Mach-O node/pg/zellij/...) -- a
   # SEPARATE artifact from the linux sidecar cut above (that one is native/linux).
@@ -3225,6 +3227,7 @@ elif [[ "$WITH_MAC" == "1" ]]; then
       "PAPERCUSP_DARWIN_SIDECAR_DIR=$MAC_SIDECAR_DIR"
       "PAPERCUSP_EXPECTED_SERVE_SHA=$mac_expected_serve_sha"
       "PAPERCUSP_MAC_OUT=$MAC_OUT"
+      "PAPERCUSP_DESKTOP_TARGET_ROOT=$ROOT"
       MAC_BUILD_TARGET=universal-apple-darwin
     )
     env "${mac_env[@]}" bash "$MAC_PRODUCER"
@@ -3547,7 +3550,7 @@ if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
   # BENIGN_ERE — so the 0.0.22 cut failed on lost-pixel's vendor key, which ships in
   # the Server sidecar ON PURPOSE (design comparison, build-desktop-sidecar.sh) and
   # which the canonical gate already classifies as benign. One gate, one allowlist.
-  python3 "$ROOT/bin/audit-release-bundle.py" --scan-artifact "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg
+  python3 "$ORCHESTRATOR_HERE/audit-release-bundle.py" --scan-artifact "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg
   # EI-8914 parity: the Windows leg records build-provenance.json (⚠ CORRECTED
   # 2026-09-22: via the shared bin/emit-build-provenance.sh called from
   # bin/build-windows-cross.sh — the build-windows-on-vm.sh this line used to name

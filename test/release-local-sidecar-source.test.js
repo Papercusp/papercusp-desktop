@@ -53,6 +53,73 @@ test('Linux AppImage exact-source salvage runs current producer logic against th
   assert.match(release, /bash "\$APPIMAGE_PRODUCER"/);
 });
 
+test('release identity audits use current policy for every frozen artifact path', () => {
+  assert.doesNotMatch(release, /\$ROOT\/bin\/audit-release-bundle\.py/);
+  assert.match(release, /\$ORCHESTRATOR_HERE\/audit-release-bundle\.py" --scan-dir "\$ROOT\/src-tauri\/sidecar"/);
+  assert.match(release, /\$ORCHESTRATOR_HERE\/audit-release-bundle\.py" --scan-artifact --require-source-archive "\$linux_artifact"/);
+  assert.match(release, /\$ORCHESTRATOR_HERE\/audit-release-bundle\.py" --scan-artifact "\$MAC_OUT"/);
+});
+
+test('Mac exact-source release uses current producer and keeps the frozen product root', () => {
+  const mac = fs.readFileSync(path.join(bin, 'build-mac-cross.sh'), 'utf8');
+  assert.match(release, /MAC_PRODUCER="\$ORCHESTRATOR_HERE\/build-mac-cross\.sh"/);
+  assert.match(release, /"PAPERCUSP_DESKTOP_TARGET_ROOT=\$ROOT"[\s\S]*env "\$\{mac_env\[@\]\}" bash "\$MAC_PRODUCER"/);
+  assert.match(mac, /HERE="\$\(cd "\$\(dirname "\$\{BASH_SOURCE\[0\]\}"\)" && pwd\)"/);
+  assert.match(mac, /ROOT="\$\(cd "\$\{PAPERCUSP_DESKTOP_TARGET_ROOT:-\$HERE\/\.\.\}" && pwd\)"/);
+});
+
+test('seed cut executes current tooling but exports the frozen Git source', (context) => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'release-seed-tooling-'));
+  context.after(() => fs.rmSync(fixture, { recursive: true, force: true }));
+  const current = path.join(fixture, 'current');
+  const frozen = path.join(fixture, 'frozen');
+  const fakeBin = path.join(fixture, 'fake-bin');
+  const receipt = path.join(fixture, 'receipt.json');
+  for (const root of [current, frozen]) {
+    fs.mkdirSync(path.join(root, 'apps', 'operator'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'papercusp-desktop', 'bin'), { recursive: true });
+  }
+  fs.mkdirSync(fakeBin);
+  fs.writeFileSync(path.join(fakeBin, 'npx'), [
+    '#!/usr/bin/env node',
+    'const fs = require("node:fs");',
+    'fs.writeFileSync(process.env.RECEIPT, JSON.stringify({ cwd: process.cwd(), policyRoot: process.env.PAPERCUSP_WORKSPACE_ROOT, args: process.argv.slice(2) }));',
+    '',
+  ].join('\n'), { mode: 0o755 });
+  const result = spawnSync('bash', ['-c', [
+    'set -euo pipefail',
+    'release_seed_cut_is_quiesced() { return 0; }',
+    'release_seed_sparse_refused() { return 1; }',
+    shellFunction(release, 'cut_release_seed'),
+    'cut_release_seed',
+  ].join('\n')], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      MONOREPO: frozen,
+      ROOT: path.join(frozen, 'papercusp-desktop'),
+      ORCHESTRATOR_HERE: path.join(current, 'papercusp-desktop', 'bin'),
+      RECEIPT: receipt,
+      PAPERCUSP_SKIP_SEED_CUT: '0',
+      PAPERCUSP_SEED_SNAPSHOT_DIR: '',
+      PAPERCUSP_SEED_REUSE_CORESTORE: '0',
+      PAPERCUSP_SEED_CORESTORE: '1',
+      PAPERCUSP_SEED_SPARSE: '0',
+      PAPERCUSP_SEED_DEPTH: '',
+    },
+  });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const actual = JSON.parse(fs.readFileSync(receipt, 'utf8'));
+  assert.equal(actual.cwd, path.join(current, 'apps', 'operator'));
+  assert.equal(actual.policyRoot, current);
+  assert.equal(actual.args[actual.args.indexOf('--repo') + 1], frozen);
+  assert.equal(actual.args[actual.args.indexOf('--out') + 1], path.join(frozen, 'papercusp-desktop', 'src-tauri', 'seed'));
+  assert.ok(actual.args.includes('--emit-epoch-key'));
+  assert.ok(!actual.args.includes('--depth'));
+  assert.ok(!actual.args.includes('--sparse'));
+});
+
 test('packed-sidecar boot gate runs current producer logic against the frozen target root', () => {
   assert.match(
     release,
