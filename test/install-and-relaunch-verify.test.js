@@ -731,9 +731,12 @@ test('Linux resolves missing WebKit dependencies before relaunching the installe
 });
 
 test('macOS native preflight executes console/domain/supervisor/single-instance predicates', () => {
+  // The real remote body is ONE shared file (WI-10004346); the verifier must
+  // still send exactly that file, never an inline fork of it.
   const source = readFileSync(SCRIPT, 'utf8');
-  const command = source.match(/cat <<'MAC_PREFLIGHT'\n([\s\S]*?)\nMAC_PREFLIGHT\n/);
-  assert.ok(command, 'the real remote preflight command must be discoverable');
+  assert.match(source, /MAC_PREFLIGHT_CMD="\$\(cat "\$HERE\/lib\/mac-native-preflight\.sh"\)"/);
+  assert.doesNotMatch(source, /<<'MAC_PREFLIGHT'/, 'no inline fork of the remote preflight body');
+  const command = [null, readFileSync(join(__dirname, '..', 'bin', 'lib', 'mac-native-preflight.sh'), 'utf8')];
   const root = mkdtempSync(join(tmpdir(), 'native-mac-preflight-'));
   try {
     executable(root, 'stat', '#!/bin/sh\nprintf "%s\\n" "$TEST_CONSOLE"\n');
