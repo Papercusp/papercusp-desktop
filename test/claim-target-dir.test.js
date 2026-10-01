@@ -437,7 +437,10 @@ test('the background deleter never holds the launch\'s slot lock', async () => {
   assert.ok(!existsSync(dead), 'the dead root is renamed aside before the launch continues');
   assert.ok(readdirSync(home).some((n) => n.includes('reaping')), 'the slow deletion must still be running');
   assert.strictEqual(claim(), join(home, '.cargo-target'), 'the background deleter kept slot 0 locked');
-  for (let i = 0; i < 100 && readdirSync(home).some((n) => n.includes('reaping')); i++) {
+  // The slow rm alone is 3s; on a loaded box the detached deleter can take well over
+  // 10s to finish, so wait against a wall-clock deadline rather than an iteration count.
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline && readdirSync(home).some((n) => n.includes('reaping'))) {
     await new Promise((r) => setTimeout(r, 100));
   }
   assert.deepStrictEqual(readdirSync(home).filter((n) => n.includes('reaping')), [], 'the background deletion completes');
