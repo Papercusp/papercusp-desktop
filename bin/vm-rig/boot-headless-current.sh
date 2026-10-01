@@ -720,6 +720,16 @@ export PAPERCUSP_IDENTITY_DIR="$SHARED/.papercusp/identity"
 export PAPERCUSP_ANNOUNCE_IDENTITY_CACHE="$SHARED/.papercusp/local-announce-identity.json"
 export PAPERCUSP_WORKSPACES_ROOT="$REAL_HOME/.papercusp-workspaces"
 export PAPERCUSP_IPC_ENABLE="1"
+# WI-10004503: the rig's inference goes through the TOWER's account-pool gateway, never a sign-in
+# of the VM's own. The tower holds an ssh reverse tunnel (papercusp-mac-vm-gateway-tunnel.service)
+# that puts its gateway on the VM's 127.0.0.1:18788; :8788 is this operator's own gateway. The VM
+# pool carries one account, tower-pool = token:~/.papercusp/tower-gateway.token holding the
+# non-secret placeholder 'papercusp-gateway' (the tower gateway strips caller auth). Copying a
+# tower OAuth bundle here instead revokes one side on refresh. Empty disables the route.
+PAPERCUSP_RIG_GATEWAY_UPSTREAM="${PAPERCUSP_RIG_GATEWAY_UPSTREAM-http://127.0.0.1:18788}"
+if [ -n "$PAPERCUSP_RIG_GATEWAY_UPSTREAM" ]; then
+  export ANTHROPIC_BASE_URL_UPSTREAM="$PAPERCUSP_RIG_GATEWAY_UPSTREAM"
+fi
 export PAPERCUSP_DHT_BOOTSTRAP="${PAPERCUSP_DHT_BOOTSTRAP:-172.31.44.1:49838}"
 # EI-21151075708883534: swarm.ts's readEffectiveDhtBootstrapRaw()/readExpectedDhtBootstrap()
 # fall back to these two marker files precisely so an env-less relaunch (e.g. a macOS
