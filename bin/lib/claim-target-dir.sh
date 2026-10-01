@@ -368,6 +368,29 @@ for (const r of hits) process.stdout.write(r + "\n");
   fi
 }
 
+# 0 when every Cargo build-script output in this root was generated AT this path.
+#
+# A Cargo root is NOT relocatable. Cargo keeps a finished build script's output
+# when the root moves, because its fingerprint does not change. Build scripts write
+# absolute paths into their OUT_DIR files, and Cargo cannot rewrite those: tauri's
+# `out/tauri-core-*-permission-files` lists every permission .toml by absolute path,
+# and tauri_build reads the list to build the app manifest. A moved root therefore
+# breaks the next `tauri dev` with "failed to read plugin permissions … No such file"
+# (WI-10004841). `root-output` records the OUT_DIR each script ran against, so a
+# root-output outside this root marks a root that was moved. It may only be reaped.
+__pc_private_slot_paths_anchored() {
+  local dir="$1" real f stray
+  real="$(realpath -- "$dir" 2>/dev/null)" || real="$dir"
+  local -a outs=()
+  for f in "$dir"/debug/build/*/root-output "$dir"/release/build/*/root-output \
+           "$dir"/*/debug/build/*/root-output "$dir"/*/release/build/*/root-output; do
+    [[ -f "$f" ]] && outs+=("$f")
+  done
+  ((${#outs[@]} > 0)) || return 0
+  stray="$(printf '%s\0' "${outs[@]}" | xargs -0 grep -L -F -e "$dir/" -e "$real/" -- 2>/dev/null)"
+  [[ -z "$stray" ]]
+}
+
 # Delete roots already renamed aside (`.reaping-*`), through the audited guard.
 __pc_private_slot_delete_renamed() {
   local shared="$1" dir
@@ -397,12 +420,17 @@ __pc_private_slot_delete_renamed() {
 }
 
 # __pc_reap_private_target_slots <shared> [adopt-name]
-# Reap dead private roots. With adopt-name (a private slot name whose lock the
-# CALLER already holds), rename the newest reapable root to that name instead of
-# deleting it and set __pc_adopted_private_root to the adopted path.
+# Reap dead private roots. With adopt-name (the caller's own per-pid slot name),
+# ADOPT the newest reapable root IN PLACE instead of deleting it: take that root's
+# own lock, keep its path, and set __pc_adopted_private_root to it and
+# __pc_adopted_private_lock_fd to the open, flocked descriptor (the caller moves
+# its claim onto it). Never rename a root to adopt it: a moved Cargo root strands
+# the absolute paths its build scripts wrote (WI-10004841), so a root that an
+# older reaper already moved is reaped, never adopted.
 __pc_reap_private_target_slots() {
   local shared="${1:?shared target root required}" adopt_name="${2:-}"
   __pc_adopted_private_root=""
+  __pc_adopted_private_lock_fd=""
   [[ "${PAPERCUSP_DESKTOP_PRIVATE_SLOT_REAP:-1}" != "0" ]] || return 0
   command -v flock >/dev/null 2>&1 || return 0
   # Empty arrays under `set -u` and {fd} allocation need bash >= 4.4.
@@ -440,7 +468,7 @@ __pc_reap_private_target_slots() {
     fi
   fi
 
-  local stamp target adopted=0
+  local stamp target adopted=0 adopt_fd
   while IFS=$'\t' read -r last dir name; do
     [[ -n "$dir" ]] || continue
     if grep -qxF -- "$dir" <<< "$refs"; then continue; fi
@@ -449,16 +477,23 @@ __pc_reap_private_target_slots() {
       continue
     fi
     if [[ -n "$adopt_name" && "$adopted" == 0 ]]; then
-      target="${dir%/*}/"
-      [[ "${dir##*/}" == "$name" ]] || target+="${shared##*/}-"
-      target+="$adopt_name"
-      if [[ ! -e "$target" && ! -L "$target" ]] && mv -T -- "$dir" "$target" 2>/dev/null; then
-        rm -f -- "${__pc_slot_lockdir}/${name}.lock"
-        touch -- "$target" || true
-        PAPERCUSP_RELEASE_DELETER=claim-target-dir.sh release_artifacts_deletion_audit adopt "$dir" "" \
-          "dead private target slot reused as a warm cache by $target" 2>/dev/null || true
-        __pc_adopted_private_root="$target"
-        adopted=1
+      if ! __pc_private_slot_paths_anchored "$dir"; then
+        echo "→ dead private target slot $dir was relocated (its build-script outputs point elsewhere) — reaping it instead of adopting (WI-10004841)" >&2
+      else
+        # A legacy root has no lock file yet; opening one for append creates it.
+        adopt_fd=""
+        if exec {adopt_fd}>>"${__pc_slot_lockdir}/${name}.lock" && flock -n "$adopt_fd"; then
+          touch -- "$dir" || true
+          PAPERCUSP_RELEASE_DELETER=claim-target-dir.sh release_artifacts_deletion_audit adopt "$dir" "" \
+            "dead private target slot reused in place as a warm cache by $adopt_name" 2>/dev/null || true
+          __pc_adopted_private_root="$dir"
+          __pc_adopted_private_lock_fd="$adopt_fd"
+          adopted=1
+          continue
+        fi
+        # Its lock was taken since the eligibility check: it has a claimant now,
+        # so neither adopt nor reap it.
+        if [[ -n "$adopt_fd" ]]; then exec {adopt_fd}>&-; fi
         continue
       fi
     fi
@@ -640,6 +675,11 @@ __pc_claim_target_dir() {
   # Prefer a dead private root's warm cache over a cold build (WI-10004764).
   __pc_reap_private_target_slots "$shared" "$private_name" || true
   if [[ -n "${__pc_adopted_private_root:-}" ]]; then
+    # Move the claim onto the adopted root's own lock: fd 8 is the descriptor the
+    # launch inherits. Re-pointing it releases the per-pid lock, which guards no root.
+    exec 8>&"$__pc_adopted_private_lock_fd"
+    exec {__pc_adopted_private_lock_fd}>&-
+    rm -f -- "${__pc_slot_lockdir}/${private_name}.lock"
     export CARGO_TARGET_DIR="$__pc_adopted_private_root"
     echo "⚠ all $slots target-dir slots are busy — reusing a dead private root's warm cache as $CARGO_TARGET_DIR." >&2
     echo "  Raise PAPERCUSP_DESKTOP_TARGET_SLOTS if this box routinely runs more desktops than that." >&2
