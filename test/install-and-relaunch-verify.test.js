@@ -67,6 +67,7 @@ function fixture({
   remoteMkdirFail = false,
   operatorJsonReadyAfter = 1,
   healthReadyAfter = 1,
+  virtualTimeSec = null,
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'install-relaunch-server-'));
   const artifacts = join(root, 'artifacts');
@@ -84,6 +85,8 @@ function fixture({
   const flipped = join(root, 'flipped');
   const operatorJsonAttempts = join(root, 'operator-json-attempts');
   const healthAttempts = join(root, 'health-attempts');
+  const virtualNow = join(root, 'virtual-now');
+  if (virtualTimeSec !== null) writeFileSync(virtualNow, String(virtualTimeSec));
   const ssh = executable(shims, 'ssh', `#!/usr/bin/env bash
 printf 'SSH %s\\n' "$*" >> "$MOCK_LOG"
 if [[ "$MOCK_REQUIRE_HOST_KEY_OPTIONS" == "1" && "$*" != *"StrictHostKeyChecking=no"* ]]; then
@@ -136,11 +139,27 @@ if [[ "$MOCK_REQUIRE_HOST_KEY_OPTIONS" == "1" && "$*" != *"StrictHostKeyChecking
   printf 'Host key verification failed: rotated host key\\n' >&2
   exit 255
 fi
+  `);
+  executable(shims, 'date', `#!/usr/bin/env bash
+if [[ "$MOCK_VIRTUAL_TIME" == "1" && "$1" == "+%s" ]]; then
+  cat "$MOCK_VIRTUAL_NOW"
+else
+  exec /bin/date "$@"
+fi
+`);
+  executable(shims, 'sleep', `#!/usr/bin/env bash
+if [[ "$MOCK_VIRTUAL_TIME" == "1" ]]; then
+  now="$(cat "$MOCK_VIRTUAL_NOW")"
+  now=$((now + $1))
+  printf '%s' "$now" > "$MOCK_VIRTUAL_NOW"
+else
+  exec /bin/sleep "$@"
+fi
 `);
 
   return {
-    root, gui, server, slices, log, flipped, ssh, scp, requireHostKeyOptions, remoteMkdirFail,
-    operatorJsonReadyAfter, healthReadyAfter, operatorJsonAttempts, healthAttempts,
+    root, gui, server, slices, log, flipped, ssh, scp, shims, requireHostKeyOptions, remoteMkdirFail,
+    operatorJsonReadyAfter, healthReadyAfter, operatorJsonAttempts, healthAttempts, virtualTimeSec, virtualNow,
   };
 }
 
@@ -380,7 +399,7 @@ const AMBIENT_ENDPOINT_ENV = [
 
 function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui, extraEnv = {}) {
   const inherited = { ...process.env };
-  for (const name of AMBIENT_ENDPOINT_ENV) delete inherited[name];
+  for (const name of [...AMBIENT_ENDPOINT_ENV, 'BASELINE_TIMEOUT']) delete inherited[name];
   const env = {
     ...inherited,
     ...extraEnv,
@@ -409,6 +428,12 @@ function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui, ex
     env.PATH = `${f.shims}:${process.env.PATH}`;
     env.MOCK_FREE_GB = String(f.freeGb);
     env.PAPERCUSP_DISK_RESERVATION_DIR = join(f.root, 'reservations');
+  }
+  if (f.virtualTimeSec !== null && f.virtualTimeSec !== undefined) {
+    env.PATH = `${f.shims}:${process.env.PATH}`;
+    env.MOCK_VIRTUAL_TIME = '1';
+    env.MOCK_VIRTUAL_NOW = f.virtualNow;
+    writeFileSync(f.virtualNow, String(f.virtualTimeSec));
   }
   if (f.executeInstall) {
     env.MOCK_EXECUTE_INSTALL = '1';
@@ -481,10 +506,26 @@ test('Windows waits for delayed operator.json and health readiness before upload
   }
 });
 
+test('Windows permits a 390-second pre-update baseline within the independent 900-second timeout', () => {
+  const f = fixture({ operatorJsonReadyAfter: 79, virtualTimeSec: 1000 });
+  try {
+    const result = runVerify(f, ['--flip-timeout', '1', '--poll-interval', '5']);
+    assert.equal(result.status, 0, result.stdout + '\n' + result.stderr);
+    assert.equal(JSON.parse(result.stdout).ok, true);
+    const lines = readFileSync(f.log, 'utf8').trim().split('\n');
+    const firstTransfer = lines.findIndex((line) => line.startsWith('SCP '));
+    const baselineProbes = lines.slice(0, firstTransfer).filter((line) => line.includes('operator.json'));
+    assert.equal(baselineProbes.length, 79);
+    assert.equal(Number(readFileSync(f.virtualNow, 'utf8')), 1390);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
 test('Windows fails closed when operator.json stays unavailable through the baseline timeout', () => {
   const f = fixture({ operatorJsonReadyAfter: 9999 });
   try {
-    const result = runVerify(f, ['--flip-timeout', '1', '--poll-interval', '1']);
+    const result = runVerify(f, ['--baseline-timeout', '1', '--poll-interval', '1']);
     assert.equal(result.status, 2, result.stdout + '\n' + result.stderr);
     assert.match(result.stderr, /operator\.json did not provide a port/);
     const log = readFileSync(f.log, 'utf8');
@@ -498,7 +539,7 @@ test('Windows fails closed when operator.json stays unavailable through the base
 test('Windows bounds health retries by the baseline timeout and fails before upload', () => {
   const f = fixture({ healthReadyAfter: 9999 });
   try {
-    const result = runVerify(f, ['--flip-timeout', '1', '--poll-interval', '1']);
+    const result = runVerify(f, ['--baseline-timeout', '1', '--poll-interval', '1']);
     assert.equal(result.status, 2, result.stdout + '\n' + result.stderr);
     assert.match(result.stderr, /health on port 15747 reports neither sha nor version/);
     assert.ok(

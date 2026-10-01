@@ -71,7 +71,8 @@
 #                                  strict codesign for BOTH roles, then relaunch.
 #                                  Does not copy/replace apps; reported explicitly.
 #   --relaunch-cmd CMD             relaunch command (must NOT terminate the operator)
-#   --flip-timeout SEC             how long to wait for a healthy baseline and the flip (default 180)
+#   --flip-timeout SEC             how long to wait for the post-install health flip (default 180)
+#   --baseline-timeout SEC         how long to wait for a healthy pre-update operator (default 900)
 #   --install-timeout SEC          budget for the installer step (default 900);
 #                                  a timeout FAILS the run (installer may still
 #                                  be running detached on the VM — no relaunch)
@@ -110,6 +111,7 @@ SERVER_INSTALL_CMD=""
 RELAUNCH_CMD=""
 OPJSON_PATH=""
 FLIP_TIMEOUT="${FLIP_TIMEOUT:-180}"
+BASELINE_TIMEOUT="${BASELINE_TIMEOUT:-900}"
 POLL_INTERVAL="${POLL_INTERVAL:-5}"
 # 300s proved too short live (0.0.8: the 479M GUI installer needs ~5min; the
 # 3.4GB Server payload far more) — and a timeout-killed ssh leaves the VM-side
@@ -146,6 +148,7 @@ while [[ $# -gt 0 ]]; do
     --verify-installed-mac) VERIFY_INSTALLED_MAC=1; shift ;;
     --relaunch-cmd) RELAUNCH_CMD="${2:-}"; shift 2 ;;
     --flip-timeout) FLIP_TIMEOUT="${2:-}"; shift 2 ;;
+    --baseline-timeout) BASELINE_TIMEOUT="${2:-}"; shift 2 ;;
     --install-timeout) INSTALL_TIMEOUT="${2:-}"; shift 2 ;;
     --poll-interval) POLL_INTERVAL="${2:-}"; shift 2 ;;
     --smoke-receipt-tag) SMOKE_RECEIPT_TAG="${2:-}"; shift 2 ;;
@@ -739,7 +742,7 @@ fi
 
 # ── 1. BEFORE snapshot ──────────────────────────────────────────────────────
 BASELINE_STARTED="$(date +%s)"
-BASELINE_DEADLINE=$((BASELINE_STARTED + FLIP_TIMEOUT))
+BASELINE_DEADLINE=$((BASELINE_STARTED + BASELINE_TIMEOUT))
 BASELINE_ATTEMPT=0
 BASELINE_PROGRESS_AT=0
 PORT_BEFORE=""
@@ -762,9 +765,9 @@ while :; do
   BASELINE_NOW="$(date +%s)"
   if [[ "$BASELINE_NOW" -ge "$BASELINE_DEADLINE" ]]; then
     if [[ -z "$PORT_BEFORE" ]]; then
-      echo "no healthy pre-update operator after ${FLIP_TIMEOUT}s ($BASELINE_ATTEMPT attempts; operator.json did not provide a port) — no artifacts were pushed" >&2
+      echo "no healthy pre-update operator after ${BASELINE_TIMEOUT}s ($BASELINE_ATTEMPT attempts; operator.json did not provide a port) — no artifacts were pushed" >&2
     else
-      echo "no healthy pre-update operator after ${FLIP_TIMEOUT}s ($BASELINE_ATTEMPT attempts; health on port $PORT_BEFORE reports neither sha nor version) — no artifacts were pushed" >&2
+      echo "no healthy pre-update operator after ${BASELINE_TIMEOUT}s ($BASELINE_ATTEMPT attempts; health on port $PORT_BEFORE reports neither sha nor version) — no artifacts were pushed" >&2
     fi
     exit 2
   fi
@@ -772,9 +775,9 @@ while :; do
   if (( BASELINE_PROGRESS_AT == 0 || BASELINE_NOW - BASELINE_PROGRESS_AT >= 30 )); then
     BASELINE_ELAPSED=$((BASELINE_NOW - BASELINE_STARTED))
     if [[ -z "$PORT_BEFORE" ]]; then
-      echo "waiting for pre-update operator baseline: operator.json has no port yet ($BASELINE_ELAPSED s/${FLIP_TIMEOUT}s)" >&2
+      echo "waiting for pre-update operator baseline: operator.json has no port yet ($BASELINE_ELAPSED s/${BASELINE_TIMEOUT}s)" >&2
     else
-      echo "waiting for pre-update operator baseline: health at port $PORT_BEFORE has neither sha nor version ($BASELINE_ELAPSED s/${FLIP_TIMEOUT}s)" >&2
+      echo "waiting for pre-update operator baseline: health at port $PORT_BEFORE has neither sha nor version ($BASELINE_ELAPSED s/${BASELINE_TIMEOUT}s)" >&2
     fi
     BASELINE_PROGRESS_AT="$BASELINE_NOW"
   fi
