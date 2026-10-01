@@ -23,11 +23,16 @@ const {
   mkdirSync,
   chmodSync,
   readFileSync,
+  readdirSync,
+  utimesSync,
 } = require('node:fs');
 const { tmpdir, homedir } = require('node:os');
 const { join } = require('node:path');
 
-const HELPER = join(__dirname, '..', 'bin', 'lib', 'claim-target-dir.sh');
+// Overridable so a mutation probe can point the suite at a mutated COPY of the
+// helper outside the shared tree instead of mutating the tracked file.
+const HELPER = process.env.PAPERCUSP_CLAIM_TARGET_DIR_HELPER
+  || join(__dirname, '..', 'bin', 'lib', 'claim-target-dir.sh');
 const BUILD_LINUX = readFileSync(join(__dirname, '..', 'bin', 'build-linux-local.sh'), 'utf8');
 const BUILD_APPIMAGE = readFileSync(join(__dirname, '..', 'bin', 'build-appimage.sh'), 'utf8');
 const RUSTUP_HOME = process.env.RUSTUP_HOME || join(homedir(), '.rustup');
@@ -91,10 +96,10 @@ function prepareCollectionTarget(root) {
  * point: it proves the lock survives the very thing the wrapper does after
  * sourcing, rather than only surviving inside the sourcing shell.
  */
-function holdSlotViaExec(env = {}) {
+function holdSlotViaExec(env = {}, { execCommand = 'sleep 30' } = {}) {
   const child = spawn(
     'bash',
-    ['-c', `. "${HELPER}" 2>/dev/null; echo "$CARGO_TARGET_DIR"; exec sleep 30`],
+    ['-c', `. "${HELPER}" 2>/dev/null; echo "$CARGO_TARGET_DIR"; exec ${execCommand}`],
     { cwd: home, env: isolatedEnv(env), stdio: ['ignore', 'pipe', 'ignore'] },
   );
   return new Promise((resolve) => {
@@ -241,6 +246,152 @@ test('slots are handed out in order, and exhaustion falls back to a PRIVATE dir 
   } finally {
     holders.forEach((h) => h.child.kill());
   }
+});
+
+// WI-10004764 — private overflow roots were never removed: 131 of them, 774 GiB,
+// filled the data disk. The reaper must remove dead ones, keep anything that is
+// live, recent, leased or referenced, and let overflow reuse a dead root warm.
+//
+// A pid above the kernel's pid_max (4194304 on Linux) can never be live, so
+// these names model a legacy root whose claiming launcher is gone.
+function reapEnv(env = {}) {
+  return {
+    PAPERCUSP_DESKTOP_PRIVATE_SLOT_REAP_SYNC: '1',
+    PAPERCUSP_DESKTOP_PRIVATE_SLOT_GRACE_SEC: '1800',
+    PAPERCUSP_RELEASE_RETENTION_ROOT: join(home, 'retention'),
+    ...env,
+  };
+}
+
+function makePrivateRoot(name, { ageSec = 7200, marker = name } = {}) {
+  const dir = join(home, `.cargo-target-${name}`);
+  mkdirSync(join(dir, 'debug'), { recursive: true });
+  writeFileSync(join(dir, 'debug', 'marker'), marker);
+  ageRoot(dir, ageSec);
+  return dir;
+}
+
+function ageRoot(dir, ageSec) {
+  const t = Date.now() / 1000 - ageSec;
+  for (const p of [join(dir, 'debug'), dir]) if (existsSync(p)) utimesSync(p, t, t);
+}
+
+function auditLines() {
+  const audit = join(home, 'retention', 'deletion-audit.tsv');
+  return existsSync(audit) ? readFileSync(audit, 'utf8').trim().split('\n') : [];
+}
+
+test('a dead private overflow root is reaped by the next claim, and the deletion is audited', () => {
+  const dead = makePrivateRoot('pid99999999');
+  assert.strictEqual(claim(reapEnv()), join(home, '.cargo-target'));
+  assert.ok(!existsSync(dead), 'the dead private root must be deleted');
+  assert.deepStrictEqual(readdirSync(home).filter((n) => n.includes('reaping')), [],
+    'a synchronous reap must not leave a renamed-aside root behind');
+  const lines = auditLines();
+  assert.ok(lines.some((l) => l.includes('decision=reap') && l.includes(`path=${dead}\t`)), lines.join('\n'));
+  assert.ok(lines.some((l) => l.includes('decision=allow') && l.includes('reaping-pid99999999')), lines.join('\n'));
+});
+
+test('live, recent, leased and referenced private roots are all kept', async () => {
+  const live = makePrivateRoot(`pid${process.pid}`);
+  const recent = makePrivateRoot('pid99999998', { ageSec: 60 });
+  const leased = makePrivateRoot('pid99999997');
+  const referenced = makePrivateRoot('pid99999996');
+  const control = makePrivateRoot('pid99999995');
+  mkdirSync(join(home, 'retention'));
+  writeFileSync(join(home, 'retention', 'lease-desktop-test.tsv'),
+    `schema=papercusp-release-retention/v1\ntag=desktop-test\ncreated_ns=1\nexpires_ns=0\npath=${join(leased, 'debug')}\n`);
+  const user = spawn('sleep', ['30'], { env: { ...process.env, CARGO_TARGET_DIR: referenced }, stdio: 'ignore' });
+  try {
+    await new Promise((r) => setTimeout(r, 100));
+    claim(reapEnv());
+    assert.ok(!existsSync(control), 'positive control: an ordinary dead root must be reaped in the same run');
+    assert.ok(existsSync(live), 'a root whose claiming pid is alive must be kept');
+    assert.ok(existsSync(recent), 'a root idle for less than the grace period must be kept');
+    assert.ok(existsSync(leased), 'a root covered by a release-retention lease must be kept');
+    assert.ok(existsSync(referenced), 'a root a live process builds into must be kept');
+  } finally {
+    user.kill();
+  }
+});
+
+test('overflow reuses the newest dead private root as a warm cache instead of a cold build', async () => {
+  const held = await holdSlotViaExec({ PAPERCUSP_DESKTOP_TARGET_SLOTS: '1' });
+  try {
+    const older = makePrivateRoot('pid99999990', { ageSec: 10000, marker: 'older' });
+    const newer = makePrivateRoot('pid99999991', { ageSec: 4000, marker: 'newer' });
+    const overflow = claim(reapEnv({ PAPERCUSP_DESKTOP_TARGET_SLOTS: '1' }));
+    assert.match(overflow, /\.cargo-target-pid\d+(-\d+)?$/);
+    assert.notStrictEqual(overflow, held.dir);
+    assert.strictEqual(readFileSync(join(overflow, 'debug', 'marker'), 'utf8'), 'newer',
+      'the overflow claim must adopt the most recently active dead root');
+    assert.ok(!existsSync(newer), 'the adopted root is renamed to its new claimant');
+    assert.ok(!existsSync(older), 'the remaining dead root is reaped');
+    assert.ok(auditLines().some((l) => l.includes('decision=adopt') && l.includes(`path=${newer}\t`)));
+  } finally {
+    held.child.kill();
+  }
+});
+
+test('a private root stays claimed while its holder lives and is reclaimed once it exits', async () => {
+  const shared = await holdSlotViaExec({ PAPERCUSP_DESKTOP_TARGET_SLOTS: '1' });
+  // The holder drops CARGO_TARGET_DIR from its own environment, as a launcher shell
+  // between cargo invocations does, so the claim lock is the ONLY thing that can
+  // show the root is in use — the reference probe cannot see this holder.
+  const priv = await holdSlotViaExec(reapEnv({ PAPERCUSP_DESKTOP_TARGET_SLOTS: '1' }),
+    { execCommand: 'env -u CARGO_TARGET_DIR sleep 30' });
+  try {
+    assert.match(priv.dir, /\.cargo-target-pid\d+$/);
+    assert.ok(existsSync(join(home, '.papercusp', 'desktop-dev-slots', `${priv.dir.split('-').pop()}.lock`)),
+      'a private claim must take a lock the reaper can test');
+    ageRoot(priv.dir, 7200);
+    const other = claim(reapEnv({ PAPERCUSP_DESKTOP_TARGET_SLOTS: '1' }));
+    assert.notStrictEqual(other, priv.dir, 'a held private root must never be adopted');
+    assert.ok(existsSync(priv.dir), 'a held private root must never be reaped');
+
+    priv.child.kill();
+    await new Promise((r) => priv.child.once('exit', r));
+    const next = claim(reapEnv({ PAPERCUSP_DESKTOP_TARGET_SLOTS: '1' }));
+    assert.ok(!existsSync(priv.dir), 'once its holder exits, the idle private root is reclaimed');
+    assert.ok(existsSync(next));
+  } finally {
+    shared.child.kill();
+    priv.child.kill();
+  }
+});
+
+test('the background deleter never holds the launch\'s slot lock', async () => {
+  // A launch execs into its build holding the slot lock on fd 8. A deleter that
+  // inherited it would keep slot 0 "busy" for as long as a 60 GiB rm runs, and the
+  // next launch would be pushed onto a cold slot. A slow rm makes the window certain.
+  const realRm = execFileSync('sh', ['-c', 'command -v rm'], { encoding: 'utf8' }).trim();
+  const bin = join(home, 'slow-bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'rm'), `#!/bin/sh\ncase "$1" in -rf) sleep 3 ;; esac\nexec ${realRm} "$@"\n`);
+  chmodSync(join(bin, 'rm'), 0o755);
+  const dead = makePrivateRoot('pid99999988');
+  const env = reapEnv({ PAPERCUSP_DESKTOP_PRIVATE_SLOT_REAP_SYNC: '0', PATH: `${bin}:${process.env.PATH}` });
+  assert.strictEqual(claim(env), join(home, '.cargo-target'));
+  assert.ok(!existsSync(dead), 'the dead root is renamed aside before the launch continues');
+  assert.ok(readdirSync(home).some((n) => n.includes('reaping')), 'the slow deletion must still be running');
+  assert.strictEqual(claim(), join(home, '.cargo-target'), 'the background deleter kept slot 0 locked');
+  for (let i = 0; i < 100 && readdirSync(home).some((n) => n.includes('reaping')); i++) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.deepStrictEqual(readdirSync(home).filter((n) => n.includes('reaping')), [], 'the background deletion completes');
+});
+
+test('the reap-only entrypoint lists without deleting on --dry-run, then reaps', () => {
+  const dead = makePrivateRoot('pid99999989');
+  const script = join(__dirname, '..', 'bin', 'reap-private-target-slots.sh');
+  const env = isolatedEnv(reapEnv({ ROOT: home }));
+  const listed = execFileSync(script, ['--dry-run'], { cwd: home, env, encoding: 'utf8' });
+  assert.match(listed, new RegExp(`would reap: ${dead.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.ok(existsSync(dead), '--dry-run must not delete');
+  execFileSync(script, [], { cwd: home, env, encoding: 'utf8' });
+  assert.ok(!existsSync(dead));
+  assert.ok(!existsSync(join(home, '.papercusp', 'desktop-dev-slots', 'slot0.lock')),
+    'reap-only must not claim a target slot');
 });
 
 test('a broken relocated target-dir symlink is healed in place for the same warm slot', async () => {
