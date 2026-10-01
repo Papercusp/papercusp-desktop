@@ -10,7 +10,8 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
+const { setTimeout: delay } = require('node:timers/promises');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -19,6 +20,82 @@ const VERIFY_SCRIPT = path.resolve(__dirname, '../../scripts/verify-tauri-headle
 const source = fs.readFileSync(VERIFY_SCRIPT, 'utf8');
 const DEV_OPERATOR_SCRIPT = path.resolve(__dirname, '../bin/dev-operator-ifneeded.sh');
 const devOperatorSource = fs.readFileSync(DEV_OPERATOR_SCRIPT, 'utf8');
+
+test('startup diagnostic refuses a live foreign PID even when its pidfile exists', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-startup-report-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'node.pid'), String(process.pid));
+    const start = source.indexOf('collect_operator_startup_diagnostic() {');
+    const end = source.indexOf('\nboot_failure_diag() {', start);
+    assert.ok(start >= 0 && end > start);
+    const result = spawnSync('bash', ['-c', source.slice(start, end) + '\ncollect_operator_startup_diagnostic'], {
+      encoding: 'utf8', timeout: 5000,
+      env: { ...process.env, OPERATOR_STARTUP_DIAGNOSTIC_DIR: dir,
+        OPERATOR_HOST_BUNDLE: path.join(dir, 'foreign-host.mjs') },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '', 'a foreign PID must not be signaled or reported as captured');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('retains startup reports per attempt and captures before the frontend deadline', () => {
+  assert.match(source, /OPERATOR_STARTUP_DIAGNOSTIC_DIR=.*VH_RUN_DIR.*attempt-\$BOOT_ATTEMPTS/);
+  assert.match(source, /PAPERCUSP_DEV_HOST_DIAGNOSTIC_DIR="\$OPERATOR_STARTUP_DIAGNOSTIC_DIR"/);
+  assert.match(source, /BUILD_ELAPSED" -ge 60.*port_is_listening/);
+  assert.match(source, /grep -Fxq -- "\$OPERATOR_HOST_BUNDLE"/);
+});
+
+test('collects one real credential-free report from the exact owned Node entry', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-owned-startup-'));
+  const entry = path.join(dir, 'host.mjs');
+  fs.writeFileSync(entry, 'console.log("ready"); setInterval(() => {}, 1000);\n');
+  const child = spawn(process.execPath, ['--report-on-signal', '--report-signal=SIGUSR2',
+    '--report-exclude-env', '--report-exclude-network', `--report-directory=${dir}`, entry], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    env: { ...process.env, STARTUP_DIAGNOSTIC_TEST_SECRET: 'must-never-be-retained' },
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      child.stdout.once('data', resolve);
+      child.once('error', reject);
+      child.once('exit', code => reject(new Error(`host exited before ready: ${code}`)));
+    });
+    fs.writeFileSync(path.join(dir, 'node.pid'), String(child.pid));
+    const start = source.indexOf('collect_operator_startup_diagnostic() {');
+    const end = source.indexOf('\nboot_failure_diag() {', start);
+    const result = spawnSync('bash', ['-c', 'log() { echo "$*"; }\n' + source.slice(start, end)
+      + '\ncollect_operator_startup_diagnostic\ncollect_operator_startup_diagnostic'], {
+      encoding: 'utf8', timeout: 5000,
+      env: { ...process.env, OPERATOR_STARTUP_DIAGNOSTIC_DIR: dir, OPERATOR_HOST_BUNDLE: entry },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim().split('\n').length, 1, 'signal only once per attempt');
+    let reports = [];
+    let report;
+    let reportText;
+    for (let i = 0; i < 100; i++) {
+      reports = fs.readdirSync(dir).filter(name => name.endsWith('.json'));
+      if (reports.length) {
+        reportText = fs.readFileSync(path.join(dir, reports[0]), 'utf8');
+        try { report = JSON.parse(reportText); break; } catch (err) {
+          if (!(err instanceof SyntaxError)) throw err;
+        }
+      }
+      await delay(20);
+    }
+    assert.equal(reports.length, 1, 'Node must actually write the retained report');
+    assert.ok(report, 'Node must finish writing a valid report before evidence is read');
+    assert.equal(report.header.processId, child.pid);
+    assert.equal(report.environmentVariables, undefined);
+    assert.ok(!reportText.includes('must-never-be-retained'));
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise(resolve => child.exitCode !== null ? resolve() : child.once('exit', resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('captures file-backed assertion argv before boot and records a sha256 manifest', () => {
   assert.match(source, /ASSERTION_CWD="\$PWD"/);

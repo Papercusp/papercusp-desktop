@@ -27,8 +27,37 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
+const { spawnSync } = require('node:child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'bin', 'dev-operator-ifneeded.sh');
+
+test('frozen host diagnostics preserve the actual exec PID and exclude credentials', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'operator diagnostic '));
+  try {
+    const entry = path.join(dir, 'host entry.js');
+    const diagnosticDir = path.join(dir, 'reports');
+    fs.writeFileSync(entry, 'console.log(JSON.stringify({pid:process.pid,args:process.execArgv}));\n');
+    const src = fs.readFileSync(SCRIPT, 'utf8');
+    const start = src.indexOf('DEV_HOST_COMMAND="npx tsx bin/hono-host.ts"');
+    const end = src.indexOf("printf -v DEV_OPERATOR_DIR_Q", start);
+    const result = spawnSync('bash', ['-c', src.slice(start, end) + '\neval "$DEV_HOST_COMMAND"'], {
+      encoding: 'utf8',
+      env: { ...process.env, DEV_SOURCE_ROOT: '', PAPERCUSP_DEV_HOST_ENTRY: entry,
+        PAPERCUSP_DEV_HOST_DIAGNOSTIC_DIR: diagnosticDir },
+      timeout: 10000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const observed = JSON.parse(result.stdout.trim().split('\n').at(-1));
+    assert.equal(Number(fs.readFileSync(path.join(diagnosticDir, 'node.pid'), 'utf8')), observed.pid);
+    for (const arg of ['--report-on-signal', '--report-signal=SIGUSR2', '--report-exclude-env', '--report-exclude-network']) {
+      assert.ok(observed.args.includes(arg), `missing ${arg}`);
+    }
+    assert.ok(observed.args.includes(`--report-directory=${diagnosticDir}`));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 /** The spawn-offload vars WI-7160 introduced. Each maps to a git-heavy caller
  *  that fork()s from the operator's main thread; on a single-process host with

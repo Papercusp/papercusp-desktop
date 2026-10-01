@@ -179,6 +179,16 @@ if [ -n "$DEV_HOST_ENTRY" ]; then
   fi
   printf -v DEV_HOST_ENTRY_Q '%q' "$DEV_HOST_ENTRY"
   DEV_HOST_COMMAND="node $DEV_HOST_ENTRY_Q"
+  # A frozen verifier can stall during module evaluation, before host-level
+  # diagnostics are installed. Arm Node itself and retain its exact PID before
+  # exec, so the verifier can capture the stall without guessing a peer's PID.
+  if [ -n "${PAPERCUSP_DEV_HOST_DIAGNOSTIC_DIR:-}" ]; then
+    mkdir -p -- "$PAPERCUSP_DEV_HOST_DIAGNOSTIC_DIR"
+    printf -v DEV_HOST_DIAGNOSTIC_DIR_Q '%q' "$PAPERCUSP_DEV_HOST_DIAGNOSTIC_DIR"
+    DEV_HOST_RUN="echo \$\$ > $DEV_HOST_DIAGNOSTIC_DIR_Q/node.pid; exec node --report-on-signal --report-signal=SIGUSR2 --report-exclude-env --report-exclude-network --report-directory=$DEV_HOST_DIAGNOSTIC_DIR_Q $DEV_HOST_ENTRY_Q"
+    printf -v DEV_HOST_RUN_Q '%q' "$DEV_HOST_RUN"
+    DEV_HOST_COMMAND="bash -c $DEV_HOST_RUN_Q"
+  fi
   echo "[tauri] using frozen plain-node operator host: $DEV_HOST_ENTRY"
 fi
 printf -v DEV_OPERATOR_DIR_Q '%q' "$DEV_OPERATOR_DIR"
