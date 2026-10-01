@@ -33,10 +33,14 @@ function voiceExpression(name, document, location = {}, KeyboardEvent = class {
 
 test('voice regression requires its settings page and finds the alert after unrelated alerts', () => {
   assert.equal(voiceExpression('GEMINI_ALERT', { querySelector: () => null }), false);
-  const page = { querySelectorAll: () => [{ textContent: 'Unrelated alert' }] };
-  const document = { querySelector: () => page };
+  let alerts = [{ textContent: 'Unrelated alert' }];
+  const page = { querySelectorAll: () => alerts };
+  const document = { querySelector: selector => selector === '.pc-settings-page--voice'
+    ? page : selector === '[role=alert]' ? alerts[0] : null };
   assert.equal(voiceExpression('GEMINI_ALERT', document), false);
-  page.querySelectorAll = () => [{ textContent: 'Unrelated alert' }, { textContent: 'Gemini Live is not supported in this release.' }];
+  alerts = [{ textContent: 'Unrelated alert' }, { textContent: 'Gemini Live is not supported in this release.' }];
+  assert.equal(new Function('document', 'return !!document.querySelector(\'[role="alert"]\')?.textContent?.includes(\'Gemini Live is not supported\');')(document), false,
+    'the original first-alert-only assertion rejects this valid rendered state');
   assert.equal(voiceExpression('GEMINI_ALERT', document), true);
 });
 
