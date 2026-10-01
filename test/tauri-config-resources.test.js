@@ -123,7 +123,7 @@ test('GUI/Server distribution contract is fail-closed and archive-aware', () => 
     'sidecar/spa/**/*',
     'resources/libPapercuspTermShim.dylib',
   ]);
-  for (const forbiddenBroadGlob of ['sidecar/**/*', 'resources/*', 'seed/**/*']) {
+  for (const forbiddenBroadGlob of ['sidecar/**/*', 'resources/*', 'seed/**/*', 'doc-vector-seed/**/*']) {
     assert(!guiGlobs.includes(forbiddenBroadGlob), `GUI allowlist widened to ${forbiddenBroadGlob}`);
   }
   for (const requiredServerOnlyPrefix of [
@@ -361,11 +361,13 @@ test('Server distribution contract retains every backend runtime class before GU
   assert.deepEqual([...packs.keys()].sort(), [
     'bootstrap-seed',
     'dev-source',
+    'doc-vector-seed',
     'local-models',
     'windows-wsl-runtime',
   ]);
   assert.deepEqual(packs.get('local-models').forbidden, ['*.tmp.*', '*.partial', '*.part']);
   assert.deepEqual(packs.get('bootstrap-seed').paths, ['seed/**/*']);
+  assert.deepEqual(packs.get('doc-vector-seed').paths, ['doc-vector-seed/**/*']);
   assert.deepEqual(packs.get('dev-source').paths, ['sidecar/source.tar.zst']);
   assert.deepEqual(packs.get('windows-wsl-runtime').platforms, ['windows']);
 
@@ -422,6 +424,7 @@ test('Tauri seed bundle is server-only, not duplicated into the GUI bundle', () 
     'sidecar/**/*',
     'resources/*',
     'seed/**/*',
+    'doc-vector-seed/**/*',
   ]);
 });
 

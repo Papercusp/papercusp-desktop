@@ -12,7 +12,8 @@
     "resources": [
       "sidecar/**/*",
       "resources/*",
-      "seed/**/*"
+      "seed/**/*",
+      "doc-vector-seed/**/*"
     ],
     "linux": {
       "deb": {
