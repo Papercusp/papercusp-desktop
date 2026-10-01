@@ -242,6 +242,17 @@ test('an unrelated raw token remains a release-gate finding', () => {
   );
 });
 
+test('D-112 seed credential scan detects raw tokens in data and script files', () => {
+  const canary = ['A9f3Kx7L', 'm2Qp8Rz4', 'V6nC1wH7'].join('');
+  const result = scan({
+    'seed/corestore/db/fixture.json': '{"token":"' + canary + '"}\n',
+    'seed/serve.mjs': 'const token = "' + canary + '";\n',
+  });
+  assert.equal(result.status, 1);
+  assert.ok(result.report.some((finding) => finding.File.endsWith('seed/corestore/db/fixture.json')));
+  assert.ok(result.report.some((finding) => finding.File.endsWith('seed/serve.mjs')));
+});
+
 test('redacted gitleaks diagnostics expose locators but never matched values or host paths', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-gitleaks-report-'));
   try {
@@ -276,14 +287,14 @@ test('redacted gitleaks diagnostics expose locators but never matched values or 
 
 test('release-local runs redacted gitleaks diagnostics after the Python assembled-bundle audit and before the boot gate', () => {
   const source = fs.readFileSync(scriptPath, 'utf8');
-  const pythonGate = source.indexOf('python3 "$ROOT/bin/audit-release-bundle.py"');
+  const pythonGate = source.indexOf('python3 "$ORCHESTRATOR_HERE/audit-release-bundle.py"');
   const gitleaksGate = source.indexOf('release-gitleaks.toml');
   const bootGate = source.indexOf('# ── BOOT GATE');
   assert.ok(pythonGate >= 0, 'the Python assembled-bundle audit is missing');
   assert.ok(gitleaksGate > pythonGate, 'gitleaks must run after the Python assembled-bundle audit');
   assert.ok(gitleaksGate < bootGate, 'gitleaks must run before the boot/platform-leg gates');
   assert.match(source, /"\$ROOT\/src-tauri\/sidecar" "\$ROOT\/src-tauri\/resources"/);
-  assert.match(source, /for _gitleaks_root in "src-tauri\/sidecar" "src-tauri\/resources"/);
+  assert.match(source, /for _gitleaks_root in "src-tauri\/sidecar" "src-tauri\/resources" "src-tauri\/seed"; do/);
   assert.match(source, /\( cd "\$ROOT" && gitleaks dir "\$_gitleaks_root"/);
   assert.match(source, /--redact=100/);
   assert.match(source, /--report-format=json/);
