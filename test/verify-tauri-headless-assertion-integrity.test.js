@@ -20,6 +20,68 @@ const VERIFY_SCRIPT = path.resolve(__dirname, '../../scripts/verify-tauri-headle
 const source = fs.readFileSync(VERIFY_SCRIPT, 'utf8');
 const DEV_OPERATOR_SCRIPT = path.resolve(__dirname, '../bin/dev-operator-ifneeded.sh');
 const devOperatorSource = fs.readFileSync(DEV_OPERATOR_SCRIPT, 'utf8');
+const dreamSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-dream-native.sh'), 'utf8');
+
+function dreamExpression(name) {
+  const expression = dreamSource.match(new RegExp(`${name}='([\\s\\S]*?)'\\n`))?.[1];
+  assert.ok(expression, `maintained native ${name} expression must exist`);
+  return new Function('window', 'document', `return ${expression};`);
+}
+
+function dreamDocument(button, alert = false) {
+  return { querySelector: () => button ? {
+    querySelectorAll: () => [button], querySelector: () => alert ? {} : null,
+  } : null };
+}
+
+test('native Dream counterexample waits for an enabled Start and refuses an alert', () => {
+  const ready = dreamExpression('COUNTEREXAMPLE_READY');
+  const button = { textContent: 'Start manual dreaming', disabled: true };
+  assert.equal(ready({}, dreamDocument(null)), false);
+  assert.equal(ready({}, dreamDocument(button)), false);
+  button.disabled = false;
+  assert.equal(ready({}, dreamDocument(button, true)), false);
+  assert.equal(ready({}, dreamDocument(button)), true);
+});
+
+test('native Dream observer preserves the real response and records acknowledged dispatch', async () => {
+  let onClick;
+  const button = { textContent: 'Start manual dreaming', disabled: false,
+    addEventListener: (event, handler) => { assert.equal(event, 'click'); onClick = handler; } };
+  const response = new Response(JSON.stringify({ ok: true, result: { content: [{ text: '{"ok":true}' }] } }));
+  const requests = [];
+  const original = async (...args) => { requests.push(args); return response; };
+  const window = { fetch: original, location: { href: 'http://127.0.0.1:33700/adv' } };
+  assert.equal(dreamExpression('COUNTEREXAMPLE_OBSERVER')(window, dreamDocument(button)), true);
+  onClick();
+  const init = { method: 'POST', body: JSON.stringify({ name: 'dream:control', args: { pot: 'dream-native', mode: 'manual', enabled: true } }) };
+  const actual = await window.fetch('/api/agent-mcp/run-tool', init);
+  assert.equal(actual, response, 'never replace the server response');
+  assert.deepEqual(await actual.json(), { ok: true, result: { content: [{ text: '{"ok":true}' }] } });
+  assert.deepEqual(requests, [['/api/agent-mcp/run-tool', init]], 'call the real fetch exactly once');
+  assert.deepEqual(window.__dreamNativeProbe.clicks, [{ disabled: false }]);
+  assert.equal(window.__dreamNativeProbe.requests.length, 1);
+  assert.equal(window.__dreamNativeAck.httpOk, true);
+  assert.equal(window.__dreamNativeAck.envelopeOk, true);
+  assert.equal(window.__dreamNativeAck.refused, false);
+});
+
+test('native Dream observer distinguishes unrelated writes, server refusals and malformed responses', async () => {
+  const button = { textContent: 'Start manual dreaming', disabled: false, addEventListener: () => {} };
+  let response = new Response('{"ok":true}');
+  const window = { fetch: async () => response, location: { href: 'http://127.0.0.1:33700/adv' } };
+  assert.equal(dreamExpression('COUNTEREXAMPLE_OBSERVER')(window, dreamDocument(button)), true);
+  const init = (pot) => ({ method: 'POST', body: JSON.stringify({ name: 'dream:control', args: { pot, mode: 'manual', enabled: true } }) });
+  await window.fetch('/api/agent-mcp/run-tool', init('another-pot'));
+  assert.equal(window.__dreamNativeAck, null, 'another pot cannot establish this counterexample');
+  response = new Response(JSON.stringify({ ok: true, result: { content: [{ text: '{"ok":false}' }] } }));
+  assert.equal(await window.fetch('/api/agent-mcp/run-tool', init('dream-native')), response);
+  assert.equal(window.__dreamNativeAck.refused, true);
+  response = new Response('invalid-json');
+  assert.equal(await window.fetch('/api/agent-mcp/run-tool', init('dream-native')), response);
+  assert.equal(window.__dreamNativeAck.refused, true);
+  assert.ok(window.__dreamNativeAck.error);
+});
 
 test('startup diagnostic refuses a live foreign PID even when its pidfile exists', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-startup-report-'));
