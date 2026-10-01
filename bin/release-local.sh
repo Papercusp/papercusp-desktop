@@ -155,6 +155,8 @@ source "$ORCHESTRATOR_HERE/lib/release-tag-pin.sh"
 # release-local.sh, even when $0 names a frozen target worktree.
 # shellcheck source=lib/rust-path-remap.sh
 source "$ORCHESTRATOR_HERE/lib/rust-path-remap.sh"
+# shellcheck source=lib/seed-reuse-age.sh
+source "$ORCHESTRATOR_HERE/lib/seed-reuse-age.sh"
 
 # A brand-new version needs an exact remote ref before the LOCAL-only cutter can
 # bake its dogfood clone pin. Keep that outward write separate from the cut:
@@ -2342,26 +2344,11 @@ cut_release_seed() {
   # unfiltered set and folded ~887k dead governor receipts. Nothing refreshes
   # the snapshot store automatically, so refuse a stale one loudly rather than
   # publish old hive state. PAPERCUSP_SEED_REUSE_MAX_AGE_HOURS=0 accepts any age.
+  # The guard is shared with mac-vm-build.sh + ensure-release-seed.sh (WI-10004593).
   if [[ "$seed_reuse" == "1" ]]; then
-    local reuse_max_h="${PAPERCUSP_SEED_REUSE_MAX_AGE_HOURS:-72}"
-    if [[ ! "$reuse_max_h" =~ ^[0-9]+$ ]]; then
-      echo "ERROR: PAPERCUSP_SEED_REUSE_MAX_AGE_HOURS must be a whole number of hours (got '$reuse_max_h')" >&2
-      return 1
-    fi
-    if (( reuse_max_h > 0 )); then
-      local reuse_cut_ts
-      reuse_cut_ts="$(node -e 'try{const m=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(Number.isFinite(m.cutTs))process.stdout.write(String(Math.trunc(m.cutTs)))}catch{}' "$seed_out/manifest.json" 2>/dev/null || true)"
-      if [[ -z "$reuse_cut_ts" ]]; then
-        echo "ERROR: seed reuse: $seed_out/manifest.json has no readable cutTs, so the reused corestore's age is unknown. Refusing to ship it (WI-10004429). Set PAPERCUSP_SEED_REUSE_MAX_AGE_HOURS=0 to accept any age." >&2
-        return 1
-      fi
-      local reuse_age_h=$(( ( $(date +%s) * 1000 - reuse_cut_ts ) / 3600000 ))
-      if (( reuse_age_h > reuse_max_h )); then
-        echo "ERROR: seed reuse: the committed corestore was cut ${reuse_age_h}h ago (cutTs=$reuse_cut_ts), older than PAPERCUSP_SEED_REUSE_MAX_AGE_HOURS=${reuse_max_h}. A reused corestore ships as-cut, so every joiner would fold that old hive state (WI-10004429). Refresh the snapshot store: cut a fresh seed on a quiesced box (bin/cut-seed-quiesced.sh, PAPERCUSP_SEED_REUSE_CORESTORE=0) and repoint ${PAPERCUSP_SEED_SNAPSHOT_DIR-$HOME/.papercusp/release-seeds/current}. Or set PAPERCUSP_SEED_REUSE_MAX_AGE_HOURS=0 to ship it anyway." >&2
-        return 1
-      fi
-      echo "==> seed: reused corestore age ${reuse_age_h}h (max ${reuse_max_h}h)"
-    fi
+    local reuse_age_line
+    reuse_age_line="$(seed_reuse_age_check "$seed_out/manifest.json")" || return 1
+    [[ -n "$reuse_age_line" ]] && echo "==> $reuse_age_line"
   fi
   if [[ "$seed_reuse" == "1" ]]; then
     core_args+=(--reuse-corestore "$seed_out")
