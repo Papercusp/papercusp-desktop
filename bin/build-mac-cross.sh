@@ -120,6 +120,8 @@ load_release_host
 # producer is run directly or as a release-local child.
 # shellcheck source=lib/release-artifacts.sh
 source "$HERE/lib/release-artifacts.sh"
+# shellcheck source=lib/cargo-target-root.sh
+source "$HERE/lib/cargo-target-root.sh"
 
 # WI-4419: a release build arms the sidecar identity-scan by default.
 export PAPERCUSP_RELEASE_AUDIT="${PAPERCUSP_RELEASE_AUDIT:-1}"
@@ -221,9 +223,7 @@ fi
 # (target-dir = ~/.cargo-target) AND src-tauri/target is a symlink, so a naive
 # "$SRC_TAURI/target/..." path is the WRONG place to read the compiled binary.
 # Same derivation build-windows-cross.sh + release-local.sh use.
-CARGO_TARGET_ROOT="$(cd "$SRC_TAURI" && cargo metadata --no-deps --format-version 1 2>/dev/null \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null || true)"
-[[ -n "$CARGO_TARGET_ROOT" ]] || CARGO_TARGET_ROOT="$SRC_TAURI/target"
+CARGO_TARGET_ROOT="$(papercusp_cargo_target_root "$SRC_TAURI")" || exit $?
 
 # Output bundle dir — the path release-local.sh's mac leg collects from
 # ($ROOT/src-tauri/target/universal-apple-darwin/release/bundle). Overridable for

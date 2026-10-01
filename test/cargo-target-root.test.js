@@ -34,11 +34,12 @@ function fixture(configToml) {
   return dir;
 }
 
-function resolve(dir, { fn = 'papercusp_cargo_target_root', cargoTargetDir } = {}) {
+function resolve(dir, { fn = 'papercusp_cargo_target_root', cargoTargetDir, pathPrefix } = {}) {
   const env = { ...process.env, CARGO_HOME: path.join(dir, 'cargo-home'), RUSTUP_HOME, HOME: dir };
   delete env.CARGO_BUILD_TARGET_DIR;
   if (cargoTargetDir === undefined) delete env.CARGO_TARGET_DIR;
   else env.CARGO_TARGET_DIR = cargoTargetDir;
+  if (pathPrefix) env.PATH = [pathPrefix, env.PATH || ''].filter(Boolean).join(path.delimiter);
   return spawnSync('bash', ['-c', `set -euo pipefail; source "$1"; ${fn} "$2"`, 'x', helper, path.join(dir, 'crate')],
     { encoding: 'utf8', env });
 }
@@ -106,6 +107,24 @@ test('an unreadable Cargo config FAILS LOUDLY instead of guessing a directory', 
   }
 });
 
+test('an unavailable Cargo command fails loudly instead of guessing a directory', (t) => {
+  if (process.platform === 'win32') return t.skip('the Cargo resolver contract runs under POSIX Bash');
+  const dir = fixture();
+  try {
+    const fakeBin = path.join(dir, 'no-cargo-bin');
+    fs.mkdirSync(fakeBin);
+    const fakeCargo = path.join(fakeBin, 'cargo');
+    fs.writeFileSync(fakeCargo, '#!/bin/sh\necho "cargo: command not found" >&2\nexit 127\n', { mode: 0o755 });
+    const res = resolve(dir, { pathPrefix: fakeBin });
+    assert.notEqual(res.status, 0);
+    assert.equal(res.stdout, '', 'a failed resolution must print no guessed path');
+    assert.match(res.stderr, /cannot resolve Cargo target directory/);
+    assert.match(res.stderr, /cargo: command not found/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── CLASS GUARD: no executable line may re-hard-code the pre-relocation default ──
 // The pattern matches `${CARGO_TARGET_DIR:-$HOME/.cargo-target}` and the
 // `${HOME}` spelling. Comment lines are skipped because history may be
@@ -123,6 +142,15 @@ const ALLOWLIST = new Set([
   'bin/vm-federation.sh',
   'scripts/linux-test-vm/lib/common.sh',
 ]);
+
+const RELEASE_TARGET_ROOT_ENTRYPOINTS = [
+  'bin/publish-platform-incremental.sh',
+  'bin/build-appimage.sh',
+  'bin/build-linux-local.sh',
+  'bin/build-mac-cross.sh',
+  'bin/build-windows-cross.sh',
+  'bin/release-local.sh',
+];
 
 function scriptFiles() {
   const out = [];
@@ -179,4 +207,22 @@ test('allowlist is shrink-only: every entry must still be a real offender', () =
   const hits = offenders();
   const stale = [...ALLOWLIST].filter((rel) => !hits.has(rel));
   assert.deepEqual(stale, [], 'these were migrated — delete them from ALLOWLIST');
+});
+
+test('all six release target-root callers use the shared fail-closed resolver', () => {
+  for (const rel of RELEASE_TARGET_ROOT_ENTRYPOINTS) {
+    const text = fs.readFileSync(path.join(root, rel), 'utf8');
+    const executable = text.split('\n')
+      .filter((line) => !line.trimStart().startsWith('#'))
+      .join('\n');
+    const sourceIndex = Math.max(
+      executable.indexOf('lib/cargo-target-root.sh'),
+      executable.indexOf('lib/claim-target-dir.sh'),
+    );
+    const resolverIndex = executable.indexOf('papercusp_cargo_target_root');
+    assert.ok(sourceIndex >= 0, `${rel} must source the cargo target resolver or claim-target wrapper`);
+    assert.ok(resolverIndex > sourceIndex, `${rel} must source the resolver before using it`);
+    assert.doesNotMatch(executable, /cargo metadata/,
+      `${rel} must not restore an inline metadata probe whose failure can bypass its fallback`);
+  }
 });

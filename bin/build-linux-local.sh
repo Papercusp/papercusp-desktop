@@ -332,9 +332,7 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
 # cargo's REAL target dir (this box has a global override → ~/.cargo-target, so it
 # is NOT src-tauri/target). Resolved once, up front: both the release-host gate
 # below and the artifact collection at the bottom need it.
-SRC_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-version 1 2>/dev/null \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null || true)"
-[[ -n "$SRC_ROOT" ]] || SRC_ROOT="$ROOT/src-tauri/target"
+SRC_ROOT="$(papercusp_cargo_target_root "$ROOT/src-tauri")" || exit $?
 
 VM_RELEASE_FRESHNESS_MARKER=""
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then

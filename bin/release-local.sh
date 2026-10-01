@@ -2795,10 +2795,9 @@ fi
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 
 # Resolve the claimed cargo output root before any build leg reads or writes it.
-# claim-target-dir.sh exports CARGO_TARGET_DIR, and cargo metadata is the source
-# of truth that maps that selection to the bundle tree for every target triple.
-CARGO_TARGET_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null)"
-[[ -n "$CARGO_TARGET_ROOT" ]] || CARGO_TARGET_ROOT="$ROOT/src-tauri/target"
+# The shared resolver honors CARGO_TARGET_DIR, otherwise asks Cargo, and refuses
+# to guess a possibly stale or relocated target directory.
+CARGO_TARGET_ROOT="$(papercusp_cargo_target_root "$ROOT/src-tauri")" || exit $?
 
 # Tauri CLI does the platform-native bundling + signing in one shot.
 # Two-bundle split (ONE binary, two roles — see src-tauri/src/app_role.rs):

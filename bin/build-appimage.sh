@@ -50,9 +50,7 @@ python3 "$AUDIT_PY" --owner-preflight \
   exit 1
 }
 
-CT="$(cd src-tauri && cargo metadata --no-deps --format-version 1 2>/dev/null \
-        | python3 -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null)"
-[ -n "$CT" ] || CT="$HOME/.cargo-target"
+CT="$(papercusp_cargo_target_root "$DESK/src-tauri")" || exit $?
 # shellcheck source=lib/release-artifacts.sh
 . "$ORCHESTRATOR_HERE/lib/release-artifacts.sh" || {
   echo "FATAL: cannot source bin/lib/release-artifacts.sh — refusing to build without release-retention guards" >&2
