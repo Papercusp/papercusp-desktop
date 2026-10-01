@@ -37,12 +37,37 @@ while (($#)); do
 done
 smoke_endpoint_defaults "$PLATFORM" 2>/dev/null || { echo "need --platform windows|mac" >&2; exit 4; }
 
+# ── Verification-harness contract (expensive-verification-loops P-006) ───────
+# Bracket mode, one phase over the whole probe. release:cut reads stdout+stderr concatenated
+# and takes the LAST line as its exit-3 hint, so the VH_* lines stay on stdout and finish()
+# finalizes the run BEFORE the SMOKE_TARGET_RESULT line. VH_FAIL_OPEN: a contract that cannot
+# start never changes the verdict.
+VH_SH="$HERE/../../libs/generic/verification-harness/bin/vh.sh"
+if [[ -f "$VH_SH" ]]; then
+  # shellcheck source=../../libs/generic/verification-harness/bin/vh.sh
+  source "$VH_SH"
+  VH_FAIL_OPEN="${VH_FAIL_OPEN:-1}"
+  vh_phase probe ""
+  vh_init smoke-target-preflight "${SMOKE_TARGET_PREFLIGHT_EVIDENCE_ROOT:-$(vh_default_root smoke-target-preflight)}"
+  vh_bracket_trap
+  vh_begin probe || true
+else
+  echo "VH_DISABLED harness=smoke-target-preflight reason=vh.sh-missing:$VH_SH"
+  vh_fail() { :; }; vh_exit() { :; }
+fi
+
 SSH=("${PC_SSH:-ssh}" -i "$SSH_KEY" -p "$SSH_PORT" -o IdentitiesOnly=yes -o ConnectTimeout=10 -o BatchMode=yes "$SSH_HOST")
 SYSTEMCTL="${PC_SYSTEMCTL:-systemctl}"
 BLOCKERS=()
 blocker() { BLOCKERS+=("$1"); echo "SMOKE_TARGET_BLOCKER $PLATFORM $1"; }
 result() { # $1=status $2=baseline
   echo "SMOKE_TARGET_RESULT platform=$PLATFORM status=$1 baseline=${2:-unknown} endpoint=$SSH_HOST:$SSH_PORT"
+}
+finish() { # $1=exit $2=status $3=baseline — close the vh run, then print the result line LAST
+  if (($1)); then vh_fail "$2" "${BLOCKERS[*]:-}"; fi
+  vh_exit "$1"
+  result "$2" "${3:-}"
+  exit "$1"
 }
 
 [[ -r "$SSH_KEY" ]] || blocker "ssh-key-missing: $SSH_KEY is not readable"
@@ -54,12 +79,10 @@ if [[ "$reach_out" != *VM-OK* ]]; then
   if [[ "$PLATFORM" == windows ]] && "$SYSTEMCTL" --user cat "$SMOKE_WINDOWS_VM_UNIT" >/dev/null 2>&1 \
      && ! "$SYSTEMCTL" --user is-active --quiet "$SMOKE_WINDOWS_VM_UNIT"; then
     echo "SMOKE_TARGET_STOPPED windows: $SMOKE_WINDOWS_VM_UNIT is inactive — boot it with: $SYSTEMCTL --user start $SMOKE_WINDOWS_VM_UNIT (about 100 s to SSH), then re-run"
-    result stopped
-    exit 3
+    finish 3 stopped
   fi
   blocker "ssh-unreachable: ${reach_out:0:300}"
-  result not-ready
-  exit 2
+  finish 2 not-ready
 fi
 
 # ── 2. console ownership (mac) — the verifier's exact remote predicate ───────
@@ -79,6 +102,5 @@ baseline="$(printf '%s' "$base_out" | sed -E 's/^Papercusp ([A-Za-z]+)[^=]*=/\1=
 grep -q '^Papercusp GUI[^=]*=.' <<<"$base_out" || blocker "baseline-missing: no installed Papercusp GUI to upgrade from"
 grep -q '^Papercusp Server[^=]*=.' <<<"$base_out" || blocker "baseline-missing: no installed Papercusp Server to upgrade from"
 
-if ((${#BLOCKERS[@]})); then result not-ready "$baseline"; exit 2; fi
-result ready "$baseline"
-exit 0
+if ((${#BLOCKERS[@]})); then finish 2 not-ready "$baseline"; fi
+finish 0 ready "$baseline"
