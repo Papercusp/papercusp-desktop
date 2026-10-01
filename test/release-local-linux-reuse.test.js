@@ -34,6 +34,9 @@ const linuxReusePreflightHarness = sliceBetween(
   '# EI-24514809679788531: a non-Linux run-leg always skips the Linux build',
   'require_release_host',
 );
+// The Linux leg runs Tauri through this wrapper (b8298ad7), defined OUTSIDE
+// linuxReuseHarness; a harness without it dies 127 (EI-24431867620224655).
+const sidecarReadLockHarness = sliceBetween('run_with_sidecar_read_lock() {', '\nvh_begin sidecar');
 const releaseTaskJournalHarness = sliceBetween(
   '# ── P-005: restart-safe release stages',
   '# ── end P-005 release-task journal helpers',
@@ -96,7 +99,12 @@ function runFreshWithFailedSibling({ emitterFails = false } = {}) {
   const tag = path.basename(temp);
   const linuxLog = `/tmp/papercusp-linuxleg-${tag}.log`;
   const cutStartPath = `/tmp/papercusp-cut-start-${tag}.txt`;
-  fs.mkdirSync(bin, { recursive: true });
+  fs.mkdirSync(path.join(bin, 'lib'), { recursive: true });
+  fs.mkdirSync(path.join(temp, 'src-tauri'), { recursive: true });
+  fs.symlinkSync(
+    path.join(root, 'bin', 'lib', 'sidecar-lock-yield.sh'),
+    path.join(bin, 'lib', 'sidecar-lock-yield.sh'),
+  );
   fs.writeFileSync(path.join(bin, 'repack-deb-xz.sh'), [
     '#!/usr/bin/env bash',
     'set -euo pipefail',
@@ -149,6 +157,7 @@ function runFreshWithFailedSibling({ emitterFails = false } = {}) {
       'DESKTOP_CHANNEL_BUILD_ENV=(); DESKTOP_CHANNEL_BUILD_CFG=(); PC_NICE=()',
       'CHANNEL=alpha',
       `export PATH=${JSON.stringify(stubs)}:"$PATH"`,
+      sidecarReadLockHarness,
       linuxReuseHarness,
       '(exit 7) & WIN_PID=$!',
       'if wait "$WIN_PID"; then win_rc=0; else win_rc=$?; fi',
@@ -165,7 +174,10 @@ function runFreshWithFailedSibling({ emitterFails = false } = {}) {
         crypto.createHash('sha256').update(fs.readFileSync(path.join(bundle, artifact.name))).digest('hex'),
       ]),
     );
-    return { result, receipt, finalHashes };
+    // The leg's own stderr lands only in linuxLog, which is removed below — keep
+    // its tail so a non-zero LINUX_RC is diagnosable from the assertion message.
+    const legLog = fs.existsSync(linuxLog) ? fs.readFileSync(linuxLog, 'utf8').slice(-2000) : '';
+    return { result, receipt, finalHashes, legLog };
   } finally {
     fs.rmSync(temp, { recursive:true, force:true });
     fs.rmSync(linuxLog, { force:true });
@@ -174,9 +186,9 @@ function runFreshWithFailedSibling({ emitterFails = false } = {}) {
 }
 
 test('completed Linux salvage retains final-byte provenance when a sibling fails', () => {
-  const { result, receipt, finalHashes } = runFreshWithFailedSibling();
+  const { result, receipt, finalHashes, legLog } = runFreshWithFailedSibling();
   assert.equal(result.status, 1, result.stderr || result.stdout);
-  assert.match(result.stdout, /WIN_RC=7 LINUX_RC=0/);
+  assert.match(result.stdout, /WIN_RC=7 LINUX_RC=0/, `Linux leg log tail:\n${legLog}`);
   assert.ok(receipt, 'successful Linux sibling lost its required reuse provenance');
   assert.equal(receipt.version, '0.0.18');
   assert.equal(receipt.buildSha, 'original-baked-sha');
@@ -191,9 +203,9 @@ test('completed Linux salvage retains final-byte provenance when a sibling fails
 });
 
 test('a Linux provenance failure cannot be reported as successful salvage', () => {
-  const { result, receipt } = runFreshWithFailedSibling({ emitterFails:true });
+  const { result, receipt, legLog } = runFreshWithFailedSibling({ emitterFails:true });
   assert.equal(result.status, 1, result.stderr || result.stdout);
-  assert.match(result.stdout, /WIN_RC=7 LINUX_RC=23/);
+  assert.match(result.stdout, /WIN_RC=7 LINUX_RC=23/, `Linux leg log tail:\n${legLog}`);
   assert.equal(receipt, null);
 });
 
