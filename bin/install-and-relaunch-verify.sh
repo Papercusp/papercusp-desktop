@@ -71,7 +71,7 @@
 #                                  strict codesign for BOTH roles, then relaunch.
 #                                  Does not copy/replace apps; reported explicitly.
 #   --relaunch-cmd CMD             relaunch command (must NOT terminate the operator)
-#   --flip-timeout SEC             how long to wait for the flip (default 180)
+#   --flip-timeout SEC             how long to wait for a healthy baseline and the flip (default 180)
 #   --install-timeout SEC          budget for the installer step (default 900);
 #                                  a timeout FAILS the run (installer may still
 #                                  be running detached on the VM — no relaunch)
@@ -644,11 +644,11 @@ discover_port() { op_exec cat "$OPJSON_PATH" | json_num port; }
 # Retry a few times: a single `wsl --exec` flap (transient, empty output) must
 # not abort the whole verify as "no healthy pre-update operator".
 read_health() {
-  local _port="$1" _body="" _i
-  for _i in 1 2 3; do
+  local _port="$1" _attempts="${2:-3}" _body="" _i
+  for ((_i = 1; _i <= _attempts; _i++)); do
     _body="$(op_exec curl -sS -m 5 "http://127.0.0.1:$_port/api/health")"
     [[ -n "$_body" ]] && break
-    sleep 2
+    (( _i < _attempts )) && sleep 2
   done
   printf '%s' "$_body"
 }
@@ -738,21 +738,48 @@ MAC_PREFLIGHT
 fi
 
 # ── 1. BEFORE snapshot ──────────────────────────────────────────────────────
-PORT_BEFORE="$(discover_port)"
+BASELINE_STARTED="$(date +%s)"
+BASELINE_DEADLINE=$((BASELINE_STARTED + FLIP_TIMEOUT))
+BASELINE_ATTEMPT=0
+BASELINE_PROGRESS_AT=0
+PORT_BEFORE=""
+BODY_BEFORE=""
 SHA_BEFORE=""; VERSION_BEFORE=""
-if [[ -n "$PORT_BEFORE" ]]; then
-  BODY_BEFORE="$(read_health "$PORT_BEFORE")"
-  SHA_BEFORE="$(printf '%s' "$BODY_BEFORE" | json_str sha)"
-  VERSION_BEFORE="$(printf '%s' "$BODY_BEFORE" | json_str version)"
-fi
-if [[ -z "$PORT_BEFORE" ]]; then
-  echo "no healthy pre-update operator (no operator.json port found) — nothing to update in place" >&2
-  exit 2
-fi
-if [[ -z "$SHA_BEFORE" && -z "$VERSION_BEFORE" ]]; then
-  echo "pre-update operator on port $PORT_BEFORE reports neither sha nor version — cannot establish an update baseline" >&2
-  exit 2
-fi
+while :; do
+  BASELINE_ATTEMPT=$((BASELINE_ATTEMPT + 1))
+  PORT_BEFORE="$(discover_port)"
+  if [[ -n "$PORT_BEFORE" ]]; then
+    # The outer readiness loop owns retries here; one empty WSL/API response
+    # must not consume three hidden waits or overrun the shared baseline budget.
+    BODY_BEFORE="$(read_health "$PORT_BEFORE" 1)"
+    SHA_BEFORE="$(printf '%s' "$BODY_BEFORE" | json_str sha)"
+    VERSION_BEFORE="$(printf '%s' "$BODY_BEFORE" | json_str version)"
+    if [[ -n "$SHA_BEFORE" || -n "$VERSION_BEFORE" ]]; then
+      break
+    fi
+  fi
+
+  BASELINE_NOW="$(date +%s)"
+  if [[ "$BASELINE_NOW" -ge "$BASELINE_DEADLINE" ]]; then
+    if [[ -z "$PORT_BEFORE" ]]; then
+      echo "no healthy pre-update operator after ${FLIP_TIMEOUT}s ($BASELINE_ATTEMPT attempts; operator.json did not provide a port) — no artifacts were pushed" >&2
+    else
+      echo "no healthy pre-update operator after ${FLIP_TIMEOUT}s ($BASELINE_ATTEMPT attempts; health on port $PORT_BEFORE reports neither sha nor version) — no artifacts were pushed" >&2
+    fi
+    exit 2
+  fi
+
+  if (( BASELINE_PROGRESS_AT == 0 || BASELINE_NOW - BASELINE_PROGRESS_AT >= 30 )); then
+    BASELINE_ELAPSED=$((BASELINE_NOW - BASELINE_STARTED))
+    if [[ -z "$PORT_BEFORE" ]]; then
+      echo "waiting for pre-update operator baseline: operator.json has no port yet ($BASELINE_ELAPSED s/${FLIP_TIMEOUT}s)" >&2
+    else
+      echo "waiting for pre-update operator baseline: health at port $PORT_BEFORE has neither sha nor version ($BASELINE_ELAPSED s/${FLIP_TIMEOUT}s)" >&2
+    fi
+    BASELINE_PROGRESS_AT="$BASELINE_NOW"
+  fi
+  sleep "$POLL_INTERVAL"
+done
 if [[ -n "$SHA_BEFORE" && "$SHA_BEFORE" == "$EXPECTED_SHA" ]]; then
   echo "pre-update operator already reports the target sha $EXPECTED_SHA — nothing to flip (stale target or already-updated)" >&2
   exit 2

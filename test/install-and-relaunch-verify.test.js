@@ -62,7 +62,12 @@ function writeProvenance(dir, sha = TARGET_SHA) {
   }));
 }
 
-function fixture({ requireHostKeyOptions = false, remoteMkdirFail = false } = {}) {
+function fixture({
+  requireHostKeyOptions = false,
+  remoteMkdirFail = false,
+  operatorJsonReadyAfter = 1,
+  healthReadyAfter = 1,
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), 'install-relaunch-server-'));
   const artifacts = join(root, 'artifacts');
   const shims = join(root, 'shims');
@@ -77,6 +82,8 @@ function fixture({ requireHostKeyOptions = false, remoteMkdirFail = false } = {}
 
   const log = join(root, 'transport.log');
   const flipped = join(root, 'flipped');
+  const operatorJsonAttempts = join(root, 'operator-json-attempts');
+  const healthAttempts = join(root, 'health-attempts');
   const ssh = executable(shims, 'ssh', `#!/usr/bin/env bash
 printf 'SSH %s\\n' "$*" >> "$MOCK_LOG"
 if [[ "$MOCK_REQUIRE_HOST_KEY_OPTIONS" == "1" && "$*" != *"StrictHostKeyChecking=no"* ]]; then
@@ -93,12 +100,24 @@ case "$*" in
     printf 'PC-REMOTE-DIR-READY\\n'
     ;;
   *"cmd /c echo VM-OK"*) printf 'VM-OK\\n' ;;
-  *"--exec cat /home/papercup/.papercusp/operator.json"*) printf '{"port":15747}\\n' ;;
+  *"--exec cat /home/papercup/.papercusp/operator.json"*)
+    operator_json_attempt="$(cat "$MOCK_OPERATOR_JSON_ATTEMPTS" 2>/dev/null || printf '0')"
+    operator_json_attempt=$((operator_json_attempt + 1))
+    printf '%s' "$operator_json_attempt" > "$MOCK_OPERATOR_JSON_ATTEMPTS"
+    if (( operator_json_attempt >= MOCK_OPERATOR_JSON_READY_AFTER )); then
+      printf '{"port":15747}\\n'
+    fi
+    ;;
   *"--exec curl -sS -m 5 http://127.0.0.1:15747/api/health"*)
-    if [[ -f "$MOCK_FLIPPED" ]]; then
-      printf '{"sha":"${TARGET_SHA}","version":"${VERSION}"}\\n'
-    else
-      printf '{"sha":"old-sha","version":"0.0.17"}\\n'
+    health_attempt="$(cat "$MOCK_HEALTH_ATTEMPTS" 2>/dev/null || printf '0')"
+    health_attempt=$((health_attempt + 1))
+    printf '%s' "$health_attempt" > "$MOCK_HEALTH_ATTEMPTS"
+    if (( health_attempt >= MOCK_HEALTH_READY_AFTER )); then
+      if [[ -f "$MOCK_FLIPPED" ]]; then
+        printf '{"sha":"${TARGET_SHA}","version":"${VERSION}"}\\n'
+      else
+        printf '{"sha":"old-sha","version":"0.0.17"}\\n'
+      fi
     fi
     ;;
   *"schtasks /run /tn papercusp-e2e"*)
@@ -119,7 +138,10 @@ if [[ "$MOCK_REQUIRE_HOST_KEY_OPTIONS" == "1" && "$*" != *"StrictHostKeyChecking
 fi
 `);
 
-  return { root, gui, server, slices, log, flipped, ssh, scp, requireHostKeyOptions, remoteMkdirFail };
+  return {
+    root, gui, server, slices, log, flipped, ssh, scp, requireHostKeyOptions, remoteMkdirFail,
+    operatorJsonReadyAfter, healthReadyAfter, operatorJsonAttempts, healthAttempts,
+  };
 }
 
 function linuxFixture({ emitDpkgWarning = false } = {}) {
@@ -371,6 +393,12 @@ function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui, ex
     MOCK_REMOTE_MKDIR_FAIL: f.remoteMkdirFail ? '1' : '0',
     PAPERCUSP_SMOKE_RECEIPT_ROOT: f.root,
   };
+  if (f.operatorJsonAttempts) {
+    env.MOCK_OPERATOR_JSON_ATTEMPTS = f.operatorJsonAttempts;
+    env.MOCK_OPERATOR_JSON_READY_AFTER = String(f.operatorJsonReadyAfter);
+    env.MOCK_HEALTH_ATTEMPTS = f.healthAttempts;
+    env.MOCK_HEALTH_READY_AFTER = String(f.healthReadyAfter);
+  }
   if (f.configured) env.MOCK_CONFIGURED = f.configured;
   if (f.updated) env.MOCK_UPDATED = f.updated;
   if (f.emitDpkgWarning) env.MOCK_EMIT_DPKG_WARNING = '1';
@@ -428,6 +456,58 @@ test('Windows auto-resolves, pushes, and installs the complete Server span befor
     assert.ok(serverInstall > guiInstall, 'Server must install after GUI');
     assert.ok(relaunch > serverInstall, 'neither app may relaunch before matching Server install finishes');
     assert.match(lines[relaunch], /cmd \/c .*schtasks \/run \/tn papercusp-e2e.*schtasks \/run \/tn papercusp-server-e2e/);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('Windows waits for delayed operator.json and health readiness before uploading artifacts', () => {
+  const f = fixture({ operatorJsonReadyAfter: 3, healthReadyAfter: 2 });
+  try {
+    const result = runVerify(f);
+    assert.equal(result.status, 0, result.stdout + '\n' + result.stderr);
+    assert.equal(JSON.parse(result.stdout).ok, true);
+
+    const lines = readFileSync(f.log, 'utf8').trim().split('\n');
+    const operatorProbes = lines.flatMap((line, index) => line.includes('operator.json') ? [index] : []);
+    const healthProbes = lines.flatMap((line, index) => line.includes('/api/health') ? [index] : []);
+    const firstTransfer = lines.findIndex((line) => line.startsWith('SCP '));
+    assert.ok(operatorProbes.length >= 3, 'operator.json must be retried until its port appears');
+    assert.ok(healthProbes.length >= 2, 'health must be retried after the port appears');
+    assert.ok(operatorProbes[2] < firstTransfer, 'the ready port must be observed before any artifact upload');
+    assert.ok(healthProbes[1] < firstTransfer, 'a healthy baseline must be observed before any artifact upload');
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('Windows fails closed when operator.json stays unavailable through the baseline timeout', () => {
+  const f = fixture({ operatorJsonReadyAfter: 9999 });
+  try {
+    const result = runVerify(f, ['--flip-timeout', '1', '--poll-interval', '1']);
+    assert.equal(result.status, 2, result.stdout + '\n' + result.stderr);
+    assert.match(result.stderr, /operator\.json did not provide a port/);
+    const log = readFileSync(f.log, 'utf8');
+    assert.doesNotMatch(log, /^SCP /m, 'no artifact may be pushed without a baseline');
+    assert.doesNotMatch(log, /\/VERYSILENT|schtasks \/run/);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('Windows bounds health retries by the baseline timeout and fails before upload', () => {
+  const f = fixture({ healthReadyAfter: 9999 });
+  try {
+    const result = runVerify(f, ['--flip-timeout', '1', '--poll-interval', '1']);
+    assert.equal(result.status, 2, result.stdout + '\n' + result.stderr);
+    assert.match(result.stderr, /health on port 15747 reports neither sha nor version/);
+    assert.ok(
+      Number(readFileSync(f.healthAttempts, 'utf8')) <= 2,
+      'health retries must be owned by the timeout-bounded outer loop',
+    );
+    const log = readFileSync(f.log, 'utf8');
+    assert.doesNotMatch(log, /^SCP /m, 'no artifact may be pushed without a healthy baseline');
+    assert.doesNotMatch(log, /\/VERYSILENT|schtasks \/run/);
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
