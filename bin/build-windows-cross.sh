@@ -815,9 +815,12 @@ for _finished_installer in "${_FINISHED_INSTALLERS[@]}"; do
   if [[ "$(basename "$_finished_installer")" == "Papercusp Server_${VERSION}_x64-setup.exe" ]]; then
     _runtime_scan_args+=(--require-windows-server-runtime)
   fi
+  # --licenses (WI-10003906 / plan open-source-release-2026-09-29 D-002): license
+  # verdict over the same expanded installer tree. REPORT-ONLY by owner ruling —
+  # it prints LICENSE_GATE findings but never changes this exit code.
   set +e
   PAPERCUSP_INNOEXTRACT="$PAPERCUSP_INNOEXTRACT" \
-    python3 "$HERE/audit-release-bundle.py" --scan-artifact "${_runtime_scan_args[@]}" "$_finished_installer"
+    python3 "$HERE/audit-release-bundle.py" --scan-artifact --licenses "${_runtime_scan_args[@]}" "$_finished_installer"
   _artifact_rc=$?
   set -e
   if [[ $_artifact_rc -eq 2 ]]; then

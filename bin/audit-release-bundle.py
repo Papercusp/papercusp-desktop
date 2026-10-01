@@ -3523,7 +3523,8 @@ def license_scan_trees(dests):
     kopia, a container rootfs, AI model weights). The policy lives in ONE place —
     scripts/check-licenses.mjs in the superproject — so this only hands it the trees
     this function's caller already expanded. Exit codes pass through: 1 = a denied or
-    unreviewed payload, 2 = not measured. Both stop the release.
+    unreviewed payload, 2 = not measured. The caller currently treats both as
+    REPORT-ONLY (owner ruling, plan D-002); they do not stop the release.
     """
     repo = os.environ.get("PAPERCUSP_REPO_ROOT") or os.path.realpath(
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")

@@ -714,8 +714,11 @@ done
 # container and FAILS CLOSED when it cannot, so "not inspected" stops reading as
 # "clean".
 echo "==> identity-scan of the finished mac artifacts"
+# --licenses (WI-10003906 / plan open-source-release-2026-09-29 D-002): license
+# verdict over the same expanded trees. REPORT-ONLY by owner ruling — it prints
+# LICENSE_GATE findings but never changes this exit code.
 set +e
-python3 "$HERE/audit-release-bundle.py" --scan-artifact "${PROV_ARTIFACTS[@]}"
+python3 "$HERE/audit-release-bundle.py" --scan-artifact --licenses "${PROV_ARTIFACTS[@]}"
 _artifact_rc=$?
 set -e
 if [[ $_artifact_rc -eq 2 ]]; then
