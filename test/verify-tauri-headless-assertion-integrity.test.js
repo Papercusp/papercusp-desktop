@@ -21,6 +21,107 @@ const source = fs.readFileSync(VERIFY_SCRIPT, 'utf8');
 const DEV_OPERATOR_SCRIPT = path.resolve(__dirname, '../bin/dev-operator-ifneeded.sh');
 const devOperatorSource = fs.readFileSync(DEV_OPERATOR_SCRIPT, 'utf8');
 const dreamSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-dream-native.sh'), 'utf8');
+const voiceSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-voice-settings.sh'), 'utf8');
+
+function voiceExpression(name, document, location = {}, KeyboardEvent = class {
+  constructor(type, options) { this.type = type; Object.assign(this, options); }
+}) {
+  const expression = voiceSource.match(new RegExp(`${name}='([\\s\\S]*?)'\\n`))?.[1];
+  assert.ok(expression, `maintained native ${name} expression must exist`);
+  return new Function('document', 'location', 'KeyboardEvent', `return ${expression};`)(document, location, KeyboardEvent);
+}
+
+test('voice regression requires its settings page and finds the alert after unrelated alerts', () => {
+  assert.equal(voiceExpression('GEMINI_ALERT', { querySelector: () => null }), false);
+  const page = { querySelectorAll: () => [{ textContent: 'Unrelated alert' }] };
+  const document = { querySelector: () => page };
+  assert.equal(voiceExpression('GEMINI_ALERT', document), false);
+  page.querySelectorAll = () => [{ textContent: 'Unrelated alert' }, { textContent: 'Gemini Live is not supported in this release.' }];
+  assert.equal(voiceExpression('GEMINI_ALERT', document), true);
+});
+
+test('voice regression cannot accept an enabled or missing Gemini option', () => {
+  let options = [];
+  const document = { querySelectorAll: () => options };
+  assert.equal(voiceExpression('GEMINI_DISABLED', document), false);
+  let disabled = false;
+  options = [{ textContent: 'Google Gemini Live', hasAttribute: () => disabled,
+    getAttribute: () => disabled ? 'true' : 'false' }];
+  assert.equal(voiceExpression('GEMINI_DISABLED', document), false);
+  disabled = true;
+  assert.equal(voiceExpression('GEMINI_DISABLED', document), true);
+});
+
+test('voice regression opens the picker using the Radix keyboard contract', () => {
+  assert.equal(voiceExpression('GEMINI_OPEN_PICKER', { querySelector: () => null }), false);
+  const actions = [];
+  const trigger = { focus: () => actions.push('focus'), dispatchEvent: e => actions.push(e) };
+  assert.equal(voiceExpression('GEMINI_OPEN_PICKER', { querySelector: () => trigger }), true);
+  assert.equal(actions[0], 'focus');
+  assert.equal(actions[1].type, 'keydown');
+  assert.equal(actions[1].key, 'ArrowDown');
+  assert.equal(actions[1].bubbles, true);
+  assert.equal(actions[1].cancelable, true);
+});
+
+test('voice regression failure evidence identifies an unmounted route without throwing', () => {
+  const document = { readyState: 'complete', querySelector: () => null,
+    querySelectorAll: () => [{ textContent: 'Onboarding is required' }] };
+  // Options and alerts use distinct selectors, as a real DOM does.
+  document.querySelectorAll = selector => selector === '[role=alert]'
+    ? [{ textContent: 'Onboarding is required' }] : [];
+  const diagnostic = voiceExpression('GEMINI_DIAGNOSTIC', document, { href: 'http://127.0.0.1:33700/onboarding' });
+  assert.equal(diagnostic.href, 'http://127.0.0.1:33700/onboarding');
+  assert.equal(diagnostic.settingsPresent, false);
+  assert.equal(diagnostic.fullAgentLabel, null);
+  assert.deepEqual(diagnostic.alerts, ['Onboarding is required']);
+  assert.deepEqual(diagnostic.geminiOptions, []);
+});
+
+function runVoiceRouteFixture(isolated) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-native-route-'));
+  const calls = path.join(dir, 'calls');
+  try {
+    const tool = path.join(dir, 'tauri-agent-tools');
+    const poll = path.join(dir, 'poll');
+    fs.writeFileSync(tool, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$VOICE_FIXTURE_CALLS"
+if [ "$1" = probe ]; then printf 'App PID: 4242\\n'; fi
+if [ "$1" = eval ] && [[ "$4" == *settingsPresent* ]]; then
+  printf '{"href":"http://127.0.0.1:33700/onboarding","settingsPresent":false}\\n'
+fi
+`);
+    fs.writeFileSync(poll, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$VOICE_FIXTURE_CALLS"
+if [[ "$*" == *pc-settings-page--voice* ]]; then exit 37; fi
+`);
+    fs.writeFileSync(path.join(dir, 'node'), '#!/usr/bin/env bash\ncat >/dev/null\n');
+    for (const file of [tool, poll, path.join(dir, 'node')]) fs.chmodSync(file, 0o755);
+    const result = spawnSync('bash', [path.resolve(__dirname, '../../scripts/verify-voice-settings.sh'), '--gemini-unavailable'], {
+      encoding: 'utf8', timeout: 5000,
+      env: { ...process.env, PATH: dir + path.delimiter + process.env.PATH,
+        VERIFY_TAURI_PID: '4242', VERIFY_TAURI_PORT: '33700',
+        VERIFY_TAURI_AGENT_TOOLS_BIN: tool, VERIFY_TAURI_POLL: poll,
+        VERIFY_TAURI_ISOLATED_DB: isolated ? '1' : '0', VOICE_FIXTURE_CALLS: calls },
+    });
+    return { ...result, calls: fs.readFileSync(calls, 'utf8') };
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('voice native regression refuses the shared DB before any preference write', () => {
+  const result = runVoiceRouteFixture(false);
+  assert.equal(result.status, 9, result.stderr);
+  assert.equal(result.calls.trim(), 'probe --pid 4242');
+});
+
+test('voice native regression preserves route failure and captures evidence before picker checks', () => {
+  const result = runVoiceRouteFixture(true);
+  assert.equal(result.status, 37, result.stderr);
+  assert.match(result.stdout, /"settingsPresent":false/);
+  assert.match(result.calls, /--require .pc-settings-page--voice/);
+  assert.doesNotMatch(result.calls, /ArrowDown/);
+  assert.doesNotMatch(result.calls, /--require \[role=option\]/);
+});
 
 function dreamExpression(name) {
   const expression = dreamSource.match(new RegExp(`${name}='([\\s\\S]*?)'\\n`))?.[1];
