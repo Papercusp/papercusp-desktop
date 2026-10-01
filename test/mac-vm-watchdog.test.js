@@ -17,6 +17,7 @@ import {
   parseCursorProbe,
   parseNeighStates,
   resolveDbUrl,
+  resolveSuDbUrl,
   RESTART_MIN_INTERVAL_FLOOR_SEC,
   runOnce,
 } from '../bin/mac-vm-watchdog.mjs';
@@ -147,6 +148,8 @@ test('loadConfig keeps the one-restart-per-hour floor and rejects a bad remedy',
   assert.equal(loadConfig({ HOME: '/h', MAC_VM_WATCHDOG_RESTART_MIN_INTERVAL_SEC: '60' }).restartMinIntervalSec, RESTART_MIN_INTERVAL_FLOOR_SEC);
   assert.equal(loadConfig({ HOME: '/h', MAC_VM_WATCHDOG_RESTART_MIN_INTERVAL_SEC: '7200' }).restartMinIntervalSec, 7200);
   assert.equal(loadConfig({ HOME: '/h' }).unit, 'papercusp-vm-mac.service');
+  assert.equal(loadConfig({ HOME: '/h' }).leaseResource, 'mac-test-vm:aviweiss@127.0.0.1:2222');
+  assert.equal(loadConfig({ HOME: '/h', MAC_VM_WATCHDOG_LEASE_RESOURCE: 'vm-test:other' }).leaseResource, 'vm-test:other');
   assert.throws(() => loadConfig({ HOME: '/h', MAC_VM_WATCHDOG_REMEDY: 'system_reset' }));
 });
 
@@ -182,6 +185,11 @@ test('resolveDbUrl reads HARNESS_ADMIN_DATABASE_URL from the operator process', 
   };
   assert.equal(await resolveDbUrl(cfg({ dbUrl: '' }), deps), 'postgres://u@h:5432/papercusp');
   assert.equal(loadConfig({ HOME: '/h', HARNESS_ADMIN_DATABASE_URL: 'postgres://env/db' }).dbUrl, 'postgres://env/db');
+});
+
+test('resolveSuDbUrl derives the lock side-database from the admin URL', async () => {
+  const main = 'postgres://user:secret@db.example:5432/papercusp?sslmode=require';
+  assert.equal(await resolveSuDbUrl(cfg({ dbUrl: main }), {}), 'postgres://user:secret@db.example:5432/papercusp_su?sslmode=require');
 });
 
 test('parsers read the neighbour table and the fold cursor probe', () => {
@@ -260,10 +268,11 @@ test('guest-unreachable needs three consecutive checks before a restart', () => 
 
 // ── end to end with fake system deps ─────────────────────────────────────
 
-function fakeDeps({ resets = 6, qmpCode = 0, quitCode = 0, pingCode = 0, startCode = 0 } = {}) {
+function fakeDeps({ resets = 6, qmpCode = 0, quitCode = 0, pingCode = 0, startCode = 0, leaseRow = null, leaseRows = null, leaseProbeCode = 0 } = {}) {
   const calls = [];
   let nowMs = Date.parse('2026-09-23T04:00:00Z');
   let qemuAlive = true;
+  let leaseProbeIndex = 0;
   const deps = {
     calls,
     advance: (sec) => { nowMs += sec * 1000; },
@@ -289,6 +298,13 @@ function fakeDeps({ resets = 6, qmpCode = 0, quitCode = 0, pingCode = 0, startCo
       }
       if (cmd === 'ping') return { code: pingCode, stdout: '', stderr: '' };
       if (cmd === 'ip') return { code: 0, stdout: pingCode ? '[{"state":["FAILED"]}]' : '[{"state":["REACHABLE"]}]', stderr: '' };
+      if (cmd === 'psql' && String(opts.stdin || '').includes('FROM agent_resource_locks')) {
+        if (leaseProbeCode !== 0) return { code: leaseProbeCode, stdout: '', stderr: 'resource lock query failed' };
+        const row = leaseRows
+          ? leaseRows[Math.min(leaseProbeIndex++, leaseRows.length - 1)]
+          : leaseRow;
+        return { code: 0, stdout: row ? `${JSON.stringify(row)}\n` : '', stderr: '' };
+      }
       if (cmd === 'psql') return { code: 0, stdout: '', stderr: '' };
       return { code: 127, stdout: '', stderr: `unexpected ${cmd}` };
     },
@@ -315,17 +331,17 @@ test('runOnce: alert on the first reset-loop check, cold restart on the second, 
 
   await runOnce(c, deps);
   assert.ok(!typesOf(deps.calls).includes('qmp:quit'), 'first check only alerts');
-  assert.equal(typesOf(deps.calls).filter((t) => t === 'psql').length, 1);
+  assert.equal(deps.calls.filter((call) => call.cmd === 'psql' && String(call.stdin || '').includes('INSERT INTO harness_shared.coord_event_log')).length, 1);
 
   deps.calls.length = 0;
   deps.advance(60);
   const second = await runOnce(c, deps);
   const seq = typesOf(deps.calls);
-  const alertAt = seq.indexOf('psql');
-  const quitAt = seq.indexOf('qmp:quit');
-  const startAt = seq.indexOf('systemctl:start');
+  const alertAt = deps.calls.findIndex((call) => call.cmd === 'psql' && String(call.stdin || '').includes('INSERT INTO harness_shared.coord_event_log'));
+  const quitAt = deps.calls.findIndex((call) => call.cmd === 'python3' && call.args[2] === 'quit');
+  const startAt = deps.calls.findIndex((call) => call.cmd === 'systemctl' && call.args[1] === 'start');
   assert.ok(alertAt >= 0 && alertAt < quitAt && quitAt < startAt, `alert, then quit, then start: ${seq.join(' ')}`);
-  assert.equal(seq.filter((t) => t === 'psql').length, 2, 'an alert before and a result alert after');
+  assert.equal(deps.calls.filter((call) => call.cmd === 'psql' && String(call.stdin || '').includes('INSERT INTO harness_shared.coord_event_log')).length, 2, 'an alert before and a result alert after');
   const restart = second.record.results.find((r) => r.type === 'cold-restart');
   assert.equal(restart.ok, true);
   const start = deps.calls.find((x) => x.cmd === 'systemctl' && x.args[1] === 'start');
@@ -368,13 +384,84 @@ test('runOnce: a hold blocks the restart; a contended QMP slot skips the run', a
   assert.ok(!typesOf(busy.calls).includes('psql'), 'a skipped run sends no alert');
 });
 
+test('runOnce: an active exclusive Mac VM lease withholds the cold restart', async () => {
+  const c = await e2eConfig();
+  const deps = fakeDeps({
+    resets: 0,
+    pingCode: 1,
+    leaseRow: {
+      owner: 'su-rig',
+      reason: 'intentional guest reboot',
+      expiresAtSec: Math.floor(Date.parse('2026-09-23T06:00:00Z') / 1000),
+    },
+  });
+
+  let last;
+  for (let i = 0; i < 3; i += 1) {
+    last = await runOnce(c, deps);
+    deps.advance(60);
+  }
+
+  assert.equal(last.classification.verdict, 'guest-unreachable');
+  assert.ok(!typesOf(deps.calls).includes('qmp:quit'));
+  assert.ok(!typesOf(deps.calls).includes('systemctl:start'));
+  assert.equal(last.state.lastRestartAt, undefined);
+  assert.equal(last.state.blocked, 'hold');
+  assert.equal(last.record.resourceLease.status, 'held');
+  assert.match(last.record.resourceLease.owner, /su-rig/);
+  const leaseQuery = deps.calls.find((call) => call.cmd === 'psql' && String(call.stdin || '').includes('FROM agent_resource_locks'));
+  assert.ok(leaseQuery, 'the watchdog reads the canonical named-resource lease state');
+  assert.ok(String(leaseQuery.stdin).includes("resource = :'resource'"));
+  assert.ok(!String(leaseQuery.stdin).includes('coordination_domain ='), 'checks every operator checkout domain for the resource');
+  assert.ok(leaseQuery.args.includes('resource=mac-test-vm:aviweiss@127.0.0.1:2222'));
+});
+
+test('runOnce: an unreadable resource lease fails closed for a cold restart', async () => {
+  const c = await e2eConfig();
+  const deps = fakeDeps({ resets: 0, pingCode: 1, leaseProbeCode: 2 });
+
+  let last;
+  for (let i = 0; i < 3; i += 1) {
+    last = await runOnce(c, deps);
+    deps.advance(60);
+  }
+
+  assert.ok(!typesOf(deps.calls).includes('qmp:quit'));
+  assert.ok(!typesOf(deps.calls).includes('systemctl:start'));
+  assert.equal(last.state.lastRestartAt, undefined);
+  assert.equal(last.state.blocked, 'lease-check-failed');
+  assert.equal(last.record.resourceLease.status, 'unknown');
+});
+
+test('runOnce: rechecks the exclusive lease immediately before QMP quit', async () => {
+  const c = await e2eConfig();
+  const lease = {
+    owner: 'su-rig',
+    reason: 'intentional guest reboot',
+    expiresAtSec: Math.floor(Date.parse('2026-09-23T06:00:00Z') / 1000),
+  };
+  const deps = fakeDeps({ resets: 0, pingCode: 1, leaseRows: [null, null, null, lease] });
+
+  let last;
+  for (let i = 0; i < 3; i += 1) {
+    last = await runOnce(c, deps);
+    deps.advance(60);
+  }
+
+  assert.ok(!typesOf(deps.calls).includes('qmp:quit'));
+  assert.equal(last.state.lastRestartAt, undefined);
+  assert.equal(last.state.blocked, 'hold');
+  assert.equal(last.record.resourceLease.status, 'held');
+  assert.equal(last.record.results.find((result) => result.type === 'cold-restart').blocked, true);
+});
+
 test('runOnce --dry-run has no side effects', async () => {
   const c = await e2eConfig();
   const deps = fakeDeps({ resets: 8 });
   const out = await runOnce(c, deps, { dryRun: true });
   assert.equal(out.classification.verdict, 'reset-loop');
   assert.deepEqual(out.record.planned, ['alert']);
-  assert.ok(!typesOf(deps.calls).includes('psql'));
+  assert.ok(!deps.calls.some((call) => call.cmd === 'psql' && String(call.stdin || '').includes('INSERT INTO harness_shared.coord_event_log')));
   assert.ok(!typesOf(deps.calls).includes('qmp:quit'));
   assert.equal(existsSync(path.join(c.stateDir, 'state.json')), false);
 });

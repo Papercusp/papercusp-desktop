@@ -71,6 +71,8 @@ export function loadConfig(env = process.env) {
   const home = env.HOME || os.homedir();
   const qmpSock = env.MAC_VM_QMP_SOCK || path.join(home, 'macos-vm/OSX-KVM/qmp.sock');
   const stateDir = env.MAC_VM_WATCHDOG_STATE_DIR || path.join(home, '.papercusp/mac-vm-watchdog');
+  const sshHost = env.MAC_VM_SSH_HOST || 'aviweiss@127.0.0.1';
+  const sshPort = String(env.MAC_VM_SSH_PORT || '2222');
   const remedy = env.MAC_VM_WATCHDOG_REMEDY || 'cold-restart';
   if (remedy !== 'cold-restart' && remedy !== 'alert-only') {
     throw new Error(`MAC_VM_WATCHDOG_REMEDY must be cold-restart or alert-only (got ${JSON.stringify(remedy)})`);
@@ -97,12 +99,13 @@ export function loadConfig(env = process.env) {
     remedy,
     stateDir,
     holdFile: env.MAC_VM_WATCHDOG_HOLD_FILE || path.join(stateDir, 'hold.json'),
+    leaseResource: env.MAC_VM_WATCHDOG_LEASE_RESOURCE || `mac-test-vm:${sshHost}:${sshPort}`,
     cursorPrefix: env.MAC_VM_WATCHDOG_CURSOR_PREFIX || '',
     cursorStaleSec: numEnv(env, 'MAC_VM_WATCHDOG_CURSOR_STALE_SEC', 1800, 60),
     cursorRemoteCmd: env.MAC_VM_WATCHDOG_CURSOR_REMOTE_CMD
       || '"/Applications/Papercusp Server.app/Contents/Resources/sidecar/bin/node" ~/.papercusp/vm-rig/p203-cursec.mjs',
-    sshHost: env.MAC_VM_SSH_HOST || 'aviweiss@127.0.0.1',
-    sshPort: String(env.MAC_VM_SSH_PORT || '2222'),
+    sshHost,
+    sshPort,
     sshKey: env.MAC_VM_SSH_KEY || path.join(home, '.ssh/papercup-vm-mac'),
     alertTo: (env.MAC_VM_WATCHDOG_ALERT_TO || '*').split(',').map((s) => s.trim()).filter(Boolean),
     workspace: env.MAC_VM_WATCHDOG_WORKSPACE || 'papercusp-workspace',
@@ -266,7 +269,10 @@ export function decide(cls, prev, cfg, nowSec, hold) {
     if (cfg.remedy !== 'cold-restart') {
       blocked = { kind: 'alert-only', text: 'the remedy is set to alert-only (MAC_VM_WATCHDOG_REMEDY)' };
     } else if (hold) {
-      blocked = { kind: 'hold', text: `a rig operation holds the VM: ${hold.by} until ${iso(hold.until)} (${hold.reason})` };
+      blocked = {
+        kind: hold.kind || 'hold',
+        text: hold.text || `a rig operation holds the VM: ${hold.by} until ${iso(hold.until)} (${hold.reason})`,
+      };
     } else if (prev.lastRestartAt && nowSec - prev.lastRestartAt < cfg.restartMinIntervalSec) {
       blocked = {
         kind: 'rate-limit',
@@ -379,6 +385,31 @@ function readPidfile(file) {
 
 /** QMP quit, wait for qemu to exit, then systemctl start. Never system_reset. */
 export async function coldRestart(cfg, deps, signals) {
+  const nowSec = Math.floor(deps.nowMs() / 1000);
+  const manualHold = activeHold(readJson(cfg.holdFile), nowSec);
+  if (manualHold) {
+    return {
+      ok: false,
+      blocked: true,
+      blockKind: 'hold',
+      step: 'hold-check',
+      detail: `a rig operation holds the VM: ${manualHold.by} until ${iso(manualHold.until)} (${manualHold.reason})`,
+    };
+  }
+
+  const resourceLease = await readExclusiveVmLease(cfg, deps);
+  const leaseHold = leaseHoldForDecision(resourceLease, cfg);
+  if (leaseHold) {
+    return {
+      ok: false,
+      blocked: true,
+      blockKind: leaseHold.kind || 'hold',
+      step: 'lease-check',
+      detail: leaseHold.text || `exclusive resource lock ${cfg.leaseResource} is held by ${resourceLease.owner} until ${iso(resourceLease.expiresAtSec)} (${resourceLease.reason || 'no reason supplied'})`,
+      resourceLease,
+    };
+  }
+
   const steps = [];
   const oldPid = signals.service.mainPid || readPidfile(cfg.qemuPidfile);
   const quit = await deps.exec('python3', [cfg.qmpHelper, cfg.qmpSock, 'quit'], { timeoutMs: 15_000 });
@@ -419,6 +450,83 @@ export async function resolveDbUrl(cfg, deps) {
     if (hit) return hit.slice(key.length + 1);
   }
   return '';
+}
+
+/** Match @papercusp/locks' suUrl(): named-resource leases live in the
+ * papercusp_su side-database, while coord alerts use the main admin database. */
+export async function resolveSuDbUrl(cfg, deps) {
+  const main = await resolveDbUrl(cfg, deps);
+  return main ? main.replace(/\/[^/?]+(\?|$)/, '/papercusp_su$1') : '';
+}
+
+/** Read the live exclusive Mac VM lease. This daemon runs outside MCP, so it
+ * uses the same PostgreSQL connection as its direct coord-alert path. Scan all
+ * coordination domains: locks:list does the same because a resource can be
+ * held from different operator checkout domains. */
+export async function readExclusiveVmLease(cfg, deps) {
+  const url = await resolveSuDbUrl(cfg, deps);
+  if (!url) return { status: 'unknown', reason: 'no database URL resolvable' };
+
+  const sql = `
+SELECT json_build_object(
+  'owner', COALESCE(owner_label, owner),
+  'reason', reason,
+  'expiresAtSec', ceil(extract(epoch FROM expires_ts))::bigint
+)::text
+  FROM agent_resource_locks
+ WHERE resource = :'resource'
+   AND mode = 'exclusive'
+   AND status IN ('held', 'draining')
+   AND expires_ts > clock_timestamp()
+ ORDER BY expires_ts DESC
+ LIMIT 1
+`;
+  let result;
+  try {
+    result = await deps.exec('psql', [
+      url, '-X', '-q', '-t', '-A', '-v', 'ON_ERROR_STOP=1', '-v', `resource=${cfg.leaseResource}`, '-f', '-',
+    ], { stdin: sql, timeoutMs: 10_000 });
+  } catch (error) {
+    return { status: 'unknown', reason: tail(error?.message || error, 200) };
+  }
+  if (result.code !== 0) {
+    return { status: 'unknown', reason: tail(result.stderr || `psql exit ${result.code}`, 200) };
+  }
+
+  const output = String(result.stdout || '').trim();
+  if (!output) return { status: 'clear' };
+  try {
+    const row = JSON.parse(output.split(/\r?\n/, 1)[0]);
+    const expiresAtSec = Number(row?.expiresAtSec);
+    if (!row || typeof row.owner !== 'string' || !Number.isFinite(expiresAtSec)) {
+      return { status: 'unknown', reason: 'resource lock query returned an invalid row' };
+    }
+    return {
+      status: 'held',
+      owner: row.owner,
+      reason: typeof row.reason === 'string' ? row.reason : '',
+      expiresAtSec,
+    };
+  } catch {
+    return { status: 'unknown', reason: 'resource lock query returned invalid JSON' };
+  }
+}
+
+function leaseHoldForDecision(lease, cfg) {
+  if (lease.status === 'held') {
+    return {
+      by: lease.owner,
+      until: lease.expiresAtSec,
+      reason: `exclusive ${cfg.leaseResource} lease${lease.reason ? `: ${lease.reason}` : ''}`,
+    };
+  }
+  if (lease.status === 'unknown') {
+    return {
+      kind: 'lease-check-failed',
+      text: `cannot verify whether ${cfg.leaseResource} has an active exclusive lease: ${lease.reason}`,
+    };
+  }
+  return null;
 }
 
 /** Coord alert via a direct coord_event_log insert (the bghost-watchdog pattern): works with the operator down. */
@@ -507,7 +615,11 @@ export async function runOnce(cfg, deps, { dryRun = false } = {}) {
     const hold = activeHold(readJson(cfg.holdFile), nowSec);
     const signals = await collectSignals(cfg, deps);
     const classification = classify(signals, cfg);
-    const { actions, state } = decide(classification, prev, cfg, nowSec, hold);
+    const resourceLease = classification.kind === 'restart'
+      ? await readExclusiveVmLease(cfg, deps)
+      : { status: 'not-checked' };
+    const resourceHold = leaseHoldForDecision(resourceLease, cfg);
+    const { actions, state } = decide(classification, prev, cfg, nowSec, hold || resourceHold);
     const record = {
       at: iso(nowSec),
       verdict: classification.verdict,
@@ -515,6 +627,7 @@ export async function runOnce(cfg, deps, { dryRun = false } = {}) {
       detail: classification.detail,
       streak: state.streak ?? 0,
       hold: hold ? { by: hold.by, until: iso(hold.until), reason: hold.reason } : null,
+      resourceLease,
       planned: actions.map((a) => a.type),
       dryRun,
     };
@@ -529,7 +642,15 @@ export async function runOnce(cfg, deps, { dryRun = false } = {}) {
       } else if (action.type === 'cold-restart') {
         const outcome = await coldRestart(cfg, deps, signals);
         results.push({ type: 'cold-restart', ...outcome });
-        const summary = outcome.ok
+        if (outcome.blocked) {
+          state.lastRestartAt = prev.lastRestartAt;
+          state.blocked = outcome.blockKind || 'hold';
+          if (outcome.resourceLease) record.resourceLease = outcome.resourceLease;
+          writeJsonAtomic(statePath, state);
+        }
+        const summary = outcome.blocked
+          ? `cold restart of ${cfg.unit} withheld at ${outcome.step}: ${outcome.detail}`
+          : outcome.ok
           ? `cold restart of ${cfg.unit} done (${action.verdict}); the guest is booting, next checks confirm recovery`
           : `cold restart of ${cfg.unit} FAILED at ${outcome.step}: ${outcome.detail}. Needs a human`;
         results.push({ type: 'alert', ok: await sendAlert(cfg, deps, { category: 'severe-event', summary }) });

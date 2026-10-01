@@ -260,7 +260,7 @@ test('reuse path: an already-bound port exits fast without spawning DEV_CMD', as
   }
 });
 
-// EI-13139: papercup-bg-host.service pins its own canonical port
+// EI-13139: papercusp-bg-host.service pins its own canonical port
 // (PAPERCUSP_HONO_PORT) — the SAME default (:3270) this wrapper picks for
 // the desktop dev operator. Hit live 2026-07-16: during a bg-host outage the
 // port went briefly free, this wrapper raced in and grabbed it, and
@@ -278,7 +278,7 @@ test('bg-host reserved-port guard: refuses bg-host\'s canonical port when it is 
     fakeSystemctl,
     [
       '#!/usr/bin/env bash',
-      '# Fake systemctl: papercup-bg-host.service is always "enabled" and',
+      '# Fake systemctl: papercusp-bg-host.service is always "enabled" and',
       `# reports PAPERCUSP_HONO_PORT=${reservedPort} via "cat".`,
       'if [ "$1" = "--user" ] && [ "$2" = "is-enabled" ]; then echo enabled; exit 0; fi',
       `if [ "$1" = "--user" ] && [ "$2" = "cat" ]; then echo "PAPERCUSP_HONO_PORT=${reservedPort}"; exit 0; fi`,
@@ -314,7 +314,7 @@ test('bg-host reserved-port guard: refuses bg-host\'s canonical port when it is 
     // channels — wait for the redirect line instead of reading it instantly.
     const redirectMatch = await waitForStderr(() => stderr, /using :(\d+) instead/, { timeoutMs: 10_000 });
     assert(redirectMatch, `wrapper did not log a reserved-port redirect — stderr was: ${stderr}`);
-    assert.match(stderr, new RegExp(`:${reservedPort} is papercup-bg-host's reserved port`));
+    assert.match(stderr, new RegExp(`:${reservedPort} is papercusp-bg-host's reserved port`));
     assert.notEqual(Number(redirectMatch[1]), reservedPort, 'wrapper redirected to the SAME reserved port');
 
     process.kill(wrapper.pid, 'SIGKILL');
@@ -371,9 +371,16 @@ test('desktop launcher starts Tauri without the fixed dev-server wait while the 
     });
     assert.equal(launched.status, 0, launched.stderr);
     const args = launched.stdout.trim().split('\n');
-    assert.deepEqual(args.slice(0, 5), ['run', 'tauri', '--', 'dev', '--no-dev-server-wait']);
-    assert.equal(args[5], '--config');
-    assert.equal(JSON.parse(args[6]).build.devUrl, 'http://127.0.0.1:45555');
+    assert.deepEqual(args.slice(0, 6), [
+      'run',
+      'tauri',
+      '--',
+      'dev',
+      '--no-watch',
+      '--no-dev-server-wait',
+    ]);
+    assert.equal(args[6], '--config');
+    assert.equal(JSON.parse(args[7]).build.devUrl, 'http://127.0.0.1:45555');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
