@@ -71,6 +71,8 @@ export PAPERCUSP_RELEASE_AUDIT="${PAPERCUSP_RELEASE_AUDIT:-1}"
 #   strings <binary> | grep -c /Users/   (and /home/) — should be 0.
 # shellcheck source=lib/rust-path-remap.sh
 source "$HERE/lib/rust-path-remap.sh"
+# shellcheck source=lib/seed-reuse-age.sh
+source "$HERE/lib/seed-reuse-age.sh"
 papercusp_export_rust_path_remap
 papercusp_export_rust_lld macos
 
@@ -234,6 +236,8 @@ cut_release_seed() {
     fi
   fi
   if [[ "$seed_reuse" == "1" ]]; then
+    # WI-10004593: refuse a stale reused corestore (shared guard, WI-10004429).
+    seed_reuse_age_check "$ROOT/src-tauri/seed/manifest.json" || return 1
     core_args=(--reuse-corestore "$ROOT/src-tauri/seed")
     [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]] && echo "WARN: PAPERCUSP_SEED_STORE_DIR ignored under seed-reuse (PAPERCUSP_SEED_REUSE_CORESTORE=$seed_reuse)" >&2
   fi
