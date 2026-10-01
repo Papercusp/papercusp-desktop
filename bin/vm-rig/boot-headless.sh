@@ -101,6 +101,12 @@ export PAPERCUSP_IDENTITY_DIR="$SHARED/.papercusp/identity"
 export PAPERCUSP_ANNOUNCE_IDENTITY_CACHE="$SHARED/.papercusp/local-announce-identity.json"
 export PAPERCUSP_WORKSPACES_ROOT="/Users/aviweiss/.papercusp-workspaces"
 export PAPERCUSP_IPC_ENABLE="1"
+# WI-10004503: inference through the tower's account-pool gateway (ssh tunnel on 127.0.0.1:18788,
+# tower-pool account in the shared PG). Same route and rationale as boot-headless-current.sh.
+PAPERCUSP_RIG_GATEWAY_UPSTREAM="${PAPERCUSP_RIG_GATEWAY_UPSTREAM-http://127.0.0.1:18788}"
+if [ -n "$PAPERCUSP_RIG_GATEWAY_UPSTREAM" ]; then
+  export ANTHROPIC_BASE_URL_UPSTREAM="$PAPERCUSP_RIG_GATEWAY_UPSTREAM"
+fi
 # The federation bootstrap peer — the ONE var the LaunchAgent injects (not
 # spawn_serve). Without it the VM boots isolated and every probe fails looking
 # like a federation regression (README gotcha).
