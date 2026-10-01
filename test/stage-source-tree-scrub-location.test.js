@@ -14,6 +14,7 @@ const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
 const stageSource = fs.readFileSync(path.join(root, 'bin/stage-source-tree.sh'), 'utf8');
+const sourceSelection = path.join(root, 'bin/lib/source-tree-selection.sh');
 const macCross = fs.readFileSync(path.join(root, 'bin/build-mac-cross.sh'), 'utf8');
 const repacker = path.join(root, 'bin/repack-deb-xz.sh');
 
@@ -32,6 +33,45 @@ test('stage-source-tree keeps its scrub quarantine outside the packaged sidecar'
     'the scrub quarantine must never be created under the packaged sidecar');
   assert.doesNotMatch(stageSource, /mktemp -d "\$SIDECAR\/\.stage-scrub-/,
     'the old in-sidecar quarantine path must not return');
+});
+
+test('identity scrub overlay cannot reintroduce a source-selection exclusion', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-source-selection-filter-'));
+  try {
+    const excluded = 'docs/reports/private-owner-audit/README.md';
+    const shipping = 'packages/demo/ship.js';
+    for (const rel of [excluded, shipping]) {
+      const file = path.join(tmp, rel);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, 'identity-bearing candidate\n');
+    }
+
+    const result = spawnSync('bash', [
+      '-c',
+      [
+        'set -euo pipefail',
+        '. "$1"',
+        "SELECTION_EXCLUDES=(--exclude='./docs/reports')",
+        'source_tree_filter_candidate_files tar "$2" "$3" "$4"',
+      ].join('\n'),
+      'bash',
+      sourceSelection,
+      tmp,
+      excluded,
+      shipping,
+    ], { encoding: 'utf8' });
+
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.equal(result.stdout.trim(), shipping,
+      'the exact tar selection must keep the excluded report out while retaining shipping source');
+    assert.match(
+      stageSource,
+      /source_tree_filter_candidate_files "\$TAR_BIN" "\$MONO" "\$\{_leakers\[@\]\}"/,
+      'stage-source-tree.sh must filter discovered leakers before building the scrub overlay',
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('source staging overlays and verifies an external committed package-lock pin', () => {

@@ -225,6 +225,19 @@ echo "    selection: ${#EXCLUDES[@]} exclude patterns (privacy half derived from
   || echo "    note: allowlist entries absent from this tree (skipped): ${MISSING[*]}"
 echo "    allowlist: ${#INCLUDES[@]} top-level entries"
 
+# GNU tar REQUIRED (WI-3307 mac leg): both the final source archive and the
+# scrub-candidate membership filter below must use the same exclude dialect.
+# On macOS: brew install gnu-tar → gtar.
+TAR_BIN=tar
+if ! tar --version 2>/dev/null | grep -q 'GNU tar'; then
+  if command -v gtar >/dev/null 2>&1; then
+    TAR_BIN=gtar
+  else
+    echo "ERROR: GNU tar required (macOS: brew install gnu-tar) — bsdtar's --owner/exclude dialect differs" >&2
+    exit 1
+  fi
+fi
+
 # ── IDENTITY SCRUB (WI-4419; desktop-v0-0-12-release-tri-platform-2026-07-19 D-004)
 # ─────────────────────────────────────────────────────────────────────────────
 # The audit gate (below) forbids this build box's identity — git name ("Avi"),
@@ -256,6 +269,25 @@ if [[ "${PAPERCUSP_STAGE_SCRUB:-1}" == "1" ]]; then
   while IFS= read -r _leak_line; do
     [[ -n "$_leak_line" ]] && _leakers+=("$_leak_line")
   done < <(python3 "$HERE/audit-release-bundle.py" --source-leakers "$MONO" "${INCLUDES[@]#./}")
+  if (( ${#_leakers[@]} > 0 )); then
+    # Selection owns which files ship. Filter the content-discovered candidates
+    # through its exact GNU-tar exclusions before creating the redacted overlay;
+    # otherwise that second pass can smuggle an excluded report back in.
+    _leaker_count_before_selection=${#_leakers[@]}
+    if ! _filtered_leakers="$(
+      source_tree_filter_candidate_files "$TAR_BIN" "$MONO" "${_leakers[@]}"
+    )"; then
+      echo "ERROR: could not filter identity scrub candidates through source selection" >&2
+      exit 1
+    fi
+    _leakers=()
+    while IFS= read -r _leak_line; do
+      [[ -n "$_leak_line" ]] && _leakers+=("$_leak_line")
+    done <<< "$_filtered_leakers"
+    _leaker_count_excluded=$((_leaker_count_before_selection - ${#_leakers[@]}))
+    (( _leaker_count_excluded == 0 )) \
+      || echo "    identity scrub: selection kept $_leaker_count_excluded excluded candidate file(s) out of the overlay"
+  fi
   if (( ${#_leakers[@]} > 0 )); then
     # Keep the quarantine outside the packaged sidecar. Tauri/deb packaging can
     # read the sidecar after source.tar.zst appears but before this script's EXIT
@@ -295,19 +327,6 @@ declare -a PACKAGE_LOCK_TAIL=(-C "$SOURCE_PACKAGE_LOCK_PIN_DIR" ./PINNED/package
 echo "    committed package-lock pin: overlaying Git HEAD copy into source.tar.zst"
 
 zstd_level="${PAPERCUSP_SOURCE_ZSTD_LEVEL:-6}"
-# GNU tar REQUIRED (WI-3307 mac leg): the exclude anchoring + --owner/--group
-# flags above are GNU dialect — macOS bsdtar rejects --owner outright and
-# matches excludes subtly differently (a silent-content bug, not a loud one).
-# On macOS: brew install gnu-tar → gtar.
-TAR_BIN=tar
-if ! tar --version 2>/dev/null | grep -q 'GNU tar'; then
-  if command -v gtar >/dev/null 2>&1; then
-    TAR_BIN=gtar
-  else
-    echo "ERROR: GNU tar required (macOS: brew install gnu-tar) — bsdtar's --owner/exclude dialect differs" >&2
-    exit 1
-  fi
-fi
 command -v zstd >/dev/null 2>&1 || { echo "ERROR: zstd not on PATH (macOS: brew install zstd)" >&2; exit 1; }
 # The shared tree is edited by the whole fleet WHILE this multi-minute tar
 # runs; GNU tar exits 1 for "file changed as we read it" — a warning (the
