@@ -102,8 +102,9 @@ set -euo pipefail
 # read offset into changed bytes. Matching } + exit 0 at EOF.
 {
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Keep helper/audit policy current while compiling and packaging the pinned source.
+ROOT="$(cd "${PAPERCUSP_DESKTOP_TARGET_ROOT:-$HERE/..}" && pwd)"
 SRC_TAURI="$ROOT/src-tauri"
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
