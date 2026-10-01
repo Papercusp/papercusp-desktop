@@ -2084,6 +2084,34 @@ mod discovery_tests {
         assert_gui_boot_reresolves_wsl_route(&body[..end]);
     }
 
+    fn assert_gui_ipc_registered_before_page_exposure(body: &str) {
+        let registration = body
+            .find("register_packaged_endpoint_ipc(")
+            .expect("the GUI must register endpoint-IPC before exposing the app");
+        for exposure in ["restore_window_visibility(", "window.navigate(", "std::thread::spawn("] {
+            let position = body.find(exposure).expect("GUI boot exposure must exist");
+            assert!(registration < position, "endpoint-IPC registration must precede {exposure}");
+        }
+    }
+
+    #[test]
+    fn gui_boot_registers_ipc_before_page_exposure() {
+        let src = include_str!("main.rs");
+        let needle = format!("fn {}(app: &tauri::App)", "gui_setup");
+        let body = &src[src.find(&needle).expect("GUI setup must exist")..];
+        let end = body.find("\n}\n").expect("GUI setup must be brace-terminated");
+        assert_gui_ipc_registered_before_page_exposure(&body[..end]);
+    }
+
+    #[test]
+    fn gui_ipc_registration_guard_rejects_missing_and_late_registration() {
+        let exposure = "restore_window_visibility(); window.navigate(); std::thread::spawn();";
+        for body in [exposure.to_string(), format!("{exposure} register_packaged_endpoint_ipc();")] {
+            assert!(std::panic::catch_unwind(|| assert_gui_ipc_registered_before_page_exposure(&body)).is_err());
+        }
+        assert_gui_ipc_registered_before_page_exposure(&format!("register_packaged_endpoint_ipc(); {exposure}"));
+    }
+
     /// D-001/P-001 recurrence guard: every packaged GUI, including Linux, is
     /// an attach-only shell. The GUI startup helper may launch the sibling
     /// Server product, but no GUI-only Linux function may spawn serve.mjs.
@@ -5767,39 +5795,21 @@ fn spawn_boot_recovery_watcher(
     });
 }
 
-/// Everything that used to run synchronously in setup() after spawning serve
-/// (P-053): wait for discovery, record the port, wire endpoint-IPC, and feed
-/// the bootstrap page its base — or a visible failure state. Runs on a worker
-/// thread so the main thread reaches the event loop immediately and the
-/// window paints the bootstrap page while serve boots.
-fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf, via_wsl: bool) {
-    // WI-37771: register the endpoint-IPC handle FIRST, before the boot-outcome
-    // branch below — NOT after a successful discovery.
-    //
-    // Every early return in that branch (the Windows WSL-onboarding deferral,
-    // the reachable-fallback-env hop, and the FATAL boot-error inject) used to
-    // leave `tauri::State<Arc<IpcClientHandle>>` UNMANAGED for the life of the
-    // process. Nothing re-registers it later, so once any of them fired, every
-    // `endpoint_invoke` failed with Tauri's generic "state not managed" — and
-    // with `requireIpc` on, the webview is forbidden from falling back to HTTP,
-    // so the app sat permanently dead ("Operator connection lost", "Failed to
-    // load Pots") even after the operator came up healthy seconds later.
-    //
-    // Runtime-reproduced on a clean Windows 11 install: the first launch must
-    // create the WSL distro and init embedded PG, which exceeds the cold-boot
-    // budget, so the operator is legitimately not up yet — exactly the case
-    // those returns hand off to. Registering here costs nothing when the
-    // operator IS up (the same handle, a few ms earlier) and is what makes the
-    // hand-off actually work when it is not: the socket source re-reads the
-    // discovery file on EVERY (re)connect and `keep_warm` retries for the life
-    // of the process, so the handle connects by itself whenever the operator
-    // appears — after the onboarding gate's finalize restart included.
-    //
-    // This mirrors the dev branch in setup(), which has always registered
-    // before any operator exists. See endpoint_ipc.rs `IpcClientHandle::disabled`
-    // for why "leave it unmanaged" is never the right shape: the webview must
-    // be able to tell "not ready YET" (wait) from "switched off" (fall back),
-    // and an unmanaged state is indistinguishable from the startup window.
+/// Register before exposing the GUI, without waiting for the Server. WI-37771
+/// protected finish_boot's early returns; P-007 also observed unmanaged state
+/// while gui_setup's worker had not reached finish_boot yet. Reuse this handle
+/// when finish_boot runs so it cannot replace state or start a second supervisor.
+fn register_packaged_endpoint_ipc(
+    app_handle: tauri::AppHandle,
+    workspace_home: std::path::PathBuf,
+    via_wsl: bool,
+) {
+    if app_handle
+        .try_state::<std::sync::Arc<endpoint_ipc::IpcClientHandle>>()
+        .is_some()
+    {
+        return;
+    }
     let ipc_enabled = std::env::var("PAPERCUSP_DESKTOP_IPC").ok().as_deref() != Some("0");
     if ipc_enabled {
         // WI-3395: on Windows the sidecar runs in WSL2 and writes
@@ -5810,9 +5820,15 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
         // /api on the capped HTTP fallback.
         let disc_home = workspace_home.clone();
         let handle = endpoint_ipc::IpcClientHandle::new(move || {
+            // GUI registration precedes cold-install WSL onboarding. The boot
+            // worker publishes the upgraded route; reconnects must read it.
+            #[cfg(target_os = "windows")]
+            let via_wsl = via_wsl || wsl_setup::detect_ready_cached();
             find_endpoint_ipc_socket_resolved(&disc_home, via_wsl)
         });
-        app_handle.manage(handle.clone());
+        if !app_handle.manage(handle.clone()) {
+            return;
+        }
         let ipc_app_handle = app_handle.clone();
         let warm_home = workspace_home.clone();
         // Record the socket in SidecarState on the FIRST successful connect,
@@ -5823,6 +5839,8 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
             loop {
                 if handle.warm().await.is_ok() {
                     println!("[papercusp-desktop] endpoint-ipc client connected (discovery file)");
+                    #[cfg(target_os = "windows")]
+                    let via_wsl = via_wsl || wsl_setup::detect_ready_cached();
                     if let Some(path) = find_endpoint_ipc_socket(&warm_home, via_wsl) {
                         let state: tauri::State<SidecarState> = ipc_app_handle.state();
                         *state.endpoint_ipc_socket.lock().unwrap() = Some(path);
@@ -5850,7 +5868,13 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
             "[papercusp-desktop] endpoint-ipc DISABLED (PAPERCUSP_DESKTOP_IPC=0) — /api on HTTP"
         );
     }
+}
 
+/// Wait for discovery and attach or report the boot failure off the main thread
+/// (P-053). GUI setup has already installed IPC; the windowless Server also uses
+/// this path, so ensure registration before any boot-outcome early return.
+fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf, via_wsl: bool) {
+    register_packaged_endpoint_ipc(app_handle.clone(), workspace_home.clone(), via_wsl);
     let discovery = match wait_for_operator(
         &app_handle,
         &workspace_home,
@@ -6147,6 +6171,9 @@ fn gui_setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // lives inside WSL, so mirror the same routing to find the right path.
     let via_wsl = should_route_via_wsl(&app.handle());
     wsl_setup::set_route_active(via_wsl);
+    let app_handle = app.handle().clone();
+    let workspace_home = workspaces::shared_sidecar_home();
+    register_packaged_endpoint_ipc(app_handle.clone(), workspace_home.clone(), via_wsl);
 
     // WI-2648: the docs-search palette shortcut is owned by the always-on
     // SERVER process (registered next to install_server_tray), NOT the GUI —
@@ -6172,8 +6199,6 @@ fn gui_setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let app_handle = app.handle().clone();
-    let workspace_home = workspaces::shared_sidecar_home();
     std::thread::spawn(move || {
         ensure_server_running(&app_handle, &workspace_home, via_wsl);
         // WI-37798: the `via_wsl` above is a STARTUP snapshot, and on a cold
@@ -6184,8 +6209,8 @@ fn gui_setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let via_wsl = await_wsl_route_ready(&app_handle, via_wsl);
         let after = app_handle.clone();
         // finish_boot polls operator.json (120s, or the 600s WSL budget once
-        // the route above resolves — covers a cold Server boot), wires
-        // endpoint-IPC, and navigates the window to the operator.
+        // the route above resolves — covers a cold Server boot), and navigates
+        // the window to the operator using the already registered IPC handle.
         finish_boot(app_handle, workspace_home, via_wsl);
         // WI-4827 cross-process COLD start (macOS/Windows two-bundle): if the
         // Quick Panel palette launched us to open a route and the GUI wasn't
