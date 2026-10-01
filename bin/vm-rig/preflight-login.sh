@@ -8,9 +8,11 @@
 # loginwindow, the Papercusp LaunchAgent never starts, and the whole federation
 # rig goes dark (procs=0, zero origin='remote' rows on the tower) — with NO crash
 # and NO error, so it reads EXACTLY like a swarm/DHT failure. Secure Token blocks
-# any headless password reset, so recovery needs a human GUI login
-# (spice://127.0.0.1:5930). WI-4070 burned days on the wrong (network) hypothesis
-# because nothing asserted this invariant up front.
+# a headless password RESET, but no reset is needed when the CURRENT password is
+# known: re-encoding /etc/kcpassword from it over `ssh … sudo -n` repairs
+# auto-login with no GUI (done 2026-10-01, WI-10004800 — see the FAIL(2) text).
+# WI-4070 burned days on the wrong (network) hypothesis because nothing asserted
+# this invariant up front.
 #
 # Usage:  bin/vm-rig/preflight-login.sh [user@vm-ip]
 # Env:    PCUSP_VM_SSH   default ssh target (default aviweiss@172.31.44.2)
@@ -135,10 +137,15 @@ PREFLIGHT: FAIL(2) — kcpassword DRIFT DETECTED.
   /Applications/Papercusp Server.app/.../bin/node" — it is checking the TOWER's
   Linux filesystem. That FATAL looks like a broken rig and is not.
 
-  A HUMAN IS NEEDED ONLY FOR DURABILITY, and only eventually: a GUI login at
-  spice://127.0.0.1:5930 is what repairs macOS AUTO-LOGIN (Secure Token blocks
-  any headless password reset), so until then the app does NOT come back by
-  itself after a VM reboot and the headless boot above must be re-run by hand.
+  DURABILITY (auto-login across reboots) is ALSO repairable headlessly when the
+  account's CURRENT password is known (agent memory: the Mac VM GUI password).
+  Verify it first, read-only:  ssh \$VM 'dscl . -authonly $VM_USER <password>'
+  then re-encode /etc/kcpassword from it (back up the old file; sudo -n works on
+  the rig): XOR <password>+NUL with 7D 89 52 23 D2 BC DD EA A3 B9 1F (cycled),
+  zero-pad to a multiple of 12 bytes, write root:wheel 0600. Reboot to confirm
+  the console reaches $VM_USER. Done 2026-10-01 (WI-10004800): the file had
+  drifted to encode the USERNAME. Only an UNKNOWN password needs a human GUI
+  login at spice://127.0.0.1:5930 (Secure Token blocks a headless RESET).
   ⚠ DO NOT BLOCK A LANE ON THAT. This text used to say only "a human must log in",
   which reads as "the rig cannot run without the owner" — it is false, and on
   2026-08-09 it cost multiple wakes of an agent's lane sitting idle behind an
