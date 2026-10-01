@@ -1,0 +1,30 @@
+# Canonical source for ~/.config/systemd/user/papercup-vm-win.service.
+# Install together with stop-guest.sh via install-unit.sh.
+[Unit]
+Description=Papercusp Windows 11 rig (qemu-kvm) — confined to its own cgroup
+After=network.target
+
+# Bound retries so a broken rig cannot restart-loop indefinitely.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/windows-vm
+ExecStart=%h/windows-vm/launch-install.sh
+Restart=always
+RestartSec=10
+
+# ExecStop synchronously requests ACPI powerdown and waits for QEMU's MAINPID to
+# exit. If it returned immediately, systemd would apply KillMode=mixed at once.
+ExecStop=%h/windows-vm/stop-guest.sh %h/windows-vm/qemu-monitor.sock
+KillMode=mixed
+TimeoutStartSec=120
+TimeoutStopSec=180
+
+# The rig is best-effort batch work; keep it below the MCP/gateway path.
+CPUAccounting=yes
+CPUWeight=20
+
+[Install]
+WantedBy=default.target
