@@ -188,7 +188,7 @@ fi
 # the hashes and invalidates the old receipt. Hardware-unavailable publication
 # remains possible only through the shared, reason-required logged override.
 if release_artifacts_run_smoke_receipts "$TAG" "$VERSION" "${NEW_ARTIFACTS[@]}"; then
-  echo "==> platform smoke gate: $PLATFORM verifier passed and its receipt is content-bound"
+  release_artifacts_smoke_outcome_message "$PLATFORM" "$RELEASE_ARTIFACTS_SMOKE_OUTCOME"
 else
   echo "ERROR: $PLATFORM is built but its automatic installed-artifact smoke did not produce a valid receipt for these exact bytes — refusing to merge it into $TAG." >&2
   echo "       Configure PAPERCUSP_PLATFORM_SMOKE_CMD for a role-specific remote rig, or use" >&2
