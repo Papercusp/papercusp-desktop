@@ -49,6 +49,7 @@ unscannable bundle is not a clean one). Never prints a secret VALUE.
 Usage:  audit-release-bundle.py <path/to/source.tar.zst>
         audit-release-bundle.py --scan-dir <assembled-tree>...
         audit-release-bundle.py --scan-artifact <finished-installer>...
+        audit-release-bundle.py --scan-artifact --require-source-archive <finished-server-installer>...
         audit-release-bundle.py --scan-artifact --licenses <finished-installer>...
                                   (also runs scripts/check-licenses.mjs --installer-tree
                                   on the expanded trees — WI-10003906 / P-017)
@@ -3607,6 +3608,36 @@ def _windows_server_runtime_violations(expanded):
     return []
 
 
+def _finished_sidecar_payload_violations(root, require_source_archive):
+    """Reject transient sidecar staging files in shipped containers.
+
+    A source archive is written as sidecar/source.tar.zst.tmp.* and atomically
+    renamed only after its audit succeeds. Packaging can race that writer unless
+    it holds the shared sidecar read lock; this finished-artifact check is the
+    independent fail-closed guard against ever publishing the temp member.
+    """
+    sidecars = []
+    for directory, dirnames, _filenames in os.walk(root):
+        if os.path.basename(directory).lower() == "sidecar":
+            sidecars.append(directory)
+
+    if not sidecars:
+        return (["required sidecar/source.tar.zst is missing (no sidecar payload found)"]
+                if require_source_archive else [])
+
+    violations = []
+    for sidecar in sidecars:
+        for directory, dirnames, filenames in os.walk(sidecar):
+            for name in sorted([*dirnames, *filenames]):
+                if ".tmp." in name.lower():
+                    member = os.path.relpath(os.path.join(directory, name), root)
+                    violations.append(f"temporary sidecar member: {member}")
+        if require_source_archive and not os.path.isfile(os.path.join(sidecar, "source.tar.zst")):
+            member = os.path.relpath(os.path.join(sidecar, "source.tar.zst"), root)
+            violations.append(f"required sidecar/source.tar.zst is missing: {member}")
+    return violations
+
+
 def scan_artifact(paths):
     """Identity-scan FINISHED installer artifacts — the bytes we actually publish.
 
@@ -3633,13 +3664,14 @@ def scan_artifact(paths):
     archive pass and acceptances — so there is no second scanner to drift.
     """
     require_windows_runtime = "--require-windows-server-runtime" in paths
+    require_source_archive = "--require-source-archive" in paths
     want_licenses = "--licenses" in paths
     # Absolute from here on: expanders run their tools with cwd=<scratch dir> (the
     # AppImage runtime MUST, it writes a fixed squashfs-root/), so a caller-relative
     # path resolved there is ENOENT — a manual `--scan-artifact bundle/appimage/X`
     # crashed with a traceback instead of a verdict (R-15, 2026-09-30).
     paths = [os.path.abspath(path) for path in paths
-             if path not in ("--require-windows-server-runtime", "--licenses")]
+             if path not in ("--require-windows-server-runtime", "--require-source-archive", "--licenses")]
     if not paths:
         print("AUDIT ERROR: --scan-artifact needs at least one artifact", file=sys.stderr)
         return 2
@@ -3670,6 +3702,7 @@ def scan_artifact(paths):
     with tempfile.TemporaryDirectory(prefix="papercusp-audit-artifact-") as tmp:
         dests = []
         uninspectable = []
+        sidecar_violations = []
         runtime_violations = []
         for idx, art in enumerate(paths):
             dest = os.path.join(tmp, f"art{idx}")
@@ -3694,6 +3727,10 @@ def scan_artifact(paths):
                     (art, violation)
                     for violation in _windows_server_runtime_violations(dest)
                 )
+            sidecar_violations.extend(
+                (art, violation)
+                for violation in _finished_sidecar_payload_violations(dest, require_source_archive)
+            )
             dests.append(dest)
 
         if uninspectable:
@@ -3706,6 +3743,12 @@ def scan_artifact(paths):
             print("  Either teach _expand_installer its format, or stop shipping it.",
                   file=sys.stderr)
             return 2
+
+        if sidecar_violations:
+            print("\n    ✗ INVALID PACKAGED SIDECAR — refusing to certify this artifact\n", file=sys.stderr)
+            for artifact, violation in sidecar_violations:
+                print(f"        {os.path.basename(artifact)}: {violation}", file=sys.stderr)
+            return 1
 
         if runtime_violations:
             for artifact, violation in runtime_violations:

@@ -161,6 +161,70 @@ test('long build serialization is distinct from the reader-facing publication lo
   }
 });
 
+test('release packaging holds a shared sidecar lock and audits finished Linux artifacts', async () => {
+  assert.ok(/PAPERCUSP_SIDECAR_LOCK_WAIT_SEC="\$\{PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-3600\}"/.test(releaseLocal),
+    'release-local must give competing cut readers/writers a release-sized bounded wait');
+  const buildLines = releaseLocal.split('\n').filter((line) =>
+    line.includes('npx --yes -p @tauri-apps/cli@') && line.includes('tauri build'),
+  );
+  assert.equal(buildLines.length, 2, 'expected the Linux x86_64 and arm64 Tauri build commands');
+  for (const line of buildLines) {
+    assert.match(line, /run_with_sidecar_read_lock env/,
+      'every release Tauri build that reads sidecar resources must hold the shared lock');
+  }
+  assert.ok(/run_with_sidecar_read_lock env[\s\S]*?bash "\$APPIMAGE_PRODUCER"/.test(releaseLocal),
+    'the AppImage producer must hold the shared sidecar read lock');
+  assert.ok(/audit-release-bundle\.py" --scan-artifact --require-source-archive "\$linux_artifact"/.test(releaseLocal),
+    'finished Server artifacts must require source.tar.zst');
+  assert.ok(/audit-release-bundle\.py" --scan-artifact "\$linux_artifact"/.test(releaseLocal),
+    'all finished Linux artifacts must reject sidecar temp members');
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-sidecar-read-lock-'));
+  const lockPath = path.join(tmp, 'sidecar.lock');
+  const ready = path.join(tmp, 'ready');
+  const readerScript = [
+    'set -euo pipefail',
+    sidecarLockHelper,
+    '__pc_acquire_sidecar_read_lock "$1"',
+    'printf ready >"$2"',
+    'sleep 0.5',
+    '__pc_release_sidecar_read_lock',
+  ].join('\n');
+  const reader = spawn('bash', ['-c', readerScript, 'bash', lockPath, ready], {
+    stdio: 'ignore',
+    env: { ...process.env, PAPERCUSP_SIDECAR_LOCK_WAIT_SEC: '2' },
+  });
+  try {
+    await waitForFile(ready);
+    assert.notEqual(
+      spawnSync('flock', ['-x', '-n', lockPath, '-c', 'true']).status,
+      0,
+      'a staging writer must not enter while release packaging reads sidecar/',
+    );
+    await new Promise((resolve, reject) => {
+      if (reader.exitCode !== null) {
+        return reader.exitCode === 0
+          ? resolve()
+          : reject(new Error(`reader exited ${reader.exitCode}`));
+      }
+      reader.once('close', (code) =>
+        code === 0 ? resolve() : reject(new Error(`reader exited ${code}`)));
+    });
+    assert.equal(
+      spawnSync('flock', ['-x', '-n', lockPath, '-c', 'true']).status,
+      0,
+      'the writer must proceed after packaging releases the read lock',
+    );
+  } finally {
+    if (reader.exitCode === null && reader.signalCode === null) {
+      const closed = new Promise((resolve) => reader.once('close', resolve));
+      reader.kill('SIGTERM');
+      await closed;
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('split release legs wait for a live sidecar build without widening the reader lock', async () => {
   assert(SIDECAR_BUILD_LOCK_BLOCK, 'could not extract the shipped sidecar build-lock acquisition');
   assert(builder.includes('SIDECAR_BUILD_LOCK_WAIT_SEC'), 'the builder must accept a build-only lock budget');

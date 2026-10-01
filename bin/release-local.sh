@@ -2515,6 +2515,21 @@ if [[ "${PAPERCUSP_RELEASE_NICE:-1}" != "0" ]]; then
 fi
 [[ ${#PC_NICE[@]} -gt 0 ]] && echo "==> local build legs run niced (P-006): ${PC_NICE[*]}"
 
+# A release stages multi-minute sidecar inputs and then packages them. Keep the
+# reader-facing transaction alive for a complete release leg; competing release
+# writers inherit this same bounded, release-sized wait budget.
+PAPERCUSP_SIDECAR_LOCK_WAIT_SEC="${PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-3600}"
+export PAPERCUSP_SIDECAR_LOCK_WAIT_SEC
+
+run_with_sidecar_read_lock() {
+  local rc
+  source "$ORCHESTRATOR_HERE/lib/sidecar-lock-yield.sh"
+  __pc_acquire_sidecar_read_lock "$ROOT/src-tauri/sidecar.lock" || return $?
+  if "$@"; then rc=0; else rc=$?; fi
+  __pc_release_sidecar_read_lock
+  return "$rc"
+}
+
 vh_begin sidecar
 echo "==> building sidecar"
 # P-004 (desktop-build-hardening-tri-platform-2026-07-11): record the cut-start
@@ -2954,7 +2969,7 @@ else
       # see the collection globs) AND its multi-GB payload compression wedged the
       # 0.0.3-alpha linux leg for 33min+. deb only.
       echo "==> tauri build (linux x86_64, role=$role) — deb only (AppImage separate WI-2918; rpm not shipped)"
-      (cd "$ROOT" && RUSTFLAGS="$PAPERCUSP_LINUX_RUSTFLAGS" PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" env "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles deb "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
+      (cd "$ROOT" && run_with_sidecar_read_lock env RUSTFLAGS="$PAPERCUSP_LINUX_RUSTFLAGS" PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles deb "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
     done
     # Repack BOTH role artifacts after Tauri finishes writing them. The helper
     # verifies the ar structure and dpkg readability, atomically replaces each
@@ -2967,7 +2982,7 @@ else
     if [[ " $PAPERCUSP_BUILD_ROLES " == *" gui "* ]]; then
       echo "==> building Linux AppImage (gui, via bin/build-appimage.sh — linuxdeploy workaround)"
       APPIMAGE_PRODUCER="$ORCHESTRATOR_HERE/build-appimage.sh"
-      (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
+      (cd "$ROOT" && run_with_sidecar_read_lock env PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
          TAURI_SIGNING_PRIVATE_KEY="${TAURI_SIGNING_PRIVATE_KEY:-$KEY_FILE}" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
          PAPERCUSP_RELEASE_CHANNEL="$CHANNEL" PAPERCUSP_DESKTOP_TARGET_ROOT="$ROOT" \
          "${PC_NICE[@]}" bash "$APPIMAGE_PRODUCER")
@@ -3087,7 +3102,7 @@ if [[ "$WITH_ARM64" == "1" ]]; then
   for role in ${PAPERCUSP_BUILD_ROLES:-gui server}; do
     role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
     echo "==> tauri build (linux arm64, role=$role)"
-    (cd "$ROOT" && RUSTFLAGS="$PAPERCUSP_LINUX_RUSTFLAGS" PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" env "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
+    (cd "$ROOT" && run_with_sidecar_read_lock env RUSTFLAGS="$PAPERCUSP_LINUX_RUSTFLAGS" PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
   done
   # The base Tauri config includes deb among the unfiltered arm64 targets.
   # Repack both role artifacts before they enter ARTIFACTS, regenerating updater
@@ -3100,6 +3115,22 @@ if [[ "$WITH_ARM64" == "1" ]]; then
   # — arm64 was the only leg appending before that reset, and its entries never
   # survived. The single live arm64 collection is in that collector block.
 fi
+
+# Audit the finished Linux containers, after Debian repacking and for both fresh
+# and provenance-verified reused artifacts. The scan expands the shipped bytes,
+# rejects any sidecar *.tmp.* member, and requires the final source archive in
+# Server payloads before they can enter the release manifest.
+for linux_artifact in \
+  "$CARGO_TARGET_ROOT"/release/bundle/deb/*_"$VERSION"_*.deb \
+  "$CARGO_TARGET_ROOT"/release/bundle/appimage/*_"$VERSION"_*.AppImage \
+  "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/deb/*_"$VERSION"_*.deb; do
+  [[ -f "$linux_artifact" ]] || continue
+  case "${linux_artifact##*/}" in
+    *Server*) python3 "$ROOT/bin/audit-release-bundle.py" --scan-artifact --require-source-archive "$linux_artifact" ;;
+    *)        python3 "$ROOT/bin/audit-release-bundle.py" --scan-artifact "$linux_artifact" ;;
+  esac
+done
+
 if [[ "$WITH_MAC" == "1" && "${PAPERCUSP_REUSE_MAC:-0}" == "1" ]]; then
   # EMERGENCY SALVAGE PATH (last resort — NOT first-class; see EI-12853). REUSE the
   # good mac artifacts already restored into $MAC_OUT from a backed-up successful cut

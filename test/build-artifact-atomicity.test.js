@@ -9,6 +9,7 @@
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
@@ -20,6 +21,7 @@ const bootstrapResource = fs.readFileSync(
   path.join(root, 'src-tauri/resources/papercup-bootstrap.sh'),
   'utf8',
 );
+const auditBundle = path.join(root, 'bin/audit-release-bundle.py');
 
 function executableLines(source) {
   return source
@@ -27,6 +29,54 @@ function executableLines(source) {
     .filter((line) => !line.trimStart().startsWith('#'))
     .join('\n');
 }
+
+function makeServerArtifact(members) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-server-artifact-'));
+  const payload = path.join(temp, 'payload');
+  for (const [relative, body] of Object.entries(members)) {
+    const target = path.join(payload, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, body);
+  }
+  const artifact = path.join(temp, 'Papercusp Server_0.0.22_amd64.app.tar.gz');
+  const packed = spawnSync('tar', ['-czf', artifact, '-C', payload, '.'], { encoding: 'utf8' });
+  assert.equal(packed.status, 0, `could not prepare synthetic Server artifact: ${packed.stderr}`);
+  return { temp, artifact };
+}
+
+test('finished Server artifact audit rejects sidecar source-archive temp members', () => {
+  const sidecar = 'Papercusp Server.app/Contents/Resources/sidecar';
+  const fixture = makeServerArtifact({
+    [`${sidecar}/serve.mjs`]: 'runtime',
+    [`${sidecar}/source.tar.zst`]: 'complete archive',
+    [`${sidecar}/source.tar.zst.tmp.partial`]: 'truncated archive',
+  });
+  try {
+    const result = spawnSync('python3', [auditBundle, '--scan-artifact', '--require-source-archive', fixture.artifact], {
+      encoding: 'utf8',
+      timeout: 30000,
+    });
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+    assert.match(`${result.stdout}\n${result.stderr}`, /temporary sidecar member: .*source\.tar\.zst\.tmp\.partial/);
+  } finally {
+    fs.rmSync(fixture.temp, { recursive: true, force: true });
+  }
+});
+
+test('finished Server artifact audit requires sidecar/source.tar.zst', () => {
+  const sidecar = 'Papercusp Server.app/Contents/Resources/sidecar';
+  const fixture = makeServerArtifact({ [`${sidecar}/serve.mjs`]: 'runtime' });
+  try {
+    const result = spawnSync('python3', [auditBundle, '--scan-artifact', '--require-source-archive', fixture.artifact], {
+      encoding: 'utf8',
+      timeout: 30000,
+    });
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+    assert.match(`${result.stdout}\n${result.stderr}`, /required sidecar\/source\.tar\.zst is missing/);
+  } finally {
+    fs.rmSync(fixture.temp, { recursive: true, force: true });
+  }
+});
 
 test('source archive is audited before atomic publication', () => {
   const executable = executableLines(stageSource);
