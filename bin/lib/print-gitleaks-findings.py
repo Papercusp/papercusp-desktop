@@ -209,6 +209,8 @@ def mechanical_class_valid(entry: dict[str, object], finding: dict[str, object],
     locator = entry["fieldPath"]
     field = str(locator[-1])
     actual = _at_path(row, locator)
+    if kind == "public-cryptographic-key":
+        return actual == value and _canonical_base64(value, 32) in context["publicKeys"]
     if kind == "reviewed-descriptive-source-text":
         return (finding["RuleID"] == "generic-api-key" and not _CREDENTIAL_FIELD.search(field)
                 and isinstance(actual, str) and match in actual and value in actual
@@ -223,8 +225,6 @@ def mechanical_class_valid(entry: dict[str, object], finding: dict[str, object],
         if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
             return False
         return value in context["publicReferences"]
-    if kind == "public-cryptographic-key":
-        return _canonical_base64(value, 32) in context["publicKeys"]
     return False
 
 
@@ -236,6 +236,142 @@ def _validate_mechanical_entries(entries: list[dict[str, object]], report: list[
         if entry["class"] in added and not mechanical_class_valid(
                 entry, by_digest[entry["digest"]], context, seed=seed):
             raise ValueError("mechanical class predicate failed")
+
+
+def _table_ops(source: bytes, table: str) -> list[dict[str, object]]:
+    decoder = json.JSONDecoder()
+    pattern = rb'\{(?:"type":"put",)?"table":"' + re.escape(table.encode()) + rb'",'
+    rows = []
+    for found in re.finditer(pattern, source):
+        # These are small public metadata rows. Oversized or incomplete rows
+        # refuse the proof instead of silently reducing the population.
+        text = source[found.start():found.start() + 4 * 1024 * 1024].decode("utf-8", errors="replace")
+        row, _ = decoder.raw_decode(text)
+        rows.append(row)
+    return rows
+
+
+def validate_envelope_structure(proof: dict[str, object], source: bytes,
+                                report: list[dict[str, object]], epochs: set[int]) -> set[str]:
+    members = _table_ops(source, "hive-members")
+    recipients = {entry["device_pubkey"] for op in members
+                  for entry in op["value"].get("device_attestations", [])}
+    if len(recipients) != 33:
+        raise ValueError("historical recipient population mismatch")
+    public_keys = {_canonical_base64(value, 32) for value in recipients}
+    rows = {op["hbKey"]: op for op in _table_ops(source, "hive-epoch-keys")}
+    values = {}
+    for op in rows.values():
+        value = op["value"]
+        if (value["harness_slug"] != "papercusp" or value["epoch"] not in epochs
+                or value["member_device_pubkey"] not in recipients
+                or op["hbKey"] != str(value["epoch"]) + ":" + value["member_device_pubkey"]):
+            raise ValueError("epoch envelope membership mismatch")
+        _canonical_base64(value["wrapped_key"], 80)
+        values[value["wrapped_key"]] = op
+    digests = set()
+    count = 0
+    for finding in report:
+        if "wrapped_key" not in finding["Match"]:
+            continue
+        if (finding["RuleID"] != "generic-api-key" or finding["Secret"] not in values
+                or finding["Match"].encode() not in source):
+            raise ValueError("envelope exact finding mismatch")
+        count += 1
+        digests.add(finding_digest(finding))
+    if (count != 62 or len(digests) != 62 or proof.get("count") != count
+            or set(proof.get("digests", [])) != digests
+            or set(proof.get("recipients", [])) != recipients
+            or proof.get("sourceSha256") != hashlib.sha256(source).hexdigest()):
+        raise ValueError("envelope count or digest set mismatch")
+    return digests
+
+
+def _read_extra_proof(proof: dict[str, object], directory: Path, name: str) -> object:
+    path = directory / name
+    _private_file(path)
+    if proof.get("evidence", {}).get(name) != _sha256(path):
+        raise ValueError("conditional evidence changed")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _mechanical_context(proof: dict[str, object], directory: Path, root: Path,
+                        source: Path, entries: list[dict[str, object]],
+                        report: list[dict[str, object]], plain_report: list[dict[str, object]]) -> dict[str, object]:
+    reference = _read_extra_proof(proof, directory, "mechanical-class-proof.private.json")
+    if (reference.get("sourceSha256") != proof["sourceSha256"]
+            or reference.get("plaintextSha256") != _sha256(directory / "seed-000080.plaintext.jsonl")):
+        raise ValueError("mechanical proof input mismatch")
+    manifest = json.loads((root / "manifest.json").read_text())
+    publics = _manifest_publics(manifest)
+    public_refs = set()
+    for ref in reference.get("publicReferences", []):
+        path = _source_file(root, ref["file"])
+        field_path = ref["fieldPath"]
+        if (_sha256(path) != ref["sourceSha256"]
+                or not re.fullmatch(r"(?:sha256|sha|digest|hash|log_id|logId)", str(field_path[-1]))):
+            raise ValueError("public reference source mismatch")
+        value = _at_path(json.loads(path.read_text()), field_path)
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
+            raise ValueError("invalid public reference value")
+        public_refs.add(value)
+    needed_lines = {int(row["StartLine"]) for row in plain_report}
+    plain_rows = {}
+    with (directory / "seed-000080.plaintext.jsonl").open() as handle:
+        for line, text in enumerate(handle, 1):
+            if line in needed_lines:
+                plain_rows[line] = json.loads(text)
+    data = source.read_bytes()
+    fields = {(found.group("field").decode(), found.group("value").decode())
+              for found in _SEED_FIELDS.finditer(data)}
+    context = {"seedFields": fields, "publicKeys": publics, "plainRows": plain_rows,
+               "publicReferences": public_refs, "idFields": set(reference.get("idFields", [])),
+               "trees": reference.get("trees", {})}
+    if any(entry["class"] == "recipient-sealed-epoch-key-envelope" for entry in entries):
+        envelope = _read_extra_proof(proof, directory, "sealed-envelope-proof-safe.json")
+        keys = json.loads((root / "epoch-keys.json").read_text())["papercusp"]
+        context["envelopeDigests"] = validate_envelope_structure(envelope, data, report, {int(k) for k in keys})
+        publics |= {_canonical_base64(value, 32) for value in envelope["recipients"]}
+        validate_identity_secret_proof(_read_extra_proof(proof, directory, "identity-secret-scan-safe.json"),
+                                       root, directory, publics, reference)
+    return context
+
+
+def validate_identity_secret_proof(scan: dict[str, object], root: Path, directory: Path,
+                                   recipients: set[bytes], reference: dict[str, object]) -> None:
+    if (scan.get("schema") != "papercusp-sealed-envelope-secret-scan-v1"
+            or scan.get("seedRootSha") != _sha256(root / "manifest.json")
+            or scan.get("scannerSha256") != _sha256(Path(__file__))
+            or any(scan.get(name) != 0 for name in ("realFindings", "derivationMatches", "rawSkMatches", "nameScanHits"))
+            or scan.get("positivePlantedSecretDetected") is not True
+            or not isinstance(scan.get("tokensChecked"), int)):
+        raise ValueError("identity secret scan failed")
+    bundle = Path(reference["bundleRoot"])
+    if not bundle.is_dir() or bundle.is_symlink():
+        raise ValueError("assembled bundle input required")
+    expected = {path.resolve() for folder in (root, bundle) for path in folder.rglob("*") if path.is_file()}
+    expected |= {_source_file(directory, value).resolve() for value in reference["plaintextInputs"]}
+    inputs = scan.get("inputs", [])
+    if len(inputs) != len(expected) or {Path(row["path"]).resolve() for row in inputs} != expected:
+        raise ValueError("identity secret scan inventory incomplete")
+    for row in inputs:
+        path = Path(row["path"])
+        if path.is_symlink() or _sha256(path) != row["sha256"]:
+            raise ValueError("identity secret scan input changed")
+    controls = scan.get("controls", [])
+    encodings = {"der-base64", "pem", "jwk-d", "hex-seed", "base64-seed", "raw-sodium-secret"}
+    samples = {}
+    for row in controls:
+        if (row.get("detected") is not True or row.get("derivationDetected") is not True
+                or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("plantedSha256", "")))
+                or row.get("inputSha256") not in {entry["sha256"] for entry in inputs}):
+            raise ValueError("identity secret positive control failed")
+        samples.setdefault(row["inputSha256"], set()).add(row["encoding"])
+    plain_hashes = {_sha256(_source_file(directory, path)) for path in reference["plaintextInputs"]}
+    bundle_hashes = {_sha256(path) for path in bundle.rglob("*") if path.is_file()}
+    if (not any(digest in plain_hashes and kinds == encodings for digest, kinds in samples.items())
+            or not any(digest in bundle_hashes and kinds == encodings for digest, kinds in samples.items())):
+        raise ValueError("seed and bundle planted controls required")
 
 # D-142/D-147: recognize complete private-key material, including raw seeds
 # whose derived public key belongs to a recipient. Source vocabulary by itself
