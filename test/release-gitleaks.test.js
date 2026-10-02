@@ -141,6 +141,50 @@ print(json.dumps({'inputs':len(scan['inputs']),'controls':len(scan['controls']),
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
+test('D-142 secret inventory hashes symlink contents without following host targets and rejects link changes', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-secret-links-'));
+  try {
+    const program = String.raw`
+import importlib.util,json,sys,pathlib,base64,hashlib,os
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+base=pathlib.Path(sys.argv[2]);base.chmod(0o700);seed=base/'seed';bundle=base/'bundle';seed.mkdir();bundle.mkdir()
+(seed/'manifest.json').write_text('{}');(bundle/'serve.mjs').write_text('const publicValue=42;')
+plain=base/'plain.jsonl';plain.write_text('{}\n')
+recipients=[m._key_publics(m._sodium(),bytes([i])*32)[0] for i in range(33)]
+outside=base/'outside';outside.write_bytes(m._ED25519_DER_PREFIX+bytes(range(32)))
+link=bundle/'command';link.symlink_to('serve.mjs')
+(bundle/'dangling').symlink_to('not-present')
+(bundle/'host-reference').symlink_to(outside)
+(bundle/'directory-link').symlink_to('nested',target_is_directory=True)
+(bundle/'nested').mkdir();(bundle/'nested'/'public.txt').write_text('public')
+config={'bundleRoots':[str(bundle)],'plaintextInputs':[str(plain)],'controlSamples':[str(plain),str(bundle/'serve.mjs')],'recipients':[base64.b64encode(p).decode() for p in recipients]}
+cfg=base/'config.json';cfg.write_text(json.dumps(config));cfg.chmod(0o600)
+scan=m.scan_identity_proof(cfg,seed,base/'scan.json')
+ref={'bundleRoots':[str(bundle)],'plaintextInputs':['plain.jsonl']}
+m.validate_identity_secret_proof(scan,seed,base,set(recipients),ref)
+assert scan['realFindings']==0 and scan['derivationMatches']==0
+links=[r for r in scan['inputs'] if r.get('contentKind')=='symlink-target']
+assert len(links)==4 and len({r['path'] for r in scan['inputs']})==len(scan['inputs'])
+assert next(r for r in links if r['path']==str(link))['sha256']==hashlib.sha256(b'serve.mjs').hexdigest()
+try: m.validate_identity_secret_proof({**scan,'inputs':[r for r in scan['inputs'] if r['path']!=str(link)]},seed,base,set(recipients),ref);raise AssertionError('omitted link passed')
+except ValueError: pass
+link.unlink();link.symlink_to('changed-target')
+try: m.validate_identity_secret_proof(scan,seed,base,set(recipients),ref);raise AssertionError('changed link passed')
+except ValueError: pass
+link.unlink();link.write_text('changed-target')
+try: m.validate_identity_secret_proof(scan,seed,base,set(recipients),ref);raise AssertionError('changed link kind passed')
+except ValueError: pass
+link.unlink();link.symlink_to(bytes(range(32)).hex())
+detected=m.scan_identity_secret_inputs([link,plain],set(recipients),[plain])
+assert detected['derivationMatches']>0 and detected['realFindings']>0
+print(json.dumps({'linksChecked':len(links),'complete':True,'linkSecretDetected':True}))
+`;
+    const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), { linksChecked: 4, complete: true, linkSecretDetected: true });
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 function scan(entries, { config = true } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-release-gitleaks-'));
   try {

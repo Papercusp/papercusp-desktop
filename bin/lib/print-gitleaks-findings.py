@@ -345,6 +345,21 @@ def _mechanical_context(proof: dict[str, object], directory: Path, root: Path,
     return context
 
 
+def _secret_inventory(roots: list[Path]) -> set[Path]:
+    # rglob does not traverse symlink directories. The link text is shipped
+    # content; its host-resolved destination is not part of the artifact.
+    return {Path(os.path.abspath(path)) for folder in roots for path in folder.rglob("*")
+            if path.is_symlink() or path.is_file()}
+
+
+def _secret_input_hash(path: Path) -> str:
+    if path.is_symlink():
+        return hashlib.sha256(os.fsencode(os.readlink(path))).hexdigest()
+    if not path.is_file():
+        raise ValueError("secret scan input must be a file or symlink")
+    return _sha256(path)
+
+
 def validate_identity_secret_proof(scan: dict[str, object], root: Path, directory: Path,
                                    recipients: set[bytes], reference: dict[str, object]) -> None:
     if (scan.get("schema") != "papercusp-sealed-envelope-secret-scan-v1"
@@ -360,14 +375,17 @@ def validate_identity_secret_proof(scan: dict[str, object], root: Path, director
     plaintext_root = Path(reference.get("plaintextRoot", str(directory)))
     if not bundles or any(not bundle.is_dir() or bundle.is_symlink() for bundle in bundles):
         raise ValueError("assembled bundle input required")
-    expected = {path.resolve() for folder in [root, *bundles] for path in folder.rglob("*") if path.is_file()}
-    expected |= {_source_file(plaintext_root, value).resolve() for value in reference["plaintextInputs"]}
+    expected = _secret_inventory([root, *bundles])
+    expected |= {Path(os.path.abspath(_source_file(plaintext_root, value)))
+                 for value in reference["plaintextInputs"]}
     inputs = scan.get("inputs", [])
-    if len(inputs) != len(expected) or {Path(row["path"]).resolve() for row in inputs} != expected:
+    if (len(inputs) != len(expected)
+            or {Path(os.path.abspath(row["path"])) for row in inputs} != expected):
         raise ValueError("identity secret scan inventory incomplete")
     for row in inputs:
         path = Path(row["path"])
-        if path.is_symlink() or _sha256(path) != row["sha256"]:
+        kind = "symlink-target" if path.is_symlink() else "file"
+        if row.get("contentKind", "file") != kind or _secret_input_hash(path) != row["sha256"]:
             raise ValueError("identity secret scan input changed")
     controls = scan.get("controls", [])
     encodings = {"der-base64", "pem", "jwk-d", "hex-seed", "base64-seed", "raw-sodium-secret"}
@@ -379,7 +397,7 @@ def validate_identity_secret_proof(scan: dict[str, object], root: Path, director
             raise ValueError("identity secret positive control failed")
         samples.setdefault(row["inputSha256"], set()).add(row["encoding"])
     plain_hashes = {_sha256(_source_file(plaintext_root, path)) for path in reference["plaintextInputs"]}
-    bundle_hashes = {_sha256(path) for bundle in bundles for path in bundle.rglob("*") if path.is_file()}
+    bundle_hashes = {_secret_input_hash(path) for path in _secret_inventory(bundles)}
     if (not any(digest in plain_hashes and kinds == encodings for digest, kinds in samples.items())
             or not any(digest in bundle_hashes and kinds == encodings for digest, kinds in samples.items())):
         raise ValueError("seed and bundle planted controls required")
@@ -529,25 +547,32 @@ def scan_identity_secret_inputs(inputs: list[Path], recipients: set[bytes],
     This never extracts containers implicitly: finished installers need their
     expanded contents in the inventory, through the existing artifact auditor.
     """
-    if not inputs or not control_samples or any(path not in inputs for path in control_samples):
+    if (not inputs or not control_samples or any(path not in inputs for path in control_samples)
+            or any(path.is_symlink() or not path.is_file() for path in control_samples)):
         raise ValueError("complete inventory and real control samples required")
     totals = Counter()
     inventory = []
     forbidden_names = ("*keychain*", "*keystore*", "*device-keypair*", "*.pem", "*.p8", "*.key")
     for path in inputs:
-        if path.is_symlink() or not path.is_file():
-            raise ValueError("secret scan input must be an actual file")
-        before = _sha256(path)
+        kind = "symlink-target" if path.is_symlink() else "file"
+        before = _secret_input_hash(path)
         # Chunk overlap covers the scanner's largest bounded JWK serialization.
         # It keeps large full-history bundles out of Python heap allocations.
-        with path.open("rb") as handle:
-            previous = b""
-            for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
-                totals.update(scan_secret_key_bytes(previous + chunk, recipients))
-                previous = chunk[-32768:]
-        if _sha256(path) != before:
+        if kind == "symlink-target":
+            totals.update(scan_secret_key_bytes(os.fsencode(os.readlink(path)), recipients))
+        else:
+            with path.open("rb") as handle:
+                previous = b""
+                for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+                    totals.update(scan_secret_key_bytes(previous + chunk, recipients))
+                    previous = chunk[-32768:]
+        if (("symlink-target" if path.is_symlink() else "file") != kind
+                or _secret_input_hash(path) != before):
             raise ValueError("secret scan input changed")
-        inventory.append({"path": str(path), "sha256": before})
+        entry = {"path": str(path), "sha256": before}
+        if kind != "file":
+            entry["contentKind"] = kind
+        inventory.append(entry)
         if any(fnmatch.fnmatch(path.name.lower(), pattern) for pattern in forbidden_names):
             totals["nameScanHits"] += 1
     sodium = _sodium()
@@ -599,7 +624,7 @@ def scan_identity_proof(config_path: Path, seed: Path, output: Path) -> dict[str
     plaintext = [Path(value) for value in config["plaintextInputs"]]
     if len(roots) < 2 or not plaintext or any(not root.is_dir() or root.is_symlink() for root in roots):
         raise ValueError("seed, assembled bundle and plaintext inventories required")
-    paths = sorted({path for root in roots for path in root.rglob("*") if path.is_file()} | set(plaintext))
+    paths = sorted(_secret_inventory(roots) | set(plaintext))
     recipients = {_canonical_base64(value, 32) for value in config["recipients"]}
     if len(recipients) != 33:
         raise ValueError("historical recipient population required")
