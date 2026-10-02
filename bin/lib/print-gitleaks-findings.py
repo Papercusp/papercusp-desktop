@@ -177,9 +177,7 @@ def assemble_seed_proof(directory: Path, root: Path, config: Path, relative: str
 def filter_seed_findings(report_path: Path, root: Path, proof_path: Path,
                          config: Path) -> dict[str, int]:
     _private_file(report_path)
-    _private_file(proof_path)
-    proof = json.loads(proof_path.read_text(encoding="utf-8"))
-    allowed = validate_seed_proof(proof, proof_path.parent, root, config)
+    allowances = seed_proof_allowances(proof_path, root, config)
     findings = json.loads(report_path.read_text(encoding="utf-8"))
     residual = []
     for finding in findings:
@@ -189,7 +187,7 @@ def filter_seed_findings(report_path: Path, root: Path, proof_path: Path,
             relative = candidate.resolve().relative_to(root.resolve()).as_posix()
         except ValueError:
             relative = ""
-        if relative == proof["file"] and finding_digest(finding) in allowed:
+        if relative in allowances and finding_digest(finding) in allowances[relative]:
             continue
         residual.append({**finding, "Match": "REDACTED", "Secret": "REDACTED"})
     # Keep the original exact scan private for independent review. The normal
@@ -200,6 +198,35 @@ def filter_seed_findings(report_path: Path, root: Path, proof_path: Path,
         json.dump(residual, handle)
     os.replace(temporary, report_path)
     return {"findings": len(findings), "exempted": len(findings) - len(residual), "remaining": len(residual)}
+
+
+def seed_proof_allowances(proof_path: Path, root: Path,
+                          config: Path) -> dict[str, set[str]]:
+    """Compose reviewed per-file proofs without broadening any file's allowance.
+
+    The directory scan can find ciphertext in multiple storage segments. Each
+    segment needs its own source-bound authentication and plaintext proof; a
+    digest approved in one segment never grants an exception in another.
+    """
+    _private_file(proof_path)
+    proof = json.loads(proof_path.read_text(encoding="utf-8"))
+    if "proofs" not in proof:
+        return {proof["file"]: validate_seed_proof(proof, proof_path.parent, root, config)}
+    if (proof.get("schemaVersion") != _PROOF_SCHEMA
+            or not isinstance(proof.get("reviewRef"), str) or not proof["reviewRef"].strip()
+            or not isinstance(proof["proofs"], list) or not proof["proofs"]):
+        raise ValueError("invalid proof collection")
+    allowances = {}
+    for entry in proof["proofs"]:
+        child = _source_file(proof_path.parent, entry["path"])
+        _private_file(child)
+        if entry.get("sha256") != _sha256(child):
+            raise ValueError("segment proof changed")
+        segment = json.loads(child.read_text(encoding="utf-8"))
+        if "proofs" in segment or segment.get("file") in allowances:
+            raise ValueError("nested or duplicate segment proof")
+        allowances[segment["file"]] = validate_seed_proof(segment, child.parent, root, config)
+    return allowances
 
 
 def _sha256(path: Path) -> str:

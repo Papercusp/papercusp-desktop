@@ -574,3 +574,39 @@ test('D-140 proof refuses changed source, epoch keys, missing proof, and failed 
     assert.equal(f.filter().status, 2);
   } finally { fs.rmSync(f.temp, { recursive: true, force: true }); }
 });
+
+test('D-140 storage-segment proofs compose while preserving per-file exact-content boundaries', () => {
+  const f = seedProofFixture({ extraCredential: true });
+  try {
+    const second = 'corestore/db/000094.blob';
+    fs.copyFileSync(f.blob, path.join(f.seed, second));
+    const evidence2 = path.join(f.evidence, 'segment2');
+    fs.mkdirSync(evidence2, { mode: 0o700 });
+    for (const name of fs.readdirSync(f.evidence)) {
+      if (name !== 'segment2') fs.copyFileSync(path.join(f.evidence, name), path.join(evidence2, name));
+    }
+    const child = path.join(evidence2, 'seed-finding-proof.json');
+    const proof2 = JSON.parse(fs.readFileSync(child));
+    proof2.file = second;
+    fs.writeFileSync(child, JSON.stringify(proof2), { mode: 0o600 });
+    const collection = { schemaVersion: proof2.schemaVersion, reviewRef: proof2.reviewRef,
+      proofs: [{ path: 'seed-finding-proof.json', sha256: f.hash(f.proof) },
+        { path: 'segment2/seed-finding-proof.json', sha256: f.hash(child) }] };
+    const master = path.join(f.evidence, 'collection.json');
+    const seal = () => fs.writeFileSync(master, JSON.stringify(collection), { mode: 0o600 });
+    seal();
+    const secondRows = f.approved.map(row => ({ ...row, File: path.join(f.seed, second) }));
+    assert.equal(f.filter([...f.approved, ...secondRows], master).status, 0);
+    assert.equal(f.filter([...f.current, ...secondRows], master).status, 1,
+      'composition must retain a new raw credential on an approved segment line');
+    assert.equal(f.filter(f.approved.map(row => ({ ...row, File: path.join(f.seed, 'third.blob') })), master).status, 1);
+    collection.proofs[1].sha256 = '0'.repeat(64); seal();
+    assert.equal(f.filter(secondRows, master).status, 2);
+    collection.proofs[1].sha256 = f.hash(child);
+    collection.proofs.push(collection.proofs[0]); seal();
+    assert.equal(f.filter(secondRows, master).status, 2, 'duplicate segment proofs must fail closed');
+    collection.proofs.pop();
+    collection.proofs[1].path = '../outside.json'; seal();
+    assert.equal(f.filter(secondRows, master).status, 2);
+  } finally { fs.rmSync(f.temp, { recursive: true, force: true }); }
+});
