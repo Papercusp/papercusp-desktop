@@ -272,7 +272,7 @@ def mechanical_class_valid(entry: dict[str, object], finding: dict[str, object],
         if shape not in expected[1]:
             return False
         _frozen_source_bytes(ref, context["trees"])
-        check = scan_secret_key_bytes(value.encode(), context["publicKeys"])
+        check = scan_secret_key_bytes(value.encode(), set(), context["publicKeys"])
         return check["realFindings"] == 0 and check["derivationMatches"] == 0
     if actual != value or _CREDENTIAL_FIELD.search(field):
         return False
@@ -522,8 +522,8 @@ def _dpkg_certificate_bytes(ref: dict[str, object], bundled_path: Path) -> bytes
 
 
 def _parsed_public_certificates(data: bytes) -> list[dict[str, str]]:
-    if re.search(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", data):
-        raise ValueError("private key in public certificate input")
+    if any(label != b"CERTIFICATE" for label in re.findall(rb"-----BEGIN ([A-Z0-9 ]+)-----", data)):
+        raise ValueError("non-certificate block in public certificate input")
     blocks = list(re.finditer(rb"-----BEGIN CERTIFICATE-----\s+([A-Za-z0-9+/=\s]+)"
                              rb"-----END CERTIFICATE-----", data))
     if (not blocks or len(blocks) != data.count(b"-----BEGIN CERTIFICATE-----")

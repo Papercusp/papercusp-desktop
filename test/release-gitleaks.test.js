@@ -199,6 +199,75 @@ test('D-142 detector recognizes X25519 PKCS8 in raw, hex and base64 encodings', 
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
+test('D-151 vendored vocabulary binds the exact bundled package identity, file and frozen sha512 lock entry', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-vendor-source-proof-'));
+  try {
+    const program = String.raw`
+import importlib.util,json,sys,pathlib,hashlib,tarfile,io,base64
+from unittest.mock import patch
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+base=pathlib.Path(sys.argv[2]);pkg=base/'node_modules/source-fixture';pkg.mkdir(parents=True)
+data=b'export const keyStoreName="public-vocabulary";\n';source=pkg/'KeyStore.js';source.write_bytes(data)
+package={'name':'source-fixture','version':'1.0.0'};(pkg/'package.json').write_text(json.dumps(package))
+archive=base/'package.tgz'
+with tarfile.open(archive,'w:gz') as out:
+ row=tarfile.TarInfo('package/KeyStore.js');row.size=len(data);out.addfile(row,io.BytesIO(data))
+integrity='sha512-'+base64.b64encode(hashlib.sha512(archive.read_bytes()).digest()).decode()
+lock=json.dumps({'packages':{'node_modules/source-fixture':{'version':'1.0.0','integrity':integrity}}}).encode()
+ref={'lockRef':{'tree':'superproject','path':'package-lock.json'},'name':'source-fixture','packagePath':'node_modules/source-fixture','version':'1.0.0','integrity':integrity,'archive':str(archive),'member':'package/KeyStore.js'}
+entry={'path':str(source),'sha256':m._sha256(source),'class':'frozen-public-source-vocabulary','packageRef':ref}
+with patch.object(m,'_frozen_source_bytes',return_value=lock):
+ assert m.validate_identity_name_exclusions([entry],{source},set(),set(),{})=={entry['sha256']:1}
+ for changed in [{**ref,'version':'2.0.0'},{**ref,'member':'package/Other.js'},{**ref,'integrity':'sha512-'+base64.b64encode(bytes(64)).decode()}]:
+  try:m.validate_identity_name_exclusions([{**entry,'packageRef':changed}],{source},set(),set(),{});raise AssertionError('changed package witness passed')
+  except ValueError:pass
+ (pkg/'package.json').write_text(json.dumps({**package,'name':'other'}))
+ try:m.validate_identity_name_exclusions([entry],{source},set(),set(),{});raise AssertionError('wrong bundled identity passed')
+ except ValueError:pass
+ (pkg/'package.json').write_text(json.dumps(package));source.write_bytes(b'changed source')
+ try:m.validate_identity_name_exclusions([{**entry,'sha256':m._sha256(source)}],{source},set(),set(),{});raise AssertionError('changed bundled bytes passed')
+ except ValueError:pass
+print(json.dumps({'positive':True,'negativeControls':5}))
+`;
+    const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), { positive: true, negativeControls: 5 });
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test('D-151 OS certificate provenance requires apt SHA256 and exact dpkg package member, not md5sums', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-os-cert-proof-'));
+  try {
+    const pkg = path.join(temp, 'deb');
+    fs.mkdirSync(path.join(pkg, 'DEBIAN'), { recursive: true });
+    fs.mkdirSync(path.join(pkg, 'usr/share/cert-fixture'), { recursive: true });
+    fs.writeFileSync(path.join(pkg, 'DEBIAN/control'),
+      'Package: proof-certificate\nVersion: 1.0\nArchitecture: all\nMaintainer: Fixture <test@example.invalid>\nDescription: certificate provenance fixture\n');
+    fs.writeFileSync(path.join(pkg, 'usr/share/cert-fixture/cert.pem'), 'synthetic certificate member\n');
+    const built = spawnSync('dpkg-deb', ['-b', pkg, path.join(temp, 'package.deb')], { encoding: 'utf8' });
+    assert.equal(built.status, 0, built.stderr);
+    const program = String.raw`
+import importlib.util,json,sys,pathlib,hashlib
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+base=pathlib.Path(sys.argv[2]);archive=base/'package.deb';index=base/'Packages';data=(base/'deb/usr/share/cert-fixture/cert.pem').read_bytes()
+index.write_text('Package: proof-certificate\nVersion: 1.0\nSHA256: '+m._sha256(archive)+'\n\n')
+ref={'name':'proof-certificate','version':'1.0','archive':str(archive),'archiveSha256':m._sha256(archive),'index':str(index),'indexSha256':m._sha256(index),'member':'./usr/share/cert-fixture/cert.pem'}
+bundled=base/'runtime/usr/share/cert-fixture/cert.pem'
+assert m._dpkg_certificate_bytes(ref,bundled)==data
+for changed in [{**ref,'version':'2.0'},{**ref,'archiveSha256':'0'*64},{**ref,'member':'./usr/share/other.pem'}]:
+ try:m._dpkg_certificate_bytes(changed,bundled);raise AssertionError('changed OS proof passed')
+ except ValueError:pass
+index.write_text('Package: proof-certificate\nVersion: 1.0\nMD5sum: irrelevant\n\n')
+try:m._dpkg_certificate_bytes({**ref,'indexSha256':m._sha256(index)},bundled);raise AssertionError('md5sums-only passed')
+except ValueError:pass
+print(json.dumps({'positive':True,'negativeControls':4}))
+`;
+    const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), { positive: true, negativeControls: 4 });
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test('D-147 secret proof collector and validator bind complete seed, plaintext and assembled inputs', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-secret-proof-'));
   try {
