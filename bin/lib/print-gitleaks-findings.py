@@ -138,6 +138,26 @@ def _at_path(value: object, path: list[object]) -> object:
     return value
 
 
+def _embedded_reference(value: object, pointer: object) -> tuple[object, str]:
+    """D-150 V4: exactly one JSON parse and an exact RFC 6901 pointer."""
+    if (not isinstance(value, str) or not isinstance(pointer, str)
+            or not pointer.startswith("/") or re.search(r"~(?![01])", pointer)):
+        raise ValueError("typed embedded JSON locator required")
+    value = json.loads(value)
+    parts = [part.replace("~1", "/").replace("~0", "~")
+             for part in pointer[1:].split("/")]
+    for part in parts:
+        if isinstance(value, dict):
+            value = value[part]
+        elif (isinstance(value, list) and re.fullmatch(r"0|[1-9][0-9]*", part)
+              and int(part) < len(value)):
+            value = value[int(part)]
+        else:
+            # A nested JSON string is not parsed a second time.
+            raise ValueError("invalid embedded JSON pointer")
+    return value, parts[-1]
+
+
 def _manifest_publics(manifest: dict[str, object]) -> set[bytes]:
     result = set()
     for store in manifest.get("stores", []):
@@ -215,6 +235,11 @@ def mechanical_class_valid(entry: dict[str, object], finding: dict[str, object],
     locator = entry["fieldPath"]
     field = str(locator[-1])
     actual = _at_path(row, locator)
+    if "embeddedJsonPointer" in entry:
+        if kind not in {"public-hash-or-log-reference", "public-condition-reference",
+                        "public-opaque-operation-reference", "public-schema-bound-reference"}:
+            return False
+        actual, field = _embedded_reference(actual, entry["embeddedJsonPointer"])
     if kind == "public-cryptographic-key":
         return actual == value and _canonical_base64(value, 32) in context["publicKeys"]
     if kind == "reviewed-descriptive-source-text":

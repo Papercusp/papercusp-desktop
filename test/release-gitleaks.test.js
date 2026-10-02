@@ -836,6 +836,36 @@ print(json.dumps({'envelopes':len(digests),'countMismatchRefused':True}))
   assert.equal(JSON.parse(result.stdout).envelopes, 62);
 });
 
+test('D-150 embedded references require one JSON parse, an exact pointer and the existing name/value predicates', () => {
+  const program = String.raw`
+import importlib.util,json,sys
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+identifier='abcdefgh-0000-'+'1234567890abcdef'*2
+ctx={'plainRows':{1:{}},'idFields':{'id'},'publicReferences':{'a'*64}}
+def check(body,pointer,value=identifier,kind='public-opaque-operation-reference'):
+ finding={'RuleID':'generic-api-key','Match':'id":"'+value+'"','Secret':value,'StartLine':1}
+ entry={'rule':finding['RuleID'],'digest':m.finding_digest(finding),'class':kind,'fieldPath':['body'],'embeddedJsonPointer':pointer}
+ ctx['plainRows'][1]={'body':body}
+ try:return m.mechanical_class_valid(entry,finding,ctx,seed=False)
+ except (ValueError,KeyError,TypeError,IndexError):return False
+assert check(json.dumps({'a/b':{'~field':[{'id':identifier}]}}),'/a~1b/~0field/0/id')
+assert check(json.dumps({'refs':{'hash':'a'*64}}),'/refs/hash','a'*64,'public-hash-or-log-reference')
+assert not check('prefix '+json.dumps({'id':identifier}),'/id')
+assert not check(json.dumps({'nested':json.dumps({'id':identifier})}),'/nested/id')
+assert not check(json.dumps({'id':identifier}),'/missing/id')
+assert not check(json.dumps({'id':identifier}),'/~2/id')
+assert not check(json.dumps([{'id':identifier}]),'/00/id')
+assert not check(json.dumps({'apiKey':identifier}),'/apiKey')
+assert not check(json.dumps({'id':'not-an-approved-id'}),'/id','not-an-approved-id')
+assert not check(json.dumps({'hash':'b'*64}),'/hash','b'*64,'public-hash-or-log-reference')
+assert not check(json.dumps({'id':identifier}),'/id',kind='reviewed-descriptive-source-text')
+print(json.dumps({'positivePointer':True,'negativeControls':True}))
+`;
+  const result = spawnSync('python3', ['-c', program, reportFormatterPath], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { positivePointer: true, negativeControls: true });
+});
+
 test('D-147 integrated proof refuses newly labelled classes without mechanical evidence and unclassified entries', () => {
   for (const kind of ['public-opaque-operation-reference', 'unclassified']) {
     const f = seedProofFixture();
