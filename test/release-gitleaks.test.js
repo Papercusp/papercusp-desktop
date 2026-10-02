@@ -95,6 +95,52 @@ test('D-142 inventory scan binds input hashes, detects keystore names, and runs 
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
+test('D-142 detector recognizes X25519 PKCS8 in raw, hex and base64 encodings', () => {
+  const crypto = require('node:crypto');
+  const der = crypto.generateKeyPairSync('x25519').privateKey.export({ type: 'pkcs8', format: 'der' });
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-x25519-control-'));
+  try {
+    const program = 'import importlib.util,json,sys\ns=importlib.util.spec_from_file_location("f",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\nprint(json.dumps(m.scan_secret_key_bytes(open(sys.argv[2],"rb").read(),set())))';
+    for (const data of [der, Buffer.from(der.toString('hex')), Buffer.from(der.toString('base64'))]) {
+      const input = path.join(temp, 'input'); fs.writeFileSync(input, data);
+      const result = spawnSync('python3', ['-c', program, reportFormatterPath, input], { encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr);
+      assert.ok(JSON.parse(result.stdout).realFindings > 0);
+      assert.ok(!(result.stdout + result.stderr).includes(der.toString('hex')));
+    }
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test('D-147 secret proof collector and validator bind complete seed, plaintext and assembled inputs', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-secret-proof-'));
+  try {
+    const program = String.raw`
+import importlib.util,json,sys,pathlib,hashlib
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+base=pathlib.Path(sys.argv[2]);base.chmod(0o700);seed=base/'seed';bundle=base/'bundle';seed.mkdir();bundle.mkdir()
+(seed/'manifest.json').write_text('{}');(bundle/'serve.mjs').write_text('const publicValue=42;')
+plain=base/'plain.jsonl';plain.write_text('{}\n')
+recipients=[m._key_publics(m._sodium(),bytes([i])*32)[0] for i in range(33)]
+import base64
+config={'bundleRoots':[str(bundle)],'plaintextInputs':[str(plain)],'controlSamples':[str(plain),str(bundle/'serve.mjs')],'recipients':[base64.b64encode(p).decode() for p in recipients]}
+cfg=base/'config.json';cfg.write_text(json.dumps(config));cfg.chmod(0o600)
+scan=m.scan_identity_proof(cfg,seed,base/'scan.json')
+ref={'bundleRoots':[str(bundle)],'plaintextInputs':['plain.jsonl']}
+m.validate_identity_secret_proof(scan,seed,base,set(recipients),ref)
+for changed in [{**scan,'inputs':scan['inputs'][:-1]},{**scan,'scannerSha256':'0'*64},{**scan,'recipientSetSha256':'0'*64},{**scan,'controls':[]},{**scan,'realFindings':1}]:
+ try: m.validate_identity_secret_proof(changed,seed,base,set(recipients),ref);raise AssertionError('incomplete secret proof passed')
+ except ValueError: pass
+(bundle/'serve.mjs').write_text('changed input')
+try: m.validate_identity_secret_proof(scan,seed,base,set(recipients),ref);raise AssertionError('changed bundle passed')
+except ValueError: pass
+print(json.dumps({'inputs':len(scan['inputs']),'controls':len(scan['controls']),'complete':True}))
+`;
+    const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).complete, true);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 function scan(entries, { config = true } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-release-gitleaks-'));
   try {

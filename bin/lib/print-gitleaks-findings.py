@@ -387,6 +387,7 @@ def validate_identity_secret_proof(scan: dict[str, object], root: Path, director
 # whose derived public key belongs to a recipient. Source vocabulary by itself
 # (a PEM header or a service name in code) is not a serialized private key.
 _ED25519_DER_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
+_X25519_DER_PREFIX = bytes.fromhex("302e020100300506032b656e04220420")
 _KEY_TOKENS = re.compile(rb"(?<![A-Za-z0-9_+/=-])(?:[0-9a-fA-F]{128}|[0-9a-fA-F]{64}|[A-Za-z0-9_+/-]{86}={0,2}|[A-Za-z0-9_+/-]{43}=?)(?![A-Za-z0-9_+/=-])")
 _PEM_PRIVATE = re.compile(rb"-----BEGIN (PRIVATE KEY|OPENSSH PRIVATE KEY|ENCRYPTED PRIVATE KEY)-----\s+([A-Za-z0-9+/=\s]+)-----END \1-----")
 _PRIVATE_JWK = re.compile(rb'\{[^{}]{0,16384}"crv"\s*:\s*"(?:Ed25519|X25519)"[^{}]{0,16384}\}')
@@ -437,17 +438,19 @@ def scan_secret_key_bytes(data: bytes, recipients: set[bytes]) -> dict[str, int]
     def der(value: bytes) -> bool:
         nonlocal serialized
         found = False
-        offset = 0
-        while True:
-            offset = value.find(_ED25519_DER_PREFIX, offset)
-            if offset < 0:
-                return found
-            end = offset + len(_ED25519_DER_PREFIX) + 32
-            if end <= len(value):
-                seeds.add(value[offset + len(_ED25519_DER_PREFIX):end])
-                serialized += 1
-                found = True
-            offset += 1
+        for prefix in (_ED25519_DER_PREFIX, _X25519_DER_PREFIX):
+            offset = 0
+            while True:
+                offset = value.find(prefix, offset)
+                if offset < 0:
+                    break
+                end = offset + len(prefix) + 32
+                if end <= len(value):
+                    seeds.add(value[offset + len(prefix):end])
+                    serialized += 1
+                    found = True
+                offset += 1
+        return found
 
     der(data)
     # A raw libsodium Ed25519 secret is seed || public. Search recipient public
@@ -465,8 +468,8 @@ def scan_secret_key_bytes(data: bytes, recipients: set[bytes]) -> dict[str, int]
             offset = data.find(public, offset + 1)
     # Complete DER, not its prefix, represented as hex or base64.
     for pattern, decode in (
-        (rb"(?<![0-9a-fA-F])" + _ED25519_DER_PREFIX.hex().encode() + rb"[0-9a-fA-F]{64}(?![0-9a-fA-F])", lambda value: bytes.fromhex(value.decode("ascii"))),
-        (rb"(?<![A-Za-z0-9+/])MC4CAQAwBQYDK2VwBCIEI[A-Za-z0-9+/]{43}(?![A-Za-z0-9+/])", base64.b64decode),
+        (rb"(?<![0-9a-fA-F])(?:" + _ED25519_DER_PREFIX.hex().encode() + b"|" + _X25519_DER_PREFIX.hex().encode() + rb")[0-9a-fA-F]{64}(?![0-9a-fA-F])", lambda value: bytes.fromhex(value.decode("ascii"))),
+        (rb"(?<![A-Za-z0-9+/])MC4CAQAwBQYDK2V[wu]BCIEI[A-Za-z0-9+/]{43}(?![A-Za-z0-9+/])", base64.b64decode),
     ):
         for match in re.finditer(pattern, data):
             der(decode(match.group()))
