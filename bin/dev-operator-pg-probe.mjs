@@ -11,7 +11,9 @@
 // uses this probe to fall back to bin/serve.ts, which starts its own embedded
 // Postgres — what the public README promises.
 //
-// Exit 0: reachable (print "reachable <source>"). Exit 1: not reachable.
+// Exit 0: reachable. Exit 1: unconfigured native fallback is unavailable, so
+// a fresh clone may boot embedded PG. Exit 2: the configured/discovered DB is
+// unavailable; preserve that database and let the dev supervisor retry it.
 // --require-applied-schema additionally compares the runner's eligible files
 // with the read-only migration ledger. It never applies a migration. Native
 // verification uses this before copying/building a private host; ordinary dev
@@ -118,7 +120,7 @@ async function main(argv) {
   }
   const reachable = result.status === 'reachable';
   console.log(`${reachable ? 'reachable' : 'unreachable'} ${result.source}`);
-  return reachable ? 0 : 1;
+  return reachable ? 0 : result.source === 'native-fallback' ? 1 : 2;
 }
 
 // realpath both sides: node realpaths import.meta.url but keeps argv[1] as invoked.

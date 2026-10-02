@@ -222,15 +222,36 @@ test('resolution order: env var, then discovery file, then native fallback', asy
   });
 });
 
-test('an unreachable database exits 1 (so the launcher picks embedded Postgres)', () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pg-probe-home-'));
-  const r = spawnSync(process.execPath, [PROBE, '--repo-root', REPO_ROOT], {
-    encoding: 'utf8',
-    env: { ...process.env, HOME: home, HARNESS_ADMIN_DATABASE_URL: 'postgresql://nobody:x@127.0.0.1:1/none', DATABASE_URL: '', PAPERCUSP_PG_URL: '' },
-    timeout: 20000,
-  });
-  assert.equal(r.status, 1, r.stderr);
-  assert.match(r.stdout, /^unreachable env:HARNESS_ADMIN_DATABASE_URL/);
+test('ordinary dev launch preserves an unavailable configured DB and only falls back for an unconfigured clone', (t) => {
+  const f = cliFixture(t);
+  const launcher = fs.readFileSync(LAUNCHER, 'utf8');
+  const selection = launcher.slice(
+    launcher.indexOf('DEV_OPERATOR_MODE=external-pg'),
+    launcher.indexOf('if [ "$DEV_OPERATOR_MODE" = embedded-pg ]; then'),
+  );
+  assert.ok(selection.includes('dev-operator-pg-probe.mjs'));
+  const clean = { ...process.env };
+  for (const name of ['HARNESS_ADMIN_DATABASE_URL', 'DATABASE_URL', 'PAPERCUSP_PG_URL', 'PAPERCUSP_PG_PORT', 'OPERATOR_DEV_CMD']) delete clean[name];
+  const discoveryHome = path.join(f.root, 'discovery');
+  fs.mkdirSync(discoveryHome);
+  fs.writeFileSync(path.join(discoveryHome, 'embedded-pg.json'), JSON.stringify({ url: 'postgresql://fixture:secret@selected/db' }));
+  for (const [config, failure, expectedExit, expectedMode] of [
+    [{ DATABASE_URL: 'postgresql://fixture:secret@selected/db' }, 'ECONNREFUSED', 2, 'external-pg'],
+    [{ DATABASE_URL: 'postgresql://fixture:secret@selected/db' }, '28P01', 2, 'external-pg'],
+    [{ PAPERCUSP_HOME: discoveryHome, PAPERCUSP_SKIP_PG_DISCOVERY: '0' }, 'ECONNREFUSED', 2, 'external-pg'],
+    [{ DATABASE_URL: 'postgresql://fixture:secret@selected/db' }, '', 0, 'external-pg'],
+    [{}, 'ECONNREFUSED', 1, 'embedded-pg'],
+  ]) {
+    const env = { ...clean, PAPERCUSP_SKIP_PG_DISCOVERY: '1', TEST_PROBE_RECEIPT: f.receipt, TEST_PROBE_FAILURE: failure, SCRIPT_DIR: path.dirname(PROBE), DEV_OPERATOR_DIR: path.join(f.root, 'apps', 'operator'), DEV_SOURCE_ROOT: f.root, DEV_HOST_ENTRY: '', ...config };
+    const probe = spawnSync(process.execPath, [PROBE, '--repo-root', f.root], { env, encoding: 'utf8', timeout: 10000 });
+    assert.equal(probe.status, expectedExit, probe.stderr);
+    assert.equal(probe.stdout.includes('secret'), false);
+    const selected = spawnSync('bash', ['-c', `set -euo pipefail\n${selection}\nprintf '%s\\n' "$DEV_OPERATOR_MODE"`], { env, encoding: 'utf8', timeout: 10000 });
+    assert.equal(selected.status, 0, selected.stderr);
+    assert.equal(selected.stdout.trim().split('\n').at(-1), expectedMode);
+    assert.equal(selected.stdout.includes('secret'), false);
+    assert.equal(JSON.parse(fs.readFileSync(f.receipt)).query, 'SELECT 1');
+  }
 });
 
 test('launcher falls back to bin/serve.ts only when the probe fails and nothing overrides it', () => {
