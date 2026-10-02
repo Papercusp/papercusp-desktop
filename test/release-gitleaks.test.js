@@ -155,17 +155,20 @@ with patch.object(m,'_frozen_source_bytes',return_value=data):
 with patch.object(m,'_frozen_source_bytes',return_value=b'other certificate'):
  try:m.validate_identity_name_exclusions([entry],{cert},set(),set(),{});raise AssertionError('changed certificate provenance passed')
  except ValueError:pass
+package=base/'node_modules/cert-fixture';package.mkdir(parents=True)
+(package/'package.json').write_text(json.dumps({'name':'cert-fixture','version':'1.0.0'}))
+vendor_cert=package/'certificate.pem';vendor_cert.write_bytes(data)
 archive=base/'package.tgz'
 with tarfile.open(archive,'w:gz') as out:
  member=tarfile.TarInfo('package/certificate.pem');member.size=len(data);out.addfile(member,io.BytesIO(data))
 integrity='sha512-'+base64.b64encode(hashlib.sha512(archive.read_bytes()).digest()).decode()
 lock=json.dumps({'packages':{'node_modules/cert-fixture':{'version':'1.0.0','integrity':integrity}}}).encode()
-ref={'lockRef':{},'name':'cert-fixture','packagePath':'node_modules/cert-fixture','version':'1.0.0','integrity':integrity,'archive':str(archive),'member':'package/certificate.pem'}
-vendored={k:v for k,v in entry.items() if k!='sourceRef'};vendored['packageRef']=ref
+ref={'lockRef':{'tree':'superproject','path':'package-lock.json'},'name':'cert-fixture','packagePath':'node_modules/cert-fixture','version':'1.0.0','integrity':integrity,'archive':str(archive),'member':'package/certificate.pem'}
+vendored={k:v for k,v in entry.items() if k!='sourceRef'};vendored['packageRef']=ref;vendored['path']=str(vendor_cert)
 with patch.object(m,'_frozen_source_bytes',return_value=lock):
- m.validate_identity_name_exclusions([vendored],{cert},set(),set(),{})
+ m.validate_identity_name_exclusions([vendored],{vendor_cert},set(),set(),{})
  for changed in [{**ref,'version':'2.0.0'},{**ref,'integrity':'sha512-'+base64.b64encode(bytes(64)).decode()}]:
-  try:m.validate_identity_name_exclusions([{**vendored,'packageRef':changed}],{cert},set(),set(),{});raise AssertionError('changed package passed')
+  try:m.validate_identity_name_exclusions([{**vendored,'packageRef':changed}],{vendor_cert},set(),set(),{});raise AssertionError('changed package passed')
   except ValueError:pass
 for invalid in [b'-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----',data+(base/'private.pem').read_bytes()]:
  cert.write_bytes(invalid);changed={**entry,'sha256':m._sha256(cert)}

@@ -407,15 +407,18 @@ def _frozen_source_bytes(ref: dict[str, object], trees: dict[str, object]) -> by
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
 
 
-def _vendored_package_bytes(ref: dict[str, object], trees: dict[str, object]) -> bytes:
-    """D-150 V2: bind the package member to its frozen lockfile integrity."""
+def _vendored_package_bytes(ref: dict[str, object], trees: dict[str, object],
+                            bundled_path: Path) -> bytes:
+    """D-150/D-151: exact bundled package member and frozen sha512 integrity."""
+    if ref["lockRef"].get("path") != "package-lock.json" or ref["lockRef"].get("tree") != "superproject":
+        raise ValueError("frozen root package lock required")
     lock = json.loads(_frozen_source_bytes(ref["lockRef"], trees))
     package = lock["packages"][ref["packagePath"]]
     if (package["version"] != ref["version"] or package["integrity"] != ref["integrity"]
             or ref["packagePath"] != "node_modules/" + ref["name"]):
         raise ValueError("vendored certificate package mismatch")
     algorithm, encoded = ref["integrity"].split("-", 1)
-    if algorithm not in {"sha256", "sha384", "sha512"}:
+    if algorithm != "sha512":
         raise ValueError("unsupported package integrity")
     archive = Path(ref["archive"])
     if archive.is_symlink() or not archive.is_file():
@@ -430,6 +433,13 @@ def _vendored_package_bytes(ref: dict[str, object], trees: dict[str, object]) ->
     member = ref["member"]
     if not member.startswith("package/") or ".." in Path(member).parts:
         raise ValueError("invalid package member")
+    suffix = "/node_modules/" + ref["name"] + "/" + member.removeprefix("package/")
+    if not bundled_path.as_posix().endswith(suffix):
+        raise ValueError("bundled package path mismatch")
+    package_root = Path(bundled_path.as_posix()[:-len(member.removeprefix("package/"))])
+    package_json = json.loads((package_root / "package.json").read_text())
+    if package_json.get("name") != ref["name"] or package_json.get("version") != ref["version"]:
+        raise ValueError("bundled package identity mismatch")
     with tarfile.open(archive) as handle:
         found = [row for row in handle.getmembers() if row.name == member]
         if len(found) != 1 or not found[0].isfile():
@@ -438,6 +448,51 @@ def _vendored_package_bytes(ref: dict[str, object], trees: dict[str, object]) ->
     if _sha256(archive) != before:
         raise ValueError("package archive changed")
     return data
+
+
+def _dpkg_certificate_bytes(ref: dict[str, object], bundled_path: Path) -> bytes:
+    """D-151 V2: .deb digest in the exact Packages index, not dpkg md5sums."""
+    index = Path(ref["index"])
+    archive = Path(ref["archive"])
+    if (index.is_symlink() or archive.is_symlink() or _sha256(index) != ref["indexSha256"]
+            or _sha256(archive) != ref["archiveSha256"]):
+        raise ValueError("OS certificate provenance input mismatch")
+    records = []
+    for paragraph in index.read_text().split("\n\n"):
+        record = dict(line.split(": ", 1) for line in paragraph.splitlines()
+                      if ": " in line and not line.startswith(" "))
+        if record.get("Package") == ref["name"] and record.get("Version") == ref["version"]:
+            records.append(record)
+    if not records or any(row.get("SHA256") != ref["archiveSha256"] for row in records):
+        raise ValueError("OS certificate is not bound to apt Packages index")
+    member = ref["member"]
+    if (not isinstance(member, str) or not member.startswith("./")
+            or ".." in Path(member).parts or not bundled_path.as_posix().endswith("/" + member[2:])):
+        raise ValueError("OS certificate path mismatch")
+    fields = subprocess.run(["dpkg-deb", "-f", str(archive), "Package", "Version"], check=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode().splitlines()
+    if fields != ["Package: " + ref["name"], "Version: " + ref["version"]]:
+        raise ValueError("OS certificate package identity mismatch")
+    producer = subprocess.Popen(["dpkg-deb", "--fsys-tarfile", str(archive)],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    found = []
+    try:
+        with tarfile.open(fileobj=producer.stdout, mode="r|") as handle:
+            for row in handle:
+                if row.name == member:
+                    if not row.isfile():
+                        raise ValueError("OS certificate regular member required")
+                    found.append(handle.extractfile(row).read())
+        if producer.wait() != 0 or len(found) != 1:
+            raise ValueError("OS certificate package member incomplete")
+    finally:
+        producer.stdout.close()
+        if producer.poll() is None:
+            producer.terminate()
+            producer.wait()
+    if _sha256(archive) != ref["archiveSha256"] or _sha256(index) != ref["indexSha256"]:
+        raise ValueError("OS certificate provenance changed")
+    return found[0]
 
 
 def _parsed_public_certificates(data: bytes) -> list[dict[str, str]]:
@@ -482,17 +537,27 @@ def validate_identity_name_exclusions(entries: list[dict[str, object]], inputs: 
         if key_check["realFindings"] != 0 or private_der.returncode == 0:
             raise ValueError("private material cannot be name-excluded")
         kind = entry["class"]
+        if "packageRef" in entry:
+            relative = entry["packageRef"]["member"]
+            if relative in {"package/test/fixtures/https_key.pem",
+                            "package/examples/advanced/create-react-native-app/android/app/debug.keystore"}:
+                raise ValueError("vendor private-key fixture cannot be excluded")
         if kind == "frozen-public-source-vocabulary":
-            if _frozen_source_bytes(entry["sourceRef"], trees) != data:
+            if ("sourceRef" in entry) == ("packageRef" in entry):
+                raise ValueError("one source provenance required")
+            provenance = (_frozen_source_bytes(entry["sourceRef"], trees) if "sourceRef" in entry
+                          else _vendored_package_bytes(entry["packageRef"], trees, path))
+            if provenance != data:
                 raise ValueError("public source exclusion bytes mismatch")
         elif kind == "parsed-public-x509-certificate":
             certificates = _parsed_public_certificates(data)
             if certificates != entry["certificates"]:
                 raise ValueError("public certificate identity mismatch")
-            if ("sourceRef" in entry) == ("packageRef" in entry):
+            if sum(name in entry for name in ("sourceRef", "packageRef", "debRef")) != 1:
                 raise ValueError("one certificate provenance required")
             provenance = (_frozen_source_bytes(entry["sourceRef"], trees) if "sourceRef" in entry
-                          else _vendored_package_bytes(entry["packageRef"], trees))
+                          else _vendored_package_bytes(entry["packageRef"], trees, path) if "packageRef" in entry
+                          else _dpkg_certificate_bytes(entry["debRef"], path))
             if provenance != data:
                 raise ValueError("public certificate provenance bytes mismatch")
         else:
