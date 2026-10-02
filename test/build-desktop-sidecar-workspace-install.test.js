@@ -1037,8 +1037,12 @@ test('sidecar source union declares every bare runtime import in operator-core',
   // reach the sidecar. snapshot-fold.worker.dev.mjs loads the .ts worker through tsx for
   // tsx/vitest runtimes; the sidecar loads the esbuilt snapshot-fold.worker.mjs instead
   // (snapshot-fold-offload.ts picks the bundled worker whenever it exists).
+  // admission-jobs.tsx-worker.mjs is the same pattern for the release-admission worker: it
+  // registers tsx on an unbundled host's worker thread, while bundled hosts load the esbuilt
+  // admission-jobs.worker.mjs (admission-offthread.ts, WI-10005223 / WI-10005359).
   const sourceTreeOnly = new Set([
     'packages/operator-core/lib/sync/hyperbee/snapshot-fold.worker.dev.mjs',
+    'packages/operator-core/lib/release/admission-jobs.tsx-worker.mjs',
   ]);
   for (const relative of sourceTreeOnly) {
     assert.ok(
