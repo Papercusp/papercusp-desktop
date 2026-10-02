@@ -504,7 +504,11 @@ test('Windows producer applies/verifies repair around compile and keeps output s
   const script = fs.readFileSync(path.join(root, 'bin/build-windows-cross.sh'), 'utf8');
   assert.ok(script.indexOf('windows-source-repair.js" apply') < script.indexOf('cargo xwin build --release'));
   assert.ok(script.indexOf('windows-source-repair.js" verify') > script.indexOf('cargo xwin build --release'));
-  assert.ok(script.indexOf('windows-source-repair.js" roles') < script.indexOf('cargo metadata'));
+  const rolesValidation = script.indexOf('node "$HERE/lib/windows-source-repair.js" roles');
+  const targetResolution = script.indexOf('papercusp_cargo_target_root "$SRC_TAURI"');
+  assert.ok(rolesValidation >= 0, 'Windows source-repair roles are validated');
+  assert.ok(targetResolution > rolesValidation,
+    'source-repair roles are validated before Cargo target-root resolution');
   assert.match(script, /source repair roles must exactly match requested build roles/);
   assert.match(script, /source repair output must be empty/);
   assert.match(script, /OUT_DIR="\$PAPERCUSP_WINDOWS_OUTPUT_DIR"/);
