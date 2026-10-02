@@ -35,6 +35,23 @@ test('stage-source-tree keeps its scrub quarantine outside the packaged sidecar'
     'the old in-sidecar quarantine path must not return');
 });
 
+test('source stager selects the explicit candidate sidecar before checking its runtime input', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-source-candidate-'));
+  try {
+    const candidate = path.join(tmp, 'isolated-candidate');
+    fs.mkdirSync(candidate);
+    const result = spawnSync('bash', [path.join(root, 'bin/stage-source-tree.sh')], {
+      encoding: 'utf8',
+      env: { ...process.env, PAPERCUSP_STAGE_SOURCE: '1', PAPERCUSP_STAGE_SOURCE_ROOT: tmp,
+        PAPERCUSP_STAGE_SOURCE_SIDECAR: candidate },
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.ok(result.stderr.includes(`${candidate}/serve.mjs missing`), result.stderr);
+    assert.ok(!fs.existsSync(path.join(candidate, 'source.tar.zst')),
+      'a candidate without a runtime input must not publish a source archive');
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
 test('identity scrub overlay cannot reintroduce a source-selection exclusion', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-source-selection-filter-'));
   try {

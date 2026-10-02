@@ -45,7 +45,10 @@ ROOT="$(cd "$HERE/.." && pwd)"                  # papercusp-desktop
 # of this box's own linux-native tree, so the shipped node_modules matches the
 # bundled darwin node instead of breaking at runtime).
 MONO="$(cd "${PAPERCUSP_STAGE_SOURCE_ROOT:-$ROOT/..}" && pwd)"
-SIDECAR="$ROOT/src-tauri/sidecar"
+# An audited tooling revision can stage the frozen source into an isolated
+# candidate sidecar without rebuilding or editing the frozen checkout (D-150).
+# Reuse the existing source-root override and the same lock/publish/audit path.
+SIDECAR="${PAPERCUSP_STAGE_SOURCE_SIDECAR:-$ROOT/src-tauri/sidecar}"
 SOURCE_PACKAGE_LOCK_PIN="${PAPERCUSP_SOURCE_PACKAGE_LOCK_PIN:-}"
 SOURCE_PACKAGE_LOCK_PIN_TMP=""
 SOURCE_PACKAGE_LOCK_PIN_DIR=""
