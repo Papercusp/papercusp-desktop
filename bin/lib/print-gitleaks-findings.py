@@ -349,15 +349,18 @@ def validate_identity_secret_proof(scan: dict[str, object], root: Path, director
     if (scan.get("schema") != "papercusp-sealed-envelope-secret-scan-v1"
             or scan.get("seedRootSha") != _sha256(root / "manifest.json")
             or scan.get("scannerSha256") != _sha256(Path(__file__))
+            or scan.get("recipientSetSha256") != hashlib.sha256(
+                json.dumps(sorted(value.hex() for value in recipients), separators=(",", ":")).encode()).hexdigest()
             or any(scan.get(name) != 0 for name in ("realFindings", "derivationMatches", "rawSkMatches", "nameScanHits"))
             or scan.get("positivePlantedSecretDetected") is not True
             or not isinstance(scan.get("tokensChecked"), int)):
         raise ValueError("identity secret scan failed")
-    bundle = Path(reference["bundleRoot"])
-    if not bundle.is_dir() or bundle.is_symlink():
+    bundles = [Path(value) for value in reference["bundleRoots"]]
+    plaintext_root = Path(reference.get("plaintextRoot", str(directory)))
+    if not bundles or any(not bundle.is_dir() or bundle.is_symlink() for bundle in bundles):
         raise ValueError("assembled bundle input required")
-    expected = {path.resolve() for folder in (root, bundle) for path in folder.rglob("*") if path.is_file()}
-    expected |= {_source_file(directory, value).resolve() for value in reference["plaintextInputs"]}
+    expected = {path.resolve() for folder in [root, *bundles] for path in folder.rglob("*") if path.is_file()}
+    expected |= {_source_file(plaintext_root, value).resolve() for value in reference["plaintextInputs"]}
     inputs = scan.get("inputs", [])
     if len(inputs) != len(expected) or {Path(row["path"]).resolve() for row in inputs} != expected:
         raise ValueError("identity secret scan inventory incomplete")
@@ -374,8 +377,8 @@ def validate_identity_secret_proof(scan: dict[str, object], root: Path, director
                 or row.get("inputSha256") not in {entry["sha256"] for entry in inputs}):
             raise ValueError("identity secret positive control failed")
         samples.setdefault(row["inputSha256"], set()).add(row["encoding"])
-    plain_hashes = {_sha256(_source_file(directory, path)) for path in reference["plaintextInputs"]}
-    bundle_hashes = {_sha256(path) for path in bundle.rglob("*") if path.is_file()}
+    plain_hashes = {_sha256(_source_file(plaintext_root, path)) for path in reference["plaintextInputs"]}
+    bundle_hashes = {_sha256(path) for bundle in bundles for path in bundle.rglob("*") if path.is_file()}
     if (not any(digest in plain_hashes and kinds == encodings for digest, kinds in samples.items())
             or not any(digest in bundle_hashes and kinds == encodings for digest, kinds in samples.items())):
         raise ValueError("seed and bundle planted controls required")
@@ -569,6 +572,8 @@ def scan_identity_secret_inputs(inputs: list[Path], recipients: set[bytes],
         raise ValueError("planted secret control failed")
     return {"schema": "papercusp-sealed-envelope-secret-scan-v1",
             "inputs": inventory, "scannerSha256": _sha256(Path(__file__)),
+            "recipientSetSha256": hashlib.sha256(json.dumps(
+                sorted(value.hex() for value in recipients), separators=(",", ":")).encode()).hexdigest(),
             "realFindings": totals["realFindings"],
             "derivationMatches": totals["derivationMatches"],
             "rawSkMatches": totals["rawSkMatches"],
@@ -576,6 +581,40 @@ def scan_identity_secret_inputs(inputs: list[Path], recipients: set[bytes],
             "literalOnlyMarkers": totals["literalOnlyMarkers"],
             "nameScanHits": totals["nameScanHits"], "controls": results,
             "positivePlantedSecretDetected": True}
+
+
+def scan_identity_proof(config_path: Path, seed: Path, output: Path) -> dict[str, object]:
+    """Collect a private scan over the explicit seed and assembled inventories.
+
+    Container expansion belongs to the maintained artifact auditor; its expanded
+    roots must be included alongside the actual sidecar/resource roots here.
+    """
+    _private_file(config_path)
+    config = json.loads(config_path.read_text())
+    roots = [seed] + [Path(value) for value in config["bundleRoots"]]
+    plaintext = [Path(value) for value in config["plaintextInputs"]]
+    if len(roots) < 2 or not plaintext or any(not root.is_dir() or root.is_symlink() for root in roots):
+        raise ValueError("seed, assembled bundle and plaintext inventories required")
+    paths = sorted({path for root in roots for path in root.rglob("*") if path.is_file()} | set(plaintext))
+    recipients = {_canonical_base64(value, 32) for value in config["recipients"]}
+    if len(recipients) != 33:
+        raise ValueError("historical recipient population required")
+    controls = [Path(value) for value in config["controlSamples"]]
+    if (not any(value in plaintext for value in controls)
+            or not any(value.resolve().is_relative_to(root.resolve()) for value in controls for root in roots[1:])):
+        raise ValueError("plaintext and bundle control samples required")
+    scan = scan_identity_secret_inputs(paths, recipients, controls)
+    scan["seedRootSha"] = _sha256(seed / "manifest.json")
+    scan["collectorConfigSha256"] = _sha256(config_path)
+    if output.parent.is_symlink() or not output.parent.is_dir() or output.parent.stat().st_mode & 0o077:
+        raise ValueError("private scan output directory required")
+    fd, temporary = tempfile.mkstemp(prefix="identity-scan-", suffix=".partial", dir=output.parent)
+    with os.fdopen(fd, "w") as handle:
+        json.dump(scan, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, output)
+    return scan
 
 
 def finding_digest(finding: dict[str, object]) -> str:
@@ -936,6 +975,16 @@ def _safe_locator(raw_file: object, scan_root: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) == 5 and argv[1] == "--scan-identity-proof":
+        try:
+            scan = scan_identity_proof(Path(argv[2]), Path(argv[3]), Path(argv[4]))
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+            print("Identity secret proof scan incomplete (values omitted).", file=sys.stderr)
+            return 2
+        print(json.dumps({key: scan[key] for key in ("schema", "seedRootSha", "scannerSha256",
+                          "realFindings", "derivationMatches", "rawSkMatches", "nameScanHits",
+                          "tokensChecked", "positivePlantedSecretDetected")}))
+        return 1 if any(scan[key] for key in ("realFindings", "derivationMatches", "rawSkMatches", "nameScanHits")) else 0
     if len(argv) == 7 and argv[1] == "--assemble-seed-proof":
         try:
             proof = assemble_seed_proof(Path(argv[2]), Path(argv[3]), Path(argv[4]), argv[5], argv[6])
