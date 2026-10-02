@@ -33,6 +33,8 @@ test('D-142 secret-key detector catches serialized keys and recipient seeds with
       base64urlSeed: Buffer.from(seed.toString('base64url')),
       sodiumSecret: Buffer.from(Buffer.concat([seed, publicKey]).toString('base64')),
       rawSodiumSecret: Buffer.concat([seed, publicKey]),
+      x25519SeedHex: Buffer.from(crypto.createHash('sha512').update(seed).digest().subarray(0, 32).toString('hex')),
+      x25519SeedBase64: Buffer.from(crypto.createHash('sha512').update(seed).digest().subarray(0, 32).toString('base64')),
     };
     const program = 'import importlib.util,json,base64,sys\ns=importlib.util.spec_from_file_location("f",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\nprint(json.dumps(m.scan_secret_key_bytes(open(sys.argv[2],"rb").read(),{base64.b64decode(sys.argv[3])})))';
     for (const [encoding, data] of Object.entries(cases)) {
@@ -62,7 +64,7 @@ test('D-142 secret-key detector distinguishes source vocabulary and unrelated pu
   const program = 'import importlib.util,json,base64,sys\ns=importlib.util.spec_from_file_location("f",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\nsodium=m._sodium();public,_=m._key_publics(sodium,bytes(range(32)))\ndata=b"BEGIN PRIVATE KEY papercusp-hive-epoch-key 302e020100300506032b657004220420 " + public.hex().encode()\nprint(json.dumps(m.scan_secret_key_bytes(data,{public})))';
   const result = spawnSync('python3', ['-c', program, reportFormatterPath], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), { realFindings: 0, derivationMatches: 0, tokensChecked: 1, literalOnlyMarkers: 2 });
+  assert.deepEqual(JSON.parse(result.stdout), { realFindings: 0, derivationMatches: 0, tokensChecked: 1, rawSkMatches: 0, literalOnlyMarkers: 2 });
 });
 
 test('D-142 inventory scan binds input hashes, detects keystore names, and runs the same planted controls', () => {
@@ -83,6 +85,7 @@ test('D-142 inventory scan binds input hashes, detects keystore names, and runs 
     assert.equal(proof.literalOnlyMarkers, 1);
     assert.equal(proof.controls.length, 12);
     assert.ok(proof.controls.every(row => row.detected && row.derivationDetected));
+    assert.ok(proof.controls.every(row => /^[a-f0-9]{64}$/.test(row.plantedSha256)));
     const hash = file => require('node:crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex');
     assert.equal(proof.scannerSha256, hash(reportFormatterPath));
     assert.deepEqual(proof.inputs, [plain, bundle].map(file => ({ path: file, sha256: hash(file) })));
