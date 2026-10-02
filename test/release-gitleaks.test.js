@@ -174,7 +174,7 @@ except ValueError: pass
 link.unlink();link.write_text('changed-target')
 try: m.validate_identity_secret_proof(scan,seed,base,set(recipients),ref);raise AssertionError('changed link kind passed')
 except ValueError: pass
-link.unlink();link.symlink_to(bytes(range(32)).hex())
+link.unlink();link.symlink_to((bytes([0])*32).hex())
 detected=m.scan_identity_secret_inputs([link,plain],set(recipients),[plain])
 assert detected['derivationMatches']>0 and detected['realFindings']>0
 print(json.dumps({'linksChecked':len(links),'complete':True,'linkSecretDetected':True}))
