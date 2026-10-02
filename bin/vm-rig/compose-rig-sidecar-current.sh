@@ -160,6 +160,7 @@ echo "  build stamp: $BUILD_STAMP"
     "${HOST_EXTERNALS[@]}" \
     --outfile="$OUT/serve.mjs" \
     --banner:js="$STAMP_BANNER" \
+    ${HOST_BANNER_DEFINES[@]+"${HOST_BANNER_DEFINES[@]}"} \
     --define:__PAPERCUSP_BUNDLED_SIDECAR__=true )
 [ -s "$OUT/serve.mjs" ] || { echo "FATAL: esbuild produced no serve.mjs" >&2; exit 1; }
 

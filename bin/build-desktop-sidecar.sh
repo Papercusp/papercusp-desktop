@@ -1243,6 +1243,7 @@ MINIFY_ARGS=(--minify-whitespace --minify-syntax)
   "${MINIFY_ARGS[@]}" \
   --outfile="$SIDECAR_DIR/serve.mjs" \
   --banner:js="$HOST_BANNER" \
+  ${HOST_BANNER_DEFINES[@]+"${HOST_BANNER_DEFINES[@]}"} \
   --define:__PAPERCUSP_BUNDLED_SIDECAR__=true \
   --define:process.env.PAPERCUP_DOGFOOD_REPO_REF="\"${PAPERCUP_DOGFOOD_REPO_REF:-}\"" \
   --define:process.env.PAPERCUP_DOGFOOD_POT_PUBKEY="\"${PAPERCUP_DOGFOOD_POT_PUBKEY:-${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}}\"" \
@@ -1325,7 +1326,8 @@ echo "→ esbuild-bundling packaged MCP proxy → $SIDECAR_DIR/mcp-proxy.mjs"
   --bundle --platform=node --format=esm --target=node22 \
   "${MINIFY_ARGS[@]}" \
   --outfile="$SIDECAR_DIR/mcp-proxy.mjs" \
-  --banner:js="$HOST_BANNER")
+  --banner:js="$HOST_BANNER" \
+  ${HOST_BANNER_DEFINES[@]+"${HOST_BANNER_DEFINES[@]}"})
 if [[ ! -f "$SIDECAR_DIR/mcp-proxy.mjs" ]]; then
   echo "ERROR: esbuild did not produce $SIDECAR_DIR/mcp-proxy.mjs"
   exit 1
@@ -1372,6 +1374,7 @@ for _psu_cli in psu:psu-launcher ptool:ptool onboard:onboard-launcher tutorial-r
     "${MINIFY_ARGS[@]}" \
     --outfile="$SIDECAR_DIR/scripts/$_psu_out.mjs" \
     --banner:js="$HOST_BANNER" \
+    ${HOST_BANNER_DEFINES[@]+"${HOST_BANNER_DEFINES[@]}"} \
     "--external:@lydell/*")
   if [[ ! -f "$SIDECAR_DIR/scripts/$_psu_out.mjs" ]]; then
     echo "ERROR: esbuild did not produce $SIDECAR_DIR/scripts/$_psu_out.mjs"
@@ -1410,7 +1413,8 @@ fi
   --bundle --platform=node --format=esm --target=node22 \
   "${MINIFY_ARGS[@]}" \
   --outfile="$SIDECAR_DIR/scripts/project-history.mjs" \
-  --banner:js="$HOST_BANNER")
+  --banner:js="$HOST_BANNER" \
+  ${HOST_BANNER_DEFINES[@]+"${HOST_BANNER_DEFINES[@]}"})
 if [[ ! -f "$SIDECAR_DIR/scripts/project-history.mjs" ]]; then
   echo "ERROR: esbuild did not produce $SIDECAR_DIR/scripts/project-history.mjs"
   exit 1
