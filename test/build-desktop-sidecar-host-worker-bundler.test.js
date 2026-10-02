@@ -97,3 +97,25 @@ test('build-desktop-sidecar.sh resolves the bundler right after the target helpe
   const callAt = builder.indexOf('bundle_host_workers "$REPO_ROOT" "$SIDECAR_DIR"');
   assert.ok(sourceAt > 0 && ensureAt > sourceAt && callAt > ensureAt, `${sourceAt} ${ensureAt} ${callAt}`);
 });
+
+// The optional standalone sibling follows the TARGET revision, unlike the
+// required worker composer. Execute the real caller block against each helper
+// contract so an older exact-source release never calls a missing function.
+for (const [name, definition, expected] of [
+  ['old target keeps its full-host route', '', 0],
+  ['current target builds its standalone sibling', 'bundle_host_spawner() { echo "standalone $1 -> $2"; }', 0],
+  ['current target build failure fails the release', 'bundle_host_spawner() { echo "standalone refused" >&2; return 7; }', 1],
+]) {
+  test(name, () => {
+    const block = builder.match(/^if declare -F bundle_host_spawner[\s\S]*?^fi$/m)?.[0];
+    assert.ok(block, 'maintained standalone target gate is missing');
+    const result = run([
+      'set -euo pipefail', 'REPO_ROOT=/target', 'SIDECAR_DIR=/output',
+      'MINIFY_ARGS=(); VERSION_DEFINE_ARGS=(); HOST_EXTERNALS=()', definition, block,
+    ].join('\n'));
+    assert.equal(result.status, expected, result.stderr);
+    if (!definition) assert.match(result.stdout, /target helper predates standalone spawner/);
+    else if (expected === 0) assert.match(result.stdout, /standalone \/target -> \/output/);
+    else assert.match(result.stderr, /standalone refused/);
+  });
+}

@@ -1290,11 +1290,17 @@ echo "    ✓ staged systemd-scope-env-runner.mjs next to serve.mjs"
 
 # Required workers are shared with the host and current-build rig.
 bundle_host_workers "$REPO_ROOT" "$SIDECAR_DIR" || exit 1
+if declare -F bundle_host_spawner >/dev/null 2>&1; then
 bundle_host_spawner "$REPO_ROOT" "$SIDECAR_DIR" "${MINIFY_ARGS[@]}" "${VERSION_DEFINE_ARGS[@]}" \
   --define:process.env.PAPERCUP_DOGFOOD_REPO_REF="\"${PAPERCUP_DOGFOOD_REPO_REF:-}\"" \
   --define:process.env.PAPERCUP_DOGFOOD_POT_PUBKEY="\"${PAPERCUP_DOGFOOD_POT_PUBKEY:-${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}}\"" \
   --define:process.env.PAPERCUP_DOGFOOD_POT_INVITE_SECRET="\"${PAPERCUP_DOGFOOD_POT_INVITE_SECRET:-${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}}\"" \
   "${HOST_EXTERNALS[@]}" || exit 1
+else
+  # Exact-source cuts may use an older TARGET helper. Its resolver still uses
+  # the full-host divert; do not borrow a newer entry from the orchestrator.
+  echo "    target helper predates standalone spawner; keeping its full-host route"
+fi
 
 # opusscript_native_wasm.wasm (EI-501) — the SAME dirname(import.meta.url)
 # gotcha as git-ext-bridge.mjs above, one layer deeper: esbuild INLINES
