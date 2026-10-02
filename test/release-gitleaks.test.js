@@ -401,3 +401,70 @@ test('seed classification refuses redacted findings and invalid ciphertext witho
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
+
+test('private seed scan persists before classification and reuses only unchanged input and report bytes', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-seed-scan-private-'));
+  try {
+    fs.chmodSync(temp, 0o700);
+    const blob = path.join(temp, 'fixture.blob');
+    const report = path.join(temp, 'report.json');
+    const meta = path.join(temp, 'report.meta.json');
+    const rawToken = ['A9f3Kx7L', 'm2Qp8Rz4', 'V6nC1wH7'].join('');
+    fs.writeFileSync(blob, JSON.stringify({ token: rawToken }));
+    const run = () => spawnSync('python3', [reportFormatterPath, '--scan-seed', report, blob, configPath], { encoding: 'utf8' });
+    const first = run();
+    assert.equal(first.status, 0, first.stderr);
+    assert.equal(JSON.parse(first.stdout).privateReportReused, false);
+    assert.deepEqual(JSON.parse(first.stdout).classes, { unclassified: 1 });
+    assert.equal(fs.statSync(report).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(meta).mode & 0o777, 0o600);
+    assert.equal(JSON.parse(fs.readFileSync(report, 'utf8'))[0].Secret, rawToken);
+    assert.equal(JSON.parse(run().stdout).privateReportReused, true);
+    // Corrupting the report without touching its metadata must force a rescan.
+    fs.writeFileSync(report, '[]');
+    assert.equal(JSON.parse(run().stdout).privateReportReused, false);
+    fs.writeFileSync(blob, '{}');
+    const changed = run();
+    assert.equal(changed.status, 0, changed.stderr);
+    assert.equal(JSON.parse(changed.stdout).privateReportReused, false);
+    assert.equal(JSON.parse(changed.stdout).findings, 0);
+    for (const result of [first, changed]) {
+      assert.ok(!(result.stdout + result.stderr).includes(rawToken));
+      assert.ok(!(result.stdout + result.stderr).includes(temp));
+    }
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('private seed scanner keeps completed evidence when classification fails and refuses public report directories', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-seed-scan-failure-'));
+  try {
+    fs.chmodSync(temp, 0o700);
+    const bin = path.join(temp, 'bin');
+    fs.mkdirSync(bin);
+    const fake = path.join(bin, 'gitleaks');
+    const marker = path.join(temp, 'scanner-called');
+    const blob = path.join(temp, 'fixture.blob');
+    const report = path.join(temp, 'report.json');
+    fs.writeFileSync(blob, '{}');
+    fs.writeFileSync(fake, '#!/bin/sh\nif [ "$1" = version ]; then echo test-v1; exit 0; fi\nwhile [ "$1" != --report-path ]; do shift; done\nprintf \'[]\' > "$2"\nprintf x >> "$SCANNER_MARKER"\nrm "$SCANNER_BLOB"\n');
+    fs.chmodSync(fake, 0o700);
+    const env = { ...process.env, PATH: bin + path.delimiter + process.env.PATH,
+      SCANNER_MARKER: marker, SCANNER_BLOB: path.join(temp, 'unused') };
+    // Inject only a classification failure; scanning and input stability succeed.
+    const program = 'import importlib.util, pathlib, sys\ns=importlib.util.spec_from_file_location("formatter",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\ndef fail(*args): raise ValueError("classification failed")\nm.classify_seed_findings=fail\nraise SystemExit(m.main([sys.argv[1],"--scan-seed",*sys.argv[2:]]))';
+    const result = spawnSync('python3', ['-c', program, reportFormatterPath, report, blob, configPath], { encoding: 'utf8', env });
+    assert.equal(result.status, 2);
+    assert.ok(fs.existsSync(report), 'completed scan must survive classification failure');
+    assert.ok(fs.existsSync(path.join(temp, 'report.meta.json')));
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'x');
+    assert.doesNotMatch(result.stderr, /classification failed|papercusp-seed-scan-failure/);
+    fs.chmodSync(temp, 0o755);
+    const refused = spawnSync('python3', [reportFormatterPath, '--scan-seed', report, blob, configPath], { encoding: 'utf8', env });
+    assert.equal(refused.status, 2);
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'x', 'unsafe directory must be refused before scan');
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});

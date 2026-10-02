@@ -13,8 +13,11 @@ import base64
 import hashlib
 import json
 import mmap
+import os
 import re
+import subprocess
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -24,6 +27,68 @@ _SEED_FIELDS = re.compile(rb'"(?P<field>__rekey|hbKey|writer_key)":"(?P<value>[^
 _MATCH_FIELD = re.compile(r'^"?([A-Za-z_][A-Za-z_0-9]*)"\s*:')
 _MESSAGE_ID = re.compile(rb'[a-z0-9]{8}-[0-9]{4}-[0-9a-f]{32}')
 _UUID = re.compile(rb'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}')
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def scan_seed_report(report: Path, blob: Path, config: Path) -> tuple[list[object], bool]:
+    """Retain an identity-bound private scan BEFORE starting classification.
+
+    Reuse requires both input identities and the saved report digest. Scanner
+    errors and changed inputs fail closed. A killed scanner leaves its private
+    partial report; a killed classifier leaves the completed reusable report.
+    """
+    directory = report.parent
+    if not directory.is_dir() or directory.is_symlink() or directory.stat().st_mode & 0o077:
+        raise ValueError("report directory must already be private")
+    meta = report.with_suffix(".meta.json")
+    if report.is_symlink() or meta.is_symlink():
+        raise ValueError("report symlink")
+    version = subprocess.run(["gitleaks", "version"], check=True,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode().strip()
+    identity = {"blobSha256": _sha256(blob), "configSha256": _sha256(config),
+                "scannerVersion": version}
+    if report.exists() and meta.exists():
+        try:
+            saved = json.loads(meta.read_text(encoding="utf-8"))
+            if (saved.get("identity") == identity and saved.get("scannerExit") in (0, 1)
+                    and saved.get("reportSha256") == _sha256(report)):
+                findings = json.loads(report.read_text(encoding="utf-8"))
+                if isinstance(findings, list) and len(findings) == saved.get("findings"):
+                    return findings, True
+        except (OSError, UnicodeError, ValueError, AttributeError):
+            pass
+    fd, name = tempfile.mkstemp(prefix="seed-scan-", suffix=".partial", dir=directory)
+    os.close(fd)
+    partial = Path(name)
+    result = subprocess.run(["gitleaks", "dir", str(blob), "--config", str(config),
+                             "--no-banner", "--log-level=error", "--redact=0",
+                             "--report-format=json", "--report-path", str(partial)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if result.returncode not in (0, 1):
+        raise ValueError("scanner failed")
+    findings = json.loads(partial.read_text(encoding="utf-8"))
+    if not isinstance(findings, list):
+        raise ValueError("report shape")
+    if identity["blobSha256"] != _sha256(blob) or identity["configSha256"] != _sha256(config):
+        raise ValueError("scan input changed")
+    report_digest = _sha256(partial)
+    os.replace(partial, report)
+    report.chmod(0o600)
+    fd, name = tempfile.mkstemp(prefix="seed-scan-meta-", suffix=".partial", dir=directory)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump({"identity": identity, "scannerExit": result.returncode,
+                   "findings": len(findings), "reportSha256": report_digest}, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(name, meta)
+    return findings, False
 
 
 def _seed_field_kind(field: str, value: bytes) -> str:
@@ -129,6 +194,16 @@ def _safe_locator(raw_file: object, scan_root: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) == 5 and argv[1] == "--scan-seed":
+        try:
+            findings, reused = scan_seed_report(Path(argv[2]), Path(argv[3]), Path(argv[4]))
+            result = classify_seed_findings(Path(argv[3]), findings)
+            result["privateReportReused"] = reused
+        except (OSError, UnicodeError, ValueError, subprocess.SubprocessError):
+            print("Private seed scan could not be completed (values omitted).", file=sys.stderr)
+            return 2
+        print(json.dumps(result))
+        return 0
     if len(argv) == 4 and argv[1] == "--classify-seed":
         try:
             findings = json.loads(Path(argv[2]).read_text(encoding="utf-8"))
