@@ -303,10 +303,15 @@ cleanup_release_local() {
   fi
   [[ -z "${_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST:-}" ]] \
     || rm -f "$_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST"
-  # The gitleaks report contains redacted matches and is kept only for the
-  # duration of this cut. The directory is private (mktemp -d) and is removed
-  # on every ordinary exit so a failed cut leaves no diagnostic bundle behind.
-  [[ -z "${_GITLEAKS_REPORT_DIR:-}" ]] || rm -rf -- "$_GITLEAKS_REPORT_DIR"
+  # A failed credential scan must keep its redacted proof for diagnosis. Normal
+  # cuts store it under the existing run directory, covered by VH run retention.
+  if [[ -n "${_GITLEAKS_REPORT_DIR:-}" ]]; then
+    if [[ "${_GITLEAKS_STATUS:-0}" != "0" ]]; then
+      echo "       Redacted credential evidence retained privately: $_GITLEAKS_REPORT_DIR" >&2
+    else
+      rm -rf -- "$_GITLEAKS_REPORT_DIR"
+    fi
+  fi
 }
 # Override any inherited value before the EXIT trap can observe it. The report
 # directory is assigned only by the gate below after a successful mktemp -d.
@@ -2732,7 +2737,12 @@ if ! command -v gitleaks >/dev/null 2>&1; then
   echo "ERROR: gitleaks is required for the assembled-bundle release gate (EI-21546652106775901)." >&2
   exit 1
 fi
-_GITLEAKS_REPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-release-gitleaks.XXXXXX")"
+if [[ -n "${VH_RUN_DIR:-}" && -d "$VH_RUN_DIR" ]]; then
+  _GITLEAKS_REPORT_DIR="$(mktemp -d "$VH_RUN_DIR/gitleaks.XXXXXX")"
+else
+  _GITLEAKS_REPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-release-gitleaks.XXXXXX")"
+fi
+chmod 700 "$_GITLEAKS_REPORT_DIR"
 _GITLEAKS_STATUS=0
 _GITLEAKS_FAILED_ROOTS=()
 for _gitleaks_root in "src-tauri/sidecar" "src-tauri/resources" "src-tauri/seed"; do

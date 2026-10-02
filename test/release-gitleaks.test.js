@@ -304,3 +304,47 @@ test('release-local runs redacted gitleaks diagnostics after the Python assemble
   assert.match(source, /_GITLEAKS_REPORT_DIR=.*mktemp -d/);
   assert.match(source, /rm -rf -- "\$_GITLEAKS_REPORT_DIR"/);
 });
+
+test('gitleaks diagnostics aggregate repeated locators and bound unique output', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-gitleaks-bounded-'));
+  try {
+    const repeated = { RuleID: 'generic-api-key', File: 'src-tauri/seed/corestore/db/fixture.blob', StartLine: 7, EndLine: 7 };
+    const findings = [...Array(1000).fill(repeated), ...Array.from({ length: 60 }, (_, i) => ({
+      ...repeated, File: `src-tauri/seed/fixture-${i}.json`,
+    }))];
+    const reportPath = path.join(temp, 'report.json');
+    fs.writeFileSync(reportPath, JSON.stringify(findings));
+    const result = spawnSync('python3', [reportFormatterPath, reportPath, 'src-tauri/seed'], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /1060 finding records; 61 unique locators/);
+    assert.match(result.stderr, /Occurrences=1000/);
+    assert.equal((result.stderr.match(/- RuleID=/g) || []).length, 50);
+    assert.match(result.stderr, /11 additional locators retained/);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('failed scans retain private evidence while successful scans remove reports', () => {
+  const source = fs.readFileSync(scriptPath, 'utf8');
+  const cleanup = source.slice(source.indexOf('cleanup_release_local() {'), source.indexOf('# Override any inherited value'));
+  const reportSetup = source.slice(source.indexOf('if [[ -n "${VH_RUN_DIR:-}" && -d "$VH_RUN_DIR" ]]'), source.indexOf('_GITLEAKS_STATUS=0'));
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-gitleaks-retention-'));
+  try {
+    for (const status of [0, 1]) {
+      const runDir = path.join(temp, `run-${status}`);
+      fs.mkdirSync(runDir);
+      const script = `set -eu\n${cleanup}\nreap_release_legs() { :; }\nVH_RUN_DIR=$1\n${reportSetup}\nprintf '[]' > "$_GITLEAKS_REPORT_DIR/report.json"\nprintf '%s' "$_GITLEAKS_REPORT_DIR" > "$VH_RUN_DIR/report-path"\n_GITLEAKS_STATUS=$2\ntrap cleanup_release_local EXIT\nexit "$2"`;
+      const result = spawnSync('bash', ['-c', script, 'retention-test', runDir, String(status)], { encoding: 'utf8' });
+      assert.equal(result.status, status, result.stderr);
+      const reportDir = fs.readFileSync(path.join(runDir, 'report-path'), 'utf8');
+      assert.equal(fs.existsSync(path.join(reportDir, 'report.json')), status === 1);
+      if (status === 1) {
+        assert.equal(fs.statSync(reportDir).mode & 0o777, 0o700);
+        assert.match(result.stderr, /evidence retained privately/);
+      }
+    }
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});

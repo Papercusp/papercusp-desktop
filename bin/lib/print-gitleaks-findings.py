@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import json
 import sys
+from collections import Counter
 from pathlib import Path
+
+MAX_LOCATORS = 50
 
 
 def _single_line(value: object, fallback: str) -> str:
@@ -60,20 +63,33 @@ def main(argv: list[str]) -> int:
         print("       No structured finding details were recorded.", file=sys.stderr)
         return 0
 
+    locators: Counter[tuple[str, str, str, str, str]] = Counter()
+    malformed = 0
     for finding in findings:
         if not isinstance(finding, dict):
-            print("       - malformed finding record (value omitted)", file=sys.stderr)
+            malformed += 1
             continue
         rule_id = _single_line(finding.get("RuleID"), "<unknown-rule>")
         locator = _safe_locator(finding.get("File"), scan_root)
         start_line = _single_line(finding.get("StartLine"), "?")
         end_line = _single_line(finding.get("EndLine"), start_line)
         description = _single_line(finding.get("Description"), "<no-description>")
+        locators[(rule_id, locator, start_line, end_line, description)] += 1
+    print(
+        f"       {len(findings)} finding records; {len(locators)} unique locators; "
+        f"showing at most {MAX_LOCATORS} (matched values omitted).",
+        file=sys.stderr,
+    )
+    for (rule_id, locator, start_line, end_line, description), count in list(locators.items())[:MAX_LOCATORS]:
         print(
             f"       - RuleID={rule_id} File={locator} "
-            f"Lines={start_line}-{end_line} Description={description}",
+            f"Lines={start_line}-{end_line} Occurrences={count} Description={description}",
             file=sys.stderr,
         )
+    if len(locators) > MAX_LOCATORS:
+        print(f"       {len(locators) - MAX_LOCATORS} additional locators retained in the private report.", file=sys.stderr)
+    if malformed:
+        print(f"       {malformed} malformed finding records (values omitted).", file=sys.stderr)
     return 0
 
 
