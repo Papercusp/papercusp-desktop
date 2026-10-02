@@ -296,7 +296,9 @@ test('release-local runs redacted gitleaks diagnostics after the Python assemble
   assert.match(source, /"\$ROOT\/src-tauri\/sidecar" "\$ROOT\/src-tauri\/resources"/);
   assert.match(source, /for _gitleaks_root in "src-tauri\/sidecar" "src-tauri\/resources" "src-tauri\/seed"; do/);
   assert.match(source, /\( cd "\$ROOT" && gitleaks dir "\$_gitleaks_root"/);
-  assert.match(source, /--redact=100/);
+  assert.match(source, /_gitleaks_redact=100/);
+  assert.match(source, /--redact="\$_gitleaks_redact"/);
+  assert.match(source, /--filter-seed/);
   assert.match(source, /--report-format=json/);
   assert.match(source, /--report-path="\$_gitleaks_report_path"/);
   assert.doesNotMatch(source, /--report-path=\/dev\/null/);
@@ -467,4 +469,108 @@ test('private seed scanner keeps completed evidence when classification fails an
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
+});
+
+function seedProofFixture({ extraCredential = false } = {}) {
+  const crypto = require('node:crypto');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-exact-seed-proof-'));
+  const seed = path.join(temp, 'seed');
+  const evidence = path.join(temp, 'evidence');
+  fs.mkdirSync(path.join(seed, 'corestore', 'db'), { recursive: true });
+  fs.mkdirSync(evidence, { mode: 0o700 });
+  const relative = 'corestore/db/000080.blob';
+  const blob = path.join(seed, relative);
+  const id = ['su-', 'f42a22d4-08e3-41e3-b181-561049962f21'].join('');
+  const token = ['A9f3Kx7L', 'm2Qp8Rz4', 'V6nC1wH7'].join('');
+  const publicLine = JSON.stringify({ writer_key: id, surface: 'messages' });
+  fs.writeFileSync(blob, publicLine.slice(0, -1) + (extraCredential ? ',"token":"' + token + '"}' : '}'));
+  fs.writeFileSync(path.join(seed, 'epoch-keys.json'), '{}');
+  fs.writeFileSync(path.join(seed, 'manifest.json'), '{}');
+  const write = (name, value) => fs.writeFileSync(path.join(evidence, name), JSON.stringify(value), { mode: 0o600 });
+  const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  const digest = row => crypto.createHash('sha256').update(JSON.stringify([row.RuleID, row.Match, row.Secret])).digest('hex');
+  const report = file => {
+    const result = spawnSync(gitleaksBin, ['dir', file, '--config', configPath, '--no-banner', '--log-level=error',
+      '--redact=0', '--report-format=json', '--report-path=-'], { encoding: 'utf8' });
+    assert.equal(result.status, 1, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  const current = report(blob);
+  const approved = current.filter(row => row.Secret === id);
+  assert.ok(approved.length > 0, 'real scanner must flag the public identifier fixture');
+  const plaintext = path.join(evidence, 'seed-000080.plaintext.jsonl');
+  fs.writeFileSync(plaintext, publicLine + '\n', { mode: 0o600 });
+  const plain = report(plaintext);
+  const version = spawnSync(gitleaksBin, ['version'], { encoding: 'utf8' }).stdout.trim();
+  const identity = file => ({ blobSha256: hash(file), configSha256: hash(configPath), scannerVersion: version });
+  write('ciphertext-auth-safe.json', { ciphertextFields: 1, parsedRows: 1,
+    classes: { authenticated_ciphertext: 1 }, unparsedCiphertextFields: 0,
+    negativeControls: { tamper_rejected: true, wrong_key_rejected: true } });
+  write('plaintext-classification-safe.json', { plaintextSha256: hash(plaintext), findings: plain.length,
+    classes: { 'public-coord-sender-identifier': plain.length }, unclassifiedLocators: [] });
+  write('plaintext-exact-finding-digests.json', plain.map(row => ({ rule: row.RuleID, digest: digest(row),
+    class: 'public-coord-sender-identifier' })));
+  write('seed-000080.plaintext.private.json', plain);
+  write('seed-000080.plaintext.private.meta.json', { identity: identity(plaintext), scannerExit: 1,
+    findings: plain.length, reportSha256: hash(path.join(evidence, 'seed-000080.plaintext.private.json')) });
+  write('seed-classification-verified-safe.json', { sourceSha256: hash(blob), findings: approved.length,
+    classes: { 'public-agent-or-session-id': approved.length }, unclassifiedLocators: [],
+    plaintextProofSha256: hash(path.join(evidence, 'plaintext-classification-safe.json')) });
+  write('seed-exact-finding-digests.json', approved.map(row => ({ rule: row.RuleID, digest: digest(row),
+    class: 'public-agent-or-session-id' })));
+  write('seed-000080.private.json', approved);
+  write('seed-000080.private.meta.json', { identity: identity(blob), scannerExit: 1, findings: approved.length });
+  const assembled = spawnSync('python3', [reportFormatterPath, '--assemble-seed-proof', evidence, seed,
+    configPath, relative, 'test:independently-reviewed-fixture'], { encoding: 'utf8' });
+  assert.equal(assembled.status, 0, assembled.stderr);
+  const proof = path.join(evidence, 'seed-finding-proof.json');
+  const filter = (rows = current, proofPath = proof) => {
+    write('current.json', rows);
+    const result = spawnSync('python3', [reportFormatterPath, '--filter-seed', path.join(evidence, 'current.json'),
+      seed, proofPath, configPath], { encoding: 'utf8' });
+    for (const value of [id, token, temp]) assert.ok(!(result.stdout + result.stderr).includes(value));
+    return result;
+  };
+  return { temp, seed, evidence, blob, proof, current, approved, filter, write, hash };
+}
+
+test('D-140 exact-content proof retains a new credential on the same blob line', () => {
+  const f = seedProofFixture({ extraCredential: true });
+  try {
+    assert.equal(f.filter(f.approved).status, 0);
+    const failed = f.filter();
+    assert.equal(failed.status, 1);
+    assert.ok(JSON.parse(failed.stdout).remaining > 0);
+    const residual = JSON.parse(fs.readFileSync(path.join(f.evidence, 'current.json')));
+    assert.ok(residual.every(row => row.Match === 'REDACTED' && row.Secret === 'REDACTED'));
+    assert.ok(fs.existsSync(path.join(f.evidence, 'current.private.json')));
+    // Native fingerprints/line numbers are deliberately unchanged in this control.
+    assert.equal(f.filter(f.approved.map(row => ({ ...row, Match: row.Match + 'changed' }))).status, 1);
+    assert.equal(f.filter(f.approved.map(row => ({ ...row, RuleID: 'another-rule' }))).status, 1);
+    assert.equal(f.filter(f.approved.map(row => ({ ...row, File: path.join(f.seed, 'other.blob') }))).status, 1);
+  } finally { fs.rmSync(f.temp, { recursive: true, force: true }); }
+});
+
+test('D-140 proof refuses changed source, epoch keys, missing proof, and failed decrypt attestation', () => {
+  const f = seedProofFixture();
+  try {
+    assert.equal(f.filter().status, 0);
+    assert.equal(f.filter(undefined, f.proof + '.missing').status, 2);
+    const original = fs.readFileSync(f.blob);
+    fs.appendFileSync(f.blob, 'changed');
+    assert.equal(f.filter().status, 2);
+    fs.writeFileSync(f.blob, original);
+    fs.writeFileSync(path.join(f.seed, 'epoch-keys.json'), '{"changed":true}');
+    assert.equal(f.filter().status, 2);
+    fs.writeFileSync(path.join(f.seed, 'epoch-keys.json'), '{}');
+    const auth = path.join(f.evidence, 'ciphertext-auth-safe.json');
+    const failedAuth = JSON.parse(fs.readFileSync(auth));
+    failedAuth.classes = { authentication_failed: 1 };
+    f.write('ciphertext-auth-safe.json', failedAuth);
+    // Reseal the hash so the semantic decrypt check, beyond hash tampering, must reject.
+    const proof = JSON.parse(fs.readFileSync(f.proof));
+    proof.evidence['ciphertext-auth-safe.json'] = f.hash(auth);
+    fs.writeFileSync(f.proof, JSON.stringify(proof));
+    assert.equal(f.filter().status, 2);
+  } finally { fs.rmSync(f.temp, { recursive: true, force: true }); }
 });
