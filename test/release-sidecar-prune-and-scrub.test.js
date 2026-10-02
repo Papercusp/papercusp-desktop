@@ -635,6 +635,52 @@ test('prune-docs removes pagefind search-index shards, not just internal-infra d
   }
 });
 
+test('D-150 producer removes vendor private-key fixtures from sidecar and source archive, preserving runtime neighbours', () => {
+  const dir = tmp('vendor-key-prune');
+  const fixtures = [
+    'node_modules/ssh2/test/fixtures/https_key.pem',
+    'node_modules/style-dictionary/examples/advanced/create-react-native-app/android/app/debug.keystore',
+  ];
+  const retained = [
+    'node_modules/ssh2/lib/client.js',
+    'node_modules/ssh2/test/fixtures/https_cert.pem',
+    'node_modules/style-dictionary/lib/index.js',
+    'node_modules/other/android/app/debug.keystore',
+  ];
+  try {
+    for (const name of [...fixtures, ...retained]) {
+      fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+      fs.writeFileSync(path.join(dir, name), 'synthetic fixture\n');
+    }
+    const exclusions = audit('--tar-excludes');
+    assert.equal(exclusions.status, 0, exclusions.stderr);
+    const archive = path.join(dir, 'source.tar');
+    const tar = spawnSync('tar', [
+      ...exclusions.stdout.trim().split('\n').map(pattern => `--exclude=${pattern}`),
+      '-cf', archive, '-C', dir, 'node_modules',
+    ], { encoding: 'utf8' });
+    assert.equal(tar.status, 0, tar.stderr);
+    const members = spawnSync('tar', ['-tf', archive], { encoding: 'utf8' });
+    assert.equal(members.status, 0, members.stderr);
+    for (const name of fixtures) assert.ok(!members.stdout.split('\n').includes(name), name);
+    for (const name of retained) assert.ok(members.stdout.split('\n').includes(name), name);
+
+    const pruned = audit('--prune-docs', dir);
+    assert.equal(pruned.status, 0, pruned.stderr);
+    for (const name of fixtures) assert.ok(!fs.existsSync(path.join(dir, name)), name);
+    for (const name of retained) assert.ok(fs.existsSync(path.join(dir, name)), name);
+    const rescan = spawnSync('python3', ['-c', String.raw`
+import importlib.util,pathlib,sys
+s=importlib.util.spec_from_file_location('audit',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+root=pathlib.Path(sys.argv[2]);rx=m._rule_rx('vendored-private-key-fixtures')
+assert not [p for p in root.rglob('*') if rx.search(p.relative_to(root).as_posix())]
+print('vendor-key-fixture-rescan=0')
+`, AUDIT, dir], { encoding: 'utf8' });
+    assert.equal(rescan.status, 0, rescan.stderr);
+    assert.match(rescan.stdout, /vendor-key-fixture-rescan=0/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 // ── WI-38233 / the 0.0.16 cut: the PRUNE↔SCAN predicate gap.
 //
 // prune_docs deletes by PATH; scan_dir fails by CONTENT. A doc whose path matches no

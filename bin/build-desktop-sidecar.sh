@@ -1290,6 +1290,7 @@ echo "    ✓ staged systemd-scope-env-runner.mjs next to serve.mjs"
 
 # Required workers are shared with the host and current-build rig.
 bundle_host_workers "$REPO_ROOT" "$SIDECAR_DIR" || exit 1
+bundle_host_spawner "$REPO_ROOT" "$SIDECAR_DIR" "${MINIFY_ARGS[@]}" "${VERSION_DEFINE_ARGS[@]}" "${HOST_EXTERNALS[@]}" || exit 1
 
 # opusscript_native_wasm.wasm (EI-501) — the SAME dirname(import.meta.url)
 # gotcha as git-ext-bridge.mjs above, one layer deeper: esbuild INLINES
@@ -2533,6 +2534,7 @@ _audit_py="$HERE/audit-release-bundle.py"
 if [[ -f "$_audit_py" ]]; then
   echo "→ pruning internal-build-infra docs from sidecar (release-privacy, WI-4419)"
   python3 "$_audit_py" --prune-docs \
+    "$SIDECAR_DIR" \
     "$SIDECAR_DIR/internal-docs" \
     "$SIDECAR_DIR/apps/operator-docs/src/content/docs" \
     "$SIDECAR_DIR/spa/docs"

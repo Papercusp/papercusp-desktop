@@ -95,6 +95,15 @@ from datetime import datetime, timezone
 # top-level allowlist cannot — the junk is nested INSIDE apps/ and packages/,
 # and some of it is git-TRACKED (a .gitignore anchoring bug, fixed by su-a1a71).
 FORBIDDEN_PATH = [
+    # D-150 V3: these vendored development fixtures contain actual private-key
+    # containers. Omit them at both producers; a public-fixture exemption is
+    # forbidden. Keep package runtime code and public certificates intact.
+    ("vendored-private-key-fixtures",
+     re.compile(r"(^|/)node_modules/(?:ssh2/test/fixtures/https_key\.pem"
+                r"|style-dictionary/examples/advanced/create-react-native-app/"
+                r"android/app/debug\.keystore)$"),
+     ["node_modules/ssh2/test/fixtures/https_key.pem",
+      "node_modules/style-dictionary/examples/advanced/create-react-native-app/android/app/debug.keystore"]),
     ("agent-transcripts", re.compile(r"(^|/)pi-sessions/|(^|/)sessions/.*\.jsonl$"),
      ["pi-sessions"]),
     # `.papercusp` AND its siblings (`.papercusp-tmp`, `.papercusp-workspaces`): a
@@ -1284,13 +1293,14 @@ def _rule_rx(name):
     sys.exit(2)
 
 
-#: FORBIDDEN_PATH rules the sidecar prune applies. Both are LEAK CLASSES that the
+#: FORBIDDEN_PATH rules the sidecar prune applies. These are LEAK CLASSES that the
 #: tar-exclude path already strips from source.tar.zst but which reach the sidecar
 #: by a different route, so both must be re-applied here.
 SIDECAR_PRUNE_RULES = (
     "internal-build-infra-docs",
     "pagefind-search-index",
     "papercusp-state-dir",
+    "vendored-private-key-fixtures",
 )
 
 

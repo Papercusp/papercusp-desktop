@@ -179,6 +179,7 @@ test('sidecar privacy prune covers every assembled documentation copy', () => {
 
   const prune = builder.slice(start, end);
   for (const docsRoot of [
+    '$SIDECAR_DIR',
     '$SIDECAR_DIR/internal-docs',
     '$SIDECAR_DIR/apps/operator-docs/src/content/docs',
     '$SIDECAR_DIR/spa/docs',
