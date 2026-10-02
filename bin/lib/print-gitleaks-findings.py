@@ -338,9 +338,10 @@ def _mechanical_context(proof: dict[str, object], directory: Path, root: Path,
         envelope = _read_extra_proof(proof, directory, "sealed-envelope-proof-safe.json")
         keys = json.loads((root / "epoch-keys.json").read_text())["papercusp"]
         context["envelopeDigests"] = validate_envelope_structure(envelope, data, report, {int(k) for k in keys})
-        publics |= {_canonical_base64(value, 32) for value in envelope["recipients"]}
+        recipient_keys = {_canonical_base64(value, 32) for value in envelope["recipients"]}
+        publics |= recipient_keys
         validate_identity_secret_proof(_read_extra_proof(proof, directory, "identity-secret-scan-safe.json"),
-                                       root, directory, publics, reference)
+                                       root, directory, recipient_keys, reference)
     return context
 
 
