@@ -575,6 +575,44 @@ test('D-140 proof refuses changed source, epoch keys, missing proof, and failed 
   } finally { fs.rmSync(f.temp, { recursive: true, force: true }); }
 });
 
+test('D-140 proof refuses surplus classified digests hidden by duplicate report findings', () => {
+  for (const plaintext of [true, false]) {
+    const f = seedProofFixture();
+    try {
+      const reportName = plaintext ? 'seed-000080.plaintext.private.json' : 'seed-000080.private.json';
+      const entriesName = plaintext ? 'plaintext-exact-finding-digests.json' : 'seed-exact-finding-digests.json';
+      const summaryName = plaintext ? 'plaintext-classification-safe.json' : 'seed-classification-verified-safe.json';
+      const metaName = plaintext ? 'seed-000080.plaintext.private.meta.json' : 'seed-000080.private.meta.json';
+      const read = name => JSON.parse(fs.readFileSync(path.join(f.evidence, name)));
+      const report = read(reportName);
+      const entries = read(entriesName);
+      const summary = read(summaryName);
+      const meta = read(metaName);
+      report.push(report[0]);
+      entries.push({ ...entries[0], digest: 'f'.repeat(64) });
+      summary.findings++;
+      summary.classes[entries[0].class]++;
+      meta.findings++;
+      f.write(reportName, report);
+      meta.reportSha256 = f.hash(path.join(f.evidence, reportName));
+      f.write(entriesName, entries);
+      f.write(summaryName, summary);
+      f.write(metaName, meta);
+      if (plaintext) {
+        const seedSummary = read('seed-classification-verified-safe.json');
+        seedSummary.plaintextProofSha256 = f.hash(path.join(f.evidence, summaryName));
+        f.write('seed-classification-verified-safe.json', seedSummary);
+      }
+      // Reseal every changed evidence file: reject the semantic mismatch even
+      // when report counts, class counts, input identities, and hashes agree.
+      const proof = read('seed-finding-proof.json');
+      for (const name of Object.keys(proof.evidence)) proof.evidence[name] = f.hash(path.join(f.evidence, name));
+      f.write('seed-finding-proof.json', proof);
+      assert.equal(f.filter().status, 2, plaintext ? 'plaintext surplus digest passed' : 'seed surplus digest passed');
+    } finally { fs.rmSync(f.temp, { recursive: true, force: true }); }
+  }
+});
+
 test('D-140 storage-segment proofs compose while preserving per-file exact-content boundaries', () => {
   const f = seedProofFixture({ extraCredential: true });
   try {

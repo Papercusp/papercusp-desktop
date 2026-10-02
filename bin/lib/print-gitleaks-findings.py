@@ -136,7 +136,7 @@ def validate_seed_proof(proof: dict[str, object], directory: Path, root: Path,
             or plain_meta.get("reportSha256") != _sha256(directory / "seed-000080.plaintext.private.json")
             or plain_meta.get("findings") != len(plain_report)
             or len(plain_entries) != len(plain_report)
-            or any(finding_digest(row) not in plain_allowed for row in plain_report)):
+            or {finding_digest(row) for row in plain_report} != plain_allowed):
         raise ValueError("plaintext scan incomplete")
     seed = evidence["seed-classification-verified-safe.json"]
     entries = evidence["seed-exact-finding-digests.json"]
@@ -149,7 +149,7 @@ def validate_seed_proof(proof: dict[str, object], directory: Path, root: Path,
             or meta.get("findings") != len(report) or len(entries) != len(report)
             or seed.get("sourceSha256") != proof["sourceSha256"]
             or seed.get("plaintextProofSha256") != _sha256(directory / "plaintext-classification-safe.json")
-            or any(finding_digest(row) not in allowed for row in report)):
+            or {finding_digest(row) for row in report} != allowed):
         raise ValueError("seed scan incomplete")
     return allowed
 
