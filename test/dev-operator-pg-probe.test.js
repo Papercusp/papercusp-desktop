@@ -135,6 +135,75 @@ test('verifier readiness runs before source/dependency snapshots, and skips only
   assert.match(src, /dev-operator-pg-probe\.mjs" --repo-root "\$REPO_DIR" --require-applied-schema/);
 });
 
+function cliFixture(t) {
+  const fixture = migrationFixture(t);
+  fs.writeFileSync(path.join(fixture.root, 'package.json'), '{}');
+  const pgDir = path.join(fixture.root, 'node_modules', 'postgres');
+  fs.mkdirSync(pgDir, { recursive: true });
+  fs.writeFileSync(path.join(pgDir, 'index.js'), `
+    module.exports = (url, options) => ({
+      unsafe: async (query) => {
+        require('node:fs').writeFileSync(process.env.TEST_PROBE_RECEIPT, JSON.stringify({ url, options, query }));
+        if (process.env.TEST_PROBE_FAILURE) throw Object.assign(new Error('private failure'), { code: process.env.TEST_PROBE_FAILURE });
+        return JSON.parse(process.env.TEST_PROBE_APPLIED || '[]').map(filename => ({ filename }));
+      },
+      end: async () => {},
+    });
+  `);
+  const runnerDir = path.join(fixture.root, 'node_modules', '@papercusp', 'embedded-postgres-server', 'src');
+  fs.mkdirSync(runnerDir, { recursive: true });
+  fs.symlinkSync(path.join(REPO_ROOT, 'libs', 'papercusp', 'packages', 'embedded-postgres-server', 'src', 'migration-runner.js'), path.join(runnerDir, 'migration-runner.js'));
+  fs.mkdirSync(path.join(fixture.root, 'apps', 'operator'), { recursive: true });
+  return { ...fixture, receipt: path.join(fixture.root, 'receipt.json') };
+}
+
+test('real probe CLI reports ready/pending/unavailable exits with the selected schema ledger', (t) => {
+  const f = cliFixture(t);
+  for (const [applied, failure, expectedStatus, expectedExit] of [
+    [['374-old.sql', '1003-new.sql'], '', 'ready', 0],
+    [['374-old.sql'], '', 'pending', 75],
+    [[], '42P01', 'unavailable', 74],
+  ]) {
+    const r = spawnSync(process.execPath, [PROBE, '--repo-root', f.root, '--require-applied-schema'], {
+      encoding: 'utf8', timeout: 10000,
+      env: { ...process.env, HARNESS_ADMIN_DATABASE_URL: 'postgresql://fixture:secret@selected/db', PAPERCUSP_PG_SQL_DIR: f.sqlDir, TEST_PROBE_RECEIPT: f.receipt, TEST_PROBE_APPLIED: JSON.stringify(applied), TEST_PROBE_FAILURE: failure },
+    });
+    assert.equal(r.status, expectedExit, r.stderr);
+    assert.equal(JSON.parse(r.stdout).status, expectedStatus);
+    assert.equal(r.stdout.includes('secret'), false);
+    assert.equal(JSON.parse(fs.readFileSync(f.receipt)).query, 'SELECT filename FROM harness_shared.schema_migrations');
+  }
+});
+
+test('real verifier preflight binds sourced .env.local, propagates refusal, and leaves isolated DB alone', (t) => {
+  const f = cliFixture(t);
+  const src = fs.readFileSync(VERIFIER, 'utf8');
+  const fn = src.slice(src.indexOf('shared_schema_readiness_preflight() {'), src.indexOf('shared_schema_readiness_preflight || exit $?'));
+  fs.writeFileSync(path.join(f.root, 'apps', 'operator', '.env.local'), 'HARNESS_ADMIN_DATABASE_URL=postgresql://fixture:sourced@selected/db\n');
+  const env = {
+    ...process.env, REPO_DIR: f.root, DESKTOP_DIR: path.join(REPO_ROOT, 'papercusp-desktop'),
+    HARNESS_ADMIN_DATABASE_URL: 'postgresql://fixture:ambient@wrong/db', PAPERCUSP_PG_SQL_DIR: f.sqlDir,
+    TEST_PROBE_RECEIPT: f.receipt, TEST_PROBE_APPLIED: '[]', TEST_PROBE_FAILURE: '', VERIFY_TAURI_ISOLATED_DB: '0',
+  };
+  const run = (overrides = {}) => spawnSync('bash', ['-c', `${fn}\nshared_schema_readiness_preflight`], { encoding: 'utf8', timeout: 10000, env: { ...env, ...overrides } });
+  const pending = run();
+  assert.equal(pending.status, 75, pending.stderr);
+  assert.match(pending.stderr, /VERIFY_TAURI_SHARED_SCHEMA_NOT_READY/);
+  assert.equal(JSON.parse(fs.readFileSync(f.receipt)).url, 'postgresql://fixture:sourced@selected/db');
+  const ready = run({ TEST_PROBE_APPLIED: '["374-old.sql","1003-new.sql"]' });
+  assert.equal(ready.status, 0, ready.stderr);
+  assert.equal(JSON.parse(ready.stdout).status, 'ready');
+  fs.unlinkSync(f.receipt);
+  const isolated = run({ VERIFY_TAURI_ISOLATED_DB: '1' });
+  assert.equal(isolated.status, 0, isolated.stderr);
+  assert.equal(isolated.stdout, '');
+  assert.equal(fs.existsSync(f.receipt), false);
+  fs.writeFileSync(path.join(f.root, 'apps', 'operator', '.env.local'), 'return 1\n');
+  const invalidEnv = run();
+  assert.equal(invalidEnv.status, 74);
+  assert.equal(fs.existsSync(f.receipt), false);
+});
+
 test('resolution order: env var, then discovery file, then native fallback', async () => {
   const { resolveDevPgUrl } = await import(PROBE);
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pg-probe-home-'));
