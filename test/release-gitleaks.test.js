@@ -1025,14 +1025,16 @@ print(json.dumps({'positivePointer':True,'negativeControls':True}))
 
 test('D-151 generated sender identifiers require exact field, frozen maker and complete maker-specific shape', () => {
   const program = String.raw`
-import importlib.util,json,sys
+import importlib.util,json,sys,hashlib
 from unittest.mock import patch
 s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
-paths=list(m._RESPAWN_MAKERS);ctx={'plainRows':{},'publicKeys':set(),'trees':{}}
+paths=list(m._RESPAWN_MAKERS);ctx={'plainRows':{},'plainRowDigests':{},'publicKeys':set(),'trees':{}}
 def valid(value,field='writer_key',maker=0,blob=None):
  finding={'RuleID':'generic-api-key','Secret':value,'Match':field+'":"'+value+'"','StartLine':1}
  entry={'class':'public-generated-agent-identifier','rule':finding['RuleID'],'digest':m.finding_digest(finding),'fieldPath':[field],'makerRef':{'tree':'superproject','path':paths[maker],'blob':blob or m._RESPAWN_MAKERS[paths[maker]][0]}}
  ctx['plainRows'][1]={field:value}
+ ctx['plainRowDigests'][1]=hashlib.sha256(json.dumps(ctx['plainRows'][1]).encode()).hexdigest()
+ entry['line']=1;entry['rowSha256']=ctx['plainRowDigests'][1]
  return m.mechanical_class_valid(entry,finding,ctx,seed=False)
 hexid='su-respawn-'+'a'*32;uuid='su-respawn-12345678-1234-4234-8234-123456789abc'
 with patch.object(m,'_frozen_source_bytes',return_value=b'frozen maker'):

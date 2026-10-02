@@ -257,7 +257,9 @@ def mechanical_class_valid(entry: dict[str, object], finding: dict[str, object],
                 and not _CREDENTIAL_FIELD.search((_MATCH_FIELD.match(match).group(1)
                                                   if _MATCH_FIELD.match(match) else "")))
     if kind == "public-generated-agent-identifier":
-        if actual != value or field not in _RESPAWN_FIELDS or finding["RuleID"] != "generic-api-key":
+        if (actual != value or field not in _RESPAWN_FIELDS or finding["RuleID"] != "generic-api-key"
+                or entry.get("line") != finding["StartLine"]
+                or entry.get("rowSha256") != context["plainRowDigests"][int(finding["StartLine"])]) :
             return False
         ref = entry["makerRef"]
         expected = _RESPAWN_MAKERS.get(ref.get("path"))
@@ -290,9 +292,12 @@ def _validate_mechanical_entries(entries: list[dict[str, object]], report: list[
                                  context: dict[str, object], *, seed: bool) -> None:
     added = _MECHANICAL_SEED_CLASSES if seed else _MECHANICAL_PLAIN_CLASSES
     by_digest = {finding_digest(finding): finding for finding in report}
+    by_location = {(finding_digest(finding), finding["StartLine"]): finding for finding in report}
     for entry in entries:
+        finding = (by_location[(entry["digest"], entry["line"])]
+                   if entry["class"] == "public-generated-agent-identifier" else by_digest[entry["digest"]])
         if entry["class"] in added and not mechanical_class_valid(
-                entry, by_digest[entry["digest"]], context, seed=seed):
+                entry, finding, context, seed=seed):
             raise ValueError("mechanical class predicate failed")
 
 
@@ -376,14 +381,17 @@ def _mechanical_context(proof: dict[str, object], directory: Path, root: Path,
         public_refs.add(value)
     needed_lines = {int(row["StartLine"]) for row in plain_report}
     plain_rows = {}
+    plain_digests = {}
     with (directory / "seed-000080.plaintext.jsonl").open() as handle:
         for line, text in enumerate(handle, 1):
             if line in needed_lines:
                 plain_rows[line] = json.loads(text)
+                plain_digests[line] = hashlib.sha256(text.encode()).hexdigest()
     data = source.read_bytes()
     fields = {(found.group("field").decode(), found.group("value").decode())
               for found in _SEED_FIELDS.finditer(data)}
     context = {"seedFields": fields, "publicKeys": publics, "plainRows": plain_rows,
+               "plainRowDigests": plain_digests,
                "publicReferences": public_refs, "idFields": set(reference.get("idFields", [])),
                "trees": reference.get("trees", {})}
     if any(entry["class"] == "recipient-sealed-epoch-key-envelope" for entry in entries):
