@@ -42,6 +42,21 @@ _PLAIN_CLASSES = {
     "public-hypercore-log-key", "public-standing-fact-reference",
     "scanner-truncated-public-coord-sender",
 }
+_MECHANICAL_SEED_CLASSES = {"public-projection-row-key", "public-hypercore-log-key",
+                            "recipient-sealed-epoch-key-envelope"}
+_MECHANICAL_PLAIN_CLASSES = {
+    "public-git-object-reference", "public-hash-or-log-reference",
+    "public-condition-reference", "public-opaque-operation-reference",
+    "public-schema-bound-reference", "reviewed-public-source-literal",
+    "public-cryptographic-key", "reviewed-descriptive-source-text",
+}
+_SEED_CLASSES |= _MECHANICAL_SEED_CLASSES
+_PLAIN_CLASSES |= _MECHANICAL_PLAIN_CLASSES
+_CREDENTIAL_FIELD = re.compile(r"token|secret|key|auth|password", re.IGNORECASE)
+_ID_FIELDS = {"id", "issue_id", "msg_id", "condition_id", "operation_id", "request_id",
+              "receipt_id", "event_id", "rubric_id", "rule_id", "task_id", "ref"}
+_FROZEN_TREES = {"superproject": "d740fc3802877d1c8c3b1068768681ee32ef0025",
+                 "desktop": "c864f7a1d1b62721a21dc8b0a576d51ff4edb345"}
 _PROOF_FILES = (
     "ciphertext-auth-safe.json", "plaintext-classification-safe.json",
     "plaintext-exact-finding-digests.json", "seed-classification-verified-safe.json",
@@ -90,6 +105,137 @@ def verify_literal_absence(inputs: list[Path], literals: list[dict[str, str]],
         inventory.append({"path": str(path), "sha256": before})
     return {"schema": "papercusp-known-literal-absence-v1", "inputs": inventory,
             "literalDigests": sorted(identities), "rawLiteralHits": 0}
+
+
+def _public_id(value: str) -> bool:
+    raw = value.encode()
+    return bool(_UUID.fullmatch(raw) or _MESSAGE_ID.fullmatch(raw)
+                or re.fullmatch(r"(?:su-|WI-|EI-|F-|P-)[A-Za-z0-9-]+", value)
+                or re.fullmatch(r"[a-z][a-z0-9_.-]*:[A-Za-z0-9_.:/-]+", value))
+
+
+def _canonical_base64(value: str, size: int) -> bytes:
+    decoded = base64.b64decode(value, validate=True)
+    if len(decoded) != size or base64.b64encode(decoded).decode() != value:
+        raise ValueError("invalid public value encoding")
+    return decoded
+
+
+def _at_path(value: object, path: list[object]) -> object:
+    if not isinstance(path, list) or not path:
+        raise ValueError("exact field locator required")
+    for part in path:
+        if isinstance(value, dict) and isinstance(part, str):
+            value = value[part]
+        elif isinstance(value, list) and type(part) is int and 0 <= part < len(value):
+            value = value[part]
+        else:
+            raise ValueError("invalid field locator")
+    return value
+
+
+def _manifest_publics(manifest: dict[str, object]) -> set[bytes]:
+    result = set()
+    for store in manifest.get("stores", []):
+        meta = store.get("meta", {})
+        values = list(meta.get("coreKeys", [])) + list(meta.get("coreLengths", {}))
+        values += list(meta.get("coreProjectedFrom", {})) + list(meta.get("coreProjectedFrom", {}).values())
+        for name in ("coreKey", "discoveryKey", "writerKey"):
+            if name in meta:
+                values.append(meta[name])
+        for value in values:
+            if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value):
+                result.add(bytes.fromhex(value))
+    return result
+
+
+def _source_tree(ref: dict[str, object], trees: dict[str, object]) -> tuple[Path, str]:
+    kind = ref.get("tree")
+    tree = trees[kind]
+    sha = tree["sha"]
+    path = Path(tree["path"])
+    if sha != _FROZEN_TREES.get(kind):
+        raise ValueError("source tree is not the admitted release source")
+    found = subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"], check=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode().strip()
+    if found != sha:
+        raise ValueError("source tree changed")
+    return path, sha
+
+
+def mechanical_class_valid(entry: dict[str, object], finding: dict[str, object],
+                           context: dict[str, object], *, seed: bool) -> bool:
+    """D-147 predicates re-derived from exact private findings and bound inputs."""
+    kind = entry["class"]
+    value = finding.get("Secret")
+    match = finding.get("Match")
+    if (entry.get("digest") != finding_digest(finding) or entry.get("rule") != finding.get("RuleID")
+            or not isinstance(value, str) or not isinstance(match, str)):
+        return False
+    if seed:
+        fields = context["seedFields"]
+        if kind == "public-projection-row-key":
+            parts = value.split("::", 1)
+            return (finding["RuleID"] == "generic-api-key" and len(parts) == 2
+                    and re.fullmatch(r"[a-z][a-z0-9-]*", parts[0]) is not None
+                    and _public_id(parts[1])
+                    and any((field, value) in fields for field in ("hbKey", "__rekey", "writer_key")))
+        if kind == "public-hypercore-log-key":
+            return (re.fullmatch(r"[0-9a-f]{64}", value) is not None
+                    and bytes.fromhex(value) in context["publicKeys"])
+        if kind == "recipient-sealed-epoch-key-envelope":
+            return entry["digest"] in context.get("envelopeDigests", set())
+        return False
+    if kind == "reviewed-public-source-literal":
+        ref = entry["sourceRef"]
+        path, sha = _source_tree(ref, context["trees"])
+        relative = ref["path"]
+        if Path(relative).is_absolute() or ".." in Path(relative).parts:
+            return False
+        blob = subprocess.run(["git", "-C", str(path), "rev-parse", sha + ":" + relative], check=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode().strip()
+        if blob != ref["blob"]:
+            return False
+        content = subprocess.run(["git", "-C", str(path), "cat-file", "blob", blob], check=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+        return match.encode() in content and value.encode() in content
+    if kind == "public-git-object-reference":
+        if not re.fullmatch(r"[0-9a-f]{40}", value):
+            return False
+        path, _ = _source_tree(entry["sourceRef"], context["trees"])
+        return subprocess.run(["git", "-C", str(path), "cat-file", "-e", value],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    row = context["plainRows"][int(finding["StartLine"])]
+    locator = entry["fieldPath"]
+    field = str(locator[-1])
+    actual = _at_path(row, locator)
+    if kind == "reviewed-descriptive-source-text":
+        return (finding["RuleID"] == "generic-api-key" and not _CREDENTIAL_FIELD.search(field)
+                and isinstance(actual, str) and match in actual and value in actual
+                and not _CREDENTIAL_FIELD.search((_MATCH_FIELD.match(match).group(1)
+                                                  if _MATCH_FIELD.match(match) else "")))
+    if actual != value or _CREDENTIAL_FIELD.search(field):
+        return False
+    if kind in {"public-condition-reference", "public-opaque-operation-reference",
+                "public-schema-bound-reference"}:
+        return field in context["idFields"] and field in _ID_FIELDS and _public_id(value)
+    if kind == "public-hash-or-log-reference":
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
+            return False
+        return value in context["publicReferences"]
+    if kind == "public-cryptographic-key":
+        return _canonical_base64(value, 32) in context["publicKeys"]
+    return False
+
+
+def _validate_mechanical_entries(entries: list[dict[str, object]], report: list[dict[str, object]],
+                                 context: dict[str, object], *, seed: bool) -> None:
+    added = _MECHANICAL_SEED_CLASSES if seed else _MECHANICAL_PLAIN_CLASSES
+    by_digest = {finding_digest(finding): finding for finding in report}
+    for entry in entries:
+        if entry["class"] in added and not mechanical_class_valid(
+                entry, by_digest[entry["digest"]], context, seed=seed):
+            raise ValueError("mechanical class predicate failed")
 
 # D-142/D-147: recognize complete private-key material, including raw seeds
 # whose derived public key belongs to a recipient. Source vocabulary by itself
