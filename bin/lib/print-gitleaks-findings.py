@@ -27,6 +27,179 @@ _SEED_FIELDS = re.compile(rb'"(?P<field>__rekey|hbKey|writer_key)":"(?P<value>[^
 _MATCH_FIELD = re.compile(r'^"?([A-Za-z_][A-Za-z_0-9]*)"\s*:')
 _MESSAGE_ID = re.compile(rb'[a-z0-9]{8}-[0-9]{4}-[0-9a-f]{32}')
 _UUID = re.compile(rb'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}')
+_PROOF_SCHEMA = "papercusp-seed-finding-proof-v1"
+_SEED_CLASSES = {
+    "authenticated-ciphertext-with-classified-plaintext", "public-agent-or-session-id",
+    "public-coord-or-issue-id", "public-sender-verified-in-decrypted-source",
+    "public-announced-event-reference",
+}
+_PLAIN_CLASSES = {
+    "public-coord-sender-identifier", "descriptive-doc-part-category-list",
+    "deliberately-invalid-localhost-auth-probe", "documented-minified-source-expression",
+    "public-hypercore-log-key", "public-standing-fact-reference",
+    "scanner-truncated-public-coord-sender",
+}
+_PROOF_FILES = (
+    "ciphertext-auth-safe.json", "plaintext-classification-safe.json",
+    "plaintext-exact-finding-digests.json", "seed-classification-verified-safe.json",
+    "seed-exact-finding-digests.json", "seed-000080.plaintext.private.meta.json",
+    "seed-000080.plaintext.private.json", "seed-000080.plaintext.jsonl",
+    "seed-000080.private.meta.json", "seed-000080.private.json",
+)
+
+
+def finding_digest(finding: dict[str, object]) -> str:
+    # Gitleaks' native fingerprint binds only file/rule/line. It would hide a
+    # second credential on the same binary-blob line (release decision D-140).
+    values = [finding.get(key) for key in ("RuleID", "Match", "Secret")]
+    if any(not isinstance(value, str) or value == "REDACTED" for value in values):
+        raise ValueError("exact private finding required")
+    return hashlib.sha256(json.dumps(values, ensure_ascii=False,
+                                     separators=(",", ":")).encode()).hexdigest()
+
+
+def _private_file(path: Path) -> None:
+    if (path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077
+            or path.parent.is_symlink() or path.parent.stat().st_mode & 0o077):
+        raise ValueError("proof must be private")
+
+
+def _source_file(root: Path, relative: str) -> Path:
+    candidate = Path(relative)
+    if candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
+        raise ValueError("invalid source locator")
+    target = root / candidate
+    if target.is_symlink() or not target.resolve().is_relative_to(root.resolve()):
+        raise ValueError("source outside seed")
+    return target
+
+
+def _classification(summary: dict[str, object], entries: list[dict[str, object]],
+                    allowed: set[str]) -> set[str]:
+    if (summary.get("unclassifiedLocators") != [] or not entries
+            or summary.get("findings") != len(entries)
+            or dict(Counter(row.get("class") for row in entries)) != summary.get("classes")
+            or not set(summary["classes"]).issubset(allowed)):
+        raise ValueError("incomplete classification")
+    for row in entries:
+        if (not isinstance(row.get("rule"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("digest", "")))):
+            raise ValueError("invalid finding digest")
+    return {str(row["digest"]) for row in entries}
+
+
+def validate_seed_proof(proof: dict[str, object], directory: Path, root: Path,
+                        config: Path) -> set[str]:
+    """Validate an explicitly reviewed, private, exact-source evidence package.
+
+    This does not infer publicness from a field name or grant new classifications.
+    The review reference and digest-only classifications are authored evidence;
+    authentication, scan results and all source inputs must remain bound to it.
+    """
+    if (proof.get("schemaVersion") != _PROOF_SCHEMA
+            or not isinstance(proof.get("reviewRef"), str) or not proof["reviewRef"].strip()
+            or proof.get("configSha256") != _sha256(config)):
+        raise ValueError("proof identity mismatch")
+    version = subprocess.run(["gitleaks", "version"], check=True,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode().strip()
+    if proof.get("scannerVersion") != version:
+        raise ValueError("scanner changed")
+    source = _source_file(root, proof["file"])
+    if (proof.get("sourceSha256") != _sha256(source)
+            or proof.get("epochKeysSha256") != _sha256(_source_file(root, "epoch-keys.json"))
+            or proof.get("manifestSha256") != _sha256(_source_file(root, "manifest.json"))):
+        raise ValueError("seed changed")
+    evidence = {}
+    for name in _PROOF_FILES:
+        path = directory / name
+        _private_file(path)
+        if proof.get("evidence", {}).get(name) != _sha256(path):
+            raise ValueError("evidence changed")
+        if name.endswith(".json"):
+            evidence[name] = json.loads(path.read_text(encoding="utf-8"))
+    auth = evidence["ciphertext-auth-safe.json"]
+    fields = auth.get("ciphertextFields")
+    if (not isinstance(fields, int) or fields <= 0 or auth.get("parsedRows") != fields
+            or auth.get("classes") != {"authenticated_ciphertext": fields}
+            or auth.get("unparsedCiphertextFields") != 0
+            or auth.get("negativeControls") != {"tamper_rejected": True, "wrong_key_rejected": True}):
+        raise ValueError("cipher authentication incomplete")
+    plain = evidence["plaintext-classification-safe.json"]
+    plain_entries = evidence["plaintext-exact-finding-digests.json"]
+    plain_allowed = _classification(plain, plain_entries, _PLAIN_CLASSES)
+    plain_meta = evidence["seed-000080.plaintext.private.meta.json"]
+    plain_identity = {"blobSha256": _sha256(directory / "seed-000080.plaintext.jsonl"),
+                      "configSha256": proof["configSha256"], "scannerVersion": version}
+    plain_report = evidence["seed-000080.plaintext.private.json"]
+    if (plain_meta.get("identity") != plain_identity or plain_meta.get("scannerExit") not in (0, 1)
+            or plain.get("plaintextSha256") != plain_identity["blobSha256"]
+            or plain_meta.get("reportSha256") != _sha256(directory / "seed-000080.plaintext.private.json")
+            or plain_meta.get("findings") != len(plain_report)
+            or len(plain_entries) != len(plain_report)
+            or any(finding_digest(row) not in plain_allowed for row in plain_report)):
+        raise ValueError("plaintext scan incomplete")
+    seed = evidence["seed-classification-verified-safe.json"]
+    entries = evidence["seed-exact-finding-digests.json"]
+    allowed = _classification(seed, entries, _SEED_CLASSES)
+    report = evidence["seed-000080.private.json"]
+    meta = evidence["seed-000080.private.meta.json"]
+    identity = {"blobSha256": proof["sourceSha256"], "configSha256": proof["configSha256"],
+                "scannerVersion": version}
+    if (meta.get("identity") != identity or meta.get("scannerExit") not in (0, 1)
+            or meta.get("findings") != len(report) or len(entries) != len(report)
+            or seed.get("sourceSha256") != proof["sourceSha256"]
+            or seed.get("plaintextProofSha256") != _sha256(directory / "plaintext-classification-safe.json")
+            or any(finding_digest(row) not in allowed for row in report)):
+        raise ValueError("seed scan incomplete")
+    return allowed
+
+
+def assemble_seed_proof(directory: Path, root: Path, config: Path, relative: str,
+                        review_ref: str) -> dict[str, object]:
+    meta = json.loads((directory / "seed-000080.private.meta.json").read_text())
+    proof = {"schemaVersion": _PROOF_SCHEMA, "reviewRef": review_ref, "file": relative,
+             "sourceSha256": _sha256(_source_file(root, relative)),
+             "epochKeysSha256": _sha256(root / "epoch-keys.json"),
+             "manifestSha256": _sha256(root / "manifest.json"),
+             "configSha256": _sha256(config), "scannerVersion": meta["identity"]["scannerVersion"],
+             "evidence": {name: _sha256(directory / name) for name in _PROOF_FILES}}
+    validate_seed_proof(proof, directory, root, config)
+    path = directory / "seed-finding-proof.json"
+    fd, temporary = tempfile.mkstemp(prefix="seed-proof-", suffix=".partial", dir=directory)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(proof, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+    return proof
+
+
+def filter_seed_findings(report_path: Path, root: Path, proof_path: Path,
+                         config: Path) -> dict[str, int]:
+    _private_file(report_path)
+    _private_file(proof_path)
+    proof = json.loads(proof_path.read_text(encoding="utf-8"))
+    allowed = validate_seed_proof(proof, proof_path.parent, root, config)
+    findings = json.loads(report_path.read_text(encoding="utf-8"))
+    residual = []
+    for finding in findings:
+        file = Path(str(finding.get("File", "")))
+        candidate = file if file.is_absolute() else Path.cwd() / file
+        try:
+            relative = candidate.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            relative = ""
+        if relative == proof["file"] and finding_digest(finding) in allowed:
+            continue
+        residual.append({**finding, "Match": "REDACTED", "Secret": "REDACTED"})
+    # Keep the original exact scan private for independent review. The normal
+    # failure formatter sees only residual, redacted findings at its usual path.
+    os.replace(report_path, report_path.with_suffix(".private.json"))
+    fd, temporary = tempfile.mkstemp(prefix="seed-residual-", suffix=".partial", dir=report_path.parent)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(residual, handle)
+    os.replace(temporary, report_path)
+    return {"findings": len(findings), "exempted": len(findings) - len(residual), "remaining": len(residual)}
 
 
 def _sha256(path: Path) -> str:
@@ -194,6 +367,22 @@ def _safe_locator(raw_file: object, scan_root: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) == 7 and argv[1] == "--assemble-seed-proof":
+        try:
+            proof = assemble_seed_proof(Path(argv[2]), Path(argv[3]), Path(argv[4]), argv[5], argv[6])
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+            print("Seed proof could not be assembled (values omitted).", file=sys.stderr)
+            return 2
+        print(json.dumps({"schemaVersion": proof["schemaVersion"], "sourceSha256": proof["sourceSha256"]}))
+        return 0
+    if len(argv) == 6 and argv[1] == "--filter-seed":
+        try:
+            result = filter_seed_findings(Path(argv[2]), Path(argv[3]), Path(argv[4]), Path(argv[5]))
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+            print("Exact seed exemption proof invalid; credential gate remains failed (values omitted).", file=sys.stderr)
+            return 2
+        print(json.dumps(result))
+        return 1 if result["remaining"] else 0
     if len(argv) == 5 and argv[1] == "--scan-seed":
         try:
             findings, reused = scan_seed_report(Path(argv[2]), Path(argv[3]), Path(argv[4]))
