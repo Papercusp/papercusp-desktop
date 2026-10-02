@@ -671,6 +671,102 @@ test('D-148 exact proof refuses literal residue even with matching report and ev
   } finally { fs.rmSync(f.temp, { recursive: true, force: true }); }
 });
 
+test('D-147 mechanical class predicates require exact public values and refuse credentials', () => {
+  const program = String.raw`
+import importlib.util,json,sys,base64,hashlib,subprocess
+from unittest.mock import patch
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+public,_=m._key_publics(m._sodium(),bytes(range(32)));pk=base64.b64encode(public).decode()
+identifier='abcdefgh-0000-'+'1234567890abcdef'*2;digest='a'*64;gitid='b'*40
+ctx={'seedFields':{('hbKey','engineer-issues::WI-42')},'publicKeys':{public},'plainRows':{},'idFields':{'id'},'publicReferences':{digest},'trees':{'superproject':{'sha':m._FROZEN_TREES['superproject'],'path':'/fixture'}}}
+def case(kind,value,field='id',seed=False,**extra):
+ finding={'RuleID':'generic-api-key','Secret':value,'Match':field+'":"'+value+'"','StartLine':1}
+ entry={'class':kind,'rule':finding['RuleID'],'digest':m.finding_digest(finding),'fieldPath':[field],**extra}
+ ctx['plainRows'][1]={field:value};return entry,finding
+results=[]
+for kind in ['public-condition-reference','public-opaque-operation-reference','public-schema-bound-reference']:
+ e,f=case(kind,identifier);assert m.mechanical_class_valid(e,f,ctx,seed=False);results.append(kind)
+e,f=case('public-hash-or-log-reference',digest);assert m.mechanical_class_valid(e,f,ctx,seed=False);results.append(e['class'])
+e,f=case('public-cryptographic-key',pk,'bkey');assert m.mechanical_class_valid(e,f,ctx,seed=False);results.append(e['class'])
+e,f=case('reviewed-descriptive-source-text','tag-set','body');ctx['plainRows'][1]['body']=f['Match'];assert m.mechanical_class_valid(e,f,ctx,seed=False);results.append(e['class'])
+e,f=case('public-projection-row-key','engineer-issues::WI-42','hbKey',seed=True);assert m.mechanical_class_valid(e,f,ctx,seed=True);results.append(e['class'])
+e,f=case('public-hypercore-log-key',public.hex(),seed=True);assert m.mechanical_class_valid(e,f,ctx,seed=True);results.append(e['class'])
+def git(args,**kwargs):
+ if args[-2:] == ['rev-parse','HEAD']: out=(m._FROZEN_TREES['superproject']+'\n').encode()
+ elif 'rev-parse' in args: out=(gitid+'\n').encode()
+ else: out=b'id":"public-fixture"'
+ return subprocess.CompletedProcess(args,0,out)
+with patch.object(m.subprocess,'run',side_effect=git) as calls:
+ e,f=case('public-git-object-reference',gitid,sourceRef={'tree':'superproject'});assert m.mechanical_class_valid(e,f,ctx,seed=False);results.append(e['class'])
+ e,f=case('reviewed-public-source-literal','public-fixture',sourceRef={'tree':'superproject','path':'src/example.ts','blob':gitid});assert m.mechanical_class_valid(e,f,ctx,seed=False);results.append(e['class'])
+ assert calls.call_count >= 5
+ e['sourceRef']['blob']='c'*40;assert not m.mechanical_class_valid(e,f,ctx,seed=False)
+for field in ['apiKey','key','keys','token','idempotencyKey','watchdogKey','conditionKey','credentialSha256']:
+ e,f=case('public-opaque-operation-reference',identifier,field);assert not m.mechanical_class_valid(e,f,ctx,seed=False)
+e,f=case('public-condition-reference','rawcredential');assert not m.mechanical_class_valid(e,f,ctx,seed=False)
+e,f=case('public-hash-or-log-reference','c'*64);assert not m.mechanical_class_valid(e,f,ctx,seed=False)
+e,f=case('public-cryptographic-key',base64.b64encode(bytes(64)).decode(),'bkey')
+try: m.mechanical_class_valid(e,f,ctx,seed=False);raise AssertionError('64-byte key passed')
+except ValueError: pass
+e,f=case('public-projection-row-key','engineer-issues::WI-42','password',seed=True);assert not m.mechanical_class_valid(e,f,ctx,seed=True)
+e,f=case('reviewed-descriptive-source-text','public-text','body');f['RuleID']='curl-auth-user';e['rule']=f['RuleID'];e['digest']=m.finding_digest(f);assert not m.mechanical_class_valid(e,f,ctx,seed=False)
+e,f=case('public-condition-reference',identifier);f['Secret']='changed';assert not m.mechanical_class_valid(e,f,ctx,seed=False)
+print(json.dumps({'positiveClasses':results,'negativeControls':True}))
+`;
+  const result = spawnSync('python3', ['-c', program, reportFormatterPath], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).positiveClasses.length, 10);
+  assert.equal(JSON.parse(result.stdout).negativeControls, true);
+});
+
+test('D-147 envelope predicate rederives all 62 findings and the historical 33 recipients', () => {
+  const program = String.raw`
+import importlib.util,json,sys,base64,hashlib
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+recipients=[base64.b64encode(m._key_publics(m._sodium(),bytes([i])*32)[0]).decode() for i in range(33)]
+ops=[{'table':'hive-members','hbKey':'member','value':{'device_attestations':[{'device_pubkey':p} for p in recipients]}}];report=[]
+for i in range(62):
+ value=base64.b64encode(bytes([i])*80).decode();p=recipients[i%33];epoch=i%2
+ ops.append({'table':'hive-epoch-keys','hbKey':str(epoch)+':'+p,'value':{'harness_slug':'papercusp','epoch':epoch,'member_device_pubkey':p,'wrapped_key':value}})
+ report.append({'RuleID':'generic-api-key','Match':'wrapped_key":"'+value+'"','Secret':value})
+source=b'\n'.join(json.dumps(op,separators=(',',':')).encode() for op in ops)
+proof={'count':62,'digests':[m.finding_digest(f) for f in report],'recipients':recipients,'sourceSha256':hashlib.sha256(source).hexdigest()}
+digests=m.validate_envelope_structure(proof,source,report,{0,1});assert len(digests)==62
+entry={'class':'recipient-sealed-epoch-key-envelope','rule':report[0]['RuleID'],'digest':m.finding_digest(report[0])}
+assert m.mechanical_class_valid(entry,report[0],{'seedFields':set(),'envelopeDigests':digests},seed=True)
+for changed in [{**proof,'count':61},{**proof,'digests':proof['digests'][:-1]},{**proof,'recipients':recipients[:-1]}]:
+ try: m.validate_envelope_structure(changed,source,report,{0,1});raise AssertionError('bad envelope proof passed')
+ except ValueError: pass
+try: m.validate_envelope_structure(proof,source,report,{0});raise AssertionError('unknown epoch passed')
+except ValueError: pass
+print(json.dumps({'envelopes':len(digests),'countMismatchRefused':True}))
+`;
+  const result = spawnSync('python3', ['-c', program, reportFormatterPath], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).envelopes, 62);
+});
+
+test('D-147 integrated proof refuses newly labelled classes without mechanical evidence and unclassified entries', () => {
+  for (const kind of ['public-opaque-operation-reference', 'unclassified']) {
+    const f = seedProofFixture();
+    try {
+      const read = name => JSON.parse(fs.readFileSync(path.join(f.evidence, name)));
+      const entries = read('plaintext-exact-finding-digests.json');
+      entries.forEach(entry => { entry.class = kind; entry.fieldPath = ['id']; });
+      f.write('plaintext-exact-finding-digests.json', entries);
+      const summary = read('plaintext-classification-safe.json');
+      summary.classes = { [kind]: entries.length }; f.write('plaintext-classification-safe.json', summary);
+      const seedSummary = read('seed-classification-verified-safe.json');
+      seedSummary.plaintextProofSha256 = f.hash(path.join(f.evidence, 'plaintext-classification-safe.json'));
+      f.write('seed-classification-verified-safe.json', seedSummary);
+      const proof = read('seed-finding-proof.json');
+      for (const name of Object.keys(proof.evidence)) proof.evidence[name] = f.hash(path.join(f.evidence, name));
+      f.write('seed-finding-proof.json', proof);
+      assert.equal(f.filter().status, 2, `${kind} passed without its predicate proof`);
+    } finally { fs.rmSync(f.temp, { recursive: true, force: true }); }
+  }
+});
+
 test('D-140 exact-content proof retains a new credential on the same blob line', () => {
   const f = seedProofFixture({ extraCredential: true });
   try {
