@@ -165,6 +165,7 @@ echo "  build stamp: $BUILD_STAMP"
 [ -s "$OUT/serve.mjs" ] || { echo "FATAL: esbuild produced no serve.mjs" >&2; exit 1; }
 
 bundle_host_workers "$REPO_ROOT" "$OUT" || exit 1
+bundle_host_spawner "$REPO_ROOT" "$OUT" "${HOST_EXTERNALS[@]}" || exit 1
 bundle_host_runtime_siblings "$REPO_ROOT" "$OUT" || exit 1
 
 # Sidecar stamp file: lets you answer the question with a `cat` instead of
