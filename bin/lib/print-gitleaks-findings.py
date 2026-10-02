@@ -259,7 +259,7 @@ def mechanical_class_valid(entry: dict[str, object], finding: dict[str, object],
     if kind == "public-generated-agent-identifier":
         if (actual != value or field not in _RESPAWN_FIELDS or finding["RuleID"] != "generic-api-key"
                 or entry.get("line") != finding["StartLine"]
-                or entry.get("rowSha256") != context["plainRowDigests"][int(finding["StartLine"])]) :
+                or entry.get("rowSha256") != context["plainRowDigests"][int(finding["StartLine"])]):
             return False
         ref = entry["makerRef"]
         expected = _RESPAWN_MAKERS.get(ref.get("path"))
@@ -273,7 +273,13 @@ def mechanical_class_valid(entry: dict[str, object], finding: dict[str, object],
             return False
         if shape not in expected[1]:
             return False
-        _frozen_source_bytes(ref, context["trees"])
+        # Thousands of rows cite the same immutable Git blob. Verify it once
+        # within this validation context, then re-check HEAD at the batch end.
+        cache = context.setdefault("_makerProofCache", {})
+        witness = (ref["tree"], ref["path"], ref["blob"])
+        if witness not in cache:
+            _frozen_source_bytes(ref, context["trees"])
+            cache[witness] = dict(ref)
         check = scan_secret_key_bytes(value.encode(), set(), context["publicKeys"])
         return check["realFindings"] == 0 and check["derivationMatches"] == 0
     if actual != value or _CREDENTIAL_FIELD.search(field):
@@ -299,6 +305,8 @@ def _validate_mechanical_entries(entries: list[dict[str, object]], report: list[
         if entry["class"] in added and not mechanical_class_valid(
                 entry, finding, context, seed=seed):
             raise ValueError("mechanical class predicate failed")
+    for ref in context.get("_makerProofCache", {}).values():
+        _source_tree(ref, context["trees"])
 
 
 def _table_ops(source: bytes, table: str) -> list[dict[str, object]]:
