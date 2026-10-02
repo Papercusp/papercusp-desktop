@@ -348,3 +348,56 @@ test('failed scans retain private evidence while successful scans remove reports
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
+
+test('seed classification indexes once, resolves split fields, and keeps raw tokens unclassified', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-seed-classify-'));
+  try {
+    const messageId = ['abcdefgh', '0000', '1234567890abcdef'.repeat(2)].join('-');
+    const ciphertext = Buffer.from(Array.from({ length: 80 }, (_, i) => i)).toString('base64');
+    const rawToken = ['A9f3Kx7L', 'm2Qp8Rz4', 'V6nC1wH7'].join('');
+    const blob = path.join(temp, 'fixture.blob');
+    fs.writeFileSync(blob, JSON.stringify({ hbKey: messageId, value: { __rekey: ciphertext }, token: rawToken }));
+    const finding = (field, value) => ({ RuleID: 'generic-api-key', Match: `${field}":"${value}"`, Secret: value });
+    const report = path.join(temp, 'report.json');
+    fs.writeFileSync(report, JSON.stringify([
+      ...Array(1000).fill(finding('hbKey', messageId)),
+      finding('__rekey', ciphertext),
+      ...Array(20).fill(finding('rekey', ciphertext)),
+      finding('token', rawToken),
+      finding('__rekey', rawToken),
+      { ...finding('hbKey', messageId), RuleID: 'other-rule' },
+    ]));
+    const result = spawnSync('python3', [reportFormatterPath, '--classify-seed', report, blob], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const summary = JSON.parse(result.stdout);
+    assert.deepEqual(summary.classes, { 'public-message-id': 1000, 'ciphertext-envelope-framing': 21, unclassified: 3 });
+    assert.equal(summary.indexPasses, 1);
+    assert.equal(summary.fullBlobSearches, 1, 'repeated fragments must share one source lookup');
+    assert.ok(summary.residuals.every((row) => row.originalField === '__rekey'));
+    for (const value of [messageId, ciphertext, rawToken, blob]) {
+      assert.ok(!(result.stdout + result.stderr).includes(value), 'classification disclosed a value or path');
+    }
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('seed classification refuses redacted findings and invalid ciphertext without printing values', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-seed-classify-negative-'));
+  try {
+    const blob = path.join(temp, 'fixture.blob');
+    const invalid = 'not-ciphertext!';
+    fs.writeFileSync(blob, JSON.stringify({ __rekey: invalid }));
+    const report = path.join(temp, 'report.json');
+    fs.writeFileSync(report, JSON.stringify([
+      { RuleID: 'generic-api-key', Match: `__rekey":"${invalid}"`, Secret: invalid },
+      { RuleID: 'generic-api-key', Match: 'hbKey":"REDACTED"', Secret: 'REDACTED' },
+    ]));
+    const result = spawnSync('python3', [reportFormatterPath, '--classify-seed', report, blob], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout).classes, { unclassified: 2 });
+    assert.ok(!(result.stdout + result.stderr).includes(invalid));
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
