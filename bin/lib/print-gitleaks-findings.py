@@ -21,6 +21,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import tarfile
 from collections import Counter
 from pathlib import Path
 
@@ -385,6 +386,124 @@ def _secret_input_hash(path: Path) -> str:
     return _sha256(path)
 
 
+_IDENTITY_NAMES = ("*keychain*", "*keystore*", "*device-keypair*", "*.pem", "*.p8", "*.key")
+
+
+def _identity_name_hit(path: Path) -> bool:
+    return any(fnmatch.fnmatch(path.name.lower(), pattern) for pattern in _IDENTITY_NAMES)
+
+
+def _frozen_source_bytes(ref: dict[str, object], trees: dict[str, object]) -> bytes:
+    root, sha = _source_tree(ref, trees)
+    relative = ref["path"]
+    if (not isinstance(relative, str) or Path(relative).is_absolute()
+            or ".." in Path(relative).parts):
+        raise ValueError("invalid frozen source locator")
+    blob = subprocess.run(["git", "-C", str(root), "rev-parse", sha + ":" + relative],
+                          check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode().strip()
+    if blob != ref["blob"]:
+        raise ValueError("frozen source blob mismatch")
+    return subprocess.run(["git", "-C", str(root), "cat-file", "blob", blob], check=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+
+
+def _vendored_package_bytes(ref: dict[str, object], trees: dict[str, object]) -> bytes:
+    """D-150 V2: bind the package member to its frozen lockfile integrity."""
+    lock = json.loads(_frozen_source_bytes(ref["lockRef"], trees))
+    package = lock["packages"][ref["packagePath"]]
+    if (package["version"] != ref["version"] or package["integrity"] != ref["integrity"]
+            or ref["packagePath"] != "node_modules/" + ref["name"]):
+        raise ValueError("vendored certificate package mismatch")
+    algorithm, encoded = ref["integrity"].split("-", 1)
+    if algorithm not in {"sha256", "sha384", "sha512"}:
+        raise ValueError("unsupported package integrity")
+    archive = Path(ref["archive"])
+    if archive.is_symlink() or not archive.is_file():
+        raise ValueError("package archive required")
+    before = _sha256(archive)
+    digest = hashlib.new(algorithm)
+    with archive.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if base64.b64encode(digest.digest()).decode() != encoded:
+        raise ValueError("package archive integrity mismatch")
+    member = ref["member"]
+    if not member.startswith("package/") or ".." in Path(member).parts:
+        raise ValueError("invalid package member")
+    with tarfile.open(archive) as handle:
+        found = [row for row in handle.getmembers() if row.name == member]
+        if len(found) != 1 or not found[0].isfile():
+            raise ValueError("exact regular package member required")
+        data = handle.extractfile(found[0]).read()
+    if _sha256(archive) != before:
+        raise ValueError("package archive changed")
+    return data
+
+
+def _parsed_public_certificates(data: bytes) -> list[dict[str, str]]:
+    if re.search(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", data):
+        raise ValueError("private key in public certificate input")
+    blocks = list(re.finditer(rb"-----BEGIN CERTIFICATE-----\s+([A-Za-z0-9+/=\s]+)"
+                             rb"-----END CERTIFICATE-----", data))
+    if (not blocks or len(blocks) != data.count(b"-----BEGIN CERTIFICATE-----")
+            or len(blocks) != data.count(b"-----END CERTIFICATE-----")):
+        raise ValueError("complete public certificates required")
+    result = []
+    for block in blocks:
+        parsed = subprocess.run(["openssl", "x509", "-inform", "PEM", "-noout",
+                                 "-sha256", "-fingerprint", "-subject", "-nameopt", "RFC2253"],
+                                input=block.group(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        if parsed.returncode != 0:
+            raise ValueError("public certificate parse failed")
+        lines = parsed.stdout.decode().splitlines()
+        fingerprint = lines[0].split("=", 1)[1].replace(":", "").lower()
+        subject = lines[1].removeprefix("subject=")
+        if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            raise ValueError("public certificate fingerprint invalid")
+        result.append({"sha256": fingerprint, "subject": subject})
+    return result
+
+
+def validate_identity_name_exclusions(entries: list[dict[str, object]], inputs: set[Path],
+                                      recipients: set[bytes], publics: set[bytes],
+                                      trees: dict[str, object]) -> dict[str, int]:
+    """D-150 V1/V2: exact file digests, re-derived provenance and key checks."""
+    seen = set()
+    counts = Counter()
+    for entry in entries:
+        path = Path(os.path.abspath(entry["path"]))
+        if (path in seen or path not in inputs or path.is_symlink() or not path.is_file()
+                or not _identity_name_hit(path) or _sha256(path) != entry["sha256"]):
+            raise ValueError("identity name exclusion input mismatch")
+        data = path.read_bytes()
+        key_check = scan_secret_key_bytes(data, recipients, publics)
+        private_der = subprocess.run(["openssl", "pkey", "-inform", "DER", "-noout"],
+                                     input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if key_check["realFindings"] != 0 or private_der.returncode == 0:
+            raise ValueError("private material cannot be name-excluded")
+        kind = entry["class"]
+        if kind == "frozen-public-source-vocabulary":
+            if _frozen_source_bytes(entry["sourceRef"], trees) != data:
+                raise ValueError("public source exclusion bytes mismatch")
+        elif kind == "parsed-public-x509-certificate":
+            certificates = _parsed_public_certificates(data)
+            if certificates != entry["certificates"]:
+                raise ValueError("public certificate identity mismatch")
+            if ("sourceRef" in entry) == ("packageRef" in entry):
+                raise ValueError("one certificate provenance required")
+            provenance = (_frozen_source_bytes(entry["sourceRef"], trees) if "sourceRef" in entry
+                          else _vendored_package_bytes(entry["packageRef"], trees))
+            if provenance != data:
+                raise ValueError("public certificate provenance bytes mismatch")
+        else:
+            raise ValueError("unsupported identity name exclusion")
+        if _sha256(path) != entry["sha256"]:
+            raise ValueError("identity name exclusion input changed")
+        seen.add(path)
+        counts[entry["sha256"]] += 1
+    return dict(sorted(counts.items()))
+
+
 def validate_identity_secret_proof(scan: dict[str, object], root: Path, directory: Path,
                                    recipients: set[bytes], reference: dict[str, object]) -> None:
     if (scan.get("schema") != "papercusp-sealed-envelope-secret-scan-v1"
@@ -412,6 +531,13 @@ def validate_identity_secret_proof(scan: dict[str, object], root: Path, director
         kind = "symlink-target" if path.is_symlink() else "file"
         if row.get("contentKind", "file") != kind or _secret_input_hash(path) != row["sha256"]:
             raise ValueError("identity secret scan input changed")
+    manifest = json.loads((root / "manifest.json").read_text())
+    exclusions = scan.get("nameExclusions", [])
+    counts = validate_identity_name_exclusions(exclusions, expected, recipients,
+                                              _manifest_publics(manifest), reference.get("trees", {}))
+    if (scan.get("nameExclusionCounts", {}) != counts
+            or len(exclusions) != sum(_identity_name_hit(path) for path in expected)):
+        raise ValueError("identity name exclusions incomplete")
     controls = scan.get("controls", [])
     encodings = {"der-base64", "pem", "jwk-d", "hex-seed", "base64-seed", "raw-sodium-secret"}
     samples = {}
@@ -433,8 +559,8 @@ def validate_identity_secret_proof(scan: dict[str, object], root: Path, director
 _ED25519_DER_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
 _X25519_DER_PREFIX = bytes.fromhex("302e020100300506032b656e04220420")
 _KEY_TOKENS = re.compile(rb"(?<![A-Za-z0-9_+/=-])(?:[0-9a-fA-F]{128}|[0-9a-fA-F]{64}|[A-Za-z0-9_+/-]{86}={0,2}|[A-Za-z0-9_+/-]{43}=?)(?![A-Za-z0-9_+/=-])")
-_PEM_PRIVATE = re.compile(rb"-----BEGIN (PRIVATE KEY|OPENSSH PRIVATE KEY|ENCRYPTED PRIVATE KEY)-----\s+([A-Za-z0-9+/=\s]+)-----END \1-----")
-_PRIVATE_JWK = re.compile(rb'\{[^{}]{0,16384}"crv"\s*:\s*"(?:Ed25519|X25519)"[^{}]{0,16384}\}')
+_PEM_PRIVATE = re.compile(rb"-----BEGIN ((?:[A-Z0-9]+ )*PRIVATE KEY)-----\s+([A-Za-z0-9+/=\s]+)-----END \1-----")
+_PRIVATE_JWK = re.compile(rb'\{[^{}]{0,16384}"kty"\s*:\s*"(?:OKP|RSA|EC)"[^{}]{0,16384}\}')
 
 
 def _sodium():
@@ -464,7 +590,8 @@ def _key_publics(sodium, seed: bytes) -> tuple[bytes, bytes]:
     return ed.raw, curve.raw
 
 
-def scan_secret_key_bytes(data: bytes, recipients: set[bytes]) -> dict[str, int]:
+def scan_secret_key_bytes(data: bytes, recipients: set[bytes],
+                          public_keys: set[bytes] | None = None) -> dict[str, int]:
     """Read-only, value-free detector shared by real input and planted controls."""
     sodium = _sodium()
     curve_recipients = set()
@@ -476,8 +603,11 @@ def scan_secret_key_bytes(data: bytes, recipients: set[bytes]) -> dict[str, int]
             raise ValueError("invalid Ed25519 recipient public key")
         curve_recipients.add(curve.raw)
     seeds: set[bytes] = set()
+    public_keys = public_keys or set()
     serialized = 0
     raw_sk_matches = 0
+    if len(data) in (32, 64):
+        seeds.add(data[:32])
 
     def der(value: bytes) -> bool:
         nonlocal serialized
@@ -499,7 +629,7 @@ def scan_secret_key_bytes(data: bytes, recipients: set[bytes]) -> dict[str, int]
     der(data)
     # A raw libsodium Ed25519 secret is seed || public. Search recipient public
     # bytes first, then derive the preceding seed; random ciphertext is not a key.
-    for public in recipients:
+    for public in recipients | public_keys:
         offset = data.find(public)
         while offset >= 0:
             if offset >= 32:
@@ -529,8 +659,9 @@ def scan_secret_key_bytes(data: bytes, recipients: set[bytes]) -> dict[str, int]
             continue
         if isinstance(value, dict) and isinstance(value.get("d"), str):
             raw = base64.urlsafe_b64decode(value["d"] + "=" * (-len(value["d"]) % 4))
-            if len(raw) in (32, 64):
+            if value.get("crv") in {"Ed25519", "X25519"} and len(raw) in (32, 64):
                 seeds.add(raw[:32])
+            if raw:
                 serialized += 1
     for match in _KEY_TOKENS.finditer(data):
         token = match.group()
@@ -548,7 +679,7 @@ def scan_secret_key_bytes(data: bytes, recipients: set[bytes]) -> dict[str, int]
     matches = 0
     for seed in seeds:
         ed, curve = _key_publics(sodium, seed)
-        if ed in recipients or curve in curve_recipients:
+        if ed in recipients | public_keys or curve in curve_recipients | public_keys:
             matches += 1
     pem_blocks = len(list(_PEM_PRIVATE.finditer(data)))
     marker_hits = (data.count(b"BEGIN PRIVATE KEY") +
@@ -565,7 +696,10 @@ def scan_secret_key_bytes(data: bytes, recipients: set[bytes]) -> dict[str, int]
 
 
 def scan_identity_secret_inputs(inputs: list[Path], recipients: set[bytes],
-                                control_samples: list[Path]) -> dict[str, object]:
+                                control_samples: list[Path], *,
+                                name_exclusions: list[dict[str, object]] | None = None,
+                                trees: dict[str, object] | None = None,
+                                public_keys: set[bytes] | None = None) -> dict[str, object]:
     """Scan an explicit complete inventory and run controls only in memory.
 
     The caller binds the inventory to seed/assembled-bundle or final artifacts.
@@ -577,19 +711,23 @@ def scan_identity_secret_inputs(inputs: list[Path], recipients: set[bytes],
         raise ValueError("complete inventory and real control samples required")
     totals = Counter()
     inventory = []
-    forbidden_names = ("*keychain*", "*keystore*", "*device-keypair*", "*.pem", "*.p8", "*.key")
+    name_exclusions = name_exclusions or []
+    public_keys = public_keys or set()
+    exclusion_counts = validate_identity_name_exclusions(name_exclusions, set(inputs), recipients,
+                                                         public_keys, trees or {})
+    excluded = {Path(os.path.abspath(entry["path"])) for entry in name_exclusions}
     for path in inputs:
         kind = "symlink-target" if path.is_symlink() else "file"
         before = _secret_input_hash(path)
         # Chunk overlap covers the scanner's largest bounded JWK serialization.
         # It keeps large full-history bundles out of Python heap allocations.
         if kind == "symlink-target":
-            totals.update(scan_secret_key_bytes(os.fsencode(os.readlink(path)), recipients))
+            totals.update(scan_secret_key_bytes(os.fsencode(os.readlink(path)), recipients, public_keys))
         else:
             with path.open("rb") as handle:
                 previous = b""
                 for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
-                    totals.update(scan_secret_key_bytes(previous + chunk, recipients))
+                    totals.update(scan_secret_key_bytes(previous + chunk, recipients, public_keys))
                     previous = chunk[-32768:]
         if (("symlink-target" if path.is_symlink() else "file") != kind
                 or _secret_input_hash(path) != before):
@@ -598,7 +736,7 @@ def scan_identity_secret_inputs(inputs: list[Path], recipients: set[bytes],
         if kind != "file":
             entry["contentKind"] = kind
         inventory.append(entry)
-        if any(fnmatch.fnmatch(path.name.lower(), pattern) for pattern in forbidden_names):
+        if _identity_name_hit(path) and Path(os.path.abspath(path)) not in excluded:
             totals["nameScanHits"] += 1
     sodium = _sodium()
     seed = os.urandom(32)
@@ -634,6 +772,7 @@ def scan_identity_secret_inputs(inputs: list[Path], recipients: set[bytes],
             "tokensChecked": totals["tokensChecked"],
             "literalOnlyMarkers": totals["literalOnlyMarkers"],
             "nameScanHits": totals["nameScanHits"], "controls": results,
+            "nameExclusions": name_exclusions, "nameExclusionCounts": exclusion_counts,
             "positivePlantedSecretDetected": True}
 
 
@@ -657,7 +796,10 @@ def scan_identity_proof(config_path: Path, seed: Path, output: Path) -> dict[str
     if (not any(value in plaintext for value in controls)
             or not any(value.resolve().is_relative_to(root.resolve()) for value in controls for root in roots[1:])):
         raise ValueError("plaintext and bundle control samples required")
-    scan = scan_identity_secret_inputs(paths, recipients, controls)
+    scan = scan_identity_secret_inputs(paths, recipients, controls,
+                                      name_exclusions=config.get("nameExclusions", []),
+                                      trees=config.get("trees", {}),
+                                      public_keys=_manifest_publics(json.loads((seed / "manifest.json").read_text())))
     scan["seedRootSha"] = _sha256(seed / "manifest.json")
     scan["collectorConfigSha256"] = _sha256(config_path)
     if output.parent.is_symlink() or not output.parent.is_dir() or output.parent.stat().st_mode & 0o077:
