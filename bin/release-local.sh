@@ -2747,10 +2747,23 @@ _GITLEAKS_STATUS=0
 _GITLEAKS_FAILED_ROOTS=()
 for _gitleaks_root in "src-tauri/sidecar" "src-tauri/resources" "src-tauri/seed"; do
   _gitleaks_report_path="$_GITLEAKS_REPORT_DIR/$(basename "$_gitleaks_root").json"
-  if ! ( cd "$ROOT" && gitleaks dir "$_gitleaks_root" \
+  _gitleaks_redact=100
+  if [[ "$_gitleaks_root" == "src-tauri/seed" && -n "${PAPERCUSP_RELEASE_SEED_FINDING_PROOF:-}" ]]; then
+    # Exact-content digests require a private raw report. Never log its values.
+    _gitleaks_redact=0
+  fi
+  _gitleaks_rc=0
+  ( cd "$ROOT" && gitleaks dir "$_gitleaks_root" \
       --config "$ORCHESTRATOR_HERE/release-gitleaks.toml" \
-      --no-banner --log-level=error --redact=100 \
-      --report-format=json --report-path="$_gitleaks_report_path" ); then
+      --no-banner --log-level=error --redact="$_gitleaks_redact" \
+      --report-format=json --report-path="$_gitleaks_report_path" ) >/dev/null 2>&1 || _gitleaks_rc=$?
+  if [[ "$_gitleaks_redact" == "0" && ( "$_gitleaks_rc" == "0" || "$_gitleaks_rc" == "1" ) ]]; then
+    _gitleaks_rc=0
+    ( cd "$ROOT" && python3 "$ORCHESTRATOR_HERE/lib/print-gitleaks-findings.py" \
+        --filter-seed "$_gitleaks_report_path" "$_gitleaks_root" \
+        "$PAPERCUSP_RELEASE_SEED_FINDING_PROOF" "$ORCHESTRATOR_HERE/release-gitleaks.toml" ) || _gitleaks_rc=$?
+  fi
+  if [[ "$_gitleaks_rc" != "0" ]]; then
     _GITLEAKS_STATUS=1
     _GITLEAKS_FAILED_ROOTS+=("$_gitleaks_root")
   fi
