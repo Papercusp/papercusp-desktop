@@ -1973,8 +1973,20 @@ def _iter_archives(dirs):
         for dirpath, _dirnames, filenames in os.walk(root):
             for fn in filenames:
                 low = fn.lower()
-                if low.endswith(ARCHIVE_SUFFIXES):
-                    yield os.path.join(dirpath, fn)
+                if not low.endswith(ARCHIVE_SUFFIXES):
+                    continue
+                full = os.path.join(dirpath, fn)
+                # A SYMLINKED archive is never expanded (WI-10005667). Opening it resolves
+                # an absolute target against the HOST root, not the scanned tree: on a
+                # container rootfs (usr/share/man/man1/man.1.gz -> /etc/alternatives/...)
+                # the link dangled and failed the gate, and a target that happened to
+                # exist on the host would have been read as image content. Nothing is
+                # lost: the link's target STRING is scanned by the symlink-target phase
+                # (WI-39462), and a target that ships is a regular file this walk reaches
+                # in its own right, the same rule grep -r applies to a symlinked file.
+                if os.path.islink(full):
+                    continue
+                yield full
 
 
 #: An expanded archive is treated as an OS ROOTFS when it has `usr/` plus at least
