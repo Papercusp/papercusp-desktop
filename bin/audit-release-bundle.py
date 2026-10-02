@@ -2125,6 +2125,28 @@ def _expand_archive(path, dest):
     os.makedirs(dest, exist_ok=True)
     low = path.lower()
     try:
+        # dpkg names its plaintext alternatives state after the managed link,
+        # including a manpage's .gz suffix. Recursive artifact readers encounter
+        # these files inside runtime images. Materialize their actual text for
+        # the SAME content scanner, rather than skipping it or feeding it to
+        # gzip. Real gzip and opaque/corrupt inputs keep the normal refusal.
+        normalized = os.path.abspath(path).replace(os.sep, "/")
+        if low.endswith(".gz") and "/var/lib/dpkg/alternatives/" in normalized:
+            with open(path, "rb") as handle:
+                prefix = handle.read(2)
+                if prefix != b"\x1f\x8b":
+                    handle.seek(0)
+                    data = handle.read(4 * 1024 * 1024 + 1)
+                    if len(data) > 4 * 1024 * 1024:
+                        return False
+                    text = data.decode("utf-8")
+                    if (not text.startswith(("auto\n", "manual\n"))
+                            or any(ord(char) < 32 and char not in "\n\r\t" for char in text)
+                            or "\x7f" in text):
+                        return False
+                    with open(os.path.join(dest, "payload"), "wb") as output:
+                        output.write(data)
+                    return True
         if low.endswith(".zip") or low.endswith(".jar") or low.endswith(".asar"):
             with zipfile.ZipFile(path) as zf:
                 zf.extractall(dest)  # noqa: S202 — scanned then discarded, never executed

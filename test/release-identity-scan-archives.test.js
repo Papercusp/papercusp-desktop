@@ -65,6 +65,34 @@ function scanArtifact(artifact, env = {}) {
   });
 }
 
+test('plaintext dpkg alternatives state named .gz is scanned without weakening corrupt archive refusal', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dpkg-alternatives-scan-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const folder = path.join(dir, 'var/lib/dpkg/alternatives');
+  fs.mkdirSync(folder, { recursive: true });
+  const file = path.join(folder, 'psql.1.gz');
+  const state = 'auto\n/usr/share/man/man1/psql.1.gz\n\n/usr/share/postgresql/man/man1/psql.1.gz\n160\n';
+  fs.writeFileSync(file, state);
+  let result = scanDir(dir);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.doesNotMatch(result.stdout, /COULD NOT BE INSPECTED/);
+  fs.writeFileSync(file, state + identityLiteral() + '\n');
+  result = scanDir(dir);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.doesNotMatch(result.stdout, /COULD NOT BE INSPECTED/);
+  fs.writeFileSync(file, require('node:zlib').gzipSync(Buffer.from(state)));
+  result = scanDir(dir);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  fs.writeFileSync(file, Buffer.from([0x1f, 0x8b, 0, 0]));
+  result = scanDir(dir);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /COULD NOT BE INSPECTED/);
+  fs.writeFileSync(file, Buffer.from('auto\n\0binary'));
+  result = scanDir(dir);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /COULD NOT BE INSPECTED/);
+});
+
 for (const state of ['valid', 'missing', 'invalid-json', 'invalid-hash', 'mismatch', 'missing-serve']) {
   test(`finished Windows Server runtime closure: ${state}`, (t) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'windows-runtime-closure-'));
