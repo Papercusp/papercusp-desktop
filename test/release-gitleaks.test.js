@@ -32,6 +32,7 @@ test('D-142 secret-key detector catches serialized keys and recipient seeds with
       base64Seed: Buffer.from(seed.toString('base64')),
       base64urlSeed: Buffer.from(seed.toString('base64url')),
       sodiumSecret: Buffer.from(Buffer.concat([seed, publicKey]).toString('base64')),
+      rawSodiumSecret: Buffer.concat([seed, publicKey]),
     };
     const program = 'import importlib.util,json,base64,sys\ns=importlib.util.spec_from_file_location("f",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\nprint(json.dumps(m.scan_secret_key_bytes(open(sys.argv[2],"rb").read(),{base64.b64decode(sys.argv[3])})))';
     for (const [encoding, data] of Object.entries(cases)) {
@@ -61,7 +62,34 @@ test('D-142 secret-key detector distinguishes source vocabulary and unrelated pu
   const program = 'import importlib.util,json,base64,sys\ns=importlib.util.spec_from_file_location("f",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\nsodium=m._sodium();public,_=m._key_publics(sodium,bytes(range(32)))\ndata=b"BEGIN PRIVATE KEY papercusp-hive-epoch-key 302e020100300506032b657004220420 " + public.hex().encode()\nprint(json.dumps(m.scan_secret_key_bytes(data,{public})))';
   const result = spawnSync('python3', ['-c', program, reportFormatterPath], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), { realFindings: 0, derivationMatches: 0, tokensChecked: 1 });
+  assert.deepEqual(JSON.parse(result.stdout), { realFindings: 0, derivationMatches: 0, tokensChecked: 1, literalOnlyMarkers: 2 });
+});
+
+test('D-142 inventory scan binds input hashes, detects keystore names, and runs the same planted controls', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-key-inventory-'));
+  try {
+    const plain = path.join(temp, 'plaintext.jsonl');
+    const bundle = path.join(temp, 'serve.mjs');
+    fs.writeFileSync(plain, '{"public":"example"}\n');
+    fs.writeFileSync(bundle, 'const service="papercusp-hive-epoch-key";\n');
+    const program = 'import importlib.util,json,sys,pathlib\ns=importlib.util.spec_from_file_location("f",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\npublic,_=m._key_publics(m._sodium(),bytes(range(32)))\npaths=[pathlib.Path(p) for p in sys.argv[2:]]\nprint(json.dumps(m.scan_identity_secret_inputs(paths,{public},paths)))';
+    const run = (...files) => spawnSync('python3', ['-c', program, reportFormatterPath, ...files], { encoding: 'utf8' });
+    const result = run(plain, bundle);
+    assert.equal(result.status, 0, result.stderr);
+    const proof = JSON.parse(result.stdout);
+    assert.equal(proof.realFindings, 0);
+    assert.equal(proof.derivationMatches, 0);
+    assert.equal(proof.nameScanHits, 0);
+    assert.equal(proof.literalOnlyMarkers, 1);
+    assert.equal(proof.controls.length, 12);
+    assert.ok(proof.controls.every(row => row.detected && row.derivationDetected));
+    const hash = file => require('node:crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+    assert.equal(proof.scannerSha256, hash(reportFormatterPath));
+    assert.deepEqual(proof.inputs, [plain, bundle].map(file => ({ path: file, sha256: hash(file) })));
+    const named = path.join(temp, 'device-keypair.enc');
+    fs.writeFileSync(named, 'opaque-keystore');
+    assert.equal(JSON.parse(run(named).stdout).nameScanHits, 1);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
 function scan(entries, { config = true } = {}) {
