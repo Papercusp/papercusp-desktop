@@ -48,7 +48,48 @@ _PROOF_FILES = (
     "seed-exact-finding-digests.json", "seed-000080.plaintext.private.meta.json",
     "seed-000080.plaintext.private.json", "seed-000080.plaintext.jsonl",
     "seed-000080.private.meta.json", "seed-000080.private.json",
+    "forbidden-literals.private.json",
 )
+
+# D-148: scanner findings alone missed a credential inside an issue body.
+# The literal remains private; only its identity is part of the release contract.
+_REQUIRED_FORBIDDEN_DIGESTS = {
+    "4e77512c313a47d2e6f84c040beb7bf4ace649adc83be6bbd7ec26ff3a3fe912",
+}
+
+
+def verify_literal_absence(inputs: list[Path], literals: list[dict[str, str]],
+                          required: set[str]) -> dict[str, object]:
+    """Check actual bytes independently of scanner rules or finding digests."""
+    if not inputs or not literals:
+        raise ValueError("complete literal guard inputs required")
+    values = []
+    for entry in literals:
+        value = entry.get("literal")
+        if (not isinstance(value, str) or not value
+                or hashlib.sha256(value.encode()).hexdigest() != entry.get("sha256")):
+            raise ValueError("forbidden literal identity mismatch")
+        values.append(value.encode())
+    identities = {entry["sha256"] for entry in literals}
+    if not required.issubset(identities):
+        raise ValueError("required literal guard missing")
+    inventory = []
+    overlap = max(map(len, values)) - 1
+    for path in inputs:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("invalid literal guard input")
+        before = _sha256(path)
+        previous = b""
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                if any(value in previous + chunk for value in values):
+                    raise ValueError("forbidden literal remains")
+                previous = chunk[-overlap:] if overlap else b""
+        if _sha256(path) != before:
+            raise ValueError("literal guard input changed")
+        inventory.append({"path": str(path), "sha256": before})
+    return {"schema": "papercusp-known-literal-absence-v1", "inputs": inventory,
+            "literalDigests": sorted(identities), "rawLiteralHits": 0}
 
 # D-142/D-147: recognize complete private-key material, including raw seeds
 # whose derived public key belongs to a recipient. Source vocabulary by itself
@@ -324,6 +365,10 @@ def validate_seed_proof(proof: dict[str, object], directory: Path, root: Path,
             or auth.get("unparsedCiphertextFields") != 0
             or auth.get("negativeControls") != {"tamper_rejected": True, "wrong_key_rejected": True}):
         raise ValueError("cipher authentication incomplete")
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    verify_literal_absence([directory / "seed-000080.plaintext.jsonl"],
+                          evidence["forbidden-literals.private.json"],
+                          _REQUIRED_FORBIDDEN_DIGESTS if manifest.get("potId") == "papercusp" else set())
     plain = evidence["plaintext-classification-safe.json"]
     plain_entries = evidence["plaintext-exact-finding-digests.json"]
     plain_allowed = _classification(plain, plain_entries, _PLAIN_CLASSES)

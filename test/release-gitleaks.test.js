@@ -570,6 +570,9 @@ function seedProofFixture({ extraCredential = false } = {}) {
   fs.writeFileSync(path.join(seed, 'manifest.json'), '{}');
   const write = (name, value) => fs.writeFileSync(path.join(evidence, name), JSON.stringify(value), { mode: 0o600 });
   const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  const forbidden = ['fixture-forbidden-', 'literal-independent-of-scanner'].join('');
+  write('forbidden-literals.private.json', [{ literal: forbidden,
+    sha256: crypto.createHash('sha256').update(forbidden).digest('hex') }]);
   const digest = row => crypto.createHash('sha256').update(JSON.stringify([row.RuleID, row.Match, row.Secret])).digest('hex');
   const report = file => {
     const result = spawnSync(gitleaksBin, ['dir', file, '--config', configPath, '--no-banner', '--log-level=error',
@@ -615,6 +618,58 @@ function seedProofFixture({ extraCredential = false } = {}) {
   };
   return { temp, seed, evidence, blob, proof, current, approved, filter, write, hash };
 }
+
+test('D-148 literal guard refuses scanner-invisible residue and incomplete identities', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-literal-guard-'));
+  try {
+    const value = ['fixture-hidden-', 'credential'].join('');
+    const input = path.join(temp, 'plaintext.jsonl');
+    const crypto = require('node:crypto');
+    const digest = crypto.createHash('sha256').update(value).digest('hex');
+    const program = 'import importlib.util,json,pathlib,sys\ns=importlib.util.spec_from_file_location("f",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\nprint(json.dumps(m.verify_literal_absence([pathlib.Path(sys.argv[2])],json.loads(sys.argv[3]),set(json.loads(sys.argv[4])))))';
+    const run = (entries = [{ literal: value, sha256: digest }], required = [digest]) =>
+      spawnSync('python3', ['-c', program, reportFormatterPath, input,
+        JSON.stringify(entries), JSON.stringify(required)], { encoding: 'utf8' });
+    fs.writeFileSync(input, JSON.stringify({ body: 'review text' }));
+    assert.equal(run().status, 0);
+    // No scanner report contains this value: the raw-byte check must still refuse it.
+    fs.writeFileSync(input, JSON.stringify({ body: value }));
+    assert.notEqual(run().status, 0);
+    // Exercise a literal crossing the chunk boundary as well.
+    fs.writeFileSync(input, 'x'.repeat(1024 * 1024 - 4) + value);
+    assert.notEqual(run().status, 0);
+    fs.writeFileSync(input, '{}');
+    assert.notEqual(run([{ literal: value, sha256: '0'.repeat(64) }]).status, 0);
+    assert.notEqual(run([], []).status, 0);
+    assert.notEqual(run(undefined, ['f'.repeat(64)]).status, 0);
+    assert.ok(!(run().stdout + run().stderr).includes(value));
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test('D-148 exact proof refuses literal residue even with matching report and evidence hashes', () => {
+  const f = seedProofFixture();
+  try {
+    const crypto = require('node:crypto');
+    const plain = path.join(f.evidence, 'seed-000080.plaintext.jsonl');
+    const rows = fs.readFileSync(plain, 'utf8');
+    const literal = JSON.parse(fs.readFileSync(path.join(f.evidence, 'forbidden-literals.private.json')))[0].literal;
+    fs.appendFileSync(plain, JSON.stringify({ body: literal }) + '\n');
+    const update = name => JSON.parse(fs.readFileSync(path.join(f.evidence, name)));
+    const meta = update('seed-000080.plaintext.private.meta.json');
+    meta.identity.blobSha256 = f.hash(plain); f.write('seed-000080.plaintext.private.meta.json', meta);
+    const summary = update('plaintext-classification-safe.json');
+    summary.plaintextSha256 = f.hash(plain); f.write('plaintext-classification-safe.json', summary);
+    const seedSummary = update('seed-classification-verified-safe.json');
+    seedSummary.plaintextProofSha256 = f.hash(path.join(f.evidence, 'plaintext-classification-safe.json'));
+    f.write('seed-classification-verified-safe.json', seedSummary);
+    const proof = update('seed-finding-proof.json');
+    for (const name of Object.keys(proof.evidence)) proof.evidence[name] = f.hash(path.join(f.evidence, name));
+    f.write('seed-finding-proof.json', proof);
+    assert.equal(f.filter().status, 2);
+    // The refusal is semantic, even after all changed input hashes are resealed.
+    assert.ok(rows.length > 0);
+  } finally { fs.rmSync(f.temp, { recursive: true, force: true }); }
+});
 
 test('D-140 exact-content proof retains a new credential on the same blob line', () => {
   const f = seedProofFixture({ extraCredential: true });
