@@ -10,6 +10,8 @@ in the release log.
 from __future__ import annotations
 
 import base64
+import ctypes
+import ctypes.util
 import hashlib
 import json
 import mmap
@@ -46,6 +48,115 @@ _PROOF_FILES = (
     "seed-000080.plaintext.private.json", "seed-000080.plaintext.jsonl",
     "seed-000080.private.meta.json", "seed-000080.private.json",
 )
+
+# D-142/D-147: recognize complete private-key material, including raw seeds
+# whose derived public key belongs to a recipient. Source vocabulary by itself
+# (a PEM header or a service name in code) is not a serialized private key.
+_ED25519_DER_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
+_KEY_TOKENS = re.compile(rb"(?<![A-Za-z0-9_+/=-])(?:[0-9a-fA-F]{128}|[0-9a-fA-F]{64}|[A-Za-z0-9_+/-]{86}={0,2}|[A-Za-z0-9_+/-]{43}=?)(?![A-Za-z0-9_+/=-])")
+_PEM_PRIVATE = re.compile(rb"-----BEGIN (PRIVATE KEY|OPENSSH PRIVATE KEY|ENCRYPTED PRIVATE KEY)-----\s+([A-Za-z0-9+/=\s]+)-----END \1-----")
+_PRIVATE_JWK = re.compile(rb'\{[^{}]{0,16384}"crv"\s*:\s*"(?:Ed25519|X25519)"[^{}]{0,16384}\}')
+
+
+def _sodium():
+    name = ctypes.util.find_library("sodium")
+    if not name:
+        raise ValueError("secret-key derivation scanner unavailable")
+    library = ctypes.CDLL(name)
+    if library.sodium_init() < 0:
+        raise ValueError("secret-key derivation scanner unavailable")
+    for function, arity in (("crypto_sign_seed_keypair", 3),
+                            ("crypto_sign_ed25519_pk_to_curve25519", 2),
+                            ("crypto_scalarmult_base", 2)):
+        method = getattr(library, function)
+        method.argtypes = [ctypes.c_void_p] * arity
+        method.restype = ctypes.c_int
+    return library
+
+
+def _key_publics(sodium, seed: bytes) -> tuple[bytes, bytes]:
+    ed = ctypes.create_string_buffer(32)
+    secret = ctypes.create_string_buffer(64)
+    curve = ctypes.create_string_buffer(32)
+    if sodium.crypto_sign_seed_keypair(ed, secret, seed) != 0:
+        raise ValueError("Ed25519 derivation failed")
+    if sodium.crypto_scalarmult_base(curve, seed) != 0:
+        raise ValueError("X25519 derivation failed")
+    return ed.raw, curve.raw
+
+
+def scan_secret_key_bytes(data: bytes, recipients: set[bytes]) -> dict[str, int]:
+    """Read-only, value-free detector shared by real input and planted controls."""
+    sodium = _sodium()
+    curve_recipients = set()
+    for public in recipients:
+        if len(public) != 32:
+            raise ValueError("invalid recipient public key")
+        curve = ctypes.create_string_buffer(32)
+        if sodium.crypto_sign_ed25519_pk_to_curve25519(curve, public) != 0:
+            raise ValueError("invalid Ed25519 recipient public key")
+        curve_recipients.add(curve.raw)
+    seeds: set[bytes] = set()
+    serialized = 0
+
+    def der(value: bytes) -> bool:
+        nonlocal serialized
+        found = False
+        offset = 0
+        while True:
+            offset = value.find(_ED25519_DER_PREFIX, offset)
+            if offset < 0:
+                return found
+            end = offset + len(_ED25519_DER_PREFIX) + 32
+            if end <= len(value):
+                seeds.add(value[offset + len(_ED25519_DER_PREFIX):end])
+                serialized += 1
+                found = True
+            offset += 1
+
+    der(data)
+    # Complete DER, not its prefix, represented as hex or base64.
+    for pattern, decode in (
+        (rb"(?<![0-9a-fA-F])" + _ED25519_DER_PREFIX.hex().encode() + rb"[0-9a-fA-F]{64}(?![0-9a-fA-F])", lambda value: bytes.fromhex(value.decode("ascii"))),
+        (rb"(?<![A-Za-z0-9+/])MC4CAQAwBQYDK2VwBCIEI[A-Za-z0-9+/]{43}(?![A-Za-z0-9+/])", base64.b64decode),
+    ):
+        for match in re.finditer(pattern, data):
+            der(decode(match.group()))
+    for match in _PEM_PRIVATE.finditer(data):
+        value = base64.b64decode(re.sub(rb"\s", b"", match.group(2)), validate=True)
+        if not der(value):
+            # Other complete PEM private-key formats are also private material.
+            serialized += 1
+    for match in _PRIVATE_JWK.finditer(data):
+        try:
+            value = json.loads(match.group())
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if isinstance(value, dict) and isinstance(value.get("d"), str):
+            raw = base64.urlsafe_b64decode(value["d"] + "=" * (-len(value["d"]) % 4))
+            if len(raw) in (32, 64):
+                seeds.add(raw[:32])
+                serialized += 1
+    for match in _KEY_TOKENS.finditer(data):
+        token = match.group()
+        try:
+            raw = (bytes.fromhex(token.decode()) if re.fullmatch(rb"[0-9a-fA-F]{64}|[0-9a-fA-F]{128}", token)
+                   else base64.b64decode(token.replace(b"-", b"+").replace(b"_", b"/") + b"=" * (-len(token) % 4), validate=True))
+        except ValueError:
+            continue
+        if len(raw) in (32, 64):
+            seeds.add(raw[:32])
+            if len(raw) == 64:
+                public, _ = _key_publics(sodium, raw[:32])
+                if raw[32:] == public:
+                    serialized += 1
+    matches = 0
+    for seed in seeds:
+        ed, curve = _key_publics(sodium, seed)
+        if ed in recipients or curve in curve_recipients:
+            matches += 1
+    return {"realFindings": serialized + matches,
+            "derivationMatches": matches, "tokensChecked": len(seeds)}
 
 
 def finding_digest(finding: dict[str, object]) -> str:

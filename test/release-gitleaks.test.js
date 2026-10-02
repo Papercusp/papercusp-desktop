@@ -13,6 +13,57 @@ const scriptPath = path.join(root, 'bin', 'release-local.sh');
 const reportFormatterPath = path.join(root, 'bin', 'lib', 'print-gitleaks-findings.py');
 const gitleaksBin = process.env.GITLEAKS_BIN || 'gitleaks';
 
+test('D-142 secret-key detector catches serialized keys and recipient seeds without leaking values', () => {
+  const crypto = require('node:crypto');
+  const pair = crypto.generateKeyPairSync('ed25519');
+  const der = pair.privateKey.export({ type: 'pkcs8', format: 'der' });
+  const jwk = pair.privateKey.export({ format: 'jwk' });
+  const seed = Buffer.from(jwk.d, 'base64url');
+  const publicKey = Buffer.from(jwk.x, 'base64url');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-private-key-control-'));
+  try {
+    const cases = {
+      rawDer: der,
+      hexDer: Buffer.from(der.toString('hex')),
+      base64Der: Buffer.from(der.toString('base64')),
+      pem: Buffer.from(pair.privateKey.export({ type: 'pkcs8', format: 'pem' })),
+      jwk: Buffer.from(JSON.stringify(jwk)),
+      hexSeed: Buffer.from(seed.toString('hex')),
+      base64Seed: Buffer.from(seed.toString('base64')),
+      base64urlSeed: Buffer.from(seed.toString('base64url')),
+      sodiumSecret: Buffer.from(Buffer.concat([seed, publicKey]).toString('base64')),
+    };
+    const program = 'import importlib.util,json,base64,sys\ns=importlib.util.spec_from_file_location("f",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\nprint(json.dumps(m.scan_secret_key_bytes(open(sys.argv[2],"rb").read(),{base64.b64decode(sys.argv[3])})))';
+    for (const [encoding, data] of Object.entries(cases)) {
+      const input = path.join(temp, encoding);
+      fs.writeFileSync(input, data, { mode: 0o600 });
+      const result = spawnSync('python3', ['-c', program, reportFormatterPath, input, publicKey.toString('base64')], { encoding: 'utf8' });
+      assert.equal(result.status, 0, `${encoding}: ${result.stderr}`);
+      const proof = JSON.parse(result.stdout);
+      assert.ok(proof.realFindings > 0, `${encoding}: private key missed`);
+      assert.ok(proof.derivationMatches > 0, `${encoding}: recipient derivation missed`);
+      assert.ok(proof.tokensChecked > 0);
+      assert.ok(!(result.stdout + result.stderr).includes(seed.toString('hex')));
+      assert.ok(!(result.stdout + result.stderr).includes(seed.toString('base64')));
+    }
+    // A raw libsodium secret is structurally private even for a different recipient.
+    const other = crypto.generateKeyPairSync('ed25519').publicKey.export({ format: 'jwk' });
+    const input = path.join(temp, 'sodiumSecret');
+    const result = spawnSync('python3', ['-c', program, reportFormatterPath, input,
+      Buffer.from(other.x, 'base64url').toString('base64')], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(JSON.parse(result.stdout).realFindings > 0);
+    assert.equal(JSON.parse(result.stdout).derivationMatches, 0);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test('D-142 secret-key detector distinguishes source vocabulary and unrelated public keys', () => {
+  const program = 'import importlib.util,json,base64,sys\ns=importlib.util.spec_from_file_location("f",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\nsodium=m._sodium();public,_=m._key_publics(sodium,bytes(range(32)))\ndata=b"BEGIN PRIVATE KEY papercusp-hive-epoch-key 302e020100300506032b657004220420 " + public.hex().encode()\nprint(json.dumps(m.scan_secret_key_bytes(data,{public})))';
+  const result = spawnSync('python3', ['-c', program, reportFormatterPath], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { realFindings: 0, derivationMatches: 0, tokensChecked: 1 });
+});
+
 function scan(entries, { config = true } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-release-gitleaks-'));
   try {
