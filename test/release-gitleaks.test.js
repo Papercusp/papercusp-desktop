@@ -1045,13 +1045,18 @@ with patch.object(m,'_frozen_source_bytes',return_value=b'frozen maker'):
   assert not valid(value)
  assert not valid(hexid,blob='0'*40)
 with patch.object(m,'_frozen_source_bytes',side_effect=ValueError('source drift')):
+ ctx.pop('_makerProofCache',None)
  try:valid(hexid);raise AssertionError('changed maker passed')
  except ValueError:pass
-print(json.dumps({'positive':3,'negative':13}))
+with patch.object(m,'_frozen_source_bytes',return_value=b'frozen maker'):assert valid(hexid)
+with patch.object(m,'_source_tree',side_effect=ValueError('HEAD changed')):
+ try:m._validate_mechanical_entries([],[],ctx,seed=False);raise AssertionError('cached maker HEAD drift passed')
+ except ValueError:pass
+print(json.dumps({'positive':3,'negative':14}))
 `;
   const result = spawnSync('python3', ['-c', program, reportFormatterPath], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), { positive: 3, negative: 13 });
+  assert.deepEqual(JSON.parse(result.stdout), { positive: 3, negative: 14 });
 });
 
 test('D-147 integrated proof refuses newly labelled classes without mechanical evidence and unclassified entries', () => {
