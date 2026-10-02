@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import ctypes.util
+import fnmatch
 import hashlib
 import json
 import mmap
@@ -98,6 +99,7 @@ def scan_secret_key_bytes(data: bytes, recipients: set[bytes]) -> dict[str, int]
         curve_recipients.add(curve.raw)
     seeds: set[bytes] = set()
     serialized = 0
+    raw_sk_matches = 0
 
     def der(value: bytes) -> bool:
         nonlocal serialized
@@ -115,6 +117,19 @@ def scan_secret_key_bytes(data: bytes, recipients: set[bytes]) -> dict[str, int]
             offset += 1
 
     der(data)
+    # A raw libsodium Ed25519 secret is seed || public. Search recipient public
+    # bytes first, then derive the preceding seed; random ciphertext is not a key.
+    for public in recipients:
+        offset = data.find(public)
+        while offset >= 0:
+            if offset >= 32:
+                seed = data[offset - 32:offset]
+                derived, _ = _key_publics(sodium, seed)
+                if derived == public:
+                    seeds.add(seed)
+                    serialized += 1
+                    raw_sk_matches += 1
+            offset = data.find(public, offset + 1)
     # Complete DER, not its prefix, represented as hex or base64.
     for pattern, decode in (
         (rb"(?<![0-9a-fA-F])" + _ED25519_DER_PREFIX.hex().encode() + rb"[0-9a-fA-F]{64}(?![0-9a-fA-F])", lambda value: bytes.fromhex(value.decode("ascii"))),
@@ -155,8 +170,82 @@ def scan_secret_key_bytes(data: bytes, recipients: set[bytes]) -> dict[str, int]
         ed, curve = _key_publics(sodium, seed)
         if ed in recipients or curve in curve_recipients:
             matches += 1
-    return {"realFindings": serialized + matches,
-            "derivationMatches": matches, "tokensChecked": len(seeds)}
+    pem_blocks = len(list(_PEM_PRIVATE.finditer(data)))
+    marker_hits = (data.count(b"BEGIN PRIVATE KEY") +
+                   data.count(b"BEGIN OPENSSH PRIVATE KEY") +
+                   data.count(b"BEGIN ENCRYPTED PRIVATE KEY") +
+                   data.count(b"papercusp-hive-epoch-key") +
+                   data.count(b"papercusp-device-keypair"))
+    dumps = len(list(re.finditer(
+        rb'papercusp-(?:hive-epoch-key|device-keypair)[^\n]{0,256}"value"\s*:\s*"[A-Za-z0-9_+/=-]{43,}"', data)))
+    return {"realFindings": serialized + matches + dumps,
+            "derivationMatches": matches, "tokensChecked": len(seeds),
+            "rawSkMatches": raw_sk_matches,
+            "literalOnlyMarkers": max(0, marker_hits - pem_blocks - dumps)}
+
+
+def scan_identity_secret_inputs(inputs: list[Path], recipients: set[bytes],
+                                control_samples: list[Path]) -> dict[str, object]:
+    """Scan an explicit complete inventory and run controls only in memory.
+
+    The caller binds the inventory to seed/assembled-bundle or final artifacts.
+    This never extracts containers implicitly: finished installers need their
+    expanded contents in the inventory, through the existing artifact auditor.
+    """
+    if not inputs or not control_samples or any(path not in inputs for path in control_samples):
+        raise ValueError("complete inventory and real control samples required")
+    totals = Counter()
+    inventory = []
+    forbidden_names = ("*keychain*", "*keystore*", "*device-keypair*", "*.pem", "*.p8", "*.key")
+    for path in inputs:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("secret scan input must be an actual file")
+        before = _sha256(path)
+        # Chunk overlap covers the scanner's largest bounded JWK serialization.
+        # It keeps large full-history bundles out of Python heap allocations.
+        with path.open("rb") as handle:
+            previous = b""
+            for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+                totals.update(scan_secret_key_bytes(previous + chunk, recipients))
+                previous = chunk[-32768:]
+        if _sha256(path) != before:
+            raise ValueError("secret scan input changed")
+        inventory.append({"path": str(path), "sha256": before})
+        if any(fnmatch.fnmatch(path.name.lower(), pattern) for pattern in forbidden_names):
+            totals["nameScanHits"] += 1
+    sodium = _sodium()
+    seed = os.urandom(32)
+    public, _ = _key_publics(sodium, seed)
+    der = _ED25519_DER_PREFIX + seed
+    controls = {
+        "der-base64": base64.b64encode(der),
+        "pem": b"-----BEGIN " + b"PRIVATE KEY-----\n" + base64.b64encode(der) + b"\n-----END " + b"PRIVATE KEY-----",
+        "jwk-d": json.dumps({"kty": "OKP", "crv": "Ed25519", "d": base64.urlsafe_b64encode(seed).decode().rstrip("=")}).encode(),
+        "hex-seed": seed.hex().encode(),
+        "base64-seed": base64.b64encode(seed),
+        "raw-sodium-secret": seed + public,
+    }
+    results = []
+    for sample in control_samples:
+        with sample.open("rb") as handle:
+            real_copy = handle.read(8 * 1024 * 1024)
+        for encoding, planted in controls.items():
+            result = scan_secret_key_bytes(real_copy + b"\n" + planted + b"\n", recipients | {public})
+            results.append({"inputSha256": _sha256(sample), "encoding": encoding,
+                            "plantedSha256": hashlib.sha256(planted).hexdigest(),
+                            "detected": result["realFindings"] > 0,
+                            "derivationDetected": result["derivationMatches"] > 0})
+    if not all(row["detected"] and row["derivationDetected"] for row in results):
+        raise ValueError("planted secret control failed")
+    return {"schema": "papercusp-sealed-envelope-secret-scan-v1",
+            "inputs": inventory, "scannerSha256": _sha256(Path(__file__)),
+            "realFindings": totals["realFindings"],
+            "derivationMatches": totals["derivationMatches"],
+            "rawSkMatches": totals["rawSkMatches"],
+            "tokensChecked": totals["tokensChecked"],
+            "literalOnlyMarkers": totals["literalOnlyMarkers"],
+            "nameScanHits": totals["nameScanHits"], "controls": results,
+            "positivePlantedSecretDetected": True}
 
 
 def finding_digest(finding: dict[str, object]) -> str:
