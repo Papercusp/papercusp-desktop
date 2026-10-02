@@ -657,13 +657,14 @@ test('D-150 producer removes vendor private-key fixtures from sidecar and source
     const archive = path.join(dir, 'source.tar');
     const tar = spawnSync('tar', [
       ...exclusions.stdout.trim().split('\n').map(pattern => `--exclude=${pattern}`),
-      '-cf', archive, '-C', dir, 'node_modules',
+      '-cf', archive, '-C', dir, './node_modules',
     ], { encoding: 'utf8' });
     assert.equal(tar.status, 0, tar.stderr);
     const members = spawnSync('tar', ['-tf', archive], { encoding: 'utf8' });
     assert.equal(members.status, 0, members.stderr);
-    for (const name of fixtures) assert.ok(!members.stdout.split('\n').includes(name), name);
-    for (const name of retained) assert.ok(members.stdout.split('\n').includes(name), name);
+    const paths = members.stdout.split('\n').map(name => name.replace(/^\.\//, ''));
+    for (const name of fixtures) assert.ok(!paths.includes(name), name);
+    for (const name of retained) assert.ok(paths.includes(name), name);
 
     const pruned = audit('--prune-docs', dir);
     assert.equal(pruned.status, 0, pruned.stderr);
