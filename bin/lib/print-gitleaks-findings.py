@@ -113,8 +113,9 @@ def verify_literal_absence(inputs: list[Path], literals: list[dict[str, str]],
 def _public_id(value: str) -> bool:
     raw = value.encode()
     return bool(_UUID.fullmatch(raw) or _MESSAGE_ID.fullmatch(raw)
-                or re.fullmatch(r"(?:su-|WI-|EI-|F-|P-)[A-Za-z0-9-]+", value)
-                or re.fullmatch(r"[a-z][a-z0-9_.-]*:[A-Za-z0-9_.:/-]+", value))
+                or (value.startswith("su-") and _UUID.fullmatch(raw[3:]))
+                or re.fullmatch(r"(?:[a-z][a-z0-9-]*/)?(?:WI|EI|F|P)-[0-9]+", value)
+                or re.fullmatch(r"0mu[a-z0-9]{16}", value))
 
 
 def _canonical_base64(value: str, size: int) -> bytes:
@@ -179,10 +180,12 @@ def mechanical_class_valid(entry: dict[str, object], finding: dict[str, object],
         fields = context["seedFields"]
         if kind == "public-projection-row-key":
             parts = value.split("::", 1)
+            field_match = _MATCH_FIELD.match(match)
+            field = field_match.group(1) if field_match else ""
             return (finding["RuleID"] == "generic-api-key" and len(parts) == 2
                     and re.fullmatch(r"[a-z][a-z0-9-]*", parts[0]) is not None
                     and _public_id(parts[1])
-                    and any((field, value) in fields for field in ("hbKey", "__rekey", "writer_key")))
+                    and field in {"hbKey", "__rekey", "writer_key"} and (field, value) in fields)
         if kind == "public-hypercore-log-key":
             return (re.fullmatch(r"[0-9a-f]{64}", value) is not None
                     and bytes.fromhex(value) in context["publicKeys"])
