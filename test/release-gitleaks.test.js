@@ -95,6 +95,91 @@ test('D-142 inventory scan binds input hashes, detects keystore names, and runs 
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
+test('D-150 source-name exclusions require exact frozen bytes and refuse private serialization or matching seeds', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-source-name-proof-'));
+  try {
+    const program = String.raw`
+import importlib.util,json,sys,pathlib,hashlib,base64
+from unittest.mock import patch
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+base=pathlib.Path(sys.argv[2]);source=base/'keychain.ts';data=b'export const service="public-keystore-name";\n';source.write_bytes(data)
+public,_=m._key_publics(m._sodium(),bytes(range(32)))
+entry={'path':str(source),'sha256':m._sha256(source),'class':'frozen-public-source-vocabulary','sourceRef':{'tree':'superproject','path':'src/keychain.ts','blob':'b'*40}}
+with patch.object(m,'_frozen_source_bytes',return_value=data):
+ scan=m.scan_identity_secret_inputs([source],{public},[source],name_exclusions=[entry])
+ assert scan['nameScanHits']==0 and scan['realFindings']==0
+ assert scan['nameExclusionCounts']=={entry['sha256']:1}
+for changed in [{**entry,'sha256':'0'*64},{**entry,'path':str(base/'missing.pem')},{**entry,'class':'public-fixture'}]:
+ try:m.validate_identity_name_exclusions([changed],{source},{public},set(),{});raise AssertionError('invalid source proof passed')
+ except ValueError:pass
+with patch.object(m,'_frozen_source_bytes',return_value=b'changed frozen bytes'):
+ try:m.validate_identity_name_exclusions([entry],{source},{public},set(),{});raise AssertionError('changed source passed')
+ except ValueError:pass
+for private in [m._ED25519_DER_PREFIX+bytes(range(32)),bytes(range(32)),bytes(range(32)).hex().encode()]:
+ source.write_bytes(private);changed={**entry,'sha256':m._sha256(source)}
+ with patch.object(m,'_frozen_source_bytes',return_value=private):
+  try:m.validate_identity_name_exclusions([changed],{source},{public},set(),{});raise AssertionError('private source bytes passed')
+  except ValueError:pass
+source.write_bytes(data)
+with patch.object(m,'_frozen_source_bytes',return_value=data):
+ try:m.validate_identity_name_exclusions([entry,entry],{source},{public},set(),{});raise AssertionError('duplicate exclusion passed')
+ except ValueError:pass
+print(json.dumps({'sourcePositive':True,'negativeControls':7}))
+`;
+    const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), { sourcePositive: true, negativeControls: 7 });
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test('D-150 public certificate exclusions parse each certificate and reject labels, changed provenance and private keys of another algorithm', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-certificate-name-proof-'));
+  try {
+    const cert = path.join(temp, 'certificate.pem');
+    const privateKey = path.join(temp, 'private.pem');
+    const generated = spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+      '-keyout', privateKey, '-out', cert, '-days', '1', '-subj', '/CN=Release Proof Fixture'], { encoding: 'utf8' });
+    assert.equal(generated.status, 0, generated.stderr);
+    const program = String.raw`
+import importlib.util,json,sys,pathlib,hashlib,tarfile,io,base64
+from unittest.mock import patch
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+base=pathlib.Path(sys.argv[2]);cert=base/'certificate.pem';data=cert.read_bytes();certs=m._parsed_public_certificates(data)
+entry={'path':str(cert),'sha256':m._sha256(cert),'class':'parsed-public-x509-certificate','certificates':certs,'sourceRef':{}}
+with patch.object(m,'_frozen_source_bytes',return_value=data):
+ scan=m.scan_identity_secret_inputs([cert],set(),[cert],name_exclusions=[entry])
+ assert scan['nameScanHits']==0 and scan['realFindings']==0
+ for changed in [{**entry,'certificates':[{'sha256':'0'*64,'subject':certs[0]['subject']}]},{**entry,'certificates':[]}]:
+  try:m.validate_identity_name_exclusions([changed],{cert},set(),set(),{});raise AssertionError('changed certificate identity passed')
+  except ValueError:pass
+with patch.object(m,'_frozen_source_bytes',return_value=b'other certificate'):
+ try:m.validate_identity_name_exclusions([entry],{cert},set(),set(),{});raise AssertionError('changed certificate provenance passed')
+ except ValueError:pass
+archive=base/'package.tgz'
+with tarfile.open(archive,'w:gz') as out:
+ member=tarfile.TarInfo('package/certificate.pem');member.size=len(data);out.addfile(member,io.BytesIO(data))
+integrity='sha512-'+base64.b64encode(hashlib.sha512(archive.read_bytes()).digest()).decode()
+lock=json.dumps({'packages':{'node_modules/cert-fixture':{'version':'1.0.0','integrity':integrity}}}).encode()
+ref={'lockRef':{},'name':'cert-fixture','packagePath':'node_modules/cert-fixture','version':'1.0.0','integrity':integrity,'archive':str(archive),'member':'package/certificate.pem'}
+vendored={k:v for k,v in entry.items() if k!='sourceRef'};vendored['packageRef']=ref
+with patch.object(m,'_frozen_source_bytes',return_value=lock):
+ m.validate_identity_name_exclusions([vendored],{cert},set(),set(),{})
+ for changed in [{**ref,'version':'2.0.0'},{**ref,'integrity':'sha512-'+base64.b64encode(bytes(64)).decode()}]:
+  try:m.validate_identity_name_exclusions([{**vendored,'packageRef':changed}],{cert},set(),set(),{});raise AssertionError('changed package passed')
+  except ValueError:pass
+for invalid in [b'-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----',data+(base/'private.pem').read_bytes()]:
+ cert.write_bytes(invalid);changed={**entry,'sha256':m._sha256(cert)}
+ with patch.object(m,'_frozen_source_bytes',return_value=invalid):
+  try:m.validate_identity_name_exclusions([changed],{cert},set(),set(),{});raise AssertionError('private/malformed certificate passed')
+  except ValueError:pass
+print(json.dumps({'certificatePositive':True,'packagePositive':True,'negativeControls':7}))
+`;
+    const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), { certificatePositive: true, packagePositive: true, negativeControls: 7 });
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test('D-142 detector recognizes X25519 PKCS8 in raw, hex and base64 encodings', () => {
   const crypto = require('node:crypto');
   const der = crypto.generateKeyPairSync('x25519').privateKey.export({ type: 'pkcs8', format: 'der' });
