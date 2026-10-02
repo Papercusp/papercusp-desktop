@@ -954,6 +954,35 @@ print(json.dumps({'positivePointer':True,'negativeControls':True}))
   assert.deepEqual(JSON.parse(result.stdout), { positivePointer: true, negativeControls: true });
 });
 
+test('D-151 generated sender identifiers require exact field, frozen maker and complete maker-specific shape', () => {
+  const program = String.raw`
+import importlib.util,json,sys
+from unittest.mock import patch
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+paths=list(m._RESPAWN_MAKERS);ctx={'plainRows':{},'publicKeys':set(),'trees':{}}
+def valid(value,field='writer_key',maker=0,blob=None):
+ finding={'RuleID':'generic-api-key','Secret':value,'Match':field+'":"'+value+'"','StartLine':1}
+ entry={'class':'public-generated-agent-identifier','rule':finding['RuleID'],'digest':m.finding_digest(finding),'fieldPath':[field],'makerRef':{'tree':'superproject','path':paths[maker],'blob':blob or m._RESPAWN_MAKERS[paths[maker]][0]}}
+ ctx['plainRows'][1]={field:value}
+ return m.mechanical_class_valid(entry,finding,ctx,seed=False)
+hexid='su-respawn-'+'a'*32;uuid='su-respawn-12345678-1234-4234-8234-123456789abc'
+with patch.object(m,'_frozen_source_bytes',return_value=b'frozen maker'):
+ assert valid(hexid) and valid(uuid) and valid(hexid,maker=1)
+ assert not valid(uuid,maker=1)
+ for field in ['key','id','body','ownerId','apiKey']:assert not valid(hexid,field)
+ for value in ['prefix-'+hexid,hexid+'suffix','su-respawn-'+'a'*24,'su-respawn-12345678-1234-1234-8234-123456789abc','su-respawn-12345678-1234-4234-1234-123456789abc']:
+  assert not valid(value)
+ assert not valid(hexid,blob='0'*40)
+with patch.object(m,'_frozen_source_bytes',side_effect=ValueError('source drift')):
+ try:valid(hexid);raise AssertionError('changed maker passed')
+ except ValueError:pass
+print(json.dumps({'positive':3,'negative':13}))
+`;
+  const result = spawnSync('python3', ['-c', program, reportFormatterPath], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { positive: 3, negative: 13 });
+});
+
 test('D-147 integrated proof refuses newly labelled classes without mechanical evidence and unclassified entries', () => {
   for (const kind of ['public-opaque-operation-reference', 'unclassified']) {
     const f = seedProofFixture();

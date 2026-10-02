@@ -50,6 +50,7 @@ _MECHANICAL_PLAIN_CLASSES = {
     "public-condition-reference", "public-opaque-operation-reference",
     "public-schema-bound-reference", "reviewed-public-source-literal",
     "public-cryptographic-key", "reviewed-descriptive-source-text",
+    "public-generated-agent-identifier",
 }
 _SEED_CLASSES |= _MECHANICAL_SEED_CLASSES
 _PLAIN_CLASSES |= _MECHANICAL_PLAIN_CLASSES
@@ -58,6 +59,13 @@ _ID_FIELDS = {"id", "issue_id", "msg_id", "condition_id", "operation_id", "reque
               "receipt_id", "event_id", "rubric_id", "rule_id", "task_id", "ref"}
 _FROZEN_TREES = {"superproject": "d740fc3802877d1c8c3b1068768681ee32ef0025",
                  "desktop": "c864f7a1d1b62721a21dc8b0a576d51ff4edb345"}
+_RESPAWN_MAKERS = {
+    "packages/operator-core/lib/agent-tools/fleet_registry/respawn-member.ts":
+        ("6662117f86f55049c335e7cf9f9c89882aaca298", {"hex16", "uuid4"}),
+    "packages/operator-core/lib/fleet/member-recovery.ts":
+        ("6d22fc28a9124ce58c5312d058c47813a3b0080c", {"hex16"}),
+}
+_RESPAWN_FIELDS = {"writer_key", "sender", "sender_id"}
 _PROOF_FILES = (
     "ciphertext-auth-safe.json", "plaintext-classification-safe.json",
     "plaintext-exact-finding-digests.json", "seed-classification-verified-safe.json",
@@ -248,6 +256,24 @@ def mechanical_class_valid(entry: dict[str, object], finding: dict[str, object],
                 and isinstance(actual, str) and match in actual and value in actual
                 and not _CREDENTIAL_FIELD.search((_MATCH_FIELD.match(match).group(1)
                                                   if _MATCH_FIELD.match(match) else "")))
+    if kind == "public-generated-agent-identifier":
+        if actual != value or field not in _RESPAWN_FIELDS or finding["RuleID"] != "generic-api-key":
+            return False
+        ref = entry["makerRef"]
+        expected = _RESPAWN_MAKERS.get(ref.get("path"))
+        if (not expected or ref.get("tree") != "superproject" or ref.get("blob") != expected[0]):
+            return False
+        if re.fullmatch(r"su-respawn-[0-9a-f]{32}", value):
+            shape = "hex16"
+        elif re.fullmatch(r"su-respawn-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", value):
+            shape = "uuid4"
+        else:
+            return False
+        if shape not in expected[1]:
+            return False
+        _frozen_source_bytes(ref, context["trees"])
+        check = scan_secret_key_bytes(value.encode(), context["publicKeys"])
+        return check["realFindings"] == 0 and check["derivationMatches"] == 0
     if actual != value or _CREDENTIAL_FIELD.search(field):
         return False
     if kind in {"public-condition-reference", "public-opaque-operation-reference",
