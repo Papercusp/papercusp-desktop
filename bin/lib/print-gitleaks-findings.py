@@ -65,6 +65,9 @@ _PROOF_FILES = (
     "seed-000080.private.meta.json", "seed-000080.private.json",
     "forbidden-literals.private.json",
 )
+_BASE_PROOF_FILES = _PROOF_FILES
+_PROOF_FILES += ("mechanical-class-proof.private.json", "sealed-envelope-proof-safe.json",
+                 "identity-secret-scan-safe.json")
 
 # D-148: scanner findings alone missed a credential inside an issue body.
 # The literal remains private; only its identity is part of the release contract.
@@ -258,7 +261,8 @@ def validate_envelope_structure(proof: dict[str, object], source: bytes,
                   for entry in op["value"].get("device_attestations", [])}
     if len(recipients) != 33:
         raise ValueError("historical recipient population mismatch")
-    public_keys = {_canonical_base64(value, 32) for value in recipients}
+    for value in recipients:
+        _canonical_base64(value, 32)
     rows = {op["hbKey"]: op for op in _table_ops(source, "hive-epoch-keys")}
     values = {}
     for op in rows.values():
@@ -634,6 +638,8 @@ def validate_seed_proof(proof: dict[str, object], directory: Path, root: Path,
         raise ValueError("seed changed")
     evidence = {}
     for name in _PROOF_FILES:
+        if name not in _BASE_PROOF_FILES and name not in proof.get("evidence", {}):
+            continue
         path = directory / name
         _private_file(path)
         if proof.get("evidence", {}).get(name) != _sha256(path):
@@ -678,6 +684,11 @@ def validate_seed_proof(proof: dict[str, object], directory: Path, root: Path,
             or seed.get("plaintextProofSha256") != _sha256(directory / "plaintext-classification-safe.json")
             or {finding_digest(row) for row in report} != allowed):
         raise ValueError("seed scan incomplete")
+    if (any(row["class"] in _MECHANICAL_SEED_CLASSES for row in entries)
+            or any(row["class"] in _MECHANICAL_PLAIN_CLASSES for row in plain_entries)):
+        context = _mechanical_context(proof, directory, root, source, entries, report, plain_report)
+        _validate_mechanical_entries(entries, report, context, seed=True)
+        _validate_mechanical_entries(plain_entries, plain_report, context, seed=False)
     return allowed
 
 
@@ -689,7 +700,8 @@ def assemble_seed_proof(directory: Path, root: Path, config: Path, relative: str
              "epochKeysSha256": _sha256(root / "epoch-keys.json"),
              "manifestSha256": _sha256(root / "manifest.json"),
              "configSha256": _sha256(config), "scannerVersion": meta["identity"]["scannerVersion"],
-             "evidence": {name: _sha256(directory / name) for name in _PROOF_FILES}}
+             "evidence": {name: _sha256(directory / name) for name in _PROOF_FILES
+                          if name in _BASE_PROOF_FILES or (directory / name).exists()}}
     validate_seed_proof(proof, directory, root, config)
     path = directory / "seed-finding-proof.json"
     fd, temporary = tempfile.mkstemp(prefix="seed-proof-", suffix=".partial", dir=directory)
