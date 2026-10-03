@@ -1518,10 +1518,18 @@ def main(argv: list[str]) -> int:
         except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
             print("Identity secret proof scan incomplete (values omitted).", file=sys.stderr)
             return 2
-        print(json.dumps({key: scan[key] for key in ("schema", "seedRootSha", "scannerSha256",
+        summary = {key: scan[key] for key in ("schema", "seedRootSha", "scannerSha256",
                           "realFindings", "derivationMatches", "rawSkMatches", "nameScanHits",
-                          "tokensChecked", "positivePlantedSecretDetected")}))
-        return 1 if any(scan[key] for key in ("realFindings", "derivationMatches", "rawSkMatches", "nameScanHits")) else 0
+                          "tokensChecked", "positivePlantedSecretDetected")}
+        digest_scan = scan.get("credentialDigestScan", {})
+        if digest_scan:
+            summary["credentialDigestCandidates"] = len(digest_scan["digests"])
+            for key in ("digestOfCredentialHits", "rawCredentialHits"):
+                summary[key] = digest_scan[key]
+        print(json.dumps(summary))
+        refused = any(scan[key] for key in ("realFindings", "derivationMatches", "rawSkMatches", "nameScanHits"))
+        refused |= any(digest_scan.get(key, 0) for key in ("digestOfCredentialHits", "rawCredentialHits"))
+        return 1 if refused else 0
     if len(argv) == 7 and argv[1] == "--assemble-seed-proof":
         try:
             proof = assemble_seed_proof(Path(argv[2]), Path(argv[3]), Path(argv[4]), argv[5], argv[6])

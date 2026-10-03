@@ -294,6 +294,9 @@ for changed in [{**scan,'inputs':scan['inputs'][:-1]},{**scan,'scannerSha256':'0
 (bundle/'serve.mjs').write_text('Authorization: Bearer '+digest)
 exposed=m.scan_identity_proof(cfg,seed,base/'exposed.json')
 assert exposed['credentialDigestScan']['rawCredentialHits']>0
+import subprocess
+cli=subprocess.run([sys.executable,sys.argv[1],'--scan-identity-proof',str(cfg),str(seed),str(base/'cli-exposed.json')],capture_output=True,text=True)
+assert cli.returncode==1 and json.loads(cli.stdout)['rawCredentialHits']>0 and digest not in cli.stdout
 try:m.validate_identity_secret_proof(exposed,seed,base,set(recipients),ref);raise AssertionError('raw digest bearer passed')
 except ValueError:pass
 try: m.validate_identity_secret_proof(scan,seed,base,set(recipients),ref);raise AssertionError('changed bundle passed')
