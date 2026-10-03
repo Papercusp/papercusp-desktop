@@ -34,6 +34,51 @@ const root = path.resolve(__dirname, '..');
 const AUDIT = path.join(root, 'bin/audit-release-bundle.py');
 const TRUST_TOOLCHAIN = path.join(root, 'bin/lib/vm-release-trust-toolchain.sh');
 const SOURCE_NOTE_HELPER = path.join(root, 'bin/lib/sidecar-source-note.sh');
+const { collectImports } = require('../bin/lib/runtime-import-census.cjs');
+
+test('D-159 census captures loader aliases, generated imports and unresolved arguments without authorizing omission', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-import-census-'));
+  try {
+    const file = path.join(dir, 'serve.mjs');
+    fs.writeFileSync(file, `import { createRequire as factory } from 'node:module';
+      const getLoader = factory; const loader = getLoader(import.meta.url);
+      const alias = loader; alias(userPath); loader('@aws-sdk/client-kms');
+      const conditional = typeof factory === 'function' ? factory(import.meta.url) : undefined;
+      conditional(pluginPath); module['require'](configPath);
+      const deferred = () => factory(import.meta.url);
+      const { createRequire: cjsFactory } = require('node:module');
+      const cjsLoader = cjsFactory(import.meta.url); cjsLoader(otherPath);
+      const Generator = Function; new Generator('specifier', 'return import(specifier)');
+      import('node:path'); import(transpiled.entryPath); export * from './worker.mjs';`);
+    const proof = collectImports(file);
+    assert.equal(proof.closureAccepted, false);
+    assert.ok(proof.loaderAliases.includes('alias'));
+    assert.ok(proof.loaderAliases.includes('conditional'));
+    assert.ok(proof.loaderAliases.includes('cjsLoader'));
+    assert.ok(!proof.loaderAliases.includes('deferred'));
+    assert.equal(proof.imports.filter((r) => r.kind === 'require').length, 6);
+    assert.ok(proof.imports.some((r) => r.specifier === '@aws-sdk/client-kms'));
+    assert.equal(proof.imports.filter((r) => r.kind === 'generated-code').length, 1);
+    assert.equal(proof.imports.filter((r) => r.kind === 'dynamic-import' && r.specifier === null).length, 1);
+    assert.ok(proof.imports.some((r) => r.specifier === './worker.mjs'));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('D-159 census byte offsets bind UTF-8 bytes and reject malformed input', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-import-bytes-'));
+  try {
+    const file = path.join(dir, 'serve.mjs');
+    const bytes = Buffer.from(`const label = 'é😀'; import(modulePath);\n`);
+    fs.writeFileSync(file, bytes);
+    const row = collectImports(file).imports[0];
+    assert.equal(bytes.subarray(row.byteStart, row.byteEnd).toString(), 'import(modulePath)');
+    assert.equal(row.byteStart, bytes.indexOf('import('));
+    fs.writeFileSync(file, 'import(');
+    assert.throws(() => collectImports(file), /parse errors/);
+    fs.writeFileSync(file, Buffer.from([0xff]));
+    assert.throws(() => collectImports(file), /non-UTF8/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
 
 /** A synthetic owner value used only to prove D-112 does not require or reject it. */
 const SYNTHETIC_OWNER = 'Zzsynthetic Gateowner';

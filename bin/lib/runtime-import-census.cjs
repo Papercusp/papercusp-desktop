@@ -1,0 +1,141 @@
+#!/usr/bin/env node
+'use strict';
+
+// D-154 / D-159 evidence collector. Reuse the installed TypeScript parser rather
+// than recognizing imports with regexes. This reports syntax and exact bytes;
+// it does not infer a dataflow boundary or authorize a producer omission.
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const ts = require('typescript');
+
+const hash = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
+
+function collectImports(file) {
+  const bytes = fs.readFileSync(file);
+  const text = bytes.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(bytes)) throw new Error('non-UTF8 module refused');
+  const tree = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  if (tree.parseDiagnostics.length) throw new Error(`module parse errors: ${tree.parseDiagnostics.length}`);
+
+  const factories = new Set();
+  const loaders = new Set(['require', '__require']);
+  const generators = new Set(['Function', 'eval']);
+  const records = [];
+  const visit = (node, fn) => { fn(node); ts.forEachChild(node, (child) => visit(child, fn)); };
+  const literal = (node) => node && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node));
+  const bare = (node, names) => ts.isIdentifier(node) && names.has(node.text);
+  const property = (node, name) => (ts.isPropertyAccessExpression(node) && node.name.text === name)
+    || (ts.isElementAccessExpression(node) && literal(node.argumentExpression) && node.argumentExpression.text === name);
+  const unwrapped = (node) => {
+    while (node && (ts.isParenthesizedExpression(node) || ts.isAwaitExpression(node))) node = node.expression;
+    return node;
+  };
+  const loaderValue = (node) => {
+    node = unwrapped(node);
+    if (!node) return false;
+    if (bare(node, loaders)) return true;
+    if (ts.isCallExpression(node)) return bare(node.expression, factories) || property(node.expression, 'createRequire');
+    if (ts.isConditionalExpression(node)) return loaderValue(node.whenTrue) || loaderValue(node.whenFalse);
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.CommaToken) return loaderValue(node.right);
+    return false;
+  };
+  const record = (node, kind, argument, extra = {}) => {
+    const start = node.getStart(tree), end = node.end;
+    records.push({ kind, start, end, source: text.slice(start, end),
+      specifier: literal(argument) ? argument.text : null, ...extra });
+  };
+
+  visit(tree, (node) => {
+    if (ts.isImportDeclaration(node) && literal(node.moduleSpecifier)
+        && ['node:module', 'module'].includes(node.moduleSpecifier.text)) {
+      const bindings = node.importClause?.namedBindings;
+      if (bindings && ts.isNamedImports(bindings)) {
+        for (const element of bindings.elements) {
+          if ((element.propertyName || element.name).text === 'createRequire') factories.add(element.name.text);
+        }
+      }
+    }
+    if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name)) {
+      const value = unwrapped(node.initializer);
+      if (value && ts.isCallExpression(value) && literal(value.arguments[0])
+          && ['node:module', 'module'].includes(value.arguments[0].text)
+          && (bare(value.expression, loaders) || value.expression.kind === ts.SyntaxKind.ImportKeyword)) {
+        for (const element of node.name.elements) {
+          if (ts.isIdentifier(element.name) && (element.propertyName || element.name).getText(tree) === 'createRequire') {
+            factories.add(element.name.text);
+          }
+        }
+      }
+    }
+  });
+  // Include aliases and conditional factory assignments used by esbuild. An
+  // alias census is deliberately conservative: a reassigned loader stays in it.
+  // These names never suffice as proof that a nonliteral argument is safe.
+  let changed;
+  do {
+    changed = false;
+    visit(tree, (node) => {
+      let left, right;
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+        left = node.name.text; right = node.initializer;
+      } else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+          && ts.isIdentifier(node.left)) {
+        left = node.left.text; right = node.right;
+      }
+      if (!right || !left) return;
+      right = unwrapped(right);
+      if (bare(right, factories) && !factories.has(left)) { factories.add(left); changed = true; }
+      if (bare(right, generators) && !generators.has(left)) { generators.add(left); changed = true; }
+      if (loaderValue(right) && !loaders.has(left)) { loaders.add(left); changed = true; }
+    });
+  } while (changed);
+
+  visit(tree, (node) => {
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+      if (node.moduleSpecifier) record(node, 'static-module', node.moduleSpecifier);
+    } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
+      record(node, 'static-module', node.moduleReference.expression);
+    } else if (ts.isCallExpression(node)) {
+      const expression = node.expression;
+      if (expression.kind === ts.SyntaxKind.ImportKeyword) record(node, 'dynamic-import', node.arguments[0]);
+      else if (bare(expression, loaders) || property(expression, 'require')
+          || (ts.isCallExpression(expression) && (bare(expression.expression, factories)
+            || property(expression.expression, 'createRequire')))) {
+        record(node, 'require', node.arguments[0], { callee: expression.getText(tree) });
+      } else if (bare(expression, generators)) {
+        record(node, 'generated-code', null, { callee: expression.getText(tree) });
+      }
+    } else if (ts.isNewExpression(node) && bare(node.expression, generators)) {
+      record(node, 'generated-code', null, { callee: node.expression.getText(tree) });
+    }
+  });
+
+  // One ordered pass converts UTF-16 parser positions to UTF-8 byte offsets.
+  // Repeated prefix encoding is quadratic on the 60 MB release bundle.
+  const positions = [...new Set(records.flatMap((r) => [r.start, r.end]))].sort((a, b) => a - b);
+  const offsets = new Map();
+  let prior = 0, offset = 0;
+  for (const position of positions) {
+    offset += Buffer.byteLength(text.slice(prior, position), 'utf8');
+    offsets.set(position, offset); prior = position;
+  }
+  return {
+    schema: 'papercusp-runtime-import-census-v1',
+    file, sha256: hash(bytes), parser: { name: 'typescript', version: ts.version },
+    loaderAliases: [...loaders].sort(),
+    imports: records.map(({ start, end, ...r }) => ({ ...r,
+      byteStart: offsets.get(start), byteEnd: offsets.get(end),
+      sha256: hash(bytes.subarray(offsets.get(start), offsets.get(end))) })),
+    closureAccepted: false,
+  };
+}
+
+module.exports = { collectImports };
+if (require.main === module) {
+  try {
+    if (process.argv.length !== 3) throw new Error('usage: runtime-import-census.cjs <module>');
+    process.stdout.write(`${JSON.stringify(collectImports(process.argv[2]), null, 2)}\n`);
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`); process.exitCode = 1;
+  }
+}
