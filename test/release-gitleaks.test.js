@@ -1059,6 +1059,93 @@ print(json.dumps({'positive':3,'negative':14}))
   assert.deepEqual(JSON.parse(result.stdout), { positive: 3, negative: 14 });
 });
 
+test('D-149 closed fields require frozen citations, exact occurrences and public or scanned values', () => {
+  const program = String.raw`
+import importlib.util,json,sys,hashlib,subprocess
+from pathlib import Path
+from unittest.mock import patch
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+identifier='12345678-1234-4234-8234-123456789abc';digest='a'*64
+ctx={'plainRows':{},'plainRowDigests':{},'publicIds':{identifier},'publicReferences':{digest},'nonBearerFields':{},
+     'trees':{kind:{'path':kind,'sha':sha} for kind,sha in m._FROZEN_TREES.items()},'identityScanValidated':True,
+     'credentialDigestScan':{'digests':[digest],'digestOfCredentialHits':0,'rawCredentialHits':0,'hashControlDetected':True,'rawControlDetected':True}}
+path=m._CREDENTIAL_DIGEST_VERIFIER['path'];blob=m._CREDENTIAL_DIGEST_VERIFIER['blob'];ref={'tree':'superproject','path':path,'blob':blob}
+source=b' '.join(name.encode() for name in sorted(m._NON_BEARER_FIELDS))+b" createHash('sha256').update(bytes).digest('hex') admissionCredentialDigest(token) !== authority.credentialSha256 admissionCredentialDigest(decodeOperatorSecretKey(key.value_b64, 'spawn-signing-key')) !== authority.credentialSha256"
+def git(args,**kwargs):
+ if 'grep' in args:
+  out=(m._FROZEN_TREES['superproject']+':'+path+'\n').encode() if args[2]=='superproject' else b''
+  return subprocess.CompletedProcess(args,0 if out else 1,out)
+ if args[-2:]==['rev-parse','HEAD']:out=(m._FROZEN_TREES[args[2]]+'\n').encode()
+ elif 'rev-parse' in args:out=(blob+'\n').encode()
+ else:out=source
+ return subprocess.CompletedProcess(args,0,out)
+def case(field,value):
+ row={field:value};ctx['plainRows'][1]=row;ctx['plainRowDigests'][1]=hashlib.sha256(json.dumps(row).encode()).hexdigest()
+ f={'RuleID':'generic-api-key','Secret':value,'Match':field+'":"'+value+'"','StartLine':1}
+ e={'class':'public-non-bearer-field-reference','rule':f['RuleID'],'digest':m.finding_digest(f),'fieldPath':[field],'line':1,'rowSha256':ctx['plainRowDigests'][1]}
+ return e,f
+for field in m._NON_BEARER_FIELDS:
+ ctx['nonBearerFields'][field]={'field':field,'shape':'hex64' if field=='credentialSha256' else 'uuid','toolingSha256':m._sha256(Path(sys.argv[1])),
+  'reviewRef':'p2p-public-release-endgame-2026-09-01#D-149','writers':[ref],'readers':[ref],'verifier':ref}
+with patch.object(m.subprocess,'run',side_effect=git):
+ for field in sorted(m._NON_BEARER_FIELDS):
+  e,f=case(field,digest if field=='credentialSha256' else identifier);assert m.mechanical_class_valid(e,f,ctx,seed=False),field
+ e,f=case('apiKey',identifier);assert not m.mechanical_class_valid(e,f,ctx,seed=False)
+ for field in ['idempotencyKey','conditionKey','watchdogKey']:
+  e,f=case(field,'00000000-0000-4000-8000-000000000000');assert not m.mechanical_class_valid(e,f,ctx,seed=False)
+ e,f=case('credentialSha256',digest);e['rowSha256']='0'*64;assert not m.mechanical_class_valid(e,f,ctx,seed=False)
+ e,f=case('credentialSha256',digest)
+ for key in ['digestOfCredentialHits','rawCredentialHits']:
+  ctx['credentialDigestScan'][key]=1;assert not m.mechanical_class_valid(e,f,ctx,seed=False);ctx['credentialDigestScan'][key]=0
+ ctx['identityScanValidated']=False;assert not m.mechanical_class_valid(e,f,ctx,seed=False);ctx['identityScanValidated']=True
+ for key in ['hashControlDetected','rawControlDetected']:
+  ctx['credentialDigestScan'][key]=False;assert not m.mechanical_class_valid(e,f,ctx,seed=False);ctx['credentialDigestScan'][key]=True
+ ctx['nonBearerFields']['conditionKey']['readers']=[];e,f=case('conditionKey',identifier)
+ try:m.mechanical_class_valid(e,f,ctx,seed=False);raise AssertionError('missing reader passed')
+ except ValueError:pass
+ ctx['nonBearerFields']['conditionKey']['readers']=[ref];ctx['nonBearerFields']['conditionKey']['toolingSha256']='0'*64
+ try:m.mechanical_class_valid(e,f,ctx,seed=False);raise AssertionError('tooling drift passed')
+ except ValueError:pass
+ ctx['nonBearerFields']['conditionKey']['toolingSha256']=m._sha256(Path(sys.argv[1]));ctx['_nonBearerSourceCache']={}
+ with patch.object(m,'_frozen_source_bytes',side_effect=ValueError('blob changed')):
+  try:m.mechanical_class_valid(e,f,ctx,seed=False);raise AssertionError('blob drift passed')
+  except ValueError:pass
+ assert m.mechanical_class_valid(e,f,ctx,seed=False)
+ ctx['_nonBearerSourceCache']={}
+ with patch.object(m.subprocess,'run',return_value=subprocess.CompletedProcess([],0,(m._FROZEN_TREES['superproject']+':uncited.ts\n').encode())):
+  try:m.mechanical_class_valid(e,f,ctx,seed=False);raise AssertionError('missing consumer passed')
+  except ValueError:pass
+with patch.object(m,'_source_tree',side_effect=ValueError('HEAD changed')):
+ ctx['_nonBearerSourceCache']={'witness':[ref]}
+ try:m._validate_mechanical_entries([],[],ctx,seed=False);raise AssertionError('cached HEAD drift passed')
+ except ValueError:pass
+print(json.dumps({'eligibleNames':sorted(m._NON_BEARER_FIELDS),'negativeControls':True}))
+`;
+  const result = spawnSync('python3', ['-c', program, reportFormatterPath], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    eligibleNames: ['conditionKey', 'credentialSha256', 'idempotencyKey', 'watchdogKey'], negativeControls: true,
+  });
+});
+
+test('D-149 digest exposure detector refuses preimages and digest reuse outside direct JSON fields', () => {
+  const program = String.raw`
+import importlib.util,json,sys,hashlib,os
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+raw=os.urandom(32).hex().encode();digest=hashlib.sha256(raw).hexdigest();targets={digest}
+assert m.scan_credential_digest_bytes(raw,targets)['digestOfCredentialHits']==1
+assert m.scan_credential_digest_bytes(digest.encode(),targets)['rawCredentialHits']==1
+assert m.scan_credential_digest_bytes(json.dumps({'credentialSha256':digest}).encode(),targets)['rawCredentialHits']==0
+assert m.scan_credential_digest_bytes(json.dumps({'credentialSha256':digest,'apiKey':digest}).encode(),targets)['rawCredentialHits']==1
+for content in [b'Authorization: Bearer '+digest.encode(),json.dumps({'body':json.dumps({'credentialSha256':digest})}).encode(),b'"credentialSha256":"'+digest.encode()+b'"']:
+ assert m.scan_credential_digest_bytes(content,targets)['rawCredentialHits']>0
+print(json.dumps({'hashControl':True,'rawControl':True,'typedField':True,'negativeControls':True}))
+`;
+  const result = spawnSync('python3', ['-c', program, reportFormatterPath], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { hashControl: true, rawControl: true, typedField: true, negativeControls: true });
+});
+
 test('D-147 integrated proof refuses newly labelled classes without mechanical evidence and unclassified entries', () => {
   for (const kind of ['public-opaque-operation-reference', 'unclassified']) {
     const f = seedProofFixture();
