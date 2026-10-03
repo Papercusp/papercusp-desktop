@@ -415,8 +415,64 @@ run_filesystem_self_test() {
   echo "SELF-TEST PASS: staged validation rejects missing/tampered payloads (incl. missing/stale harness) and swap/rollback preserves the previous payload"
 }
 
+# D-168 (p2p-public-release-endgame-2026-09-01, 2026-10-03): the PUBLIC DHT is the rig's default,
+# the product topology, matching the tower bg-host since D-167. The isolated rig testnet
+# (172.31.44.1:49838) is selected ONLY when the caller passes PAPERCUSP_DHT_BOOTSTRAP explicitly;
+# every drill that needs the testnet must pass it. (Before D-168 this launcher defaulted to it.)
+#
+# The marker files follow the selection. EI-21151075708883534 / EI-8893: swarm.ts's
+# readEffectiveDhtBootstrapRaw()/readExpectedDhtBootstrap() fall back to ~/.papercusp/dht-bootstrap
+# and ~/.papercusp/expected-dht-bootstrap when the env var is absent, so an env-less relaunch (a
+# macOS Server.app self-relaunch via LaunchServices drops the launch env) keeps the SAME universe as
+# this boot. Isolated boot: write both markers (WI-4070: without them the relaunch silently fell onto
+# the public DHT). Public boot: DELETE both markers, because a marker left by an earlier isolated
+# boot would otherwise pin this boot, and every env-less relaunch, back to the testnet.
+select_rig_dht_bootstrap() {
+  local dir="$1/.papercusp"
+  mkdir -p "$dir" || return 1
+  if [ -n "${PAPERCUSP_DHT_BOOTSTRAP:-}" ]; then
+    export PAPERCUSP_DHT_BOOTSTRAP
+    printf '%s' "$PAPERCUSP_DHT_BOOTSTRAP" > "$dir/dht-bootstrap.tmp" \
+      && mv "$dir/dht-bootstrap.tmp" "$dir/dht-bootstrap" || return 1
+    printf '%s' "$PAPERCUSP_DHT_BOOTSTRAP" > "$dir/expected-dht-bootstrap.tmp" \
+      && mv "$dir/expected-dht-bootstrap.tmp" "$dir/expected-dht-bootstrap" || return 1
+  else
+    unset PAPERCUSP_DHT_BOOTSTRAP
+    rm -f "$dir/dht-bootstrap" "$dir/expected-dht-bootstrap" || return 1
+  fi
+}
+
+run_dht_select_self_test() {
+  local root out exported
+  root="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-dht-selftest.XXXXXX")" || return 1
+  fail() { echo "SELF-TEST FAIL: $1" >&2; rm -rf "$root"; return 1; }
+  # 1. Unset => PUBLIC, and stale isolated markers from an earlier boot are removed.
+  mkdir -p "$root/.papercusp"
+  printf '172.31.44.1:49838' > "$root/.papercusp/dht-bootstrap"
+  printf '172.31.44.1:49838' > "$root/.papercusp/expected-dht-bootstrap"
+  out="$(unset PAPERCUSP_DHT_BOOTSTRAP; select_rig_dht_bootstrap "$root" && printf '%s' "${PAPERCUSP_DHT_BOOTSTRAP-<unset>}")" \
+    || { fail "dht default selection errored"; return 1; }
+  [ "$out" = "<unset>" ] || { fail "dht default is not public (got '$out')"; return 1; }
+  [ ! -e "$root/.papercusp/dht-bootstrap" ] && [ ! -e "$root/.papercusp/expected-dht-bootstrap" ] \
+    || { fail "a public boot left an isolated-DHT marker behind"; return 1; }
+  # 2. Empty string => PUBLIC too (an empty value is not a bootstrap).
+  out="$(PAPERCUSP_DHT_BOOTSTRAP=''; select_rig_dht_bootstrap "$root" && printf '%s' "${PAPERCUSP_DHT_BOOTSTRAP-<unset>}")" \
+    || { fail "dht empty-value selection errored"; return 1; }
+  [ "$out" = "<unset>" ] || { fail "an empty PAPERCUSP_DHT_BOOTSTRAP did not select public (got '$out')"; return 1; }
+  # 3. Explicit => isolated: exported to children, and both markers carry the value.
+  exported="$(PAPERCUSP_DHT_BOOTSTRAP=10.0.0.9:1234; select_rig_dht_bootstrap "$root" && env | sed -n 's/^PAPERCUSP_DHT_BOOTSTRAP=//p')" \
+    || { fail "dht explicit selection errored"; return 1; }
+  [ "$exported" = "10.0.0.9:1234" ] || { fail "an explicit bootstrap was not exported (got '$exported')"; return 1; }
+  [ "$(cat "$root/.papercusp/dht-bootstrap")" = "10.0.0.9:1234" ] \
+    && [ "$(cat "$root/.papercusp/expected-dht-bootstrap")" = "10.0.0.9:1234" ] \
+    || { fail "an explicit bootstrap did not write both markers"; return 1; }
+  rm -rf "$root"
+  echo "SELF-TEST PASS: rig DHT defaults to PUBLIC (stale isolated markers removed); an explicit PAPERCUSP_DHT_BOOTSTRAP selects the isolated testnet and writes both markers"
+}
+
 if [ "$SELF_TEST" = "1" ]; then
-  run_filesystem_self_test
+  run_filesystem_self_test || exit $?
+  run_dht_select_self_test
   exit $?
 fi
 
@@ -737,21 +793,9 @@ PAPERCUSP_RIG_GATEWAY_UPSTREAM="${PAPERCUSP_RIG_GATEWAY_UPSTREAM-http://127.0.0.
 if [ -n "$PAPERCUSP_RIG_GATEWAY_UPSTREAM" ]; then
   export ANTHROPIC_BASE_URL_UPSTREAM="$PAPERCUSP_RIG_GATEWAY_UPSTREAM"
 fi
-export PAPERCUSP_DHT_BOOTSTRAP="${PAPERCUSP_DHT_BOOTSTRAP:-172.31.44.1:49838}"
-# EI-21151075708883534: swarm.ts's readEffectiveDhtBootstrapRaw()/readExpectedDhtBootstrap()
-# fall back to these two marker files precisely so an env-less relaunch (e.g. a macOS
-# Server.app self-relaunch via LaunchServices, which does not inherit its LaunchAgent's
-# EnvironmentVariables — EI-8893) still resolves the ISOLATED rig bootstrap instead of
-# silently joining the PUBLIC DHT. The env var above always wins when present, so this write
-# is a no-op for THIS boot's own routing — it exists purely to survive the NEXT, env-less one.
-# Nothing else in the tree provisions these files, so without this write the marker never
-# exists and the fallback path silently drops the host onto the public DHT (measured 2026-08-22,
-# WI-4070: weeks of zero peer discovery misdiagnosed as a dead rig / network fault).
-mkdir -p "$REAL_HOME/.papercusp"
-printf '%s' "$PAPERCUSP_DHT_BOOTSTRAP" > "$REAL_HOME/.papercusp/dht-bootstrap.tmp" \
-  && mv "$REAL_HOME/.papercusp/dht-bootstrap.tmp" "$REAL_HOME/.papercusp/dht-bootstrap"
-printf '%s' "$PAPERCUSP_DHT_BOOTSTRAP" > "$REAL_HOME/.papercusp/expected-dht-bootstrap.tmp" \
-  && mv "$REAL_HOME/.papercusp/expected-dht-bootstrap.tmp" "$REAL_HOME/.papercusp/expected-dht-bootstrap"
+# D-168: PUBLIC DHT unless PAPERCUSP_DHT_BOOTSTRAP is passed explicitly; markers follow (see
+# select_rig_dht_bootstrap above).
+select_rig_dht_bootstrap "$REAL_HOME" || { echo "FATAL: could not apply the DHT selection markers under $REAL_HOME/.papercusp" >&2; exit 1; }
 # EI-13317 forensics ride the per-attempt dial trace (peer-dial-registry.ts) —
 # keep it armed by default on the rig so a reboot never silently drops the
 # evidence stream (su-71c69's reverse-leg legs depend on it).
@@ -768,7 +812,7 @@ export PAPERCUSP_SWARM_CHURN_DEBUG="${PAPERCUSP_SWARM_CHURN_DEBUG:-1}"
 
 echo "boot-current: serve=$SERVE"
 echo "boot-current: PG_DATA_DIR=$PAPERCUSP_PG_DATA_DIR  PG_SQL_DIR=$PAPERCUSP_PG_SQL_DIR"
-echo "boot-current: DHT=$PAPERCUSP_DHT_BOOTSTRAP  PORT=$PAPERCUSP_HONO_PORT"
+echo "boot-current: DHT=${PAPERCUSP_DHT_BOOTSTRAP:-PUBLIC}  PORT=$PAPERCUSP_HONO_PORT"
 
 # --- fully detach (perl setsid; nohup alone dies with the ssh session)
 #
