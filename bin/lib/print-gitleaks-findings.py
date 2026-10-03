@@ -52,6 +52,7 @@ _MECHANICAL_PLAIN_CLASSES = {
     "public-cryptographic-key", "reviewed-descriptive-source-text",
     "public-generated-agent-identifier",
     "public-non-bearer-field-reference",
+    "public-quoted-issue-reference",
 }
 _SEED_CLASSES |= _MECHANICAL_SEED_CLASSES
 _PLAIN_CLASSES |= _MECHANICAL_PLAIN_CLASSES
@@ -67,6 +68,10 @@ _RESPAWN_MAKERS = {
         ("6d22fc28a9124ce58c5312d058c47813a3b0080c", {"hex16"}),
 }
 _RESPAWN_FIELDS = {"writer_key", "sender", "sender_id"}
+_PUBLIC_ISSUE_MAKER = {
+    "tree": "superproject", "path": "packages/operator-core/lib/issues-engineer.ts",
+    "blob": "ab53e49b9bf43f6e1c2589302f8acb1fed891b8e",
+}
 _NON_BEARER_FIELDS = {"idempotencyKey", "conditionKey", "watchdogKey", "credentialSha256"}
 _CREDENTIAL_DIGEST_VERIFIER = {
     "tree": "superproject",
@@ -329,6 +334,8 @@ def mechanical_class_valid(entry: dict[str, object], finding: dict[str, object],
         path, _ = _source_tree(entry["sourceRef"], context["trees"])
         return subprocess.run(["git", "-C", str(path), "cat-file", "-e", value],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    if kind == "public-quoted-issue-reference":
+        return quoted_issue_reference_valid(entry, finding, context)
     row = context["plainRows"][int(finding["StartLine"])]
     locator = entry["fieldPath"]
     field = str(locator[-1])
@@ -398,7 +405,8 @@ def _validate_mechanical_entries(entries: list[dict[str, object]], report: list[
     by_location = {(finding_digest(finding), finding["StartLine"]): finding for finding in report}
     for entry in entries:
         finding = (by_location[(entry["digest"], entry["line"])]
-                   if entry["class"] in {"public-generated-agent-identifier", "public-non-bearer-field-reference"}
+                   if entry["class"] in {"public-generated-agent-identifier", "public-non-bearer-field-reference",
+                                         "public-quoted-issue-reference"}
                    else by_digest[entry["digest"]])
         if entry["class"] in added and not mechanical_class_valid(
                 entry, finding, context, seed=seed):
@@ -478,6 +486,118 @@ def _read_extra_proof(proof: dict[str, object], directory: Path, name: str) -> o
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def validate_quoted_issue_twins(refs: list[dict[str, object]], directory: Path,
+                                root: Path, config: Path,
+                                parent_proof: dict[str, object]) -> dict[str, set[str]]:
+    """D-160 T1: independently valid same-seed proofs supply complete EI twins.
+
+    Only top-level issue_id values are eligible. A twin's proof cannot depend
+    on quoted twins, preventing recursive or circular admission.
+    """
+    twins: dict[str, set[str]] = {}
+    for ref in refs:
+        child = _source_file(directory.parent, ref["proofPath"])
+        _private_file(child)
+        if child.resolve() == (directory / "seed-finding-proof.json").resolve():
+            raise ValueError("quoted issue self-twin refused")
+        if _sha256(child) != ref.get("proofSha256"):
+            raise ValueError("quoted issue twin proof changed")
+        proof = json.loads(child.read_text())
+        if ("proofs" in proof or proof.get("manifestSha256") != parent_proof["manifestSha256"]
+                or proof.get("epochKeysSha256") != parent_proof["epochKeysSha256"]):
+            raise ValueError("quoted issue twin is not from the same seed")
+        entries = json.loads((child.parent / "plaintext-exact-finding-digests.json").read_text())
+        reference = json.loads((child.parent / "mechanical-class-proof.private.json").read_text())
+        if (reference.get("quotedIssueTwinProofs")
+                or any(entry.get("class") == "public-quoted-issue-reference" for entry in entries)):
+            raise ValueError("quoted issue twin proof cannot depend on quoted twins")
+        validate_seed_proof(proof, child.parent, root, config)
+        plaintext = child.parent / "seed-000080.plaintext.jsonl"
+        if _sha256(plaintext) != ref.get("plaintextSha256"):
+            raise ValueError("quoted issue twin plaintext changed")
+        line_number = ref.get("line")
+        if type(line_number) is not int or line_number < 1 or ref.get("fieldPath") != ["issue_id"]:
+            raise ValueError("quoted issue exact structured locator required")
+        row = None
+        with plaintext.open() as handle:
+            for line, text in enumerate(handle, 1):
+                if line == line_number:
+                    if hashlib.sha256(text.encode()).hexdigest() != ref.get("rowSha256"):
+                        raise ValueError("quoted issue twin row changed")
+                    row = json.loads(text)
+                    break
+        value = row.get("issue_id") if isinstance(row, dict) else None
+        if not isinstance(value, str) or re.fullmatch(r"EI-[0-9]+", value) is None:
+            raise ValueError("quoted issue complete EI twin required")
+        twins.setdefault(value, set()).add(ref["proofSha256"])
+    return twins
+
+
+def quoted_issue_reference_valid(entry: dict[str, object], finding: dict[str, object],
+                                  context: dict[str, object]) -> bool:
+    """D-160's accessBug EI route; other fields and UUIDs remain refused."""
+    value = finding.get("Secret")
+    locator = ["payload", "out", "accessBug"]
+    if (entry.get("reviewRef") != "p2p-public-release-endgame-2026-09-01#D-160"
+            or finding.get("RuleID") != "generic-api-key"
+            or not isinstance(value, str) or re.fullmatch(r"EI-[0-9]+", value) is None
+            or entry.get("fieldPath") != locator
+            or entry.get("line") != finding.get("StartLine")
+            or entry.get("rowSha256") != context["plainRowDigests"][int(finding["StartLine"])]
+            or entry.get("sourceRef") != _PUBLIC_ISSUE_MAKER
+            or entry.get("twinProofSha256") not in context.get("quotedIssueTwins", {}).get(value, set())
+            or context.get("identityScanValidated") is not True):
+        return False
+    row = context["plainRows"][int(finding["StartLine"])]
+    if _at_path(row, locator) != value:
+        return False
+    field = _MATCH_FIELD.match(finding["Match"])
+    if not field or field.group(1) != "accessBug":
+        return False
+    maker = _frozen_source_bytes(entry["sourceRef"], context["trees"])
+    if any(part not in maker for part in (
+            b"const ms = BigInt(Math.max(0, Date.now() - EI_ID_EPOCH_MS));",
+            b"const rand = BigInt(randomInt(0, EI_ID_RAND_SPACE));",
+            b"return ((ms << EI_ID_RAND_BITS) + rand).toString();",
+            b"const candidate = `EI-${newCollisionResistantIssueTail()}`;")):
+        return False
+    context.setdefault("_makerProofCache", {})["public-issue"] = entry["sourceRef"]
+    containers = entry.get("containingStrings", [])
+    if not containers:
+        return False
+    checked = set()
+    for container in containers:
+        path = container["fieldPath"]
+        path_key = json.dumps(path, separators=(",", ":"))
+        if path_key in checked:
+            return False
+        checked.add(path_key)
+        text = _at_path(row, path)
+        if not isinstance(text, str) or (path != locator and finding["Match"] not in text):
+            return False
+        expected = [{"byteStart": match.start(), "byteEnd": match.end(),
+                     "sha256": hashlib.sha256(value.encode()).hexdigest()}
+                    for match in re.finditer(re.escape(value.encode()), text.encode())]
+        if not expected or container.get("spans") != expected:
+            return False
+        measured = scan_quoted_token_remainder(text, expected, context["identityRecipients"],
+                                              context["scannerConfig"], context["credentialDigests"])
+        if container.get("scan") != measured:
+            return False
+    required = {json.dumps(locator, separators=(",", ":"))}
+    def walk(item: object, path: list[object]) -> None:
+        if isinstance(item, dict):
+            for key, nested in item.items():
+                walk(nested, [*path, key])
+        elif isinstance(item, list):
+            for index, nested in enumerate(item):
+                walk(nested, [*path, index])
+        elif isinstance(item, str) and finding["Match"] in item:
+            required.add(json.dumps(path, separators=(",", ":")))
+    walk(row, [])
+    return required == checked
+
+
 def _mechanical_context(proof: dict[str, object], directory: Path, root: Path,
                         source: Path, entries: list[dict[str, object]],
                         report: list[dict[str, object]], plain_report: list[dict[str, object]]) -> dict[str, object]:
@@ -526,11 +646,19 @@ def _mechanical_context(proof: dict[str, object], directory: Path, root: Path,
                "publicReferences": public_refs, "idFields": set(reference.get("idFields", [])),
                "trees": reference.get("trees", {}), "publicIds": public_ids,
                "nonBearerFields": reference.get("nonBearerFields", {})}
+    quoted_twins = reference.get("quotedIssueTwinProofs", [])
+    if quoted_twins:
+        config = Path(__file__).parent.parent / "release-gitleaks.toml"
+        if _sha256(config) != proof["configSha256"]:
+            raise ValueError("quoted issue scan configuration changed")
+        context["quotedIssueTwins"] = validate_quoted_issue_twins(
+            quoted_twins, directory, root, config, proof)
+        context["scannerConfig"] = config
     has_envelopes = any(entry["class"] == "recipient-sealed-epoch-key-envelope" for entry in entries)
     # Plain entries are checked by the caller; a supplied closed field proof
     # requires the same full inventory scan, even in a non-metadata segment.
     has_non_bearer = bool(reference.get("nonBearerFields"))
-    if has_envelopes or has_non_bearer:
+    if has_envelopes or has_non_bearer or quoted_twins:
         envelope = _read_extra_proof(proof, directory, "sealed-envelope-proof-safe.json")
         keys = json.loads((root / "epoch-keys.json").read_text())["papercusp"]
         if has_envelopes:
@@ -563,6 +691,8 @@ def _mechanical_context(proof: dict[str, object], directory: Path, root: Path,
         validate_identity_secret_proof(identity_scan, root, directory, recipient_keys, reference)
         context["identityScanValidated"] = True
         context["credentialDigestScan"] = identity_scan.get("credentialDigestScan", {})
+        context["identityRecipients"] = recipient_keys
+        context["credentialDigests"] = set(reference.get("credentialDigests", []))
     return context
 
 

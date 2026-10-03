@@ -1234,6 +1234,72 @@ print(json.dumps({'adjacentCredentialRefused':True,'adjacentPrivateKeyRefused':T
   assert.deepEqual(JSON.parse(result.stdout), { adjacentCredentialRefused: true, adjacentPrivateKeyRefused: true, privateTokenRefused: true });
 });
 
+test('D-160 EI reference requires a validated exact twin, frozen maker and every containing-string rescan', () => {
+  const program = String.raw`
+import importlib.util,json,sys,pathlib,hashlib,copy
+from unittest.mock import patch
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+config=pathlib.Path(sys.argv[2]);public,_=m._key_publics(m._sodium(),bytes(range(32)))
+value='EI-24900000000000000';finding={'RuleID':'generic-api-key','Secret':value,'Match':'"accessBug":"'+value+'"','StartLine':1}
+row={'payload':{'out':{'accessBug':value}}};rowsha=hashlib.sha256(json.dumps(row).encode()).hexdigest()
+spans=[{'byteStart':0,'byteEnd':len(value),'sha256':hashlib.sha256(value.encode()).hexdigest()}]
+scan=m.scan_quoted_token_remainder(value,spans,{public},config,set())
+entry={'class':'public-quoted-issue-reference','digest':m.finding_digest(finding),'rule':finding['RuleID'],'reviewRef':'p2p-public-release-endgame-2026-09-01#D-160','line':1,'rowSha256':rowsha,'fieldPath':['payload','out','accessBug'],'sourceRef':m._PUBLIC_ISSUE_MAKER,'twinProofSha256':'a'*64,'containingStrings':[{'fieldPath':['payload','out','accessBug'],'spans':spans,'scan':scan}]}
+ctx={'plainRows':{1:row},'plainRowDigests':{1:rowsha},'quotedIssueTwins':{value:{'a'*64}},'identityScanValidated':True,'identityRecipients':{public},'scannerConfig':config,'credentialDigests':set(),'trees':{}}
+maker=b'const ms = BigInt(Math.max(0, Date.now() - EI_ID_EPOCH_MS)); const rand = BigInt(randomInt(0, EI_ID_RAND_SPACE)); return ((ms << EI_ID_RAND_BITS) + rand).toString(); const candidate = '+bytes([96])+b'EI-'+bytes([36])+b'{newCollisionResistantIssueTail()}'+bytes([96])+b';'
+def valid(e=entry,f=finding):return m.mechanical_class_valid(e,f,ctx,seed=False)
+with patch.object(m,'_frozen_source_bytes',return_value=maker):
+ assert valid()
+ for e in [{**entry,'twinProofSha256':'b'*64},{**entry,'rowSha256':'0'*64},{**entry,'sourceRef':{**m._PUBLIC_ISSUE_MAKER,'blob':'0'*40}},{**entry,'line':2},{**entry,'fieldPath':['payload','out','apiKey']},{**entry,'containingStrings':[]},{**entry,'containingStrings':entry['containingStrings']*2}]:assert not valid(e)
+ ctx['identityScanValidated']=False;assert not valid();ctx['identityScanValidated']=True
+ e=copy.deepcopy(entry);e['containingStrings'][0]['scan']['remainderSha256']='0'*64;assert not valid(e)
+ f={**finding,'Secret':'12345678-1234-4234-8234-123456789abc'};e={**entry,'digest':m.finding_digest(f)};assert not valid(e,f)
+ row['body']=finding['Match'];assert not valid()
+ text=row['body'];offset=text.index(value);extra={'fieldPath':['body'],'spans':[{'byteStart':offset,'byteEnd':offset+len(value),'sha256':spans[0]['sha256']}]};extra['scan']=m.scan_quoted_token_remainder(text,extra['spans'],{public},config,set());e={**entry,'containingStrings':[entry['containingStrings'][0],extra]};assert valid(e)
+ row['body']+='; apiKey="ghp_'+'Ab3De4Fg5Hi6Jk7Lm8No9Pq0Rs1Tu2Vw3Xy4'+'"'
+ try:valid(e);raise AssertionError('adjacent credential passed')
+ except ValueError:pass
+with patch.object(m,'_frozen_source_bytes',return_value=b'wrong maker'):assert not valid()
+print(json.dumps({'exactEI':True,'allOccurrences':True,'negativeControls':True}))
+`;
+  const result = spawnSync('python3', ['-c', program, reportFormatterPath, configPath], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { exactEI: true, allOccurrences: true, negativeControls: true });
+});
+
+test('D-160 structured twins require an independently valid same-seed proof and cannot form a cycle', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-issue-twin-proof-'));
+  try {
+    const program = String.raw`
+import importlib.util,json,sys,pathlib,hashlib
+from unittest.mock import patch
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+base=pathlib.Path(sys.argv[2]);current=base/'current';current.mkdir(mode=0o700);other=base/'other';other.mkdir(mode=0o700);config=base/'config';config.write_text('test')
+parent={'manifestSha256':'a'*64,'epochKeysSha256':'b'*64};proof=dict(parent);child=other/'seed-finding-proof.json';child.write_text(json.dumps(proof));child.chmod(0o600)
+plain=other/'seed-000080.plaintext.jsonl';text=json.dumps({'issue_id':'EI-24900000000000000'})+'\n';plain.write_text(text);plain.chmod(0o600)
+entries=other/'plaintext-exact-finding-digests.json';entries.write_text('[]');reference=other/'mechanical-class-proof.private.json';reference.write_text('{}')
+ref={'proofPath':'other/seed-finding-proof.json','proofSha256':m._sha256(child),'plaintextSha256':m._sha256(plain),'line':1,'rowSha256':hashlib.sha256(text.encode()).hexdigest(),'fieldPath':['issue_id']}
+def valid(r=ref):return m.validate_quoted_issue_twins([r],current,base,config,parent)
+def refused(r=ref):
+ try:valid(r);raise AssertionError('invalid twin passed')
+ except ValueError:pass
+with patch.object(m,'validate_seed_proof',return_value=set()) as check:
+ assert valid()=={'EI-24900000000000000':{ref['proofSha256']}};check.assert_called_once()
+ for r in [{**ref,'proofPath':'../outside.json'},{**ref,'proofSha256':'0'*64},{**ref,'plaintextSha256':'0'*64},{**ref,'rowSha256':'0'*64},{**ref,'fieldPath':['id']},{**ref,'line':True},{**ref,'line':2}]:refused(r)
+ for changed in [{**proof,'manifestSha256':'c'*64},{**proof,'epochKeysSha256':'c'*64},{**proof,'proofs':[]}]:
+  child.write_text(json.dumps(changed));refused({**ref,'proofSha256':m._sha256(child)})
+ child.write_text(json.dumps(proof))
+ entries.write_text(json.dumps([{'class':'public-quoted-issue-reference'}]));refused()
+ entries.write_text('[]');reference.write_text(json.dumps({'quotedIssueTwinProofs':[ref]}));refused();reference.write_text('{}')
+with patch.object(m,'validate_seed_proof',side_effect=ValueError('authentication failed')):refused()
+print(json.dumps({'validatedTwin':True,'negativeControls':True,'cyclesRefused':True}))
+`;
+    const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), { validatedTwin: true, negativeControls: true, cyclesRefused: true });
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test('D-147 integrated proof refuses newly labelled classes without mechanical evidence and unclassified entries', () => {
   for (const kind of ['public-opaque-operation-reference', 'unclassified']) {
     const f = seedProofFixture();
