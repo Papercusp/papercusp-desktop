@@ -1519,6 +1519,11 @@ def _uuid_artifact_population(roots: list[Path]):
             low = path.name.lower()
             installer = audit._looks_like_installer_stub(low)
             if not installer and not low.endswith(audit.ARCHIVE_SUFFIXES):
+                with path.open('rb') as handle:
+                    prefix = handle.read(512)
+                if (prefix.startswith((b'\x1f\x8b', b'PK\x03\x04', b'\x28\xb5\x2f\xfd', b'\xfd7zXZ\x00', b'BZh'))
+                        or prefix[257:262] == b'ustar'):
+                    raise ValueError('UUID archive format/name mismatch requires explicit reader')
                 return
             if digest in ancestors or len(ancestors) >= 32:
                 raise ValueError('UUID archive recursion invalid')
@@ -1557,6 +1562,12 @@ def census_uuid_artifacts(config_path: Path, roots: list[Path]) -> dict[str, obj
                 with path.open('rb') as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
                     tokens.update(match.group(1).decode() for match in re.finditer(_UUID_NAMED_TEXT.pattern.encode(), data))
         inventory, occurrences = [], []
+        for root in roots:
+            if root.is_dir():
+                for directory, dirs, _ in os.walk(root, followlinks=False):
+                    for name in dirs:
+                        if _uuid_occurrences((Path(directory) / name).relative_to(root).as_posix(), tokens):
+                            raise ValueError('UUID unsafe artifact directory path')
         for index, (path, label, digest) in enumerate(population, 1):
             segment = f'artifact-{index:06d}'
             if _uuid_occurrences(label, tokens):
@@ -1567,11 +1578,19 @@ def census_uuid_artifacts(config_path: Path, roots: list[Path]) -> dict[str, obj
                 found = _uuid_document_occurrences(path.read_text(encoding='utf-8'), path.suffix.lower(), tokens)
             else:
                 found = []
-                if tokens and path.stat().st_size:
-                    pattern = re.compile(b'|'.join(re.escape(t.encode()) for t in sorted(tokens)), re.IGNORECASE)
+                if path.stat().st_size:
                     with path.open('rb') as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
-                        found = [{'line': data[:m.start()].count(b'\n') + 1, 'fieldPath': ['<bytes>', n]}
-                                 for n, m in enumerate(pattern.finditer(data))]
+                        if tokens:
+                            pattern = re.compile(b'|'.join(re.escape(t.encode()) for t in sorted(tokens)), re.IGNORECASE)
+                            found = [{'line': data[:m.start()].count(b'\n') + 1, 'fieldPath': ['<bytes>', n]}
+                                     for n, m in enumerate(pattern.finditer(data))]
+                            utf16 = re.compile(b'|'.join(re.escape(t.encode(encoding)) for t in sorted(tokens)
+                                                        for encoding in ('utf-16-le', 'utf-16-be')), re.IGNORECASE)
+                            found += [{'line': 1, 'fieldPath': ['<utf16-bytes>', n]}
+                                      for n, _ in enumerate(utf16.finditer(data))]
+                        if any(re.search(re.escape('idempotencyKey'.encode(encoding)), data, re.IGNORECASE)
+                               for encoding in ('utf-16-le', 'utf-16-be')):
+                            raise ValueError('UUID UTF16 named class requires explicit decoder')
             current = hashlib.sha256(os.readlink(path).encode()).hexdigest() if path.is_symlink() else _sha256(path)
             if current != digest:
                 raise ValueError('UUID artifact changed during scan')

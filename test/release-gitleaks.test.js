@@ -186,7 +186,17 @@ unsafe=base/'unsafe';unsafe.mkdir();write(unsafe/a,'safe')
 refused(lambda:m.census_uuid_artifacts(cfg,[unsafe]))
 encoded=base/'encoded';encoded.mkdir();write(encoded/'page.html','idempotencyKey: &#99;'+a[1:])
 refused(lambda:m.census_uuid_artifacts(cfg,[encoded]))
-print(json.dumps({'originalOccurrences':scan['occurrenceCount'],'redactedDocuments':report['redactedDocuments'],'outputRawClassHits':0,'archivesExpanded':len(arch['inventory'])-1,'sourceUnchanged':True,'refusalControls':12}))
+opaque=base/'opaque';opaque.mkdir();(opaque/'compressed.bin').write_bytes(gzip.compress(('idempotencyKey: '+c).encode()))
+refused(lambda:m.census_uuid_artifacts(cfg,[opaque]))
+wide=base/'wide';wide.mkdir();(wide/'mirror.bin').write_bytes(a.encode('utf-16-le'))
+assert m.census_uuid_artifacts(cfg,[wide])['occurrenceCount']==1
+(wide/'named.bin').write_bytes(('idempotencyKey: '+c).encode('utf-16-le'))
+refused(lambda:m.census_uuid_artifacts(cfg,[wide]))
+unsafe_empty=base/'unsafe-empty';unsafe_empty.mkdir();(unsafe_empty/a).mkdir();write(unsafe_empty/'safe.txt','safe')
+refused(lambda:m.census_uuid_artifacts(cfg,[unsafe_empty]))
+signed_escape=base/'signed-escape';signed_escape.mkdir();write(signed_escape/'signed.json','{"idempotencyKey":"'+a+'","\\u0073ignature":"original-signature"}')
+refused(lambda:m.project_uuid_document_tree(cfg,signed_escape,base/'signed-escape-output',base/'signed-escape-report.json'))
+print(json.dumps({'originalOccurrences':scan['occurrenceCount'],'redactedDocuments':report['redactedDocuments'],'outputRawClassHits':0,'archivesExpanded':len(arch['inventory'])-1,'sourceUnchanged':True,'refusalControls':16}))
 `;
     const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8', timeout: 30_000 });
     assert.equal(result.status, 0, result.stderr);
