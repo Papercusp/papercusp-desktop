@@ -488,7 +488,8 @@ def _read_extra_proof(proof: dict[str, object], directory: Path, name: str) -> o
 
 def validate_quoted_issue_twins(refs: list[dict[str, object]], directory: Path,
                                 root: Path, config: Path,
-                                parent_proof: dict[str, object]) -> dict[str, set[str]]:
+                                parent_proof: dict[str, object],
+                                identity_context: dict[str, object] | None = None) -> dict[str, set[str]]:
     """D-160 T1: independently valid same-seed proofs supply complete EI twins.
 
     Only top-level issue_id values are eligible. A twin's proof cannot depend
@@ -511,7 +512,13 @@ def validate_quoted_issue_twins(refs: list[dict[str, object]], directory: Path,
         if (reference.get("quotedIssueTwinProofs")
                 or any(entry.get("class") == "public-quoted-issue-reference" for entry in entries)):
             raise ValueError("quoted issue twin proof cannot depend on quoted twins")
-        validate_seed_proof(proof, child.parent, root, config)
+        if "occurrenceScope" in proof:
+            validate_seed_proof(proof, child.parent, root, config,
+                                issue_twin=ref, identity_context=identity_context)
+            identity_context.setdefault("quotedIssueTwinResiduals", {})[ref["proofSha256"]] = (
+                proof["occurrenceScope"]["remainingPlaintextFindings"])
+        else:
+            validate_seed_proof(proof, child.parent, root, config)
         plaintext = child.parent / "seed-000080.plaintext.jsonl"
         if _sha256(plaintext) != ref.get("plaintextSha256"):
             raise ValueError("quoted issue twin plaintext changed")
@@ -651,8 +658,6 @@ def _mechanical_context(proof: dict[str, object], directory: Path, root: Path,
         config = Path(__file__).parent.parent / "release-gitleaks.toml"
         if _sha256(config) != proof["configSha256"]:
             raise ValueError("quoted issue scan configuration changed")
-        context["quotedIssueTwins"] = validate_quoted_issue_twins(
-            quoted_twins, directory, root, config, proof)
         context["scannerConfig"] = config
     has_envelopes = any(entry["class"] == "recipient-sealed-epoch-key-envelope" for entry in entries)
     # Plain entries are checked by the caller; a supplied closed field proof
@@ -693,6 +698,9 @@ def _mechanical_context(proof: dict[str, object], directory: Path, root: Path,
         context["credentialDigestScan"] = identity_scan.get("credentialDigestScan", {})
         context["identityRecipients"] = recipient_keys
         context["credentialDigests"] = set(reference.get("credentialDigests", []))
+    if quoted_twins:
+        context["quotedIssueTwins"] = validate_quoted_issue_twins(
+            quoted_twins, directory, root, context["scannerConfig"], proof, context)
     return context
 
 
@@ -1346,7 +1354,8 @@ def _classification(summary: dict[str, object], entries: list[dict[str, object]]
 
 
 def validate_seed_proof(proof: dict[str, object], directory: Path, root: Path,
-                        config: Path) -> set[str]:
+                        config: Path, *, issue_twin: dict[str, object] | None = None,
+                        identity_context: dict[str, object] | None = None) -> set[str]:
     """Validate an explicitly reviewed, private, exact-source evidence package.
 
     This does not infer publicness from a field name or grant new classifications.
@@ -1357,6 +1366,15 @@ def validate_seed_proof(proof: dict[str, object], directory: Path, root: Path,
             or not isinstance(proof.get("reviewRef"), str) or not proof["reviewRef"].strip()
             or proof.get("configSha256") != _sha256(config)):
         raise ValueError("proof identity mismatch")
+    if "occurrenceScope" in proof and issue_twin is None:
+        raise ValueError("occurrence proof cannot clear a segment")
+    if issue_twin is not None and (
+            proof.get("reviewRef") != "p2p-public-release-endgame-2026-09-01#D-165"
+            or proof.get("toolingSha256") != _sha256(Path(__file__))
+            or not isinstance(proof.get("occurrenceScope"), dict)
+            or not identity_context or identity_context.get("identityScanValidated") is not True
+            or not identity_context.get("identityRecipients")):
+        raise ValueError("scoped issue twin identity proof required")
     version = subprocess.run(["gitleaks", "version"], check=True,
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode().strip()
     if proof.get("scannerVersion") != version:
@@ -1389,7 +1407,8 @@ def validate_seed_proof(proof: dict[str, object], directory: Path, root: Path,
                           _REQUIRED_FORBIDDEN_DIGESTS if manifest.get("potId") == "papercusp" else set())
     plain = evidence["plaintext-classification-safe.json"]
     plain_entries = evidence["plaintext-exact-finding-digests.json"]
-    plain_allowed = _classification(plain, plain_entries, _PLAIN_CLASSES)
+    plain_allowed = (_classification(plain, plain_entries, _PLAIN_CLASSES)
+                     if issue_twin is None else None)
     plain_meta = evidence["seed-000080.plaintext.private.meta.json"]
     plain_identity = {"blobSha256": _sha256(directory / "seed-000080.plaintext.jsonl"),
                       "configSha256": proof["configSha256"], "scannerVersion": version}
@@ -1399,8 +1418,50 @@ def validate_seed_proof(proof: dict[str, object], directory: Path, root: Path,
             or plain_meta.get("reportSha256") != _sha256(directory / "seed-000080.plaintext.private.json")
             or plain_meta.get("findings") != len(plain_report)
             or len(plain_entries) != len(plain_report)
-            or {finding_digest(row) for row in plain_report} != plain_allowed):
+            or (issue_twin is None
+                and {finding_digest(row) for row in plain_report} != plain_allowed)):
         raise ValueError("plaintext scan incomplete")
+    if issue_twin is not None:
+        scope = proof["occurrenceScope"]
+        plaintext = directory / "seed-000080.plaintext.jsonl"
+        if (scope.get("kind") != "public-issue-id-twin"
+                or scope.get("fieldPath") != ["issue_id"]
+                or scope.get("line") != issue_twin.get("line")
+                or type(scope.get("line")) is not int or scope["line"] < 1
+                or scope.get("rowSha256") != issue_twin.get("rowSha256")
+                or issue_twin.get("fieldPath") != ["issue_id"]
+                or issue_twin.get("plaintextSha256") != plain_identity["blobSha256"]
+                or auth.get("sourceSha256") != proof["sourceSha256"]
+                or plain.get("findings") != len(plain_report)
+                or scope.get("remainingPlaintextFindings") != len(plain_report)
+                or dict(Counter(row.get("class") for row in plain_entries)) != plain.get("classes")
+                or Counter((row.get("digest"), row.get("rule")) for row in plain_entries)
+                != Counter((finding_digest(row), row.get("RuleID")) for row in plain_report)):
+            raise ValueError("scoped issue twin binding or residue mismatch")
+        row = None
+        row_count = 0
+        with plaintext.open() as handle:
+            for row_count, text in enumerate(handle, 1):
+                parsed = json.loads(text)
+                if row_count == scope["line"]:
+                    if hashlib.sha256(text.encode()).hexdigest() != scope["rowSha256"]:
+                        raise ValueError("scoped issue twin row changed")
+                    row = parsed
+        if row_count != fields:
+            raise ValueError("scoped issue twin authentication row count mismatch")
+        value = row.get("issue_id") if isinstance(row, dict) else None
+        if not isinstance(value, str) or re.fullmatch(r"EI-[0-9]+", value) is None:
+            raise ValueError("scoped complete public issue id required")
+        spans = [{"byteStart": 0, "byteEnd": len(value.encode()),
+                  "sha256": hashlib.sha256(value.encode()).hexdigest()}]
+        measured = scan_quoted_token_remainder(
+            value, spans, identity_context["identityRecipients"], config,
+            identity_context.get("credentialDigests", set()))
+        if scope.get("tokenScan") != measured:
+            raise ValueError("scoped issue twin token scan mismatch")
+        # T1 evidence only: not a single seed or plaintext finding is cleared
+        # here. Their full report remains bound and its residue is reported.
+        return set()
     seed = evidence["seed-classification-verified-safe.json"]
     entries = evidence["seed-exact-finding-digests.json"]
     allowed = _classification(seed, entries, _SEED_CLASSES)
@@ -1427,7 +1488,8 @@ def validate_seed_proof(proof: dict[str, object], directory: Path, root: Path,
 
 
 def assemble_seed_proof(directory: Path, root: Path, config: Path, relative: str,
-                        review_ref: str) -> dict[str, object]:
+                        review_ref: str, *, issue_twin: dict[str, object] | None = None,
+                        identity_context: dict[str, object] | None = None) -> dict[str, object]:
     meta = json.loads((directory / "seed-000080.private.meta.json").read_text())
     proof = {"schemaVersion": _PROOF_SCHEMA, "reviewRef": review_ref, "file": relative,
              "sourceSha256": _sha256(_source_file(root, relative)),
@@ -1436,7 +1498,11 @@ def assemble_seed_proof(directory: Path, root: Path, config: Path, relative: str
              "configSha256": _sha256(config), "scannerVersion": meta["identity"]["scannerVersion"],
              "evidence": {name: _sha256(directory / name) for name in _PROOF_FILES
                           if name in _BASE_PROOF_FILES or (directory / name).exists()}}
-    validate_seed_proof(proof, directory, root, config)
+    if issue_twin is not None:
+        proof["toolingSha256"] = _sha256(Path(__file__))
+        proof["occurrenceScope"] = issue_twin["occurrenceScope"]
+    validate_seed_proof(proof, directory, root, config,
+                        issue_twin=issue_twin, identity_context=identity_context)
     path = directory / "seed-finding-proof.json"
     fd, temporary = tempfile.mkstemp(prefix="seed-proof-", suffix=".partial", dir=directory)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
