@@ -22,4 +22,6 @@ test('the Mac verification rsync preserves remote Papercusp runtime scratch', ()
   const transfer = script.match(/rsync -az --delete[\s\S]*?"\$SNAP\/" "\$VM:\$VMDIR\/"/);
   assert.ok(transfer, 'the snapshot transfer must be present');
   assert.match(transfer[0], /--exclude '\/\.papercusp\/'/);
+  assert.match(transfer[0], /--exclude '\/papercusp-desktop\/src-tauri\/sidecar\/'/);
+  assert.match(transfer[0], /--exclude '\/papercusp-desktop\/src-tauri\/macos-term-shim\/\.build\/'/);
 });
