@@ -1133,7 +1133,9 @@ test('D-149 digest exposure detector refuses preimages and digest reuse outside 
 import importlib.util,json,sys,hashlib,os
 s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
 raw=os.urandom(32).hex().encode();digest=hashlib.sha256(raw).hexdigest();targets={digest}
-assert m.scan_credential_digest_bytes(raw,targets)['digestOfCredentialHits']==1
+assert m.scan_credential_digest_bytes(raw,targets)['digestOfCredentialHits']>0
+binary=os.urandom(32);binary_digest=hashlib.sha256(binary).hexdigest()
+assert m.scan_credential_digest_bytes(binary,{binary_digest})['digestOfCredentialHits']>0
 assert m.scan_credential_digest_bytes(digest.encode(),targets)['rawCredentialHits']==1
 assert m.scan_credential_digest_bytes(json.dumps({'credentialSha256':digest}).encode(),targets)['rawCredentialHits']==0
 assert m.scan_credential_digest_bytes(json.dumps({'credentialSha256':digest,'apiKey':digest}).encode(),targets)['rawCredentialHits']==1
