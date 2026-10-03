@@ -87,6 +87,72 @@ NODE
 
 # Output-only D166 doc copy point. Private originals survive outside the shipped
 # tree for independent review; never rewrite the canonical docs or a frozen core.
+seed_uuid_project_source_archive() {
+  local formatter="$1" selected="$2" sidecar="$3"
+  local census="${PAPERCUSP_SEED_UUID_CENSUS_PATH:-}" digest="${PAPERCUSP_SEED_UUID_CENSUS_SHA256:-}"
+  SEED_UUID_SOURCE_ARCHIVE_PATH="$selected"
+  [[ -n "$census$digest" ]] || return 0
+  local evidence context actual
+  # Consume the one private pointer emitted by the preceding sidecar copy
+  # point. Never select an arbitrary prior context or publish this descriptor.
+  if ! context="$(node - "${VH_RUN_DIR:-}" "$census" "$digest" "$sidecar" <<'NODE'
+const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
+try {
+  const [run, census, digest, sidecar] = process.argv.slice(2);
+  const repository = path.resolve(fs.realpathSync(sidecar), '../../..');
+  const privateRoot = fs.realpathSync(run);
+  if (privateRoot === repository || privateRoot.startsWith(repository + path.sep)) throw Error();
+  const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  if (!/^[a-f0-9]{64}$/.test(digest) || hash(census) !== digest) throw Error();
+  const pointers = fs.readdirSync(run).filter(name => name.startsWith('uuid-document-projection-inputs.'));
+  if (pointers.length !== 1) throw Error();
+  const descriptor = JSON.parse(fs.readFileSync(fs.readFileSync(path.join(run, pointers[0]), 'utf8').trim(), 'utf8'));
+  if (hash(descriptor.censusPath) !== descriptor.censusSha256) throw Error();
+  const config = JSON.parse(fs.readFileSync(descriptor.censusPath, 'utf8'));
+  if (config.originalCensusSha256 !== digest) throw Error();
+  process.stdout.write(descriptor.censusPath);
+} catch { process.exit(1); }
+NODE
+)"; then
+    echo "ERROR: UUID source projection requires the exact private sidecar census context (values omitted)." >&2
+    return 1
+  fi
+  evidence="$(mktemp -d "$VH_RUN_DIR/uuid-source-inputs.XXXXXX")" || return 1
+  chmod 700 "$evidence" || return 1
+  mkdir "$evidence/original" "$evidence/projected" || return 1
+  mv "$selected" "$evidence/original/source.tar.zst" || return 1
+  local original="$evidence/original/source.tar.zst" projected="$evidence/projected/source.tar.zst"
+  local report="$evidence/source-redactions.json" public_report="$sidecar/uuid-idempotency-source-redactions.json"
+  [[ ! -e "$public_report" && ! -L "$public_report" ]] || return 1
+  actual="$(sha256sum -- "$context")" || return 1
+  local bound="$evidence/source-census.private.json"
+  python3 "$formatter" --bind-uuid-source-documents "$context" "${actual%% *}" "$original" "$bound" "$evidence/documents" || return 1
+  context="$bound"
+  python3 "$formatter" --project-uuid-source-archive "$context" "$original" "$projected" "$report" || return 1
+  python3 "$formatter" --validate-uuid-source-archive "$context" "$original" "$projected" "$report" || return 1
+  cp "$report" "$public_report" || return 1
+  node - "$evidence" "$context" "$original" "$sidecar/source.tar.zst" "$public_report" <<'NODE'
+const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
+const [directory, censusPath, sourcePath, outputPath, manifestPath] = process.argv.slice(2);
+const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+fs.writeFileSync(path.join(directory, 'projection-inputs.private.json'), JSON.stringify({
+  censusPath, censusSha256: hash(censusPath), sourcePath, sourceSha256: hash(sourcePath), outputPath,
+  manifestPath, manifestSha256: hash(manifestPath), inputPlane: 'selected-source-archive-after-normal-privacy-not-signed-source-proof'
+}), { mode: 0o600 });
+NODE
+  [[ "$?" == "0" ]] || return 1
+  SEED_UUID_SOURCE_ARCHIVE_PATH="$projected"
+}
+
+seed_uuid_validate_release_artifacts() {
+  local formatter="$1" phase="$2"
+  shift 2
+  local census="${PAPERCUSP_SEED_UUID_CENSUS_PATH:-}" digest="${PAPERCUSP_SEED_UUID_CENSUS_SHA256:-}"
+  [[ -n "$census$digest" ]] || return 0
+  python3 "$formatter" --validate-uuid-release-artifacts "$census" "$digest" "${VH_RUN_DIR:-}" "$phase" "$@" \
+    || { echo "ERROR: UUID class coverage or independent projection validation refused (values omitted)." >&2; return 1; }
+}
+
 seed_uuid_project_sidecar_documents() {
   local formatter="$1" sidecar="$2"
   local census="${PAPERCUSP_SEED_UUID_CENSUS_PATH:-}"

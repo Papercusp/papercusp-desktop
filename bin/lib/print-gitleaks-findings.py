@@ -1801,6 +1801,283 @@ def project_uuid_document_tree(config_path: Path, source: Path, output: Path, ma
         raise
 
 
+@contextlib.contextmanager
+def _uuid_source_tar(path: Path):
+    """Same zstd/tar readers as the audit, with the producer's status checked."""
+    if path.is_symlink() or not path.is_file() or not path.name.endswith('.tar.zst'):
+        raise ValueError('UUID source archive requires exact tar.zst input')
+    proc = subprocess.Popen(['zstd', '-dc', str(path)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        with tarfile.open(fileobj=proc.stdout, mode='r|') as archive:
+            yield archive
+        proc.stdout.close()
+        if proc.wait() != 0:
+            raise ValueError('UUID source archive decompression failed')
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        proc.stdout.close()
+
+
+def _uuid_source_tar_inventory(path: Path, documents: Path | None = None):
+    """Bind EVERY member, including links/modes/PAX, without following links."""
+    inventory, seen = [], set()
+    with _uuid_source_tar(path) as archive:
+        for member in archive:
+            parts = member.name.split('/')
+            relative = '/'.join(p for p in parts if p not in ('', '.'))
+            if (member.name.startswith('/') or '\\' in member.name or '..' in parts
+                    or relative in seen or relative == '__member_names__.txt'
+                    or not (member.isfile() or member.isdir() or member.issym())):
+                # GNU tar's D166 producer dereferences hard links. An older or
+                # ambiguous archive must not hide a second plaintext population.
+                raise ValueError('UUID source archive member unsupported or ambiguous')
+            seen.add(relative)
+            meta = {field: getattr(member, field) for field in
+                    ('name', 'mode', 'uid', 'gid', 'mtime', 'size', 'linkname', 'uname', 'gname', 'devmajor', 'devminor')}
+            meta.update(type=member.type.hex(), pax_headers=dict(member.pax_headers))
+            # PAX can encode an ordinary header field (including long names).
+            # Bind its semantic value once, while retaining every custom header.
+            for key, field in {'path': 'name', 'linkpath': 'linkname', 'size': 'size',
+                               'uid': 'uid', 'gid': 'gid', 'mtime': 'mtime',
+                               'uname': 'uname', 'gname': 'gname'}.items():
+                if key in meta['pax_headers']:
+                    value = meta['pax_headers'][key]
+                    same = float(value) == meta[field] if field in ('size', 'uid', 'gid', 'mtime') else value == meta[field]
+                    if same:
+                        del meta['pax_headers'][key]
+            digest = None
+            if member.isfile():
+                stream = archive.extractfile(member)
+                if stream is None or not relative:
+                    raise ValueError('UUID source archive payload unreadable')
+                sha = hashlib.sha256()
+                target = None
+                if documents is not None and Path(relative).suffix.lower() in _UUID_DOC_SUFFIXES:
+                    target_path = documents / relative
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    target = target_path.open('xb')
+                try:
+                    for data in iter(lambda: stream.read(1024 * 1024), b''):
+                        sha.update(data)
+                        if target is not None:
+                            target.write(data)
+                finally:
+                    stream.close()
+                    if target is not None:
+                        target.close()
+                digest = sha.hexdigest()
+            inventory.append({'relative': relative, 'metadata': meta, 'sha256': digest})
+    if not inventory:
+        raise ValueError('UUID source archive empty')
+    return inventory
+
+
+def _uuid_source_archive_expectation(config_path: Path, source: Path, private: Path):
+    documents = private / 'documents'
+    documents.mkdir(mode=0o700)
+    before = _sha256(source)
+    inventory = _uuid_source_tar_inventory(source, documents)
+    census = census_uuid_artifacts(config_path, [source])
+    if any(p.is_file() for p in documents.rglob('*')):
+        config, _ = _uuid_census_inputs(config_path)
+        bound = private / 'census.private.json'
+        bound.write_text(json.dumps({**config, 'documentSources': [*config.get('documentSources', []),
+                         {'rootPath': str(documents), 'rootSha256': _uuid_document_root_sha256(documents)}]}))
+        bound.chmod(0o600)
+        _, _, changes, report = _uuid_document_projection_expectation(bound, documents)
+    else:
+        changes = {}
+        report = {'schema': 'papercusp-uuid-idempotency-document-redaction-manifest-v1',
+                  'reviewRef': _UUID_DROP_REVIEW, 'replacement': _UUID_MARKER,
+                  'authenticationDisposition': 'plaintext-output-only-not-original-row-authentication',
+                  'redactedDocuments': 0, 'occurrenceCount': 0, 'occurrences': []}
+    # Anything in a binary, nested archive, link or archive metadata is outside
+    # this plaintext copy operation. Refuse it; never remove its member.
+    if census['occurrenceCount'] != report['occurrenceCount'] or _sha256(source) != before:
+        raise ValueError('UUID source archive contains unprojectable occurrences or changed')
+    report = {**report, 'inputPlane': 'selected-source-archive-after-normal-privacy-not-signed-source-proof'}
+    for row in inventory:
+        relative = Path(row['relative'])
+        if relative in changes:
+            data = changes[relative].encode('utf-8')
+            row['sha256'] = hashlib.sha256(data).hexdigest()
+            row['metadata']['size'] = len(data)
+            if 'size' in row['metadata']['pax_headers']:
+                row['metadata']['pax_headers']['size'] = str(len(data))
+    return inventory, changes, report
+
+
+def bind_uuid_source_documents(config_path: Path, expected_sha256: str, source: Path, output: Path, documents: Path):
+    """Keep the selected source's class-discovery inputs for the final census."""
+    if (_sha256(config_path) != expected_sha256 or output.exists() or documents.exists()
+            or output.parent.stat().st_mode & 0o077):
+        raise ValueError('UUID source document binding requires fresh private inputs')
+    config, _ = _uuid_census_inputs(config_path)
+    before = _sha256(source)
+    documents.mkdir(mode=0o700)
+    _uuid_source_tar_inventory(source, documents)
+    sources = list(config.get('documentSources', []))
+    if any(path.is_file() for path in documents.rglob('*')):
+        sources.append({'rootPath': str(documents), 'rootSha256': _uuid_document_root_sha256(documents)})
+    if _sha256(source) != before:
+        raise ValueError('UUID source document archive changed')
+    with output.open('x') as handle:
+        os.chmod(output, 0o600)
+        json.dump({**config, 'documentSources': sources, 'selectedSourceArchiveSha256': before}, handle)
+
+
+def validate_uuid_release_artifacts(config_path: Path, expected_sha256: str, run: Path,
+                                    roots: list[Path], final: bool = False):
+    """Independent projection/count checks plus a census of every supplied leaf."""
+    _private_file(config_path)
+    if _sha256(config_path) != expected_sha256 or run.is_symlink() or not run.is_dir():
+        raise ValueError('UUID release context changed or unavailable')
+    pointers = list(run.glob('uuid-document-projection-inputs.*'))
+    sources = list(run.glob('uuid-source-inputs.*/projection-inputs.private.json'))
+    if len(pointers) != 1 or len(sources) != 1:
+        raise ValueError('UUID release projection descriptors incomplete or ambiguous')
+    doc_path = Path(pointers[0].read_text().strip())
+    for path in (doc_path, sources[0]):
+        _private_file(path)
+        if not path.resolve().is_relative_to(run.resolve()):
+            raise ValueError('UUID release descriptor outside private run')
+    docs = json.loads(doc_path.read_text())
+    source = json.loads(sources[0].read_text())
+    for descriptor in (docs, source):
+        if _sha256(Path(descriptor['censusPath'])) != descriptor['censusSha256']:
+            raise ValueError('UUID release projection census changed')
+        census, _ = _uuid_census_inputs(Path(descriptor['censusPath']))
+        if census.get('originalCensusSha256') != expected_sha256:
+            raise ValueError('UUID release projection original census mismatch')
+    original = Path(source['sourcePath'])
+    if _sha256(original) != source['sourceSha256']:
+        raise ValueError('UUID selected source archive changed')
+    expected_payloads, doc_prefixes = {}, []
+    documents_count = 0
+    for doc in docs['documentProjections']:
+        manifest = Path(doc['manifestPath'])
+        if _sha256(manifest) != doc['manifestSha256']:
+            raise ValueError('UUID document manifest changed')
+        report = validate_uuid_document_projection(Path(docs['censusPath']), Path(doc['sourcePath']),
+                                                   Path(doc['outputPath']), manifest)
+        documents_count += report['occurrenceCount']
+        prefix = doc['relative'] + '/'
+        doc_prefixes.append(prefix)
+        for path, label in _uuid_root_files([Path(doc['outputPath'])]):
+            expected_payloads[prefix + label.split('/', 1)[1]] = _sha256(path)
+        expected_payloads[manifest.name] = _sha256(manifest)
+    source_manifest = Path(source['manifestPath'])
+    if _sha256(source_manifest) != source['manifestSha256']:
+        raise ValueError('UUID source manifest changed')
+    source_report = validate_uuid_source_archive(Path(source['censusPath']), original,
+                                                Path(source['outputPath']), source_manifest)
+    expected_payloads['source.tar.zst'] = _sha256(Path(source['outputPath']))
+    expected_payloads[source_manifest.name] = _sha256(source_manifest)
+    if not final:
+        if (len(roots) != 3 or [root.name for root in roots] != ['sidecar', 'resources', 'seed']
+                or any(root.is_symlink() or not root.is_dir() for root in roots)
+                or Path(source['outputPath']).resolve() != (roots[0] / 'source.tar.zst').resolve()
+                or any(Path(doc['outputPath']).resolve() != (roots[0] / doc['relative']).resolve()
+                       for doc in docs['documentProjections'])):
+            raise ValueError('UUID assembled release roots incomplete or different')
+    else:
+        if any(root.is_symlink() or not root.is_file() for root in roots):
+            raise ValueError('UUID final release requires exact artifact files')
+        # Reuse the audit's actual installer/archive population. Require exact
+        # projected payloads AND manifests in each artifact, including copies.
+        for root in roots:
+            groups = {}
+            with _uuid_artifact_population([root]) as population:
+                for path, label, digest in population:
+                    match = re.search(r'(?:/|!)sidecar/', label)
+                    if not match:
+                        continue
+                    relative = label[match.end():]
+                    if '!' in relative:
+                        continue  # expanded descendants are censused separately
+                    if relative in expected_payloads or any(relative.startswith(prefix) for prefix in doc_prefixes):
+                        if path.is_symlink():
+                            raise ValueError('UUID final document payload linked')
+                        group = groups.setdefault(label[:match.end()], {})
+                        if relative in group:
+                            raise ValueError('UUID final document population ambiguous')
+                        group[relative] = digest
+                if not groups or any(group != expected_payloads for group in groups.values()):
+                    raise ValueError('UUID final artifact projection payload population mismatch')
+    census = census_uuid_artifacts(Path(source['censusPath']), roots)
+    if census['occurrenceCount']:
+        raise ValueError('UUID class remains in fully staged or final release artifacts')
+    return {'reviewRef': _UUID_DROP_REVIEW, 'documentOccurrences': documents_count,
+            'sourceOccurrences': source_report['occurrenceCount'], 'remainingOccurrences': 0,
+            'inventory': census['inventory'], 'coverage': census['coverage'],
+            'releaseRootSelection': 'declared-assembled-roots' if not final else 'requires-independent-final-artifact-set-validation',
+            'sourceAuthentication': 'requires-independent-original-core-and-source-signature-validation'}
+
+
+def validate_uuid_source_archive(config_path: Path, source: Path, output: Path, manifest: Path):
+    if source.resolve() == output.resolve() or manifest.is_symlink():
+        raise ValueError('UUID source archive validation inputs invalid')
+    with tempfile.TemporaryDirectory(prefix='papercusp-uuid-source-') as directory:
+        expected, _, report = _uuid_source_archive_expectation(config_path, source, Path(directory))
+        if json.loads(manifest.read_text()) != report or _uuid_source_tar_inventory(output) != expected:
+            raise ValueError('UUID source archive manifest or exact member population mismatch')
+        if census_uuid_artifacts(config_path, [output, manifest])['occurrenceCount']:
+            raise ValueError('UUID class remains in source archive output')
+        return report
+
+
+def project_uuid_source_archive(config_path: Path, source: Path, output: Path, manifest: Path):
+    """Overlay the exact selected archive into a NEW output; retain every member."""
+    if (output.exists() or output.is_symlink() or manifest.exists() or manifest.is_symlink()
+            or source.resolve() in (output.resolve(), manifest.resolve())
+            or not output.name.endswith('.tar.zst')):
+        raise ValueError('UUID source archive requires fresh distinct outputs')
+    before = _sha256(source)
+    output_created = manifest_created = False
+    with tempfile.TemporaryDirectory(prefix='papercusp-uuid-source-') as directory:
+        _, changes, report = _uuid_source_archive_expectation(config_path, source, Path(directory))
+        try:
+            with output.open('xb') as destination:
+                output_created = True
+                proc = subprocess.Popen(['zstd', '-T0', '-6', '--long=27', '-q', '-c'],
+                                        stdin=subprocess.PIPE, stdout=destination, stderr=subprocess.DEVNULL)
+                try:
+                    with _uuid_source_tar(source) as original, tarfile.open(fileobj=proc.stdin, mode='w|', format=tarfile.PAX_FORMAT) as projected:
+                        for member in original:
+                            relative = Path('/'.join(p for p in member.name.split('/') if p not in ('', '.')))
+                            if relative in changes:
+                                data = changes[relative].encode('utf-8')
+                                member.size = len(data)
+                                if 'size' in member.pax_headers:
+                                    member.pax_headers['size'] = str(len(data))
+                                projected.addfile(member, io.BytesIO(data))
+                            else:
+                                projected.addfile(member, original.extractfile(member) if member.isfile() else None)
+                    proc.stdin.close()
+                    if proc.wait() != 0:
+                        raise ValueError('UUID source archive compression failed')
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.wait()
+                    proc.stdin.close()
+            with manifest.open('x') as handle:
+                manifest_created = True
+                json.dump(report, handle)
+            validate_uuid_source_archive(config_path, source, output, manifest)
+            if _sha256(source) != before:
+                raise ValueError('UUID frozen source archive changed')
+            return report
+        except BaseException:
+            if output_created:
+                output.unlink()
+            if manifest_created:
+                manifest.unlink()
+            raise
+
+
 def _uuid_open_row(row: dict[str, object], pot_id: str, keys: dict[str, object]) -> tuple[object, bool]:
     """Authenticate original stored envelopes with the production length-prefixed AAD."""
     value = row['value']
@@ -2563,6 +2840,34 @@ def _safe_locator(raw_file: object, scan_root: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) == 7 and argv[1] == '--bind-uuid-source-documents':
+        try:
+            bind_uuid_source_documents(Path(argv[2]), argv[3], Path(argv[4]), Path(argv[5]), Path(argv[6]))
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, tarfile.TarError):
+            print('UUID source document binding incomplete (values omitted).', file=sys.stderr)
+            return 2
+        return 0
+    if len(argv) >= 7 and argv[1] == '--validate-uuid-release-artifacts':
+        try:
+            if argv[5] not in ('--assembled', '--final'):
+                raise ValueError('UUID release validation phase invalid')
+            result = validate_uuid_release_artifacts(Path(argv[2]), argv[3], Path(argv[4]),
+                                                    [Path(path) for path in argv[6:]], argv[5] == '--final')
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, tarfile.TarError):
+            print('UUID release artifact validation incomplete (values omitted).', file=sys.stderr)
+            return 2
+        print(json.dumps(result))
+        return 0
+    if len(argv) == 6 and argv[1] in ('--project-uuid-source-archive', '--validate-uuid-source-archive'):
+        try:
+            operation = project_uuid_source_archive if argv[1].startswith('--project-') else validate_uuid_source_archive
+            result = operation(Path(argv[2]), Path(argv[3]), Path(argv[4]), Path(argv[5]))
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, tarfile.TarError, subprocess.SubprocessError):
+            print('UUID source archive projection/validation incomplete (values omitted).', file=sys.stderr)
+            return 2
+        print(json.dumps({'reviewRef': result['reviewRef'], 'occurrenceCount': result['occurrenceCount'],
+                          'redactedDocuments': result['redactedDocuments']}))
+        return 0
     if len(argv) >= 6 and argv[1] == '--bind-uuid-document-sources':
         try:
             bind_uuid_document_sources(Path(argv[2]), argv[3], Path(argv[4]), [Path(path) for path in argv[5:]])

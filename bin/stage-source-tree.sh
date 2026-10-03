@@ -343,7 +343,14 @@ set +e +o pipefail
 # PAPERCUSP_STAGE_SCRUB=0 or nothing leaked.
 declare -a _scrub_tail=()
 [[ -n "$SCRUB_DIR" ]] && _scrub_tail=(-C "$SCRUB_DIR" "${SCRUB_MEMBERS[@]}")
+declare -a UUID_SOURCE_TAR_ARGS=()
+if [[ -n "${PAPERCUSP_SEED_UUID_CENSUS_PATH:-}${PAPERCUSP_SEED_UUID_CENSUS_SHA256:-}" ]]; then
+  # Each selected regular-file plaintext must be independently visible to the
+  # census; preserve symbolic links but materialize GNU tar hard-link payloads.
+  UUID_SOURCE_TAR_ARGS=(--hard-dereference)
+fi
 "$TAR_BIN" --numeric-owner --owner=0 --group=0 \
+  "${UUID_SOURCE_TAR_ARGS[@]}" \
   "${EXCLUDES[@]}" "${SCRUB_EXCLUDES[@]}" "${PACKAGE_LOCK_EXCLUDES[@]}" \
   "${SCRUB_TRANSFORM[@]}" "${PACKAGE_LOCK_TRANSFORM[@]}" \
   -C "$MONO" -cf - "${INCLUDES[@]}" \
@@ -378,6 +385,14 @@ if ! cmp -s "$SOURCE_PACKAGE_LOCK_PIN_COPY" "$SOURCE_PACKAGE_LOCK_ARCHIVE_TMP"; 
   exit 1
 fi
 echo "    ✓ source.tar.zst ./package-lock.json matches committed Git pin"
+
+# D166 extends the audit-owned COPY path after exact selection, normal privacy
+# and the committed lock pin. Freeze that produced archive outside every ship
+# root, then replace it with a mechanically projected archive. Canonical and
+# frozen source files are never rewritten or silently excluded.
+. "$HERE/lib/seed-reuse-age.sh"
+seed_uuid_project_source_archive "$HERE/lib/print-gitleaks-findings.py" "$OUT_TMP" "$SIDECAR" || exit 1
+OUT_TMP="$SEED_UUID_SOURCE_ARCHIVE_PATH"
 
 # ── THE GATE (WI-4419). Audit what we ACTUALLY produced, not what we meant to.
 # Wired HERE, in the producer, rather than in each of the three callers
