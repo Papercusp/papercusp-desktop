@@ -794,3 +794,109 @@ test('a CLEAN verdict reports the file count it actually read (falsifiable pass)
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// WI-10005961 — PUBLIC_UPSTREAM_FILE_SHA256 accepts whole files that are byte-exact public
+// upstream package content (measured: the EL10 cracklib dictionary carries the
+// known-sensitive literal 'avraham'). The real 9 MB dictionary cannot live in this repo,
+// so these tests load the REAL auditor module, swap in a fixture digest table, and run
+// its real --scan-dir path. No environment variable can widen the table in production.
+const CRACKLIB_EL10_PW_DICT_SHA256 = '5026c59d7b64cf0bb993075efb9ac2df8d284cd5ce8c09b5e750fd9ef16fc481';
+
+function scanDirWithPublicDigests(dir, table) {
+  const code = [
+    'import importlib.util, json, sys',
+    'spec = importlib.util.spec_from_file_location("audit_release_bundle", sys.argv[1])',
+    'audit = importlib.util.module_from_spec(spec)',
+    'spec.loader.exec_module(audit)',
+    'audit.PUBLIC_UPSTREAM_FILE_SHA256 = json.loads(sys.argv[2])',
+    'sys.argv = [sys.argv[1], "--scan-dir", sys.argv[3]]',
+    'sys.exit(audit.main())',
+  ].join('\n');
+  return spawnSync('python3', ['-c', code, AUDIT, JSON.stringify(table), dir], {
+    encoding: 'utf8',
+    env: AUDIT_ENV,
+  });
+}
+
+/** A binary "dictionary" carrying an identity literal the scan hunts in every file. */
+function publicDictionaryBytes(lit) {
+  return Buffer.concat([Buffer.from([0, 4]), Buffer.from('kna\0'), Buffer.from(lit), Buffer.from('\0i\0')]);
+}
+
+test('a byte-exact public upstream file carrying an identity literal is accepted by whole-file digest', () => {
+  const lit = identityLiteral();
+  const dir = fixture('public-upstream');
+  try {
+    const bytes = publicDictionaryBytes(lit);
+    fs.mkdirSync(path.join(dir, 'bundle/usr/share/cracklib'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'bundle/usr/share/cracklib/pw_dict.pwd'), bytes);
+    fs.writeFileSync(path.join(dir, 'bundle/a.txt'), 'nothing sensitive\n');
+    fs.writeFileSync(path.join(dir, 'bundle/b.txt'), 'also fine\n');
+    const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+
+    // Control: without the entry the same tree fails, so the pass below is the table's doing.
+    const control = scanDirWithPublicDigests(path.join(dir, 'bundle'), {});
+    assert.equal(control.status, 1, `the literal must fail without an entry:\n${control.stdout}${control.stderr}`);
+
+    const r = scanDirWithPublicDigests(path.join(dir, 'bundle'), { [digest]: 'fixture-dicts-1.0 /usr/share/cracklib/pw_dict.pwd' });
+    assert.equal(r.status, 0, `an exact listed digest must pass:\n${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /ACCEPTED 1 file\(s\) that are byte-exact public upstream package content/);
+    assert.match(r.stdout, /\[fixture-dicts-1\.0 \/usr\/share\/cracklib\/pw_dict\.pwd\]/);
+    // The CLEAN line must still report the scan's file count, not an acceptance counter.
+    assert.match(r.stdout, /✓ CLEAN .*\(3 file\(s\)/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('THE FALSIFIER: one changed byte in a listed public file fails the scan again', () => {
+  const lit = identityLiteral();
+  const dir = fixture('public-upstream-changed');
+  try {
+    const listed = publicDictionaryBytes(lit);
+    const changed = Buffer.concat([listed, Buffer.from('x')]);
+    fs.writeFileSync(path.join(dir, 'bundle/pw_dict.pwd'), changed);
+    const digest = crypto.createHash('sha256').update(listed).digest('hex');
+    const r = scanDirWithPublicDigests(path.join(dir, 'bundle'), { [digest]: 'fixture' });
+    assert.equal(r.status, 1, `a modified file must not ride on the listed digest:\n${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /MUST NOT SHIP/);
+    assert.doesNotMatch(r.stdout, /byte-exact public upstream/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a listed public file inside an ARCHIVE is not accepted (its bytes cannot be re-read)', () => {
+  const lit = identityLiteral();
+  const dir = fixture('public-upstream-archive');
+  try {
+    const bytes = publicDictionaryBytes(lit);
+    const stage = path.join(dir, 'stage');
+    fs.mkdirSync(stage);
+    fs.writeFileSync(path.join(stage, 'pw_dict.pwd'), bytes);
+    execFileSync('tar', ['--owner=0', '--group=0', '--numeric-owner', '-czf', path.join(dir, 'bundle/dicts.tar.gz'), '-C', stage, 'pw_dict.pwd']);
+    const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+    const r = scanDirWithPublicDigests(path.join(dir, 'bundle'), { [digest]: 'fixture' });
+    assert.equal(r.status, 1, `an archive member must keep failing:\n${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /dicts\.tar\.gz/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the shipped public-upstream table holds exactly the measured EL10 cracklib dictionary', () => {
+  const code = [
+    'import importlib.util, json, sys',
+    'spec = importlib.util.spec_from_file_location("audit_release_bundle", sys.argv[1])',
+    'audit = importlib.util.module_from_spec(spec)',
+    'spec.loader.exec_module(audit)',
+    'print(json.dumps(audit.PUBLIC_UPSTREAM_FILE_SHA256, sort_keys=True))',
+  ].join('\n');
+  const r = spawnSync('python3', ['-c', code, AUDIT], { encoding: 'utf8', env: AUDIT_ENV });
+  assert.equal(r.status, 0, r.stderr);
+  // Growing this table widens a privacy gate: each new entry needs its own measured
+  // package digest and its own review, so this pin must be edited on purpose.
+  assert.deepEqual(JSON.parse(r.stdout), {
+    [CRACKLIB_EL10_PW_DICT_SHA256]: 'cracklib-dicts-2.9.11-8.el10.x86_64 /usr/share/cracklib/pw_dict.pwd',
+  });
+});

@@ -527,6 +527,49 @@ KNOWN_SENSITIVE_IDENTITIES = {
 AUTHORISED_PRODUCT_STRINGS = ("papercusp-cupboard.aviynw.workers.dev",)
 
 
+# Whole FILES, byte-for-byte public upstream package content, that happen to contain a
+# denylisted identity literal (WI-10005961, 2026-10-03). Keyed by the SHA-256 of the
+# ENTIRE file; the value records where the bytes come from, so the entry can be
+# re-verified against the package without trusting this comment.
+#
+#   • cracklib-dicts-2.9.11-8.el10.x86_64 /usr/share/cracklib/pw_dict.pwd — the packed
+#     cracklib password dictionary. Its word list includes 'avraham', a common given
+#     name, which is also KNOWN_SENSITIVE_IDENTITIES['known-sensitive:mac-vm-login']. Every
+#     EL10 system ships these bytes, so they disclose nothing about any box or credential.
+#     The bootc workspace-host image inherits them unmodified from
+#     quay.io/centos-bootc/centos-bootc:stream10@sha256:f1f9f8029edbd7de0cb4e1520befebe0dbd5dbd173ff5722f0f95a80087cb3fd,
+#     both at that path and as the hardlinked base-commit object under
+#     sysroot/ostree/repo/objects/ (one inode). MEASURED: the digest below equals the one
+#     the RPM itself records (`rpm -q --dump cracklib-dicts`; `rpm -V` flags mtime only).
+#     No later layer can remove it: the base layer and the base commit's ostree object
+#     carry it onto the disk whatever the image deletes. stream9's cracklib-dicts-2.9.6
+#     word list lacks the word, which is why the scan only started failing on stream10.
+#
+# This is an ACCEPTANCE of exact bytes, not an exclude. A file passes only if its whole
+# content hashes to an entry here: change one byte (add a real leak beside the word) and
+# it fails again. Never applied to archive members, whose bytes this pass cannot
+# re-read, and unreadable files keep failing. The default stays "fix the SOURCE"; an
+# entry belongs here only for third-party bytes we do not author and cannot rebuild,
+# with the package and digest measured as above. A newer package version is a new
+# digest and fails closed until someone measures it the same way.
+PUBLIC_UPSTREAM_FILE_SHA256 = {
+    "5026c59d7b64cf0bb993075efb9ac2df8d284cd5ce8c09b5e750fd9ef16fc481":
+        "cracklib-dicts-2.9.11-8.el10.x86_64 /usr/share/cracklib/pw_dict.pwd",
+}
+
+
+def _file_sha256(path):
+    """SHA-256 of a whole file, or None when it cannot be read (fails CLOSED)."""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
 def _count_occurrences(path, needle):
     """Exact byte-count of `needle` in `path`.
 
@@ -2908,14 +2951,16 @@ def scan_dir(dirs):
                 if n < 0:
                     unexplained.append(f"{lit} (unreadable)")
                     continue
-                covered = 0
+                # Not `covered`: that name holds the scan's file count, which the
+                # CLEAN line below reports (WI-10005961).
+                accounted = 0
                 for ok_str in AUTHORISED_PRODUCT_STRINGS:
                     if lit in ok_str:
                         c = _count_occurrences(f, ok_str)
                         if c > 0:
-                            covered += c * ok_str.count(lit)
-                if covered != n:
-                    unexplained.append(f"{lit} x{n - covered} unaccounted")
+                            accounted += c * ok_str.count(lit)
+                if accounted != n:
+                    unexplained.append(f"{lit} x{n - accounted} unaccounted")
             if unexplained:
                 kept.add(f)
             else:
@@ -2928,6 +2973,27 @@ def scan_dir(dirs):
             print(f"        {os.path.basename(f)}")
         print("      Every occurrence was counted and matched to an authorised string;\n"
               "      one unaccounted occurrence would still have FAILED the file.")
+
+    # ── Public upstream package files, by whole-file digest (WI-10005961) ──────
+    # See PUBLIC_UPSTREAM_FILE_SHA256 for WHY each entry ships. Exact bytes only:
+    # never an archive member ("!"), and an unreadable file keeps failing.
+    public_upstream = []
+    if files:
+        kept = set()
+        for f in sorted(files):
+            digest = None if "!" in f else _file_sha256(f)
+            if digest is not None and digest in PUBLIC_UPSTREAM_FILE_SHA256:
+                public_upstream.append((f, PUBLIC_UPSTREAM_FILE_SHA256[digest]))
+            else:
+                kept.add(f)
+        files = kept
+    if public_upstream:
+        print(f"\n    ⚠ ACCEPTED {len(public_upstream)} file(s) that are byte-exact public "
+              f"upstream package content (WI-10005961):")
+        for f, origin in public_upstream[:10]:
+            print(f"        {f}  [{origin}]")
+        print("      Whole-file SHA-256 matched a measured upstream digest; one changed byte\n"
+              "      would still have FAILED the file.")
 
     # Symlink-target findings are reported SEPARATELY and are deliberately NOT run
     # through the seed / authorised-product-string acceptance passes above: both
