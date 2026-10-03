@@ -44,6 +44,7 @@ function collectImports(file) {
     node = unwrapped(node);
     if (!node) return false;
     if (bare(node, loaders)) return true;
+    if (property(node, 'require')) return true;
     if (ts.isCallExpression(node)) return bare(node.expression, factories) || property(node.expression, 'createRequire');
     if (ts.isConditionalExpression(node)) return loaderValue(node.whenTrue) || loaderValue(node.whenFalse);
     if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.CommaToken) return loaderValue(node.right);
@@ -97,7 +98,9 @@ function collectImports(file) {
       }
       if (!right || !left) return;
       right = unwrapped(right);
-      if (bare(right, factories) && !factories.has(left)) { factories.add(left); changed = true; }
+      if ((bare(right, factories) || property(right, 'createRequire')) && !factories.has(left)) {
+        factories.add(left); changed = true;
+      }
       if (bare(right, generators) && !generators.has(left)) { generators.add(left); changed = true; }
       if (loaderValue(right) && !loaders.has(left)) { loaders.add(left); changed = true; }
     });
@@ -135,6 +138,7 @@ function collectImports(file) {
   return {
     schema: 'papercusp-runtime-import-census-v1',
     file, sha256: hash(bytes), parser: { name: 'typescript', version: ts.version },
+    coverage: 'Syntax census of static imports/exports, dynamic import, require and createRequire aliases, property require candidates, Function/eval and direct aliases. Generated bodies and per-site dataflow remain unproved.',
     loaderAliases: [...new Set([...loaders].map((key) => typeof key === 'string' ? key.slice('unbound:'.length) : key.name))].sort(),
     imports: records.map(({ start, end, ...r }) => ({ ...r,
       byteStart: offsets.get(start), byteEnd: offsets.get(end),

@@ -48,6 +48,9 @@ test('D-159 census captures loader aliases, generated imports and unresolved arg
       const deferred = () => factory(import.meta.url);
       const { createRequire: cjsFactory } = require('node:module');
       const cjsLoader = cjsFactory(import.meta.url); cjsLoader(otherPath);
+      const memberFactory = moduleApi['createRequire'];
+      const memberLoader = memberFactory(import.meta.url); memberLoader(memberPath);
+      const memberAlias = module['require']; memberAlias(aliasedPath);
       const Generator = Function; new Generator('specifier', 'return import(specifier)');
       import('node:path'); import(transpiled.entryPath); export * from './worker.mjs';`);
     const proof = collectImports(file);
@@ -56,7 +59,7 @@ test('D-159 census captures loader aliases, generated imports and unresolved arg
     assert.ok(proof.loaderAliases.includes('conditional'));
     assert.ok(proof.loaderAliases.includes('cjsLoader'));
     assert.ok(!proof.loaderAliases.includes('deferred'));
-    assert.equal(proof.imports.filter((r) => r.kind === 'require').length, 6);
+    assert.equal(proof.imports.filter((r) => r.kind === 'require').length, 8);
     assert.ok(proof.imports.some((r) => r.specifier === '@aws-sdk/client-kms'));
     assert.equal(proof.imports.filter((r) => r.kind === 'generated-code').length, 1);
     assert.equal(proof.imports.filter((r) => r.kind === 'dynamic-import' && r.specifier === null).length, 1);
