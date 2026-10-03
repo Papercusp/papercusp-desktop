@@ -67,7 +67,7 @@
     "prebuild:all-bundles": "node bin/check-spa-freshness.js",
     "build:all-bundles": "bash bin/build-deb-repacked.sh --all-bundles",
     "build:archived": "bash bin/build-and-archive-deb.sh",
-    "test:config": "node --test --test-global-setup=test/monorepo-host-preflight.mjs test/tauri-config-resources.test.js test/inno-silent-upgrade.test.js test/bootstrap-node-install.test.js test/wsl-runtime-resources.test.js test/wsl-sidecar-staging.test.js test/windows-source-repair.test.js test/sidecar-runtime-generation.test.js test/inno-wsl-payload-holders.test.js test/windows-vm-service-stop.test.js",
+    "test:config": "node --test --test-global-setup=test/monorepo-host-preflight.mjs test/tauri-config-resources.test.js test/docs-search-server-terminal-state.test.js test/inno-silent-upgrade.test.js test/bootstrap-node-install.test.js test/wsl-runtime-resources.test.js test/wsl-sidecar-staging.test.js test/windows-source-repair.test.js test/sidecar-runtime-generation.test.js test/inno-wsl-payload-holders.test.js test/windows-vm-service-stop.test.js",
     "bindings": "cd src-tauri && cargo build --quiet && (cargo run --quiet 2>/dev/null & PID=$!; sleep 4; kill $PID 2>/dev/null; wait $PID 2>/dev/null; true) && echo '\u2713 tauri-bindings.ts regenerated'"
   },
   "devDependencies": {

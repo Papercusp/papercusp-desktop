@@ -16,3 +16,10 @@ test('the Server manages disabled NativeTerminal state before registering the do
   assert.match(init, /if window_owner \{[\s\S]*resolve_strategy_from_env\(\)[\s\S]*\} else \{[\s\S]*TerminalStrategy::Disabled/);
   assert.match(init, /app\.manage\(nt\)/);
 });
+
+test('the Mac verification rsync preserves remote Papercusp runtime scratch', () => {
+  const script = fs.readFileSync(path.join(__dirname, '../bin/mac-vm-verify-build.sh'), 'utf8');
+  const transfer = script.match(/rsync -az --delete[\s\S]*?"\$SNAP\/" "\$VM:\$VMDIR\/"/);
+  assert.ok(transfer, 'the snapshot transfer must be present');
+  assert.match(transfer[0], /--exclude '\/\.papercusp\/'/);
+});
