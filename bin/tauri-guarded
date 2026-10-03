@@ -262,9 +262,12 @@ if [[ "$__subcommand" == "dev" ]]; then
   # the papercusp tree a missing gate makes node fail and this refuses, so deleting the gate is
   # not a bypass. A standalone desktop checkout has no superproject tree to fence. The gate skips
   # itself inside a test runner, the release gate, and GitHub Actions (restricted-hold-preflight.mjs).
+  # WI-10005802: the gate starts under the committed-source loader, so the gate and the preflight
+  # library it imports run their committed (HEAD) bytes: a held write to either cannot run here.
   __pc_superproject="$(git -C "$__here" rev-parse --show-superproject-working-tree 2>/dev/null || true)"
   if [[ -n "$__pc_superproject" ]]; then
-    if ! node "$__pc_superproject/scripts/restricted-hold-tree-gate.mjs" --door tauri-dev "$__pc_superproject"; then
+    if ! node --import "$__pc_superproject/scripts/lib/committed-source-loader.mjs" \
+        "$__pc_superproject/scripts/restricted-hold-tree-gate.mjs" --door tauri-dev "$__pc_superproject"; then
       echo "FATAL: the restricted-write fence refused \`tauri dev\` (see the RESTRICTED_HOLD_REFUSED line above); nothing was booted." >&2
       exit 1
     fi
