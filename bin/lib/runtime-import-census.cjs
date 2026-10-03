@@ -6,24 +6,34 @@
 // it does not infer a dataflow boundary or authorize a producer omission.
 const fs = require('node:fs');
 const crypto = require('node:crypto');
+const path = require('node:path');
 const ts = require('typescript');
 
 const hash = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
 
 function collectImports(file) {
+  file = path.resolve(file);
   const bytes = fs.readFileSync(file);
   const text = bytes.toString('utf8');
   if (!Buffer.from(text, 'utf8').equals(bytes)) throw new Error('non-UTF8 module refused');
   const tree = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   if (tree.parseDiagnostics.length) throw new Error(`module parse errors: ${tree.parseDiagnostics.length}`);
 
+  // Binding is local to this exact source file. Do not load project config,
+  // imported code, or host declarations while assigning lexical symbol identities.
+  const options = { allowJs: true, noResolve: true, noLib: true };
+  const host = ts.createCompilerHost(options);
+  host.getSourceFile = (name) => path.resolve(name) === file ? tree : undefined;
+  const checker = ts.createProgram([file], options, host).getTypeChecker();
+  const binding = (node) => checker.getSymbolAtLocation(node) || `unbound:${node.text}`;
+
   const factories = new Set();
-  const loaders = new Set(['require', '__require']);
-  const generators = new Set(['Function', 'eval']);
+  const loaders = new Set(['unbound:require', 'unbound:__require']);
+  const generators = new Set(['unbound:Function', 'unbound:eval']);
   const records = [];
   const visit = (node, fn) => { fn(node); ts.forEachChild(node, (child) => visit(child, fn)); };
   const literal = (node) => node && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node));
-  const bare = (node, names) => ts.isIdentifier(node) && names.has(node.text);
+  const bare = (node, names) => ts.isIdentifier(node) && names.has(binding(node));
   const property = (node, name) => (ts.isPropertyAccessExpression(node) && node.name.text === name)
     || (ts.isElementAccessExpression(node) && literal(node.argumentExpression) && node.argumentExpression.text === name);
   const unwrapped = (node) => {
@@ -46,12 +56,15 @@ function collectImports(file) {
   };
 
   visit(tree, (node) => {
+    if (ts.isIdentifier(node) && ['require', '__require'].includes(node.text)) loaders.add(binding(node));
+  });
+  visit(tree, (node) => {
     if (ts.isImportDeclaration(node) && literal(node.moduleSpecifier)
         && ['node:module', 'module'].includes(node.moduleSpecifier.text)) {
       const bindings = node.importClause?.namedBindings;
       if (bindings && ts.isNamedImports(bindings)) {
         for (const element of bindings.elements) {
-          if ((element.propertyName || element.name).text === 'createRequire') factories.add(element.name.text);
+          if ((element.propertyName || element.name).text === 'createRequire') factories.add(binding(element.name));
         }
       }
     }
@@ -62,7 +75,7 @@ function collectImports(file) {
           && (bare(value.expression, loaders) || value.expression.kind === ts.SyntaxKind.ImportKeyword)) {
         for (const element of node.name.elements) {
           if (ts.isIdentifier(element.name) && (element.propertyName || element.name).getText(tree) === 'createRequire') {
-            factories.add(element.name.text);
+            factories.add(binding(element.name));
           }
         }
       }
@@ -77,10 +90,10 @@ function collectImports(file) {
     visit(tree, (node) => {
       let left, right;
       if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
-        left = node.name.text; right = node.initializer;
+        left = binding(node.name); right = node.initializer;
       } else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
           && ts.isIdentifier(node.left)) {
-        left = node.left.text; right = node.right;
+        left = binding(node.left); right = node.right;
       }
       if (!right || !left) return;
       right = unwrapped(right);
@@ -122,7 +135,7 @@ function collectImports(file) {
   return {
     schema: 'papercusp-runtime-import-census-v1',
     file, sha256: hash(bytes), parser: { name: 'typescript', version: ts.version },
-    loaderAliases: [...loaders].sort(),
+    loaderAliases: [...new Set([...loaders].map((key) => typeof key === 'string' ? key.slice('unbound:'.length) : key.name))].sort(),
     imports: records.map(({ start, end, ...r }) => ({ ...r,
       byteStart: offsets.get(start), byteEnd: offsets.get(end),
       sha256: hash(bytes.subarray(offsets.get(start), offsets.get(end))) })),

@@ -80,6 +80,22 @@ test('D-159 census byte offsets bind UTF-8 bytes and reject malformed input', ()
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('D-159 aliases follow lexical bindings across minified local names', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-import-scopes-'));
+  try {
+    const file = path.join(dir, 'serve.mjs');
+    fs.writeFileSync(file, `import { createRequire as make } from 'node:module';
+      function load() { const r = make(import.meta.url); const x = r; x(pluginPath); }
+      function other() { const r = Math.abs; const x = r; x(value); }
+      function shadow(make) { const r = make(import.meta.url); r(value); }
+      function generator() { const f = Function; new f('return 1'); }
+      function otherGenerator() { const f = Date; new f(); }`);
+    const proof = collectImports(file);
+    assert.deepEqual(proof.imports.filter((r) => r.kind === 'require').map((r) => r.source), ['x(pluginPath)']);
+    assert.deepEqual(proof.imports.filter((r) => r.kind === 'generated-code').map((r) => r.source), ["new f('return 1')"]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 /** A synthetic owner value used only to prove D-112 does not require or reject it. */
 const SYNTHETIC_OWNER = 'Zzsynthetic Gateowner';
 const AUDIT_ENV = { ...process.env };
