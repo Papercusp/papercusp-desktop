@@ -1092,6 +1092,10 @@ def scan_credential_digest_bytes(data: bytes, digests: set[str]) -> dict[str, in
             pass
         if any(hashlib.sha256(candidate).hexdigest() in digests for candidate in candidates):
             counts["digestOfCredentialHits"] += 1
+        # D-156: gateway.ts hashes the authorization HEADER, not just its token.
+        if any(hashlib.sha256(prefix + candidate).hexdigest() in digests
+               for prefix in (b"Bearer ", b"bearer ", b"BEARER ") for candidate in candidates):
+            counts["digestOfCredentialHits"] += 1
         if value.decode("ascii") not in digests:
             continue
         start = data.rfind(b"\n", 0, token.start()) + 1

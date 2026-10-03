@@ -1136,6 +1136,9 @@ raw=os.urandom(32).hex().encode();digest=hashlib.sha256(raw).hexdigest();targets
 assert m.scan_credential_digest_bytes(raw,targets)['digestOfCredentialHits']>0
 binary=os.urandom(32);binary_digest=hashlib.sha256(binary).hexdigest()
 assert m.scan_credential_digest_bytes(binary,{binary_digest})['digestOfCredentialHits']>0
+header_digest=hashlib.sha256(b'Bearer '+raw).hexdigest()
+assert m.scan_credential_digest_bytes(raw,{header_digest})['digestOfCredentialHits']>0
+assert m.scan_credential_digest_bytes(b'Authorization: Bearer '+raw,{header_digest})['digestOfCredentialHits']>0
 assert m.scan_credential_digest_bytes(digest.encode(),targets)['rawCredentialHits']==1
 assert m.scan_credential_digest_bytes(json.dumps({'credentialSha256':digest}).encode(),targets)['rawCredentialHits']==0
 assert m.scan_credential_digest_bytes(json.dumps({'credentialSha256':digest,'apiKey':digest}).encode(),targets)['rawCredentialHits']==1
