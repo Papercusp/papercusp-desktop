@@ -408,6 +408,16 @@ def _validate_mechanical_entries(entries: list[dict[str, object]], report: list[
     for refs in context.get("_nonBearerSourceCache", {}).values():
         for ref in refs:
             _source_tree(ref, context["trees"])
+    if not seed:
+        counts = Counter()
+        for entry in entries:
+            if entry["class"] == "public-non-bearer-field-reference":
+                row = context["plainRows"][int(entry["line"])]
+                field = str(entry["fieldPath"][-1])
+                if "embeddedJsonPointer" in entry:
+                    _, field = _embedded_reference(_at_path(row, entry["fieldPath"]), entry["embeddedJsonPointer"])
+                counts[field] += 1
+        context["nonBearerCounts"] = {field: counts[field] for field in sorted(_NON_BEARER_FIELDS)}
 
 
 def _table_ops(source: bytes, table: str) -> list[dict[str, object]]:
@@ -516,11 +526,39 @@ def _mechanical_context(proof: dict[str, object], directory: Path, root: Path,
                "publicReferences": public_refs, "idFields": set(reference.get("idFields", [])),
                "trees": reference.get("trees", {}), "publicIds": public_ids,
                "nonBearerFields": reference.get("nonBearerFields", {})}
-    if any(entry["class"] == "recipient-sealed-epoch-key-envelope" for entry in entries):
+    has_envelopes = any(entry["class"] == "recipient-sealed-epoch-key-envelope" for entry in entries)
+    has_non_bearer = any(entry["class"] == "public-non-bearer-field-reference" for entry in plain_report) if False else False
+    # Plain entries are checked by the caller; a supplied closed field proof
+    # requires the same full inventory scan, even in a non-metadata segment.
+    has_non_bearer = bool(reference.get("nonBearerFields"))
+    if has_envelopes or has_non_bearer:
         envelope = _read_extra_proof(proof, directory, "sealed-envelope-proof-safe.json")
         keys = json.loads((root / "epoch-keys.json").read_text())["papercusp"]
-        context["envelopeDigests"] = validate_envelope_structure(envelope, data, report, {int(k) for k in keys})
-        recipient_keys = {_canonical_base64(value, 32) for value in envelope["recipients"]}
+        if has_envelopes:
+            context["envelopeDigests"] = validate_envelope_structure(envelope, data, report, {int(k) for k in keys})
+            recipient_keys = {_canonical_base64(value, 32) for value in envelope["recipients"]}
+        else:
+            recipient_ref = reference["identityRecipientSource"]
+            recipient_source = _source_file(root, recipient_ref["file"])
+            if _sha256(recipient_source) != recipient_ref["sha256"]:
+                raise ValueError("identity recipient source changed")
+            recipient_data = recipient_source.read_bytes()
+            members = _table_ops(recipient_data, "hive-members")
+            encoded = {entry["device_pubkey"] for op in members
+                       for entry in op["value"].get("device_attestations", [])}
+            recipient_keys = {_canonical_base64(value, 32) for value in encoded}
+            rows = _table_ops(recipient_data, "hive-epoch-keys")
+            if len(recipient_keys) != 33 or not rows or set(envelope["recipients"]) != encoded:
+                raise ValueError("historical recipient source incomplete")
+            for op in rows:
+                value = op["value"]
+                if (value["harness_slug"] != "papercusp" or value["epoch"] not in {int(k) for k in keys}
+                        or value["member_device_pubkey"] not in encoded
+                        or op["hbKey"] != str(value["epoch"]) + ":" + value["member_device_pubkey"]):
+                    raise ValueError("cross-segment recipient source mismatch")
+                _canonical_base64(value["wrapped_key"], 80)
+            if envelope["sourceSha256"] != recipient_ref["sha256"]:
+                raise ValueError("recipient proof source mismatch")
         publics |= recipient_keys
         identity_scan = _read_extra_proof(proof, directory, "identity-secret-scan-safe.json")
         validate_identity_secret_proof(identity_scan, root, directory, recipient_keys, reference)
@@ -761,6 +799,15 @@ def validate_identity_secret_proof(scan: dict[str, object], root: Path, director
     if (scan.get("nameExclusionCounts", {}) != counts
             or len(exclusions) != sum(_identity_name_hit(path) for path in expected)):
         raise ValueError("identity name exclusions incomplete")
+    if "credentialDigestScan" in scan:
+        digest_scan = scan["credentialDigestScan"]
+        digests = digest_scan.get("digests", [])
+        if (not digests or len(digests) != len(set(digests))
+                or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in digests)
+                or any(digest_scan.get(name) != 0 for name in ("digestOfCredentialHits", "rawCredentialHits"))
+                or any(digest_scan.get(name) is not True for name in ("hashControlDetected", "rawControlDetected"))
+                or not re.fullmatch(r"[0-9a-f]{64}", str(digest_scan.get("plantedSha256", "")))):
+            raise ValueError("credential digest exposure scan failed")
     controls = scan.get("controls", [])
     encodings = {"der-base64", "pem", "jwk-d", "hex-seed", "base64-seed", "raw-sodium-secret"}
     samples = {}
@@ -922,7 +969,8 @@ def scan_identity_secret_inputs(inputs: list[Path], recipients: set[bytes],
                                 control_samples: list[Path], *,
                                 name_exclusions: list[dict[str, object]] | None = None,
                                 trees: dict[str, object] | None = None,
-                                public_keys: set[bytes] | None = None) -> dict[str, object]:
+                                public_keys: set[bytes] | None = None,
+                                credential_digests: set[str] | None = None) -> dict[str, object]:
     """Scan an explicit complete inventory and run controls only in memory.
 
     The caller binds the inventory to seed/assembled-bundle or final artifacts.
@@ -933,6 +981,10 @@ def scan_identity_secret_inputs(inputs: list[Path], recipients: set[bytes],
             or any(path.is_symlink() or not path.is_file() for path in control_samples)):
         raise ValueError("complete inventory and real control samples required")
     totals = Counter()
+    digest_totals = Counter()
+    credential_digests = credential_digests or set()
+    if any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in credential_digests):
+        raise ValueError("invalid credential digest candidate")
     inventory = []
     name_exclusions = name_exclusions or []
     public_keys = public_keys or set()
@@ -945,12 +997,15 @@ def scan_identity_secret_inputs(inputs: list[Path], recipients: set[bytes],
         # Chunk overlap covers the scanner's largest bounded JWK serialization.
         # It keeps large full-history bundles out of Python heap allocations.
         if kind == "symlink-target":
-            totals.update(scan_secret_key_bytes(os.fsencode(os.readlink(path)), recipients, public_keys))
+            content = os.fsencode(os.readlink(path))
+            totals.update(scan_secret_key_bytes(content, recipients, public_keys))
+            digest_totals.update(scan_credential_digest_bytes(content, credential_digests))
         else:
             with path.open("rb") as handle:
                 previous = b""
                 for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
                     totals.update(scan_secret_key_bytes(previous + chunk, recipients, public_keys))
+                    digest_totals.update(scan_credential_digest_bytes(previous + chunk, credential_digests))
                     previous = chunk[-32768:]
         if (("symlink-target" if path.is_symlink() else "file") != kind
                 or _secret_input_hash(path) != before):
@@ -985,7 +1040,7 @@ def scan_identity_secret_inputs(inputs: list[Path], recipients: set[bytes],
                             "derivationDetected": result["derivationMatches"] > 0})
     if not all(row["detected"] and row["derivationDetected"] for row in results):
         raise ValueError("planted secret control failed")
-    return {"schema": "papercusp-sealed-envelope-secret-scan-v1",
+    result = {"schema": "papercusp-sealed-envelope-secret-scan-v1",
             "inputs": inventory, "scannerSha256": _sha256(Path(__file__)),
             "recipientSetSha256": hashlib.sha256(json.dumps(
                 sorted(value.hex() for value in recipients), separators=(",", ":")).encode()).hexdigest(),
@@ -997,6 +1052,59 @@ def scan_identity_secret_inputs(inputs: list[Path], recipients: set[bytes],
             "nameScanHits": totals["nameScanHits"], "controls": results,
             "nameExclusions": name_exclusions, "nameExclusionCounts": exclusion_counts,
             "positivePlantedSecretDetected": True}
+    if credential_digests:
+        planted = os.urandom(32).hex().encode()
+        target = hashlib.sha256(planted).hexdigest()
+        hash_control = scan_credential_digest_bytes(planted, {target})
+        raw_control = scan_credential_digest_bytes(target.encode(), {target})
+        result["credentialDigestScan"] = {
+            "digests": sorted(credential_digests),
+            "digestOfCredentialHits": digest_totals["digestOfCredentialHits"],
+            "rawCredentialHits": digest_totals["rawCredentialHits"],
+            "hashControlDetected": hash_control["digestOfCredentialHits"] > 0,
+            "rawControlDetected": raw_control["rawCredentialHits"] > 0,
+            "plantedSha256": target,
+        }
+    return result
+
+
+def scan_credential_digest_bytes(data: bytes, digests: set[str]) -> dict[str, int]:
+    """D-149 E3: refuse a digest preimage or reuse outside a typed JSON field.
+
+    Values stay in memory. A digest in prose, a header, or a string containing
+    JSON is refused; only direct, parseable credentialSha256 properties qualify.
+    """
+    counts = Counter()
+    if not digests:
+        return counts
+    for token in re.finditer(rb"[A-Za-z0-9_+/.=-]{8,4096}", data):
+        value = token.group()
+        candidates = {value}
+        if re.fullmatch(rb"[0-9a-fA-F]{64}|[0-9a-fA-F]{128}", value):
+            candidates.add(bytes.fromhex(value.decode()))
+        try:
+            decoded = base64.b64decode(value.replace(b"-", b"+").replace(b"_", b"/")
+                                       + b"=" * (-len(value) % 4), validate=True)
+            if len(decoded) in (32, 64):
+                candidates.add(decoded)
+        except ValueError:
+            pass
+        if any(hashlib.sha256(candidate).hexdigest() in digests for candidate in candidates):
+            counts["digestOfCredentialHits"] += 1
+        if value.decode("ascii") not in digests:
+            continue
+        start = data.rfind(b"\n", 0, token.start()) + 1
+        end = data.find(b"\n", token.end())
+        line = data[start:end if end >= 0 else len(data)]
+        before = data[start:token.start()]
+        direct = re.search(rb'(?<!\\)"credentialSha256"\s*:\s*"$', before)
+        try:
+            json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            direct = None
+        if direct is None:
+            counts["rawCredentialHits"] += 1
+    return counts
 
 
 def scan_identity_proof(config_path: Path, seed: Path, output: Path) -> dict[str, object]:
@@ -1022,7 +1130,8 @@ def scan_identity_proof(config_path: Path, seed: Path, output: Path) -> dict[str
     scan = scan_identity_secret_inputs(paths, recipients, controls,
                                       name_exclusions=config.get("nameExclusions", []),
                                       trees=config.get("trees", {}),
-                                      public_keys=_manifest_publics(json.loads((seed / "manifest.json").read_text())))
+                                      public_keys=_manifest_publics(json.loads((seed / "manifest.json").read_text())),
+                                      credential_digests=set(config.get("credentialDigests", [])))
     scan["seedRootSha"] = _sha256(seed / "manifest.json")
     scan["collectorConfigSha256"] = _sha256(config_path)
     if output.parent.is_symlink() or not output.parent.is_dir() or output.parent.stat().st_mode & 0o077:
@@ -1150,6 +1259,10 @@ def validate_seed_proof(proof: dict[str, object], directory: Path, root: Path,
         context = _mechanical_context(proof, directory, root, source, entries, report, plain_report)
         _validate_mechanical_entries(entries, report, context, seed=True)
         _validate_mechanical_entries(plain_entries, plain_report, context, seed=False)
+        if any(row["class"] == "public-non-bearer-field-reference" for row in plain_entries):
+            if plain.get("nonBearerFields") != {"listedNames": sorted(_NON_BEARER_FIELDS),
+                                              "admitted": context["nonBearerCounts"]}:
+                raise ValueError("closed non-bearer admission census mismatch")
     return allowed
 
 
