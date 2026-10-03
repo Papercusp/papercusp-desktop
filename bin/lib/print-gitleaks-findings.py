@@ -1958,7 +1958,9 @@ def validate_uuid_idempotency_row_drops(config_path: Path, plan_set: dict[str, o
         census = census_uuid_artifacts(config_path, artifact_roots)
         if census['occurrenceCount']:
             raise ValueError('UUID class remains in expanded shipped population')
-        coverage = census['coverage']
+        return {'reviewRef': _UUID_DROP_REVIEW, 'counts': expected['counts'], 'rawClassHits': 0,
+                'artifacts': census['inventory'], 'artifactCoverage': census['coverage'],
+                'candidateBinding': 'requires-independent-actual-artifact-validation'}
     inventory = []
     for path in artifact_inputs:
         if path.is_symlink() or not path.is_file():

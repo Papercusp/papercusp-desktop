@@ -87,6 +87,8 @@ refused(lambda:valid(files=[shipped_manifest],roots=[ship]))
 assert valid(files=[shipped_manifest,extra],roots=[ship])['rawClassHits']==0
 refused(lambda:valid(files=[shipped_manifest,extra,extra],roots=[ship]))
 refused(lambda:valid(files=[shipped_manifest,extra,doc],roots=[ship]))
+link=ship/'safe-link';link.symlink_to('unlisted.txt')
+assert valid(files=[shipped_manifest,extra,link],roots=[ship])['rawClassHits']==0
 token=m._uuid_open_row(originals[0],'fixture-pot',json.loads((base/'epoch-keys.json').read_text())['fixture-pot'])[0]['payload']['idempotencyKey']
 new_token='14be300d-'+'6014-47a7-bb41-62c5b782971d'
 for content in [token,'idempotencyKey: '+new_token,'x'*(1024*1024-18)+token,
@@ -121,6 +123,24 @@ print(json.dumps({'counts':result['counts'],'failClosed':True,'privateHashes':[r
     assert.equal(assembled.status, 0, assembled.stderr);
     assert.equal(JSON.parse(assembled.stdout).counts.droppedRows, 4);
     assert.equal(fs.statSync(planOutput).mode & 0o077, 0);
+    const manifestPath = path.join(temp, 'ship', 'manifest.json');
+    const artifacts = fs.readdirSync(path.join(temp, 'ship')).map(name => path.join(temp, 'ship', name));
+    const candidate = {
+      manifestPath, manifestSha256: hash(fs.readFileSync(manifestPath)),
+      sources: [{ ...source, rowCount: 1, rowsPath: path.join(temp, 'output.jsonl'),
+        rowsSha256: hash(fs.readFileSync(path.join(temp, 'output.jsonl'))) }],
+      artifactInputs: artifacts, artifactRoots: [path.join(temp, 'ship')],
+    };
+    const candidatePath = write('candidate.json', JSON.stringify(candidate));
+    const validate = () => spawnSync('python3', [reportFormatterPath, '--validate-uuid-row-drops',
+      configPath, planOutput, candidatePath], { encoding: 'utf8' });
+    const checked = validate();
+    assert.equal(checked.status, 0, checked.stderr);
+    assert.equal(JSON.parse(checked.stdout).rawClassHits, 0);
+    fs.writeFileSync(candidatePath, JSON.stringify({ ...candidate, artifactRoots: undefined }));
+    assert.equal(validate().status, 2, 'unbound arbitrary-file list is not complete-root evidence');
+    fs.writeFileSync(candidatePath, JSON.stringify({ ...candidate, artifactInputs: [manifestPath] }));
+    assert.equal(validate().status, 2, 'omitted leaf must refuse at the actual CLI');
     const repeated = spawnSync('python3', [reportFormatterPath, '--assemble-uuid-row-drops', configPath, planOutput], { encoding: 'utf8' });
     assert.equal(repeated.status, 2, 'assembler must not overwrite prior evidence');
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
