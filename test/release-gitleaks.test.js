@@ -182,9 +182,11 @@ assert json.loads((output/'data.json').read_text())['safe']=='kept exactly'
 assert all(token.lower() not in manifest.read_text().lower() for token in (a,b,c,d))
 assert all(set(o)=={'segment','line','fieldPath'} for o in report['occurrences'])
 assert all(o['line']>0 and o['fieldPath'] for o in report['occurrences'])
+refusals=0
 def refused(fn):
+ global refusals
  try:fn();raise AssertionError('invalid artifact census/projection passed')
- except (ValueError,KeyError,OSError,UnicodeError):pass
+ except (ValueError,KeyError,OSError,UnicodeError):refusals+=1
 refused(lambda:m.project_uuid_document_tree(cfg,docs,output,base/'another.json'))
 refused(lambda:m.project_uuid_document_tree(cfg,docs,docs/'nested',base/'nested.json'))
 refused(lambda:m.census_uuid_artifacts(cfg,[docs,docs]))
@@ -216,7 +218,13 @@ unsafe_empty=base/'unsafe-empty';unsafe_empty.mkdir();(unsafe_empty/a).mkdir();w
 refused(lambda:m.census_uuid_artifacts(cfg,[unsafe_empty]))
 signed_escape=base/'signed-escape';signed_escape.mkdir();write(signed_escape/'signed.json','{"idempotencyKey":"'+a+'","\\u0073ignature":"original-signature"}')
 refused(lambda:m.project_uuid_document_tree(cfg,signed_escape,base/'signed-escape-output',base/'signed-escape-report.json'))
-print(json.dumps({'originalOccurrences':scan['occurrenceCount'],'redactedDocuments':report['redactedDocuments'],'outputRawClassHits':0,'archivesExpanded':len(arch['inventory'])-1,'sourceUnchanged':True,'refusalControls':16}))
+unknown=base/'unknown-extension';unknown.mkdir();write(unknown/'payload.bin','{"\\u0069dempotencyKey":"\\u0031'+c[1:]+'"}')
+assert m.census_uuid_artifacts(cfg,[unknown])['occurrenceCount']==1
+write(unknown/'payload.bin','&quot;idempotencyKey&quot;:&quot;'+c+'&quot;')
+assert m.census_uuid_artifacts(cfg,[unknown])['occurrenceCount']==1
+html_json=base/'html-json';html_json.mkdir();write(html_json/'payload.json','{"idempotencyKey":"&#99;'+a[1:]+'"}')
+refused(lambda:m.census_uuid_artifacts(cfg,[html_json]))
+print(json.dumps({'originalOccurrences':scan['occurrenceCount'],'redactedDocuments':report['redactedDocuments'],'outputRawClassHits':0,'archivesExpanded':len(arch['inventory'])-1,'sourceUnchanged':True,'refusalControls':refusals}))
 `;
     const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8', timeout: 30_000 });
     assert.equal(result.status, 0, result.stderr);

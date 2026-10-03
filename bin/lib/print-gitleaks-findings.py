@@ -1349,7 +1349,8 @@ _UUID_DROP_SCHEMA = 'papercusp-uuid-idempotency-row-drop-plan-v1'
 _UUID_DROP_SET_SCHEMA = 'papercusp-uuid-idempotency-row-drop-plan-set-v1'
 _UUID_MARKER = '<redacted:idempotency-key>'
 _UUID4_TEXT = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}'
-_UUID_NAMED_TEXT = re.compile(r'\bidempotencyKey[\s\\"\x27]*[:=][\s\\"\x27]*(' + _UUID4_TEXT + r')')
+_UUID_FIELD_SPACE = r'(?:[\s\\"\x27]|&quot;|&#34;|&#39;)*'
+_UUID_NAMED_TEXT = re.compile(r'\bidempotencyKey' + _UUID_FIELD_SPACE + r'[:=]' + _UUID_FIELD_SPACE + r'(' + _UUID4_TEXT + r')')
 _UUID_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
 _UUID_DOC_SUFFIXES = {'.md', '.mdx', '.html', '.htm', '.txt', '.json', '.jsonl'}
 
@@ -1447,6 +1448,8 @@ def _uuid_document_occurrences(text: str, suffix: str, tokens: set[str]) -> list
         if suffix in ('.json', '.jsonl'):
             for match in _UUID_JSON_STRING.finditer(text):
                 decoded = json.loads(match.group())
+                if len(list(pattern.finditer(html.unescape(decoded)))) != len(list(pattern.finditer(decoded))):
+                    raise ValueError('UUID HTML-encoded value requires explicit projection')
                 lines += [text.count('\n', 0, match.start()) + 1] * len(list(pattern.finditer(decoded)))
         else:
             lines = [text.count('\n', 0, match.start()) + 1 for match in pattern.finditer(text)]
@@ -1469,6 +1472,16 @@ def _uuid_document_occurrences(text: str, suffix: str, tokens: set[str]) -> list
                         'fieldPath': ['<json-string>', index, '<text>', n]}
                        for n, _ in enumerate(pattern.finditer(decoded))]
     return result
+
+
+def _uuid_byte_strings(data):
+    """JSON string decoding without a whole-blob UTF8 allocation or suffix trust."""
+    for index, match in enumerate(re.finditer(_UUID_JSON_STRING.pattern.encode(), data)):
+        try:
+            value = json.loads(match.group())
+        except (UnicodeError, ValueError):
+            continue
+        yield index, match, value
 
 
 def _uuid_root_files(roots: list[Path]) -> list[tuple[Path, str]]:
@@ -1561,6 +1574,13 @@ def census_uuid_artifacts(config_path: Path, roots: list[Path]) -> dict[str, obj
             elif path.stat().st_size:
                 with path.open('rb') as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
                     tokens.update(match.group(1).decode() for match in re.finditer(_UUID_NAMED_TEXT.pattern.encode(), data))
+                    previous = None
+                    for _, match, value in _uuid_byte_strings(data):
+                        tokens.update(_uuid_class_tokens(html.unescape(value)))
+                        if (previous and previous[0] == 'idempotencyKey'
+                                and data[previous[1]:match.start()].strip() == b':'):
+                            tokens.update(re.findall(_UUID4_TEXT, html.unescape(value)))
+                        previous = (value, match.end())
         inventory, occurrences = [], []
         for root in roots:
             if root.is_dir():
@@ -1584,6 +1604,15 @@ def census_uuid_artifacts(config_path: Path, roots: list[Path]) -> dict[str, obj
                             pattern = re.compile(b'|'.join(re.escape(t.encode()) for t in sorted(tokens)), re.IGNORECASE)
                             found = [{'line': data[:m.start()].count(b'\n') + 1, 'fieldPath': ['<bytes>', n]}
                                      for n, m in enumerate(pattern.finditer(data))]
+                            text_pattern = re.compile('|'.join(re.escape(t) for t in sorted(tokens)), re.IGNORECASE)
+                            for n, match, value in _uuid_byte_strings(data):
+                                if len(list(text_pattern.finditer(html.unescape(value)))) != len(list(text_pattern.finditer(value))):
+                                    raise ValueError('UUID byte string HTML encoding requires explicit decoder')
+                                if pattern.search(match.group()):
+                                    continue
+                                found += [{'line': data[:match.start()].count(b'\n') + 1,
+                                           'fieldPath': ['<json-string>', n, '<text>', i]}
+                                          for i, _ in enumerate(text_pattern.finditer(value))]
                             utf16 = re.compile(b'|'.join(re.escape(t.encode(encoding)) for t in sorted(tokens)
                                                         for encoding in ('utf-16-le', 'utf-16-be')), re.IGNORECASE)
                             found += [{'line': 1, 'fieldPath': ['<utf16-bytes>', n]}
