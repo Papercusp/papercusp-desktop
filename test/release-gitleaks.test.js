@@ -1147,6 +1147,8 @@ assert m.scan_credential_digest_bytes(binary,{binary_digest})['digestOfCredentia
 header_digest=hashlib.sha256(b'Bearer '+raw).hexdigest()
 assert m.scan_credential_digest_bytes(raw,{header_digest})['digestOfCredentialHits']>0
 assert m.scan_credential_digest_bytes(b'Authorization: Bearer '+raw,{header_digest})['digestOfCredentialHits']>0
+short=b'abcd';short_digest=hashlib.sha256(short).hexdigest()
+assert m.scan_credential_digest_bytes(short,{short_digest})['digestOfCredentialHits']>0
 assert m.scan_credential_digest_bytes(digest.encode(),targets)['rawCredentialHits']==1
 assert m.scan_credential_digest_bytes(json.dumps({'credentialSha256':digest}).encode(),targets)['rawCredentialHits']==0
 assert m.scan_credential_digest_bytes(json.dumps({'credentialSha256':digest,'apiKey':digest}).encode(),targets)['rawCredentialHits']==1

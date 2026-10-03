@@ -1078,7 +1078,7 @@ def scan_credential_digest_bytes(data: bytes, digests: set[str]) -> dict[str, in
         return counts
     if len(data) in (32, 64) and hashlib.sha256(data).hexdigest() in digests:
         counts["digestOfCredentialHits"] += 1
-    for token in re.finditer(rb"[A-Za-z0-9_+/.=-]{8,4096}", data):
+    for token in re.finditer(rb"[A-Za-z0-9_+/.=-]{1,4096}", data):
         value = token.group()
         candidates = {value}
         if re.fullmatch(rb"[0-9a-fA-F]{64}|[0-9a-fA-F]{128}", value):
