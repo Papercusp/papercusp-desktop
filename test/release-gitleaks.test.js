@@ -63,8 +63,9 @@ output={**source,'rowCount':1,'rowsPath':str(base/'output.jsonl'),'rowsSha256':m
 p=plan['plans'][0]
 reports=[{'schema':'papercusp-uuid-idempotency-redaction-manifest-v1','reviewRef':p['reviewRef'],'replacement':m._UUID_MARKER,'authenticationDisposition':'dropped','ciphertextAuthentication':'requires-independent-candidate-validation','droppedRows':4,'occurrenceCount':6,'occurrences':[o for r in p['rows'] for o in r['occurrences']]}]
 manifest=base/'manifest.json';manifest.write_text(json.dumps({'stores':[{'meta':{'uuidIdempotencyRedactions':reports}}]}))
-valid=lambda p=plan,o=[output],r=reports,files=[manifest]:m.validate_uuid_idempotency_row_drops(config,p,o,r,files)
+valid=lambda p=plan,o=[output],r=reports,files=[manifest],roots=None:m.validate_uuid_idempotency_row_drops(config,p,o,r,files,artifact_roots=roots)
 result=valid();assert result['rawClassHits']==0
+assert result['artifactCoverage']=='supplied-file-list-only'
 def refused(fn):
  try:fn();raise AssertionError('invalid UUID proof passed')
  except (ValueError,KeyError):pass
@@ -79,6 +80,13 @@ for changed in [originals,[],[{**originals[3],'ts':999}],[{**originals[3],'autho
  out.write_text(''.join(json.dumps(row)+'\n' for row in changed));o={**output,'rowCount':len(changed),'rowsSha256':m._sha256(out)};refused(lambda:valid(o=[o]))
 out.write_text(json.dumps(originals[3])+'\n');output['rowsSha256']=m._sha256(out)
 doc=base/'doc.txt';doc.write_text('idempotencyKey: <redacted:idempotency-key>');valid(files=[manifest,doc])
+ship=base/'ship';ship.mkdir();shipped_manifest=ship/'manifest.json';shipped_manifest.write_bytes(manifest.read_bytes())
+assert valid(files=[shipped_manifest],roots=[ship])['artifactCoverage']=='complete-within-bound-roots'
+extra=ship/'unlisted.txt';extra.write_text('ordinary unrelated content')
+refused(lambda:valid(files=[shipped_manifest],roots=[ship]))
+assert valid(files=[shipped_manifest,extra],roots=[ship])['rawClassHits']==0
+refused(lambda:valid(files=[shipped_manifest,extra,extra],roots=[ship]))
+refused(lambda:valid(files=[shipped_manifest,extra,doc],roots=[ship]))
 token=m._uuid_open_row(originals[0],'fixture-pot',json.loads((base/'epoch-keys.json').read_text())['fixture-pot'])[0]['payload']['idempotencyKey']
 new_token='14be300d-'+'6014-47a7-bb41-62c5b782971d'
 for content in [token,'idempotencyKey: '+new_token,'x'*(1024*1024-18)+token,
@@ -115,6 +123,93 @@ print(json.dumps({'counts':result['counts'],'failClosed':True,'privateHashes':[r
     assert.equal(fs.statSync(planOutput).mode & 0o077, 0);
     const repeated = spawnSync('python3', [reportFormatterPath, '--assemble-uuid-row-drops', configPath, planOutput], { encoding: 'utf8' });
     assert.equal(repeated.status, 2, 'assembler must not overwrite prior evidence');
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test('D-166 inventories nested archives and projects only new document copies with value-free occurrence manifests', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-uuid-artifacts-'));
+  fs.chmodSync(temp, 0o700);
+  try {
+    const program = String.raw`
+import importlib.util,json,sys,pathlib,gzip,zipfile,hashlib
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+base=pathlib.Path(sys.argv[2])
+a='c539c37e-09d8-49b6-928b-706f25c70852';b='d8b5ad5a-7e05-4d70-878d-61e937d60439'
+c='14be300d-6014-47a7-bb41-62c5b782971d';d='6a3793b0-ac63-436d-b2f6-92c0ece64c82'
+def write(path,text):
+ path.write_text(text);path.chmod(0o600);return path
+rows=write(base/'rows.jsonl',json.dumps({'table':'harness_plans','hbKey':'safe','value':{'idempotencyKey':a},'segment':'segment-000001.blob','line':1})+'\n')
+keys=write(base/'keys.json',json.dumps({'fixture-pot':{}}))
+cfg=write(base/'config.json',json.dumps({'reviewRef':m._UUID_DROP_REVIEW,'potId':'fixture-pot','epochKeysPath':str(keys),'epochKeysSha256':m._sha256(keys),'sources':[{'sourceKeyHex':'a'*64,'sourceLength':1,'rowCount':1,'rowsPath':str(rows),'rowsSha256':m._sha256(rows)}]}))
+docs=base/'frozen';docs.mkdir(mode=0o700)
+write(docs/'data.json','{\n "idempotencyKey":"\\u0064'+b[1:]+'",\n "mirror":"'+a+'",\n "safe":"kept exactly"\n}\n')
+write(docs/'page.html','<p>&quot;idempotencyKey&quot;:&quot;'+c+'&quot;</p>\n<p>'+a.upper()+'</p>\n')
+write(docs/'guide.mdx','first\n{"idempotencyKey":"\\u0036'+d[1:]+'"}\nmirror '+b+'\n')
+write(docs/'whitespace.txt','idempotencyKey:'+(' '*(1024*1024))+d+'\nmirror '+d+'\n')
+write(docs/'ordinary.txt','unchanged operation_id: 92f716c7-43e3-423e-9e3b-c9b063f03ecd\n')
+(docs/'safe.bin').write_bytes(bytes(range(256)))
+frozen={p.name:p.read_bytes() for p in docs.iterdir()}
+scan=m.census_uuid_artifacts(cfg,[docs]);assert scan['occurrenceCount']==8,scan['occurrences']
+assert scan['coverage']=='complete-within-bound-roots' and len(scan['inventory'])==6
+output=base/'output';manifest=base/'redactions.json'
+report=m.project_uuid_document_tree(cfg,docs,output,manifest)
+assert report['occurrenceCount']==8 and report['redactedDocuments']==4
+assert report['authenticationDisposition']=='plaintext-output-only-not-original-row-authentication'
+assert m.census_uuid_artifacts(cfg,[output,manifest])['occurrenceCount']==0
+assert {p.name:p.read_bytes() for p in docs.iterdir()}==frozen
+assert (output/'ordinary.txt').read_bytes()==frozen['ordinary.txt'] and (output/'safe.bin').read_bytes()==frozen['safe.bin']
+assert json.loads((output/'data.json').read_text())['safe']=='kept exactly'
+assert all(token.lower() not in manifest.read_text().lower() for token in (a,b,c,d))
+assert all(set(o)=={'segment','line','fieldPath'} for o in report['occurrences'])
+assert all(o['line']>0 and o['fieldPath'] for o in report['occurrences'])
+def refused(fn):
+ try:fn();raise AssertionError('invalid artifact census/projection passed')
+ except (ValueError,KeyError,OSError,UnicodeError):pass
+refused(lambda:m.project_uuid_document_tree(cfg,docs,output,base/'another.json'))
+refused(lambda:m.project_uuid_document_tree(cfg,docs,docs/'nested',base/'nested.json'))
+refused(lambda:m.census_uuid_artifacts(cfg,[docs,docs]))
+refused(lambda:m.census_uuid_artifacts(cfg,[base/'missing']))
+archive=base/'archives';archive.mkdir()
+with zipfile.ZipFile(archive/'outer.zip','w',compression=zipfile.ZIP_DEFLATED) as z:
+ z.writestr('inner.gz',gzip.compress(('idempotencyKey: '+c).encode()))
+arch=m.census_uuid_artifacts(cfg,[archive]);assert arch['occurrenceCount']>0 and len(arch['inventory'])==3
+refused(lambda:m.project_uuid_document_tree(cfg,archive,base/'archive-output',base/'archive-report.json'))
+assert not (base/'archive-output').exists() and not (base/'archive-report.json').exists()
+(archive/'corrupt.gz').write_bytes(b'not gzip');refused(lambda:m.census_uuid_artifacts(cfg,[archive]))
+signed=base/'signed';signed.mkdir();write(signed/'signed.json',json.dumps({'idempotencyKey':a,'signature':'original-signature'}))
+refused(lambda:m.project_uuid_document_tree(cfg,signed,base/'signed-output',base/'signed-report.json'))
+assert not (base/'signed-output').exists() and not (base/'signed-report.json').exists()
+linked=base/'links';linked.mkdir();(linked/'link').symlink_to(a)
+assert m.census_uuid_artifacts(cfg,[linked])['occurrenceCount']==1
+refused(lambda:m.project_uuid_document_tree(cfg,linked,base/'linked-output',base/'linked-report.json'))
+unsafe=base/'unsafe';unsafe.mkdir();write(unsafe/a,'safe')
+refused(lambda:m.census_uuid_artifacts(cfg,[unsafe]))
+encoded=base/'encoded';encoded.mkdir();write(encoded/'page.html','idempotencyKey: &#99;'+a[1:])
+refused(lambda:m.census_uuid_artifacts(cfg,[encoded]))
+print(json.dumps({'originalOccurrences':scan['occurrenceCount'],'redactedDocuments':report['redactedDocuments'],'outputRawClassHits':0,'archivesExpanded':len(arch['inventory'])-1,'sourceUnchanged':True,'refusalControls':12}))
+`;
+    const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8', timeout: 30_000 });
+    assert.equal(result.status, 0, result.stderr);
+    const proof = JSON.parse(result.stdout);
+    assert.equal(proof.originalOccurrences, 8);
+    assert.equal(proof.redactedDocuments, 4);
+    assert.equal(proof.outputRawClassHits, 0);
+    assert.equal(proof.archivesExpanded, 2);
+    assert.ok(proof.sourceUnchanged);
+    for (const token of ['c539c37e-09d8-49b6-928b-706f25c70852', 'd8b5ad5a-7e05-4d70-878d-61e937d60439']) {
+      assert.ok(!(result.stdout + result.stderr).includes(token));
+    }
+    const scan = spawnSync('python3', [reportFormatterPath, '--census-uuid-artifacts', path.join(temp, 'config.json'),
+      path.join(temp, 'frozen')], { encoding: 'utf8' });
+    assert.equal(scan.status, 1, scan.stderr);
+    assert.equal(JSON.parse(scan.stdout).occurrenceCount, 8);
+    const projected = spawnSync('python3', [reportFormatterPath, '--project-uuid-documents', path.join(temp, 'config.json'),
+      path.join(temp, 'frozen'), path.join(temp, 'cli-output'), path.join(temp, 'cli-redactions.json')], { encoding: 'utf8' });
+    assert.equal(projected.status, 0, projected.stderr);
+    assert.equal(JSON.parse(projected.stdout).occurrenceCount, 8);
+    const repeated = spawnSync('python3', [reportFormatterPath, '--project-uuid-documents', path.join(temp, 'config.json'),
+      path.join(temp, 'frozen'), path.join(temp, 'cli-output'), path.join(temp, 'cli-redactions.json')], { encoding: 'utf8' });
+    assert.equal(repeated.status, 2, repeated.stderr);
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 

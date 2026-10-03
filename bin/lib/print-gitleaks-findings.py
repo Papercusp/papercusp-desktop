@@ -12,12 +12,17 @@ from __future__ import annotations
 import base64
 import ctypes
 import ctypes.util
+import contextlib
 import fnmatch
 import hashlib
+import html
+import importlib.util
+import io
 import json
 import mmap
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1345,6 +1350,8 @@ _UUID_DROP_SET_SCHEMA = 'papercusp-uuid-idempotency-row-drop-plan-set-v1'
 _UUID_MARKER = '<redacted:idempotency-key>'
 _UUID4_TEXT = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}'
 _UUID_NAMED_TEXT = re.compile(r'\bidempotencyKey[\s\\"\x27]*[:=][\s\\"\x27]*(' + _UUID4_TEXT + r')')
+_UUID_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+_UUID_DOC_SUFFIXES = {'.md', '.mdx', '.html', '.htm', '.txt', '.json', '.jsonl'}
 
 
 def _uuid_class_tokens(value: object) -> set[str]:
@@ -1389,6 +1396,277 @@ def _uuid_occurrences(value: object, tokens: set[str], path: list[object] | None
 
 def _uuid_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
+
+
+def _uuid_source_tokens(config_path: Path) -> set[str]:
+    config, keys = _uuid_census_inputs(config_path)
+    tokens = set()
+    for source in config['sources']:
+        for row in _uuid_source_rows(source):
+            plain, _ = _uuid_open_row(row, config['potId'], keys)
+            tokens.update(_uuid_class_tokens(plain))
+            tokens.update(_uuid_class_tokens({k: row[k] for k in ('table', 'hbKey', 'author_pubkey') if k in row}))
+    return tokens
+
+
+def _uuid_document_value(text: str, suffix: str) -> object:
+    if suffix == '.json':
+        return json.loads(text)
+    if suffix == '.jsonl':
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
+    return text
+
+
+def _uuid_document_tokens(text: str, suffix: str) -> set[str]:
+    tokens = _uuid_class_tokens(_uuid_document_value(text, suffix))
+    # Rendered docs quote JSON with HTML entities. JSON string literals in prose
+    # can also quote an escaped field name/value. Neither is a path exemption.
+    tokens.update(_uuid_class_tokens(html.unescape(text)))
+    for representation in (text, html.unescape(text)):
+        previous = None
+        for match in _UUID_JSON_STRING.finditer(representation):
+            try:
+                decoded = json.loads(match.group())
+            except ValueError:
+                previous = None
+                continue
+            tokens.update(_uuid_class_tokens(decoded))
+            if (previous and previous[0] == 'idempotencyKey'
+                    and representation[previous[1]:match.start()].strip() == ':'):
+                tokens.update(re.findall(_UUID4_TEXT, decoded))
+            previous = (decoded, match.end())
+    return tokens
+
+
+def _uuid_document_occurrences(text: str, suffix: str, tokens: set[str]) -> list[dict[str, object]]:
+    value = _uuid_document_value(text, suffix)
+    paths = _uuid_occurrences(value, tokens)
+    pattern = re.compile('|'.join(re.escape(t) for t in sorted(tokens)), re.IGNORECASE) if tokens else None
+    lines = []
+    if pattern:
+        if suffix in ('.json', '.jsonl'):
+            for match in _UUID_JSON_STRING.finditer(text):
+                decoded = json.loads(match.group())
+                lines += [text.count('\n', 0, match.start()) + 1] * len(list(pattern.finditer(decoded)))
+        else:
+            lines = [text.count('\n', 0, match.start()) + 1 for match in pattern.finditer(text)]
+            if len(list(pattern.finditer(html.unescape(text)))) != len(lines):
+                raise ValueError('UUID HTML-encoded value requires explicit projection')
+    if len(paths) != len(lines):
+        raise ValueError('UUID document representation requires explicit projection')
+    result = [{'line': line, 'fieldPath': path} for line, path in zip(lines, paths)]
+    if suffix not in ('.json', '.jsonl') and pattern:
+        for index, match in enumerate(_UUID_JSON_STRING.finditer(text)):
+            try:
+                decoded = json.loads(match.group())
+            except ValueError:
+                continue
+            # Raw matches were already counted above. Only decoded-but-absent
+            # representations are an additional surface (e.g. a Unicode UUID).
+            if pattern.search(match.group()):
+                continue
+            result += [{'line': text.count('\n', 0, match.start()) + 1,
+                        'fieldPath': ['<json-string>', index, '<text>', n]}
+                       for n, _ in enumerate(pattern.finditer(decoded))]
+    return result
+
+
+def _uuid_root_files(roots: list[Path]) -> list[tuple[Path, str]]:
+    if not roots:
+        raise ValueError('UUID artifact roots missing')
+    resolved = [root.resolve() for root in roots]
+    if any(a == b or a.is_relative_to(b) or b.is_relative_to(a)
+           for i, a in enumerate(resolved) for b in resolved[i + 1:]):
+        raise ValueError('UUID artifact roots overlap')
+    result = []
+    for index, root in enumerate(roots):
+        if root.is_symlink() or not root.exists():
+            raise ValueError('UUID artifact root missing or linked')
+        if root.is_file():
+            result.append((root, f'root-{index}/{root.name}'))
+            continue
+        if not root.is_dir():
+            raise ValueError('UUID artifact root unsupported')
+        for directory, dirs, files in os.walk(root, followlinks=False):
+            for name in sorted(dirs + files):
+                path = Path(directory) / name
+                if path.is_symlink() or path.is_file():
+                    result.append((path, f'root-{index}/{path.relative_to(root).as_posix()}'))
+                elif not path.is_dir():
+                    raise ValueError('UUID artifact contains special file')
+    if not result:
+        raise ValueError('UUID artifact population empty')
+    return sorted(result, key=lambda entry: entry[1])
+
+
+@contextlib.contextmanager
+def _uuid_artifact_population(roots: list[Path]):
+    """Reuse the release audit's readers; never certify compressed bytes alone."""
+    spec = importlib.util.spec_from_file_location('uuid_release_audit', Path(__file__).parents[1] / 'audit-release-bundle.py')
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    original = _uuid_root_files(roots)
+    fingerprint = lambda p: hashlib.sha256(os.readlink(p).encode()).hexdigest() if p.is_symlink() else _sha256(p)
+    before = [(label, fingerprint(path)) for path, label in original]
+    with tempfile.TemporaryDirectory(prefix='papercusp-uuid-artifacts-') as temporary:
+        population = []
+
+        def visit(path: Path, label: str, ancestors: tuple[str, ...] = ()):
+            digest = fingerprint(path)
+            population.append((path, label, digest))
+            if path.is_symlink():
+                return  # The link target string is scanned, never followed on the host.
+            low = path.name.lower()
+            installer = audit._looks_like_installer_stub(low)
+            if not installer and not low.endswith(audit.ARCHIVE_SUFFIXES):
+                return
+            if digest in ancestors or len(ancestors) >= 32:
+                raise ValueError('UUID archive recursion invalid')
+            destination = Path(temporary) / str(len(population))
+            # Readers may report archive member names/errors. Do not echo those
+            # into a release log that promises never to disclose the UUID value.
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                ok = audit._expand_installer(str(path.absolute()), str(destination))[0] if installer else audit._expand_archive(str(path.absolute()), str(destination))
+            if not ok:
+                raise ValueError('UUID artifact could not be expanded')
+            members = _uuid_root_files([destination])
+            if installer and audit._tree_bytes(str(destination)) < path.stat().st_size * audit.ARTIFACT_MIN_EXPANSION_RATIO:
+                raise ValueError('UUID installer expansion coverage incomplete')
+            for member, relative in members:
+                visit(member, label + '!' + relative.split('/', 1)[1], (*ancestors, digest))
+            if fingerprint(path) != digest:
+                raise ValueError('UUID archive changed during enumeration')
+
+        for path, label in original:
+            visit(path, label)
+        yield population
+        if before != [(label, fingerprint(path)) for path, label in _uuid_root_files(roots)]:
+            raise ValueError('UUID artifact population changed')
+
+
+def census_uuid_artifacts(config_path: Path, roots: list[Path]) -> dict[str, object]:
+    """Complete within the caller's bound roots, not proof of release-root selection."""
+    tokens = _uuid_source_tokens(config_path)
+    with _uuid_artifact_population(roots) as population:
+        for path, _, _ in population:
+            if path.is_symlink():
+                continue
+            if path.suffix.lower() in _UUID_DOC_SUFFIXES:
+                tokens.update(_uuid_document_tokens(path.read_text(encoding='utf-8'), path.suffix.lower()))
+            elif path.stat().st_size:
+                with path.open('rb') as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                    tokens.update(match.group(1).decode() for match in re.finditer(_UUID_NAMED_TEXT.pattern.encode(), data))
+        inventory, occurrences = [], []
+        for index, (path, label, digest) in enumerate(population, 1):
+            segment = f'artifact-{index:06d}'
+            if _uuid_occurrences(label, tokens):
+                raise ValueError('UUID unsafe artifact path')
+            if path.is_symlink():
+                found = _uuid_document_occurrences(os.readlink(path), '.txt', tokens)
+            elif path.suffix.lower() in _UUID_DOC_SUFFIXES:
+                found = _uuid_document_occurrences(path.read_text(encoding='utf-8'), path.suffix.lower(), tokens)
+            else:
+                found = []
+                if tokens and path.stat().st_size:
+                    pattern = re.compile(b'|'.join(re.escape(t.encode()) for t in sorted(tokens)), re.IGNORECASE)
+                    with path.open('rb') as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                        found = [{'line': data[:m.start()].count(b'\n') + 1, 'fieldPath': ['<bytes>', n]}
+                                 for n, m in enumerate(pattern.finditer(data))]
+            current = hashlib.sha256(os.readlink(path).encode()).hexdigest() if path.is_symlink() else _sha256(path)
+            if current != digest:
+                raise ValueError('UUID artifact changed during scan')
+            inventory.append({'segment': segment, 'path': label, 'sha256': digest})
+            occurrences += [{**row, 'segment': segment} for row in found]
+        return {'reviewRef': _UUID_DROP_REVIEW, 'inventory': inventory,
+                'occurrences': occurrences, 'occurrenceCount': len(occurrences),
+                'coverage': 'complete-within-bound-roots',
+                'releaseRootSelection': 'requires-independent-release-inventory-validation'}
+
+
+def project_uuid_document_tree(config_path: Path, source: Path, output: Path, manifest: Path) -> dict[str, object]:
+    """New output COPY only. Authenticated rows and archives are never rewritten."""
+    if (not source.is_dir() or source.is_symlink() or output.exists() or output.is_symlink()
+            or manifest.exists() or manifest.is_symlink()
+            or output.resolve().is_relative_to(source.resolve())
+            or source.resolve().is_relative_to(output.resolve())
+            or manifest.resolve().is_relative_to(source.resolve())
+            or manifest.resolve().is_relative_to(output.resolve())):
+        raise ValueError('UUID document projection requires distinct fresh outputs')
+    census = census_uuid_artifacts(config_path, [source])
+    originals = _uuid_root_files([source])
+    tokens = _uuid_source_tokens(config_path)
+    for path, _ in originals:
+        if path.is_symlink():
+            raise ValueError('UUID document projection cannot copy linked input')
+        if path.suffix.lower() in _UUID_DOC_SUFFIXES:
+            tokens.update(_uuid_document_tokens(path.read_text(encoding='utf-8'), path.suffix.lower()))
+    expected = {row['path']: row['sha256'] for row in census['inventory'] if '!' not in row['path']}
+    changes = {}
+
+    def carries_authentication(value: object) -> bool:
+        if isinstance(value, dict):
+            return bool(set(value) & {'__rekey', 'signature', 'author_pubkey'}) or any(carries_authentication(child) for child in value.values())
+        if isinstance(value, list):
+            return any(carries_authentication(child) for child in value)
+        if isinstance(value, str):
+            return any(json.loads(match.group()) in ('__rekey', 'signature', 'author_pubkey')
+                       for match in _UUID_JSON_STRING.finditer(value))
+        return False
+
+    for path, label in originals:
+        if _sha256(path) != expected[label]:
+            raise ValueError('UUID frozen document changed')
+        if path.suffix.lower() not in _UUID_DOC_SUFFIXES:
+            continue
+        text = path.read_text(encoding='utf-8')
+        if not _uuid_document_occurrences(text, path.suffix.lower(), tokens):
+            continue
+        if carries_authentication(_uuid_document_value(text, path.suffix.lower())):
+            raise ValueError('UUID document contains original authentication; drop or reattest required')
+        pattern = re.compile('|'.join(re.escape(t) for t in sorted(tokens)), re.IGNORECASE)
+        # Rewrite JSON string literals separately to cover Unicode-escaped values,
+        # preserving every byte outside those strings and JSONL record boundaries.
+        def replacement(match):
+            try:
+                value = json.loads(match.group())
+            except ValueError:
+                return match.group()
+            changed = pattern.sub(_UUID_MARKER, value)
+            return json.dumps(changed, ensure_ascii=False) if changed != value else match.group()
+        changed = pattern.sub(_UUID_MARKER, _UUID_JSON_STRING.sub(replacement, text))
+        if _uuid_document_tokens(changed, path.suffix.lower()) or _uuid_document_occurrences(changed, path.suffix.lower(), tokens):
+            raise ValueError('UUID document projection incomplete')
+        changes[path.relative_to(source)] = changed
+    # Build outside the frozen input, publish no partial output on a refused scan.
+    output.mkdir(mode=0o700)
+    try:
+        shutil.copytree(source, output, dirs_exist_ok=True)
+        for relative, text in changes.items():
+            target = output / relative
+            target.write_text(text, encoding='utf-8')
+        verified = census_uuid_artifacts(config_path, [output])
+        if verified['occurrenceCount']:
+            raise ValueError('UUID unprojected archive/binary/document remains')
+        if [(label, _sha256(path)) for path, label in _uuid_root_files([source])] != [(label, expected[label]) for _, label in originals]:
+            raise ValueError('UUID frozen document population changed')
+        report = {'schema': 'papercusp-uuid-idempotency-document-redaction-manifest-v1',
+                  'reviewRef': _UUID_DROP_REVIEW, 'replacement': _UUID_MARKER,
+                  'authenticationDisposition': 'plaintext-output-only-not-original-row-authentication',
+                  'redactedDocuments': len(changes), 'occurrenceCount': census['occurrenceCount'],
+                  'occurrences': census['occurrences']}
+        fd, temporary = tempfile.mkstemp(prefix='.uuid-manifest-', dir=manifest.parent)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                json.dump(report, handle, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(temporary, manifest)
+        finally:
+            os.unlink(temporary)
+        return report
+    except BaseException:
+        shutil.rmtree(output)
+        raise
 
 
 def _uuid_open_row(row: dict[str, object], pot_id: str, keys: dict[str, object]) -> tuple[object, bool]:
@@ -1589,7 +1867,8 @@ def assemble_uuid_idempotency_drop_plans(config_path: Path) -> dict[str, object]
 def validate_uuid_idempotency_row_drops(config_path: Path, plan_set: dict[str, object],
                                       output_sources: list[dict[str, object]],
                                       reports: list[dict[str, object]],
-                                      artifact_inputs: list[Path]) -> dict[str, object]:
+                                      artifact_inputs: list[Path], *,
+                                      artifact_roots: list[Path] | None = None) -> dict[str, object]:
     """Independently authenticate retained output and compare the complete source/drop partition.
 
     Source/output exports must be independently bound to the actual candidate by the caller.
@@ -1651,6 +1930,16 @@ def validate_uuid_idempotency_row_drops(config_path: Path, plan_set: dict[str, o
                         for plan in expected['plans']]
     if reports != expected_reports or retained_auth != expected['counts']['authenticatedOriginalRetained']:
         raise ValueError('UUID public manifest or authentication accounting mismatch')
+    coverage = 'supplied-file-list-only'
+    if artifact_roots is not None:
+        population = _uuid_root_files(artifact_roots)
+        if (len(set(artifact_inputs)) != len(artifact_inputs)
+                or {p.absolute() for p in artifact_inputs} != {p.absolute() for p, _ in population}):
+            raise ValueError('UUID supplied artifact inventory omits or adds shipped files')
+        census = census_uuid_artifacts(config_path, artifact_roots)
+        if census['occurrenceCount']:
+            raise ValueError('UUID class remains in expanded shipped population')
+        coverage = census['coverage']
     inventory = []
     for path in artifact_inputs:
         if path.is_symlink() or not path.is_file():
@@ -1679,7 +1968,8 @@ def validate_uuid_idempotency_row_drops(config_path: Path, plan_set: dict[str, o
             raise ValueError('UUID shipped artifact changed')
         inventory.append({'path': str(path), 'sha256': before})
     return {'reviewRef': _UUID_DROP_REVIEW, 'counts': expected['counts'], 'rawClassHits': 0,
-            'artifacts': inventory, 'candidateBinding': 'requires-independent-actual-artifact-validation'}
+            'artifacts': inventory, 'artifactCoverage': coverage,
+            'candidateBinding': 'requires-independent-actual-artifact-validation'}
 
 
 def _classification(summary: dict[str, object], entries: list[dict[str, object]],
@@ -2137,6 +2427,23 @@ def _safe_locator(raw_file: object, scan_root: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) >= 4 and argv[1] == '--census-uuid-artifacts':
+        try:
+            result = census_uuid_artifacts(Path(argv[2]), [Path(path) for path in argv[3:]])
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError):
+            print('UUID artifact census incomplete (values omitted).', file=sys.stderr)
+            return 2
+        print(json.dumps({key: result[key] for key in ('reviewRef', 'occurrenceCount', 'occurrences', 'coverage', 'releaseRootSelection')}))
+        return 1 if result['occurrenceCount'] else 0
+    if len(argv) == 6 and argv[1] == '--project-uuid-documents':
+        try:
+            result = project_uuid_document_tree(Path(argv[2]), Path(argv[3]), Path(argv[4]), Path(argv[5]))
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError):
+            print('UUID document projection incomplete (values omitted).', file=sys.stderr)
+            return 2
+        print(json.dumps({'reviewRef': result['reviewRef'], 'occurrenceCount': result['occurrenceCount'],
+                          'redactedDocuments': result['redactedDocuments']}))
+        return 0
     if len(argv) == 4 and argv[1] == '--assemble-uuid-row-drops':
         try:
             config, output = Path(argv[2]), Path(argv[3])
@@ -2173,7 +2480,9 @@ def main(argv: list[str]) -> int:
             inputs = [Path(path) for path in candidate['artifactInputs']]
             if manifest_path not in inputs:
                 raise ValueError('UUID output manifest not scanned')
-            result = validate_uuid_idempotency_row_drops(Path(argv[2]), plan, candidate['sources'], reports, inputs)
+            roots = [Path(path) for path in candidate['artifactRoots']]
+            result = validate_uuid_idempotency_row_drops(Path(argv[2]), plan, candidate['sources'], reports, inputs,
+                                                        artifact_roots=roots)
         except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError):
             print('UUID row-drop validation incomplete; candidate remains refused (values omitted).', file=sys.stderr)
             return 2
