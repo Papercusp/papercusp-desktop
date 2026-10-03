@@ -2724,6 +2724,8 @@ fi
 # in 136s — ONE file off the per-leg AppDir gate's 17,560 / 3, for ~2 minutes
 # against the ~40 minutes of builds it now front-runs.
 echo "==> assembled-bundle identity gate (EI-20304355477263736): scanning the FULLY-staged bundle (scope-identical to the per-leg gate, ~40min earlier)"
+seed_uuid_validate_release_artifacts "$ORCHESTRATOR_HERE/lib/print-gitleaks-findings.py" --assembled \
+  "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/resources" "$ROOT/src-tauri/seed" || exit 1
 if ! python3 "$ORCHESTRATOR_HERE/audit-release-bundle.py" --scan-dir "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/resources"; then
   echo "ERROR: the fully-assembled bundle (sidecar + bundled resources) carries a sensitive/build-box identity — refusing to launch the platform legs (EI-20304355477263736)." >&2
   echo "       This is the SAME rule the per-leg AppDir/.app gate enforces; it now fires BEFORE ~40 minutes of Rust builds instead of after them." >&2
