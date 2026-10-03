@@ -35,10 +35,17 @@ source "$HERE/seed-resource-root.sh"
 
 # New staged payloads must match the host/desktop runtime graph. Restart-only
 # can still recover an older payload; it does not certify that payload current.
+# This runs on the VM and cannot source apps/operator/bin/bundle-host-common.sh,
+# so it is a COPY of HOST_WORKER_OUTPUTS + HOST_RUNTIME_SIBLING_OUTPUTS there.
+# test/mac-vm-health.test.js pins the two sets equal: a worker added only on the
+# compose side was sealed into the manifest but never overlaid into the
+# candidate, so every staged deploy died in shasum -c (WI-10005744).
 RUNTIME_SIBLINGS=(
   local-embedder-worker.script.mjs cpu-task-worker.script.mjs
   local-reranker-worker.script.mjs event-loop-sentinel.worker.mjs
-  snapshot-fold.worker.mjs systemd-scope-env-runner.mjs
+  snapshot-fold.worker.mjs mutation-probe-closure.worker.mjs
+  admission-jobs.worker.mjs
+  systemd-scope-env-runner.mjs git-ext-bridge.mjs
 )
 
 APP="/Applications/Papercusp Server.app"

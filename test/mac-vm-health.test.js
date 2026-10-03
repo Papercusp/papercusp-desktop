@@ -650,6 +650,29 @@ test('login preflight requires and accepts the actual Hono health endpoint', asy
   }
 });
 
+test('current mac rig launcher RUNTIME_SIBLINGS equals the composer worker + runtime-sibling set (WI-10005744)', () => {
+  // The composer seals and pushes every HOST_WORKER_OUTPUTS +
+  // HOST_RUNTIME_SIBLING_OUTPUTS entry, but the VM-side launcher overlays only
+  // its own copy of the list. A worker added on the compose side alone is
+  // sealed into PAYLOAD-MANIFEST yet never copied into the candidate, so every
+  // staged deploy fails shasum verification and rolls back.
+  const common = new URL('../../apps/operator/bin/bundle-host-common.sh', import.meta.url).pathname;
+  const composed = spawnSync('bash', ['-c',
+    'source "$1" >/dev/null || exit 9; printf "%s\\n" "${HOST_WORKER_OUTPUTS[@]}" "${HOST_RUNTIME_SIBLING_OUTPUTS[@]}"',
+    '_', common], { encoding: 'utf8' });
+  assert.equal(composed.status, 0, composed.stderr);
+  const launcher = spawnSync('bash', ['-c',
+    'eval "$(sed -n "/^RUNTIME_SIBLINGS=(/,/^)/p" "$1")"; printf "%s\\n" "${RUNTIME_SIBLINGS[@]}"',
+    '_', currentBoot], { encoding: 'utf8' });
+  assert.equal(launcher.status, 0, launcher.stderr);
+  const lines = (text) => text.split('\n').filter(Boolean).sort();
+  const expected = lines(composed.stdout);
+  // Positive control: the canonical set is non-empty and carries a known worker,
+  // so an extraction that silently returned nothing cannot pass as "equal".
+  assert.ok(expected.includes('snapshot-fold.worker.mjs'), `composer set unreadable: ${composed.stdout}`);
+  assert.deepEqual(lines(launcher.stdout), expected);
+});
+
 test('current mac rig launcher validates staged integrity and deployment preserves the executable contract', async () => {
   const mode = (await stat(currentBoot)).mode & 0o777;
   assert.equal(mode & 0o111, 0o111, 'boot-headless-current.sh must have executable bits set');
