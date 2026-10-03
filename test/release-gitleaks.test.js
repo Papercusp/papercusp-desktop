@@ -56,7 +56,7 @@ import importlib.util,json,sys,pathlib,copy
 s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
 base=pathlib.Path(sys.argv[2]);config=base/'config.json';original_bytes=(base/'original.jsonl').read_bytes()
 plan=m.assemble_uuid_idempotency_drop_plans(config)
-assert plan['counts']=={'originalRows':5,'originalAuthenticated':4,'originalPlaintext':1,'droppedRows':4,'droppedAuthenticated':3,'authenticatedOriginalRetained':1,'redactedReattested':0,'occurrenceCount':6}
+assert plan['counts']=={'originalRows':5,'originalAuthenticated':4,'originalPlaintext':1,'droppedRows':4,'droppedAuthenticated':3,'privacyDroppedRows':0,'privacyDroppedAuthenticated':0,'privacyRedactedPlaintext':0,'authenticatedOriginalRetained':1,'redactedReattested':0,'occurrenceCount':6}
 assert len(plan['plans'])==1 and len(plan['plans'][0]['rows'])==4
 source=json.loads(config.read_text())['sources'][0]
 output={**source,'rowCount':1,'rowsPath':str(base/'output.jsonl'),'rowsSha256':m._sha256(base/'output.jsonl')}

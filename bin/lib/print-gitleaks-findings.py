@@ -1489,6 +1489,27 @@ def _uuid_source_rows(source: dict[str, object]):
         raise ValueError('UUID source export incomplete or changed')
 
 
+def _uuid_privacy_projection(row: dict[str, object], authenticated: bool) -> tuple[str, object]:
+    """Private, source-hash-bound expectation from the maintained TS privacy fold.
+
+    GO must independently reproduce that export with the exact release literal set.
+    This never authorizes a changed encrypted value to claim its original AEAD.
+    """
+    projection = row.get('privacyProjection', {'disposition': 'carry'})
+    if not isinstance(projection, dict):
+        raise ValueError('UUID privacy projection invalid')
+    disposition = projection.get('disposition')
+    if disposition in ('carry', 'drop') and set(projection) == {'disposition'}:
+        return disposition, row['value']
+    if disposition == 'redact' and set(projection) == {'disposition', 'value'}:
+        if authenticated or row.get('epoch') is not None:
+            raise ValueError('UUID privacy projection cannot retain changed original authentication')
+        if projection['value'] == row['value']:
+            raise ValueError('UUID privacy projection redaction unchanged')
+        return disposition, projection['value']
+    raise ValueError('UUID privacy projection invalid')
+
+
 def assemble_uuid_idempotency_drop_plans(config_path: Path) -> dict[str, object]:
     """Re-derive an entire supplied authenticated row population, independent of gitleaks hits.
 
@@ -1503,11 +1524,12 @@ def assemble_uuid_idempotency_drop_plans(config_path: Path) -> dict[str, object]
             plain, authenticated = _uuid_open_row(row, config['potId'], keys)
             original += 1
             encrypted += int(authenticated)
+            _uuid_privacy_projection(row, authenticated)
             tokens.update(_uuid_class_tokens(plain))
             tokens.update(_uuid_class_tokens({field: row[field] for field in ('table', 'hbKey', 'author_pubkey') if field in row}))
     plans = []
     locators = set()
-    dropped = encrypted_dropped = 0
+    dropped = encrypted_dropped = privacy_dropped = privacy_auth_dropped = privacy_redacted = 0
     for source in config['sources']:
         rows = []
         for row in _uuid_source_rows(source):
@@ -1516,6 +1538,10 @@ def assemble_uuid_idempotency_drop_plans(config_path: Path) -> dict[str, object]
             paths += _uuid_occurrences({field: row[field] for field in ('table', 'hbKey', 'author_pubkey') if field in row},
                                        tokens, ['<row-header>'])
             if not paths:
+                disposition, _ = _uuid_privacy_projection(row, authenticated)
+                privacy_dropped += int(disposition == 'drop')
+                privacy_auth_dropped += int(disposition == 'drop' and authenticated)
+                privacy_redacted += int(disposition == 'redact')
                 continue
             occurrences = [{'segment': row['segment'], 'line': row['line'], 'fieldPath': path} for path in paths]
             for occurrence in occurrences:
@@ -1542,7 +1568,10 @@ def assemble_uuid_idempotency_drop_plans(config_path: Path) -> dict[str, object]
             'sourceSignatureAndCoverage': 'requires-independent-hypercore-export-validation',
             'counts': {'originalRows': original, 'originalAuthenticated': encrypted,
                        'originalPlaintext': original - encrypted, 'droppedRows': dropped,
-                       'droppedAuthenticated': encrypted_dropped, 'authenticatedOriginalRetained': encrypted - encrypted_dropped,
+                       'droppedAuthenticated': encrypted_dropped,
+                       'privacyDroppedRows': privacy_dropped, 'privacyDroppedAuthenticated': privacy_auth_dropped,
+                       'privacyRedactedPlaintext': privacy_redacted,
+                       'authenticatedOriginalRetained': encrypted - encrypted_dropped - privacy_auth_dropped,
                        'redactedReattested': 0, 'occurrenceCount': len(locators)}}
 
 
@@ -1565,25 +1594,31 @@ def validate_uuid_idempotency_row_drops(config_path: Path, plan_set: dict[str, o
     dropped = {(p['sourceKeyHex'], r['table'], r['hbKey']) for p in expected['plans'] for r in p['rows']}
     tokens = set()
     originals = {}
+    privacy_dropped = set()
     for source in config['sources']:
         for row in _uuid_source_rows(source):
-            plain, _ = _uuid_open_row(row, config['potId'], keys)
+            plain, authenticated = _uuid_open_row(row, config['potId'], keys)
             tokens.update(_uuid_class_tokens(plain))
             tokens.update(_uuid_class_tokens({field: row[field] for field in ('table', 'hbKey', 'author_pubkey') if field in row}))
-            originals[(source['sourceKeyHex'], row['table'], row['hbKey'])] = row
+            identity = (source['sourceKeyHex'], row['table'], row['hbKey'])
+            disposition, value = _uuid_privacy_projection(row, authenticated)
+            originals[identity] = {**row, 'value': value}
+            if disposition == 'drop':
+                privacy_dropped.add(identity)
     retained_auth = 0
     for key, source in by_key.items():
         path = Path(source['rowsPath'])
         _private_file(path)
         if _sha256(path) != source['rowsSha256']:
             raise ValueError('UUID output export changed')
-        remaining = {identity for identity in originals if identity[0] == key} - dropped
+        remaining = {identity for identity in originals if identity[0] == key} - dropped - privacy_dropped
         for row in _uuid_source_rows(source):
             identity = (key, row['table'], row['hbKey'])
             if identity not in remaining:
                 raise ValueError('dropped or extra UUID output row')
             original = originals[identity]
-            content = lambda entry: {k: v for k, v in entry.items() if k not in ('segment', 'line', 'storedValueJson')}
+            content = lambda entry: {k: v for k, v in entry.items()
+                                     if k not in ('segment', 'line', 'storedValueJson', 'privacyProjection')}
             if content(row) != content(original):
                 raise ValueError('UUID output changed original authentication')
             plain, authenticated = _uuid_open_row(row, config['potId'], keys)
