@@ -165,6 +165,12 @@ pub fn current_shortcut() -> Option<String> {
 /// (main.rs): the MAIN window's live URL when there is one (dev + the GUI
 /// process), else the Server process's spawned-sidecar port. The Server has no
 /// window, so the sidecar-port fallback is what makes the palette work there.
+fn palette_origin_from_ports(latched: Option<u16>, discovered: Option<u16>) -> Option<String> {
+    latched
+        .or(discovered)
+        .map(|port| format!("http://localhost:{port}"))
+}
+
 fn resolve_base(app: &AppHandle) -> Option<String> {
     if let Some(base) = app
         .get_webview_window("main")
@@ -182,8 +188,16 @@ fn resolve_base(app: &AppHandle) -> Option<String> {
         return Some(base);
     }
     let state: tauri::State<crate::SidecarState> = app.state();
-    let guard = state.port.lock().ok()?;
-    (*guard).map(|p| format!("http://localhost:{}", p))
+    let latched = *state.port.lock().ok()?;
+    // The always-on Server can reuse an operator started by its systemd service.
+    // In that case it never owns the serve child and may not latch the port,
+    // even though operator.json already names the live content origin.
+    let discovered = latched
+        .is_none()
+        .then(crate::operator_discovery_port_from_home)
+        .flatten()
+        .filter(|port| crate::operator_http_ready(*port));
+    palette_origin_from_ports(latched, discovered)
 }
 
 // ---------------------------------------------------------------------------
@@ -726,5 +740,18 @@ mod tests {
     #[test]
     fn diagnostic_window_label_is_distinct_from_the_palette() {
         assert_ne!(WINDOW_LABEL, UNAVAILABLE_WINDOW_LABEL);
+    }
+
+    #[test]
+    fn server_palette_uses_operator_discovery_when_its_port_was_not_latched() {
+        assert_eq!(
+            palette_origin_from_ports(None, Some(16582)).as_deref(),
+            Some("http://localhost:16582")
+        );
+        assert_eq!(
+            palette_origin_from_ports(Some(15509), Some(16582)).as_deref(),
+            Some("http://localhost:15509")
+        );
+        assert_eq!(palette_origin_from_ports(None, None), None);
     }
 }

@@ -18,7 +18,7 @@ tauri-build = { version = "2", features = [] }
 # `tray-icon` powers the "Papercusp Server" menubar/tray app (Server role, no
 # main window); cross-platform (macOS status item, Windows notification-area,
 # Linux appindicator). See app_role.rs + the Server branch in setup().
-tauri = { version = "2", features = ["specta", "tray-icon", "devtools"] }
+tauri = { version = "2", features = ["specta", "tray-icon", "devtools", "webview-data-url"] }
 tauri-plugin-shell = "2"
 # Cross-platform login auto-start for the Server role: macOS LaunchAgent,
 # Windows HKCU Run key, Linux XDG ~/.config/autostart. Registered only when

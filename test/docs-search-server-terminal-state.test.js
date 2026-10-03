@@ -4,6 +4,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const main = fs.readFileSync(path.join(__dirname, '../src-tauri/src/main.rs'), 'utf8');
+const cargo = fs.readFileSync(path.join(__dirname, '../src-tauri/Cargo.toml'), 'utf8');
 
 test('the Server manages disabled NativeTerminal state before registering the docs shortcut', () => {
   const setup = main.slice(main.indexOf('.setup(move |app| {'), main.indexOf('.run(|app_handle, event|'));
@@ -24,4 +25,8 @@ test('the Mac verification rsync preserves remote Papercusp runtime scratch', ()
   assert.match(transfer[0], /--exclude '\/\.papercusp\/'/);
   assert.match(transfer[0], /--exclude '\/papercusp-desktop\/src-tauri\/sidecar\/'/);
   assert.match(transfer[0], /--exclude '\/papercusp-desktop\/src-tauri\/macos-term-shim\/\.build\/'/);
+});
+
+test('the packaged Server enables Tauri data URLs for the offline Quick Panel diagnostic', () => {
+  assert.match(cargo, /^tauri = .*"webview-data-url"/m);
 });
