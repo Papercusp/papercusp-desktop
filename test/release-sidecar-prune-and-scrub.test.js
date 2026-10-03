@@ -113,9 +113,17 @@ test('D-161 census identifies type-only edges without dropping mixed runtime imp
       const value: number = 1;`);
     const proof = collectImports(file);
     assert.deepEqual(proof.imports.filter((r) => r.typeOnly).map((r) => r.specifier),
-      ['only-types', 'named-types', 'export-types', 'named-export-types']);
+      ['only-types', 'export-types']);
     assert.deepEqual(proof.imports.filter((r) => !r.typeOnly).map((r) => r.specifier),
-      ['default-runtime', 'mixed-runtime', 'side-effect', 'mixed-export-runtime']);
+      ['named-types', 'default-runtime', 'mixed-runtime', 'side-effect', 'named-export-types', 'mixed-export-runtime']);
+    const ts = require('typescript');
+    const emitted = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
+      compilerOptions: { verbatimModuleSyntax: true, module: ts.ModuleKind.ESNext },
+    }).outputText;
+    assert.ok(emitted.includes("import {} from 'named-types'"));
+    assert.ok(emitted.includes("export {} from 'named-export-types'"));
+    assert.ok(!emitted.includes('only-types'));
+    assert.ok(!emitted.includes('export-types'));
     assert.equal(proof.closureAccepted, false);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

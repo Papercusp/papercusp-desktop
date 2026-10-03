@@ -109,12 +109,11 @@ function collectImports(file) {
   visit(tree, (node) => {
     if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
       const clause = ts.isImportDeclaration(node) ? node.importClause : node;
-      const bindings = ts.isImportDeclaration(node) ? clause?.namedBindings : node.exportClause;
-      const namedTypesOnly = bindings && (ts.isNamedImports(bindings) || ts.isNamedExports(bindings))
-        && bindings.elements.length > 0 && bindings.elements.every((element) => element.isTypeOnly)
-        && !(ts.isImportDeclaration(node) && clause?.name);
+      // `import { type T }` can emit `import {}` with verbatimModuleSyntax:
+      // the module still executes. Only a declaration-level `type` guarantees
+      // removal independently of compiler options or native type stripping.
       if (node.moduleSpecifier) record(node, 'static-module', node.moduleSpecifier,
-        { typeOnly: Boolean(clause?.isTypeOnly || namedTypesOnly) });
+        { typeOnly: Boolean(clause?.isTypeOnly) });
     } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
       record(node, 'static-module', node.moduleReference.expression);
     } else if (ts.isCallExpression(node)) {
