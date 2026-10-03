@@ -27,17 +27,17 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
+const { makeDesktopTestScratchDirSync } = require('./test-scratch.cjs');
 
 const BIN = path.join(__dirname, '..', 'bin');
 const EMITTER = path.join(BIN, 'emit-build-provenance.sh');
 const VERIFIER = path.join(BIN, 'verify-provenance.sh');
 
 function tmp() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'prov-sidecar-'));
+  return makeDesktopTestScratchDirSync('prov-sidecar-');
 }
 
 function startHealthFixtureServer() {

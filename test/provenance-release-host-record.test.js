@@ -40,10 +40,10 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
+const { makeDesktopTestScratchDirSync } = require('./test-scratch.cjs');
 
 const BIN = path.join(__dirname, '..', 'bin');
 const EMITTER = path.join(BIN, 'emit-build-provenance.sh');
@@ -61,7 +61,7 @@ const FIXTURE_SECRET = 'NOTAREALSECRETPREFIX';
  * could hide in a field this test does not name).
  */
 function emit(releaseHost) {
-  const out = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'prov-relhost-')), 'out');
+  const out = path.join(makeDesktopTestScratchDirSync('prov-relhost-'), 'out');
   fs.mkdirSync(out, { recursive: true });
   const artifact = path.join(out, 'App_0.0.0_amd64.deb');
   fs.writeFileSync(artifact, 'fixture');

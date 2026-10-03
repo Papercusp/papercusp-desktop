@@ -16,6 +16,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
+const { makeDesktopTestScratchDirSync } = require('./test-scratch.cjs');
 
 const {
   inspectSidecarFreshness,
@@ -244,7 +245,7 @@ function writeStampedSidecar(
 }
 
 test('CLI: exits 0 and prints the banner when nothing is asserted', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-fresh-'));
+  const dir = makeDesktopTestScratchDirSync('sidecar-fresh-');
   fs.writeFileSync(path.join(dir, 'build-provenance.json'), prov());
   const r = runCli(dir);
   assert.equal(r.status, 0);
@@ -252,14 +253,14 @@ test('CLI: exits 0 and prints the banner when nothing is asserted', () => {
 });
 
 test('CLI: exits 4 when an asserted commit cannot be shown to be present', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-fresh-'));
+  const dir = makeDesktopTestScratchDirSync('sidecar-fresh-');
   fs.writeFileSync(path.join(dir, 'build-provenance.json'), prov());
   const r = runCli(dir, { PAPERCUSP_REQUIRE_SIDECAR_CONTAINS: 'ffffffffffffffffffffffff' });
   assert.equal(r.status, 4);
 });
 
 test('CLI: the documented override turns a refusal back into exit 0', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-fresh-'));
+  const dir = makeDesktopTestScratchDirSync('sidecar-fresh-');
   fs.writeFileSync(path.join(dir, 'build-provenance.json'), prov());
   const r = runCli(dir, {
     PAPERCUSP_REQUIRE_SIDECAR_CONTAINS: 'ffffffffffffffffffffffff',
@@ -276,7 +277,7 @@ test('CLI: a sidecar dir that does not exist is reported, not crashed on', () =>
 });
 
 test('CLI: release-cut hash and minimum-epoch assertions pass for matching sidecar bytes', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-fresh-'));
+  const dir = makeDesktopTestScratchDirSync('sidecar-fresh-');
   const expectedSha = writeStampedSidecar(dir, { serveText: 'release sidecar bytes\n', epochSec: 250 });
   const r = runCli(dir, {
     PAPERCUSP_EXPECTED_SERVE_SHA: expectedSha,
@@ -288,7 +289,7 @@ test('CLI: release-cut hash and minimum-epoch assertions pass for matching sidec
 });
 
 test('CLI: release-cut hash assertion rejects different packed serve.mjs bytes', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-fresh-'));
+  const dir = makeDesktopTestScratchDirSync('sidecar-fresh-');
   const actualSha = writeStampedSidecar(dir, { serveText: 'stale sidecar bytes\n', epochSec: 250 });
   const expectedSha = sha256('fresh sidecar bytes\n');
   assert.notEqual(expectedSha, actualSha);
@@ -300,7 +301,7 @@ test('CLI: release-cut hash assertion rejects different packed serve.mjs bytes',
 });
 
 test('CLI: minimum-epoch assertion rejects a sidecar stamped before the release cut', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-fresh-'));
+  const dir = makeDesktopTestScratchDirSync('sidecar-fresh-');
   const serveText = 'sidecar from an earlier cut\n';
   writeStampedSidecar(dir, { serveText, epochSec: 100 });
   const r = runCli(dir, { PAPERCUSP_SIDECAR_MIN_EPOCH_SEC: '200' });
@@ -311,7 +312,7 @@ test('CLI: minimum-epoch assertion rejects a sidecar stamped before the release 
 });
 
 test('CLI: an asserted cut with missing or malformed stamp fails closed', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-fresh-'));
+  const dir = makeDesktopTestScratchDirSync('sidecar-fresh-');
   fs.writeFileSync(path.join(dir, 'build-provenance.json'), prov());
   fs.writeFileSync(path.join(dir, 'serve.mjs'), 'sidecar bytes\n');
   fs.writeFileSync(path.join(dir, '.sidecar-build-stamp'), '{not json');
@@ -321,7 +322,7 @@ test('CLI: an asserted cut with missing or malformed stamp fails closed', () => 
 });
 
 test('CLI: release cross-build assertion rejects an ordinary dev sidecar before compilation', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-fresh-'));
+  const dir = makeDesktopTestScratchDirSync('sidecar-fresh-');
   writeStampedSidecar(dir);
   const r = runCli(dir, {
     PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT: '1',
@@ -333,7 +334,7 @@ test('CLI: release cross-build assertion rejects an ordinary dev sidecar before 
 });
 
 test('CLI: release cross-build assertion accepts a successfully audited sidecar', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-fresh-'));
+  const dir = makeDesktopTestScratchDirSync('sidecar-fresh-');
   writeStampedSidecar(dir, { releaseAuditPassed: true });
   const r = runCli(dir, { PAPERCUSP_REQUIRE_SIDECAR_RELEASE_AUDIT: '1' });
   assert.equal(r.status, 0, r.stderr);
