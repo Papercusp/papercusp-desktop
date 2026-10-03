@@ -76,6 +76,22 @@ test('D-161 lexical seeds bind UTF8 bytes and fail closed on invalid input', () 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('D-161 lexical census retains local export escapes and refuses ambiguous lookup environments', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-lexical-escapes-'));
+  try {
+    const file = path.join(dir, 'bundle.mjs');
+    fs.writeFileSync(file, 'const c = {}; export {c}; export {c as publicNamespace};');
+    assert.deepEqual(collectLexicalReferences(file, [{name: 'c', byteStart: 6}])
+      .populations[0].references.map((row) => row.context.source), ['c = {}', 'c', 'c as publicNamespace']);
+    fs.writeFileSync(file, 'const c = {}; export {c as c};');
+    assert.equal(collectLexicalReferences(file, [{name: 'c', byteStart: 6}]).populations[0].references.length, 2);
+    fs.writeFileSync(file, 'const c = {}; function f(x = c) { var c; }');
+    assert.throws(() => collectLexicalReferences(file, [{name: 'c', byteStart: 6}]), /parameter-default/);
+    fs.writeFileSync(file, 'var c = {}; with (dynamicScope) { use(c); }');
+    assert.throws(() => collectLexicalReferences(file, [{name: 'c', byteStart: 4}]), /with-scope/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('D-161 static closure follows Node import and require conditions without executing modules', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-module-closure-'));
   try {

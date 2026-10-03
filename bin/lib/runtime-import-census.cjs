@@ -186,7 +186,8 @@ function collectLexicalReferences(file, seeds) {
         || ts.isPropertyDeclaration(parent)) && parent.name === node) return false;
     if (ts.isBindingElement(parent) && parent.propertyName === node) return false;
     if (ts.isImportSpecifier(parent) && parent.propertyName === node) return false;
-    if (ts.isExportSpecifier(parent) || ts.isLabeledStatement(parent)
+    if (ts.isExportSpecifier(parent) && parent.propertyName && parent.name === node) return false;
+    if (ts.isLabeledStatement(parent)
         || ts.isBreakStatement(parent) || ts.isContinueStatement(parent)) return false;
     return true;
   };
@@ -194,6 +195,13 @@ function collectLexicalReferences(file, seeds) {
     if (!lexical(node)) return null;
     const name = ts.escapeLeadingUnderscores(node.text);
     for (let scope = node.parent; scope; scope = scope.parent) {
+      // Default parameter initializers have a separate environment from a
+      // function body. A binder table alone cannot decide those references.
+      if (ts.isParameter(scope) && scope.initializer
+          && node.getStart(tree) >= scope.initializer.getStart(tree)) {
+        throw new Error('parameter-default lexical reference requires semantic proof');
+      }
+      if (ts.isWithStatement(scope)) throw new Error('with-scope lexical reference refused');
       const symbol = scope.locals?.get(name);
       if (symbol) return symbol;
     }
@@ -223,7 +231,7 @@ function collectLexicalReferences(file, seeds) {
   });
   return { schema: 'papercusp-lexical-reference-census-v1', file, sha256: hash(bytes),
     parser: { name: 'typescript', version: ts.version },
-    coverage: 'Binder-local lexical identifiers only. Property names, type inference, alias dataflow and generated bodies are not resolved.',
+    coverage: 'Binder-local lexical identifiers and local export names only. Parameter defaults and with scopes refuse; property names, type inference, alias dataflow and generated bodies are not resolved.',
     populations, closureAccepted: false };
 }
 
