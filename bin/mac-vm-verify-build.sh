@@ -105,6 +105,9 @@ for OVERLAY in \
   packages/operator-core/lib/harness-registry.test.ts \
   packages/operator-core/lib/harness/improvements/learning-infra-health.ts \
   packages/operator-core/lib/harness/improvements/learning-infra-health.test.ts \
+  apps/operator/scripts/lib/mirror-tree.sh \
+  apps/operator/scripts/setup-wake-runtime.sh \
+  apps/operator/scripts/setup-vad-runtime.sh \
 ; do
   if [ -f "$MONOREPO/$OVERLAY" ]; then
     mkdir -p "$SNAP/$(dirname "$OVERLAY")"
