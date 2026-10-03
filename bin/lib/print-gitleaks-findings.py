@@ -1401,7 +1401,7 @@ def _uuid_open_row(row: dict[str, object], pot_id: str, keys: dict[str, object])
     if set(value) != {'__rekey'} or type(row.get('epoch')) is not int or row['epoch'] < 0:
         raise ValueError('invalid UUID source envelope')
     author = row.get('author_pubkey')
-    if not isinstance(author, str) or not author:
+    if not isinstance(author, str):
         raise ValueError('original author required for AAD')
     key = _canonical_base64(keys[str(row['epoch'])], 32)
     encoded = value['__rekey']
@@ -1451,6 +1451,19 @@ def _uuid_census_inputs(config_path: Path) -> tuple[dict[str, object], dict[str,
         _private_file(path)
         if _sha256(path) != source['rowsSha256']:
             raise ValueError('UUID source export changed')
+    if 'sourceManifestPath' in config:
+        manifest_path = Path(config['sourceManifestPath'])
+        if _sha256(manifest_path) != config['sourceManifestSha256']:
+            raise ValueError('UUID source manifest changed')
+        manifest = json.loads(manifest_path.read_text())
+        stores = [store for store in manifest['stores'] if store['kind'] == 'corestore']
+        if len(stores) != 1 or manifest.get('potId') != config['potId']:
+            raise ValueError('UUID source manifest coverage invalid')
+        meta = stores[0]['meta']
+        if (set(meta['coreKeys']) != seen or len(meta['coreKeys']) != len(seen)
+                or any(meta['coreLengths'][s['sourceKeyHex']] != s['sourceLength']
+                       or s.get('sourceBlocksRead') != s['sourceLength'] for s in config['sources'])):
+            raise ValueError('UUID source core/block coverage incomplete')
     # The exporter must enumerate the actual signed core/snapshot population.
     # A supplied export is not, by itself, proof that every source core was read.
     return config, keys

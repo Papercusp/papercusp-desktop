@@ -29,7 +29,7 @@ test('D-166 authenticates the full supplied row census, drops the class and mirr
       { operation_id: '92f716c7-43e3-423e-9e3b-c9b063f03ecd', safe: 'unchanged' },
       { nested: [{ idempotencyKey: tokenA }] }];
     const rows = values.map((value, index) => {
-      const row = { table: 'harness_plans', hbKey: `row-${index}`, author_pubkey: 'synthetic-public-author',
+      const row = { table: 'harness_plans', hbKey: `row-${index}`, author_pubkey: index === 0 ? '' : 'synthetic-public-author',
         ts: 100 + index, epoch: 0, segment: 'segment-000001.blob', line: index + 1 };
       if (index === 4) { delete row.epoch; return { ...row, value }; }
       const opId = hash(JSON.stringify([row.table, row.hbKey, row.author_pubkey]));
