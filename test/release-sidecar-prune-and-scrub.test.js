@@ -122,8 +122,8 @@ test('D-161 census identifies type-only edges without dropping mixed runtime imp
     }).outputText;
     assert.ok(emitted.includes("import {} from 'named-types'"));
     assert.ok(emitted.includes("export {} from 'named-export-types'"));
-    assert.ok(!emitted.includes('only-types'));
-    assert.ok(!emitted.includes('export-types'));
+    assert.ok(!emitted.includes("from 'only-types'"));
+    assert.ok(!emitted.includes("from 'export-types'"));
     assert.equal(proof.closureAccepted, false);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
