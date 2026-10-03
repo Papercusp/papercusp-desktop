@@ -100,12 +100,21 @@ seed_uuid_project_sidecar_documents() {
   local actual
   actual="$(sha256sum -- "$census" 2>/dev/null)" || return 1
   [[ "${actual%% *}" == "$digest" ]] || { echo "ERROR: UUID census changed before document projection (values omitted)." >&2; return 1; }
-  local evidence index=0 relative frozen projected report original
-  if [[ -n "${VH_RUN_DIR:-}" && "$VH_RUN_DIR/" == "$sidecar/"* ]]; then
-    echo "ERROR: UUID private evidence cannot live in the shipped resource tree (values omitted)." >&2
+  local evidence index=0 relative frozen projected report public_report original
+  if ! node - "$sidecar" "${VH_RUN_DIR:-}" <<'NODE'
+const fs = require('node:fs'), path = require('node:path');
+try {
+  const [sidecar, run] = process.argv.slice(2);
+  const repository = path.resolve(fs.realpathSync(sidecar), '../../..');
+  const evidence = fs.realpathSync(run);
+  if (!fs.statSync(evidence).isDirectory() || evidence === repository || evidence.startsWith(repository + path.sep)) process.exit(1);
+} catch { process.exit(1); }
+NODE
+  then
+    echo "ERROR: UUID private evidence requires a durable verification run outside the source/resource tree (values omitted)." >&2
     return 1
   fi
-  evidence="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-uuid-doc-inputs.XXXXXX")" || return 1
+  evidence="$(mktemp -d "$VH_RUN_DIR/uuid-doc-inputs.XXXXXX")" || return 1
   chmod 700 "$evidence" || return 1
   for relative in internal-docs apps/operator-docs/src/content/docs spa; do
     [[ ! -e "$sidecar/$relative" && ! -L "$sidecar/$relative" ]] && continue
@@ -114,9 +123,14 @@ seed_uuid_project_sidecar_documents() {
       return 1
     fi
     frozen="$evidence/input-$index"
-    projected="$sidecar/$relative.uuid-projected"
-    report="$sidecar/uuid-idempotency-doc-redactions-$index.json"
-    cp -a "$sidecar/$relative" "$frozen" || return 1
+    projected="$evidence/projected-$index"
+    report="$evidence/redactions-$index.json"
+    public_report="$sidecar/uuid-idempotency-doc-redactions-$index.json"
+    if [[ -e "$public_report" || -L "$public_report" ]]; then
+      echo "ERROR: UUID document manifest already exists; a fresh copy point is required (values omitted)." >&2
+      return 1
+    fi
+    cp -a "$sidecar/$relative" "$frozen" 2>/dev/null || return 1
     if ! python3 "$formatter" --project-uuid-documents "$census" "$frozen" "$projected" "$report" \
         || ! python3 "$formatter" --validate-uuid-documents "$census" "$frozen" "$projected" "$report"; then
       echo "ERROR: UUID doc projection or independent manifest check refused (values omitted)." >&2
@@ -129,16 +143,17 @@ seed_uuid_project_sidecar_documents() {
       echo "ERROR: UUID doc copy changed after freezing (values omitted)." >&2
       return 1
     fi
-    mv "$sidecar/$relative" "$original" || return 1
-    if ! mv "$projected" "$sidecar/$relative"; then
-      mv "$original" "$sidecar/$relative" || true
+    mv "$sidecar/$relative" "$original" 2>/dev/null || return 1
+    if ! mv "$projected" "$sidecar/$relative" 2>/dev/null; then
+      mv "$original" "$sidecar/$relative" 2>/dev/null || true
       return 1
     fi
-    node - "$evidence" "$census" "$digest" "$relative" "$frozen" "$sidecar/$relative" "$report" <<'NODE'
+    mv "$report" "$public_report" 2>/dev/null || return 1
+    node - "$evidence" "$census" "$digest" "$relative" "$frozen" "$sidecar/$relative" "$public_report" <<'NODE'
 const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
 const [directory, censusPath, censusSha256, relative, sourcePath, outputPath, manifestPath] = process.argv.slice(2);
 const file = path.join(directory, 'projection-inputs.private.json');
-const state = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { censusPath, censusSha256, documentProjections: [] };
+const state = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { censusPath, censusSha256, inputPlane: 'generated-doc-copy-after-normal-privacy-projection-not-signed-source-proof', documentProjections: [] };
 const manifestSha256 = crypto.createHash('sha256').update(fs.readFileSync(manifestPath)).digest('hex');
 state.documentProjections.push({ relative, sourcePath, outputPath, manifestPath, manifestSha256 });
 fs.writeFileSync(file, JSON.stringify(state), { mode: 0o600 });
@@ -156,7 +171,7 @@ NODE
   if [[ -n "${VH_RUN_DIR:-}" && -d "$VH_RUN_DIR" ]]; then
     local pointer
     pointer="$(mktemp "$VH_RUN_DIR/uuid-document-projection-inputs.XXXXXX")" || return 1
-    printf '%s\n' "$evidence/projection-inputs.private.json" > "$pointer"
+    printf '%s\n' "$evidence/projection-inputs.private.json" > "$pointer" || return 1
     chmod 600 "$pointer" || return 1
   fi
   SEED_UUID_DOC_INPUTS_PATH="$evidence/projection-inputs.private.json"

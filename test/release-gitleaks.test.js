@@ -173,6 +173,7 @@ scan=m.census_uuid_artifacts(cfg,[docs]);assert scan['occurrenceCount']==8,scan[
 assert scan['coverage']=='complete-within-bound-roots' and len(scan['inventory'])==6
 output=base/'output';manifest=base/'redactions.json'
 report=m.project_uuid_document_tree(cfg,docs,output,manifest)
+assert m.validate_uuid_document_projection(cfg,docs,output,manifest)==report
 assert report['occurrenceCount']==8 and report['redactedDocuments']==4
 assert report['authenticationDisposition']=='plaintext-output-only-not-original-row-authentication'
 assert m.census_uuid_artifacts(cfg,[output,manifest])['occurrenceCount']==0
@@ -187,6 +188,19 @@ def refused(fn):
  global refusals
  try:fn();raise AssertionError('invalid artifact census/projection passed')
  except (ValueError,KeyError,OSError,UnicodeError):refusals+=1
+saved_manifest=manifest.read_bytes()
+for field,value in [('occurrenceCount',0),('redactedDocuments',0),('authenticationDisposition','authenticated-original')]:
+ changed=json.loads(saved_manifest);changed[field]=value;manifest.write_text(json.dumps(changed))
+ refused(lambda:m.validate_uuid_document_projection(cfg,docs,output,manifest))
+manifest.write_bytes(saved_manifest)
+original_out=(output/'ordinary.txt').read_bytes()
+(output/'ordinary.txt').write_text('unrelated mutation');refused(lambda:m.validate_uuid_document_projection(cfg,docs,output,manifest))
+(output/'ordinary.txt').unlink();refused(lambda:m.validate_uuid_document_projection(cfg,docs,output,manifest))
+(output/'ordinary.txt').write_bytes(original_out)
+write(output/'surplus.txt','surplus');refused(lambda:m.validate_uuid_document_projection(cfg,docs,output,manifest));(output/'surplus.txt').unlink()
+changed=json.loads(saved_manifest);changed['occurrences'][0]['line']+=1;manifest.write_text(json.dumps(changed))
+refused(lambda:m.validate_uuid_document_projection(cfg,docs,output,manifest));manifest.write_bytes(saved_manifest)
+assert m.validate_uuid_document_projection(cfg,docs,output,manifest)==report
 refused(lambda:m.project_uuid_document_tree(cfg,docs,output,base/'another.json'))
 refused(lambda:m.project_uuid_document_tree(cfg,docs,docs/'nested',base/'nested.json'))
 refused(lambda:m.census_uuid_artifacts(cfg,[docs,docs]))
@@ -245,6 +259,10 @@ print(json.dumps({'originalOccurrences':scan['occurrenceCount'],'redactedDocumen
       path.join(temp, 'frozen'), path.join(temp, 'cli-output'), path.join(temp, 'cli-redactions.json')], { encoding: 'utf8' });
     assert.equal(projected.status, 0, projected.stderr);
     assert.equal(JSON.parse(projected.stdout).occurrenceCount, 8);
+    const validated = spawnSync('python3', [reportFormatterPath, '--validate-uuid-documents', path.join(temp, 'config.json'),
+      path.join(temp, 'frozen'), path.join(temp, 'cli-output'), path.join(temp, 'cli-redactions.json')], { encoding: 'utf8' });
+    assert.equal(validated.status, 0, validated.stderr);
+    assert.equal(JSON.parse(validated.stdout).occurrenceCount, 8);
     const repeated = spawnSync('python3', [reportFormatterPath, '--project-uuid-documents', path.join(temp, 'config.json'),
       path.join(temp, 'frozen'), path.join(temp, 'cli-output'), path.join(temp, 'cli-redactions.json')], { encoding: 'utf8' });
     assert.equal(repeated.status, 2, repeated.stderr);

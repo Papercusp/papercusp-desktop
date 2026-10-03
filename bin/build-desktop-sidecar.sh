@@ -19,6 +19,13 @@
 
 set -euo pipefail
 
+# ── Self-read guard (WI-3306 idiom; WI-10005998): parse the whole script before
+# executing, so a peer's mid-run edit to this shared-tree file can't shift the
+# running shell's read offset into changed bytes. A ~45-min bake died this way on
+# 2026-10-03 ('line 5012: VM_RELEASE_TRUST_OUTPUT_DIR: unbound variable' after a
+# 6-line insertion upstream of the running offset). Matching exit 0 + } at EOF.
+{
+
 # Multi-repo layout (post phase-c split). The desktop bundle pulls from
 # two sibling clones:
 #
@@ -5354,3 +5361,6 @@ __pc_release_sidecar_publish_lock
 # Compute size
 total_size=$(du -sh "$SIDECAR_DIR" 2>/dev/null | awk '{print $1}')
 echo "✓ sidecar built at $SIDECAR_DIR ($total_size)"
+exit 0
+
+}  # ── end self-read guard (WI-3306) ──

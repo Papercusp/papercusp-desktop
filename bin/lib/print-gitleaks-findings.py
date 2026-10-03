@@ -1407,6 +1407,15 @@ def _uuid_source_tokens(config_path: Path) -> set[str]:
             plain, _ = _uuid_open_row(row, config['potId'], keys)
             tokens.update(_uuid_class_tokens(plain))
             tokens.update(_uuid_class_tokens({k: row[k] for k in ('table', 'hbKey', 'author_pubkey') if k in row}))
+    for document in config.get('documentSources', []):
+        root = Path(document['rootPath'])
+        if _uuid_document_root_sha256(root) != document['rootSha256']:
+            raise ValueError('UUID frozen document binding changed')
+        for path, _ in _uuid_root_files([root]):
+            if path.is_symlink():
+                raise ValueError('UUID frozen document input linked')
+            if path.suffix.lower() in _UUID_DOC_SUFFIXES:
+                tokens.update(_uuid_document_tokens(path.read_text(encoding='utf-8'), path.suffix.lower()))
     return tokens
 
 
@@ -1510,6 +1519,30 @@ def _uuid_root_files(roots: list[Path]) -> list[tuple[Path, str]]:
     if not result:
         raise ValueError('UUID artifact population empty')
     return sorted(result, key=lambda entry: entry[1])
+
+
+def _uuid_document_root_sha256(root: Path) -> str:
+    entries = _uuid_root_files([root])
+    if not root.is_dir() or any(path.is_symlink() for path, _ in entries):
+        raise ValueError('UUID frozen document root invalid')
+    return hashlib.sha256(_uuid_json([(label, _sha256(path)) for path, label in entries]).encode()).hexdigest()
+
+
+def bind_uuid_document_sources(config_path: Path, expected_sha256: str, output: Path, roots: list[Path]) -> None:
+    if not re.fullmatch(r'[0-9a-f]{64}', expected_sha256) or _sha256(config_path) != expected_sha256:
+        raise ValueError('UUID private census changed')
+    config, _ = _uuid_census_inputs(config_path)
+    if 'documentSources' in config or not roots:
+        raise ValueError('UUID document binding requires original census and fresh roots')
+    _uuid_root_files(roots)  # Refuse overlaps as well as missing/empty populations.
+    context = {**config, 'originalCensusSha256': expected_sha256,
+               'documentSources': [{'rootPath': str(root), 'rootSha256': _uuid_document_root_sha256(root)} for root in roots]}
+    _private_file(config_path)
+    if output.parent.is_symlink() or output.parent.stat().st_mode & 0o077:
+        raise ValueError('UUID document context must stay private')
+    with output.open('x', encoding='utf-8') as handle:
+        os.chmod(output, 0o600)
+        json.dump(context, handle)
 
 
 @contextlib.contextmanager
@@ -1898,7 +1931,9 @@ def assemble_uuid_idempotency_drop_plans(config_path: Path) -> dict[str, object]
     Final admission requires an independently enumerated actual Hypercore export.
     """
     config, keys = _uuid_census_inputs(config_path)
-    tokens = set()
+    # A supplied frozen document population extends class discovery, not source
+    # signature authority. Mirrors across input planes must use one token union.
+    tokens = _uuid_source_tokens(config_path)
     original = encrypted = 0
     for source in config['sources']:
         for row in _uuid_source_rows(source):
@@ -2522,6 +2557,14 @@ def _safe_locator(raw_file: object, scan_root: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) >= 6 and argv[1] == '--bind-uuid-document-sources':
+        try:
+            bind_uuid_document_sources(Path(argv[2]), argv[3], Path(argv[4]), [Path(path) for path in argv[5:]])
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError):
+            print('UUID document source binding incomplete (values omitted).', file=sys.stderr)
+            return 2
+        print(json.dumps({'reviewRef': _UUID_DROP_REVIEW, 'documentRoots': len(argv[5:])}))
+        return 0
     if len(argv) == 6 and argv[1] == '--validate-uuid-documents':
         try:
             result = validate_uuid_document_projection(Path(argv[2]), Path(argv[3]), Path(argv[4]), Path(argv[5]))
