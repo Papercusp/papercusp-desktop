@@ -1355,6 +1355,66 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def scan_quoted_token_remainder(text: str, spans: list[dict[str, object]],
+                                recipients: set[bytes], config: Path,
+                                credential_digests: set[str]) -> dict[str, object]:
+    """D-157 T3/T4 only; this scan does not establish a twin or maker proof.
+
+    Offsets address UTF-8 bytes. Each span must cover a complete maximal token;
+    masking preserves every other byte, including adjacent credential text.
+    The caller must separately validate T1/T2 (and D-158 for metadata twins).
+    """
+    if not isinstance(text, str) or not spans or not recipients:
+        raise ValueError("complete quoted token scan inputs required")
+    original = text.encode()
+    masked = bytearray(original)
+    token_proofs = []
+    previous_end = 0
+    token_character = re.compile(rb"[A-Za-z0-9_-]")
+    for span in spans:
+        start, end = span.get("byteStart"), span.get("byteEnd")
+        if (type(start) is not int or type(end) is not int
+                or not 0 <= previous_end <= start < end <= len(original)):
+            raise ValueError("invalid or overlapping quoted token offsets")
+        token = original[start:end]
+        if (not re.fullmatch(rb"[A-Za-z0-9_-]+", token)
+                or start > 0 and token_character.fullmatch(original[start - 1:start])
+                or end < len(original) and token_character.fullmatch(original[end:end + 1])
+                or hashlib.sha256(token).hexdigest() != span.get("sha256")):
+            raise ValueError("quoted token is not an exact maximal match")
+        if token.decode() in credential_digests:
+            raise ValueError("credential digest requires the direct E3 route")
+        key_scan = scan_secret_key_bytes(token, recipients)
+        if any(key_scan[key] for key in ("realFindings", "derivationMatches", "rawSkMatches")):
+            raise ValueError("quoted token secret-key scan refused")
+        masked[start:end] = b" " * len(token)
+        token_proofs.append({"byteStart": start, "byteEnd": end,
+                             "sha256": span["sha256"], "keyScan": key_scan})
+        previous_end = end
+    remainder = bytes(masked)
+    key_scan = scan_secret_key_bytes(remainder, recipients)
+    digest_scan = scan_credential_digest_bytes(original, credential_digests)
+    if (any(key_scan[key] for key in ("realFindings", "derivationMatches", "rawSkMatches"))
+            or any(digest_scan.values())):
+        raise ValueError("quoted token containing string secret scan refused")
+    with tempfile.TemporaryDirectory(prefix="quoted-token-scan-") as temporary:
+        directory = Path(temporary)
+        source = directory / "remainder.txt"
+        source.write_bytes(remainder)
+        source.chmod(0o600)
+        report = directory / "remainder.private.json"
+        findings, _ = scan_seed_report(report, source, config)
+        metadata = json.loads(report.with_suffix(".meta.json").read_text())
+        if findings:
+            raise ValueError("quoted token remainder scan refused")
+    return {"schema": "papercusp-quoted-token-remainder-v1",
+            "sourceSha256": hashlib.sha256(original).hexdigest(),
+            "remainderSha256": hashlib.sha256(remainder).hexdigest(),
+            "tokens": token_proofs, "remainderKeyScan": key_scan,
+            "credentialDigestScan": digest_scan, "gitleaks": metadata["identity"],
+            "remainderFindings": 0}
+
+
 def scan_seed_report(report: Path, blob: Path, config: Path) -> tuple[list[object], bool]:
     """Retain an identity-bound private scan BEFORE starting classification.
 

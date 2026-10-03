@@ -1164,6 +1164,56 @@ print(json.dumps({'hashControl':True,'rawControl':True,'typedField':True,'negati
   assert.deepEqual(JSON.parse(result.stdout), { hashControl: true, rawControl: true, typedField: true, negativeControls: true });
 });
 
+test('D-157 token scan masks exact UTF-8 spans and refuses prefixes, overlaps and credential digests', () => {
+  const program = String.raw`
+import importlib.util,json,sys,pathlib,hashlib
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+config=pathlib.Path(sys.argv[2]);public,_=m._key_publics(m._sodium(),bytes(range(32)))
+token='su-12345678-1234-4234-8234-123456789abc';text='Quoted café: '+token+'; retained suffix.'
+raw=text.encode();start=raw.index(token.encode());span={'byteStart':start,'byteEnd':start+len(token),'sha256':hashlib.sha256(token.encode()).hexdigest()}
+proof=m.scan_quoted_token_remainder(text,[span],{public},config,set())
+masked=raw[:start]+b' '*len(token)+raw[start+len(token):]
+assert proof['sourceSha256']==hashlib.sha256(raw).hexdigest()
+assert proof['remainderSha256']==hashlib.sha256(masked).hexdigest()
+assert proof['gitleaks']['blobSha256']==proof['remainderSha256'] and proof['remainderFindings']==0
+assert proof['tokens'][0]['sha256']==span['sha256'] and token not in json.dumps(proof)
+for changed in [[{**span,'byteEnd':span['byteEnd']-1}], [span,span], [{**span,'byteStart':True}], [{**span,'sha256':'0'*64}]]:
+ try:m.scan_quoted_token_remainder(text,changed,{public},config,set());raise AssertionError('invalid span passed')
+ except ValueError:pass
+for surrounding in [token+'extra','prefix_'+token]:
+ raw=surrounding.encode();start=raw.index(token.encode());changed={**span,'byteStart':start,'byteEnd':start+len(token)}
+ try:m.scan_quoted_token_remainder(surrounding,[changed],{public},config,set());raise AssertionError('nonmaximal token passed')
+ except ValueError:pass
+digest=hashlib.sha256(b'example credential').hexdigest();changed={'byteStart':0,'byteEnd':len(digest),'sha256':hashlib.sha256(digest.encode()).hexdigest()}
+try:m.scan_quoted_token_remainder(digest,[changed],{public},config,{digest});raise AssertionError('E3 digest masked')
+except ValueError:pass
+print(json.dumps({'exactMask':True,'negativeControls':7,'remainderScan':True}))
+`;
+  const result = spawnSync('python3', ['-c', program, reportFormatterPath, configPath], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { exactMask: true, negativeControls: 7, remainderScan: true });
+});
+
+test('D-157 remainder scan catches an adjacent credential and private key after masking a public token', () => {
+  const program = String.raw`
+import importlib.util,json,sys,pathlib,hashlib
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+config=pathlib.Path(sys.argv[2]);seed=bytes(range(32));public,_=m._key_publics(m._sodium(),seed)
+token='su-12345678-1234-4234-8234-123456789abc'
+span={'byteStart':0,'byteEnd':len(token),'sha256':hashlib.sha256(token.encode()).hexdigest()}
+for suffix in ['; apiKey="ghp_'+'Ab3De4Fg5Hi6Jk7Lm8No9Pq0Rs1Tu2Vw3Xy4'+'"', '; key='+seed.hex()]:
+ try:m.scan_quoted_token_remainder(token+suffix,[span],{public},config,set());raise AssertionError('adjacent secret passed')
+ except ValueError:pass
+private=seed.hex();private_span={'byteStart':0,'byteEnd':len(private),'sha256':hashlib.sha256(private.encode()).hexdigest()}
+try:m.scan_quoted_token_remainder(private,[private_span],{public},config,set());raise AssertionError('private token passed')
+except ValueError:pass
+print(json.dumps({'adjacentCredentialRefused':True,'adjacentPrivateKeyRefused':True,'privateTokenRefused':True}))
+`;
+  const result = spawnSync('python3', ['-c', program, reportFormatterPath, configPath], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { adjacentCredentialRefused: true, adjacentPrivateKeyRefused: true, privateTokenRefused: true });
+});
+
 test('D-147 integrated proof refuses newly labelled classes without mechanical evidence and unclassified entries', () => {
   for (const kind of ['public-opaque-operation-reference', 'unclassified']) {
     const f = seedProofFixture();
