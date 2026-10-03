@@ -116,6 +116,24 @@ NODE
   fi
   evidence="$(mktemp -d "$VH_RUN_DIR/uuid-doc-inputs.XXXXXX")" || return 1
   chmod 700 "$evidence" || return 1
+  local frozen_roots=()
+  for relative in internal-docs apps/operator-docs/src/content/docs spa; do
+    [[ ! -e "$sidecar/$relative" && ! -L "$sidecar/$relative" ]] && continue
+    if [[ ! -d "$sidecar/$relative" || -L "$sidecar/$relative" ]]; then
+      echo "ERROR: UUID doc copy point is linked or not a directory (values omitted)." >&2
+      return 1
+    fi
+    frozen="$evidence/input-$index"
+    cp -a "$sidecar/$relative" "$frozen" 2>/dev/null || return 1
+    frozen_roots+=("$frozen")
+    index=$((index+1))
+  done
+  local bound="$evidence/document-census.private.json"
+  python3 "$formatter" --bind-uuid-document-sources "$census" "$digest" "$bound" "${frozen_roots[@]}" || return 1
+  census="$bound"
+  actual="$(sha256sum -- "$census" 2>/dev/null)" || return 1
+  digest="${actual%% *}"
+  index=0
   for relative in internal-docs apps/operator-docs/src/content/docs spa; do
     [[ ! -e "$sidecar/$relative" && ! -L "$sidecar/$relative" ]] && continue
     if [[ ! -d "$sidecar/$relative" || -L "$sidecar/$relative" ]]; then
@@ -130,7 +148,6 @@ NODE
       echo "ERROR: UUID document manifest already exists; a fresh copy point is required (values omitted)." >&2
       return 1
     fi
-    cp -a "$sidecar/$relative" "$frozen" 2>/dev/null || return 1
     if ! python3 "$formatter" --project-uuid-documents "$census" "$frozen" "$projected" "$report" \
         || ! python3 "$formatter" --validate-uuid-documents "$census" "$frozen" "$projected" "$report"; then
       echo "ERROR: UUID doc projection or independent manifest check refused (values omitted)." >&2

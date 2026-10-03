@@ -1407,6 +1407,12 @@ def _uuid_source_tokens(config_path: Path) -> set[str]:
             plain, _ = _uuid_open_row(row, config['potId'], keys)
             tokens.update(_uuid_class_tokens(plain))
             tokens.update(_uuid_class_tokens({k: row[k] for k in ('table', 'hbKey', 'author_pubkey') if k in row}))
+    tokens.update(_uuid_document_source_tokens(config))
+    return tokens
+
+
+def _uuid_document_source_tokens(config: dict[str, object]) -> set[str]:
+    tokens = set()
     for document in config.get('documentSources', []):
         root = Path(document['rootPath'])
         if _uuid_document_root_sha256(root) != document['rootSha256']:
@@ -1933,7 +1939,7 @@ def assemble_uuid_idempotency_drop_plans(config_path: Path) -> dict[str, object]
     config, keys = _uuid_census_inputs(config_path)
     # A supplied frozen document population extends class discovery, not source
     # signature authority. Mirrors across input planes must use one token union.
-    tokens = _uuid_source_tokens(config_path)
+    tokens = _uuid_document_source_tokens(config)
     original = encrypted = 0
     for source in config['sources']:
         for row in _uuid_source_rows(source):

@@ -351,6 +351,80 @@ test('D-142 inventory scan binds input hashes, detects keystore names, and runs 
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
+test('D-166 sidecar copy point binds the whole document population and preserves hardlinked originals outside shipped roots', () => {
+  const crypto = require('node:crypto');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'uuid-document-copy-point-'));
+  const helper = path.join(root, 'bin', 'lib', 'seed-reuse-age.sh');
+  try {
+    const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+    const a = 'c539c37e-09d8-49b6-928b-706f25c70852';
+    const b = 'd8b5ad5a-7e05-4d70-878d-61e937d60439';
+    const privateFile = (name, content) => {
+      const target = path.join(temp, name); fs.writeFileSync(target, content, { mode: 0o600 }); return target;
+    };
+    const rowsPath = privateFile('rows.jsonl', JSON.stringify({ table: 'harness_plans', hbKey: 'safe', value: { idempotencyKey: a },
+      segment: 'segment-000001.blob', line: 1 }) + '\n');
+    const keysPath = privateFile('keys.json', JSON.stringify({ 'fixture-pot': {} }));
+    const censusPath = privateFile('census.json', JSON.stringify({ reviewRef: 'p2p-public-release-endgame-2026-09-01#D-166',
+      potId: 'fixture-pot', epochKeysPath: keysPath, epochKeysSha256: hash(fs.readFileSync(keysPath)), sources: [
+        { sourceKeyHex: 'a'.repeat(64), sourceLength: 1, rowCount: 1, rowsPath, rowsSha256: hash(fs.readFileSync(rowsPath)) }] }));
+    const verification = path.join(temp, 'verification'); fs.mkdirSync(verification, { mode: 0o700 });
+    const canonical = path.join(temp, 'canonical-docs'); fs.mkdirSync(canonical);
+    const sidecar = path.join(temp, 'repo', 'papercusp-desktop', 'src-tauri', 'sidecar');
+    const roots = ['internal-docs', 'apps/operator-docs/src/content/docs', 'spa'];
+    const texts = [`idempotencyKey: ${b}\nsource mirror ${a}\n`, `bare mirror ${b}\n`, JSON.stringify({ idempotencyKey: a, safe: 'preserved' })];
+    roots.forEach((relative, index) => {
+      fs.mkdirSync(path.join(sidecar, relative), { recursive: true });
+      const original = path.join(canonical, `source-${index}${index === 2 ? '.json' : '.mdx'}`);
+      fs.writeFileSync(original, texts[index]);
+      fs.linkSync(original, path.join(sidecar, relative, path.basename(original)));
+    });
+    const argsFile = path.join(temp, 'private-descriptor-path');
+    const env = { ...process.env, PAPERCUSP_SEED_UUID_CENSUS_PATH: censusPath,
+      PAPERCUSP_SEED_UUID_CENSUS_SHA256: hash(fs.readFileSync(censusPath)), VH_RUN_DIR: verification, UUID_TEST_DESCRIPTOR: argsFile };
+    const run = (target = sidecar, extra = {}) => spawnSync('bash', ['-c',
+      'set -euo pipefail; source "$1"; seed_uuid_project_sidecar_documents "$2" "$3" || exit 1; printf "%s" "$SEED_UUID_DOC_INPUTS_PATH" > "$UUID_TEST_DESCRIPTOR"',
+      'x', helper, reportFormatterPath, target], { encoding: 'utf8', env: { ...env, ...extra }, timeout: 60_000 });
+    const result = run(); assert.equal(result.status, 0, result.stderr);
+    assert.ok(!(result.stdout + result.stderr).includes(a) && !(result.stdout + result.stderr).includes(b));
+    const descriptorPath = fs.readFileSync(argsFile, 'utf8');
+    const descriptor = JSON.parse(fs.readFileSync(descriptorPath, 'utf8'));
+    assert.equal(descriptor.documentProjections.length, 3);
+    assert.equal(fs.statSync(descriptorPath).mode & 0o077, 0);
+    assert.equal(descriptor.inputPlane, 'generated-doc-copy-after-normal-privacy-projection-not-signed-source-proof');
+    const bound = JSON.parse(fs.readFileSync(descriptor.censusPath, 'utf8'));
+    assert.equal(bound.documentSources.length, 3);
+    let count = 0;
+    descriptor.documentProjections.forEach((entry, index) => {
+      const manifest = JSON.parse(fs.readFileSync(entry.manifestPath, 'utf8')); count += manifest.occurrenceCount;
+      const validated = spawnSync('python3', [reportFormatterPath, '--validate-uuid-documents', descriptor.censusPath,
+        entry.sourcePath, entry.outputPath, entry.manifestPath], { encoding: 'utf8', timeout: 30_000 });
+      assert.equal(validated.status, 0, validated.stderr);
+      const name = `source-${index}${index === 2 ? '.json' : '.mdx'}`;
+      assert.equal(fs.readFileSync(path.join(canonical, name), 'utf8'), texts[index]);
+      assert.equal(fs.readFileSync(path.join(entry.sourcePath, name), 'utf8'), texts[index]);
+      assert.ok(!fs.readFileSync(path.join(entry.outputPath, name), 'utf8').includes(a));
+      assert.ok(!fs.readFileSync(path.join(entry.outputPath, name), 'utf8').includes(b));
+      assert.notEqual(fs.statSync(path.join(canonical, name)).ino, fs.statSync(path.join(entry.outputPath, name)).ino);
+      assert.ok(!fs.readFileSync(entry.manifestPath, 'utf8').includes(temp));
+      assert.ok(!entry.sourcePath.startsWith(sidecar));
+    });
+    assert.equal(count, 4, 'a value named only in rendered docs must also redact its bare source-doc mirror');
+    const scanned = spawnSync('python3', [reportFormatterPath, '--census-uuid-artifacts', descriptor.censusPath, sidecar], { encoding: 'utf8' });
+    assert.equal(scanned.status, 0, scanned.stderr);
+    assert.equal(JSON.parse(scanned.stdout).occurrenceCount, 0);
+    assert.ok(!fs.existsSync(path.join(sidecar, 'uuid-document-evidence.private-path.tmp')));
+    assert.equal(run().status, 1, 'existing emitted manifests must not silently reapply a new input census');
+    assert.equal(run(sidecar, { PAPERCUSP_SEED_UUID_CENSUS_SHA256: 'b'.repeat(64) }).status, 1);
+    assert.equal(run(sidecar, { VH_RUN_DIR: sidecar }).status, 1, 'no private evidence even temporarily inside shipped roots');
+    assert.equal(run(sidecar, { VH_RUN_DIR: '' }).status, 1, 'private originals need durable run-scoped recovery');
+    const build = fs.readFileSync(path.join(root, 'bin', 'build-desktop-sidecar.sh'), 'utf8');
+    const call = 'seed_uuid_project_sidecar_documents "$HERE/lib/print-gitleaks-findings.py" "$SIDECAR_DIR" || exit 1';
+    assert.ok(build.indexOf(call) > build.indexOf('python3 "$_audit_py" --scrub-text'));
+    assert.ok(build.indexOf(call) < build.indexOf('python3 "$_audit_py" --scrub-binaries'));
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test('D-150 source-name exclusions require exact frozen bytes and refuse private serialization or matching seeds', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-source-name-proof-'));
   try {
