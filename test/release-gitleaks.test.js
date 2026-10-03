@@ -13,6 +13,76 @@ const scriptPath = path.join(root, 'bin', 'release-local.sh');
 const reportFormatterPath = path.join(root, 'bin', 'lib', 'print-gitleaks-findings.py');
 const gitleaksBin = process.env.GITLEAKS_BIN || 'gitleaks';
 
+test('D-166 source archive projection retains the exact selected population and independently refuses drift', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-uuid-source-archive-'));
+  fs.chmodSync(temp, 0o700);
+  try {
+    const program = String.raw`
+import importlib.util,json,sys,pathlib,io,tarfile,subprocess
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+base=pathlib.Path(sys.argv[2]);token='c539c37e-09d8-49b6-928b-706f25c70852'
+def write(path,text):
+ path.write_text(text);path.chmod(0o600);return path
+rows=write(base/'rows.jsonl',json.dumps({'table':'harness_plans','hbKey':'safe','value':{'idempotencyKey':token},'segment':'segment-000001.blob','line':1})+'\n')
+keys=write(base/'keys.json',json.dumps({'fixture-pot':{}}))
+cfg=write(base/'config.json',json.dumps({'reviewRef':m._UUID_DROP_REVIEW,'potId':'fixture-pot','epochKeysPath':str(keys),'epochKeysSha256':m._sha256(keys),'sources':[{'sourceKeyHex':'a'*64,'sourceLength':1,'rowCount':1,'rowsPath':str(rows),'rowsSha256':m._sha256(rows)}]}))
+def archive(path,files,extra=None):
+ raw=io.BytesIO()
+ with tarfile.open(fileobj=raw,mode='w',format=tarfile.PAX_FORMAT) as tf:
+  for name,data in files.items():
+   member=tarfile.TarInfo(name);member.mode=0o640;member.mtime=123;member.pax_headers={'SAFE.tag':'kept'};member.size=len(data);tf.addfile(member,io.BytesIO(data))
+  link=tarfile.TarInfo('./node_modules/.bin/tsx');link.type=tarfile.SYMTYPE;link.linkname='../tsx/dist/cli.mjs';tf.addfile(link)
+  if extra:tf.addfile(extra)
+ path.write_bytes(subprocess.run(['zstd','-q','-c'],input=raw.getvalue(),capture_output=True,check=True).stdout)
+def refused(fn):
+ try:fn();raise AssertionError('invalid archive passed')
+ except (ValueError,OSError):pass
+source=base/'source.tar.zst';output=base/'output.tar.zst';manifest=base/'report.json'
+long='./packages/'+('long-directory/'*12)+'guide.md'
+files={'./docs/guide.md':('idempotencyKey: '+token+'\nmirror '+token+'\n').encode(),long:token.encode(),'./package-lock.json':b'{"lockfileVersion":3}\n','./node_modules/tsx/dist/cli.mjs':b'ordinary executable\n'}
+archive(source,files);original=source.read_bytes()
+report=m.project_uuid_source_archive(cfg,source,output,manifest)
+assert report['occurrenceCount']==3 and report['redactedDocuments']==2
+assert token not in manifest.read_text() and m.validate_uuid_source_archive(cfg,source,output,manifest)==report
+assert source.read_bytes()==original
+entries=m._uuid_source_tar_inventory(output)
+assert len(entries)==5 and entries[-1]['metadata']['linkname']=='../tsx/dist/cli.mjs'
+assert entries[0]['metadata']['mode']==0o640 and entries[0]['metadata']['pax_headers']=={'SAFE.tag':'kept'}
+saved=manifest.read_bytes();bad=json.loads(saved);bad['occurrenceCount']+=1;manifest.write_text(json.dumps(bad));refused(lambda:m.validate_uuid_source_archive(cfg,source,output,manifest));manifest.write_bytes(saved)
+for kind in ('mutation','omission','surplus'):
+ changed={name:data.replace(token.encode(),m._UUID_MARKER.encode()) for name,data in files.items()}
+ if kind=='mutation':changed['./package-lock.json']=b'{}'
+ if kind=='omission':del changed[long]
+ if kind=='surplus':changed['./surplus.txt']=b'new'
+ candidate=base/(kind+'.tar.zst');archive(candidate,changed);refused(lambda:m.validate_uuid_source_archive(cfg,source,candidate,manifest))
+for kind in ('binary','signed','metadata','hardlink','traversal','duplicate'):
+ candidate=base/(kind+'.tar.zst');changed=dict(files);extra=None
+ if kind=='binary':changed['./opaque.bin']=token.encode()
+ if kind=='signed':changed['./signed.json']=json.dumps({'signature':'old','idempotencyKey':token}).encode()
+ if kind=='metadata':extra=tarfile.TarInfo('./safe-link');extra.type=tarfile.SYMTYPE;extra.linkname=token
+ if kind=='hardlink':extra=tarfile.TarInfo('./hard');extra.type=tarfile.LNKTYPE;extra.linkname='./docs/guide.md'
+ if kind=='traversal':extra=tarfile.TarInfo('../outside');extra.size=0
+ if kind=='duplicate':extra=tarfile.TarInfo('./docs/guide.md');extra.size=0
+ archive(candidate,changed,extra);target=base/(kind+'-out.tar.zst');proof=base/(kind+'-report.json')
+ refused(lambda:m.project_uuid_source_archive(cfg,candidate,target,proof));assert not target.exists() and not proof.exists()
+refused(lambda:m.project_uuid_source_archive(cfg,source,output,base/'new.json'))
+print(json.dumps({'pass':True,'occurrences':3,'exactPopulation':5,'negativeControls':10}))
+`;
+    const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8' });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.equal(JSON.parse(result.stdout).pass, true);
+    const validated = spawnSync('python3', [reportFormatterPath, '--validate-uuid-source-archive',
+      path.join(temp, 'config.json'), path.join(temp, 'source.tar.zst'), path.join(temp, 'output.tar.zst'), path.join(temp, 'report.json')], { encoding: 'utf8' });
+    assert.equal(validated.status, 0, `${validated.stdout}${validated.stderr}`);
+    const corrupt = path.join(temp, 'corrupt.tar.zst');
+    fs.writeFileSync(corrupt, 'invalid archive');
+    const refused = spawnSync('python3', [reportFormatterPath, '--project-uuid-source-archive',
+      path.join(temp, 'config.json'), corrupt, path.join(temp, 'refused.tar.zst'), path.join(temp, 'refused.json')], { encoding: 'utf8' });
+    assert.equal(refused.status, 2);
+    assert.match(refused.stderr, /values omitted/);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test('D-166 authenticates the full supplied row census, drops the class and mirrors, and preserves honest counts', () => {
   const crypto = require('node:crypto');
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-uuid-census-'));
