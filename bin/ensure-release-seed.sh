@@ -76,6 +76,7 @@ OPERATOR_DIR="$MONOREPO/apps/operator"
 log() { echo "[ensure-seed] $*"; }
 # shellcheck source=lib/seed-reuse-age.sh
 source "$HERE/lib/seed-reuse-age.sh"
+seed_uuid_row_drop_prepare || exit 1
 
 seed_present() { [[ -f "$MANIFEST" ]]; }
 
@@ -265,6 +266,7 @@ run_cut() {
         "${depth_args[@]}" \
         "${core_args[@]}" \
         "${emit_args[@]}" \
+        "${SEED_UUID_ROW_DROP_ARGS[@]}" \
         "$@"
   ) 2>&1 | tee -a "$CUT_LOG"
   local rc=$?
@@ -310,6 +312,10 @@ if [[ "$cut_rc" -ne 0 && ${#sparse_args[@]} -gt 0 ]] \
 fi
 
 if [[ "$cut_rc" -ne 0 ]]; then
+  if [[ "$SEED_UUID_ROW_DROP_ACTIVE" == "1" ]]; then
+    log "ERROR: UUID source-bound cut failed; refusing stale/seedless fallback"
+    exit 1
+  fi
   log "WARN: seed cut FAILED (rc=$cut_rc)"
   if seed_usable; then
     log "a usable committed seed is still present — continuing the build with it"

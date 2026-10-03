@@ -157,6 +157,7 @@ source "$ORCHESTRATOR_HERE/lib/release-tag-pin.sh"
 source "$ORCHESTRATOR_HERE/lib/rust-path-remap.sh"
 # shellcheck source=lib/seed-reuse-age.sh
 source "$ORCHESTRATOR_HERE/lib/seed-reuse-age.sh"
+seed_uuid_row_drop_prepare || exit 1
 
 # A brand-new version needs an exact remote ref before the LOCAL-only cutter can
 # bake its dogfood clone pin. Keep that outward write separate from the cut:
@@ -2266,6 +2267,7 @@ release_seed_cut_is_quiesced() {
 }
 
 cut_release_seed() {
+  seed_uuid_row_drop_prepare || return 1
   if [[ "${PAPERCUSP_SKIP_SEED_CUT:-0}" == "1" ]]; then
     echo "==> seed: PAPERCUSP_SKIP_SEED_CUT=1 — leaving src-tauri/seed as-is"
     return 0
@@ -2320,7 +2322,7 @@ cut_release_seed() {
   # first. Copy rather than hardlink: the reuse cut writes into $seed_out. An
   # empty PAPERCUSP_SEED_SNAPSHOT_DIR disables hydration.
   local seed_snapshot="${PAPERCUSP_SEED_SNAPSHOT_DIR-$HOME/.papercusp/release-seeds/current}"
-  if [[ "$seed_reuse" == "auto" && -n "$seed_snapshot" && ! -d "$seed_out/corestore" \
+  if [[ "$SEED_UUID_ROW_DROP_ACTIVE" != "1" && "$seed_reuse" == "auto" && -n "$seed_snapshot" && ! -d "$seed_out/corestore" \
         && -d "$seed_snapshot/corestore" && -f "$seed_snapshot/manifest.json" ]]; then
     echo "==> seed: hydrating $seed_out from snapshot store $seed_snapshot (WI-10003231)"
     local seed_tmp="$seed_out.hydrate.$$"
@@ -2360,6 +2362,7 @@ cut_release_seed() {
     [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]] && echo "WARN: PAPERCUSP_SEED_STORE_DIR ignored under seed-reuse (PAPERCUSP_SEED_REUSE_CORESTORE=$seed_reuse)" >&2
   fi
   if [[ "${PAPERCUSP_SEED_CORESTORE:-1}" == "1" && "$seed_reuse" != "1" ]] \
+      && [[ "$SEED_UUID_ROW_DROP_ACTIVE" != "1" ]] \
       && ! release_seed_cut_is_quiesced; then
     echo "ERROR: fresh release seed cut requires a quiesced operator; run bin/cut-seed-quiesced.sh." >&2
     return 1
@@ -2419,6 +2422,7 @@ cut_release_seed() {
         "${depth_args[@]}" \
         "${core_args[@]}" \
         "${emit_args[@]}" \
+        "${SEED_UUID_ROW_DROP_ARGS[@]}" \
         "$@"
   ) 2>&1 | tee -a "$cut_log"
   }
@@ -2505,6 +2509,8 @@ cut_doc_vector_seed() {
 
 cut_doc_vector_seed
 cut_release_seed
+# Later Tauri/VM hooks consume this completed seed, never reapply a source plan.
+unset PAPERCUSP_SEED_UUID_PLAN_PATH PAPERCUSP_SEED_UUID_PLAN_SHA256
 
 # Belt-and-braces (0.0.11 cut r3, WI-4736): cut-seed-cli now prunes RocksDB's
 # info log at cut time, but a reused/as-is seed (PAPERCUSP_SKIP_SEED_CUT=1) or a

@@ -37,3 +37,31 @@ seed_reuse_age_check() {
   fi
   echo "seed: reused corestore age ${reuse_age_h}h (max ${reuse_max_h}h)"
 }
+
+# D166 extends the shared seed-mode policy. Call before any skip or repair.
+# The CLI verifies private permissions, actual source rows/head and literal
+# policy; no value or private binding hash is printed by this guard.
+seed_uuid_row_drop_prepare() {
+  SEED_UUID_ROW_DROP_ACTIVE=0
+  SEED_UUID_ROW_DROP_ARGS=()
+  local plan="${PAPERCUSP_SEED_UUID_PLAN_PATH:-}"
+  local digest="${PAPERCUSP_SEED_UUID_PLAN_SHA256:-}"
+  [[ -n "$plan$digest" ]] || return 0
+  local store="${PAPERCUSP_SEED_STORE_DIR:-}"
+  if [[ "$plan" != /* || "$store" != /* || ! "$digest" =~ ^[0-9a-f]{64}$ \
+      || ! -f "$plan" || -L "$plan" || ! -d "$store" || -L "$store" \
+      || "${PAPERCUSP_SKIP_SEED_CUT:-0}" == "1" || "${PAPERCUSP_FAST_ITER:-0}" == "1" \
+      || "${PAPERCUSP_SEED_CORESTORE:-1}" != "1" || "${PAPERCUSP_SEED_REUSE_CORESTORE:-auto}" != "0" \
+      || "${PAPERCUSP_SEED_SPARSE:-1}" != "0" || "${PAPERCUSP_SEED_FORCE:-0}" != "1" ]]; then
+    echo "ERROR: UUID row-drop plans require exact private inputs and a fresh, full frozen-source cut; skip/reuse/refresh is refused." >&2
+    return 1
+  fi
+  local actual
+  actual="$(sha256sum -- "$plan" 2>/dev/null)" || return 1
+  if [[ "${actual%% *}" != "$digest" ]]; then
+    echo "ERROR: UUID row-drop plan input changed (values omitted)." >&2
+    return 1
+  fi
+  SEED_UUID_ROW_DROP_ACTIVE=1
+  SEED_UUID_ROW_DROP_ARGS=(--skip-corestore-refresh --uuid-idempotency-drop-plans "$plan" --uuid-idempotency-drop-plans-sha256 "$digest")
+}
