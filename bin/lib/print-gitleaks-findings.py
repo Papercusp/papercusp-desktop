@@ -527,7 +527,6 @@ def _mechanical_context(proof: dict[str, object], directory: Path, root: Path,
                "trees": reference.get("trees", {}), "publicIds": public_ids,
                "nonBearerFields": reference.get("nonBearerFields", {})}
     has_envelopes = any(entry["class"] == "recipient-sealed-epoch-key-envelope" for entry in entries)
-    has_non_bearer = any(entry["class"] == "public-non-bearer-field-reference" for entry in plain_report) if False else False
     # Plain entries are checked by the caller; a supplied closed field proof
     # requires the same full inventory scan, even in a non-metadata segment.
     has_non_bearer = bool(reference.get("nonBearerFields"))
@@ -1077,6 +1076,8 @@ def scan_credential_digest_bytes(data: bytes, digests: set[str]) -> dict[str, in
     counts = Counter()
     if not digests:
         return counts
+    if len(data) in (32, 64) and hashlib.sha256(data).hexdigest() in digests:
+        counts["digestOfCredentialHits"] += 1
     for token in re.finditer(rb"[A-Za-z0-9_+/.=-]{8,4096}", data):
         value = token.group()
         candidates = {value}
