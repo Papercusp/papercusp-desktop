@@ -831,15 +831,23 @@ test('prune-docs removes pagefind search-index shards, not just internal-infra d
   }
 });
 
-test('D-150 producer removes vendor private-key fixtures from sidecar and source archive, preserving runtime neighbours', () => {
+test('D-150/D-164 producers retain only the exact SSH2 certificate fixture and runtime neighbours', () => {
   const dir = tmp('vendor-key-prune');
   const fixtures = [
     'node_modules/ssh2/test/fixtures/https_key.pem',
+    'node_modules/ssh2/test/fixtures/id_rsa',
+    'node_modules/ssh2/test/fixtures/keyParser/openssh_new_rsa.pub',
+    'node_modules/ssh2/test/fixtures/unknown-public-fixture.txt',
+    'node_modules/ssh2/test/fixtures/http',
+    'node_modules/ssh2/test/fixtures/https_cert.pem.backup',
+    'node_modules/ssh2/test/fixtures/nested/https_cert.pem',
+    'packages/peer/node_modules/ssh2/test/fixtures/id_ecdsa',
     'node_modules/style-dictionary/examples/advanced/create-react-native-app/android/app/debug.keystore',
   ];
   const retained = [
     'node_modules/ssh2/lib/client.js',
     'node_modules/ssh2/test/fixtures/https_cert.pem',
+    'packages/peer/node_modules/ssh2/test/fixtures/https_cert.pem',
     'node_modules/style-dictionary/lib/index.js',
     'node_modules/other/android/app/debug.keystore',
   ];
@@ -853,7 +861,7 @@ test('D-150 producer removes vendor private-key fixtures from sidecar and source
     const archive = path.join(dir, 'source.tar');
     const tar = spawnSync('tar', [
       ...exclusions.stdout.trim().split('\n').map(pattern => `--exclude=${pattern}`),
-      '-cf', archive, '-C', dir, './node_modules',
+      '-cf', archive, '-C', dir, './node_modules', './packages',
     ], { encoding: 'utf8' });
     assert.equal(tar.status, 0, tar.stderr);
     const members = spawnSync('tar', ['-tf', archive], { encoding: 'utf8' });

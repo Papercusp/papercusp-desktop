@@ -94,16 +94,29 @@ from datetime import datetime, timezone
 # form catches X at ANY depth (packages/operator-core/.papercusp), which the
 # top-level allowlist cannot — the junk is nested INSIDE apps/ and packages/,
 # and some of it is git-TRACKED (a .gitignore anchoring bug, fixed by su-a1a71).
+def _tar_globs_except_leaf(directory, retained):
+    """GNU tar globs for every descendant except one exact admitted leaf."""
+    globs = []
+    for index, character in enumerate(retained):
+        prefix = retained[:index]
+        if prefix:
+            globs.append(directory + prefix)
+        globs.append(directory + prefix + "[!" + character + "]*")
+    globs.append(directory + retained + "?*")
+    return globs
+
+
 FORBIDDEN_PATH = [
-    # D-150 V3: these vendored development fixtures contain actual private-key
-    # containers. Omit them at both producers; a public-fixture exemption is
-    # forbidden. Keep package runtime code and public certificates intact.
+    # D-150 V3 / D-164: prune every SSH2 fixture except the exact certificate
+    # admitted by tarball provenance. Keep the certificate's identity/key scan
+    # mandatory; this path rule alone never admits its bytes. Other vendor
+    # private-key fixtures remain forbidden at both producers.
     ("vendored-private-key-fixtures",
-     re.compile(r"(^|/)node_modules/(?:ssh2/test/fixtures/https_key\.pem"
+     re.compile(r"(^|/)node_modules/(?:ssh2/test/fixtures/(?!https_cert\.pem$).+"
                 r"|style-dictionary/examples/advanced/create-react-native-app/"
                 r"android/app/debug\.keystore)$"),
-     ["node_modules/ssh2/test/fixtures/https_key.pem",
-      "node_modules/style-dictionary/examples/advanced/create-react-native-app/android/app/debug.keystore"]),
+     _tar_globs_except_leaf("node_modules/ssh2/test/fixtures/", "https_cert.pem")
+     + ["node_modules/style-dictionary/examples/advanced/create-react-native-app/android/app/debug.keystore"]),
     ("agent-transcripts", re.compile(r"(^|/)pi-sessions/|(^|/)sessions/.*\.jsonl$"),
      ["pi-sessions"]),
     # `.papercusp` AND its siblings (`.papercusp-tmp`, `.papercusp-workspaces`): a
