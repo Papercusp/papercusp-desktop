@@ -2560,6 +2560,12 @@ if [[ -f "$_audit_py" ]]; then
     "$SIDECAR_DIR/apps/operator-docs/src/content/docs" \
     "$SIDECAR_DIR/serve.mjs" \
     "$SIDECAR_DIR/spa"
+  # D166: the doc source, rendered docs and SPA are already independent shipping
+  # copies. Preserve their normal-privacy projection privately, mint a NEW UUID
+  # output copy, and independently rederive each manifest before publishing it.
+  # Census context survives release-local's one-use row-plan clearing.
+  source "$HERE/lib/seed-reuse-age.sh"
+  seed_uuid_project_sidecar_documents "$HERE/lib/print-gitleaks-findings.py" "$SIDECAR_DIR" || exit 1
   # WI-37620: a build-box path baked into a COMPILED addon (.rodata assert string)
   # is reachable by neither of the gate's other remedies — `strip` leaves it and the
   # file is needed at runtime — so scrub it. Must run BEFORE the scan below.

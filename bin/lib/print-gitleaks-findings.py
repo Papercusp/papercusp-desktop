@@ -1650,8 +1650,13 @@ def _uuid_document_projection_expectation(config_path: Path, source: Path):
         if isinstance(value, list):
             return any(carries_authentication(child) for child in value)
         if isinstance(value, str):
-            return any(json.loads(match.group()) in ('__rekey', 'signature', 'author_pubkey')
-                       for match in _UUID_JSON_STRING.finditer(value))
+            for match in _UUID_JSON_STRING.finditer(value):
+                try:
+                    if json.loads(match.group()) in ('__rekey', 'signature', 'author_pubkey'):
+                        return True
+                except ValueError:
+                    pass  # A prose quote is not necessarily a JSON literal.
+            return False
         return False
 
     for path, label in originals:
@@ -1721,6 +1726,7 @@ def project_uuid_document_tree(config_path: Path, source: Path, output: Path, ma
     originals, expected, changes, report = _uuid_document_projection_expectation(config_path, source)
     # Build outside the frozen input, publish no partial output on a refused scan.
     output.mkdir(mode=0o700)
+    manifest_created = False
     try:
         shutil.copytree(source, output, dirs_exist_ok=True)
         for relative, text in changes.items():
@@ -1738,6 +1744,7 @@ def project_uuid_document_tree(config_path: Path, source: Path, output: Path, ma
                 handle.flush()
                 os.fsync(handle.fileno())
             os.link(temporary, manifest)
+            manifest_created = True
         finally:
             os.unlink(temporary)
         validate_uuid_document_projection(config_path, source, output, manifest)
@@ -1746,7 +1753,7 @@ def project_uuid_document_tree(config_path: Path, source: Path, output: Path, ma
         shutil.rmtree(output)
         # Only remove this call's manifest, never one that won an exclusive-create
         # race. The emitted bytes must still equal our exact safe report.
-        if manifest.is_file() and not manifest.is_symlink():
+        if manifest_created and manifest.is_file() and not manifest.is_symlink():
             try:
                 if json.loads(manifest.read_text()) == report:
                     manifest.unlink()

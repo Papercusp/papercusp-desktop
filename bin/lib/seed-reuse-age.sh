@@ -84,3 +84,80 @@ NODE
   SEED_UUID_ROW_DROP_ACTIVE=1
   SEED_UUID_ROW_DROP_ARGS=(--skip-corestore-refresh --uuid-idempotency-drop-plans "$plan" --uuid-idempotency-drop-plans-sha256 "$digest")
 }
+
+# Output-only D166 doc copy point. Private originals survive outside the shipped
+# tree for independent review; never rewrite the canonical docs or a frozen core.
+seed_uuid_project_sidecar_documents() {
+  local formatter="$1" sidecar="$2"
+  local census="${PAPERCUSP_SEED_UUID_CENSUS_PATH:-}"
+  local digest="${PAPERCUSP_SEED_UUID_CENSUS_SHA256:-}"
+  [[ -n "$census$digest" ]] || return 0
+  if [[ "$sidecar" != */src-tauri/sidecar || ! -d "$sidecar" || -L "$sidecar" \
+      || "$census" != /* || ! -f "$census" || -L "$census" || ! "$digest" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "ERROR: UUID document projection needs exact private context and the generated sidecar root (values omitted)." >&2
+    return 1
+  fi
+  local actual
+  actual="$(sha256sum -- "$census" 2>/dev/null)" || return 1
+  [[ "${actual%% *}" == "$digest" ]] || { echo "ERROR: UUID census changed before document projection (values omitted)." >&2; return 1; }
+  local evidence index=0 relative frozen projected report original
+  if [[ -n "${VH_RUN_DIR:-}" && "$VH_RUN_DIR/" == "$sidecar/"* ]]; then
+    echo "ERROR: UUID private evidence cannot live in the shipped resource tree (values omitted)." >&2
+    return 1
+  fi
+  evidence="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-uuid-doc-inputs.XXXXXX")" || return 1
+  chmod 700 "$evidence" || return 1
+  for relative in internal-docs apps/operator-docs/src/content/docs spa; do
+    [[ ! -e "$sidecar/$relative" && ! -L "$sidecar/$relative" ]] && continue
+    if [[ ! -d "$sidecar/$relative" || -L "$sidecar/$relative" ]]; then
+      echo "ERROR: UUID doc copy point is linked or not a directory (values omitted)." >&2
+      return 1
+    fi
+    frozen="$evidence/input-$index"
+    projected="$sidecar/$relative.uuid-projected"
+    report="$sidecar/uuid-idempotency-doc-redactions-$index.json"
+    cp -a "$sidecar/$relative" "$frozen" || return 1
+    if ! python3 "$formatter" --project-uuid-documents "$census" "$frozen" "$projected" "$report" \
+        || ! python3 "$formatter" --validate-uuid-documents "$census" "$frozen" "$projected" "$report"; then
+      echo "ERROR: UUID doc projection or independent manifest check refused (values omitted)." >&2
+      return 1
+    fi
+    # Keep the pre-projection copy for review. The destination is a newly minted
+    # output tree that both source-derived checks have already verified.
+    original="$evidence/pre-projection-$index"
+    if ! diff -r "$frozen" "$sidecar/$relative" >/dev/null 2>&1; then
+      echo "ERROR: UUID doc copy changed after freezing (values omitted)." >&2
+      return 1
+    fi
+    mv "$sidecar/$relative" "$original" || return 1
+    if ! mv "$projected" "$sidecar/$relative"; then
+      mv "$original" "$sidecar/$relative" || true
+      return 1
+    fi
+    node - "$evidence" "$census" "$digest" "$relative" "$frozen" "$sidecar/$relative" "$report" <<'NODE'
+const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
+const [directory, censusPath, censusSha256, relative, sourcePath, outputPath, manifestPath] = process.argv.slice(2);
+const file = path.join(directory, 'projection-inputs.private.json');
+const state = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { censusPath, censusSha256, documentProjections: [] };
+const manifestSha256 = crypto.createHash('sha256').update(fs.readFileSync(manifestPath)).digest('hex');
+state.documentProjections.push({ relative, sourcePath, outputPath, manifestPath, manifestSha256 });
+fs.writeFileSync(file, JSON.stringify(state), { mode: 0o600 });
+NODE
+    [[ "$?" == "0" ]] || return 1
+    index=$((index+1))
+  done
+  if [[ "$index" == "0" ]]; then
+    echo "ERROR: UUID doc copy point enumerated no input directories (values omitted)." >&2
+    return 1
+  fi
+  actual="$(sha256sum -- "$census" 2>/dev/null)" || return 1
+  [[ "${actual%% *}" == "$digest" ]] || { echo "ERROR: UUID census changed during document projection (values omitted)." >&2; return 1; }
+  # A PRIVATE run-scoped pointer, never in the Tauri resource roots.
+  if [[ -n "${VH_RUN_DIR:-}" && -d "$VH_RUN_DIR" ]]; then
+    local pointer
+    pointer="$(mktemp "$VH_RUN_DIR/uuid-document-projection-inputs.XXXXXX")" || return 1
+    printf '%s\n' "$evidence/projection-inputs.private.json" > "$pointer"
+    chmod 600 "$pointer" || return 1
+  fi
+  SEED_UUID_DOC_INPUTS_PATH="$evidence/projection-inputs.private.json"
+}

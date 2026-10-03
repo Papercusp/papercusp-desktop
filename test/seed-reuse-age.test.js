@@ -36,9 +36,13 @@ test('D166 shared seed policy preserves argument boundaries and refuses stale, p
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'uuid-seed-mode-'));
   try {
     const plan = path.join(dir, "private plan's.json"); const store = path.join(dir, 'frozen original');
-    fs.mkdirSync(store); fs.writeFileSync(plan, '{"fixture":"not a credential"}', { mode: 0o600 });
+    const census = path.join(dir, "census config's.json");
+    fs.mkdirSync(store); fs.writeFileSync(census, JSON.stringify({ reviewRef: 'p2p-public-release-endgame-2026-09-01#D-166' }), { mode: 0o600 });
+    const censusDigest = require('node:crypto').createHash('sha256').update(fs.readFileSync(census)).digest('hex');
+    fs.writeFileSync(plan, JSON.stringify({ privateSourceBindings: { configSha256: censusDigest } }), { mode: 0o600 });
     const digest = require('node:crypto').createHash('sha256').update(fs.readFileSync(plan)).digest('hex');
     const base = { ...process.env, PAPERCUSP_SEED_UUID_PLAN_PATH: plan, PAPERCUSP_SEED_UUID_PLAN_SHA256: digest,
+      PAPERCUSP_SEED_UUID_CENSUS_PATH: census, PAPERCUSP_SEED_UUID_CENSUS_SHA256: censusDigest,
       PAPERCUSP_SEED_STORE_DIR: store, PAPERCUSP_SEED_FORCE: '1', PAPERCUSP_SEED_CORESTORE: '1',
       PAPERCUSP_SEED_REUSE_CORESTORE: '0', PAPERCUSP_SEED_SPARSE: '0', PAPERCUSP_SKIP_SEED_CUT: '0', PAPERCUSP_FAST_ITER: '0' };
     const run = env => spawnSync('bash', ['-c', 'source "$1"; seed_uuid_row_drop_prepare || exit $?; printf "%s\\n" "$SEED_UUID_ROW_DROP_ACTIVE" "${SEED_UUID_ROW_DROP_ARGS[@]}"', 'x', helper],
@@ -47,9 +51,14 @@ test('D166 shared seed policy preserves argument boundaries and refuses stale, p
     assert.deepEqual(valid.stdout.trim().split('\n'), ['1', '--skip-corestore-refresh', '--uuid-idempotency-drop-plans', plan, '--uuid-idempotency-drop-plans-sha256', digest]);
     for (const bad of [{ PAPERCUSP_SEED_UUID_PLAN_SHA256: 'b'.repeat(64) }, { PAPERCUSP_SEED_UUID_PLAN_PATH: '' },
       { PAPERCUSP_SEED_STORE_DIR: '' }, { PAPERCUSP_SKIP_SEED_CUT: '1' }, { PAPERCUSP_FAST_ITER: '1' },
+      { PAPERCUSP_SEED_UUID_CENSUS_PATH: '' }, { PAPERCUSP_SEED_UUID_CENSUS_SHA256: 'bad' },
+      { PAPERCUSP_SEED_UUID_CENSUS_SHA256: 'b'.repeat(64) },
       { PAPERCUSP_SEED_REUSE_CORESTORE: 'auto' }, { PAPERCUSP_SEED_CORESTORE: '0' }, { PAPERCUSP_SEED_SPARSE: '1' }, { PAPERCUSP_SEED_FORCE: '0' }]) {
       assert.equal(run(bad).status, 1, JSON.stringify(bad));
     }
+    fs.writeFileSync(plan, JSON.stringify({ privateSourceBindings: { configSha256: 'c'.repeat(64) } }));
+    const reboundDigest = require('node:crypto').createHash('sha256').update(fs.readFileSync(plan)).digest('hex');
+    assert.equal(run({ PAPERCUSP_SEED_UUID_PLAN_SHA256: reboundDigest }).status, 1, 'plan cannot bind a different private census');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -62,12 +71,15 @@ for (const release of [false, true]) {
       fs.mkdirSync(path.join(bin, 'lib'), { recursive: true }); fs.mkdirSync(path.join(dir, 'apps', 'operator'), { recursive: true });
       fs.mkdirSync(fake); fs.mkdirSync(store); fs.mkdirSync(path.join(desktop, 'src-tauri', 'seed'), { recursive: true });
       fs.copyFileSync(helper, path.join(bin, 'lib', 'seed-reuse-age.sh'));
-      const plan = path.join(dir, 'plan.json'); fs.writeFileSync(plan, '{}', { mode: 0o600 });
+      const census = path.join(dir, 'census.json'); fs.writeFileSync(census, JSON.stringify({ reviewRef: 'p2p-public-release-endgame-2026-09-01#D-166' }), { mode: 0o600 });
+      const censusDigest = require('node:crypto').createHash('sha256').update(fs.readFileSync(census)).digest('hex');
+      const plan = path.join(dir, 'plan.json'); fs.writeFileSync(plan, JSON.stringify({ privateSourceBindings: { configSha256: censusDigest } }), { mode: 0o600 });
       const digest = require('node:crypto').createHash('sha256').update(fs.readFileSync(plan)).digest('hex');
       const argsPath = path.join(dir, 'args.json');
       fs.writeFileSync(path.join(fake, 'npx'), '#!/usr/bin/env node\nconst fs=require("node:fs"),p=require("node:path");const a=process.argv.slice(2);fs.writeFileSync(process.env.UUID_TEST_ARGS_OUT,JSON.stringify(a));if(process.env.UUID_TEST_FAIL==="1")process.exit(7);const out=a[a.indexOf("--out")+1];fs.mkdirSync(out,{recursive:true});fs.writeFileSync(p.join(out,"manifest.json"),"{}");fs.writeFileSync(p.join(out,"epoch-keys.json"),"{}");\n', { mode: 0o755 });
       const env = { ...process.env, PATH: `${fake}:${process.env.PATH}`, UUID_TEST_ARGS_OUT: argsPath,
         PAPERCUSP_SEED_UUID_PLAN_PATH: plan, PAPERCUSP_SEED_UUID_PLAN_SHA256: digest, PAPERCUSP_SEED_STORE_DIR: store,
+        PAPERCUSP_SEED_UUID_CENSUS_PATH: census, PAPERCUSP_SEED_UUID_CENSUS_SHA256: censusDigest,
         PAPERCUSP_SEED_FORCE: '1', PAPERCUSP_SEED_REUSE_CORESTORE: '0', PAPERCUSP_SEED_CORESTORE: '1',
         PAPERCUSP_SEED_SPARSE: '0', PAPERCUSP_SKIP_SEED_CUT: '0', PAPERCUSP_FAST_ITER: '0', PAPERCUSP_SEED_SNAPSHOT_DIR: '',
         PAPERCUSP_SEED_EMIT_EPOCH_KEY: '1', PAPERCUSP_SEED_DEPTH: '' };
@@ -76,7 +88,7 @@ for (const release of [false, true]) {
       if (release) {
         const definition = fs.readFileSync(script, 'utf8').match(/^cut_release_seed\(\) \{\n[\s\S]*?^\}/m)?.[0];
         assert(definition);
-        command = `set -uo pipefail; source "$1/lib/seed-reuse-age.sh"; ORCHESTRATOR_HERE="$1"; ROOT="$2"; MONOREPO="$3"; release_seed_cut_is_quiesced(){ exit 69; }; release_seed_sparse_refused(){ return 1; }; ${definition}\ncut_release_seed || exit $?\nexport PAPERCUSP_SKIP_SEED_CUT=1; seed_uuid_row_drop_prepare`;
+        command = `set -uo pipefail; source "$1/lib/seed-reuse-age.sh"; ORCHESTRATOR_HERE="$1"; ROOT="$2"; MONOREPO="$3"; release_seed_cut_is_quiesced(){ exit 69; }; release_seed_sparse_refused(){ return 1; }; ${definition}\ncut_release_seed || exit $?\ntest -n "$PAPERCUSP_SEED_UUID_CENSUS_PATH" && test -n "$PAPERCUSP_SEED_UUID_CENSUS_SHA256" || exit 72\nexport PAPERCUSP_SKIP_SEED_CUT=1; seed_uuid_row_drop_prepare`;
       } else {
         fs.copyFileSync(script, path.join(bin, 'ensure-release-seed.sh'));
       }
