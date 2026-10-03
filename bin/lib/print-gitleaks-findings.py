@@ -1339,6 +1339,270 @@ def _source_file(root: Path, relative: str) -> Path:
     return target
 
 
+_UUID_DROP_REVIEW = 'p2p-public-release-endgame-2026-09-01#D-166'
+_UUID_DROP_SCHEMA = 'papercusp-uuid-idempotency-row-drop-plan-v1'
+_UUID_DROP_SET_SCHEMA = 'papercusp-uuid-idempotency-row-drop-plan-set-v1'
+_UUID_MARKER = '<redacted:idempotency-key>'
+_UUID4_TEXT = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}'
+_UUID_NAMED_TEXT = re.compile(r'\bidempotencyKey[\s\\"\x27]*[:=][\s\\"\x27]*(' + _UUID4_TEXT + r')')
+
+
+def _uuid_class_tokens(value: object) -> set[str]:
+    """Discover the field class, including JSON quoted inside prose. Never print values."""
+    tokens = set()
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key == 'idempotencyKey' and isinstance(child, str):
+                tokens.update(re.findall(_UUID4_TEXT, child))
+            tokens.update(_uuid_class_tokens(key))
+            tokens.update(_uuid_class_tokens(child))
+    elif isinstance(value, list):
+        for child in value:
+            tokens.update(_uuid_class_tokens(child))
+    elif isinstance(value, str):
+        tokens.update(_UUID_NAMED_TEXT.findall(value))
+    return tokens
+
+
+def _uuid_occurrences(value: object, tokens: set[str], path: list[object] | None = None) -> list[list[object]]:
+    """Value-free exact field paths; text indices distinguish repeats in one container."""
+    path = [] if path is None else path
+    result = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            # A secret used as an object key cannot itself become a public field path.
+            if any(token.lower() in key.lower() for token in tokens):
+                raise ValueError('unsafe UUID object-key locator')
+            result += _uuid_occurrences(child, tokens, [*path, key])
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            result += _uuid_occurrences(child, tokens, [*path, index])
+    elif isinstance(value, str) and tokens:
+        pattern = re.compile('|'.join(re.escape(t) for t in sorted(tokens)), re.IGNORECASE)
+        hits = list(pattern.finditer(value))
+        if len(hits) == 1 and hits[0].span() == (0, len(value)):
+            result.append(path)
+        else:
+            result += [[*path, '<text>', index] for index in range(len(hits))]
+    return result
+
+
+def _uuid_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
+
+
+def _uuid_open_row(row: dict[str, object], pot_id: str, keys: dict[str, object]) -> tuple[object, bool]:
+    """Authenticate original stored envelopes with the production length-prefixed AAD."""
+    value = row['value']
+    if not isinstance(value, dict) or '__rekey' not in value:
+        if row.get('epoch') is not None:
+            raise ValueError('stamped row without ciphertext')
+        return value, False
+    if set(value) != {'__rekey'} or type(row.get('epoch')) is not int or row['epoch'] < 0:
+        raise ValueError('invalid UUID source envelope')
+    author = row.get('author_pubkey')
+    if not isinstance(author, str) or not author:
+        raise ValueError('original author required for AAD')
+    key = _canonical_base64(keys[str(row['epoch'])], 32)
+    encoded = value['__rekey']
+    if not isinstance(encoded, str):
+        raise ValueError('invalid UUID ciphertext encoding')
+    ciphertext = base64.b64decode(encoded, validate=True)
+    if len(ciphertext) < 40 or base64.b64encode(ciphertext).decode() != encoded:
+        raise ValueError('invalid UUID ciphertext framing')
+    op_id = hashlib.sha256(_uuid_json([row['table'], row['hbKey'], author]).encode()).hexdigest()
+    parts = [pot_id.encode(), str(row['epoch']).encode(), op_id.encode()]
+    aad = b''.join(len(part).to_bytes(4, 'big') + part for part in parts)
+    sodium = _sodium()
+    method = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt
+    method.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulonglong), ctypes.c_void_p,
+                       ctypes.c_void_p, ctypes.c_ulonglong, ctypes.c_void_p, ctypes.c_ulonglong,
+                       ctypes.c_void_p, ctypes.c_void_p]
+    method.restype = ctypes.c_int
+    output = ctypes.create_string_buffer(len(ciphertext) - 40)
+    length = ctypes.c_ulonglong()
+    if method(output, ctypes.byref(length), None, ciphertext[24:], len(ciphertext) - 24,
+              aad, len(aad), ciphertext[:24], key) != 0:
+        raise ValueError('UUID source authentication failed')
+    return json.loads(output.raw[:length.value]), True
+
+
+def _uuid_census_inputs(config_path: Path) -> tuple[dict[str, object], dict[str, object]]:
+    _private_file(config_path)
+    config = json.loads(config_path.read_text())
+    if (config.get('reviewRef') != _UUID_DROP_REVIEW
+            or not isinstance(config.get('potId'), str) or not config['potId']
+            or not isinstance(config.get('sources'), list) or not config['sources']):
+        raise ValueError('UUID census configuration incomplete')
+    keys_path = Path(config['epochKeysPath'])
+    _private_file(keys_path)
+    if _sha256(keys_path) != config['epochKeysSha256']:
+        raise ValueError('UUID epoch key binding changed')
+    keys = json.loads(keys_path.read_text())[config['potId']]
+    seen = set()
+    for source in config['sources']:
+        key = source.get('sourceKeyHex')
+        if (not isinstance(key, str) or not re.fullmatch(r'[0-9a-f]{64}', key) or key in seen
+                or type(source.get('sourceLength')) is not int or source['sourceLength'] <= 0
+                or type(source.get('rowCount')) is not int or source['rowCount'] < 0):
+            raise ValueError('UUID source census binding invalid')
+        seen.add(key)
+        path = Path(source['rowsPath'])
+        _private_file(path)
+        if _sha256(path) != source['rowsSha256']:
+            raise ValueError('UUID source export changed')
+    # The exporter must enumerate the actual signed core/snapshot population.
+    # A supplied export is not, by itself, proof that every source core was read.
+    return config, keys
+
+
+def _uuid_source_rows(source: dict[str, object]):
+    count = 0
+    row_ids = set()
+    with Path(source['rowsPath']).open() as handle:
+        for count, text in enumerate(handle, 1):
+            row = json.loads(text)
+            if (not isinstance(row, dict) or not isinstance(row.get('table'), str) or not row['table']
+                    or not isinstance(row.get('hbKey'), str) or not row['hbKey'] or 'value' not in row
+                    or not re.fullmatch(r'segment-[0-9]{6}\.(?:blob|log)', str(row.get('segment')))
+                    or type(row.get('line')) is not int or row['line'] <= 0):
+                raise ValueError('UUID source row/locator invalid')
+            identity = (row['table'], row['hbKey'])
+            if identity in row_ids:
+                raise ValueError('UUID source export must contain each winning row once')
+            row_ids.add(identity)
+            yield row
+    if count != source['rowCount'] or _sha256(Path(source['rowsPath'])) != source['rowsSha256']:
+        raise ValueError('UUID source export incomplete or changed')
+
+
+def assemble_uuid_idempotency_drop_plans(config_path: Path) -> dict[str, object]:
+    """Re-derive an entire supplied authenticated row population, independent of gitleaks hits.
+
+    This is source-AEAD and plan evidence, not source-signature/coverage or GO evidence.
+    Final admission requires an independently enumerated actual Hypercore export.
+    """
+    config, keys = _uuid_census_inputs(config_path)
+    tokens = set()
+    original = encrypted = 0
+    for source in config['sources']:
+        for row in _uuid_source_rows(source):
+            plain, authenticated = _uuid_open_row(row, config['potId'], keys)
+            original += 1
+            encrypted += int(authenticated)
+            tokens.update(_uuid_class_tokens(plain))
+    plans = []
+    locators = set()
+    dropped = encrypted_dropped = 0
+    for source in config['sources']:
+        rows = []
+        for row in _uuid_source_rows(source):
+            plain, authenticated = _uuid_open_row(row, config['potId'], keys)
+            paths = _uuid_occurrences(plain, tokens)
+            if not paths:
+                continue
+            occurrences = [{'segment': row['segment'], 'line': row['line'], 'fieldPath': path} for path in paths]
+            for occurrence in occurrences:
+                identity = _uuid_json(occurrence)
+                if not occurrence['fieldPath'] or identity in locators:
+                    raise ValueError('UUID occurrence locator missing or duplicated')
+                locators.add(identity)
+            # Exporters may supply JSON.stringify(value), preserving JS number encoding.
+            stored = row.get('storedValueJson', _uuid_json(row['value']))
+            if not isinstance(stored, str) or json.loads(stored) != row['value']:
+                raise ValueError('UUID stored value serialization changed')
+            rows.append({'table': row['table'], 'hbKey': row['hbKey'],
+                         'valueSha256': hashlib.sha256(stored.encode()).hexdigest(), 'occurrences': occurrences})
+            dropped += 1
+            encrypted_dropped += int(authenticated)
+        if rows:
+            plans.append({'schema': _UUID_DROP_SCHEMA, 'reviewRef': _UUID_DROP_REVIEW,
+                          'sourceKeyHex': source['sourceKeyHex'], 'sourceLength': source['sourceLength'], 'rows': rows})
+    # All counters refer to source rows; a dropped ciphertext is never claimed as shipped auth.
+    return {'schema': _UUID_DROP_SET_SCHEMA, 'reviewRef': _UUID_DROP_REVIEW, 'plans': plans,
+            'privateSourceBindings': {'configSha256': _sha256(config_path),
+                                     'sources': config['sources'], 'epochKeysSha256': config['epochKeysSha256']},
+            'sourceAuthentication': 'original-envelope-aead',
+            'sourceSignatureAndCoverage': 'requires-independent-hypercore-export-validation',
+            'counts': {'originalRows': original, 'originalAuthenticated': encrypted,
+                       'originalPlaintext': original - encrypted, 'droppedRows': dropped,
+                       'droppedAuthenticated': encrypted_dropped, 'authenticatedOriginalRetained': encrypted - encrypted_dropped,
+                       'redactedReattested': 0, 'occurrenceCount': len(locators)}}
+
+
+def validate_uuid_idempotency_row_drops(config_path: Path, plan_set: dict[str, object],
+                                      output_sources: list[dict[str, object]],
+                                      reports: list[dict[str, object]],
+                                      artifact_inputs: list[Path]) -> dict[str, object]:
+    """Independently authenticate retained output and compare the complete source/drop partition.
+
+    Source/output exports must be independently bound to the actual candidate by the caller.
+    No gitleaks exemptions or segment clearances are produced.
+    """
+    expected = assemble_uuid_idempotency_drop_plans(config_path)
+    if expected != plan_set or not artifact_inputs:
+        raise ValueError('UUID plan census changed or artifact coverage missing')
+    config, keys = _uuid_census_inputs(config_path)
+    by_key = {entry['sourceKeyHex']: entry for entry in output_sources}
+    if len(by_key) != len(output_sources) or set(by_key) != {s['sourceKeyHex'] for s in config['sources']}:
+        raise ValueError('UUID output core coverage mismatch')
+    dropped = {(p['sourceKeyHex'], r['table'], r['hbKey']) for p in expected['plans'] for r in p['rows']}
+    tokens = set()
+    originals = {}
+    for source in config['sources']:
+        for row in _uuid_source_rows(source):
+            plain, _ = _uuid_open_row(row, config['potId'], keys)
+            tokens.update(_uuid_class_tokens(plain))
+            originals[(source['sourceKeyHex'], row['table'], row['hbKey'])] = row
+    retained_auth = 0
+    for key, source in by_key.items():
+        path = Path(source['rowsPath'])
+        _private_file(path)
+        if _sha256(path) != source['rowsSha256']:
+            raise ValueError('UUID output export changed')
+        remaining = {identity for identity in originals if identity[0] == key} - dropped
+        for row in _uuid_source_rows(source):
+            identity = (key, row['table'], row['hbKey'])
+            if identity not in remaining:
+                raise ValueError('dropped or extra UUID output row')
+            original = originals[identity]
+            if any(row.get(field) != original.get(field) for field in ('value', 'author_pubkey', 'epoch')):
+                raise ValueError('UUID output changed original authentication')
+            plain, authenticated = _uuid_open_row(row, config['potId'], keys)
+            if _uuid_class_tokens(plain) or _uuid_occurrences(plain, tokens):
+                raise ValueError('UUID class remains in output')
+            retained_auth += int(authenticated)
+            remaining.remove(identity)
+        if remaining:
+            raise ValueError('UUID output omitted unrelated source rows')
+    expected_reports = [{'schema': 'papercusp-uuid-idempotency-redaction-manifest-v1',
+                         'reviewRef': _UUID_DROP_REVIEW, 'replacement': _UUID_MARKER,
+                         'authenticationDisposition': 'dropped',
+                         'ciphertextAuthentication': 'requires-independent-candidate-validation',
+                         'droppedRows': len(plan['rows']),
+                         'occurrenceCount': sum(len(row['occurrences']) for row in plan['rows']),
+                         'occurrences': [o for row in plan['rows'] for o in row['occurrences']]}
+                        for plan in expected['plans']]
+    if reports != expected_reports or retained_auth != expected['counts']['authenticatedOriginalRetained']:
+        raise ValueError('UUID public manifest or authentication accounting mismatch')
+    inventory = []
+    for path in artifact_inputs:
+        before = _sha256(path)
+        # Scan every byte, including matches crossing chunk boundaries; no scan-report allowlist.
+        tail = b''
+        with path.open('rb') as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                text = (tail + chunk).decode('utf-8', errors='replace')
+                if _uuid_class_tokens(text) or _uuid_occurrences(text, tokens):
+                    raise ValueError('UUID class remains in shipped artifact')
+                tail = (tail + chunk)[-256:]
+        if _sha256(path) != before:
+            raise ValueError('UUID shipped artifact changed')
+        inventory.append({'path': str(path), 'sha256': before})
+    return {'reviewRef': _UUID_DROP_REVIEW, 'counts': expected['counts'], 'rawClassHits': 0,
+            'artifacts': inventory, 'candidateBinding': 'requires-independent-actual-artifact-validation'}
+
+
 def _classification(summary: dict[str, object], entries: list[dict[str, object]],
                     allowed: set[str]) -> set[str]:
     if (summary.get("unclassifiedLocators") != [] or not entries
