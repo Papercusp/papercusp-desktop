@@ -51,6 +51,7 @@ _MECHANICAL_PLAIN_CLASSES = {
     "public-schema-bound-reference", "reviewed-public-source-literal",
     "public-cryptographic-key", "reviewed-descriptive-source-text",
     "public-generated-agent-identifier",
+    "public-non-bearer-field-reference",
 }
 _SEED_CLASSES |= _MECHANICAL_SEED_CLASSES
 _PLAIN_CLASSES |= _MECHANICAL_PLAIN_CLASSES
@@ -66,6 +67,16 @@ _RESPAWN_MAKERS = {
         ("6d22fc28a9124ce58c5312d058c47813a3b0080c", {"hex16"}),
 }
 _RESPAWN_FIELDS = {"writer_key", "sender", "sender_id"}
+_NON_BEARER_FIELDS = {"idempotencyKey", "conditionKey", "watchdogKey", "credentialSha256"}
+_CREDENTIAL_DIGEST_VERIFIER = {
+    "tree": "superproject",
+    "path": "packages/operator-core/lib/work-item-admission-authority.ts",
+    "blob": "f64c9f76696d7b28659345cad4441ec80675dad8",
+}
+_RUNTIME_SOURCE_PATHS = (
+    "*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.py", "*.rs",
+    ":!*.test.*", ":!*.spec.*", ":!*/__tests__/*", ":!*/test/*", ":!*/tests/*",
+)
 _PROOF_FILES = (
     "ciphertext-auth-safe.json", "plaintext-classification-safe.json",
     "plaintext-exact-finding-digests.json", "seed-classification-verified-safe.json",
@@ -196,6 +207,84 @@ def _source_tree(ref: dict[str, object], trees: dict[str, object]) -> tuple[Path
     return path, sha
 
 
+def validate_non_bearer_sources(field: str, witness: dict[str, object],
+                                context: dict[str, object]) -> None:
+    """D-149: exact frozen reader/writer citations, with a complete source census.
+
+    This checks the citations themselves. Independent GO still reviews their
+    meaning; a source witness alone never admits an occurrence.
+    """
+    if (field not in _NON_BEARER_FIELDS or witness.get("field") != field
+            or witness.get("toolingSha256") != _sha256(Path(__file__))
+            or witness.get("reviewRef") != "p2p-public-release-endgame-2026-09-01#D-149"):
+        raise ValueError("closed non-bearer field source proof required")
+    writers, readers = witness.get("writers", []), witness.get("readers", [])
+    if not writers or not readers:
+        raise ValueError("non-bearer writer and reader proofs required")
+    refs = {(ref["tree"], ref["path"], ref["blob"]): ref for ref in [*writers, *readers]}
+    cache = context.setdefault("_nonBearerSourceCache", {})
+    identity = hashlib.sha256(json.dumps(witness, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if identity in cache:
+        return
+    observed = set()
+    for tree in _FROZEN_TREES:
+        path, sha = _source_tree({"tree": tree}, context["trees"])
+        result = subprocess.run(["git", "-C", str(path), "grep", "-l", "-w", "-F", field,
+                                 sha, "--", *_RUNTIME_SOURCE_PATHS],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        if result.returncode not in (0, 1):
+            raise ValueError("non-bearer source census failed")
+        for line in result.stdout.decode().splitlines():
+            prefix = sha + ":"
+            if not line.startswith(prefix):
+                raise ValueError("invalid frozen source census")
+            relative = line[len(prefix):]
+            matching = [key for key in refs if key[:2] == (tree, relative)]
+            if len(matching) != 1:
+                raise ValueError("non-bearer reader/writer census incomplete")
+            observed.add(matching[0])
+    if observed != set(refs):
+        raise ValueError("non-bearer source census mismatch")
+    for ref in refs.values():
+        if not re.search(rb"\b" + field.encode() + rb"\b", _frozen_source_bytes(ref, context["trees"])):
+            raise ValueError("field absent from cited source")
+    if field == "credentialSha256":
+        if witness.get("verifier") != _CREDENTIAL_DIGEST_VERIFIER:
+            raise ValueError("credential digest verifier mismatch")
+        content = _frozen_source_bytes(witness["verifier"], context["trees"])
+        if any(snippet not in content for snippet in (
+                b"createHash('sha256').update(bytes).digest('hex')",
+                b"admissionCredentialDigest(token) !== authority.credentialSha256",
+                b"admissionCredentialDigest(decodeOperatorSecretKey(key.value_b64, 'spawn-signing-key')) !== authority.credentialSha256")):
+            raise ValueError("credential verifier does not hash the presented credential")
+    cache[identity] = list(refs.values())
+
+
+def non_bearer_reference_valid(field: str, value: str, witness: dict[str, object],
+                               context: dict[str, object]) -> bool:
+    validate_non_bearer_sources(field, witness, context)
+    shape = witness.get("shape")
+    if field == "credentialSha256":
+        clearance = context.get("credentialDigestScan", {})
+        return (shape == "hex64" and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+                and context.get("identityScanValidated") is True
+                and value in clearance.get("digests", [])
+                and clearance.get("digestOfCredentialHits") == 0
+                and clearance.get("rawCredentialHits") == 0
+                and clearance.get("hashControlDetected") is True
+                and clearance.get("rawControlDetected") is True)
+    if shape == "uuid":
+        return _UUID.fullmatch(value.encode()) is not None and value in context.get("publicIds", set())
+    if shape == "projection-id":
+        parts = value.split("::", 1)
+        return (len(parts) == 2 and re.fullmatch(r"[a-z][a-z0-9-]*", parts[0]) is not None
+                and _public_id(parts[1]) and parts[1] in context.get("publicIds", set()))
+    if shape in {"hex40", "hex64"}:
+        return (re.fullmatch(r"[0-9a-f]{" + shape[3:] + r"}", value) is not None
+                and value in context["publicReferences"])
+    return False
+
+
 def mechanical_class_valid(entry: dict[str, object], finding: dict[str, object],
                            context: dict[str, object], *, seed: bool) -> bool:
     """D-147 predicates re-derived from exact private findings and bound inputs."""
@@ -246,9 +335,17 @@ def mechanical_class_valid(entry: dict[str, object], finding: dict[str, object],
     actual = _at_path(row, locator)
     if "embeddedJsonPointer" in entry:
         if kind not in {"public-hash-or-log-reference", "public-condition-reference",
-                        "public-opaque-operation-reference", "public-schema-bound-reference"}:
+                        "public-opaque-operation-reference", "public-schema-bound-reference",
+                        "public-non-bearer-field-reference"}:
             return False
         actual, field = _embedded_reference(actual, entry["embeddedJsonPointer"])
+    if kind == "public-non-bearer-field-reference":
+        if (actual != value or field not in _NON_BEARER_FIELDS
+                or finding["RuleID"] != "generic-api-key"
+                or entry.get("line") != finding["StartLine"]
+                or entry.get("rowSha256") != context["plainRowDigests"][int(finding["StartLine"])]):
+            return False
+        return non_bearer_reference_valid(field, value, context["nonBearerFields"][field], context)
     if kind == "public-cryptographic-key":
         return actual == value and _canonical_base64(value, 32) in context["publicKeys"]
     if kind == "reviewed-descriptive-source-text":
@@ -301,12 +398,16 @@ def _validate_mechanical_entries(entries: list[dict[str, object]], report: list[
     by_location = {(finding_digest(finding), finding["StartLine"]): finding for finding in report}
     for entry in entries:
         finding = (by_location[(entry["digest"], entry["line"])]
-                   if entry["class"] == "public-generated-agent-identifier" else by_digest[entry["digest"]])
+                   if entry["class"] in {"public-generated-agent-identifier", "public-non-bearer-field-reference"}
+                   else by_digest[entry["digest"]])
         if entry["class"] in added and not mechanical_class_valid(
                 entry, finding, context, seed=seed):
             raise ValueError("mechanical class predicate failed")
     for ref in context.get("_makerProofCache", {}).values():
         _source_tree(ref, context["trees"])
+    for refs in context.get("_nonBearerSourceCache", {}).values():
+        for ref in refs:
+            _source_tree(ref, context["trees"])
 
 
 def _table_ops(source: bytes, table: str) -> list[dict[str, object]]:
@@ -390,10 +491,22 @@ def _mechanical_context(proof: dict[str, object], directory: Path, root: Path,
     needed_lines = {int(row["StartLine"]) for row in plain_report}
     plain_rows = {}
     plain_digests = {}
+    public_ids = set()
     with (directory / "seed-000080.plaintext.jsonl").open() as handle:
         for line, text in enumerate(handle, 1):
+            row = json.loads(text)
+            def collect_ids(value: object) -> None:
+                if isinstance(value, dict):
+                    for name, item in value.items():
+                        if name in _ID_FIELDS and isinstance(item, str) and _public_id(item):
+                            public_ids.add(item)
+                        collect_ids(item)
+                elif isinstance(value, list):
+                    for item in value:
+                        collect_ids(item)
+            collect_ids(row)
             if line in needed_lines:
-                plain_rows[line] = json.loads(text)
+                plain_rows[line] = row
                 plain_digests[line] = hashlib.sha256(text.encode()).hexdigest()
     data = source.read_bytes()
     fields = {(found.group("field").decode(), found.group("value").decode())
@@ -401,15 +514,18 @@ def _mechanical_context(proof: dict[str, object], directory: Path, root: Path,
     context = {"seedFields": fields, "publicKeys": publics, "plainRows": plain_rows,
                "plainRowDigests": plain_digests,
                "publicReferences": public_refs, "idFields": set(reference.get("idFields", [])),
-               "trees": reference.get("trees", {})}
+               "trees": reference.get("trees", {}), "publicIds": public_ids,
+               "nonBearerFields": reference.get("nonBearerFields", {})}
     if any(entry["class"] == "recipient-sealed-epoch-key-envelope" for entry in entries):
         envelope = _read_extra_proof(proof, directory, "sealed-envelope-proof-safe.json")
         keys = json.loads((root / "epoch-keys.json").read_text())["papercusp"]
         context["envelopeDigests"] = validate_envelope_structure(envelope, data, report, {int(k) for k in keys})
         recipient_keys = {_canonical_base64(value, 32) for value in envelope["recipients"]}
         publics |= recipient_keys
-        validate_identity_secret_proof(_read_extra_proof(proof, directory, "identity-secret-scan-safe.json"),
-                                       root, directory, recipient_keys, reference)
+        identity_scan = _read_extra_proof(proof, directory, "identity-secret-scan-safe.json")
+        validate_identity_secret_proof(identity_scan, root, directory, recipient_keys, reference)
+        context["identityScanValidated"] = True
+        context["credentialDigestScan"] = identity_scan.get("credentialDigestScan", {})
     return context
 
 
