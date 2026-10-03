@@ -1631,15 +1631,8 @@ def census_uuid_artifacts(config_path: Path, roots: list[Path]) -> dict[str, obj
                 'releaseRootSelection': 'requires-independent-release-inventory-validation'}
 
 
-def project_uuid_document_tree(config_path: Path, source: Path, output: Path, manifest: Path) -> dict[str, object]:
-    """New output COPY only. Authenticated rows and archives are never rewritten."""
-    if (not source.is_dir() or source.is_symlink() or output.exists() or output.is_symlink()
-            or manifest.exists() or manifest.is_symlink()
-            or output.resolve().is_relative_to(source.resolve())
-            or source.resolve().is_relative_to(output.resolve())
-            or manifest.resolve().is_relative_to(source.resolve())
-            or manifest.resolve().is_relative_to(output.resolve())):
-        raise ValueError('UUID document projection requires distinct fresh outputs')
+def _uuid_document_projection_expectation(config_path: Path, source: Path):
+    """Independently rederive from frozen inputs, never from the emitted manifest."""
     census = census_uuid_artifacts(config_path, [source])
     originals = _uuid_root_files([source])
     tokens = _uuid_source_tokens(config_path)
@@ -1685,6 +1678,47 @@ def project_uuid_document_tree(config_path: Path, source: Path, output: Path, ma
         if _uuid_document_tokens(changed, path.suffix.lower()) or _uuid_document_occurrences(changed, path.suffix.lower(), tokens):
             raise ValueError('UUID document projection incomplete')
         changes[path.relative_to(source)] = changed
+    report = {'schema': 'papercusp-uuid-idempotency-document-redaction-manifest-v1',
+              'reviewRef': _UUID_DROP_REVIEW, 'replacement': _UUID_MARKER,
+              'authenticationDisposition': 'plaintext-output-only-not-original-row-authentication',
+              'redactedDocuments': len(changes), 'occurrenceCount': census['occurrenceCount'],
+              'occurrences': census['occurrences']}
+    return originals, expected, changes, report
+
+
+def validate_uuid_document_projection(config_path: Path, source: Path, output: Path,
+                                     manifest: Path) -> dict[str, object]:
+    if (not source.is_dir() or source.is_symlink() or not output.is_dir() or output.is_symlink()
+            or source.resolve() == output.resolve() or manifest.is_symlink()):
+        raise ValueError('UUID document validation inputs invalid')
+    originals, expected, changes, report = _uuid_document_projection_expectation(config_path, source)
+    if json.loads(manifest.read_text()) != report:
+        raise ValueError('UUID document manifest does not match frozen occurrence census')
+    actual = _uuid_root_files([output])
+    if [label for _, label in actual] != [label for _, label in originals]:
+        raise ValueError('UUID document output population mismatch')
+    for path, label in actual:
+        relative = Path(label.split('/', 1)[1])
+        digest = hashlib.sha256(changes[relative].encode('utf-8')).hexdigest() if relative in changes else expected[label]
+        if path.is_symlink() or _sha256(path) != digest:
+            raise ValueError('UUID document output differs from exact projection')
+    if census_uuid_artifacts(config_path, [output, manifest])['occurrenceCount']:
+        raise ValueError('UUID class remains in projected docs or manifest')
+    if [(label, _sha256(path)) for path, label in _uuid_root_files([source])] != [(label, expected[label]) for _, label in originals]:
+        raise ValueError('UUID frozen document population changed')
+    return report
+
+
+def project_uuid_document_tree(config_path: Path, source: Path, output: Path, manifest: Path) -> dict[str, object]:
+    """New output COPY only. Authenticated rows and archives are never rewritten."""
+    if (not source.is_dir() or source.is_symlink() or output.exists() or output.is_symlink()
+            or manifest.exists() or manifest.is_symlink()
+            or output.resolve().is_relative_to(source.resolve())
+            or source.resolve().is_relative_to(output.resolve())
+            or manifest.resolve().is_relative_to(source.resolve())
+            or manifest.resolve().is_relative_to(output.resolve())):
+        raise ValueError('UUID document projection requires distinct fresh outputs')
+    originals, expected, changes, report = _uuid_document_projection_expectation(config_path, source)
     # Build outside the frozen input, publish no partial output on a refused scan.
     output.mkdir(mode=0o700)
     try:
@@ -1697,11 +1731,6 @@ def project_uuid_document_tree(config_path: Path, source: Path, output: Path, ma
             raise ValueError('UUID unprojected archive/binary/document remains')
         if [(label, _sha256(path)) for path, label in _uuid_root_files([source])] != [(label, expected[label]) for _, label in originals]:
             raise ValueError('UUID frozen document population changed')
-        report = {'schema': 'papercusp-uuid-idempotency-document-redaction-manifest-v1',
-                  'reviewRef': _UUID_DROP_REVIEW, 'replacement': _UUID_MARKER,
-                  'authenticationDisposition': 'plaintext-output-only-not-original-row-authentication',
-                  'redactedDocuments': len(changes), 'occurrenceCount': census['occurrenceCount'],
-                  'occurrences': census['occurrences']}
         fd, temporary = tempfile.mkstemp(prefix='.uuid-manifest-', dir=manifest.parent)
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as handle:
@@ -1711,9 +1740,18 @@ def project_uuid_document_tree(config_path: Path, source: Path, output: Path, ma
             os.link(temporary, manifest)
         finally:
             os.unlink(temporary)
+        validate_uuid_document_projection(config_path, source, output, manifest)
         return report
     except BaseException:
         shutil.rmtree(output)
+        # Only remove this call's manifest, never one that won an exclusive-create
+        # race. The emitted bytes must still equal our exact safe report.
+        if manifest.is_file() and not manifest.is_symlink():
+            try:
+                if json.loads(manifest.read_text()) == report:
+                    manifest.unlink()
+            except (OSError, ValueError):
+                pass
         raise
 
 
@@ -2477,6 +2515,15 @@ def _safe_locator(raw_file: object, scan_root: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) == 6 and argv[1] == '--validate-uuid-documents':
+        try:
+            result = validate_uuid_document_projection(Path(argv[2]), Path(argv[3]), Path(argv[4]), Path(argv[5]))
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError):
+            print('UUID document validation incomplete (values omitted).', file=sys.stderr)
+            return 2
+        print(json.dumps({'reviewRef': result['reviewRef'], 'occurrenceCount': result['occurrenceCount'],
+                          'redactedDocuments': result['redactedDocuments']}))
+        return 0
     if len(argv) >= 4 and argv[1] == '--census-uuid-artifacts':
         try:
             result = census_uuid_artifacts(Path(argv[2]), [Path(path) for path in argv[3:]])

@@ -48,8 +48,11 @@ seed_uuid_row_drop_prepare() {
   local digest="${PAPERCUSP_SEED_UUID_PLAN_SHA256:-}"
   [[ -n "$plan$digest" ]] || return 0
   local store="${PAPERCUSP_SEED_STORE_DIR:-}"
+  local census="${PAPERCUSP_SEED_UUID_CENSUS_PATH:-}"
+  local census_digest="${PAPERCUSP_SEED_UUID_CENSUS_SHA256:-}"
   if [[ "$plan" != /* || "$store" != /* || ! "$digest" =~ ^[0-9a-f]{64}$ \
       || ! -f "$plan" || -L "$plan" || ! -d "$store" || -L "$store" \
+      || "$census" != /* || ! "$census_digest" =~ ^[0-9a-f]{64}$ || ! -f "$census" || -L "$census" \
       || "${PAPERCUSP_SKIP_SEED_CUT:-0}" == "1" || "${PAPERCUSP_FAST_ITER:-0}" == "1" \
       || "${PAPERCUSP_SEED_CORESTORE:-1}" != "1" || "${PAPERCUSP_SEED_REUSE_CORESTORE:-auto}" != "0" \
       || "${PAPERCUSP_SEED_SPARSE:-1}" != "0" || "${PAPERCUSP_SEED_FORCE:-0}" != "1" ]]; then
@@ -60,6 +63,22 @@ seed_uuid_row_drop_prepare() {
   actual="$(sha256sum -- "$plan" 2>/dev/null)" || return 1
   if [[ "${actual%% *}" != "$digest" ]]; then
     echo "ERROR: UUID row-drop plan input changed (values omitted)." >&2
+    return 1
+  fi
+  # Both private inputs must name the same original census. Do not let a later
+  # document projection silently use a different class population.
+  if ! node - "$plan" "$census" "$census_digest" <<'NODE'
+const fs = require('node:fs'), crypto = require('node:crypto');
+try {
+  const [plan, census, digest] = process.argv.slice(2);
+  const bytes = fs.readFileSync(census);
+  if (crypto.createHash('sha256').update(bytes).digest('hex') !== digest
+      || JSON.parse(fs.readFileSync(plan, 'utf8')).privateSourceBindings?.configSha256 !== digest
+      || JSON.parse(bytes).reviewRef !== 'p2p-public-release-endgame-2026-09-01#D-166') process.exit(1);
+} catch { process.exit(1); }
+NODE
+  then
+    echo "ERROR: UUID census input changed or does not bind the row plan (values omitted)." >&2
     return 1
   fi
   SEED_UUID_ROW_DROP_ACTIVE=1
