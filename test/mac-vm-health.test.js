@@ -5,6 +5,7 @@ import path from 'node:path';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
 import test from 'node:test';
+import testScratch from './test-scratch.cjs';
 
 const script = new URL('../bin/mac-vm-health.sh', import.meta.url).pathname;
 const qmpCommand = new URL('../bin/qmp-command.py', import.meta.url).pathname;
@@ -16,6 +17,7 @@ const probeSession = new URL('../bin/vm-rig/probe-session.sh', import.meta.url).
 const loginPreflight = new URL('../bin/vm-rig/preflight-login.sh', import.meta.url).pathname;
 const currentBoot = new URL('../bin/vm-rig/boot-headless-current.sh', import.meta.url).pathname;
 const currentComposer = new URL('../bin/vm-rig/compose-rig-sidecar-current.sh', import.meta.url).pathname;
+const { desktopTestScratchRoot, makeDesktopTestScratchDir, makeDesktopTestScratchDirSync } = testScratch;
 
 const fixtureDirs = new Set();
 
@@ -36,7 +38,7 @@ test.afterEach(cleanupFixtureDirs);
 let cleanupGuardDir;
 
 async function fixture({ ssh = true, qmp = true, qmpExit = qmp ? 0 : 1, operatorProbe = '' } = {}) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'mac-vm-health-'));
+  const dir = await makeDesktopTestScratchDir('mac-vm-health-');
   fixtureDirs.add(dir);
   const bin = path.join(dir, 'bin');
   execFileSync('mkdir', ['-p', bin]);
@@ -75,6 +77,15 @@ test('fixture cleanup guard removes temporary directories', async () => {
 test('fixture cleanup guard runs after each test', async () => {
   assert.equal(fixtureDirs.size, 0);
   await assert.rejects(stat(cleanupGuardDir), { code: 'ENOENT' });
+});
+
+test('desktop test scratch helper nests sync and async fixtures under one parent', async () => {
+  const syncDir = makeDesktopTestScratchDirSync('scratch-helper-sync-');
+  const asyncDir = await makeDesktopTestScratchDir('scratch-helper-async-');
+  fixtureDirs.add(syncDir);
+  fixtureDirs.add(asyncDir);
+  assert.equal(path.dirname(syncDir), desktopTestScratchRoot);
+  assert.equal(path.dirname(asyncDir), desktopTestScratchRoot);
 });
 
 test('reports healthy when guest SSH answers', async () => {
