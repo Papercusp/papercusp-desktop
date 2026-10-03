@@ -99,6 +99,27 @@ test('D-159 aliases follow lexical bindings across minified local names', () => 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('D-161 census identifies type-only edges without dropping mixed runtime imports', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-import-types-'));
+  try {
+    const file = path.join(dir, 'entry.ts');
+    fs.writeFileSync(file, `import type { Plugin } from 'only-types';
+      import { type Config } from 'named-types';
+      import Default, { type Config as C } from 'default-runtime';
+      import { type Config as D, run } from 'mixed-runtime';
+      import 'side-effect'; export type { Plugin } from 'export-types';
+      export { type Config as E } from 'named-export-types';
+      export { type Config as F, run } from 'mixed-export-runtime';
+      const value: number = 1;`);
+    const proof = collectImports(file);
+    assert.deepEqual(proof.imports.filter((r) => r.typeOnly).map((r) => r.specifier),
+      ['only-types', 'named-types', 'export-types', 'named-export-types']);
+    assert.deepEqual(proof.imports.filter((r) => !r.typeOnly).map((r) => r.specifier),
+      ['default-runtime', 'mixed-runtime', 'side-effect', 'mixed-export-runtime']);
+    assert.equal(proof.closureAccepted, false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 /** A synthetic owner value used only to prove D-112 does not require or reject it. */
 const SYNTHETIC_OWNER = 'Zzsynthetic Gateowner';
 const AUDIT_ENV = { ...process.env };

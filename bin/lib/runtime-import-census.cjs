@@ -16,7 +16,7 @@ function collectImports(file) {
   const bytes = fs.readFileSync(file);
   const text = bytes.toString('utf8');
   if (!Buffer.from(text, 'utf8').equals(bytes)) throw new Error('non-UTF8 module refused');
-  const tree = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const tree = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.getScriptKindFromFileName(file));
   if (tree.parseDiagnostics.length) throw new Error(`module parse errors: ${tree.parseDiagnostics.length}`);
 
   // Binding is local to this exact source file. Do not load project config,
@@ -108,7 +108,13 @@ function collectImports(file) {
 
   visit(tree, (node) => {
     if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
-      if (node.moduleSpecifier) record(node, 'static-module', node.moduleSpecifier);
+      const clause = ts.isImportDeclaration(node) ? node.importClause : node;
+      const bindings = ts.isImportDeclaration(node) ? clause?.namedBindings : node.exportClause;
+      const namedTypesOnly = bindings && (ts.isNamedImports(bindings) || ts.isNamedExports(bindings))
+        && bindings.elements.length > 0 && bindings.elements.every((element) => element.isTypeOnly)
+        && !(ts.isImportDeclaration(node) && clause?.name);
+      if (node.moduleSpecifier) record(node, 'static-module', node.moduleSpecifier,
+        { typeOnly: Boolean(clause?.isTypeOnly || namedTypesOnly) });
     } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
       record(node, 'static-module', node.moduleReference.expression);
     } else if (ts.isCallExpression(node)) {
