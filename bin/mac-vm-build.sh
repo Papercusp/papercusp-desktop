@@ -363,12 +363,6 @@ echo "--- sidecar (darwin $(uname -m)) ---"
 if [[ "$PAPERCUSP_REUSE_SIDECAR" == "1" && -d src-tauri/sidecar/apps ]] \
    && file src-tauri/sidecar/bin/node 2>/dev/null | grep -q 'Mach-O'; then
   echo "    PAPERCUSP_REUSE_SIDECAR=1 — reusing existing DARWIN src-tauri/sidecar (skipping the ~1.2GB rebuild)"
-  # A REUSED sidecar skipped build-desktop-sidecar.sh and with it the
-  # release-bundle dependency verifier (WI-3315) — run it here so the reuse
-  # fast-path can't ship a bundle with host-masked deps (the pg_wrapper /
-  # unbundled-kopia bug class). Fails the build on violation, same as the
-  # rebuild path.
-  bash bin/verify-sidecar-bundle.sh src-tauri/sidecar
 else
   if [[ "$PAPERCUSP_REUSE_SIDECAR" == "1" ]]; then
     echo "    PAPERCUSP_REUSE_SIDECAR=1 but the sidecar is missing or NOT darwin (an rsync likely clobbered it with the Linux host sidecar) — rebuilding to be safe"
@@ -378,60 +372,15 @@ fi
 echo "--- sidecar node arch ---"
 file src-tauri/sidecar/bin/node || true
 
-# ── chat dock: bundle pui + companion wasm + zellij (WI-668) ──────────────
-# The docked terminal runs `pui chat` (zellij with the pui-companion plugin).
-# None of these ship by default → the dock is a blank pane in a packaged app.
-# Drop them into the sidecar so native_terminal.rs (prepare_dock_env) can put
-# pui+zellij on PATH and point PUI_COMPANION_WASM at the bundled plugin.
-echo "--- chat dock: pui + companion wasm + zellij 0.44.3 ---"
-REPO="$(cd "$ROOT/.." && pwd)"
+# ── chat dock: keep the sidecar's verified artifact generation together ───
+# build-desktop-sidecar.sh already builds pui, its companion, and zellij, then
+# writes pui-install.json over the exact final bytes. Rebuilding either member
+# here used to make the packaged manifest stale (observed on macOS 0.0.26).
+# This check also covers PAPERCUSP_REUSE_SIDECAR=1 before Tauri copies it,
+# including the dependency closure it used to check separately above.
+echo "--- chat dock: verify bundled pui generation ---"
 SIDECAR="$ROOT/src-tauri/sidecar"
-mkdir -p "$SIDECAR/bin"
-# Resolve cargo's REAL target dir (honors CARGO_TARGET_DIR + ~/.cargo/config.toml
-# `[build] target-dir` — a box-level redirect puts artifacts NOWHERE under
-# <crate>/target/, which broke pui-zellij-plugin's build-install.sh the same way,
-# P-002 2026-08-24). Fail-soft like build-desktop-sidecar.sh (WI-40008): loud
-# WARN, then the standard in-crate/workspace candidates below still apply.
-if ! CARGO_TGT="$(
-  cd "$REPO/apps/tui" \
-    && cargo metadata --no-deps --format-version 1 \
-      | python3 -c 'import sys,json;print(json.load(sys.stdin).get("target_directory",""))'
-)"; then
-  echo "    WARN: cargo metadata could not resolve the target directory — falling back to standard crate/workspace target paths" >&2
-  CARGO_TGT=""
-fi
-# 1. pui binary (apps/tui) — native release build.
-( cd "$REPO/apps/tui" && cargo build --release )
-# Existence-checked candidates (NOT `find` over maybe-missing dirs — under
-# `set -eo pipefail` a missing path arg makes find non-zero → pipefail → exit).
-PUI_BIN=""
-for _c in "${CARGO_TGT:+$CARGO_TGT/release/pui}" "$REPO/apps/tui/target/release/pui" "$REPO/target/release/pui"; do
-  [[ -n "$_c" && -f "$_c" ]] && PUI_BIN="$_c" && break
-done
-[[ -n "$PUI_BIN" ]] || { echo "ERROR: pui binary not found after build"; exit 1; }
-cp "$PUI_BIN" "$SIDECAR/bin/pui"; chmod 755 "$SIDECAR/bin/pui"
-echo "    ✓ pui → sidecar/bin/pui ($PUI_BIN)"
-# 2. companion zellij plugin (wasm32-wasip1) — API version-coupled to zellij 0.44.3.
-rustup target add wasm32-wasip1 >/dev/null 2>&1 || true
-( cd "$REPO/apps/pui-zellij-plugin" && cargo build --release --target wasm32-wasip1 )
-WASM=""
-for _c in "${CARGO_TGT:+$CARGO_TGT/wasm32-wasip1/release/pui_companion.wasm}" "$REPO/apps/pui-zellij-plugin/target/wasm32-wasip1/release/pui_companion.wasm" "$REPO/target/wasm32-wasip1/release/pui_companion.wasm"; do
-  [[ -n "$_c" && -f "$_c" ]] && WASM="$_c" && break
-done
-[[ -n "$WASM" ]] || { echo "ERROR: companion .wasm not found after build"; exit 1; }
-cp "$WASM" "$SIDECAR/pui-companion.wasm"
-echo "    ✓ companion → sidecar/pui-companion.wasm ($WASM)"
-# 3. zellij 0.44.3 — the plugin API is version-coupled; must match EXACTLY.
-ZJ_VER=0.44.3
-case "$(uname -m)" in arm64) ZJ_ARCH=aarch64 ;; *) ZJ_ARCH=x86_64 ;; esac
-if [[ -x "$SIDECAR/bin/zellij" ]] && "$SIDECAR/bin/zellij" --version 2>/dev/null | grep -q "$ZJ_VER"; then
-  echo "    ✓ zellij ${ZJ_VER} already bundled — skipping download"
-else
-  curl -fsSL "https://github.com/zellij-org/zellij/releases/download/v${ZJ_VER}/zellij-${ZJ_ARCH}-apple-darwin.tar.gz" | tar -xz -C "$SIDECAR/bin"
-  [[ -x "$SIDECAR/bin/zellij" ]] || { echo "ERROR: zellij ${ZJ_VER} not fetched"; exit 1; }
-  chmod 755 "$SIDECAR/bin/zellij"
-  echo "    ✓ zellij ${ZJ_VER} (${ZJ_ARCH}) → sidecar/bin/zellij"
-fi
+bash bin/verify-sidecar-bundle.sh "$SIDECAR"
 
 # ── env-sidecars/staging (WI-3285 P-004; pinned contract, plan
 # env-switcher-packaged-all-platforms-2026-07-06) ──────────────────────────
