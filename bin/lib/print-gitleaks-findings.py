@@ -1451,6 +1451,14 @@ def _uuid_census_inputs(config_path: Path) -> tuple[dict[str, object], dict[str,
         _private_file(path)
         if _sha256(path) != source['rowsSha256']:
             raise ValueError('UUID source export changed')
+        if 'privacyProjectionContext' in source:
+            context = source['privacyProjectionContext']
+            if (not isinstance(context, dict)
+                    or set(context) != {'schema', 'literalsSha256', 'excludedTablesSha256'}
+                    or context['schema'] != 'papercusp-seed-privacy-projection-v1'
+                    or any(not re.fullmatch(r'[0-9a-f]{64}', str(context[field]))
+                           for field in ('literalsSha256', 'excludedTablesSha256'))):
+                raise ValueError('UUID privacy projection context invalid')
     if 'sourceManifestPath' in config:
         manifest_path = Path(config['sourceManifestPath'])
         if _sha256(manifest_path) != config['sourceManifestSha256']:
@@ -1484,6 +1492,8 @@ def _uuid_source_rows(source: dict[str, object]):
             if identity in row_ids:
                 raise ValueError('UUID source export must contain each winning row once')
             row_ids.add(identity)
+            if 'privacyProjection' in row and 'privacyProjectionContext' not in source:
+                raise ValueError('UUID privacy projection context missing')
             yield row
     if count != source['rowCount'] or _sha256(Path(source['rowsPath'])) != source['rowsSha256']:
         raise ValueError('UUID source export incomplete or changed')
@@ -1566,6 +1576,7 @@ def assemble_uuid_idempotency_drop_plans(config_path: Path) -> dict[str, object]
                                      'sources': config['sources'], 'epochKeysSha256': config['epochKeysSha256']},
             'sourceAuthentication': 'original-envelope-aead',
             'sourceSignatureAndCoverage': 'requires-independent-hypercore-export-validation',
+            'sourcePrivacyProjection': 'requires-independent-shared-projection-validation',
             'counts': {'originalRows': original, 'originalAuthenticated': encrypted,
                        'originalPlaintext': original - encrypted, 'droppedRows': dropped,
                        'droppedAuthenticated': encrypted_dropped,
