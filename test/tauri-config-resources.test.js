@@ -11,6 +11,10 @@ function readConfig(name) {
   return JSON.parse(fs.readFileSync(path.join(root, 'src-tauri', name), 'utf8'));
 }
 
+test('macOS bundles have an explicit code signing identity', () => {
+  assert.equal(readConfig('tauri.conf.json').bundle.macOS.signingIdentity, '-');
+});
+
 function readText(...segments) {
   return fs.readFileSync(path.join(root, ...segments), 'utf8');
 }
