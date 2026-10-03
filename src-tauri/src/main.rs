@@ -9056,8 +9056,15 @@ fn start_native_terminal(app: &AppHandle) {
 /// do NOT launch it (D-004: the dock is FLAGS.TESTING-gated; the webview's
 /// `native_terminal_set_enabled` relay is the only spawn path). Runs in both
 /// dev and prod so the state + layout persistence are ready if the gate opens.
-fn init_native_terminal(app: &tauri::App) {
-    let strategy = native_terminal::resolve_strategy_from_env();
+fn init_native_terminal(app: &tauri::App, window_owner: bool) {
+    // The packaged Server owns the Quick Panel webview even though it has no
+    // main window. That webview invokes native-terminal commands during mount,
+    // so the state must exist in every role. A Server must never spawn a dock.
+    let strategy = if window_owner {
+        native_terminal::resolve_strategy_from_env()
+    } else {
+        native_terminal::TerminalStrategy::Disabled
+    };
     println!(
         "[papercusp-desktop] native-terminal strategy: {}",
         strategy.label()
@@ -9683,13 +9690,10 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
                 }
             }
 
-            // Native sibling terminal — resolve strategy + launch the glued
-            // (X11) / native terminal and register the glue hook. It's glued to
-            // a window, so only the GUI (and dev) has one; the windowless Server
-            // skips it. Visual-only; coordinates via the substrate.
-            if is_dev || role.is_gui() {
-                init_native_terminal(app);
-            }
+            // Every role may host a webview: the Server owns the Quick Panel.
+            // Manage terminal state for its commands in every role, with a
+            // disabled strategy on the windowless Server.
+            init_native_terminal(app, is_dev || role.is_gui());
 
             if is_dev {
                 // In dev mode we trust the developer (or beforeDevCommand's
