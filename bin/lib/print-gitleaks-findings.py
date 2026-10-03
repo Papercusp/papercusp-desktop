@@ -742,6 +742,10 @@ def _vendored_package_bytes(ref: dict[str, object], trees: dict[str, object],
     if (package["version"] != ref["version"] or package["integrity"] != ref["integrity"]
             or ref["packagePath"] != "node_modules/" + ref["name"]):
         raise ValueError("vendored certificate package mismatch")
+    registry_url = ("https://registry.npmjs.org/" + ref["name"] + "/-/"
+                    + ref["name"].rsplit("/", 1)[-1] + "-" + ref["version"] + ".tgz")
+    if package.get("resolved") != registry_url:
+        raise ValueError("vendored package registry URL mismatch")
     algorithm, encoded = ref["integrity"].split("-", 1)
     if algorithm != "sha512":
         raise ValueError("unsupported package integrity")
@@ -756,17 +760,41 @@ def _vendored_package_bytes(ref: dict[str, object], trees: dict[str, object],
     if base64.b64encode(digest.digest()).decode() != encoded:
         raise ValueError("package archive integrity mismatch")
     member = ref["member"]
-    if not member.startswith("package/") or ".." in Path(member).parts:
+    if (not isinstance(member, str) or member.startswith("/")
+            or any(part in {"", ".", ".."} for part in member.split("/"))):
         raise ValueError("invalid package member")
-    suffix = "/node_modules/" + ref["name"] + "/" + member.removeprefix("package/")
-    if not bundled_path.as_posix().endswith(suffix):
-        raise ValueError("bundled package path mismatch")
-    package_root = Path(bundled_path.as_posix()[:-len(member.removeprefix("package/"))])
-    package_json = json.loads((package_root / "package.json").read_text())
-    if package_json.get("name") != ref["name"] or package_json.get("version") != ref["version"]:
-        raise ValueError("bundled package identity mismatch")
     with tarfile.open(archive) as handle:
-        found = [row for row in handle.getmembers() if row.name == member]
+        members = handle.getmembers()
+        # npm also serves archives with repository roots (ssh2@1.17.0 uses
+        # mscdex-ssh2-5c506eb/). Derive exactly one root from the integrity-bound
+        # package metadata, never from a caller-selected arbitrary prefix.
+        metadata = [row for row in members
+                    if len(row.name.split("/")) == 2 and row.name.endswith("/package.json")]
+        if (len(metadata) != 1 or not metadata[0].isfile()
+                or metadata[0].name.split("/")[0] in {"", ".", ".."}):
+            raise ValueError("unique regular archive package metadata required")
+        archive_json = json.loads(handle.extractfile(metadata[0]).read())
+        if (not isinstance(archive_json, dict) or archive_json.get("name") != ref["name"]
+                or archive_json.get("version") != ref["version"]):
+            raise ValueError("archive package identity mismatch")
+        prefix = metadata[0].name.removesuffix("package.json")
+        if not member.startswith(prefix) or member == metadata[0].name:
+            raise ValueError("package member outside archive root")
+        relative = member[len(prefix):]
+        if ((ref["name"] == "ssh2" and relative.startswith("test/fixtures/")
+             and relative != "test/fixtures/https_cert.pem")
+                or (ref["name"] == "style-dictionary"
+                    and relative == "examples/advanced/create-react-native-app/android/app/debug.keystore")):
+            raise ValueError("vendor fixture cannot be excluded")
+        suffix = "/node_modules/" + ref["name"] + "/" + relative
+        if not bundled_path.as_posix().endswith(suffix):
+            raise ValueError("bundled package path mismatch")
+        package_root = Path(bundled_path.as_posix()[:-len(relative)])
+        package_json = json.loads((package_root / "package.json").read_text())
+        if (package_json.get("name") != ref["name"]
+                or package_json.get("version") != ref["version"]):
+            raise ValueError("bundled package identity mismatch")
+        found = [row for row in members if row.name == member]
         if len(found) != 1 or not found[0].isfile():
             raise ValueError("exact regular package member required")
         data = handle.extractfile(found[0]).read()
@@ -862,11 +890,6 @@ def validate_identity_name_exclusions(entries: list[dict[str, object]], inputs: 
         if key_check["realFindings"] != 0 or private_der.returncode == 0:
             raise ValueError("private material cannot be name-excluded")
         kind = entry["class"]
-        if "packageRef" in entry:
-            relative = entry["packageRef"]["member"]
-            if relative in {"package/test/fixtures/https_key.pem",
-                            "package/examples/advanced/create-react-native-app/android/app/debug.keystore"}:
-                raise ValueError("vendor private-key fixture cannot be excluded")
         if kind == "frozen-public-source-vocabulary":
             if ("sourceRef" in entry) == ("packageRef" in entry):
                 raise ValueError("one source provenance required")
