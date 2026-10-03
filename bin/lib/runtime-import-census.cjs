@@ -160,6 +160,73 @@ function collectImports(file) {
 // of conditions: require.resolve for CJS and import.meta.resolve for ESM. Both
 // run in a child with host NODE_OPTIONS/NODE_PATH removed. ESM also needs the
 // explicit-parent flag so it cannot use this collector's tree.
+// Binder-only name lookup avoids asking the JS type checker to infer enormous
+// bundled initializers. A seed identifies one lexical binding by exact bytes;
+// equal spellings in other scopes or property names never join its population.
+function collectLexicalReferences(file, seeds) {
+  file = path.resolve(file);
+  const bytes = fs.readFileSync(file), text = bytes.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(bytes)) throw new Error('non-UTF8 module refused');
+  const tree = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  if (tree.parseDiagnostics.length) throw new Error(`module parse errors: ${tree.parseDiagnostics.length}`);
+  if (!Array.isArray(seeds) || !seeds.length) throw new Error('exact lexical seeds required');
+  ts.bindSourceFile(tree, { allowJs: true, noResolve: true, noLib: true });
+  const names = new Set(seeds.map((seed) => seed.name));
+  const nodes = [];
+  const visit = (node) => {
+    if (ts.isIdentifier(node) && names.has(node.text)) nodes.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  const lexical = (node) => {
+    const parent = node.parent;
+    if (ts.isPropertyAccessExpression(parent) && parent.name === node) return false;
+    if ((ts.isPropertyAssignment(parent) || ts.isMethodDeclaration(parent)
+        || ts.isGetAccessorDeclaration(parent) || ts.isSetAccessorDeclaration(parent)
+        || ts.isPropertyDeclaration(parent)) && parent.name === node) return false;
+    if (ts.isBindingElement(parent) && parent.propertyName === node) return false;
+    if (ts.isImportSpecifier(parent) && parent.propertyName === node) return false;
+    if (ts.isExportSpecifier(parent) || ts.isLabeledStatement(parent)
+        || ts.isBreakStatement(parent) || ts.isContinueStatement(parent)) return false;
+    return true;
+  };
+  const binding = (node) => {
+    if (!lexical(node)) return null;
+    const name = ts.escapeLeadingUnderscores(node.text);
+    for (let scope = node.parent; scope; scope = scope.parent) {
+      const symbol = scope.locals?.get(name);
+      if (symbol) return symbol;
+    }
+    return null;
+  };
+  const positions = [...new Set(nodes.flatMap((node) =>
+    [node.getStart(tree), node.end, node.parent.getStart(tree), node.parent.end]))].sort((a, b) => a - b);
+  const offsets = new Map(); let previous = 0, offset = 0;
+  for (const position of positions) {
+    offset += Buffer.byteLength(text.slice(previous, position), 'utf8');
+    offsets.set(position, offset); previous = position;
+  }
+  const citation = (node) => {
+    const start = offsets.get(node.getStart(tree)), end = offsets.get(node.end);
+    return { byteStart: start, byteEnd: end, sha256: hash(bytes.subarray(start, end)),
+      kind: ts.SyntaxKind[node.kind], source: text.slice(node.getStart(tree), node.end) };
+  };
+  const populations = seeds.map((seed) => {
+    const node = nodes.find((candidate) => candidate.text === seed.name
+      && offsets.get(candidate.getStart(tree)) === seed.byteStart);
+    if (!node) throw new Error(`lexical seed not found: ${seed.name}@${seed.byteStart}`);
+    const symbol = binding(node);
+    if (!symbol) throw new Error(`lexical seed is unbound or a property name: ${seed.name}@${seed.byteStart}`);
+    const references = nodes.filter((candidate) => candidate.text === seed.name && binding(candidate) === symbol);
+    return { seed: citation(node), references: references.map((reference) =>
+      ({ identifier: citation(reference), context: citation(reference.parent) })) };
+  });
+  return { schema: 'papercusp-lexical-reference-census-v1', file, sha256: hash(bytes),
+    parser: { name: 'typescript', version: ts.version },
+    coverage: 'Binder-local lexical identifiers only. Property names, type inference, alias dataflow and generated bodies are not resolved.',
+    populations, closureAccepted: false };
+}
+
 function collectStaticClosure(root, entrypoints) {
   root = fs.realpathSync(root);
   const inside = (file) => { const p = path.relative(root, file); return p !== '..' && !p.startsWith(`..${path.sep}`) && !path.isAbsolute(p); };
@@ -239,7 +306,7 @@ function collectStaticClosure(root, entrypoints) {
     closureAccepted: false };
 }
 
-module.exports = { collectImports, collectStaticClosure };
+module.exports = { collectImports, collectStaticClosure, collectLexicalReferences };
 if (require.main === module) {
   try {
     const args = process.argv.slice(2);

@@ -34,7 +34,47 @@ const root = path.resolve(__dirname, '..');
 const AUDIT = path.join(root, 'bin/audit-release-bundle.py');
 const TRUST_TOOLCHAIN = path.join(root, 'bin/lib/vm-release-trust-toolchain.sh');
 const SOURCE_NOTE_HELPER = path.join(root, 'bin/lib/sidecar-source-note.sh');
-const { collectImports, collectStaticClosure } = require('../bin/lib/runtime-import-census.cjs');
+const { collectImports, collectStaticClosure, collectLexicalReferences } = require('../bin/lib/runtime-import-census.cjs');
+
+test('D-161 namespace census follows the seeded binding through getters and excludes shadowed names', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-lexical-census-'));
+  try {
+    const file = path.join(dir, 'bundle.mjs');
+    const source = `const c = {}; exportGet(c, {core: () => c});
+      function peer(c) { return c.core.Doc; }
+      { const c = {Doc: 1}; c.Doc; }
+      const unrelated = {c: 2}; unrelated.c;
+      const alias = c; const shorthand = {c}; alias.core;`;
+    fs.writeFileSync(file, source);
+    const proof = collectLexicalReferences(file, [{name: 'c', byteStart: Buffer.byteLength(source.slice(0, source.indexOf('c =')))}]);
+    assert.deepEqual(proof.populations[0].references.map((row) => row.context.source),
+      ['c = {}', 'exportGet(c, {core: () => c})', '() => c', 'alias = c', 'c']);
+    assert.equal(proof.closureAccepted, false);
+    const shadow = source.indexOf('peer(c)') + 'peer('.length;
+    assert.deepEqual(collectLexicalReferences(file, [{name: 'c', byteStart: shadow}])
+      .populations[0].references.map((row) => row.context.source), ['c', 'c.core']);
+    assert.throws(() => collectLexicalReferences(file, [{name: 'c', byteStart: source.indexOf('unrelated.c') + 'unrelated.'.length}]), /property name/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('D-161 lexical seeds bind UTF8 bytes and fail closed on invalid input', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-lexical-bytes-'));
+  try {
+    const file = path.join(dir, 'bundle.cjs');
+    const source = '/* Ω😀 */ let __namespace; function init(){ __namespace = {}; return __namespace; }';
+    fs.writeFileSync(file, source);
+    const byteStart = Buffer.byteLength(source.slice(0, source.indexOf('__namespace')));
+    const proof = collectLexicalReferences(file, [{name: '__namespace', byteStart}]);
+    assert.equal(proof.populations[0].references.length, 3);
+    for (const row of proof.populations[0].references) {
+      assert.equal(Buffer.from(source).subarray(row.identifier.byteStart, row.identifier.byteEnd).toString(), '__namespace');
+    }
+    assert.throws(() => collectLexicalReferences(file, [{name: '__namespace', byteStart: source.indexOf('__namespace')}]), /seed not found/);
+    assert.throws(() => collectLexicalReferences(file, [{name: 'absent', byteStart: 0}]), /seed not found/);
+    fs.writeFileSync(file, 'function (');
+    assert.throws(() => collectLexicalReferences(file, [{name: 'x', byteStart: 0}]), /parse errors/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
 
 test('D-161 static closure follows Node import and require conditions without executing modules', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-module-closure-'));
