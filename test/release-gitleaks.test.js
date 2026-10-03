@@ -1194,6 +1194,26 @@ print(json.dumps({'exactMask':True,'negativeControls':7,'remainderScan':True}))
   assert.deepEqual(JSON.parse(result.stdout), { exactMask: true, negativeControls: 7, remainderScan: true });
 });
 
+test('secret-key derivation catches all encoded seed assignments without accepting partial tokens', () => {
+  const program = String.raw`
+import importlib.util,json,sys,base64
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+seed=bytes(range(32));public,_=m._key_publics(m._sodium(),seed);secret=seed+public
+encodings=[seed.hex().encode(),base64.b64encode(seed),base64.urlsafe_b64encode(seed).rstrip(b'='),secret.hex().encode(),base64.b64encode(secret),base64.urlsafe_b64encode(secret).rstrip(b'=')]
+for encoded in encodings:
+ for prefix,suffix in [(b'key=',b''),(b'key=',b';'),(b'key = ',b'\n'),(b'key="',b'"')]:
+  proof=m.scan_secret_key_bytes(prefix+encoded+suffix,{public})
+  assert proof['derivationMatches']>0 and proof['tokensChecked']>0
+ for prefix,suffix in [(b'_',b''),(b'x',b''),(b'',b'x'),(b'',b'_')]:
+  proof=m.scan_secret_key_bytes(prefix+encoded+suffix,{public})
+  assert proof['derivationMatches']==0
+print(json.dumps({'assignmentControls':24,'maximalBoundaryControls':24}))
+`;
+  const result = spawnSync('python3', ['-c', program, reportFormatterPath], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { assignmentControls: 24, maximalBoundaryControls: 24 });
+});
+
 test('D-157 remainder scan catches an adjacent credential and private key after masking a public token', () => {
   const program = String.raw`
 import importlib.util,json,sys,pathlib,hashlib

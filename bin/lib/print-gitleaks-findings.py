@@ -827,7 +827,9 @@ def validate_identity_secret_proof(scan: dict[str, object], root: Path, director
 # (a PEM header or a service name in code) is not a serialized private key.
 _ED25519_DER_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
 _X25519_DER_PREFIX = bytes.fromhex("302e020100300506032b656e04220420")
-_KEY_TOKENS = re.compile(rb"(?<![A-Za-z0-9_+/=-])(?:[0-9a-fA-F]{128}|[0-9a-fA-F]{64}|[A-Za-z0-9_+/-]{86}={0,2}|[A-Za-z0-9_+/-]{43}=?)(?![A-Za-z0-9_+/=-])")
+# '=' can precede an unquoted assignment value. On the right it remains part
+# of base64 padding, so a prefix of a longer encoded value is never accepted.
+_KEY_TOKENS = re.compile(rb"(?<![A-Za-z0-9_+/-])(?:[0-9a-fA-F]{128}|[0-9a-fA-F]{64}|[A-Za-z0-9_+/-]{86}={0,2}|[A-Za-z0-9_+/-]{43}=?)(?![A-Za-z0-9_+/=-])")
 _PEM_PRIVATE = re.compile(rb"-----BEGIN ((?:[A-Z0-9]+ )*PRIVATE KEY)-----\s+([A-Za-z0-9+/=\s]+)-----END \1-----")
 _PRIVATE_JWK = re.compile(rb'\{[^{}]{0,16384}"kty"\s*:\s*"(?:OKP|RSA|EC)"[^{}]{0,16384}\}')
 
