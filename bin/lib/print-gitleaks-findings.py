@@ -1381,7 +1381,7 @@ def _uuid_occurrences(value: object, tokens: set[str], path: list[object] | None
         pattern = re.compile('|'.join(re.escape(t) for t in sorted(tokens)), re.IGNORECASE)
         hits = list(pattern.finditer(value))
         if len(hits) == 1 and hits[0].span() == (0, len(value)):
-            result.append(path)
+            result.append(path or ['<value>'])
         else:
             result += [[*path, '<text>', index] for index in range(len(hits))]
     return result
@@ -1504,6 +1504,7 @@ def assemble_uuid_idempotency_drop_plans(config_path: Path) -> dict[str, object]
             original += 1
             encrypted += int(authenticated)
             tokens.update(_uuid_class_tokens(plain))
+            tokens.update(_uuid_class_tokens({field: row[field] for field in ('table', 'hbKey', 'author_pubkey') if field in row}))
     plans = []
     locators = set()
     dropped = encrypted_dropped = 0
@@ -1512,6 +1513,8 @@ def assemble_uuid_idempotency_drop_plans(config_path: Path) -> dict[str, object]
         for row in _uuid_source_rows(source):
             plain, authenticated = _uuid_open_row(row, config['potId'], keys)
             paths = _uuid_occurrences(plain, tokens)
+            paths += _uuid_occurrences({field: row[field] for field in ('table', 'hbKey', 'author_pubkey') if field in row},
+                                       tokens, ['<row-header>'])
             if not paths:
                 continue
             occurrences = [{'segment': row['segment'], 'line': row['line'], 'fieldPath': path} for path in paths]
@@ -1566,6 +1569,7 @@ def validate_uuid_idempotency_row_drops(config_path: Path, plan_set: dict[str, o
         for row in _uuid_source_rows(source):
             plain, _ = _uuid_open_row(row, config['potId'], keys)
             tokens.update(_uuid_class_tokens(plain))
+            tokens.update(_uuid_class_tokens({field: row[field] for field in ('table', 'hbKey', 'author_pubkey') if field in row}))
             originals[(source['sourceKeyHex'], row['table'], row['hbKey'])] = row
     retained_auth = 0
     for key, source in by_key.items():
@@ -1583,7 +1587,9 @@ def validate_uuid_idempotency_row_drops(config_path: Path, plan_set: dict[str, o
             if content(row) != content(original):
                 raise ValueError('UUID output changed original authentication')
             plain, authenticated = _uuid_open_row(row, config['potId'], keys)
-            if _uuid_class_tokens(plain) or _uuid_occurrences(plain, tokens):
+            headers = {field: row[field] for field in ('table', 'hbKey', 'author_pubkey') if field in row}
+            if (_uuid_class_tokens(plain) or _uuid_occurrences(plain, tokens)
+                    or _uuid_class_tokens(headers) or _uuid_occurrences(headers, tokens)):
                 raise ValueError('UUID class remains in output')
             retained_auth += int(authenticated)
             remaining.remove(identity)

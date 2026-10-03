@@ -80,15 +80,23 @@ for changed in [originals,[],[{**originals[3],'ts':999}],[{**originals[3],'autho
 out.write_text(json.dumps(originals[3])+'\n');output['rowsSha256']=m._sha256(out)
 doc=base/'doc.txt';doc.write_text('idempotencyKey: <redacted:idempotency-key>');valid(files=[manifest,doc])
 token=m._uuid_open_row(originals[0],'fixture-pot',json.loads((base/'epoch-keys.json').read_text())['fixture-pot'])[0]['payload']['idempotencyKey']
-for content in [token,'idempotencyKey: 14be300d-6014-47a7-bb41-62c5b782971d','x'*(1024*1024-18)+token,
-                'idempotencyKey:'+(' '*(1024*1024))+'14be300d-6014-47a7-bb41-62c5b782971d']:
+new_token='14be300d-'+'6014-47a7-bb41-62c5b782971d'
+for content in [token,'idempotencyKey: '+new_token,'x'*(1024*1024-18)+token,
+                'idempotencyKey:'+(' '*(1024*1024))+new_token]:
  doc.write_text(content);refused(lambda:valid(files=[manifest,doc]))
 encoded=base/'encoded.json';encoded.write_text('{"idempotencyKey":"\\u0063'+token[1:]+'"}');refused(lambda:valid(files=[manifest,encoded]))
+assert m._uuid_occurrences(token,{token})==[['<value>']]
 sourcefile=base/'original.jsonl';cfg=json.loads(config.read_text())
 def assemble_changed(rows):
  sourcefile.write_text(''.join(json.dumps(row)+'\n' for row in rows));cfg['sources'][0]['rowsSha256']=m._sha256(sourcefile);config.write_text(json.dumps(cfg));m.assemble_uuid_idempotency_drop_plans(config)
 for changed in [[{**originals[0],'author_pubkey':'changed'},*originals[1:]], [{**originals[0],'hbKey':'changed'},*originals[1:]],originals[:-1],[originals[0],*originals[:-1]]]:refused(lambda:assemble_changed(changed))
 sourcefile.write_bytes(original_bytes);cfg['sources'][0]['rowsSha256']=m._sha256(sourcefile);config.write_text(json.dumps(cfg));assert m.assemble_uuid_idempotency_drop_plans(config)['counts']==plan['counts']
+header_row={'table':'harness_plans','hbKey':token,'value':{'public':'retained otherwise'},'segment':'segment-000001.blob','line':6}
+header_cfg=copy.deepcopy(cfg);header_cfg['sources'][0]['rowCount']=6;header_cfg['sources'][0]['sourceLength']=6
+sourcefile.write_text(original_bytes.decode()+json.dumps(header_row)+'\n');header_cfg['sources'][0]['rowsSha256']=m._sha256(sourcefile);config.write_text(json.dumps(header_cfg))
+header_plan=m.assemble_uuid_idempotency_drop_plans(config);assert header_plan['counts']['droppedRows']==5 and header_plan['counts']['occurrenceCount']==7
+assert header_plan['plans'][0]['rows'][-1]['occurrences'][0]['fieldPath']==['<row-header>','hbKey']
+sourcefile.write_bytes(original_bytes);config.write_text(json.dumps(cfg))
 assert sourcefile.read_bytes()==original_bytes
 print(json.dumps({'counts':result['counts'],'failClosed':True,'privateHashes':[r['valueSha256'] for r in p['rows']]}))
 `;
