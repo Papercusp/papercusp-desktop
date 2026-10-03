@@ -397,6 +397,22 @@ test('direct sidecar producer captures provenance before dependency mutations', 
   assert.match(builder, /PROVENANCE_SOURCE_DIRTY_MANIFEST/);
 });
 
+test('Mac VM build verifies the sidecar pui generation before packaging without replacing it', () => {
+  const builder = fs.readFileSync(path.join(BIN, 'mac-vm-build.sh'), 'utf8');
+  const sidecarBuildAt = builder.indexOf('bash bin/build-desktop-sidecar.sh');
+  const verifyAt = builder.lastIndexOf('bash bin/verify-sidecar-bundle.sh "$SIDECAR"');
+  const tauriBuildAt = builder.indexOf('echo "--- tauri build ($MAC_BUILD_TARGET) ---"');
+
+  assert.ok(sidecarBuildAt > 0, 'Mac producer must build the canonical sidecar');
+  assert.ok(verifyAt > sidecarBuildAt, 'Mac producer must verify the assembled sidecar');
+  assert.ok(tauriBuildAt > verifyAt, 'the pui manifest must be verified before Tauri copies the sidecar');
+  assert.doesNotMatch(
+    builder.slice(sidecarBuildAt, tauriBuildAt),
+    /(?:cp|install)\s+[^\n]*(?:\$SIDECAR\/bin\/pui|\$SIDECAR\/pui-companion\.wasm)/,
+    'Mac producer must not replace pui or its companion after their shared manifest is written',
+  );
+});
+
 test('release-audited sidecar fails closed on dirty or moving source before publish', () => {
   const builder = fs.readFileSync(path.join(BIN, 'build-desktop-sidecar.sh'), 'utf8');
   const dirtyGuardAt = builder.indexOf('release-audited sidecar requires a clean source tree');
