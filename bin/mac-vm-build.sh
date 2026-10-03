@@ -322,6 +322,12 @@ done
 mkdir -p src-tauri/resources
 if [[ -n "$SHIM" ]]; then
   cp "$SHIM" src-tauri/resources/libPapercuspTermShim.dylib
+  # SwiftPM embeds absolute build paths in the dylib's debug/local symbols.
+  # Strip the vendored copy before Tauri signs and packages it; the source
+  # artifact remains available for build diagnostics. The assembled-app
+  # identity scan below verifies the exact bytes that will ship.
+  xcrun strip -x src-tauri/resources/libPapercuspTermShim.dylib \
+    || { echo "FATAL: could not strip build paths from the term shim" >&2; exit 1; }
   # WI-484916: ASSERT the slices, do not merely print them. This was
   # `lipo -info ... || true`, a probe whose failure was unobservable — the
   # can-falsely-pass class P-411/WI-5788 eliminated for rig scenarios, sitting

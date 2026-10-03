@@ -15,6 +15,16 @@ test('macOS bundles have an explicit code signing identity', () => {
   assert.equal(readConfig('tauri.conf.json').bundle.macOS.signingIdentity, '-');
 });
 
+test('Mac producer strips Swift debug paths before signing the vendored terminal shim', () => {
+  const producer = fs.readFileSync(path.join(root, 'bin/mac-vm-build.sh'), 'utf8');
+  const copiedAt = producer.indexOf('cp "$SHIM" src-tauri/resources/libPapercuspTermShim.dylib');
+  const strippedAt = producer.indexOf('xcrun strip -x src-tauri/resources/libPapercuspTermShim.dylib');
+  const verifiedAt = producer.indexOf('assert_shim_slices src-tauri/resources/libPapercuspTermShim.dylib');
+  const packagedAt = producer.indexOf('npx tauri build');
+  assert(copiedAt >= 0 && copiedAt < strippedAt && strippedAt < verifiedAt && verifiedAt < packagedAt);
+  assert.match(producer, /audit-release-bundle\.py" --scan-dir "\$role_bundle_dir\/macos\/\$role_label\.app"/);
+});
+
 function readText(...segments) {
   return fs.readFileSync(path.join(root, ...segments), 'utf8');
 }
