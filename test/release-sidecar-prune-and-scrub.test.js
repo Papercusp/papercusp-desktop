@@ -34,7 +34,47 @@ const root = path.resolve(__dirname, '..');
 const AUDIT = path.join(root, 'bin/audit-release-bundle.py');
 const TRUST_TOOLCHAIN = path.join(root, 'bin/lib/vm-release-trust-toolchain.sh');
 const SOURCE_NOTE_HELPER = path.join(root, 'bin/lib/sidecar-source-note.sh');
-const { collectImports } = require('../bin/lib/runtime-import-census.cjs');
+const { collectImports, collectStaticClosure } = require('../bin/lib/runtime-import-census.cjs');
+
+test('D-161 static closure follows Node import and require conditions without executing modules', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-module-closure-'));
+  try {
+    const pkg = path.join(dir, 'node_modules', 'dual'); fs.mkdirSync(pkg, { recursive: true });
+    fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: 'dual', exports: { import: './esm.mjs', require: './cjs.cjs' } }));
+    fs.writeFileSync(path.join(pkg, 'esm.mjs'), "throw new Error('must not execute'); import './import-leaf.mjs';");
+    fs.writeFileSync(path.join(pkg, 'cjs.cjs'), "throw new Error('must not execute'); require('./require-leaf.cjs');");
+    fs.writeFileSync(path.join(pkg, 'import-leaf.mjs'), "export const value = 1;");
+    fs.writeFileSync(path.join(pkg, 'require-leaf.cjs'), "module.exports = require('./data.json');");
+    fs.writeFileSync(path.join(pkg, 'data.json'), '{"value":1}');
+    fs.writeFileSync(path.join(dir, 'entry.ts'), "import 'dual'; require('dual'); import d = require('dual'); import type t = require('absent-type'); import(dynamicName);");
+    const proof = collectStaticClosure(dir, ['entry.ts']);
+    assert.deepEqual(proof.outside, []); assert.deepEqual(proof.failures, []);
+    assert.deepEqual(proof.files[0].imports.filter((edge) => edge.target).map((edge) => edge.target),
+      ['node_modules/dual/esm.mjs', 'node_modules/dual/cjs.cjs', 'node_modules/dual/cjs.cjs']);
+    assert.ok(proof.files.some((file) => file.file === 'node_modules/dual/import-leaf.mjs'));
+    assert.ok(proof.files.some((file) => file.file === 'node_modules/dual/require-leaf.cjs'));
+    assert.ok(proof.files.some((file) => file.resourceKind === 'json'));
+    assert.ok(proof.manifests.some((file) => file.file === 'node_modules/dual/package.json'));
+    assert.deepEqual(proof.unresolved.map((edge) => edge.site.source), ['import(dynamicName)']);
+    assert.equal(proof.closureAccepted, false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('D-161 static closure retains caught missing imports, generated bodies and root escapes', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-module-boundary-'));
+  try {
+    const root = path.join(dir, 'root'); fs.mkdirSync(root);
+    fs.writeFileSync(path.join(dir, 'outside.cjs'), "require('@aws-sdk/client-kms');");
+    fs.symlinkSync(path.join(dir, 'outside.cjs'), path.join(root, 'escape.cjs'));
+    fs.writeFileSync(path.join(root, 'entry.cjs'), "try { require('missing'); } catch {} require('./escape.cjs'); new Function(body);");
+    const proof = collectStaticClosure(root, ['entry.cjs']);
+    assert.equal(proof.outside.length, 1);
+    assert.deepEqual(proof.unresolved.map((edge) => edge.site.source),
+      ["require('missing')", "require('./escape.cjs')", 'new Function(body)']);
+    assert.equal(proof.unresolved[0].errorCode, 'MODULE_NOT_FOUND');
+    assert.equal(proof.closureAccepted, false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
 
 test('D-159 census captures loader aliases, generated imports and unresolved arguments without authorizing omission', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-import-census-'));

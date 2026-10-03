@@ -7,6 +7,9 @@
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const path = require('node:path');
+const { builtinModules, createRequire } = require('node:module');
+const { execFileSync } = require('node:child_process');
+const { fileURLToPath } = require('node:url');
 const ts = require('typescript');
 
 const hash = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -115,7 +118,8 @@ function collectImports(file) {
       if (node.moduleSpecifier) record(node, 'static-module', node.moduleSpecifier,
         { typeOnly: Boolean(clause?.isTypeOnly) });
     } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
-      record(node, 'static-module', node.moduleReference.expression);
+      record(node, 'static-module', node.moduleReference.expression,
+        { typeOnly: Boolean(node.isTypeOnly), resolutionMode: 'require' });
     } else if (ts.isCallExpression(node)) {
       const expression = node.expression;
       if (expression.kind === ts.SyntaxKind.ImportKeyword) record(node, 'dynamic-import', node.arguments[0]);
@@ -152,11 +156,98 @@ function collectImports(file) {
   };
 }
 
-module.exports = { collectImports };
+// Resolve syntax without executing candidate modules. Node supplies both sets
+// of conditions: require.resolve for CJS and import.meta.resolve for ESM. The
+// latter needs the explicit-parent flag so it cannot use this collector's tree.
+function collectStaticClosure(root, entrypoints) {
+  root = fs.realpathSync(root);
+  const inside = (file) => { const p = path.relative(root, file); return p !== '..' && !p.startsWith(`..${path.sep}`) && !path.isAbsolute(p); };
+  const builtin = new Set(builtinModules.flatMap((name) => [name, `node:${name}`]));
+  const files = [], outside = [], failures = [], manifests = new Map(), seen = new Set();
+  let pending = entrypoints.map((file) => path.resolve(root, file));
+  const esmResolver = `import { pathToFileURL } from 'node:url';
+    const queries = JSON.parse(process.argv[1]);
+    console.log(JSON.stringify(queries.map(({file, specifier}) => {
+      try { return {target: import.meta.resolve(specifier, pathToFileURL(file).href)}; }
+      catch (error) { return {errorCode: error.code || error.name}; }
+    })));`;
+  const env = { ...process.env }; delete env.NODE_OPTIONS; delete env.NODE_PATH;
+  const bindManifests = (file) => {
+    for (let dir = path.dirname(file); inside(dir); dir = path.dirname(dir)) {
+      const manifest = path.join(dir, 'package.json');
+      if (fs.existsSync(manifest)) manifests.set(manifest, hash(fs.readFileSync(manifest)));
+      if (dir === root) break;
+    }
+  };
+  while (pending.length) {
+    const batch = pending; pending = [];
+    const esm = [];
+    for (const candidate of batch) {
+      let file;
+      try { file = fs.realpathSync(candidate); }
+      catch (error) { failures.push({ file: candidate, errorCode: error.code }); continue; }
+      if (!inside(file)) { outside.push({ file: candidate, target: file }); continue; }
+      if (seen.has(file)) continue;
+      seen.add(file); bindManifests(file);
+      let census;
+      try {
+        if (path.extname(file) === '.json') {
+          const bytes = fs.readFileSync(file), text = bytes.toString('utf8');
+          if (!Buffer.from(text, 'utf8').equals(bytes)) throw new Error('non-UTF8 JSON refused');
+          JSON.parse(text);
+          census = { file, sha256: hash(bytes), imports: [], resourceKind: 'json' };
+        } else census = collectImports(file);
+      } catch (error) { failures.push({ file, error: error.message }); continue; }
+      const row = { file: path.relative(root, file), sha256: census.sha256, imports: [] };
+      if (census.resourceKind) row.resourceKind = census.resourceKind;
+      files.push(row);
+      for (const site of census.imports) {
+        const edge = { site }; row.imports.push(edge);
+        if (site.typeOnly) { edge.typeOnly = true; continue; }
+        if (site.specifier === null || site.kind === 'generated-code') { edge.unresolved = true; continue; }
+        if (builtin.has(site.specifier)) { edge.builtin = true; continue; }
+        edge.resolutionMode = site.resolutionMode || (site.kind === 'require' ? 'require' : 'import');
+        if (edge.resolutionMode === 'import') { esm.push({ file, edge }); continue; }
+        try { finish(edge, createRequire(file).resolve(site.specifier)); }
+        catch (error) { edge.errorCode = error.code || error.name; edge.unresolved = true; }
+      }
+    }
+    if (esm.length) {
+      const queries = esm.map(({ file, edge }) => ({ file, specifier: edge.site.specifier }));
+      const resolutions = JSON.parse(execFileSync(process.execPath,
+        ['--experimental-import-meta-resolve', '--input-type=module', '-e', esmResolver, JSON.stringify(queries)],
+        { env, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }));
+      if (resolutions.length !== esm.length) throw new Error('ESM resolver population mismatch');
+      resolutions.forEach((resolution, index) => {
+        const edge = esm[index].edge;
+        if (resolution.errorCode) { edge.errorCode = resolution.errorCode; edge.unresolved = true; return; }
+        try { finish(edge, fileURLToPath(resolution.target)); }
+        catch (error) { edge.errorCode = error.code || error.name; edge.unresolved = true; }
+      });
+    }
+  }
+  function finish(edge, target) {
+    target = fs.realpathSync(target);
+    if (!inside(target)) { edge.unresolved = true; outside.push({ site: edge.site, target }); return; }
+    bindManifests(target); edge.target = path.relative(root, target); pending.push(target);
+  }
+  return { schema: 'papercusp-static-module-closure-v1', root, entrypoints, nodeVersion: process.version,
+    resolution: 'Node default require/import conditions; no candidate execution; realpaths must remain inside root',
+    files, manifests: [...manifests].map(([file, sha256]) => ({ file: path.relative(root, file), sha256 })),
+    outside, failures, unresolved: files.flatMap((file) => file.imports.filter((edge) => edge.unresolved).map((edge) => ({ file: file.file, ...edge }))),
+    closureAccepted: false };
+}
+
+module.exports = { collectImports, collectStaticClosure };
 if (require.main === module) {
   try {
-    if (process.argv.length !== 3) throw new Error('usage: runtime-import-census.cjs <module>');
-    process.stdout.write(`${JSON.stringify(collectImports(process.argv[2]), null, 2)}\n`);
+    const args = process.argv.slice(2);
+    if (args[0] === '--static-closure' && args.length >= 3) {
+      process.stdout.write(`${JSON.stringify(collectStaticClosure(args[1], args.slice(2)), null, 2)}\n`);
+    } else {
+      if (args.length !== 1) throw new Error('usage: runtime-import-census.cjs <module> | --static-closure <root> <entry>…');
+      process.stdout.write(`${JSON.stringify(collectImports(args[0]), null, 2)}\n`);
+    }
   } catch (error) {
     process.stderr.write(`${error.message}\n`); process.exitCode = 1;
   }
