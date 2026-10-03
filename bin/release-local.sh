@@ -2468,6 +2468,8 @@ cut_release_seed() {
     echo "ERROR: installer seed cut failed (rc=$cut_rc); refusing to continue the release cut." >&2
     return 1
   fi
+  # Later Tauri/VM hooks consume the completed seed, never reapply its source plan.
+  unset PAPERCUSP_SEED_UUID_PLAN_PATH PAPERCUSP_SEED_UUID_PLAN_SHA256
 }
 
 # Precomputed doc_sections vectors (plan ship-precomputed-doc-vectors-2026-10-01,
@@ -2509,8 +2511,6 @@ cut_doc_vector_seed() {
 
 cut_doc_vector_seed
 cut_release_seed
-# Later Tauri/VM hooks consume this completed seed, never reapply a source plan.
-unset PAPERCUSP_SEED_UUID_PLAN_PATH PAPERCUSP_SEED_UUID_PLAN_SHA256
 
 # Belt-and-braces (0.0.11 cut r3, WI-4736): cut-seed-cli now prunes RocksDB's
 # info log at cut time, but a reused/as-is seed (PAPERCUSP_SKIP_SEED_CUT=1) or a

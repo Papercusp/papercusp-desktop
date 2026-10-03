@@ -76,7 +76,7 @@ for (const release of [false, true]) {
       if (release) {
         const definition = fs.readFileSync(script, 'utf8').match(/^cut_release_seed\(\) \{\n[\s\S]*?^\}/m)?.[0];
         assert(definition);
-        command = `set -uo pipefail; source "$1/lib/seed-reuse-age.sh"; ORCHESTRATOR_HERE="$1"; ROOT="$2"; MONOREPO="$3"; release_seed_cut_is_quiesced(){ exit 69; }; release_seed_sparse_refused(){ return 1; }; ${definition}\ncut_release_seed`;
+        command = `set -uo pipefail; source "$1/lib/seed-reuse-age.sh"; ORCHESTRATOR_HERE="$1"; ROOT="$2"; MONOREPO="$3"; release_seed_cut_is_quiesced(){ exit 69; }; release_seed_sparse_refused(){ return 1; }; ${definition}\ncut_release_seed || exit $?\nexport PAPERCUSP_SKIP_SEED_CUT=1; seed_uuid_row_drop_prepare`;
       } else {
         fs.copyFileSync(script, path.join(bin, 'ensure-release-seed.sh'));
       }
