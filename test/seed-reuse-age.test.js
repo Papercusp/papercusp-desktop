@@ -32,6 +32,71 @@ function check(cutTs, env = {}) {
 
 const HOUR = 3_600_000;
 
+test('D166 shared seed policy preserves argument boundaries and refuses stale, partial or skipped plans', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'uuid-seed-mode-'));
+  try {
+    const plan = path.join(dir, "private plan's.json"); const store = path.join(dir, 'frozen original');
+    fs.mkdirSync(store); fs.writeFileSync(plan, '{"fixture":"not a credential"}', { mode: 0o600 });
+    const digest = require('node:crypto').createHash('sha256').update(fs.readFileSync(plan)).digest('hex');
+    const base = { ...process.env, PAPERCUSP_SEED_UUID_PLAN_PATH: plan, PAPERCUSP_SEED_UUID_PLAN_SHA256: digest,
+      PAPERCUSP_SEED_STORE_DIR: store, PAPERCUSP_SEED_FORCE: '1', PAPERCUSP_SEED_CORESTORE: '1',
+      PAPERCUSP_SEED_REUSE_CORESTORE: '0', PAPERCUSP_SEED_SPARSE: '0', PAPERCUSP_SKIP_SEED_CUT: '0', PAPERCUSP_FAST_ITER: '0' };
+    const run = env => spawnSync('bash', ['-c', 'source "$1"; seed_uuid_row_drop_prepare || exit $?; printf "%s\\n" "$SEED_UUID_ROW_DROP_ACTIVE" "${SEED_UUID_ROW_DROP_ARGS[@]}"', 'x', helper],
+      { encoding: 'utf8', env: { ...base, ...env } });
+    const valid = run({}); assert.equal(valid.status, 0, valid.stderr);
+    assert.deepEqual(valid.stdout.trim().split('\n'), ['1', '--skip-corestore-refresh', '--uuid-idempotency-drop-plans', plan, '--uuid-idempotency-drop-plans-sha256', digest]);
+    for (const bad of [{ PAPERCUSP_SEED_UUID_PLAN_SHA256: 'b'.repeat(64) }, { PAPERCUSP_SEED_UUID_PLAN_PATH: '' },
+      { PAPERCUSP_SEED_STORE_DIR: '' }, { PAPERCUSP_SKIP_SEED_CUT: '1' }, { PAPERCUSP_FAST_ITER: '1' },
+      { PAPERCUSP_SEED_REUSE_CORESTORE: 'auto' }, { PAPERCUSP_SEED_CORESTORE: '0' }, { PAPERCUSP_SEED_SPARSE: '1' }, { PAPERCUSP_SEED_FORCE: '0' }]) {
+      assert.equal(run(bad).status, 1, JSON.stringify(bad));
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+for (const release of [false, true]) {
+  test(`D166 ${release ? 'release-local' : 'ensure-release-seed'} forwards the frozen plan and fails closed on cut errors`, () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'uuid-seed-wrapper-'));
+    try {
+      const desktop = path.join(dir, 'papercusp-desktop'); const bin = path.join(desktop, 'bin');
+      const fake = path.join(dir, 'fake-bin'); const store = path.join(dir, 'frozen-store');
+      fs.mkdirSync(path.join(bin, 'lib'), { recursive: true }); fs.mkdirSync(path.join(dir, 'apps', 'operator'), { recursive: true });
+      fs.mkdirSync(fake); fs.mkdirSync(store); fs.mkdirSync(path.join(desktop, 'src-tauri', 'seed'), { recursive: true });
+      fs.copyFileSync(helper, path.join(bin, 'lib', 'seed-reuse-age.sh'));
+      const plan = path.join(dir, 'plan.json'); fs.writeFileSync(plan, '{}', { mode: 0o600 });
+      const digest = require('node:crypto').createHash('sha256').update(fs.readFileSync(plan)).digest('hex');
+      const argsPath = path.join(dir, 'args.json');
+      fs.writeFileSync(path.join(fake, 'npx'), '#!/usr/bin/env node\nconst fs=require("node:fs"),p=require("node:path");const a=process.argv.slice(2);fs.writeFileSync(process.env.UUID_TEST_ARGS_OUT,JSON.stringify(a));if(process.env.UUID_TEST_FAIL==="1")process.exit(7);const out=a[a.indexOf("--out")+1];fs.mkdirSync(out,{recursive:true});fs.writeFileSync(p.join(out,"manifest.json"),"{}");fs.writeFileSync(p.join(out,"epoch-keys.json"),"{}");\n', { mode: 0o755 });
+      const env = { ...process.env, PATH: `${fake}:${process.env.PATH}`, UUID_TEST_ARGS_OUT: argsPath,
+        PAPERCUSP_SEED_UUID_PLAN_PATH: plan, PAPERCUSP_SEED_UUID_PLAN_SHA256: digest, PAPERCUSP_SEED_STORE_DIR: store,
+        PAPERCUSP_SEED_FORCE: '1', PAPERCUSP_SEED_REUSE_CORESTORE: '0', PAPERCUSP_SEED_CORESTORE: '1',
+        PAPERCUSP_SEED_SPARSE: '0', PAPERCUSP_SKIP_SEED_CUT: '0', PAPERCUSP_FAST_ITER: '0', PAPERCUSP_SEED_SNAPSHOT_DIR: '',
+        PAPERCUSP_SEED_EMIT_EPOCH_KEY: '1', PAPERCUSP_SEED_DEPTH: '' };
+      const script = path.join(root, 'bin', release ? 'release-local.sh' : 'ensure-release-seed.sh');
+      let command;
+      if (release) {
+        const definition = fs.readFileSync(script, 'utf8').match(/^cut_release_seed\(\) \{\n[\s\S]*?^\}/m)?.[0];
+        assert(definition);
+        command = `set -uo pipefail; source "$1/lib/seed-reuse-age.sh"; ORCHESTRATOR_HERE="$1"; ROOT="$2"; MONOREPO="$3"; release_seed_cut_is_quiesced(){ exit 69; }; release_seed_sparse_refused(){ return 1; }; ${definition}\ncut_release_seed`;
+      } else {
+        fs.copyFileSync(script, path.join(bin, 'ensure-release-seed.sh'));
+      }
+      const run = extra => spawnSync('bash', release ? ['-c', command, 'x', bin, desktop, dir] : [path.join(bin, 'ensure-release-seed.sh')],
+        { encoding: 'utf8', env: { ...env, ...extra }, timeout: 10000 });
+      const valid = run({}); assert.equal(valid.status, 0, valid.stderr + valid.stdout);
+      const args = JSON.parse(fs.readFileSync(argsPath));
+      assert(args.includes('--skip-corestore-refresh')); assert(!args.includes('--reuse-corestore')); assert(!args.includes('--sparse'));
+      assert.equal(args[args.indexOf('--store-dir') + 1], store);
+      assert.equal(args[args.indexOf('--uuid-idempotency-drop-plans') + 1], plan);
+      assert.equal(args[args.indexOf('--uuid-idempotency-drop-plans-sha256') + 1], digest);
+      const manifest = path.join(desktop, 'src-tauri', 'seed', 'manifest.json'); fs.writeFileSync(manifest, 'prior-output-sentinel');
+      const failed = run({ UUID_TEST_FAIL: '1' }); assert.notEqual(failed.status, 0, failed.stdout);
+      assert.equal(fs.readFileSync(manifest, 'utf8'), 'prior-output-sentinel');
+      fs.rmSync(argsPath); const changed = run({ PAPERCUSP_SEED_UUID_PLAN_SHA256: 'b'.repeat(64) });
+      assert.notEqual(changed.status, 0); assert(!fs.existsSync(argsPath), 'changed plan invoked the cutter');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+}
+
 test('a fresh reused corestore passes and reports its age', () => {
   // Mid-hour on purpose (EI-24759293506933965): the helper floors `date +%s` to whole seconds
   // while Date.now() carries milliseconds, so a fixture exactly 2h old measures a few hundred
