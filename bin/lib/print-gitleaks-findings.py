@@ -1566,7 +1566,8 @@ def validate_uuid_idempotency_row_drops(config_path: Path, plan_set: dict[str, o
             if identity not in remaining:
                 raise ValueError('dropped or extra UUID output row')
             original = originals[identity]
-            if any(row.get(field) != original.get(field) for field in ('value', 'author_pubkey', 'epoch')):
+            content = lambda entry: {k: v for k, v in entry.items() if k not in ('segment', 'line', 'storedValueJson')}
+            if content(row) != content(original):
                 raise ValueError('UUID output changed original authentication')
             plain, authenticated = _uuid_open_row(row, config['potId'], keys)
             if _uuid_class_tokens(plain) or _uuid_occurrences(plain, tokens):
@@ -1587,8 +1588,21 @@ def validate_uuid_idempotency_row_drops(config_path: Path, plan_set: dict[str, o
         raise ValueError('UUID public manifest or authentication accounting mismatch')
     inventory = []
     for path in artifact_inputs:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError('UUID shipped artifact input invalid')
         before = _sha256(path)
-        # Scan every byte, including matches crossing chunk boundaries; no scan-report allowlist.
+        # mmap keeps arbitrarily spaced field/value pairs visible without a fixed overlap gap.
+        if path.stat().st_size:
+            with path.open('rb') as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                if re.search(_UUID_NAMED_TEXT.pattern.encode(), data):
+                    raise ValueError('UUID named class remains in shipped artifact')
+        if path.suffix in ('.json', '.jsonl'):
+            with path.open() as handle:
+                rows = (json.loads(line) for line in handle) if path.suffix == '.jsonl' else [json.load(handle)]
+                for value in rows:
+                    if _uuid_class_tokens(value) or _uuid_occurrences(value, tokens):
+                        raise ValueError('UUID encoded class remains in shipped artifact')
+        # Known-value mirrors crossing chunk boundaries; no scan-report allowlist.
         tail = b''
         with path.open('rb') as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b''):
@@ -2058,6 +2072,49 @@ def _safe_locator(raw_file: object, scan_root: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) == 4 and argv[1] == '--assemble-uuid-row-drops':
+        try:
+            config, output = Path(argv[2]), Path(argv[3])
+            if output.exists() or output.is_symlink() or output.parent.is_symlink() or output.parent.stat().st_mode & 0o077:
+                raise ValueError('private create-only UUID output required')
+            result = assemble_uuid_idempotency_drop_plans(config)
+            fd, temporary = tempfile.mkstemp(prefix='uuid-drops-', suffix='.partial', dir=output.parent)
+            try:
+                with os.fdopen(fd, 'w') as handle:
+                    json.dump(result, handle, ensure_ascii=False)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.link(temporary, output)
+            finally:
+                os.unlink(temporary)
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError):
+            print('UUID row-drop assembly incomplete (values omitted).', file=sys.stderr)
+            return 2
+        print(json.dumps({'schema': result['schema'], 'counts': result['counts'], 'planSetSha256': _sha256(output)}))
+        return 0
+    if len(argv) == 5 and argv[1] == '--validate-uuid-row-drops':
+        try:
+            plan_path, output_path = Path(argv[3]), Path(argv[4])
+            _private_file(plan_path)
+            _private_file(output_path)
+            plan = json.loads(plan_path.read_text())
+            candidate = json.loads(output_path.read_text())
+            manifest_path = Path(candidate['manifestPath'])
+            if _sha256(manifest_path) != candidate['manifestSha256']:
+                raise ValueError('UUID output manifest changed')
+            manifest = json.loads(manifest_path.read_text())
+            reports = [report for store in manifest['stores']
+                       for report in store.get('meta', {}).get('uuidIdempotencyRedactions', [])]
+            inputs = [Path(path) for path in candidate['artifactInputs']]
+            if manifest_path not in inputs:
+                raise ValueError('UUID output manifest not scanned')
+            result = validate_uuid_idempotency_row_drops(Path(argv[2]), plan, candidate['sources'], reports, inputs)
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError):
+            print('UUID row-drop validation incomplete; candidate remains refused (values omitted).', file=sys.stderr)
+            return 2
+        print(json.dumps({'reviewRef': result['reviewRef'], 'counts': result['counts'],
+                          'rawClassHits': result['rawClassHits'], 'candidateBinding': result['candidateBinding']}))
+        return 0
     if len(argv) == 5 and argv[1] == "--scan-identity-proof":
         try:
             scan = scan_identity_proof(Path(argv[2]), Path(argv[3]), Path(argv[4]))

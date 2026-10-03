@@ -13,6 +13,103 @@ const scriptPath = path.join(root, 'bin', 'release-local.sh');
 const reportFormatterPath = path.join(root, 'bin', 'lib', 'print-gitleaks-findings.py');
 const gitleaksBin = process.env.GITLEAKS_BIN || 'gitleaks';
 
+test('D-166 authenticates the full supplied row census, drops the class and mirrors, and preserves honest counts', () => {
+  const crypto = require('node:crypto');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-uuid-census-'));
+  fs.chmodSync(temp, 0o700);
+  try {
+    const sodium = require('sodium-native');
+    const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+    const key = crypto.randomBytes(32);
+    const tokenA = 'c539c37e-09d8-49b6-928b-706f25c70852';
+    const tokenB = 'd8b5ad5a-7e05-4d70-878d-61e937d60439';
+    const values = [{ payload: { idempotencyKey: tokenA } },
+      { body: JSON.stringify({ idempotencyKey: tokenB }) },
+      { body: `historical mirror ${tokenA} ${tokenB} ${tokenB}` },
+      { operation_id: '92f716c7-43e3-423e-9e3b-c9b063f03ecd', safe: 'unchanged' },
+      { nested: [{ idempotencyKey: tokenA }] }];
+    const rows = values.map((value, index) => {
+      const row = { table: 'harness_plans', hbKey: `row-${index}`, author_pubkey: 'synthetic-public-author',
+        ts: 100 + index, epoch: 0, segment: 'segment-000001.blob', line: index + 1 };
+      if (index === 4) { delete row.epoch; return { ...row, value }; }
+      const opId = hash(JSON.stringify([row.table, row.hbKey, row.author_pubkey]));
+      const aad = Buffer.concat(['fixture-pot', '0', opId].flatMap(part => {
+        const bytes = Buffer.from(part); const length = Buffer.alloc(4); length.writeUInt32BE(bytes.length);
+        return [length, bytes];
+      }));
+      const nonce = crypto.randomBytes(24); const plain = Buffer.from(JSON.stringify(value));
+      const ciphertext = Buffer.alloc(plain.length + 16);
+      sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(ciphertext, plain, aad, null, nonce, key);
+      return { ...row, value: { __rekey: Buffer.concat([nonce, ciphertext]).toString('base64') } };
+    });
+    const write = (name, content) => {
+      const file = path.join(temp, name); fs.writeFileSync(file, content, { mode: 0o600 }); return file;
+    };
+    const rowsPath = write('original.jsonl', rows.map(row => JSON.stringify(row)).join('\n') + '\n');
+    const keysPath = write('epoch-keys.json', JSON.stringify({ 'fixture-pot': { 0: key.toString('base64') } }));
+    const source = { sourceKeyHex: 'a'.repeat(64), sourceLength: 5, rowCount: 5, rowsPath, rowsSha256: hash(fs.readFileSync(rowsPath)) };
+    const configPath = write('config.json', JSON.stringify({ reviewRef: 'p2p-public-release-endgame-2026-09-01#D-166',
+      potId: 'fixture-pot', epochKeysPath: keysPath, epochKeysSha256: hash(fs.readFileSync(keysPath)), sources: [source] }));
+    write('output.jsonl', JSON.stringify(rows[3]) + '\n');
+    const program = String.raw`
+import importlib.util,json,sys,pathlib,copy
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+base=pathlib.Path(sys.argv[2]);config=base/'config.json';original_bytes=(base/'original.jsonl').read_bytes()
+plan=m.assemble_uuid_idempotency_drop_plans(config)
+assert plan['counts']=={'originalRows':5,'originalAuthenticated':4,'originalPlaintext':1,'droppedRows':4,'droppedAuthenticated':3,'authenticatedOriginalRetained':1,'redactedReattested':0,'occurrenceCount':6}
+assert len(plan['plans'])==1 and len(plan['plans'][0]['rows'])==4
+source=json.loads(config.read_text())['sources'][0]
+output={**source,'rowCount':1,'rowsPath':str(base/'output.jsonl'),'rowsSha256':m._sha256(base/'output.jsonl')}
+p=plan['plans'][0]
+reports=[{'schema':'papercusp-uuid-idempotency-redaction-manifest-v1','reviewRef':p['reviewRef'],'replacement':m._UUID_MARKER,'authenticationDisposition':'dropped','ciphertextAuthentication':'requires-independent-candidate-validation','droppedRows':4,'occurrenceCount':6,'occurrences':[o for r in p['rows'] for o in r['occurrences']]}]
+manifest=base/'manifest.json';manifest.write_text(json.dumps({'stores':[{'meta':{'uuidIdempotencyRedactions':reports}}]}))
+valid=lambda p=plan,o=[output],r=reports,files=[manifest]:m.validate_uuid_idempotency_row_drops(config,p,o,r,files)
+result=valid();assert result['rawClassHits']==0
+def refused(fn):
+ try:fn();raise AssertionError('invalid UUID proof passed')
+ except (ValueError,KeyError):pass
+bad=copy.deepcopy(plan);bad['counts']['droppedRows']=0;refused(lambda:valid(p=bad))
+bad=copy.deepcopy(plan);bad['plans'][0]['rows'][0]['valueSha256']='0'*64;refused(lambda:valid(p=bad))
+bad=copy.deepcopy(reports);bad[0]['authenticationDisposition']='authenticated-original';refused(lambda:valid(r=bad))
+bad=copy.deepcopy(reports);bad[0]['occurrences'].pop();refused(lambda:valid(r=bad))
+refused(lambda:valid(o=[]));refused(lambda:valid(o=[output,output]));refused(lambda:valid(files=[]))
+originals=[json.loads(t) for t in original_bytes.decode().splitlines()]
+out=base/'output.jsonl'
+for changed in [originals,[],[{**originals[3],'ts':999}],[{**originals[3],'author_pubkey':'changed'}],[{**originals[3],'value':{'safe':'changed'}}]]:
+ out.write_text(''.join(json.dumps(row)+'\n' for row in changed));o={**output,'rowCount':len(changed),'rowsSha256':m._sha256(out)};refused(lambda:valid(o=[o]))
+out.write_text(json.dumps(originals[3])+'\n');output['rowsSha256']=m._sha256(out)
+doc=base/'doc.txt';doc.write_text('idempotencyKey: <redacted:idempotency-key>');valid(files=[manifest,doc])
+token=m._uuid_open_row(originals[0],'fixture-pot',json.loads((base/'epoch-keys.json').read_text())['fixture-pot'])[0]['payload']['idempotencyKey']
+for content in [token,'idempotencyKey: 14be300d-6014-47a7-bb41-62c5b782971d','x'*(1024*1024-18)+token,
+                'idempotencyKey:'+(' '*(1024*1024))+'14be300d-6014-47a7-bb41-62c5b782971d']:
+ doc.write_text(content);refused(lambda:valid(files=[manifest,doc]))
+encoded=base/'encoded.json';encoded.write_text('{"idempotencyKey":"\\u0063'+token[1:]+'"}');refused(lambda:valid(files=[manifest,encoded]))
+sourcefile=base/'original.jsonl';cfg=json.loads(config.read_text())
+def assemble_changed(rows):
+ sourcefile.write_text(''.join(json.dumps(row)+'\n' for row in rows));cfg['sources'][0]['rowsSha256']=m._sha256(sourcefile);config.write_text(json.dumps(cfg));m.assemble_uuid_idempotency_drop_plans(config)
+for changed in [[{**originals[0],'author_pubkey':'changed'},*originals[1:]], [{**originals[0],'hbKey':'changed'},*originals[1:]],originals[:-1],[originals[0],*originals[:-1]]]:refused(lambda:assemble_changed(changed))
+sourcefile.write_bytes(original_bytes);cfg['sources'][0]['rowsSha256']=m._sha256(sourcefile);config.write_text(json.dumps(cfg));assert m.assemble_uuid_idempotency_drop_plans(config)['counts']==plan['counts']
+assert sourcefile.read_bytes()==original_bytes
+print(json.dumps({'counts':result['counts'],'failClosed':True,'privateHashes':[r['valueSha256'] for r in p['rows']]}))
+`;
+    const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8', timeout: 30_000 });
+    assert.equal(result.status, 0, result.stderr);
+    const proof = JSON.parse(result.stdout);
+    assert.deepEqual(proof.privateHashes, [0, 1, 2, 4].map(index => hash(JSON.stringify(rows[index].value))));
+    assert.equal(proof.counts.occurrenceCount, 6);
+    assert.ok(proof.failClosed);
+    assert.ok(!(result.stdout + result.stderr).includes(tokenA));
+    assert.ok(!(result.stdout + result.stderr).includes(tokenB));
+    const planOutput = path.join(temp, 'plan-set.json');
+    const assembled = spawnSync('python3', [reportFormatterPath, '--assemble-uuid-row-drops', configPath, planOutput], { encoding: 'utf8' });
+    assert.equal(assembled.status, 0, assembled.stderr);
+    assert.equal(JSON.parse(assembled.stdout).counts.droppedRows, 4);
+    assert.equal(fs.statSync(planOutput).mode & 0o077, 0);
+    const repeated = spawnSync('python3', [reportFormatterPath, '--assemble-uuid-row-drops', configPath, planOutput], { encoding: 'utf8' });
+    assert.equal(repeated.status, 2, 'assembler must not overwrite prior evidence');
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test('D-142 secret-key detector catches serialized keys and recipient seeds without leaking values', () => {
   const crypto = require('node:crypto');
   const pair = crypto.generateKeyPairSync('ed25519');
