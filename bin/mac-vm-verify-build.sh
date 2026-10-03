@@ -108,6 +108,7 @@ for OVERLAY in \
   apps/operator/scripts/lib/mirror-tree.sh \
   apps/operator/scripts/setup-wake-runtime.sh \
   apps/operator/scripts/setup-vad-runtime.sh \
+  apps/operator/scripts/setup-vditor-runtime.sh \
 ; do
   if [ -f "$MONOREPO/$OVERLAY" ]; then
     mkdir -p "$SNAP/$(dirname "$OVERLAY")"
