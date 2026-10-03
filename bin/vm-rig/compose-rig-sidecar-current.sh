@@ -260,6 +260,17 @@ if [ "$PUSH" = "1" ]; then
   REMOTE_LAUNCHD_DIR_Q="$(printf '%q' "$REMOTE_LAUNCHD_DIR")"
   REMOTE_SERVICE_USER_Q="$(printf '%q' "$REMOTE_SERVICE_USER")"
   REMOTE_INSTALLER_Q="${REMOTE_LAUNCHD_DIR_Q}/install-launchdaemon.sh"
+  # The staged health wait must cover migration catch-up on the far side. The
+  # launcher's own 180s default is sized for a warm restart; a payload that is
+  # dozens of migrations ahead of the VM DB failed that window mid-migration and
+  # rolled back healthy (WI-10004688, 2026-10-03). The value is forwarded over
+  # ssh explicitly because a local env var never reaches the remote shell.
+  RESTART_HEALTH_TIMEOUT_SEC="${PAPERCUSP_RESTART_HEALTH_TIMEOUT_SEC:-900}"
+  case "$RESTART_HEALTH_TIMEOUT_SEC" in
+    ''|*[!0-9]*) echo "FATAL: PAPERCUSP_RESTART_HEALTH_TIMEOUT_SEC must be a positive integer (got '$RESTART_HEALTH_TIMEOUT_SEC')" >&2; exit 2 ;;
+  esac
+  REMOTE_HEALTH_ENV="PAPERCUSP_RESTART_HEALTH_TIMEOUT_SEC=$RESTART_HEALTH_TIMEOUT_SEC"
+  echo "→ staged health window: ${RESTART_HEALTH_TIMEOUT_SEC}s"
   echo "→ staging payload on $VM:$REMOTE_STAGE (native node_modules/ untouched)"
   # The active directory is not written in place. boot-headless-current.sh
   # validates the complete stage, stops the exact recorded owner PID, swaps the
@@ -299,7 +310,7 @@ if [ "$PUSH" = "1" ]; then
   # LaunchDaemon owner is booted out, stop only a PID proven to map to the exact
   # installed Server bundle; the helper fails closed if identity is uncertain.
   ssh "$VM" "PAPERCUSP_RIG_HOME=$REMOTE_HOME_Q PAPERCUSP_RIG_SIDECAR_DIR=$REMOTE_DIR_Q bash $REMOTE_LAUNCHER_Q --quiesce-server"
-  if ! ssh "$VM" "PAPERCUSP_RIG_HOME=$REMOTE_HOME_Q PAPERCUSP_RIG_SIDECAR_DIR=$REMOTE_DIR_Q bash $REMOTE_LAUNCHER_Q --stage $REMOTE_STAGE_Q"; then
+  if ! ssh "$VM" "$REMOTE_HEALTH_ENV PAPERCUSP_RIG_HOME=$REMOTE_HOME_Q PAPERCUSP_RIG_SIDECAR_DIR=$REMOTE_DIR_Q bash $REMOTE_LAUNCHER_Q --stage $REMOTE_STAGE_Q"; then
     echo "FATAL: staged deploy failed; restoring current-payload LaunchDaemon around the rollback payload" >&2
     ssh "$VM" "sudo -n $REMOTE_INSTALLER_Q --user $REMOTE_SERVICE_USER_Q --current-payload $REMOTE_DIR_Q --current-launcher $REMOTE_LAUNCHER_Q" || true
     exit 1
@@ -313,7 +324,7 @@ if [ "$PUSH" = "1" ]; then
   # persistent service uninstalled).
   if ! ssh "$VM" "sudo -n $REMOTE_INSTALLER_Q --user $REMOTE_SERVICE_USER_Q --current-payload $REMOTE_DIR_Q --current-launcher $REMOTE_LAUNCHER_Q --build-sha $BUILD_SHA --build-version 0.0.0"; then
     echo "FATAL: LaunchDaemon install/identity verification failed; restoring bounded detached service" >&2
-    ssh "$VM" "PAPERCUSP_RIG_HOME=$REMOTE_HOME_Q PAPERCUSP_RIG_SIDECAR_DIR=$REMOTE_DIR_Q bash $REMOTE_LAUNCHER_Q" || true
+    ssh "$VM" "$REMOTE_HEALTH_ENV PAPERCUSP_RIG_HOME=$REMOTE_HOME_Q PAPERCUSP_RIG_SIDECAR_DIR=$REMOTE_DIR_Q bash $REMOTE_LAUNCHER_Q" || true
     exit 1
   fi
   echo "→ staged deploy completed and system/com.papercusp.server now supervises the exact current payload"
