@@ -7,7 +7,7 @@
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const path = require('node:path');
-const { builtinModules, createRequire } = require('node:module');
+const { builtinModules } = require('node:module');
 const { execFileSync } = require('node:child_process');
 const { fileURLToPath } = require('node:url');
 const ts = require('typescript');
@@ -157,18 +157,21 @@ function collectImports(file) {
 }
 
 // Resolve syntax without executing candidate modules. Node supplies both sets
-// of conditions: require.resolve for CJS and import.meta.resolve for ESM. The
-// latter needs the explicit-parent flag so it cannot use this collector's tree.
+// of conditions: require.resolve for CJS and import.meta.resolve for ESM. Both
+// run in a child with host NODE_OPTIONS/NODE_PATH removed. ESM also needs the
+// explicit-parent flag so it cannot use this collector's tree.
 function collectStaticClosure(root, entrypoints) {
   root = fs.realpathSync(root);
   const inside = (file) => { const p = path.relative(root, file); return p !== '..' && !p.startsWith(`..${path.sep}`) && !path.isAbsolute(p); };
   const builtin = new Set(builtinModules.flatMap((name) => [name, `node:${name}`]));
   const files = [], outside = [], failures = [], manifests = new Map(), seen = new Set();
   let pending = entrypoints.map((file) => path.resolve(root, file));
-  const esmResolver = `import { pathToFileURL } from 'node:url';
+  const resolver = `import { pathToFileURL } from 'node:url';
+    import { createRequire } from 'node:module';
     const queries = JSON.parse(process.argv[1]);
-    console.log(JSON.stringify(queries.map(({file, specifier}) => {
-      try { return {target: import.meta.resolve(specifier, pathToFileURL(file).href)}; }
+    console.log(JSON.stringify(queries.map(({file, specifier, mode}) => {
+      try { return {target: mode === 'require' ? pathToFileURL(createRequire(file).resolve(specifier)).href
+        : import.meta.resolve(specifier, pathToFileURL(file).href)}; }
       catch (error) { return {errorCode: error.code || error.name}; }
     })));`;
   const env = { ...process.env }; delete env.NODE_OPTIONS; delete env.NODE_PATH;
@@ -181,7 +184,7 @@ function collectStaticClosure(root, entrypoints) {
   };
   while (pending.length) {
     const batch = pending; pending = [];
-    const esm = [];
+    const queries = [];
     for (const candidate of batch) {
       let file;
       try { file = fs.realpathSync(candidate); }
@@ -207,19 +210,17 @@ function collectStaticClosure(root, entrypoints) {
         if (site.specifier === null || site.kind === 'generated-code') { edge.unresolved = true; continue; }
         if (builtin.has(site.specifier)) { edge.builtin = true; continue; }
         edge.resolutionMode = site.resolutionMode || (site.kind === 'require' ? 'require' : 'import');
-        if (edge.resolutionMode === 'import') { esm.push({ file, edge }); continue; }
-        try { finish(edge, createRequire(file).resolve(site.specifier)); }
-        catch (error) { edge.errorCode = error.code || error.name; edge.unresolved = true; }
+        queries.push({ file, edge });
       }
     }
-    if (esm.length) {
-      const queries = esm.map(({ file, edge }) => ({ file, specifier: edge.site.specifier }));
+    if (queries.length) {
+      const input = queries.map(({ file, edge }) => ({ file, specifier: edge.site.specifier, mode: edge.resolutionMode }));
       const resolutions = JSON.parse(execFileSync(process.execPath,
-        ['--experimental-import-meta-resolve', '--input-type=module', '-e', esmResolver, JSON.stringify(queries)],
+        ['--experimental-import-meta-resolve', '--input-type=module', '-e', resolver, JSON.stringify(input)],
         { env, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }));
-      if (resolutions.length !== esm.length) throw new Error('ESM resolver population mismatch');
+      if (resolutions.length !== queries.length) throw new Error('Node resolver population mismatch');
       resolutions.forEach((resolution, index) => {
-        const edge = esm[index].edge;
+        const edge = queries[index].edge;
         if (resolution.errorCode) { edge.errorCode = resolution.errorCode; edge.unresolved = true; return; }
         try { finish(edge, fileURLToPath(resolution.target)); }
         catch (error) { edge.errorCode = error.code || error.name; edge.unresolved = true; }

@@ -40,7 +40,8 @@ test('D-161 static closure follows Node import and require conditions without ex
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-module-closure-'));
   try {
     const pkg = path.join(dir, 'node_modules', 'dual'); fs.mkdirSync(pkg, { recursive: true });
-    fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: 'dual', exports: { import: './esm.mjs', require: './cjs.cjs' } }));
+    fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: 'dual', exports: { 'collector-host': './poison.cjs', import: './esm.mjs', require: './cjs.cjs' } }));
+    fs.writeFileSync(path.join(pkg, 'poison.cjs'), "require('@aws-sdk/client-kms');");
     fs.writeFileSync(path.join(pkg, 'esm.mjs'), "throw new Error('must not execute'); import './import-leaf.mjs';");
     fs.writeFileSync(path.join(pkg, 'cjs.cjs'), "throw new Error('must not execute'); require('./require-leaf.cjs');");
     fs.writeFileSync(path.join(pkg, 'import-leaf.mjs'), "export const value = 1;");
@@ -57,6 +58,12 @@ test('D-161 static closure follows Node import and require conditions without ex
     assert.ok(proof.manifests.some((file) => file.file === 'node_modules/dual/package.json'));
     assert.deepEqual(proof.unresolved.map((edge) => edge.site.source), ['import(dynamicName)']);
     assert.equal(proof.closureAccepted, false);
+    const child = JSON.parse(execFileSync(process.execPath, ['-e',
+      "console.log(JSON.stringify(require(process.argv[1]).collectStaticClosure(process.argv[2], ['entry.ts'])))",
+      path.join(root, 'bin/lib/runtime-import-census.cjs'), dir], {
+      env: { ...process.env, NODE_OPTIONS: '--conditions=collector-host' }, encoding: 'utf8',
+    }));
+    assert.deepEqual(child.files.map((file) => file.file), proof.files.map((file) => file.file));
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
