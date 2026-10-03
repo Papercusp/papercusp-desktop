@@ -160,9 +160,10 @@ package=base/'node_modules/cert-fixture';package.mkdir(parents=True)
 vendor_cert=package/'certificate.pem';vendor_cert.write_bytes(data)
 archive=base/'package.tgz'
 with tarfile.open(archive,'w:gz') as out:
+ metadata=(package/'package.json').read_bytes();row=tarfile.TarInfo('package/package.json');row.size=len(metadata);out.addfile(row,io.BytesIO(metadata))
  member=tarfile.TarInfo('package/certificate.pem');member.size=len(data);out.addfile(member,io.BytesIO(data))
 integrity='sha512-'+base64.b64encode(hashlib.sha512(archive.read_bytes()).digest()).decode()
-lock=json.dumps({'packages':{'node_modules/cert-fixture':{'version':'1.0.0','integrity':integrity}}}).encode()
+lock=json.dumps({'packages':{'node_modules/cert-fixture':{'version':'1.0.0','resolved':'https://registry.npmjs.org/cert-fixture/-/cert-fixture-1.0.0.tgz','integrity':integrity}}}).encode()
 ref={'lockRef':{'tree':'superproject','path':'package-lock.json'},'name':'cert-fixture','packagePath':'node_modules/cert-fixture','version':'1.0.0','integrity':integrity,'archive':str(archive),'member':'package/certificate.pem'}
 vendored={k:v for k,v in entry.items() if k!='sourceRef'};vendored['packageRef']=ref;vendored['path']=str(vendor_cert)
 with patch.object(m,'_frozen_source_bytes',return_value=lock):
@@ -211,9 +212,10 @@ data=b'export const keyStoreName="public-vocabulary";\n';source=pkg/'KeyStore.js
 package={'name':'source-fixture','version':'1.0.0'};(pkg/'package.json').write_text(json.dumps(package))
 archive=base/'package.tgz'
 with tarfile.open(archive,'w:gz') as out:
+ metadata=json.dumps(package).encode();row=tarfile.TarInfo('package/package.json');row.size=len(metadata);out.addfile(row,io.BytesIO(metadata))
  row=tarfile.TarInfo('package/KeyStore.js');row.size=len(data);out.addfile(row,io.BytesIO(data))
 integrity='sha512-'+base64.b64encode(hashlib.sha512(archive.read_bytes()).digest()).decode()
-lock=json.dumps({'packages':{'node_modules/source-fixture':{'version':'1.0.0','integrity':integrity}}}).encode()
+lock=json.dumps({'packages':{'node_modules/source-fixture':{'version':'1.0.0','resolved':'https://registry.npmjs.org/source-fixture/-/source-fixture-1.0.0.tgz','integrity':integrity}}}).encode()
 ref={'lockRef':{'tree':'superproject','path':'package-lock.json'},'name':'source-fixture','packagePath':'node_modules/source-fixture','version':'1.0.0','integrity':integrity,'archive':str(archive),'member':'package/KeyStore.js'}
 entry={'path':str(source),'sha256':m._sha256(source),'class':'frozen-public-source-vocabulary','packageRef':ref}
 with patch.object(m,'_frozen_source_bytes',return_value=lock):
@@ -232,6 +234,56 @@ print(json.dumps({'positive':True,'negativeControls':5}))
     const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout), { positive: true, negativeControls: 5 });
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
+test('D-164 vendored provenance accepts the SSH2 archive root and refuses ambiguous identity, paths and fixtures', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-vendor-archive-root-'));
+  try {
+    const program = String.raw`
+import importlib.util,json,sys,pathlib,hashlib,tarfile,io,base64
+from unittest.mock import patch
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+base=pathlib.Path(sys.argv[2]);pkg=base/'node_modules/ssh2';pkg.mkdir(parents=True)
+identity={'name':'ssh2','version':'1.17.0'};(pkg/'package.json').write_text(json.dumps(identity))
+relative='test/fixtures/https_cert.pem';bundled=pkg/relative;bundled.parent.mkdir(parents=True);data=b'public certificate member';bundled.write_bytes(data)
+def packet(prefix='mscdex-ssh2-5c506eb',extra=(),metadata=None,include_metadata=True):
+ archive=base/'package.tgz';rows=[]
+ if include_metadata:rows.append((prefix+'/package.json',json.dumps(identity if metadata is None else metadata).encode(),tarfile.REGTYPE))
+ rows.append((prefix+'/'+relative,data,tarfile.REGTYPE));rows.extend(extra)
+ with tarfile.open(archive,'w:gz') as out:
+  for name,content,kind in rows:
+   row=tarfile.TarInfo(name);row.type=kind;row.size=len(content) if kind==tarfile.REGTYPE else 0;out.addfile(row,io.BytesIO(content) if row.isfile() else None)
+ integrity='sha512-'+base64.b64encode(hashlib.sha512(archive.read_bytes()).digest()).decode()
+ locked={'version':'1.17.0','resolved':'https://registry.npmjs.org/ssh2/-/ssh2-1.17.0.tgz','integrity':integrity}
+ ref={'lockRef':{'tree':'superproject','path':'package-lock.json'},'name':'ssh2','packagePath':'node_modules/ssh2','version':'1.17.0','integrity':integrity,'archive':str(archive),'member':prefix+'/'+relative}
+ return ref,locked
+def read(ref,locked,path=bundled):
+ with patch.object(m,'_frozen_source_bytes',return_value=json.dumps({'packages':{'node_modules/ssh2':locked}}).encode()):return m._vendored_package_bytes(ref,{},path)
+def refused(ref,locked,path=bundled):
+ try:read(ref,locked,path);raise AssertionError('invalid archive provenance passed')
+ except ValueError:pass
+for prefix in ['package','mscdex-ssh2-5c506eb']:
+ ref,locked=packet(prefix);assert read(ref,locked)==data
+for metadata in [{'name':'other','version':'1.17.0'},{'name':'ssh2','version':'2.0.0'}]:
+ ref,locked=packet(metadata=metadata);refused(ref,locked)
+ref,locked=packet(include_metadata=False);refused(ref,locked)
+for extra in [[('other/package.json',json.dumps(identity).encode(),tarfile.REGTYPE)],[('mscdex-ssh2-5c506eb/package.json',json.dumps(identity).encode(),tarfile.REGTYPE)],[('mscdex-ssh2-5c506eb/'+relative,data,tarfile.REGTYPE)]]:
+ ref,locked=packet(extra=extra);refused(ref,locked)
+ref,locked=packet()
+for member in ['/mscdex-ssh2-5c506eb/'+relative,'mscdex-ssh2-5c506eb/../'+relative,'mscdex-ssh2-5c506eb//'+relative,'mscdex-ssh2-5c506eb/./'+relative,'other/'+relative,'mscdex-ssh2-5c506eb/']:
+ refused({**ref,'member':member},locked)
+for resolved in [None,'https://example.invalid/ssh2.tgz','http://registry.npmjs.org/ssh2/-/ssh2-1.17.0.tgz','https://registry.npmjs.org/ssh2/-/ssh2-1.16.0.tgz']:
+ refused(ref,{**locked,'resolved':resolved})
+for fixture in ['test/fixtures/https_key.pem','test/fixtures/keyParser/public.pub','test/fixtures/unknown.pem']:
+ ref,locked=packet(extra=[('mscdex-ssh2-5c506eb/'+fixture,data,tarfile.REGTYPE)]);path=pkg/fixture;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(data);refused({**ref,'member':'mscdex-ssh2-5c506eb/'+fixture},locked,path)
+for kind in [tarfile.SYMTYPE,tarfile.LNKTYPE]:
+ ref,locked=packet(extra=[('mscdex-ssh2-5c506eb/'+relative,b'',kind)]);refused(ref,locked)
+print(json.dumps({'packageRoot':True,'ssh2Root':True,'failClosed':True}))
+`;
+    const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), { packageRoot: true, ssh2Root: true, failClosed: true });
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
