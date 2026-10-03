@@ -734,6 +734,30 @@ test('current mac rig launcher validates staged integrity and deployment preserv
   assert.equal(spawnSync('bash', ['-n', currentComposer]).status, 0);
 });
 
+test('current composer forwards a migration-sized staged health window to the VM launcher (WI-10004688)', async () => {
+  // A local env var never crosses ssh. Before this pin the staged deploy always
+  // ran under the launcher's 180s warm-restart default and rolled back while a
+  // ~40-migration catch-up was still applying.
+  const composer = await readFile(currentComposer, 'utf8');
+  const launcher = await readFile(currentBoot, 'utf8');
+  assert.match(launcher, /local timeout="\$\{PAPERCUSP_RESTART_HEALTH_TIMEOUT_SEC:-\d+\}"/, 'launcher must still read the forwarded variable');
+  const fallback = composer.match(/RESTART_HEALTH_TIMEOUT_SEC="\$\{PAPERCUSP_RESTART_HEALTH_TIMEOUT_SEC:-(\d+)\}"/);
+  assert.ok(fallback, 'composer must resolve a staged health window');
+  assert.ok(Number(fallback[1]) >= 600, `staged default must cover migration catch-up (got ${fallback[1]}s)`);
+  assert.match(composer, /REMOTE_HEALTH_ENV="PAPERCUSP_RESTART_HEALTH_TIMEOUT_SEC=\$RESTART_HEALTH_TIMEOUT_SEC"/);
+  assert.match(composer, /ssh "\$VM" "\$REMOTE_HEALTH_ENV [^"]*bash \$REMOTE_LAUNCHER_Q --stage \$REMOTE_STAGE_Q"/, 'the --stage call must carry the window over ssh');
+
+  // The validator must reject a non-integer before it is spliced into a remote command line.
+  const block = composer.match(/RESTART_HEALTH_TIMEOUT_SEC="\$\{[^\n]+\n\s*case[\s\S]*?esac/)[0];
+  const run = (value) => spawnSync('bash', ['-c', `${block}\necho "OK:$RESTART_HEALTH_TIMEOUT_SEC"`], {
+    encoding: 'utf8',
+    env: { ...process.env, PAPERCUSP_RESTART_HEALTH_TIMEOUT_SEC: value },
+  });
+  assert.equal(run('1200').stdout.trim(), 'OK:1200');
+  assert.equal(run('5; rm -rf x').status, 2);
+  assert.equal(run('abc').status, 2);
+});
+
 test('vm-rig helpers survive reboot through verified persistent install and probe self-repair', async () => {
   const deploy = await readFile(vmRigDeploy, 'utf8');
   assert.match(deploy, /\$HOME\/\.papercusp\/vm-rig/);
