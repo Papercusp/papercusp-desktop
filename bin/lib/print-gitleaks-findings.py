@@ -1396,7 +1396,7 @@ def validate_seed_proof(proof: dict[str, object], directory: Path, root: Path,
             evidence[name] = json.loads(path.read_text(encoding="utf-8"))
     auth = evidence["ciphertext-auth-safe.json"]
     fields = auth.get("ciphertextFields")
-    if (not isinstance(fields, int) or fields <= 0 or auth.get("parsedRows") != fields
+    if (type(fields) is not int or fields <= 0 or auth.get("parsedRows") != fields
             or auth.get("classes") != {"authenticated_ciphertext": fields}
             or auth.get("unparsedCiphertextFields") != 0
             or auth.get("negativeControls") != {"tamper_rejected": True, "wrong_key_rejected": True}):
@@ -1433,6 +1433,7 @@ def validate_seed_proof(proof: dict[str, object], directory: Path, root: Path,
                 or issue_twin.get("plaintextSha256") != plain_identity["blobSha256"]
                 or auth.get("sourceSha256") != proof["sourceSha256"]
                 or plain.get("findings") != len(plain_report)
+                or type(scope.get("remainingPlaintextFindings")) is not int
                 or scope.get("remainingPlaintextFindings") != len(plain_report)
                 or dict(Counter(row.get("class") for row in plain_entries)) != plain.get("classes")
                 or Counter((row.get("digest"), row.get("rule")) for row in plain_entries)

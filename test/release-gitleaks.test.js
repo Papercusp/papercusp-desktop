@@ -1352,6 +1352,61 @@ print(json.dumps({'validatedTwin':True,'negativeControls':True,'cyclesRefused':T
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
+test('D-165 authenticated EI occurrence supplies a twin while preserving every refused segment finding', () => {
+  const f = seedProofFixture();
+  try {
+    const program = String.raw`
+import importlib.util,json,sys,pathlib,hashlib,copy,subprocess
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+directory=pathlib.Path(sys.argv[2]);root=pathlib.Path(sys.argv[3]);config=pathlib.Path(sys.argv[4]);proof_path=directory/'seed-finding-proof.json';proof=json.loads(proof_path.read_text())
+plaintext=directory/'seed-000080.plaintext.jsonl';row=json.loads(plaintext.read_text());value='EI-24900000000000000';row['issue_id']=value;row['body']='apiKey="ghp_'+'Ab3De4Fg5Hi6Jk7Lm8No9Pq0Rs1Tu2Vw3Xy4'+'"';text=json.dumps(row)+'\n';plaintext.write_text(text)
+scan=subprocess.run(['gitleaks','dir',str(plaintext),'--config',str(config),'--no-banner','--log-level=error','--redact=0','--report-format=json','--report-path=-'],capture_output=True,text=True);assert scan.returncode==1
+report=json.loads(scan.stdout);assert len(report)>0
+def write(name,data):
+ p=directory/name;p.write_text(json.dumps(data));p.chmod(0o600);return m._sha256(p)
+write('seed-000080.plaintext.private.json',report)
+identity={'blobSha256':m._sha256(plaintext),'configSha256':m._sha256(config),'scannerVersion':proof['scannerVersion']}
+write('seed-000080.plaintext.private.meta.json',{'identity':identity,'scannerExit':1,'findings':len(report),'reportSha256':m._sha256(directory/'seed-000080.plaintext.private.json')})
+write('plaintext-exact-finding-digests.json',[{'rule':r['RuleID'],'digest':m.finding_digest(r),'class':'unclassified'} for r in report])
+write('plaintext-classification-safe.json',{'plaintextSha256':m._sha256(plaintext),'findings':len(report),'classes':{'unclassified':len(report)},'unclassifiedLocators':[{'line':r['StartLine']} for r in report]})
+auth=json.loads((directory/'ciphertext-auth-safe.json').read_text());auth['sourceSha256']=proof['sourceSha256'];write('ciphertext-auth-safe.json',auth);write('mechanical-class-proof.private.json',{})
+for name in [*proof['evidence'],'mechanical-class-proof.private.json']:proof['evidence'][name]=m._sha256(directory/name)
+public,_=m._key_publics(m._sodium(),bytes(range(32)));ctx={'identityScanValidated':True,'identityRecipients':{public},'credentialDigests':set()}
+spans=[{'byteStart':0,'byteEnd':len(value),'sha256':hashlib.sha256(value.encode()).hexdigest()}]
+ref={'proofPath':'evidence/seed-finding-proof.json','plaintextSha256':m._sha256(plaintext),'line':1,'fieldPath':['issue_id'],'rowSha256':hashlib.sha256(text.encode()).hexdigest()}
+proof['reviewRef']='p2p-public-release-endgame-2026-09-01#D-165';proof['toolingSha256']=m._sha256(pathlib.Path(sys.argv[1]));proof['occurrenceScope']={'kind':'public-issue-id-twin','line':1,'fieldPath':['issue_id'],'rowSha256':ref['rowSha256'],'remainingPlaintextFindings':len(report),'tokenScan':m.scan_quoted_token_remainder(value,spans,{public},config,set())}
+def valid(p=proof,r=ref,c=ctx):return m.validate_seed_proof(p,directory,root,config,issue_twin=r,identity_context=c)
+def refused(p=proof,r=ref,c=ctx):
+ try:valid(p,r,c);raise AssertionError('invalid scoped twin passed')
+ except ValueError:pass
+assert valid()==set();ref['occurrenceScope']=proof['occurrenceScope']
+proof=m.assemble_seed_proof(directory,root,config,proof['file'],proof['reviewRef'],issue_twin=ref,identity_context=ctx);ref['proofSha256']=m._sha256(proof_path)
+current=directory.parent/'current';current.mkdir(mode=0o700)
+assert m.validate_quoted_issue_twins([ref],current,root,config,proof,ctx)=={value:{ref['proofSha256']}}
+assert ctx['quotedIssueTwinResiduals']=={ref['proofSha256']:len(report)}
+try:m.validate_seed_proof(proof,directory,root,config);raise AssertionError('partial proof cleared segment')
+except ValueError:pass
+for changed in [{**ref,'line':2},{**ref,'fieldPath':['id']},{**ref,'rowSha256':'0'*64},{**ref,'plaintextSha256':'0'*64}]:refused(r=changed)
+for changed in [{**ctx,'identityScanValidated':False},{**ctx,'identityRecipients':set()}]:refused(c=changed)
+for changed in [{**proof,'reviewRef':'other'},{**proof,'toolingSha256':'0'*64},{**proof,'sourceSha256':'0'*64},{**proof,'epochKeysSha256':'0'*64},{**proof,'manifestSha256':'0'*64}]:refused(p=changed)
+for key,wrong in [('kind','other'),('fieldPath',['id']),('line',True),('rowSha256','0'*64),('remainingPlaintextFindings',0),('remainingPlaintextFindings',True),('tokenScan',{})]:
+ changed=copy.deepcopy(proof);changed['occurrenceScope'][key]=wrong;refused(p=changed)
+for key,wrong in [('sourceSha256','0'*64),('ciphertextFields',2),('ciphertextFields',True),('negativeControls',{'tamper_rejected':False,'wrong_key_rejected':True})]:
+ changed={**auth,key:wrong};digest=write('ciphertext-auth-safe.json',changed);p=copy.deepcopy(proof);p['evidence']['ciphertext-auth-safe.json']=digest;refused(p=p)
+write('ciphertext-auth-safe.json',auth)
+assert json.loads((directory/'plaintext-classification-safe.json').read_text())['classes']=={'unclassified':len(report)}
+print(json.dumps({'scopedTwin':True,'remaining':len(report),'rawCredentialStillRefused':True,'failClosed':True}))
+`;
+    const result = spawnSync('python3', ['-c', program, reportFormatterPath, f.evidence, f.seed, configPath], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const proof = JSON.parse(result.stdout);
+    assert.equal(proof.scopedTwin, true);
+    assert.ok(proof.remaining > 0);
+    assert.equal(proof.rawCredentialStillRefused, true);
+    assert.equal(proof.failClosed, true);
+  } finally { fs.rmSync(f.temp, { recursive: true, force: true }); }
+});
+
 test('D-147 integrated proof refuses newly labelled classes without mechanical evidence and unclassified entries', () => {
   for (const kind of ['public-opaque-operation-reference', 'unclassified']) {
     const f = seedProofFixture();
