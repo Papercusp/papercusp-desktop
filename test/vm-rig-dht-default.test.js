@@ -11,7 +11,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-const launcher = path.join(import.meta.dirname, '..', 'bin', 'vm-rig', 'boot-headless-current.sh');
+// Overridable so a mutation probe can point the guard at a mutated COPY outside the tree.
+const launcher =
+  process.env.PAPERCUSP_RIG_LAUNCHER_UNDER_TEST ||
+  path.join(import.meta.dirname, '..', 'bin', 'vm-rig', 'boot-headless-current.sh');
 
 test('launcher self-test proves the PUBLIC default, stale-marker removal and the explicit isolated override', () => {
   const env = { ...process.env };
