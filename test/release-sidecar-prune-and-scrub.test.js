@@ -1385,20 +1385,26 @@ test('mac producers strip only signing-invalid xattrs and preserve required user
   const dir = tmp('mac-xattrs');
   const file = path.join(dir, 'seed.bin');
   fs.writeFileSync(file, 'seed');
-  const setup = spawnSync('python3', ['-c', `
-import os, sys
+const setup = spawnSync('python3', ['-c', `
+import os, subprocess, sys
 p = sys.argv[1]
 set_names = []
 for name in ('com.apple.FinderInfo', 'user.com.apple.FinderInfo'):
     try:
-        os.setxattr(p, name, b'finder')
+        if hasattr(os, 'setxattr'):
+            os.setxattr(p, name, b'finder')
+        else:
+            subprocess.run(['/usr/bin/xattr', '-w', name, 'finder', p], check=True, capture_output=True)
         set_names.append(name)
         break
-    except OSError:
+    except (OSError, subprocess.CalledProcessError):
         pass
 if not set_names:
     raise SystemExit('could not set a platform xattr fixture')
-os.setxattr(p, 'user.device-file', b'keep')
+if hasattr(os, 'setxattr'):
+    os.setxattr(p, 'user.device-file', b'keep')
+else:
+    subprocess.run(['/usr/bin/xattr', '-w', 'user.device-file', 'keep', p], check=True)
 `, file], { encoding: 'utf8' });
   try {
     assert.equal(setup.status, 0, `could not create xattr fixture: ${setup.stderr}`);
@@ -1411,8 +1417,11 @@ os.setxattr(p, 'user.device-file', b'keep')
     assert.equal(clean.status, 0, `strict metadata check must pass after scrub: ${clean.stderr}`);
 
     const attrs = spawnSync('python3', ['-c', `
-import os, sys
-print('\\n'.join(sorted(os.listxattr(sys.argv[1]))))
+import os, subprocess, sys
+if hasattr(os, 'listxattr'):
+    print('\\n'.join(sorted(os.listxattr(sys.argv[1]))))
+else:
+    subprocess.run(['/usr/bin/xattr', sys.argv[1]], check=True)
 `, file], { encoding: 'utf8' });
     assert.equal(attrs.status, 0, attrs.stderr);
     assert.match(attrs.stdout, /(?:^|\n)user\.device-file(?:\n|$)/,
