@@ -140,6 +140,22 @@ with zipfile.ZipFile(sys.argv[2],'w') as archive:
     assert.equal(pack().status, 0);
     const final = validate('--final', [artifact]);
     assert.equal(final.status, 0, `${final.stdout}${final.stderr}`);
+    // release-local passes its exact ARTIFACTS list, including detached
+    // signatures. A signature has no sidecar tree but is still censused; only
+    // an included, independently validated payload can account for it.
+    const signature = write(artifact + '.sig', 'fixture detached signature\n');
+    const signed = validate('--final', [artifact, signature]);
+    assert.equal(signed.status, 0, `${signed.stdout}${signed.stderr}`);
+    assert.ok(JSON.parse(signed.stdout.trim()).artifactLeavesChecked
+      > JSON.parse(final.stdout.trim()).artifactLeavesChecked);
+    assert.notEqual(validate('--final', [signature]).status, 0, 'signature-only set must refuse');
+    const orphan = write(path.join(temp, 'orphan.zip.sig'), 'fixture detached signature\n');
+    assert.notEqual(validate('--final', [artifact, orphan]).status, 0, 'orphan signature must refuse');
+    fs.writeFileSync(signature, sourceOnly);
+    assert.notEqual(validate('--final', [artifact, signature]).status, 0, 'signature bytes must join the source-only class census');
+    fs.writeFileSync(signature, '');
+    assert.notEqual(validate('--final', [artifact, signature]).status, 0, 'empty detached signature must refuse');
+    fs.writeFileSync(signature, 'fixture detached signature\n');
     write(path.join(sidecar, 'internal-docs/surplus.md'), 'surplus'); assert.equal(pack().status, 0);
     assert.notEqual(validate('--final', [artifact]).status, 0, 'surplus documentation must fail exact population validation');
     fs.unlinkSync(path.join(sidecar, 'internal-docs/surplus.md'));

@@ -1987,9 +1987,19 @@ def validate_uuid_release_artifacts(config_path: Path, expected_sha256: str, run
     else:
         if any(root.is_symlink() or not root.is_file() for root in roots):
             raise ValueError('UUID final release requires exact artifact files')
+        payload_roots = {root.resolve() for root in roots if not root.name.endswith('.sig')}
         # Reuse the audit's actual installer/archive population. Require exact
-        # projected payloads AND manifests in each artifact, including copies.
+        # projected payloads AND manifests in each payload, including copies.
+        # ARTIFACTS also includes detached signatures: account for them against
+        # an included payload, but keep their bytes in the full class census
+        # below. Signature cryptographic verification remains the signing gate.
         for root in roots:
+            if root.name.endswith('.sig'):
+                parent = root.with_name(root.name[:-4])
+                if (parent.resolve() not in payload_roots or parent.is_symlink()
+                        or not parent.is_file() or not root.stat().st_size):
+                    raise ValueError('UUID final detached signature lacks included payload or is empty')
+                continue
             groups = {}
             with _uuid_artifact_population([root]) as population:
                 for path, label, digest in population:
