@@ -3684,6 +3684,12 @@ fi
 release_artifacts_assert_collected_sigs_complete "release-local" "${ARTIFACTS[@]}" \
   || { echo "ERROR: a release-local leg collector dropped an on-disk signature (see above) — fix its glob" >&2; exit 1; }
 
+# ARTIFACTS is now the exact publish set, including detached signatures and any
+# normalized spanned-Server outputs. Validate that same complete set before the
+# manifest can certify it; do not reconstruct a narrower platform root list.
+seed_uuid_validate_release_artifacts "$ORCHESTRATOR_HERE/lib/print-gitleaks-findings.py" --final \
+  "${ARTIFACTS[@]}" || exit 1
+
 # Retain all final target/artifact roots only after every enabled leg has
 # finished and ARTIFACTS contains the exact bytes this cut will publish.
 papercusp_retain_release_paths \
