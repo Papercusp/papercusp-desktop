@@ -9091,31 +9091,66 @@ fn init_native_terminal(app: &tauri::App, window_owner: bool) {
     // launched, so there's no per-window-event hook to register here.)
 }
 
-/// A hardware GL render node (`/dev/dri/renderD*`) — its ABSENCE means software
-/// rendering (llvmpipe) or a GPU with no render capability (QXL / virtio in a VM,
-/// or headless), where WebKitGTK's DMA-BUF renderer wedges Xorg. A missing
-/// `/dev/dri` directory ⇒ no render node.
+/// Whether any DRM render node can provide hardware GL. A 2D virtio GPU also
+/// exposes renderD*, but cannot accelerate WebKit's compositor (WI-4480).
+/// Keep physical GPUs and virgl-capable guests accelerated; use the existing
+/// software fallback only when every node is absent or confirmed 2D virtio.
 #[cfg(target_os = "linux")]
 fn linux_has_dri_render_node() -> bool {
-    linux_has_dri_render_node_at(std::path::Path::new("/dev/dri"), std::path::Path::new("/sys/class/drm"))
+    linux_has_dri_render_node_at(
+        std::path::Path::new("/dev/dri"),
+        std::path::Path::new("/sys/class/drm"),
+    )
 }
 
 #[cfg(target_os = "linux")]
-fn linux_has_dri_render_node_at(dri: &std::path::Path, _drm: &std::path::Path) -> bool {
+fn linux_has_dri_render_node_at(dri: &std::path::Path, drm: &std::path::Path) -> bool {
     std::fs::read_dir(dri)
         .map(|rd| {
             rd.flatten().any(|e| {
-                e.file_name()
-                    .to_str()
-                    .is_some_and(|n| n.starts_with("renderD"))
+                e.file_name().to_str().is_some_and(|n| {
+                    n.starts_with("renderD")
+                        && !linux_virtio_gpu_is_2d(&drm.join(n).join("device"))
+                })
             })
         })
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "linux")]
+fn linux_virtio_gpu_is_2d(device: &std::path::Path) -> bool {
+    let driver = std::fs::read_link(device.join("driver")).ok();
+    if driver.as_ref().and_then(|p| p.file_name()) == Some(std::ffi::OsStr::new("virtio_gpu")) {
+        // Linux drivers/virtio/virtio.c features_show writes bit 0 FIRST, not a
+        // conventional binary integer. VIRTIO_GPU_F_VIRGL (virtio_gpu.h) is bit
+        // 0. Unknown/unreadable features preserve the existing accelerated path.
+        return std::fs::read_to_string(device.join("features"))
+            .ok()
+            .is_some_and(|s| {
+                let bits = s.trim();
+                bits.starts_with('0') && bits.bytes().all(|b| b == b'0' || b == b'1')
+            });
+    }
+    // DRM's device link on PCI virtio points to the transport, with the actual
+    // virtio_gpu device one level below (e.g. .../0000:00:01.0/virtio0).
+    if driver.as_ref().and_then(|p| p.file_name()) == Some(std::ffi::OsStr::new("virtio-pci")) {
+        return std::fs::read_dir(device)
+            .map(|rd| {
+                rd.flatten().any(|e| {
+                    e.file_name()
+                        .to_str()
+                        .is_some_and(|n| n.starts_with("virtio"))
+                        && linux_virtio_gpu_is_2d(&e.path())
+                })
+            })
+            .unwrap_or(false);
+    }
+    false
+}
+
 /// Whether to force `WEBKIT_DISABLE_DMABUF_RENDERER=1`. The DMA-BUF renderer
 /// misbehaves in two Linux GPU situations: the NVIDIA proprietary driver
-/// (stale-tile artifacts) and software rendering with no hardware render node
+/// (stale-tile artifacts) and software rendering with no usable GL render node
 /// (X-server wedge / black screen on a VM — WI-3282). Pure so it's unit-tested.
 fn should_disable_dmabuf(nvidia_present: bool, software_render: bool) -> bool {
     nvidia_present || software_render
@@ -9194,7 +9229,12 @@ mod render_capability_tests {
     fn render_capability_2d_virtio_node_does_not_imply_acceleration() {
         let fixture = DrmFixture::new();
         // Exact sysfs shape and negotiated features from the clean Linux VM.
-        fixture.node("renderD128", "virtio_gpu", Some("0100000000000000000000000000110010000000100000000000000000000000\n"), true);
+        fixture.node(
+            "renderD128",
+            "virtio_gpu",
+            Some("0100000000000000000000000000110010000000100000000000000000000000\n"),
+            true,
+        );
         assert!(!fixture.has_acceleration());
     }
 
@@ -9395,18 +9435,18 @@ pub fn run() {
     //   (a) the NVIDIA proprietary driver — stale-tile artifacts (ghost fragments
     //       of other surfaces composited into the webview; webkit#262607,
     //       tauri#9394/#14924; dev box, webkit2gtk 2.52 + driver 580); and
-    //   (b) SOFTWARE rendering with no hardware GL render node (llvmpipe, or a QXL
-    //       / virtio GPU in a VM, or headless) — there the DMA-BUF path drove Xorg
+    //   (b) SOFTWARE rendering with no usable hardware GL render node (llvmpipe,
+    //       QXL / 2D virtio in a VM, or headless) — there the DMA-BUF path drove Xorg
     //       to 93% and WEDGED the X server (black, frozen, uninteractable) even
     //       after killing every app process (WI-3282, owner's clean Linux VM). The
-    //       absence of /dev/dri/renderD* is the software-render signal.
+    //       A render node alone is insufficient: 2D virtio exposes one too.
     #[cfg(target_os = "linux")]
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         let nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists();
         let software_render = !linux_has_dri_render_node();
         if should_disable_dmabuf(nvidia, software_render) {
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-            // On a genuinely GPU-less box also drop accelerated compositing — there
+            // With software GL also drop accelerated compositing — there
             // is no hardware accel to lose and it forecloses the rest of the
             // GL-compositing X-wedge class. NOT done on the NVIDIA path (a real GPU
             // is present — disabling compositing there would be a perf regression),
