@@ -2009,3 +2009,19 @@ test('D-140 storage-segment proofs compose while preserving per-file exact-conte
     assert.equal(f.filter(secondRows, master).status, 2);
   } finally { fs.rmSync(f.temp, { recursive: true, force: true }); }
 });
+
+test('release-local validates the complete collected artifact set before manifest preparation', () => {
+  const active = fs.readFileSync(scriptPath, 'utf8')
+    .split('\n')
+    .filter((line) => !/^\s*#/.test(line))
+    .join('\n');
+  const signatures = active.indexOf('release_artifacts_assert_collected_sigs_complete "release-local" "${ARTIFACTS[@]}"');
+  const finalGate = active.indexOf('seed_uuid_validate_release_artifacts "$ORCHESTRATOR_HERE/lib/print-gitleaks-findings.py" --final');
+  const manifest = active.indexOf('release_task_prepare_manifest_stage "${ARTIFACTS[@]}"');
+
+  assert.ok(signatures >= 0, 'release-local must verify that every collected signable file has its signature');
+  assert.ok(finalGate > signatures, 'final UUID validation must run after all platform artifacts and signatures are collected');
+  assert.ok(manifest > finalGate, 'final UUID validation must precede manifest preparation');
+  assert.match(active.slice(finalGate, manifest), /--final\s*\\\s*"\$\{ARTIFACTS\[@\]\}"/,
+    'the final validator must receive every collected publish root, including signatures and normalized Server outputs');
+});
