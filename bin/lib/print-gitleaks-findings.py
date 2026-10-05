@@ -1898,6 +1898,8 @@ def _uuid_source_archive_expectation(config_path: Path, source: Path, private: P
     if census['occurrenceCount'] != report['occurrenceCount'] or _sha256(source) != before:
         raise ValueError('UUID source archive contains unprojectable occurrences or changed')
     report = {**report, 'inputPlane': 'selected-source-archive-after-normal-privacy-not-signed-source-proof'}
+    if Path('package-lock.json') in changes:
+        raise ValueError('UUID projection would change the committed package-lock pin')
     for row in inventory:
         relative = Path(row['relative'])
         if relative in changes:
@@ -2011,7 +2013,7 @@ def validate_uuid_release_artifacts(config_path: Path, expected_sha256: str, run
         raise ValueError('UUID class remains in fully staged or final release artifacts')
     return {'reviewRef': _UUID_DROP_REVIEW, 'documentOccurrences': documents_count,
             'sourceOccurrences': source_report['occurrenceCount'], 'remainingOccurrences': 0,
-            'inventory': census['inventory'], 'coverage': census['coverage'],
+            'artifactLeavesChecked': len(census['inventory']), 'coverage': census['coverage'],
             'releaseRootSelection': 'declared-assembled-roots' if not final else 'requires-independent-final-artifact-set-validation',
             'sourceAuthentication': 'requires-independent-original-core-and-source-signature-validation'}
 

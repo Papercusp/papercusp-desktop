@@ -35,6 +35,16 @@ test('stage-source-tree keeps its scrub quarantine outside the packaged sidecar'
     'the old in-sidecar quarantine path must not return');
 });
 
+test('D166 source projection follows exact selection and the committed lock guard before archive audit', () => {
+  const selection = stageSource.indexOf('source_tree_selection "$HERE" "$MONO" installer');
+  const pin = stageSource.indexOf('cmp -s "$SOURCE_PACKAGE_LOCK_PIN_COPY" "$SOURCE_PACKAGE_LOCK_ARCHIVE_TMP"');
+  const projection = stageSource.indexOf('seed_uuid_project_source_archive "$HERE/lib/print-gitleaks-findings.py" "$OUT_TMP" "$SIDECAR"');
+  const audit = stageSource.indexOf('python3 "$HERE/audit-release-bundle.py" "$OUT_TMP"');
+  const publish = stageSource.indexOf('mv -f "$OUT_TMP" "$OUT"');
+  assert.ok(selection >= 0 && pin > selection && projection > pin && audit > projection && publish > audit);
+  assert.ok(stageSource.includes('UUID_SOURCE_TAR_ARGS=(--hard-dereference)'), 'every selected hard-link payload must be visible');
+});
+
 test('source stager selects the explicit candidate sidecar before checking its runtime input', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-source-candidate-'));
   try {

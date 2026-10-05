@@ -83,6 +83,73 @@ print(json.dumps({'pass':True,'occurrences':3,'exactPopulation':5,'negativeContr
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
+test('D-166 source copy point and final gate retain source-only class discovery and independently check packaged payloads', () => {
+  const crypto = require('node:crypto');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'uuid-release-copy-points-'));
+  fs.chmodSync(temp, 0o700);
+  const helper = path.join(root, 'bin', 'lib', 'seed-reuse-age.sh');
+  try {
+    const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+    const token = 'c539c37e-09d8-49b6-928b-706f25c70852';
+    const sourceOnly = 'd8b5ad5a-7e05-4d70-878d-61e937d60439';
+    const write = (file, data) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, data, { mode: 0o600 }); return file; };
+    const rows = write(path.join(temp, 'rows.jsonl'), JSON.stringify({ table: 'plans', hbKey: 'safe', value: { idempotencyKey: token }, segment: 'segment-000001.blob', line: 1 }) + '\n');
+    const keys = write(path.join(temp, 'keys.json'), JSON.stringify({ 'fixture-pot': {} }));
+    const census = write(path.join(temp, 'census.json'), JSON.stringify({ reviewRef: 'p2p-public-release-endgame-2026-09-01#D-166', potId: 'fixture-pot', epochKeysPath: keys, epochKeysSha256: hash(fs.readFileSync(keys)), sources: [{ sourceKeyHex: 'a'.repeat(64), sourceLength: 1, rowCount: 1, rowsPath: rows, rowsSha256: hash(fs.readFileSync(rows)) }] }));
+    const sidecar = path.join(temp, 'repository/papercusp-desktop/src-tauri/sidecar');
+    const resources = path.join(sidecar, '..', 'resources');
+    const seed = path.join(sidecar, '..', 'seed');
+    const run = path.join(temp, 'verification'); fs.mkdirSync(run, { mode: 0o700 });
+    write(path.join(sidecar, 'internal-docs/page.md'), 'idempotencyKey: ' + token + '\n');
+    write(path.join(resources, 'ordinary.txt'), 'resource'); write(path.join(seed, 'ordinary.blob'), 'seed');
+    const outputPointer = path.join(temp, 'output-pointer');
+    const env = { ...process.env, PAPERCUSP_SEED_UUID_CENSUS_PATH: census, PAPERCUSP_SEED_UUID_CENSUS_SHA256: hash(fs.readFileSync(census)), VH_RUN_DIR: run, UUID_TEST_OUTPUT: outputPointer };
+    const execute = (command, args = [], changes = {}) => spawnSync('bash', ['-c', 'set -euo pipefail; source "$1"; ' + command, 'bash', helper, reportFormatterPath, ...args], { encoding: 'utf8', env: { ...env, ...changes } });
+    const docs = execute('seed_uuid_project_sidecar_documents "$2" "$3"', [sidecar]);
+    assert.equal(docs.status, 0, `${docs.stdout}${docs.stderr}`);
+    const selected = path.join(temp, 'selected.tar.zst');
+    const raw = spawnSync('python3', ['-c', String.raw`
+import io,tarfile,subprocess,sys,pathlib
+raw=io.BytesIO()
+with tarfile.open(fileobj=raw,mode='w') as archive:
+ for name,data in [('docs/source.md',('idempotencyKey: '+sys.argv[2]+'\nmirror '+sys.argv[2]).encode()),('package-lock.json',b'{"lockfileVersion":3}')]:
+  member=tarfile.TarInfo(name);member.size=len(data);archive.addfile(member,io.BytesIO(data))
+pathlib.Path(sys.argv[1]).write_bytes(subprocess.run(['zstd','-q','-c'],input=raw.getvalue(),capture_output=True,check=True).stdout)
+`, selected, sourceOnly], { encoding: 'utf8' });
+    assert.equal(raw.status, 0, raw.stderr);
+    const source = execute('seed_uuid_project_source_archive "$2" "$3" "$4"; printf "%s" "$SEED_UUID_SOURCE_ARCHIVE_PATH" > "$UUID_TEST_OUTPUT"', [selected, sidecar]);
+    assert.equal(source.status, 0, `${source.stdout}${source.stderr}`);
+    fs.renameSync(fs.readFileSync(outputPointer, 'utf8'), path.join(sidecar, 'source.tar.zst'));
+    const validate = (phase, roots, changes = {}) => execute('seed_uuid_validate_release_artifacts "$2" "$3" "${@:4}"', [phase, ...roots], changes);
+    const assembled = validate('--assembled', [sidecar, resources, seed]);
+    assert.equal(assembled.status, 0, `${assembled.stdout}${assembled.stderr}`);
+    const count = JSON.parse(assembled.stdout.trim());
+    assert.equal(count.sourceOccurrences, 2); assert.equal(count.documentOccurrences, 1); assert.equal(count.remainingOccurrences, 0);
+    assert.notEqual(validate('--assembled', [sidecar, resources]).status, 0, 'missing seed root must refuse');
+    write(path.join(resources, 'bare-mirror.txt'), sourceOnly);
+    assert.notEqual(validate('--assembled', [sidecar, resources, seed]).status, 0, 'source-only token mirror must be found after its named source occurrence is redacted');
+    fs.unlinkSync(path.join(resources, 'bare-mirror.txt'));
+    const artifact = path.join(temp, 'installer.zip');
+    const pack = () => spawnSync('python3', ['-c', String.raw`
+import sys,pathlib,zipfile
+source=pathlib.Path(sys.argv[1])
+with zipfile.ZipFile(sys.argv[2],'w') as archive:
+ for file in source.rglob('*'):
+  if file.is_file():archive.write(file,'sidecar/'+str(file.relative_to(source)))
+`, sidecar, artifact], { encoding: 'utf8' });
+    assert.equal(pack().status, 0);
+    const final = validate('--final', [artifact]);
+    assert.equal(final.status, 0, `${final.stdout}${final.stderr}`);
+    write(path.join(sidecar, 'internal-docs/surplus.md'), 'surplus'); assert.equal(pack().status, 0);
+    assert.notEqual(validate('--final', [artifact]).status, 0, 'surplus documentation must fail exact population validation');
+    fs.unlinkSync(path.join(sidecar, 'internal-docs/surplus.md'));
+    fs.unlinkSync(path.join(sidecar, 'uuid-idempotency-source-redactions.json')); assert.equal(pack().status, 0);
+    assert.notEqual(validate('--final', [artifact]).status, 0, 'missing manifest must refuse');
+    assert.notEqual(validate('--assembled', [sidecar, resources, seed], { PAPERCUSP_SEED_UUID_CENSUS_SHA256: 'b'.repeat(64) }).status, 0);
+    assert.ok(!fs.readdirSync(sidecar).some(name => name.includes('private')));
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test('D-166 authenticates the full supplied row census, drops the class and mirrors, and preserves honest counts', () => {
   const crypto = require('node:crypto');
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-uuid-census-'));
