@@ -186,6 +186,7 @@ papercusp_pinned_deps_snapshot() {
     # cheap to rebuild but it may be the lowerdir of a mounted overlay while we run, and a
     # half-populated lower layer is precisely the torn read this file exists to prevent.
     local _copy_rc=0
+    echo "snapshotting $_rel (mode=$_copy_mode)"
     if [ "$_copy_mode" = copy ]; then
       cp -a "$_src" "$_tmp" 2>/dev/null || _copy_rc=$?
     else
