@@ -6,6 +6,15 @@ const test = require('node:test');
 const main = fs.readFileSync(path.join(__dirname, '../src-tauri/src/main.rs'), 'utf8');
 const cargo = fs.readFileSync(path.join(__dirname, '../src-tauri/Cargo.toml'), 'utf8');
 
+test('a rejected shortcut rebind rebuilds native tray checkmarks from the persisted choice', () => {
+  const start = main.indexOf('} else if let Some(payload) = id.strip_prefix(DOCS_SHORTCUT_MENU_PREFIX)');
+  const handler = main.slice(start, main.indexOf('    // Reuse the bundle icon', start));
+  const refusal = handler.indexOf('docs-search set to {payload} failed');
+  const rebuild = handler.indexOf('match build_server_tray_menu(app)');
+  assert.ok(refusal >= 0, 'the refused rebind must be reported');
+  assert.ok(rebuild > refusal, 'the menu rebuild must also run after a refused rebind');
+});
+
 test('the Server manages disabled NativeTerminal state before registering the docs shortcut', () => {
   const setup = main.slice(main.indexOf('.setup(move |app| {'), main.indexOf('.run(|app_handle, event|'));
   const manage = setup.indexOf('init_native_terminal(app, is_dev || role.is_gui())');

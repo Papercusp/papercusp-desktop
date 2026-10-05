@@ -6566,24 +6566,21 @@ fn install_server_tray(app: &tauri::App) -> tauri::Result<()> {
                     }
                 });
             } else if let Some(payload) = id.strip_prefix(DOCS_SHORTCUT_MENU_PREFIX) {
-                // Set the docs-search global shortcut live, then rebuild the tray
-                // menu so the checkmark tracks the new selection. The "Off" item
+                // Rebuild after success OR refusal: native check items toggle
+                // before this callback, so a refused key otherwise stays checked
+                // alongside the persisted working selection. The "Off" item
                 // carries the SHORTCUT_OFF payload → None → disable entirely.
                 let choice = (payload != docs_search::SHORTCUT_OFF).then_some(payload);
-                match docs_search::set_shortcut(app, choice) {
-                    Ok(()) => match build_server_tray_menu(app) {
-                        Ok(menu) => {
-                            if let Some(tray) = app.tray_by_id("papercusp-server") {
-                                let _ = tray.set_menu(Some(menu));
-                            }
+                if let Err(e) = docs_search::set_shortcut(app, choice) {
+                    eprintln!("[papercusp-server] docs-search set to {payload} failed: {e}");
+                }
+                match build_server_tray_menu(app) {
+                    Ok(menu) => {
+                        if let Some(tray) = app.tray_by_id("papercusp-server") {
+                            let _ = tray.set_menu(Some(menu));
                         }
-                        Err(e) => {
-                            eprintln!("[papercusp-server] tray menu rebuild failed: {e}")
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("[papercusp-server] docs-search set to {payload} failed: {e}")
                     }
+                    Err(e) => eprintln!("[papercusp-server] tray menu rebuild failed: {e}"),
                 }
             }
         });
