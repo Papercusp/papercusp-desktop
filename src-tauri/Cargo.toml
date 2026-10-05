@@ -135,6 +135,10 @@ gtk = "0.18"
 glib = "0.18"
 libloading = "0.8"
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Exercise the OS grab owned by the same crate the Tauri shortcut plugin uses.
+global-hotkey = "0.8"
+
 # libloading on macOS — the D-009 SwiftTerm embed dlopens the
 # macos-term-shim dylib at runtime (same no-link-time-dependency pattern as
 # the Linux VTE embed; absent shim → NewWindow downgrade).
@@ -186,6 +190,10 @@ strip = "symbols"
 # still carries the unwrap as of 2026-06-09 — drop this patch when a released
 # tauri-runtime-wry walks the ancestry safely.
 [patch.crates-io]
+# global-hotkey 0.8.0 queues X11 ungrabs without flushing: Off keeps swallowing
+# the key until another registration. Backport upstream PR #197; remove when a
+# released version includes it. Real X11 coverage: tests/global_shortcut_x11.rs.
+global-hotkey = { path = "vendor/global-hotkey" }
 # tao 0.35.3's Linux raw-device helper calls XDefaultRootWindow(NULL) when
 # XOpenDisplay fails, crashing the whole app. Keep this exact release vendored
 # with the null-display guard in vendor/tao/src/platform_impl/linux/device.rs.
