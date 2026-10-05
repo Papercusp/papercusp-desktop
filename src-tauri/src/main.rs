@@ -9097,7 +9097,12 @@ fn init_native_terminal(app: &tauri::App, window_owner: bool) {
 /// `/dev/dri` directory ⇒ no render node.
 #[cfg(target_os = "linux")]
 fn linux_has_dri_render_node() -> bool {
-    std::fs::read_dir("/dev/dri")
+    linux_has_dri_render_node_at(std::path::Path::new("/dev/dri"), std::path::Path::new("/sys/class/drm"))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_has_dri_render_node_at(dri: &std::path::Path, _drm: &std::path::Path) -> bool {
+    std::fs::read_dir(dri)
         .map(|rd| {
             rd.flatten().any(|e| {
                 e.file_name()
@@ -9130,6 +9135,105 @@ mod dmabuf_render_tests {
         assert!(should_disable_dmabuf(true, true));
         // A real hardware GL render node and no NVIDIA → keep the fast DMA-BUF path.
         assert!(!should_disable_dmabuf(false, false));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod render_capability_tests {
+    use super::linux_has_dri_render_node_at;
+    use std::path::PathBuf;
+
+    struct DrmFixture(PathBuf);
+
+    impl DrmFixture {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "papercusp-drm-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(root.join("dev/dri")).unwrap();
+            std::fs::create_dir_all(root.join("sys/class/drm")).unwrap();
+            Self(root)
+        }
+
+        fn node(&self, name: &str, driver: &str, features: Option<&str>, pci: bool) {
+            use std::os::unix::fs::symlink;
+            std::fs::write(self.0.join("dev/dri").join(name), "").unwrap();
+            let device = self.0.join("devices").join(name);
+            std::fs::create_dir_all(&device).unwrap();
+            let class = self.0.join("sys/class/drm").join(name);
+            std::fs::create_dir_all(&class).unwrap();
+            symlink(&device, class.join("device")).unwrap();
+            let gpu = if pci {
+                symlink("/sys/bus/pci/drivers/virtio-pci", device.join("driver")).unwrap();
+                device.join("virtio0")
+            } else {
+                device
+            };
+            std::fs::create_dir_all(&gpu).unwrap();
+            symlink(format!("/sys/bus/virtio/drivers/{driver}"), gpu.join("driver")).unwrap();
+            if let Some(features) = features {
+                std::fs::write(gpu.join("features"), features).unwrap();
+            }
+        }
+
+        fn has_acceleration(&self) -> bool {
+            linux_has_dri_render_node_at(&self.0.join("dev/dri"), &self.0.join("sys/class/drm"))
+        }
+    }
+
+    impl Drop for DrmFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn render_capability_2d_virtio_node_does_not_imply_acceleration() {
+        let fixture = DrmFixture::new();
+        // Exact sysfs shape and negotiated features from the clean Linux VM.
+        fixture.node("renderD128", "virtio_gpu", Some("0100000000000000000000000000110010000000100000000000000000000000\n"), true);
+        assert!(!fixture.has_acceleration());
+    }
+
+    #[test]
+    fn render_capability_direct_2d_virtio_is_software() {
+        let fixture = DrmFixture::new();
+        fixture.node("renderD128", "virtio_gpu", Some("01000000\n"), false);
+        assert!(!fixture.has_acceleration());
+    }
+
+    #[test]
+    fn render_capability_virgl_retains_acceleration() {
+        let fixture = DrmFixture::new();
+        fixture.node("renderD128", "virtio_gpu", Some("11000000\n"), true);
+        assert!(fixture.has_acceleration());
+    }
+
+    #[test]
+    fn render_capability_physical_and_hybrid_gpus_retain_acceleration() {
+        let fixture = DrmFixture::new();
+        fixture.node("renderD128", "virtio_gpu", Some("01000000\n"), true);
+        fixture.node("renderD129", "amdgpu", None, false);
+        assert!(fixture.has_acceleration());
+    }
+
+    #[test]
+    fn render_capability_unknown_features_do_not_disable_real_hardware() {
+        for features in [None, Some(""), Some("malformed\n")] {
+            let fixture = DrmFixture::new();
+            fixture.node("renderD128", "virtio_gpu", features, true);
+            assert!(fixture.has_acceleration());
+        }
+    }
+
+    #[test]
+    fn render_capability_no_render_nodes_uses_software() {
+        let fixture = DrmFixture::new();
+        assert!(!fixture.has_acceleration());
+        assert!(!linux_has_dri_render_node_at(&fixture.0.join("missing"), &fixture.0));
     }
 }
 
