@@ -903,7 +903,15 @@ DEB_PATH="${DEB_CANDIDATES[0]}"
 # saving ~193MB on the measured GUI artifact while retaining old-dpkg support.
 # This is deliberately NOT inside BUILD_TIMEOUT_SEC: a cold compile and an
 # advancing xz each own a full phase budget (EI-21561573003367567).
-echo "=== repacking ($DEB_PATH), independently bounded to ${REPACK_TIMEOUT_SEC}s ==="
+# WI-10006665: a test artifact keeps the guard half of the repack (stale .stage-scrub
+# members, member layout) but skips the xz -9 recompression (~55 min for 0.68 GB on c1007),
+# unless PAPERCUSP_TEST_ARTIFACT_XZ=1 asks for the release-shaped package.
+PAPERCUSP_DEB_REPACK_GUARD_ONLY=0
+if [[ "$TEST_ARTIFACT" == "1" && "${PAPERCUSP_TEST_ARTIFACT_XZ:-0}" != "1" ]]; then
+  PAPERCUSP_DEB_REPACK_GUARD_ONLY=1
+fi
+export PAPERCUSP_DEB_REPACK_GUARD_ONLY
+echo "=== repacking ($DEB_PATH, guard-only=$PAPERCUSP_DEB_REPACK_GUARD_ONLY), independently bounded to ${REPACK_TIMEOUT_SEC}s ==="
 set +e
 run_bounded_phase "$REPACK_TIMEOUT_SEC" bash -c 'exec 8>&- 9>&-; exec bash "$1" "$2"' _ "$LIVE_DESKTOP_DIR/bin/repack-deb-xz.sh" "$DEB_PATH" &
 BUILD_PGID=$!

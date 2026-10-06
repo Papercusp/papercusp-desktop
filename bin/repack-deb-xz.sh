@@ -63,6 +63,22 @@ mapfile -t MEMBERS < <(ar t "$DEB_PATH")
 [[ "${MEMBERS[1]}" == control.tar.* ]] || { echo "FATAL: second deb member is not control.tar.*" >&2; exit 4; }
 [[ "${MEMBERS[2]}" == data.tar.* ]] || { echo "FATAL: third deb member is not data.tar.*" >&2; exit 4; }
 
+# WI-10006665: guard-only mode keeps every check above (stale .stage-scrub members, the
+# 3-member layout) and leaves the package bytes and any .sig untouched. It exists for TEST
+# artifacts (build-and-archive-deb.sh --test-artifact), which dpkg installs on a throwaway VM
+# and reads data.tar.gz natively. There xz -9 cost ~55 min to save 0.68 GB of a 3.66 GB
+# package (c1007, 2026-10-06), against seconds of upload. Release builds never set it.
+GUARD_ONLY="${PAPERCUSP_DEB_REPACK_GUARD_ONLY:-0}"
+[[ "$GUARD_ONLY" == 0 || "$GUARD_ONLY" == 1 ]] || {
+  echo "FATAL: PAPERCUSP_DEB_REPACK_GUARD_ONLY must be 0 or 1, got: $GUARD_ONLY" >&2
+  exit 7
+}
+if [[ "$GUARD_ONLY" == 1 ]]; then
+  dpkg-deb --info "$DEB_PATH" >/dev/null
+  echo "==> guard-only: checked $DEB_PATH; data member left as ${MEMBERS[2]} (no recompression)"
+  exit 0
+fi
+
 if [[ "${MEMBERS[2]}" == "data.tar.xz" ]]; then
   dpkg-deb --info "$DEB_PATH" >/dev/null
   dpkg-deb --contents "$DEB_PATH" >/dev/null

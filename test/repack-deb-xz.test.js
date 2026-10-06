@@ -6,7 +6,8 @@ const path = require('node:path');
 const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
-const helper = path.join(root, 'bin', 'repack-deb-xz.sh');
+// Overridable so scripts/mutation-probe.sh can point the suite at an out-of-tree mutant copy.
+const helper = process.env.PAPERCUSP_REPACK_HELPER_UNDER_TEST || path.join(root, 'bin', 'repack-deb-xz.sh');
 const buildWrapperRel = 'bin/build-deb-repacked.sh';
 const tauriGuardRel = 'bin/tauri-guarded';
 
@@ -639,4 +640,114 @@ test('announces an unsigned output when repacking without a signing key', () => 
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+// WI-10006665: guard-only mode (test artifacts) keeps the checks but skips the xz -9 recompression.
+function buildGuardFixture(tmp, extraRel) {
+  const pkg = path.join(tmp, 'pkg');
+  fs.mkdirSync(path.join(pkg, 'DEBIAN'), { recursive: true });
+  fs.mkdirSync(path.join(pkg, 'opt', 'fixture'), { recursive: true });
+  fs.writeFileSync(path.join(pkg, 'DEBIAN', 'control'), [
+    'Package: papercusp-repack-guard-only-test',
+    'Version: 1.0.0',
+    'Architecture: all',
+    'Maintainer: Papercusp <test@example.invalid>',
+    'Description: guard-only fixture',
+    '',
+  ].join('\n'));
+  fs.writeFileSync(path.join(pkg, 'opt', 'fixture', 'payload'), 'guard-only bytes\n');
+  if (extraRel) {
+    fs.mkdirSync(path.dirname(path.join(pkg, extraRel)), { recursive: true });
+    fs.writeFileSync(path.join(pkg, extraRel), 'stale scrub copy\n');
+  }
+  const deb = path.join(tmp, 'guard.deb');
+  run('dpkg-deb', ['-Zgzip', '-b', pkg, deb]);
+  fs.writeFileSync(`${deb}.sig`, 'signature-for-original-bytes\n');
+  return deb;
+}
+
+test('guard-only mode leaves the package bytes and signature untouched and never runs xz', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-guard-only-'));
+  try {
+    const deb = buildGuardFixture(tmp);
+    const original = fs.readFileSync(deb);
+    const fakeBin = path.join(tmp, 'bin');
+    fs.mkdirSync(fakeBin);
+    // Any xz invocation fails loudly, so a recompression attempt cannot pass silently.
+    fs.writeFileSync(path.join(fakeBin, 'xz'), '#!/usr/bin/env bash\necho XZ-CALLED >&2\nexit 42\n', { mode: 0o755 });
+    const res = spawnSync('bash', [helper, deb], {
+      encoding: 'utf8',
+      // No signing key: the normal path would refuse (exit 5) to stale the .sig.
+      env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, TAURI_SIGNING_PRIVATE_KEY: '', PAPERCUSP_DEB_REPACK_GUARD_ONLY: '1' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /guard-only: checked .*; data member left as data\.tar\.gz \(no recompression\)/);
+    assert.doesNotMatch(res.stderr, /XZ-CALLED/);
+    assert.deepEqual(fs.readFileSync(deb), original, 'guard-only must not rewrite the package');
+    assert.equal(fs.readFileSync(`${deb}.sig`, 'utf8'), 'signature-for-original-bytes\n');
+
+    // Calibration: the same fixture without guard-only takes the recompression path.
+    const normal = spawnSync('bash', [helper, deb], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, TAURI_SIGNING_PRIVATE_KEY: '' },
+    });
+    assert.equal(normal.status, 5, 'without guard-only the signed fixture reaches the stale-signature refusal');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('guard-only mode still refuses a package carrying stale .stage-scrub members', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-guard-only-scrub-'));
+  try {
+    const deb = buildGuardFixture(tmp, 'usr/lib/Papercusp Server/sidecar/.stage-scrub-abc123/SCRUBBED/leak.txt');
+    const original = fs.readFileSync(deb);
+    const res = spawnSync('bash', [helper, deb], {
+      encoding: 'utf8',
+      env: { ...process.env, TAURI_SIGNING_PRIVATE_KEY: '', PAPERCUSP_DEB_REPACK_GUARD_ONLY: '1' },
+    });
+    assert.equal(res.status, 8, res.stderr);
+    assert.match(res.stderr, /stale \.stage-scrub members/);
+    assert.deepEqual(fs.readFileSync(deb), original);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('guard-only mode rejects a value other than 0 or 1', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-guard-only-bad-'));
+  try {
+    const deb = buildGuardFixture(tmp);
+    const res = spawnSync('bash', [helper, deb], {
+      encoding: 'utf8',
+      env: { ...process.env, TAURI_SIGNING_PRIVATE_KEY: '', PAPERCUSP_DEB_REPACK_GUARD_ONLY: 'yes' },
+    });
+    assert.equal(res.status, 7, res.stderr);
+    assert.match(res.stderr, /PAPERCUSP_DEB_REPACK_GUARD_ONLY must be 0 or 1/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('build-and-archive-deb.sh selects guard-only for test artifacts only, and the opt-in restores xz', () => {
+  // Evaluate the wrapper's REAL decision block (from its WI-10006665 marker through the export)
+  // under each input, rather than matching its text.
+  const src = fs.readFileSync(path.join(root, 'bin', 'build-and-archive-deb.sh'), 'utf8');
+  const start = src.indexOf('# WI-10006665:');
+  const end = src.indexOf('export PAPERCUSP_DEB_REPACK_GUARD_ONLY', start);
+  assert.ok(start >= 0 && end > start, 'decision block not found in build-and-archive-deb.sh');
+  const block = src.slice(start, end) + 'export PAPERCUSP_DEB_REPACK_GUARD_ONLY\nprintf %s "$PAPERCUSP_DEB_REPACK_GUARD_ONLY"\n';
+  const decide = (testArtifact, optIn) => {
+    const env = { ...process.env, TEST_ARTIFACT: testArtifact };
+    delete env.PAPERCUSP_TEST_ARTIFACT_XZ;
+    delete env.PAPERCUSP_DEB_REPACK_GUARD_ONLY;
+    if (optIn !== undefined) env.PAPERCUSP_TEST_ARTIFACT_XZ = optIn;
+    return run('bash', ['-c', `TEST_ARTIFACT="$TEST_ARTIFACT"\n${block}`], { env });
+  };
+  assert.equal(decide('1'), '1', 'a test artifact skips xz');
+  assert.equal(decide('1', '1'), '0', 'PAPERCUSP_TEST_ARTIFACT_XZ=1 restores the release-shaped repack');
+  assert.equal(decide('0'), '0', 'a release build always recompresses');
+  assert.equal(decide('0', '0'), '0');
+  // The decision must be exported BEFORE the repack phase is launched.
+  assert.ok(end < src.indexOf('repack-deb-xz.sh" "$DEB_PATH" &'), 'the export must precede the repack launch');
 });
