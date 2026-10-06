@@ -388,6 +388,21 @@ if [[ -f "$UPLOAD_FROM/history.json" ]]; then
 fi
 
 if [[ -f "$UPLOAD_FROM/index.html" ]]; then
+  # WI-10006550: every page and installer index.html links to is uploaded by now, so
+  # check that each relative link resolves on the PUBLIC host before the index advertises
+  # it. A registry row is not an uploaded object: the 0.0.25 page linked a Server .deb
+  # that was recorded but never uploaded, and served a 404 download link.
+  echo "==> checking that every link on index.html resolves before it goes live"
+  LINK_RC=0
+  node "$HERE/check-page-links.mjs" "$UPLOAD_FROM/index.html" "$BASE" || LINK_RC=$?
+  if [[ "$LINK_RC" == "1" ]]; then
+    echo "  ✗ refusing to upload index.html: it would link the object(s) above, which the host does not serve." >&2
+    echo "    Upload the missing objects (bin/upload-release.sh), or mark them withdrawn in the release" >&2
+    echo "    registry and regenerate the page, then re-run this script." >&2
+    exit 1
+  elif [[ "$LINK_RC" != "0" ]]; then
+    echo "  ⚠ links not checked (the public host did not answer); the read-path check below decides." >&2
+  fi
   echo "==> uploading index.html (LAST — this is the page we share)"
   aws s3 cp "$UPLOAD_FROM/index.html" "s3://${R2_BUCKET}/${KEY_PREFIX}/index.html" \
     --endpoint-url "$ENDPOINT" \
