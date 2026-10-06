@@ -1084,9 +1084,9 @@ mod tests {
 
     #[test]
     fn vm_release_forces_environment_operator_provisioning_off() {
-        assert_eq!(provision_env_operators_for("vm-release", false), "0");
-        assert_eq!(provision_env_operators_for("dogfood", false), "1");
-        assert_eq!(provision_env_operators_for("", false), "1");
+        assert_eq!(provision_env_operators_for("vm-release", false, None), "0");
+        assert_eq!(provision_env_operators_for("dogfood", false, None), "1");
+        assert_eq!(provision_env_operators_for("", false, None), "1");
     }
 
     /// WI-10006420: the headless Server never provisions the desktop
@@ -1094,8 +1094,19 @@ mod tests {
     #[test]
     fn headless_service_forces_environment_operator_provisioning_off() {
         for profile in ["dogfood", "vm-release", ""] {
-            assert_eq!(provision_env_operators_for(profile, true), "0", "{profile}");
+            assert_eq!(provision_env_operators_for(profile, true, Some("1")), "0", "{profile}");
         }
+    }
+
+    #[test]
+    fn environment_operator_provisioning_respects_explicit_opt_out() {
+        for profile in ["dogfood", "public", ""] {
+            assert_eq!(provision_env_operators_for(profile, false, Some("0")), "0", "{profile}");
+            for requested in [None, Some("1"), Some(""), Some("false")] {
+                assert_eq!(provision_env_operators_for(profile, false, requested), "1", "{profile}");
+            }
+        }
+        assert_eq!(provision_env_operators_for("vm-release", false, Some("1")), "0");
     }
 
     #[test]
@@ -7013,14 +7024,20 @@ fn baked_distribution_profile() -> &'static str {
 /// (dev :3270 / prod :3070 / staging :3170 / local :3055). They exist only to
 /// light up the desktop's EnvSwitcherBar, so they are OFF for:
 /// - `vm-release` (the immutable customer VM build), and
+/// - an explicit `PAPERCUSP_PROVISION_ENV_OPERATORS=0` opt-out (the same
+///   opt-out honored by host-bootstrap, including isolated desktop verification),
 /// - the `--headless-service` Server whatever its profile (WI-10006420). It has
 ///   no window, the operators bind loopback so nothing remote can use them, and
 ///   measured 2026-10-06 on a dogfood-profile Server they cost 2.3-2.9 GB RSS
 ///   (tsx dev operator + Vite dev server) plus the first-boot source extract. On
 ///   a shared host a second tenant also found the first tenant's listeners
 ///   "already reachable" and adopted them as its own.
-fn provision_env_operators_for(profile: &str, headless_service: bool) -> &'static str {
-    if headless_service || profile == "vm-release" {
+fn provision_env_operators_for(
+    profile: &str,
+    headless_service: bool,
+    requested: Option<&str>,
+) -> &'static str {
+    if headless_service || profile == "vm-release" || requested == Some("0") {
         "0"
     } else {
         "1"
@@ -7345,7 +7362,11 @@ fn spawn_serve(
         // single-writer), so arming it on every desktop sidecar spawn is safe.
         .env(
             "PAPERCUSP_PROVISION_ENV_OPERATORS",
-            provision_env_operators_for(baked_distribution_profile(), headless_service),
+            provision_env_operators_for(
+                baked_distribution_profile(),
+                headless_service,
+                std::env::var("PAPERCUSP_PROVISION_ENV_OPERATORS").ok().as_deref(),
+            ),
         )
         // Phase E (P-051): shared-operator model — per-spawn HOME comes from
         // each job's workspace, set operator-side.
