@@ -25,6 +25,107 @@ function sliceBetween(start, end) {
   return source.slice(from, to);
 }
 
+// D172 exercises the real cutter boundaries against disposable Git repositories.
+// No builder or public remote is involved; the final binding uses the existing
+// create-only helper and proves both the missing-ref and mismatched-ref paths.
+const tagPreconditionHarness = sliceBetween('# ── Dogfood-pin tag precondition', '# ── PRECHECK-ONLY EXIT');
+const tagLocalHarness = sliceBetween('if git -C "$MONOREPO" rev-parse --git-dir', '# P-003 clause 3');
+const tagFinishHarness = sliceBetween('vh_begin tag\n', '# ── ⛔ LOCAL-only.');
+
+test('tag-deferred builds leave both repositories and canonical manifests untouched until exact binding', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deferred-tag-'));
+  const remote = path.join(temp, 'remote.git');
+  const repo = path.join(temp, 'source');
+  const desktop = path.join(temp, 'desktop');
+  const probeLog = path.join(temp, 'probes');
+  const canonical = path.join(temp, 'canonical');
+  const tag = 'desktop-v0.0.29-alpha';
+  function git(cwd, ...args) {
+    const r = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr || r.stdout);
+    return r.stdout.trim();
+  }
+  function init(cwd) {
+    fs.mkdirSync(cwd);
+    git(cwd, 'init', '-q');
+    git(cwd, 'config', 'user.name', 'release-test');
+    git(cwd, 'config', 'user.email', 'release-test@example.invalid');
+    fs.writeFileSync(path.join(cwd, 'package.json'), '{"version":"0.0.28"}');
+    fs.mkdirSync(path.join(cwd, 'src-tauri'));
+    for (const name of ['tauri.conf.json', 'Cargo.toml', 'Cargo.lock']) fs.writeFileSync(path.join(cwd, 'src-tauri', name), 'original');
+    git(cwd, 'add', '.');
+    git(cwd, 'commit', '-qm', 'source');
+    return git(cwd, 'rev-parse', 'HEAD');
+  }
+  const quote = (s) => `'${s.replaceAll("'", "'\"'\"'")}'`;
+  try {
+    fs.mkdirSync(remote);
+    git(remote, 'init', '--bare', '-q');
+    const sha = init(repo);
+    const desktopSha = init(desktop);
+    git(repo, 'remote', 'add', 'origin', remote);
+    fs.mkdirSync(canonical);
+    fs.writeFileSync(path.join(canonical, 'witness'), 'unchanged');
+    // Build-owned residue must never become a commit/tag in deferred mode.
+    fs.writeFileSync(path.join(desktop, 'package.json'), '{"version":"0.0.29"}');
+    function run(deferTag, { finish = false, bind = false, canonicalRoot = canonical } = {}) {
+      const command = [
+        'set -euo pipefail',
+        `MONOREPO=${quote(repo)}`, `ROOT=${quote(desktop)}`, `TAG=${quote(tag)}`,
+        `EXPECTED_SOURCE_SHA=${quote(sha)}`, 'VERSION=0.0.29',
+        `PAPERCUSP_RELEASE_DEFER_TAG=${deferTag ? '1' : '0'}`,
+        `PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT=${quote(canonicalRoot)}`,
+        `source ${quote(path.join(root, 'bin', 'lib', 'release-tag-pin.sh'))}`,
+        // Keep the real helper's ref reader but direct its public-remote input
+        // to the disposable origin; recording calls catches accidental probes.
+        `release_tag_remote_sha() { printf 'probe\\n' >> ${quote(probeLog)}; git -C "$1" ls-remote --refs --tags origin "refs/tags/$2" | awk 'NR == 1 { print $1 }'; }`,
+        ...(bind ? ['release_tag_create_exact "$MONOREPO" "$TAG" "$EXPECTED_SOURCE_SHA"'] : []),
+        tagPreconditionHarness, tagLocalHarness,
+        ...(finish ? ['vh_begin() { :; }', tagFinishHarness, 'test "$CANONICAL_WRITEBACK_STATUS" = 0'] : []),
+      ].join('\n');
+      return spawnSync('bash', ['-c', command], { encoding: 'utf8' });
+    }
+    const missing = run(false);
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /Nothing has been modified/);
+    fs.rmSync(probeLog);
+    const deferred = run(true, { finish: true });
+    assert.equal(deferred.status, 0, deferred.stderr || deferred.stdout);
+    assert.equal(fs.existsSync(probeLog), false, 'deferral probed a remote tag');
+    assert.equal(git(repo, 'tag', '--list'), '');
+    assert.equal(git(remote, 'tag', '--list'), '');
+    assert.equal(git(desktop, 'tag', '--list'), '');
+    assert.equal(git(desktop, 'rev-parse', 'HEAD'), desktopSha);
+    assert.equal(fs.readFileSync(path.join(canonical, 'witness'), 'utf8'), 'unchanged');
+    assert.deepEqual(fs.readdirSync(canonical), ['witness']);
+    const bound = run(false, { bind: true });
+    assert.equal(bound.status, 0, bound.stderr || bound.stdout);
+    assert.equal(git(repo, 'rev-parse', `refs/tags/${tag}`), sha);
+    assert.equal(git(remote, 'rev-parse', `refs/tags/${tag}`), sha);
+    assert.equal(git(desktop, 'rev-parse', 'HEAD'), desktopSha, 'binding committed build residue');
+    const normalFinish = run(false, { finish: true, canonicalRoot: desktop });
+    assert.equal(normalFinish.status, 0, normalFinish.stderr || normalFinish.stdout);
+    assert.notEqual(git(desktop, 'rev-parse', 'HEAD'), desktopSha, 'normal version commit did not run');
+    assert.equal(git(desktop, 'rev-parse', `refs/tags/${tag}`), git(desktop, 'rev-parse', 'HEAD'));
+
+    // A different immutable remote ref is never re-bound to speculative bytes.
+    fs.writeFileSync(path.join(repo, 'package.json'), 'changed');
+    git(repo, 'commit', '-qam', 'different source');
+    const other = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'push', '-q', '--force', 'origin', `${other}:refs/tags/${tag}`);
+    const mismatch = run(false, { bind: true });
+    assert.notEqual(mismatch.status, 0);
+    assert.match(mismatch.stderr, /intentionally non-overwriting/);
+    assert.equal(git(remote, 'rev-parse', `refs/tags/${tag}`), other);
+    assert.equal(git(repo, 'rev-parse', `refs/tags/${tag}`), sha);
+    const deferredMismatch = run(true, { finish: true });
+    assert.equal(deferredMismatch.status, 0, deferredMismatch.stderr || deferredMismatch.stdout);
+    assert.equal(git(remote, 'rev-parse', `refs/tags/${tag}`), other);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 // Run the REAL provenance helper and Linux reuse branch, stopping before the
 // independent Android branch. This is deliberately not a rewritten model of
 // the shell logic: if the production branch changes, the behavior under test
