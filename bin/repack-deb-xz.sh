@@ -67,7 +67,8 @@ mapfile -t MEMBERS < <(ar t "$DEB_PATH")
 # 3-member layout) and leaves the package bytes and any .sig untouched. It exists for TEST
 # artifacts (build-and-archive-deb.sh --test-artifact), which dpkg installs on a throwaway VM
 # and reads data.tar.gz natively. There xz -9 cost ~55 min to save 0.68 GB of a 3.66 GB
-# package (c1007, 2026-10-06), against seconds of upload. Release builds never set it.
+# package (c1007, 2026-10-06); at the tower's measured ~1.3 MB/s GCS upload those 0.68 GB
+# cost ~9 min, so skipping saves ~46 min per test build. Release builds never set it.
 GUARD_ONLY="${PAPERCUSP_DEB_REPACK_GUARD_ONLY:-0}"
 [[ "$GUARD_ONLY" == 0 || "$GUARD_ONLY" == 1 ]] || {
   echo "FATAL: PAPERCUSP_DEB_REPACK_GUARD_ONLY must be 0 or 1, got: $GUARD_ONLY" >&2
