@@ -658,6 +658,7 @@ fn install_load_failure_recovery<R: tauri::Runtime>(window: &tauri::WebviewWindo
         use webkit2gtk::WebViewExt;
         let wv: webkit2gtk::WebView = webview.inner();
         let tracker = Arc::new(Mutex::new(RecoveryTracker::default()));
+        let crash_hint = recovery_crash_hint();
         {
             let tracker = Arc::clone(&tracker);
             wv.connect_load_changed(move |wv, event| {
@@ -680,15 +681,19 @@ fn install_load_failure_recovery<R: tauri::Runtime>(window: &tauri::WebviewWindo
             eprintln!(
                 "[papercusp-desktop] main-frame load failed for {failing_uri} ({error}) — showing recovery page"
             );
-            let kind = tracker
+            let now = Instant::now();
+            let (kind, waited) = tracker
                 .lock()
-                .map(|mut t| t.on_failed(failing_uri))
-                .unwrap_or(RecoveryKind::Starting);
+                .map(|mut t| {
+                    let kind = t.on_failed_at(failing_uri, now);
+                    (kind, t.waited(failing_uri, now))
+                })
+                .unwrap_or((RecoveryKind::Starting, Duration::ZERO));
             // content_uri = the failed URI so the page keeps that security
             // origin: its same-origin health poll dials exactly the origin
             // that died.
             wv.load_alternate_html(
-                &recovery_page_html(failing_uri, kind),
+                &recovery_page_html(failing_uri, kind, waited, &crash_hint),
                 failing_uri,
                 Some(failing_uri),
             );
@@ -718,6 +723,12 @@ struct RecoveryTracker {
     /// Set when a recovery page is about to load: its own commit carries the
     /// failed URI as content URI and must not count as the operator answering.
     alternate_pending: bool,
+    /// When the CURRENT unanswered stretch began, per origin: the first failed
+    /// load since the origin last answered (plan desktop-dev-startup-speed-
+    /// 2026-10-06 P-003). The recovery page is re-rendered on every failed
+    /// retry, so its elapsed-time counter must come from here, not from the
+    /// page itself, or it would restart at zero after each retry.
+    waiting_since: std::collections::HashMap<String, Instant>,
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -728,6 +739,7 @@ impl RecoveryTracker {
             return;
         }
         if let Some(origin) = uri.and_then(uri_origin) {
+            self.waiting_since.remove(&origin);
             self.answered.insert(origin);
         }
     }
@@ -735,11 +747,34 @@ impl RecoveryTracker {
     /// A main-frame load failed at `failing_uri` and the recovery page is
     /// about to be shown: which variant should it be?
     fn on_failed(&mut self, failing_uri: &str) -> RecoveryKind {
+        self.on_failed_at(failing_uri, Instant::now())
+    }
+
+    /// `on_failed` with an explicit clock, so the waiting-time bookkeeping is
+    /// testable without sleeping.
+    fn on_failed_at(&mut self, failing_uri: &str, now: Instant) -> RecoveryKind {
         self.alternate_pending = true;
         match uri_origin(failing_uri) {
-            Some(origin) if self.answered.contains(&origin) => RecoveryKind::Lost,
-            _ => RecoveryKind::Starting,
+            Some(origin) => {
+                let kind = if self.answered.contains(&origin) {
+                    RecoveryKind::Lost
+                } else {
+                    RecoveryKind::Starting
+                };
+                self.waiting_since.entry(origin).or_insert(now);
+                kind
+            }
+            None => RecoveryKind::Starting,
         }
+    }
+
+    /// How long `failing_uri`'s origin has gone unanswered as of `now`: zero
+    /// for an origin with no failure on record (or one without an authority).
+    fn waited(&self, failing_uri: &str, now: Instant) -> Duration {
+        uri_origin(failing_uri)
+            .and_then(|origin| self.waiting_since.get(&origin).copied())
+            .map(|since| now.saturating_duration_since(since))
+            .unwrap_or(Duration::ZERO)
     }
 }
 
@@ -813,6 +848,57 @@ fn restore_window_visibility<R: tauri::Runtime + 'static>(
     });
 }
 
+/// How long the recovery page waits before adding the "it may have crashed"
+/// hint (plan desktop-dev-startup-speed-2026-10-06 P-003). A loaded dev box
+/// can take minutes to boot the operator, so the hint says that waiting can
+/// be normal rather than declaring a crash.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const RECOVERY_CRASH_HINT_AFTER: Duration = Duration::from_secs(180);
+
+/// Where the operator's error would be if it crashed instead of booting. A
+/// dev build's operator inherits the `tauri dev` terminal (see the
+/// `cfg!(debug_assertions)` stdio branch of the serve spawn), so that is
+/// where its error goes; a packaged build tees serve output to the rotated
+/// `<sidecar home>/.papercusp/logs/serve.log` instead (WI-1707).
+#[cfg(target_os = "linux")]
+fn recovery_crash_hint() -> String {
+    recovery_crash_hint_for(
+        cfg!(debug_assertions),
+        &workspaces::shared_sidecar_home().join(".papercusp").join("logs").join("serve.log"),
+    )
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn recovery_crash_hint_for(dev_build: bool, serve_log: &std::path::Path) -> String {
+    let minutes = RECOVERY_CRASH_HINT_AFTER.as_secs() / 60;
+    if dev_build {
+        format!(
+            "Still waiting after {minutes} minutes. On a busy machine that can be normal, but the server may also have crashed. If it did, its error is in the terminal window where you ran npm run dev."
+        )
+    } else {
+        format!(
+            "Still waiting after {minutes} minutes. On a busy machine that can be normal, but the server may also have failed to start. If it did, its error is in {}.",
+            serve_log.display()
+        )
+    }
+}
+
+/// Escape text for an HTML text node.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn html_escape_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// The bundled offline-recovery page (EI-239). Self-contained inline
 /// HTML+JS: polls the failed URI once a second (any HTTP response counts —
 /// an error status still proves the origin is back) and navigates to it on
@@ -820,11 +906,22 @@ fn restore_window_visibility<R: tauri::Runtime + 'static>(
 /// poll. The URI is embedded as a JSON string literal, with `<` further
 /// escaped to `<`: JSON alone leaves `</script>` intact inside the
 /// literal, which would still terminate the script element.
+///
+/// Plan desktop-dev-startup-speed-2026-10-06 P-003: the page also shows how
+/// long it has been waiting (`waited` = the tracker's unanswered stretch so
+/// far, so the counter survives the page being re-rendered on every failed
+/// retry), and once that passes `RECOVERY_CRASH_HINT_AFTER` it shows
+/// `crash_hint` — where the operator's error would be if it crashed instead
+/// of still booting.
 #[cfg(target_os = "linux")]
-fn recovery_page_html(failing_uri: &str, kind: RecoveryKind) -> String {
+fn recovery_page_html(failing_uri: &str, kind: RecoveryKind, waited: Duration, crash_hint: &str) -> String {
     let uri_js = serde_json::to_string(failing_uri)
         .unwrap_or_else(|_| "\"/\"".to_string())
         .replace('<', "\\u003c");
+    let waited_ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX);
+    let hint_after_ms = RECOVERY_CRASH_HINT_AFTER.as_millis();
+    let hint_hidden = if waited >= RECOVERY_CRASH_HINT_AFTER { "" } else { " hidden" };
+    let hint_html = html_escape_text(crash_hint);
     let (title, heading, detail) = match kind {
         RecoveryKind::Starting => (
             "Papercusp — starting",
@@ -846,14 +943,32 @@ fn recovery_page_html(failing_uri: &str, kind: RecoveryKind) -> String {
   button{{margin-top:6px;padding:7px 18px;border-radius:8px;border:1px solid #3a4254;background:#1a1f29;color:#d6dae2;font:inherit;cursor:pointer}}
   button:hover{{background:#232a38}}
   .dot{{width:9px;height:9px;border-radius:50%;background:#e0b54a;animation:b 1.2s ease-in-out infinite}}
+  .elapsed{{font-variant-numeric:tabular-nums}}
+  .hint{{color:#e0b54a}}
   @keyframes b{{50%{{opacity:.25}}}}
 </style></head><body><div class="wrap">
   <div class="dot"></div>
   <h1>{heading}</h1>
   <p>{detail}</p>
+  <p class="elapsed" id="elapsed"></p>
+  <p class="hint" id="hint"{hint_hidden}>{hint_html}</p>
   <button onclick="location.replace(TARGET)">Retry now</button>
   <script>
     const TARGET = {uri_js};
+    const WAIT_STARTED = Date.now() - {waited_ms};
+    const HINT_AFTER_MS = {hint_after_ms};
+    function waitedText(ms) {{
+      const s = Math.max(0, Math.floor(ms / 1000));
+      if (s < 60) return 'Waiting ' + s + ' s';
+      return 'Waiting ' + Math.floor(s / 60) + ' min ' + String(s % 60).padStart(2, '0') + ' s';
+    }}
+    function tick() {{
+      const ms = Date.now() - WAIT_STARTED;
+      document.getElementById('elapsed').textContent = waitedText(ms);
+      if (ms >= HINT_AFTER_MS) document.getElementById('hint').hidden = false;
+    }}
+    tick();
+    setInterval(tick, 1000);
     async function poll() {{
       try {{
         await fetch(TARGET, {{ method: 'HEAD', cache: 'no-store' }});
@@ -1362,13 +1477,20 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn recovery_page_embeds_uri_safely() {
-        let html = super::recovery_page_html("http://127.0.0.1:3170/adv?ws=x", super::RecoveryKind::Lost);
+        let html = super::recovery_page_html(
+            "http://127.0.0.1:3170/adv?ws=x",
+            super::RecoveryKind::Lost,
+            std::time::Duration::ZERO,
+            "hint",
+        );
         assert!(html.contains(r#"const TARGET = "http://127.0.0.1:3170/adv?ws=x";"#));
         assert!(html.contains("Retry now"));
 
         let hostile = super::recovery_page_html(
             r#"http://x/"</script><script>alert(1)"#,
             super::RecoveryKind::Starting,
+            std::time::Duration::ZERO,
+            "hint",
         );
         // The quote is JSON-escaped and `<` is unicode-escaped, so neither a
         // raw </script> nor a raw <script> from the URI survives in the HTML.
@@ -1384,16 +1506,87 @@ mod tests {
     #[test]
     fn recovery_page_cold_start_does_not_claim_the_operator_was_lost() {
         let uri = "http://127.0.0.1:3270/adv?ws=papercusp-workspace";
-        let starting = super::recovery_page_html(uri, super::RecoveryKind::Starting);
+        let zero = std::time::Duration::ZERO;
+        let starting = super::recovery_page_html(uri, super::RecoveryKind::Starting, zero, "hint");
         assert!(!starting.contains("lost its operator process"), "cold start must not claim a loss");
         assert!(starting.contains("Starting Papercusp"));
         assert!(starting.contains("<title>Papercusp — starting</title>"));
         assert!(starting.contains("poll();"), "the starting page must still poll for the operator");
 
-        let lost = super::recovery_page_html(uri, super::RecoveryKind::Lost);
+        let lost = super::recovery_page_html(uri, super::RecoveryKind::Lost, zero, "hint");
         assert!(lost.contains("Papercusp lost its operator process"));
         assert!(lost.contains("<title>Papercusp — reconnecting</title>"));
         assert!(lost.contains("poll();"));
+    }
+
+    /// Plan desktop-dev-startup-speed-2026-10-06 P-003: the page shows how
+    /// long it has waited, counting from the tracker's waited time (so a
+    /// re-render after a failed retry continues the count instead of
+    /// restarting at zero), and keeps auto-open + Retry.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovery_page_shows_elapsed_time_from_the_tracker() {
+        use std::time::Duration;
+        let uri = "http://127.0.0.1:3270/adv?ws=papercusp-workspace";
+        let html =
+            super::recovery_page_html(uri, super::RecoveryKind::Starting, Duration::from_millis(42_500), "hint");
+        assert!(html.contains(r#"<p class="elapsed" id="elapsed"></p>"#), "elapsed counter element");
+        assert!(
+            html.contains("const WAIT_STARTED = Date.now() - 42500;"),
+            "the counter must start from the waited time handed in, not from page load"
+        );
+        assert!(html.contains("setInterval(tick, 1000);"), "the counter must tick once a second");
+        assert!(html.contains("'Waiting ' + s + ' s'"));
+        assert!(html.contains("location.replace(TARGET)"), "auto-open on answer + Retry must remain");
+        assert!(html.contains("Retry now"));
+        assert!(html.contains("poll();"));
+    }
+
+    /// P-003: the crash hint is hidden before ~3 minutes, shown from then on
+    /// (rendered visible when the wait already passed the threshold, and
+    /// revealed by the ticking script when it passes while the page is up),
+    /// and its text is HTML-escaped.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovery_page_shows_crash_hint_only_after_three_minutes() {
+        use std::time::Duration;
+        let uri = "http://127.0.0.1:3270/adv";
+        let after = super::RECOVERY_CRASH_HINT_AFTER;
+        assert_eq!(after, Duration::from_secs(180), "the plan asks for ~3 minutes");
+
+        let early = super::recovery_page_html(uri, super::RecoveryKind::Starting, Duration::from_secs(30), "HINT-TEXT");
+        assert!(early.contains(r#"<p class="hint" id="hint" hidden>HINT-TEXT</p>"#), "hidden before 3 min");
+        assert!(early.contains("const HINT_AFTER_MS = 180000;"));
+        assert!(
+            early.contains("if (ms >= HINT_AFTER_MS) document.getElementById('hint').hidden = false;"),
+            "a page left open must reveal the hint when the wait crosses the threshold"
+        );
+
+        let late = super::recovery_page_html(uri, super::RecoveryKind::Starting, after, "HINT-TEXT");
+        assert!(late.contains(r#"<p class="hint" id="hint">HINT-TEXT</p>"#), "visible from 3 min on");
+        let lost_late = super::recovery_page_html(uri, super::RecoveryKind::Lost, after * 2, "HINT-TEXT");
+        assert!(lost_late.contains(r#"<p class="hint" id="hint">HINT-TEXT</p>"#), "a lost operator gets it too");
+
+        let hostile = super::recovery_page_html(uri, super::RecoveryKind::Starting, after, r#"<img src=x onerror="a">&"#);
+        assert!(!hostile.contains("<img src=x"), "hint text must be escaped");
+        assert!(hostile.contains("&lt;img src=x onerror=&quot;a&quot;&gt;&amp;"));
+    }
+
+    /// P-003: a dev build points at the `npm run dev` terminal (its operator
+    /// inherits that console); a packaged build points at serve.log.
+    #[test]
+    fn recovery_crash_hint_names_where_the_error_is() {
+        let log = std::path::Path::new("/home/u/.papercusp/logs/serve.log");
+        let dev = super::recovery_crash_hint_for(true, log);
+        assert!(dev.contains("3 minutes"));
+        assert!(dev.contains("may also have crashed"));
+        assert!(dev.contains("the terminal window where you ran npm run dev"));
+        assert!(!dev.contains("serve.log"));
+
+        let packaged = super::recovery_crash_hint_for(false, log);
+        assert!(packaged.contains("3 minutes"));
+        assert!(packaged.contains("/home/u/.papercusp/logs/serve.log"));
+        assert!(!packaged.contains("npm run dev"), "an installed app has no npm run dev terminal");
     }
 
     /// WI-10002878: the commit/fail sequencing WebKit drives. The recovery
@@ -1420,6 +1613,36 @@ mod tests {
         );
         t.on_committed(None); // a commit with no URI must not panic or record anything
         assert_eq!(t.on_failed("http://127.0.0.1:3170/adv"), Starting);
+    }
+
+    /// P-003: the waited time is measured from the FIRST failure of the
+    /// current unanswered stretch and keeps growing across retries (each retry
+    /// re-renders the page); an answer ends the stretch, so a later loss
+    /// counts from that loss, and origins are timed independently.
+    #[test]
+    fn recovery_tracker_measures_the_unanswered_stretch() {
+        use super::RecoveryKind::{Lost, Starting};
+        use std::time::{Duration, Instant};
+        let mut t = super::RecoveryTracker::default();
+        let op = "http://127.0.0.1:3270/adv?ws=papercusp-workspace";
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+
+        assert_eq!(t.waited(op, t0), Duration::ZERO, "nothing on record yet");
+        assert_eq!(t.on_failed_at(op, at(0)), Starting);
+        assert_eq!(t.waited(op, at(0)), Duration::ZERO);
+        t.on_committed(Some(op)); // the recovery page's own commit
+        assert_eq!(t.on_failed_at(op, at(40)), Starting, "a retry that fails again");
+        assert_eq!(t.waited(op, at(40)), Duration::from_secs(40), "a retry must not restart the count");
+        t.on_committed(Some(op)); // recovery page
+        assert_eq!(t.waited("http://127.0.0.1:3270/other-route", at(200)), Duration::from_secs(200), "keyed on origin");
+        assert_eq!(t.waited("http://127.0.0.1:3170/adv", at(200)), Duration::ZERO, "another origin is separate");
+
+        t.on_committed(Some("http://127.0.0.1:3270/adv?tab=harnesses")); // the operator answered
+        assert_eq!(t.waited(op, at(300)), Duration::ZERO, "an answer ends the stretch");
+        assert_eq!(t.on_failed_at(op, at(500)), Lost);
+        assert_eq!(t.waited(op, at(530)), Duration::from_secs(30), "a later loss counts from the loss");
+        assert_eq!(t.waited("about:blank", at(530)), Duration::ZERO);
     }
 
     /// The "has this operator answered before" memory is keyed on origin, so
