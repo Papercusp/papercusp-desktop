@@ -2487,8 +2487,10 @@ cut_release_seed() {
 # failure here never fails the release: the install then embeds the uncovered
 # sections itself, exactly as before. Incremental: the previous release's seed is
 # applied first, so only sections whose page_sha changed are re-embedded. The
-# manifest holds only (source_key, slug, anchor, page_sha) keys — no build-box
-# paths for the bundle audit to refuse. Bundled via tauri.server.conf.json
+# manifest holds only (source_key, slug, anchor, page_sha) keys, but an anchor is
+# a HEADING SLUG and can quote a person, so the exporter runs the audit's own
+# --scrub-text over the seed and refuses to write one it cannot scrub
+# (WI-10006868). Bundled via tauri.server.conf.json
 # `doc-vector-seed/**/*`; found at runtime by doc-vector-seed-dir.ts.
 cut_doc_vector_seed() {
   local out="$ROOT/src-tauri/doc-vector-seed"
