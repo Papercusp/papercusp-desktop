@@ -32,7 +32,7 @@
 #   --test-artifact  build a DRILL/TEST Server .deb from a dev (unaudited) sidecar
 #                    (WI-10003499). The release identity audit and source-coherence
 #                    proofs are NOT required, and the output never lands where a
-#                    consumer scavenges: it goes to bundle/deb/test-artifacts/ with
+#                    consumer scavenges: it goes to .papercusp-deb-archive/<profile>/test-artifacts/ with
 #                    a TEST-ARTIFACT file name, and the live bundle/deb copy is
 #                    removed. Pass the printed path explicitly to a drill, e.g.
 #                    bin/hive-git-drill.sh <path>. Never publish one.
@@ -356,12 +356,12 @@ papercusp_export_rust_lld linux
 # canonical tree is never clean, so drills that need a CURRENT Server .deb (P-505
 # hive-git-drill, the migration-freshness check) had no producer at all. The
 # relaxation is paid for at the OUTPUT: a test artifact is written only to
-# bundle/deb/test-artifacts/ under a TEST-ARTIFACT name, and the live bundle/deb
+# .papercusp-deb-archive/<profile>/test-artifacts/ under a TEST-ARTIFACT name, and the live bundle/deb
 # copy is removed, so no scavenger (live-federation-gate, a drill's default pick)
 # can mistake it for a canonical build. The ordinary freshness verdicts still run.
 if [[ "$TEST_ARTIFACT" == "1" ]]; then
   echo "==> TEST ARTIFACT MODE (WI-10003499): release identity audit and source coherence are NOT required;" >&2
-  echo "    output goes ONLY to bundle/deb/test-artifacts/ — never archive/, never the scavenged bundle/deb path. Do not publish it." >&2
+  echo "    output goes ONLY to <cargo target>/.papercusp-deb-archive/<profile>/test-artifacts/ — never archive/, never the scavenged bundle/deb path. Do not publish it." >&2
   node "$LIVE_DESKTOP_DIR/bin/check-sidecar-freshness.js" \
     --sidecar "$DESKTOP_DIR/src-tauri/sidecar" \
     --repo-root "$LIVE_REPO_DIR" \
@@ -399,12 +399,21 @@ if [ "$DEBUG" = 1 ]; then
 fi
 
 DEB_DIR="$CARGO_TARGET/$PROFILE_DIR/bundle/deb"
-ARCHIVE_DIR="$DEB_DIR/archive"
+# WI-10006749: archived packages live OUTSIDE every directory the Cargo reclaimer may
+# delete. scripts/lib/cargo-result.mjs (reclaimInactiveCargoArtifacts) removes whole
+# <target>/<profile> and <target>/release/bundle directories when the disk is short,
+# judging recency by each directory's own mtime, which a build writing deeper down does
+# not move. On 2026-10-06 that deleted the c1009 test-artifact .deb minutes after its
+# build. A build cache may be deleted; an archive may not. The target root itself is
+# never a candidate, and the leading dot keeps this name out of the reclaimer's
+# target-triple pattern (/^[A-Za-z0-9_]+-[A-Za-z0-9_]+-/). Same filesystem as DEB_DIR.
+DEB_ARCHIVE_ROOT="$CARGO_TARGET/.papercusp-deb-archive/$PROFILE_DIR"
+ARCHIVE_DIR="$DEB_ARCHIVE_ROOT/archive"
 ARCHIVE_LABEL=""
 if [[ "$TEST_ARTIFACT" == "1" ]]; then
   # WI-10003499: a test artifact must never share the canonical archive or its
   # retention census, and its file name must say what it is wherever it travels.
-  ARCHIVE_DIR="$DEB_DIR/test-artifacts"
+  ARCHIVE_DIR="$DEB_ARCHIVE_ROOT/test-artifacts"
   ARCHIVE_LABEL="TEST-ARTIFACT-"
 fi
 

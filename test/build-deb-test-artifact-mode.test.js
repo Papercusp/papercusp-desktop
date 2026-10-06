@@ -10,7 +10,8 @@
 //   1. The relaxation never leaks into the default (release-shaped) path: without the
 //      flag, both the release identity audit and source coherence are still required.
 //   2. A test artifact never lands where a consumer scavenges: it is archived under
-//      bundle/deb/test-artifacts/ with a TEST-ARTIFACT name, and the live
+//      <target>/.papercusp-deb-archive/<profile>/test-artifacts/ (WI-10006749) with a
+//      TEST-ARTIFACT name, and the live
 //      bundle/deb/Papercusp*_amd64.deb copy is removed after the archived pair is
 //      published.
 
@@ -102,9 +103,11 @@ test('--test-artifact relaxes only those two proofs, under a distinct label and 
 
 test('a test artifact is archived under test-artifacts/ with a TEST-ARTIFACT file name', () => {
   const block = slice('DEB_DIR="$CARGO_TARGET/$PROFILE_DIR/bundle/deb"', '# WI-3287');
+  // WI-10006749: both archives sit under <target>/.papercusp-deb-archive, never under
+  // <target>/<profile>, which the Cargo reclaimer deletes as a whole under disk pressure.
   for (const [flag, dir, label] of [
-    [0, '/t/release/bundle/deb/archive', ''],
-    [1, '/t/release/bundle/deb/test-artifacts', 'TEST-ARTIFACT-'],
+    [0, '/t/.papercusp-deb-archive/release/archive', ''],
+    [1, '/t/.papercusp-deb-archive/release/test-artifacts', 'TEST-ARTIFACT-'],
   ]) {
     const res = runBash(
       [
@@ -118,6 +121,9 @@ test('a test artifact is archived under test-artifacts/ with a TEST-ARTIFACT fil
     );
     assert.equal(res.status, 0, res.stderr);
     assert.equal(res.stdout.trim(), `${dir}|${label}`);
+    for (const reclaimable of ['/t/release/', '/t/debug/']) {
+      assert.ok(!`${dir}/`.startsWith(reclaimable), `${dir} must not sit under the reclaimable profile ${reclaimable}`);
+    }
   }
   assert.match(
     full,
