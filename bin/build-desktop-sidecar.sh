@@ -1180,6 +1180,25 @@ source "$WEB_DIR/bin/bundle-host-common.sh"
 # shellcheck source=lib/host-worker-bundler.sh
 source "$HERE/lib/host-worker-bundler.sh"
 papercusp_ensure_host_worker_bundler "$HERE/../../apps/operator/bin/bundle-host-common.sh" || exit 1
+
+# WI-10006694: an ESM bundle whose graph reaches a CommonJS require() carries esbuild's
+# `Dynamic require of "x" is not supported` stub. Without HOST_BANNER's createRequire shim that stub
+# throws at LOAD, and only in the packaged sidecar (the dev tree runs the same entries through tsx).
+# The orchestrator bins once shipped without the banner, so every packaged dbos-invoke role spawn
+# died before main (c1007k, 2026-10-06: the D-055 step 2 merge-resolver, via yaml's require("process")).
+# Run this on every ESM bundle built WITHOUT the banner, so a new CommonJS dependency fails the build
+# instead of the install.
+assert_esm_require_shim() {
+  local f
+  for f in "$@"; do
+    if grep -q 'Dynamic require of' "$f" && ! head -c 2048 "$f" | grep -q 'createRequire'; then
+      echo "ERROR: $f reaches a CommonJS require() but has no createRequire banner, so it throws" >&2
+      echo "       'Dynamic require of ... is not supported' at load. Bundle it with --banner:js=\"\$HOST_BANNER\"." >&2
+      return 1
+    fi
+  done
+  return 0
+}
 HOST_EXTERNALS=(
   "${HOST_COMMON_EXTERNALS[@]}"
 
@@ -2631,6 +2650,7 @@ if [[ -d "$OMP_HOOK_SRC_DIR" ]]; then
         echo "ERROR: vm-release OMP bundle missing/empty: $OMP_HOOK_DST_DIR/$omp_hook_entry.mjs" >&2
         exit 1
       }
+      assert_esm_require_shim "$OMP_HOOK_DST_DIR/$omp_hook_entry.mjs" || exit 1
     done
   else
     echo "→ copying omp hook TypeScript bundle → sidecar/apps/operator/scripts/hooks/omp/"
@@ -2913,12 +2933,17 @@ fi
 mkdir -p "$ORCH_DST/bin"
 for b in invoke-once run assemble-prompt get-plan-context; do
   if [[ -f "$ORCH_SRC/bin/$b.ts" ]]; then
+    # The shared ESM banner is load-bearing here, exactly as for project-history.mjs: invoke-once
+    # and assemble-prompt reach yaml's CommonJS path (WI-10006694).
     (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 "$ORCH_SRC/bin/$b.ts" \
       --bundle --platform=node --format=esm --target=node22 \
       "${MINIFY_ARGS[@]}" \
-      --outfile="$ORCH_DST/bin/$b.mjs")
+      --outfile="$ORCH_DST/bin/$b.mjs" \
+      --banner:js="$HOST_BANNER" \
+      ${HOST_BANNER_DEFINES[@]+"${HOST_BANNER_DEFINES[@]}"})
   fi
 done
+assert_esm_require_shim "$ORCH_DST"/bin/*.mjs || exit 1
 # Minimal package.json so the dir is a resolvable @papercusp/orchestrator root.
 cat > "$ORCH_DST/package.json" <<'JSON'
 { "name": "@papercusp/orchestrator", "version": "0.0.1", "private": true, "type": "module" }
@@ -2983,6 +3008,7 @@ for _wh_entrypoint in papercusp-remote-initializer papercusp-deliver-material; d
     echo "ERROR: $_wh_bin was not produced (or is empty) by esbuild" >&2
     exit 1
   fi
+  assert_esm_require_shim "$_wh_bin" || exit 1
   if [[ ! -x "$_wh_bin" ]]; then
     echo "ERROR: $_wh_bin is present but not executable — the host spawns it directly" >&2
     exit 1

@@ -1156,3 +1156,73 @@ test('sidecar build resolves and verifies the repo-pinned Node runtime before np
   assert.match(runtimeBlock, /\[ "\$_node_major" -ge "\$PAPERCUSP_REQUIRED_NODE_MAJOR" \]/);
   assert.match(runtimeBlock, /ERROR: sidecar release build requires Node/);
 });
+
+// WI-10006694 — an ESM bundle that reaches a CommonJS require() throws "Dynamic require of ... is
+// not supported" at load unless it carries the createRequire banner. The orchestrator bins shipped
+// without it, so every packaged dbos-invoke role spawn (the D-055 merge-resolver on c1007k) died
+// before main.
+const ESM_REQUIRE_SHIM_GUARD = extractFunction('assert_esm_require_shim');
+
+function runEsmRequireShimGuard(files) {
+  const bash = ['/usr/bin/bash', '/bin/bash'].find((candidate) => fs.existsSync(candidate));
+  assert.ok(bash, 'a bash interpreter is required to exercise the builder helper');
+  return childProcess.spawnSync(
+    bash,
+    ['-c', `set -euo pipefail\n${ESM_REQUIRE_SHIM_GUARD}\nassert_esm_require_shim "$@"`, 'guard', ...files],
+    { encoding: 'utf8' },
+  );
+}
+
+test('assert_esm_require_shim refuses a bundle with the dynamic-require stub and no createRequire banner', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-esm-shim-'));
+  try {
+    // esbuild's stub, as minified into the c1007k invoke-once.mjs.
+    const stub = 'var __require=(x=>{throw Error(\'Dynamic require of "\'+x+\'" is not supported\')});__require("process");\n';
+    const bare = path.join(dir, 'bare.mjs');
+    fs.writeFileSync(bare, stub);
+    const bannered = path.join(dir, 'bannered.mjs');
+    fs.writeFileSync(
+      bannered,
+      `#!/usr/bin/env node\nimport{createRequire as __pcr}from'module';const require=__pcr(import.meta.url);\n${stub}`,
+    );
+    const plain = path.join(dir, 'plain.mjs');
+    fs.writeFileSync(plain, 'console.log(1);\n');
+
+    const refused = runEsmRequireShimGuard([plain, bare]);
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.match(refused.stderr, /bare\.mjs reaches a CommonJS require\(\) but has no createRequire banner/);
+
+    const accepted = runEsmRequireShimGuard([plain, bannered]);
+    assert.equal(accepted.status, 0, accepted.stderr);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('every ESM esbuild bundle in the builder carries the createRequire banner or is checked by assert_esm_require_shim', () => {
+  const lines = builder.split('\n');
+  const invocations = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!/npx --yes esbuild@/.test(lines[i])) continue;
+    let end = i;
+    let text = lines[i];
+    while (/\\\s*$/.test(lines[end]) && end + 1 < lines.length) {
+      end += 1;
+      text += `\n${lines[end]}`;
+    }
+    invocations.push({ start: i + 1, end: end + 1, text });
+  }
+  const esm = invocations.filter((inv) => /--format=esm/.test(inv.text));
+  assert.ok(esm.length >= 7, `expected the builder's ESM bundles, found ${esm.length}`);
+  const unguarded = esm.filter(
+    (inv) =>
+      !/--banner:js="\$HOST_BANNER"/.test(inv.text) &&
+      !lines.slice(inv.end, inv.end + 25).some((line) => /^\s*assert_esm_require_shim /.test(line)),
+  );
+  assert.deepEqual(unguarded.map((inv) => `build-desktop-sidecar.sh:${inv.start}`), []);
+
+  const orchestrator = esm.find((inv) => inv.text.includes('"$ORCH_SRC/bin/$b.ts"'));
+  assert.ok(orchestrator, 'the orchestrator bins bundle is missing from the builder');
+  assert.match(orchestrator.text, /--banner:js="\$HOST_BANNER"/);
+  assert.match(builder, /^assert_esm_require_shim "\$ORCH_DST"\/bin\/\*\.mjs \|\| exit 1$/m);
+});
