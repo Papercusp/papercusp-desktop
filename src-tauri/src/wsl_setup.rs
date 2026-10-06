@@ -1329,6 +1329,19 @@ pub fn ensure_windows_cli_shims() {
 // explicit choice — even `nat` — is respected). It takes effect on the next
 // `wsl --shutdown` / WSL2-VM restart; we never force one (the app already
 // survives distro restarts via the WI-3270 resilience layer).
+//
+// KNOWN COST (measured WI-10006715, WSL 2.7.11, 2026-10-06): mirrored mode adds
+// `table ip filter chain WSLOUTPUT { hook output priority filter; meta mark set 0x1 }`,
+// which OVERWRITES the mark on every locally generated packet, plus policy rules
+// that route TCP to 127.0.0.1 out `loopback0` (`ipproto tcp lookup 127` ahead of
+// `lookup local`). Together they break mark-based NAT for loopback-published
+// container ports: a ROOTFUL podman/netavark `-p 127.0.0.1:<port>` connect from
+// inside ANY distro hangs (the masquerade mark is erased, so the SYN reaches the
+// container from 127.0.0.1 and its reply is lost), while the same port still
+// answers from Windows. Our own operator binds 127.0.0.1 natively and is not
+// affected; a containerised route on Windows must use `--network host` (measured
+// working in P-051), and users' own rootful bridge publishes in other distros
+// regress once this setting applies. Workaround + follow-up: see WI-10006715.
 
 /// Pure merge: given the current `.wslconfig` contents (None = no file),
 /// return the contents to WRITE so `[wsl2] networkingMode=mirrored` is present,
