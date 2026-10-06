@@ -1009,7 +1009,7 @@ pub(crate) static HOME_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::n
 #[cfg(test)]
 mod tests {
     use super::{
-        provision_env_operators_for_profile, sidecar_runtime_generation, sidecar_wslenv,
+        provision_env_operators_for, sidecar_runtime_generation, sidecar_wslenv,
         windows_path_to_wsl, wsl_runtime_sidecar_path,
     };
     use std::path::PathBuf;
@@ -1084,9 +1084,18 @@ mod tests {
 
     #[test]
     fn vm_release_forces_environment_operator_provisioning_off() {
-        assert_eq!(provision_env_operators_for_profile("vm-release"), "0");
-        assert_eq!(provision_env_operators_for_profile("dogfood"), "1");
-        assert_eq!(provision_env_operators_for_profile(""), "1");
+        assert_eq!(provision_env_operators_for("vm-release", false), "0");
+        assert_eq!(provision_env_operators_for("dogfood", false), "1");
+        assert_eq!(provision_env_operators_for("", false), "1");
+    }
+
+    /// WI-10006420: the headless Server never provisions the desktop
+    /// env-switcher operators, whatever profile it was built with.
+    #[test]
+    fn headless_service_forces_environment_operator_provisioning_off() {
+        for profile in ["dogfood", "vm-release", ""] {
+            assert_eq!(provision_env_operators_for(profile, true), "0", "{profile}");
+        }
     }
 
     #[test]
@@ -2790,6 +2799,7 @@ mod discovery_tests {
             &missing_dir,
             &missing_dir,
             &install_defect,
+            false,
         )
         .expect_err("a sidecar dir with no serve.mjs must not spawn");
 
@@ -6857,6 +6867,7 @@ fn bring_up_sidecar(
         &shared_state_dir,
         &workspace_home,
         &INSTALL_DEFECT,
+        false,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -6998,14 +7009,25 @@ fn baked_distribution_profile() -> &'static str {
     option_env!("PAPERCUSP_DISTRIBUTION_PROFILE").unwrap_or("dogfood")
 }
 
-fn provision_env_operators_for_profile(profile: &str) -> &'static str {
-    if profile == "vm-release" {
+/// Whether the operator should provision the local env-switcher operators
+/// (dev :3270 / prod :3070 / staging :3170 / local :3055). They exist only to
+/// light up the desktop's EnvSwitcherBar, so they are OFF for:
+/// - `vm-release` (the immutable customer VM build), and
+/// - the `--headless-service` Server whatever its profile (WI-10006420). It has
+///   no window, the operators bind loopback so nothing remote can use them, and
+///   measured 2026-10-06 on a dogfood-profile Server they cost 2.3-2.9 GB RSS
+///   (tsx dev operator + Vite dev server) plus the first-boot source extract. On
+///   a shared host a second tenant also found the first tenant's listeners
+///   "already reachable" and adopted them as its own.
+fn provision_env_operators_for(profile: &str, headless_service: bool) -> &'static str {
+    if headless_service || profile == "vm-release" {
         "0"
     } else {
         "1"
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_serve(
     via_wsl: bool,
     port_hint: u16,
@@ -7015,6 +7037,7 @@ fn spawn_serve(
     shared_state_dir: &std::path::Path,
     workspace_home: &std::path::Path,
     install_defect: &InstallDefectLatch,
+    headless_service: bool,
 ) -> std::io::Result<Child> {
     // WI-5390: fail CLOSED on a structurally broken install instead of spawning a
     // command that cannot possibly work. Without this the spawn "succeeds" (the
@@ -7322,7 +7345,7 @@ fn spawn_serve(
         // single-writer), so arming it on every desktop sidecar spawn is safe.
         .env(
             "PAPERCUSP_PROVISION_ENV_OPERATORS",
-            provision_env_operators_for_profile(baked_distribution_profile()),
+            provision_env_operators_for(baked_distribution_profile(), headless_service),
         )
         // Phase E (P-051): shared-operator model — per-spawn HOME comes from
         // each job's workspace, set operator-side.
@@ -7757,6 +7780,7 @@ fn spawn_serve_supervisor(
                         &sup_shared,
                         &sup_home,
                         &INSTALL_DEFECT,
+                        false,
                     ) {
                         Ok(c) => {
                             *state.child.lock().unwrap() = Some(c);
@@ -9361,6 +9385,7 @@ fn run_headless_service() -> ! {
         &shared_state_dir,
         &workspace_home,
         &INSTALL_DEFECT,
+        true,
     ) {
         Ok(child) => child,
         Err(error) => {
