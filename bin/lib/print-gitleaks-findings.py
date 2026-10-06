@@ -2144,7 +2144,8 @@ def _uuid_source_span(source: dict[str, object]) -> None:
                  'apps/operator/lib/release/cut-seed-cli.ts',
                  'packages/operator-core/lib/sync/hyperbee/seed-frozen-execution.ts',
                  'packages/operator-core/lib/sync/hyperbee/hive-epoch-aead.ts',
-                 'apps/operator/bin/release/dependency-generation.sh'}
+                 'apps/operator/bin/release/dependency-generation.sh',
+                 'scripts/check-lockfile-census.mjs'}
         hashes = {'dependencyInputSha256', 'installedPackagesSha256',
                   'dependencyGenerationSnapshotSha256', 'materializedTreesSha256'}
         if (not isinstance(binding, dict)
