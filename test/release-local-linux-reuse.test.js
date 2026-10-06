@@ -1713,6 +1713,7 @@ function runArm64Collection({ includeArm64Artifact = true } = {}) {
   const command = [
     'set -euo pipefail',
     `CARGO_TARGET_ROOT=${JSON.stringify(target)}`,
+    `ORCHESTRATOR_HERE=${JSON.stringify(path.join(root, 'bin'))}`,
     'VERSION=0.0.18',
     'LINUX_REUSE=0',
     'RELEASE_TASK_JOURNAL_ENABLED=0',

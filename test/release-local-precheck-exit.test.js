@@ -50,7 +50,7 @@ test('release launcher resolves Cargo under a minimal systemd PATH before build 
   assert(definition, 'Cargo PATH resolver is missing');
   const call = firstLine(text, /^ensure_release_cargo_path$/);
   const targetClaim = firstLine(text, /^source "\$ORCHESTRATOR_HERE\/lib\/claim-target-dir.sh"$/);
-  const metadata = firstLine(text, /^CARGO_TARGET_ROOT="\$\(cd /);
+  const metadata = firstLine(text, /^CARGO_TARGET_ROOT="\$\(papercusp_cargo_target_root /);
   assert(call > 0 && call < targetClaim && targetClaim < metadata, 'Cargo must be resolved before release build setup');
 
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'release-cargo-path-'));

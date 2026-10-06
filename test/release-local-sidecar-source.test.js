@@ -75,6 +75,7 @@ test('seed cut executes current tooling but exports the frozen Git source', (con
   const frozen = path.join(fixture, 'frozen');
   const fakeBin = path.join(fixture, 'fake-bin');
   const receipt = path.join(fixture, 'receipt.json');
+  const prepareReceipt = path.join(fixture, 'prepare-receipt');
   for (const root of [current, frozen]) {
     fs.mkdirSync(path.join(root, 'apps', 'operator'), { recursive: true });
     fs.mkdirSync(path.join(root, 'papercusp-desktop', 'bin'), { recursive: true });
@@ -83,6 +84,7 @@ test('seed cut executes current tooling but exports the frozen Git source', (con
   fs.writeFileSync(path.join(fakeBin, 'npx'), [
     '#!/usr/bin/env node',
     'const fs = require("node:fs");',
+    'if (!fs.existsSync(process.env.PREPARE_RECEIPT)) process.exit(2);',
     'fs.writeFileSync(process.env.RECEIPT, JSON.stringify({ cwd: process.cwd(), policyRoot: process.env.PAPERCUSP_WORKSPACE_ROOT, args: process.argv.slice(2) }));',
     '',
   ].join('\n'), { mode: 0o755 });
@@ -90,6 +92,7 @@ test('seed cut executes current tooling but exports the frozen Git source', (con
     'set -euo pipefail',
     'release_seed_cut_is_quiesced() { return 0; }',
     'release_seed_sparse_refused() { return 1; }',
+    'seed_uuid_row_drop_prepare() { printf "prepared\\n" > "$PREPARE_RECEIPT"; }',
     shellFunction(release, 'cut_release_seed'),
     'cut_release_seed',
   ].join('\n')], {
@@ -101,6 +104,7 @@ test('seed cut executes current tooling but exports the frozen Git source', (con
       ROOT: path.join(frozen, 'papercusp-desktop'),
       ORCHESTRATOR_HERE: path.join(current, 'papercusp-desktop', 'bin'),
       RECEIPT: receipt,
+      PREPARE_RECEIPT: prepareReceipt,
       PAPERCUSP_SKIP_SEED_CUT: '0',
       PAPERCUSP_SEED_SNAPSHOT_DIR: '',
       PAPERCUSP_SEED_REUSE_CORESTORE: '0',

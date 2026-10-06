@@ -310,7 +310,7 @@ test('the Linux local release entrypoint restores Cargo from CARGO_HOME before b
   );
   const cargoGuardAt = linuxScript.indexOf('_cargo_home="${CARGO_HOME:-$HOME/.cargo}"');
   const sidecarAt = linuxScript.indexOf('bash "$ROOT/bin/build-desktop-sidecar.sh"');
-  const metadataAt = linuxScript.indexOf('cargo metadata --no-deps --format-version 1');
+  const metadataAt = linuxScript.indexOf('papercusp_cargo_target_root "$ROOT/src-tauri"');
 
   assert.ok(cargoGuardAt > preflightAt, 'Cargo resolution must preserve identity-preflight ordering');
   assert.ok(sidecarAt > cargoGuardAt, 'Cargo must fail closed before sidecar assembly starts');
@@ -493,7 +493,7 @@ test('the Linux AppImage producer removes Tauri intermediates before audited pac
 
 test('the Linux AppImage producer keeps the identity-policy preflight before toolchain work', () => {
   const preflightAt = appimageScript.indexOf('python3 "$AUDIT_PY" --owner-preflight');
-  const metadataAt = appimageScript.indexOf('cargo metadata --no-deps --format-version 1');
+  const metadataAt = appimageScript.indexOf('papercusp_cargo_target_root "$DESK/src-tauri"');
   const tauriAt = appimageScript.indexOf(
     'npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles appimage',
   );
@@ -512,7 +512,7 @@ test('the Linux AppImage producer keeps the identity-policy preflight before too
 
 test('the Linux local release entrypoint claims one Cargo target slot before either role builds', () => {
   const claimAt = linuxScript.indexOf('source "$HERE/lib/claim-target-dir.sh"');
-  const metadataAt = linuxScript.indexOf('cargo metadata --no-deps --format-version 1');
+  const metadataAt = linuxScript.indexOf('papercusp_cargo_target_root "$ROOT/src-tauri"');
   const packageAt = linuxScript.indexOf('tauri build --bundles deb');
 
   assert.ok(claimAt >= 0, 'build-linux-local.sh must source the shared target-slot claimant');

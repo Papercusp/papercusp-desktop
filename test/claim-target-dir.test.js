@@ -577,11 +577,11 @@ test('Linux artifact collection invokes relocation recovery before creating bund
   assert.ok(prepareAt < mkdirAt, 'collection target recovery must precede mkdir through the symlink');
 });
 
-test('direct AppImage entrypoint claims a target slot before Cargo metadata', () => {
+test('direct AppImage entrypoint claims a target slot before Cargo target discovery', () => {
   const claimAt = BUILD_APPIMAGE.indexOf('. "$ORCHESTRATOR_HERE/lib/claim-target-dir.sh"');
-  const metadataAt = BUILD_APPIMAGE.indexOf('cargo metadata --no-deps');
+  const metadataAt = BUILD_APPIMAGE.indexOf('papercusp_cargo_target_root "$DESK/src-tauri"');
   assert.ok(claimAt >= 0, 'build-appimage must source claim-target-dir.sh');
-  assert.ok(metadataAt >= 0, 'build-appimage must read Cargo metadata');
+  assert.ok(metadataAt >= 0, 'build-appimage must resolve its Cargo target root');
   assert.ok(claimAt < metadataAt, 'target-dir claim must precede Cargo metadata in the direct entrypoint');
 });
 
