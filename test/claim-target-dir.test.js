@@ -470,11 +470,12 @@ test('the background deleter never holds the launch\'s slot lock', async () => {
   // next launch would be pushed onto a cold slot. A slow rm makes the window certain.
   const realRm = execFileSync('sh', ['-c', 'command -v rm'], { encoding: 'utf8' }).trim();
   const bin = join(home, 'slow-bin');
+  const trace = join(home, 'deleter.trace');
   mkdirSync(bin);
-  writeFileSync(join(bin, 'rm'), `#!/bin/sh\ncase "$1" in -rf) sleep 3 ;; esac\nexec ${realRm} "$@"\n`);
+  writeFileSync(join(bin, 'rm'), `#!/bin/sh\ncase "$1" in -rf) printf 'started\\n' >> "$FIXTURE_RM_TRACE"; sleep 3; ${realRm} "$@"; status=$?; printf 'exit=%s\\n' "$status" >> "$FIXTURE_RM_TRACE"; exit "$status" ;; esac\nexec ${realRm} "$@"\n`);
   chmodSync(join(bin, 'rm'), 0o755);
   const dead = makePrivateRoot('pid99999988');
-  const env = reapEnv({ PAPERCUSP_DESKTOP_PRIVATE_SLOT_REAP_SYNC: '0', PATH: `${bin}:${process.env.PATH}` });
+  const env = reapEnv({ PAPERCUSP_DESKTOP_PRIVATE_SLOT_REAP_SYNC: '0', PATH: `${bin}:${process.env.PATH}`, FIXTURE_RM_TRACE: trace });
   assert.strictEqual(claim(env), join(home, '.cargo-target'));
   assert.ok(!existsSync(dead), 'the dead root is renamed aside before the launch continues');
   assert.ok(readdirSync(home).some((n) => n.includes('reaping')), 'the slow deletion must still be running');
@@ -485,7 +486,9 @@ test('the background deleter never holds the launch\'s slot lock', async () => {
   while (Date.now() < deadline && readdirSync(home).some((n) => n.includes('reaping'))) {
     await new Promise((r) => setTimeout(r, 100));
   }
-  assert.deepStrictEqual(readdirSync(home).filter((n) => n.includes('reaping')), [], 'the background deletion completes');
+  const deletionTrace = existsSync(trace) ? readFileSync(trace, 'utf8') : 'rm was never entered';
+  assert.deepStrictEqual(readdirSync(home).filter((n) => n.includes('reaping')), [],
+    `the background deletion completes; fixture rm trace: ${deletionTrace}`);
 });
 
 test('the reap-only entrypoint lists without deleting on --dry-run, then reaps', () => {
