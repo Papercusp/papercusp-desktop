@@ -745,7 +745,10 @@ impl RecoveryTracker {
     }
 
     /// A main-frame load failed at `failing_uri` and the recovery page is
-    /// about to be shown: which variant should it be?
+    /// about to be shown: which variant should it be? Test-only convenience:
+    /// the live handler calls `on_failed_at` with the same `now` it passes to
+    /// `waited`, so the two readings agree.
+    #[cfg(test)]
     fn on_failed(&mut self, failing_uri: &str) -> RecoveryKind {
         self.on_failed_at(failing_uri, Instant::now())
     }
