@@ -1543,6 +1543,26 @@ mod tests {
         assert!(html.contains("location.replace(TARGET)"), "auto-open on answer + Retry must remain");
         assert!(html.contains("Retry now"));
         assert!(html.contains("poll();"));
+
+        // Acceptance R-4 falsifiers, bound to the wiring rather than to the
+        // mere presence of a string: "Retry does nothing" and "the page stays
+        // on the starting screen after the operator answers".
+        assert!(
+            html.contains(r#"<button onclick="location.replace(TARGET)">Retry now</button>"#),
+            "the Retry button must reload the target"
+        );
+        let poll = &html[html.find("async function poll()").expect("the page defines poll()")..];
+        let fetch_at = poll.find("await fetch(TARGET").expect("poll() probes the target");
+        let open_at = poll.find("location.replace(TARGET)").expect("poll() opens the app when the target answers");
+        let catch_at = poll.find("catch").expect("poll() handles a failed probe");
+        assert!(
+            fetch_at < open_at && open_at < catch_at,
+            "auto-open must sit on poll()'s success path: after the probe, before the failure branch"
+        );
+        assert!(
+            poll[catch_at..].contains("setTimeout(poll, 1000)"),
+            "a failed probe must schedule another poll"
+        );
     }
 
     /// P-003: the crash hint is hidden before ~3 minutes, shown from then on
