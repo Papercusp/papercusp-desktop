@@ -42,9 +42,16 @@ read -r SSH_PORT SPICE_PORT OP_PORT <<<"$PORTS"
 seed_args=()
 [ -n "${BOOT_SEED:-}" ] && seed_args=(-drive "if=virtio,format=raw,file=$BOOT_SEED,readonly=on")
 
+root_args=(-drive "if=virtio,format=qcow2,file=$DISK,cache=writeback,discard=unmap")
 extra_args=()
 if [ -n "${BOOT_DATA_DISK:-}" ]; then
   [ -f "$BOOT_DATA_DISK" ] || die "BOOT_DATA_DISK not found: $BOOT_DATA_DISK"
+  # qemu realizes `-drive if=virtio` devices AFTER every explicit -device, so the data
+  # disk would take the lower PCI slot and SeaBIOS (which boots only the FIRST hard
+  # disk) tries the blank data disk and halts at "No bootable device" (measured
+  # 2026-10-06). Pin the root disk as the boot device instead.
+  root_args=(-drive "if=none,id=pcroot,format=qcow2,file=$DISK,cache=writeback,discard=unmap"
+             -device "virtio-blk-pci,drive=pcroot,bootindex=0")
   extra_args+=(-drive "if=none,id=pcdata,format=qcow2,file=$BOOT_DATA_DISK,cache=writeback,discard=unmap"
                -device "virtio-blk-pci,drive=pcdata,serial=pcdata")
 fi
@@ -108,7 +115,7 @@ run_testvm_scoped "$NAME" "$VM_RAM_MB" qemu-system-x86_64 \
   -name "papercusp-testvm-$NAME" \
   -enable-kvm -machine q35,accel=kvm -cpu host \
   -m "$VM_RAM_MB" -smp "$VM_CPUS" \
-  -drive "if=virtio,format=qcow2,file=$DISK,cache=writeback,discard=unmap" \
+  "${root_args[@]}" \
   "${seed_args[@]}" \
   "${extra_args[@]}" \
   -netdev "user,id=net0,net=${SLIRP_NET:-10.0.2.0/24},hostfwd=tcp::${SSH_PORT}-:22${op_hostfwd}" \

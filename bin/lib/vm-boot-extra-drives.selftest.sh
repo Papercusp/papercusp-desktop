@@ -59,19 +59,39 @@ if [ -f "$ARGV" ] && mentions "file=$TMP/root.qcow2"; then
 else
   bad "default boot did not reach the stubbed qemu launch: $(tail -n 3 "$TMP/out")"
 fi
-if mentions "pcdata" || mentions "-virtfs"; then
-  bad "default boot added an extra drive or 9p export"
+if mentions "pcdata" || mentions "pcroot" || mentions "-virtfs"; then
+  bad "default boot added an extra drive, a root bootindex or a 9p export"
 else
   ok "default boot adds no extra drive and no 9p export"
 fi
+if has "if=virtio,format=qcow2,file=$TMP/root.qcow2,cache=writeback,discard=unmap"; then
+  ok "default boot keeps the legacy if=virtio root drive"
+else
+  bad "default boot changed the root drive argv"
+fi
 
-# 2. BOOT_DATA_DISK → virtio-blk with a stable serial.
+# 2. BOOT_DATA_DISK → virtio-blk with a stable serial, and the ROOT disk pinned as the
+#    boot device. qemu realizes `-drive if=virtio` after every explicit -device, so an
+#    unpinned root lands behind the blank data disk and SeaBIOS halts at "No bootable
+#    device" (the guest never boots; measured 2026-10-06).
 boot BOOT_DATA_DISK="$TMP/data.qcow2"
 if has "if=none,id=pcdata,format=qcow2,file=$TMP/data.qcow2,cache=writeback,discard=unmap" \
    && has "virtio-blk-pci,drive=pcdata,serial=pcdata"; then
   ok "BOOT_DATA_DISK attaches as virtio-blk serial=pcdata"
 else
   bad "BOOT_DATA_DISK argv wrong: $(grep -F pcdata "$ARGV" 2>/dev/null | tr '\n' ' ')"
+fi
+if has "if=none,id=pcroot,format=qcow2,file=$TMP/root.qcow2,cache=writeback,discard=unmap" \
+   && has "virtio-blk-pci,drive=pcroot,bootindex=0" \
+   && ! mentions "if=virtio,format=qcow2,file=$TMP/root.qcow2"; then
+  ok "with a data disk, the root disk is the explicit boot device (bootindex=0)"
+else
+  bad "with a data disk, the root disk is not pinned as the boot device"
+fi
+if mentions "drive=pcdata" && grep -F "drive=pcdata" "$ARGV" | grep -qF bootindex; then
+  bad "the data disk carries a bootindex (SeaBIOS would prefer it)"
+else
+  ok "the data disk carries no bootindex"
 fi
 
 # 3. BOOT_SHARE_RO → read-only 9p export.
