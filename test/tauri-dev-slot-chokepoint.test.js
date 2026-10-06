@@ -307,7 +307,10 @@ test('the sidecar writer bounds its wait and identifies cooperative readers', ()
   const builder = readFileSync(join(DESKTOP_DIR, 'bin', 'build-desktop-sidecar.sh'), 'utf8');
   const windowsBuilder = readFileSync(join(DESKTOP_DIR, 'bin', 'build-windows-cross.sh'), 'utf8');
   const helper = readFileSync(join(DESKTOP_DIR, 'bin', 'lib', 'sidecar-lock-yield.sh'), 'utf8');
-  assert.match(helper, /SIDECAR_LOCK_WAIT="\$\{PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-60\}"/);
+  assert.match(
+    helper,
+    /SIDECAR_LOCK_WAIT="\$\{PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-\$\{PAPERCUSP_UNATTENDED_LOCK_WAIT_SEC:-60\}\}"/,
+  );
   assert.match(helper, /flock -w "\$SIDECAR_LOCK_WAIT" 9/);
   assert.match(helper, /PAPERCUSP_SIDECAR_READER_YIELD_AFTER_SEC/);
   assert.match(helper, /kill -USR1/);

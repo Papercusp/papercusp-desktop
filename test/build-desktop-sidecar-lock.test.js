@@ -225,13 +225,51 @@ test('release packaging holds a shared sidecar lock and audits finished Linux ar
   }
 });
 
+// EI-24961470606265468: an unattended build (systemd-run capacity run, scheduled
+// gate) lost five builds to 60-300 s lock defaults. One knob now feeds every
+// lock wait in the chain; the specific knob still wins. Behavioral: source the
+// shipped helper and read what it resolved, plus the build-lock budget that
+// inherits from it.
+test('the unattended lock-wait knob feeds the sidecar publish and build lock budgets', () => {
+  const helperPath = path.join(root, 'bin/lib/sidecar-lock-yield.sh');
+  const resolve = (env) => {
+    const clean = { PATH: process.env.PATH, HOME: process.env.HOME, ...env };
+    const res = spawnSync(
+      'bash',
+      ['-c', 'source "$1"; echo "$SIDECAR_LOCK_WAIT ${PAPERCUSP_SIDECAR_BUILD_LOCK_WAIT_SEC:-$SIDECAR_LOCK_WAIT}"', 'probe', helperPath],
+      { env: clean, encoding: 'utf8' },
+    );
+    assert.equal(res.status, 0, res.stderr);
+    return res.stdout.trim();
+  };
+  assert.equal(resolve({}), '60 60', 'interactive default stays 60 s');
+  assert.equal(resolve({ PAPERCUSP_UNATTENDED_LOCK_WAIT_SEC: '3600' }), '3600 3600');
+  assert.equal(
+    resolve({ PAPERCUSP_UNATTENDED_LOCK_WAIT_SEC: '3600', PAPERCUSP_SIDECAR_LOCK_WAIT_SEC: '7' }),
+    '7 7',
+    'the specific publish knob beats the umbrella',
+  );
+  assert.equal(
+    resolve({ PAPERCUSP_UNATTENDED_LOCK_WAIT_SEC: '3600', PAPERCUSP_SIDECAR_BUILD_LOCK_WAIT_SEC: '9' }),
+    '3600 9',
+  );
+  assert.match(
+    builder,
+    /SIDECAR_BUILD_LOCK_WAIT="\$\{PAPERCUSP_SIDECAR_BUILD_LOCK_WAIT_SEC:-\$SIDECAR_LOCK_WAIT\}"/,
+    'the build lock must keep inheriting the helper budget, or the umbrella stops reaching it',
+  );
+});
+
 test('split release legs wait for a live sidecar build without widening the reader lock', async () => {
   assert(SIDECAR_BUILD_LOCK_BLOCK, 'could not extract the shipped sidecar build-lock acquisition');
   assert(builder.includes('SIDECAR_BUILD_LOCK_WAIT_SEC'), 'the builder must accept a build-only lock budget');
   assert(builder.includes('flock -w "$SIDECAR_BUILD_LOCK_WAIT" 8'), 'the build lock must use its own budget');
   assert(releaseLocal.includes('PAPERCUSP_SIDECAR_BUILD_LOCK_WAIT_SEC='), 'release-local must set a release-sized build budget');
   assert(releaseLocal.includes(':-3600'), 'the default release build-lock budget must cover a long release leg');
-  assert(sidecarLockHelper.includes('PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-60'), 'the generic lock default remains 60s');
+  assert(
+    sidecarLockHelper.includes('PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-${PAPERCUSP_UNATTENDED_LOCK_WAIT_SEC:-60}'),
+    'the generic lock default remains 60s unless the unattended knob is set',
+  );
   assert(sidecarLockHelper.includes('flock -w "$SIDECAR_LOCK_WAIT" 9'), 'the reader-facing publish lock keeps the generic bound');
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-release-build-lock-wait-'));
