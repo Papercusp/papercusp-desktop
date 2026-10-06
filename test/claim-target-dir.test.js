@@ -478,15 +478,21 @@ test('the background deleter never holds the launch\'s slot lock', async () => {
   const env = reapEnv({ PAPERCUSP_DESKTOP_PRIVATE_SLOT_REAP_SYNC: '0', PATH: `${bin}:${process.env.PATH}`, FIXTURE_RM_TRACE: trace });
   assert.strictEqual(claim(env), join(home, '.cargo-target'));
   assert.ok(!existsSync(dead), 'the dead root is renamed aside before the launch continues');
+  const deadline = Date.now() + 30_000;
+  const readTrace = () => existsSync(trace) ? readFileSync(trace, 'utf8') : 'rm was never entered';
+  while (Date.now() < deadline && !readTrace().includes('started')) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.match(readTrace(), /started/, 'the original background deleter reaches its controlled slow rm');
   assert.ok(readdirSync(home).some((n) => n.includes('reaping')), 'the slow deletion must still be running');
   assert.strictEqual(claim(), join(home, '.cargo-target'), 'the background deleter kept slot 0 locked');
   // The slow rm alone is 3s; on a loaded box the detached deleter can take well over
   // 10s to finish, so wait against a wall-clock deadline rather than an iteration count.
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline && readdirSync(home).some((n) => n.includes('reaping'))) {
+  while (Date.now() < deadline && !readTrace().includes('exit=0')) {
     await new Promise((r) => setTimeout(r, 100));
   }
-  const deletionTrace = existsSync(trace) ? readFileSync(trace, 'utf8') : 'rm was never entered';
+  const deletionTrace = readTrace();
+  assert.match(deletionTrace, /exit=0/, 'the original background deletion succeeds');
   assert.deepStrictEqual(readdirSync(home).filter((n) => n.includes('reaping')), [],
     `the background deletion completes; fixture rm trace: ${deletionTrace}`);
 });
