@@ -95,6 +95,9 @@ seed_uuid_project_source_archive() {
   local evidence context actual
   # Consume the one private pointer emitted by the preceding sidecar copy
   # point. Never select an arbitrary prior context or publish this descriptor.
+  # This lookup returns an input path, not a pass/fail measurement. A later
+  # staging failure may discard that pointer without losing an observed verdict;
+  # scan-discarded-measurements records this reviewed site in its generated baseline.
   if ! context="$(node - "${VH_RUN_DIR:-}" "$census" "$digest" "$sidecar" <<'NODE'
 const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
 try {
