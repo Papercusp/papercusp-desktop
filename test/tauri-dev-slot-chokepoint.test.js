@@ -241,7 +241,7 @@ test('the Tauri chokepoint waits for an in-flight sidecar publish before startup
   }
 });
 
-test('a long-lived `tauri dev` yields its parent-held sidecar reader lock on SIGUSR1', async (t) => {
+test('a long-lived `tauri dev` yields its parent-held sidecar reader lock on SIGUSR1', { timeout: 15_000 }, async (t) => {
   const haveFlock = spawnSync('bash', ['-c', 'command -v flock'], { encoding: 'utf8' }).status === 0;
   if (!haveFlock) {
     t.skip('needs flock(1) for the cooperative reader/writer lock proof');
@@ -262,40 +262,76 @@ test('a long-lived `tauri dev` yields its parent-held sidecar reader lock on SIG
   };
   let guard;
   let writer;
+  let guardClosed = false;
   try {
     writeFileSync(shim, '#!/usr/bin/env bash\necho READY\nexec sleep 30\n');
     chmodSync(shim, 0o755);
 
     let stdout = '';
     let stderr = '';
-    guard = spawn('bash', [GUARD, 'dev'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Own the entire fixture group, including the shim that keeps stdout open if
+    // a broken guard exits before cleanup. This never targets another test's child.
+    guard = spawn('bash', [GUARD, 'dev'], { env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    guard.once('close', () => { guardClosed = true; });
     guard.stdout.on('data', (chunk) => { stdout += chunk; });
     guard.stderr.on('data', (chunk) => { stderr += chunk; });
-    await new Promise((resolve, reject) => {
-      const deadline = setTimeout(() => reject(new Error(`tauri shim never reached startup: ${stdout}`)), 3000);
-      guard.stdout.on('data', () => {
-        if (stdout.includes('READY')) {
-          clearTimeout(deadline);
-          resolve();
-        }
-      });
-      guard.once('error', reject);
+    const waitForOutput = (stream, read, matches, phase) => new Promise((resolve, reject) => {
+      const cleanup = () => {
+        stream.off('data', check);
+        guard.off('exit', exited);
+        guard.off('error', errored);
+        t.signal.removeEventListener('abort', aborted);
+      };
+      const check = () => {
+        if (matches(read())) { cleanup(); resolve(); }
+      };
+      const exited = (code, signal) => {
+        cleanup();
+        reject(new Error(`guard exited before ${phase}: code=${code} signal=${signal}; stdout=${stdout}; stderr=${stderr}`));
+      };
+      const errored = (error) => { cleanup(); reject(error); };
+      const aborted = () => errored(new Error(`fixture deadline while waiting for ${phase}; stdout=${stdout}; stderr=${stderr}`));
+      stream.on('data', check);
+      guard.once('exit', exited);
+      guard.once('error', errored);
+      t.signal.addEventListener('abort', aborted, { once: true });
+      check();
+      if (guard.exitCode !== null || guard.signalCode !== null) exited(guard.exitCode, guard.signalCode);
+      else if (t.signal.aborted) aborted();
     });
+    // Startup is a precondition of the lock proof, not a three-second performance
+    // claim. The test framework bounds the whole fixture; early exits name their cause.
+    await waitForOutput(guard.stdout, () => stdout, (text) => text.includes('READY'), 'shim readiness');
+
+    const blocked = spawnSync('flock', ['-n', '-x', lock, '-c', 'true']);
+    assert.equal(blocked.status, 1, 'the kernel must refuse a writer while the startup reader is held');
 
     writer = spawn('flock', ['-w', '2', '-x', lock, '-c', 'true'], { stdio: 'ignore' });
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    assert.equal(writer.exitCode, null, 'the writer must wait while the startup reader is still held');
+    const writerExit = new Promise((resolve, reject) => {
+      writer.once('close', resolve);
+      writer.once('error', reject);
+    });
+    const yielded = waitForOutput(guard.stderr, () => stderr,
+      (text) => /yielded .*waiting sidecar publish \(SIGUSR1\)/.test(text), 'cooperative yield');
 
     process.kill(guard.pid, 'SIGUSR1');
-    const writerExit = await new Promise((resolve) => writer.once('close', resolve));
-    assert.equal(writerExit, 0, 'the writer must acquire the lock after the cooperative yield');
+    const [exitCode] = await Promise.all([writerExit, yielded]);
+    assert.equal(exitCode, 0, 'the writer must acquire the lock after the cooperative yield');
     assert.match(stderr, /yielded .*waiting sidecar publish \(SIGUSR1\)/);
     assert.equal(guard.exitCode, null, 'yielding the lock must not terminate the long-lived dev child');
+    assert.equal(guard.signalCode, null, 'a signal-killed guard cannot masquerade as a live dev parent');
   } finally {
-    if (writer && writer.exitCode === null) writer.kill('SIGTERM');
-    if (guard && guard.exitCode === null) {
-      guard.kill('SIGTERM');
-      await new Promise((resolve) => guard.once('close', resolve));
+    if (writer && writer.exitCode === null && writer.signalCode === null) {
+      const closed = new Promise((resolve) => writer.once('close', resolve));
+      writer.kill('SIGTERM');
+      await closed;
+    }
+    if (guard) {
+      const closed = guardClosed ? Promise.resolve() : new Promise((resolve) => guard.once('close', resolve));
+      try { process.kill(-guard.pid, 'SIGKILL'); } catch (error) {
+        if (error.code !== 'ESRCH') throw error;
+      }
+      await closed;
     }
     rmSync(home, { recursive: true, force: true });
     rmSync(shimDir, { recursive: true, force: true });
