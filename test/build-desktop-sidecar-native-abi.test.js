@@ -36,6 +36,72 @@ function extractVerifierGuard() {
   return match[1];
 }
 
+function runPgvectorBottleFixture({ major = 18, architecture = 'x86_64', selectFails = false } = {}) {
+  const match = builder.match(/fetch_pgvector_darwin_bottle\(\) \{[\s\S]*?\n\}\necho "→ bundling pgvector/);
+  assert.ok(match, 'pgvector bottle normalizer is missing');
+  const fn = match[0].replace(/\necho "→ bundling pgvector$/, '');
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-pgvector-bottle-'));
+  const keg = path.join(fixture, 'keg');
+  const extension = path.join(keg, `share/postgresql@${major}/extension`);
+  fs.mkdirSync(path.join(keg, `lib/postgresql@${major}`), { recursive: true });
+  fs.mkdirSync(extension, { recursive: true });
+  fs.writeFileSync(path.join(keg, `lib/postgresql@${major}/vector.dylib`), 'fixture');
+  fs.writeFileSync(path.join(extension, 'vector.control'), "default_version = '0.8.6'\n");
+  fs.writeFileSync(path.join(extension, 'vector--0.8.6.sql'), '-- fixture\n');
+  try {
+    const result = spawnSync('bash', ['-c', [
+      'set -euo pipefail',
+      'EMBEDDED_PG_MAJOR=18',
+      '_brew_ver_with_darwin_bottle() {',
+      '  [[ "$*" == "pgvector 0.8.7 x64 homebrew/core/pgvector" ]] || return 9',
+      selectFails ? '  return 1' : '  printf "0.8.6\\n"',
+      '}',
+      '_fetch_brew_bottle_raw() {',
+      '  printf "%s\\n" "$*" > "$PC_FETCH_ARGS"',
+      '  printf "%s\\n" "$PC_KEG"',
+      '}',
+      `file() { printf "Mach-O 64-bit ${architecture} bundle\\n"; }`,
+      fn,
+      'if normalized="$(fetch_pgvector_darwin_bottle 0.8.7 x64)"; then',
+      '  [[ -f "$normalized/vector.dylib" && -f "$normalized/extension/vector.control" ]]',
+      '  rm -rf "$normalized"',
+      'else exit 1; fi',
+    ].join('\n')], {
+      encoding: 'utf8',
+      timeout: 10_000,
+      env: { ...process.env, PC_KEG: keg, PC_FETCH_ARGS: path.join(fixture, 'fetch.args') },
+    });
+    const argsPath = path.join(fixture, 'fetch.args');
+    return { ...result, fetchArgs: fs.existsSync(argsPath) ? fs.readFileSync(argsPath, 'utf8').trim() : null };
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+}
+
+test('pgvector uses the maintained target-compatible bottle selector before fetching', () => {
+  const result = runPgvectorBottleFixture();
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.equal(result.fetchArgs, 'pgvector 0.8.6 x64 homebrew/core/pgvector');
+});
+
+test('pgvector rejects an older PostgreSQL ABI instead of accepting any vector.dylib', () => {
+  const result = runPgvectorBottleFixture({ major: 17 });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /postgresql@18\/vector\.dylib not found/);
+});
+
+test('pgvector rejects a bottle whose actual Mach-O architecture disagrees with the target', () => {
+  const result = runPgvectorBottleFixture({ architecture: 'arm64' });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /not Mach-O x86_64/);
+});
+
+test('pgvector stops before downloading when target bottle selection fails', () => {
+  const result = runPgvectorBottleFixture({ selectFails: true });
+  assert.equal(result.status, 1);
+  assert.equal(result.fetchArgs, null);
+});
+
 test('desktop worker builds before Node staging and is executed by the finished-bundle verifier', () => {
   const buildStart = builder.indexOf('DESKTOP_SESSION_BIN=');
   const buildEnd = builder.indexOf('# Bundle the embedded-postgres-server', buildStart);

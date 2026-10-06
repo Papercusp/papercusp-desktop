@@ -3352,18 +3352,33 @@ sys.exit(1)' "$brew_arch"
 # to <out>/vector.dylib + <out>/extension/ (from share/postgresql@18/extension).
 fetch_pgvector_darwin_bottle() {
   local ver="$1" arch="$2"
+  # WI-10006933: stable can be ARM-only while an older bottle still supports
+  # the Intel rig. Reuse the same target selector as PostgreSQL and Git.
+  ver="$(_brew_ver_with_darwin_bottle pgvector "$ver" "$arch" homebrew/core/pgvector)" || return 1
   local tmp; tmp="$(_fetch_brew_bottle_raw pgvector "$ver" "$arch" homebrew/core/pgvector)" || return 1
   # The bottle carries BOTH share/postgresql@18/extension (the SQL + vector.control
   # we want) AND include/postgresql@18/server/extension (headers, no control) — so
   # target the share/ path EXPLICITLY, or a bare `-name extension` picks include/
   # (it sorts first) and the copy fails. NB: set -e is DISABLED inside this fn (it
   # is called via `||`), so every failure is checked by hand and returns non-zero.
-  local dylib; dylib="$(find "$tmp" -type f -path '*/lib/postgresql@18/vector.dylib' | sed -n 1p)"
-  [[ -z "$dylib" ]] && dylib="$(find "$tmp" -type f -name vector.dylib | sed -n 1p)"
-  local extdir; extdir="$(find "$tmp" -type d -path '*/share/postgresql@18/extension' | sed -n 1p)"
-  [[ -z "$extdir" ]] && extdir="$(dirname "$(find "$tmp" -type f -path '*/share/*' -name vector.control | sed -n 1p)")"
-  [[ -f "$dylib" ]] || { echo "pgvector bottle: lib/postgresql@18/vector.dylib not found in bottle" >&2; rm -rf "$tmp"; return 1; }
-  [[ -n "$extdir" && -f "$extdir/vector.control" ]] || { echo "pgvector bottle: share/postgresql@18/extension/vector.control not found in bottle" >&2; rm -rf "$tmp"; return 1; }
+  # Do not accept an older PostgreSQL ABI merely because its file has the same
+  # name. A compatible CPU bottle must also contain the pinned server's major.
+  local major="${EMBEDDED_PG_MAJOR:-18}"
+  local dylib; dylib="$(find "$tmp" -type f -path "*/lib/postgresql@$major/vector.dylib" | sed -n 1p)"
+  local extdir; extdir="$(find "$tmp" -type d -path "*/share/postgresql@$major/extension" | sed -n 1p)"
+  [[ -f "$dylib" ]] || { echo "pgvector bottle: lib/postgresql@$major/vector.dylib not found in bottle" >&2; rm -rf "$tmp"; return 1; }
+  [[ -n "$extdir" && -f "$extdir/vector.control" ]] || { echo "pgvector bottle: share/postgresql@$major/extension/vector.control not found in bottle" >&2; rm -rf "$tmp"; return 1; }
+  local expected_arch description
+  case "$arch" in
+    x64) expected_arch=x86_64 ;;
+    arm64) expected_arch=arm64 ;;
+    *) echo "pgvector bottle: unsupported arch $arch" >&2; rm -rf "$tmp"; return 1 ;;
+  esac
+  description="$(file -b "$dylib")" || { rm -rf "$tmp"; return 1; }
+  [[ "$description" == *Mach-O* && "$description" == *"$expected_arch"* ]] || {
+    echo "pgvector bottle: vector.dylib is not Mach-O $expected_arch ($description)" >&2
+    rm -rf "$tmp"; return 1
+  }
   local out; out="$(mktemp -d)"; mkdir -p "$out/extension"
   cp "$dylib" "$out/vector.dylib" || { echo "pgvector bottle: dylib copy failed" >&2; rm -rf "$tmp"; return 1; }
   cp "$extdir"/vector*.sql "$out/extension/" 2>/dev/null || true
