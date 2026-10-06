@@ -54,6 +54,9 @@ bad=copy.deepcopy(bound);bad['sources'][0]['sourceInput']['executionBinding']['i
 excluded_bound=copy.deepcopy(bound);eb=excluded_bound['sources'][0]['sourceInput']['executionBinding']
 eb.update(excludedEntries=[{'path':'node_modules/@fixture/.x-1234abcd','name':'@fixture/x','version':'1.0.0'}],excludedEntryCount=1)
 write('config.json',excluded_bound);assert valid()['plans'][0]['sourceInput']['executionBinding']==eb
+tooling=copy.deepcopy(bound);tb=tooling['sources'][0]['sourceInput']['executionBinding']
+tb.update(excludedEntries=[{'path':'node_modules/.papercusp-isolated-snapshot','name':None,'version':None}],excludedEntryCount=1)
+write('config.json',tooling);assert valid()['plans'][0]['sourceInput']['executionBinding']==tb
 for change in ['bad-count','unknown-dot','bad-name','loaded-excluded','no-preload']:
  bad=copy.deepcopy(excluded_bound);b=bad['sources'][0]['sourceInput']['executionBinding']
  if change=='bad-count':b['excludedEntryCount']=0

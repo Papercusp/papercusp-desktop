@@ -2203,7 +2203,7 @@ def _uuid_source_span(source: dict[str, object]) -> None:
             if len(leaf) != 2:
                 raise ValueError('UUID frozen excluded entry outside dependency namespace')
             name = leaf[1]
-            leftover = re.fullmatch(r'(?:(@[^/]+)/)?\.([^/]+)-[A-Za-z0-9]{8}', name)
+            leftover = None if name in root_tooling else re.fullmatch(r'(?:(@[^/]+)/)?\.([^/]+)-[A-Za-z0-9]{8}', name)
             if leftover:
                 expected_name = ((leftover[1] + '/') if leftover[1] else '') + leftover[2]
                 if (entry['name'] != expected_name or not isinstance(entry['version'], str)
