@@ -13,6 +13,50 @@ const scriptPath = path.join(root, 'bin', 'release-local.sh');
 const reportFormatterPath = path.join(root, 'bin', 'lib', 'print-gitleaks-findings.py');
 const gitleaksBin = process.env.GITLEAKS_BIN || 'gitleaks';
 
+test('D-174 census guard requires exact signed snapshot-span counts and complete winner dispositions', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-original-span-'));
+  fs.chmodSync(temp, 0o700);
+  try {
+    const program = String.raw`
+import importlib.util,json,sys,pathlib,copy
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+base=pathlib.Path(sys.argv[2])
+def write(name,value):
+ p=base/name;p.write_text(json.dumps(value));p.chmod(0o600);return p
+keys=write('keys.json',{'fixture-pot':{}})
+rows=base/'rows.jsonl';rows.write_text(json.dumps({'table':'harness_plans','hbKey':'safe','value':{'public':True},'segment':'segment-000001.blob','line':1,'privacyProjection':{'disposition':'carry'}})+'\n');rows.chmod(0o600)
+manifest=write('source.json',{'potId':'fixture-pot','stores':[{'kind':'corestore','meta':{'coreKeys':['a'*64],'coreLengths':{'a'*64:10}}}]})
+span={'coverage':'complete-snapshot-set + tail','seedIndex':6,'coversUpTo':6,'chunkCount':2,'snapshotSetSha256':'b'*64,'omittedPrefixBlocks':6,'sourceBlocksRead':4,'sourceBlocksJsonSha256':'c'*64,'proofInventorySha256':'f'*64,'sealedRowOccurrences':2,'foldNow':1000,'sourceHead':{'sourceKeyHex':'a'*64,'sourceLength':10,'fork':0,'byteLength':100,'treeHash':'d'*64,'signatureHex':'e'*128},'winners':[{'table':'harness_plans','hbKey':'safe','disposition':'carry'}]}
+source={'sourceKeyHex':'a'*64,'sourceLength':10,'rowCount':1,'rowsPath':str(rows),'rowsSha256':m._sha256(rows),'sourceBlocksRead':4,'sourceBlocksJsonSha256':'c'*64,'sourceInput':span,'privacyProjectionContext':{'schema':'papercusp-seed-privacy-projection-v1','literalsSha256':'f'*64,'excludedTablesSha256':'f'*64}}
+config={'reviewRef':m._UUID_DROP_REVIEW,'potId':'fixture-pot','epochKeysPath':str(keys),'epochKeysSha256':m._sha256(keys),'sourceManifestPath':str(manifest),'sourceManifestSha256':m._sha256(manifest),'sources':[source]}
+cfg=write('config.json',config)
+def valid():return m.assemble_uuid_idempotency_drop_plans(cfg)
+def refused(value):
+ write('config.json',value)
+ try:valid();raise AssertionError('inexact original-span guard passed')
+ except ValueError:pass
+ write('config.json',config)
+result=valid();assert len(result['plans'])==1 and result['plans'][0]['rows']==[] and result['plans'][0]['sourceInput']==span
+assert result['spanAuthenticationCounts']=={'proofVerifiedBlocks':4,'aeadOpenedWinningRows':0,'unopenedNonWinningSealedRowOccurrences':2}
+for count in [3,5,10]:
+ bad=copy.deepcopy(config);bad['sources'][0]['sourceBlocksRead']=count;bad['sources'][0]['sourceInput']['sourceBlocksRead']=count;refused(bad)
+for field,value in [('seedIndex',5),('coversUpTo',5),('chunkCount',5),('omittedPrefixBlocks',5),('coverage','full-log'),('snapshotSetSha256',None),('foldNow',True),('winners',[])]:
+ bad=copy.deepcopy(config);bad['sources'][0]['sourceInput'][field]=value;refused(bad)
+bad=copy.deepcopy(config);bad['sources'][0]['sourceInput']['sourceHead']['sourceLength']=9;refused(bad)
+bad=copy.deepcopy(config);bad['sources'][0]['sourceInput']['winners']*=2;refused(bad)
+bad=copy.deepcopy(config);bad['sources'][0]['sourceInput']['winners'][0]['disposition']='drop';refused(bad)
+# Declaring no set means the exact full-log count, never a smaller undeclared span.
+full=copy.deepcopy(config);s=full['sources'][0];s['sourceBlocksRead']=10;s['sourceInput'].update(coverage='full-log',seedIndex=0,coversUpTo=0,chunkCount=0,snapshotSetSha256=None,omittedPrefixBlocks=0,sourceBlocksRead=10)
+write('config.json',full);assert valid()['plans'][0]['sourceInput']['sourceBlocksRead']==10
+bad=copy.deepcopy(config);del bad['sources'][0]['sourceInput'];refused(bad)
+print('exact-original-span-guard-pass')
+`;
+    const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8', timeout: 30_000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), 'exact-original-span-guard-pass');
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test('D-166 source archive projection retains the exact selected population and independently refuses drift', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-uuid-source-archive-'));
   fs.chmodSync(temp, 0o700);

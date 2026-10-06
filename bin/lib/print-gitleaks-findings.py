@@ -2126,6 +2126,68 @@ def _uuid_open_row(row: dict[str, object], pot_id: str, keys: dict[str, object])
     return json.loads(output.raw[:length.value]), True
 
 
+def _uuid_source_span(source: dict[str, object]) -> None:
+    """D-174 exact declared ORIGINAL span. This validates shape/counts, not GO proof."""
+    span = source.get('sourceInput')
+    if span is None:
+        return  # Legacy full-log inputs retain the manifest's full-count guard.
+    required = {'coverage', 'sourceHead', 'seedIndex', 'coversUpTo', 'chunkCount',
+                'snapshotSetSha256', 'omittedPrefixBlocks', 'sourceBlocksRead',
+                'sourceBlocksJsonSha256', 'proofInventorySha256', 'sealedRowOccurrences', 'foldNow', 'winners'}
+    if not isinstance(span, dict) or set(span) - {'executionBinding'} != required:
+        raise ValueError('UUID original source span incomplete')
+    if 'executionBinding' in span:
+        binding = span['executionBinding']
+        paths = {'packages/operator-core/lib/sync/hyperbee/read-merge.ts',
+                 'packages/operator-core/lib/sync/hyperbee/log-snapshot.ts',
+                 'packages/operator-core/lib/sync/hyperbee/seed-provider-corestore.ts',
+                 'apps/operator/lib/release/cut-seed-cli.ts'}
+        if (not isinstance(binding, dict)
+                or set(binding) != {'sourceCommit', 'gitDirty', 'nodeVersion', 'packageLockSha256',
+                                    'installedLockSha256', 'dependencyGeneration', 'directBlobs'}
+                or not re.fullmatch(r'[0-9a-f]{40}', str(binding['sourceCommit']))
+                or binding['gitDirty'] is not False
+                or not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', str(binding['nodeVersion']))
+                or any(not re.fullmatch(r'[0-9a-f]{64}', str(binding[k])) for k in ('packageLockSha256', 'installedLockSha256'))
+                or not re.fullmatch(r'v1-[0-9a-f]{64}', str(binding['dependencyGeneration']))
+                or not isinstance(binding['directBlobs'], list)
+                or len(binding['directBlobs']) != len(paths)
+                or any(not isinstance(b, dict) or set(b) != {'path', 'sha256'}
+                       or b['path'] not in paths or not re.fullmatch(r'[0-9a-f]{64}', str(b['sha256']))
+                       for b in binding['directBlobs'])
+                or {b['path'] for b in binding['directBlobs']} != paths):
+            raise ValueError('UUID frozen execution binding invalid')
+    length = source['sourceLength']
+    if (any(type(span.get(k)) is not int or span[k] < 0 for k in
+            ('seedIndex', 'coversUpTo', 'chunkCount', 'omittedPrefixBlocks', 'sourceBlocksRead', 'sealedRowOccurrences', 'foldNow'))
+            or not 0 <= span['seedIndex'] < length
+            or span['coversUpTo'] != span['seedIndex']
+            or span['omittedPrefixBlocks'] != span['seedIndex']
+            or span['sourceBlocksRead'] != length - span['seedIndex']
+            or source.get('sourceBlocksRead') != span['sourceBlocksRead']
+            or source.get('sourceBlocksJsonSha256') != span['sourceBlocksJsonSha256']
+            or not re.fullmatch(r'[0-9a-f]{64}', str(span['sourceBlocksJsonSha256']))
+            or not re.fullmatch(r'[0-9a-f]{64}', str(span['proofInventorySha256']))):
+        raise ValueError('UUID original source span block coverage mismatch')
+    if span['chunkCount']:
+        if (span['coverage'] != 'complete-snapshot-set + tail'
+                or span['seedIndex'] + span['chunkCount'] > length
+                or not re.fullmatch(r'[0-9a-f]{64}', str(span['snapshotSetSha256']))):
+            raise ValueError('UUID original snapshot set binding invalid')
+    elif (span['coverage'] != 'full-log' or span['seedIndex'] != 0
+          or span['snapshotSetSha256'] is not None):
+        raise ValueError('UUID from-zero source coverage invalid')
+    head = span['sourceHead']
+    if (not isinstance(head, dict)
+            or set(head) != {'sourceKeyHex', 'sourceLength', 'fork', 'byteLength', 'treeHash', 'signatureHex'}
+            or head['sourceKeyHex'] != source['sourceKeyHex'] or head['sourceLength'] != length
+            or any(type(head[k]) is not int or head[k] < 0 for k in ('fork', 'byteLength'))
+            or not re.fullmatch(r'[0-9a-f]{64}', str(head['treeHash']))
+            or not re.fullmatch(r'(?:[0-9a-f]{2}){64,}', str(head['signatureHex']))
+            or not isinstance(span['winners'], list)):
+        raise ValueError('UUID signed original head/winner binding invalid')
+
+
 def _uuid_census_inputs(config_path: Path) -> tuple[dict[str, object], dict[str, object]]:
     _private_file(config_path)
     config = json.loads(config_path.read_text())
@@ -2146,6 +2208,7 @@ def _uuid_census_inputs(config_path: Path) -> tuple[dict[str, object], dict[str,
                 or type(source.get('rowCount')) is not int or source['rowCount'] < 0):
             raise ValueError('UUID source census binding invalid')
         seen.add(key)
+        _uuid_source_span(source)
         path = Path(source['rowsPath'])
         _private_file(path)
         if _sha256(path) != source['rowsSha256']:
@@ -2169,7 +2232,8 @@ def _uuid_census_inputs(config_path: Path) -> tuple[dict[str, object], dict[str,
         meta = stores[0]['meta']
         if (set(meta['coreKeys']) != seen or len(meta['coreKeys']) != len(seen)
                 or any(meta['coreLengths'][s['sourceKeyHex']] != s['sourceLength']
-                       or s.get('sourceBlocksRead') != s['sourceLength'] for s in config['sources'])):
+                       or s.get('sourceBlocksRead') != s['sourceLength'] - s.get('sourceInput', {}).get('seedIndex', 0)
+                       for s in config['sources'])):
             raise ValueError('UUID source core/block coverage incomplete')
     # The exporter must enumerate the actual signed core/snapshot population.
     # A supplied export is not, by itself, proof that every source core was read.
@@ -2179,6 +2243,8 @@ def _uuid_census_inputs(config_path: Path) -> tuple[dict[str, object], dict[str,
 def _uuid_source_rows(source: dict[str, object]):
     count = 0
     row_ids = set()
+    declared = source.get('sourceInput', {}).get('winners')
+    winners = []
     with Path(source['rowsPath']).open() as handle:
         for count, text in enumerate(handle, 1):
             row = json.loads(text)
@@ -2191,11 +2257,15 @@ def _uuid_source_rows(source: dict[str, object]):
             if identity in row_ids:
                 raise ValueError('UUID source export must contain each winning row once')
             row_ids.add(identity)
+            winners.append({'table': row['table'], 'hbKey': row['hbKey'],
+                            'disposition': row.get('privacyProjection', {'disposition': 'carry'}).get('disposition')})
             if 'privacyProjection' in row and 'privacyProjectionContext' not in source:
                 raise ValueError('UUID privacy projection context missing')
             yield row
     if count != source['rowCount'] or _sha256(Path(source['rowsPath'])) != source['rowsSha256']:
         raise ValueError('UUID source export incomplete or changed')
+    if declared is not None and winners != declared:
+        raise ValueError('UUID original census winner/disposition coverage mismatch')
 
 
 def _uuid_privacy_projection(row: dict[str, object], authenticated: bool) -> tuple[str, object]:
@@ -2238,6 +2308,10 @@ def assemble_uuid_idempotency_drop_plans(config_path: Path) -> dict[str, object]
             _uuid_privacy_projection(row, authenticated)
             tokens.update(_uuid_class_tokens(plain))
             tokens.update(_uuid_class_tokens({field: row[field] for field in ('table', 'hbKey', 'author_pubkey') if field in row}))
+    spans = [source['sourceInput'] for source in config['sources'] if 'sourceInput' in source]
+    unopened = sum(span['sealedRowOccurrences'] for span in spans) - encrypted
+    if spans and (len(spans) != len(config['sources']) or unopened < 0):
+        raise ValueError('UUID proof/AEAD census accounting incomplete')
     plans = []
     locators = set()
     dropped = encrypted_dropped = privacy_dropped = privacy_auth_dropped = privacy_redacted = 0
@@ -2268,11 +2342,20 @@ def assemble_uuid_idempotency_drop_plans(config_path: Path) -> dict[str, object]
                          'valueSha256': hashlib.sha256(stored.encode()).hexdigest(), 'occurrences': occurrences})
             dropped += 1
             encrypted_dropped += int(authenticated)
-        if rows:
+        if rows or 'sourceInput' in source:
             plans.append({'schema': _UUID_DROP_SCHEMA, 'reviewRef': _UUID_DROP_REVIEW,
-                          'sourceKeyHex': source['sourceKeyHex'], 'sourceLength': source['sourceLength'], 'rows': rows})
+                          'sourceKeyHex': source['sourceKeyHex'], 'sourceLength': source['sourceLength'], 'rows': rows,
+                          **({'sourceInput': source['sourceInput']} if 'sourceInput' in source else {})})
     # All counters refer to source rows; a dropped ciphertext is never claimed as shipped auth.
     return {'schema': _UUID_DROP_SET_SCHEMA, 'reviewRef': _UUID_DROP_REVIEW, 'plans': plans,
+            **({'sourceCoverage': [{'coverage': span['coverage'], 'omittedPrefixBlocks': span['omittedPrefixBlocks'],
+                                   'sourceBlocksRead': span['sourceBlocksRead'], 'sourceLength': source['sourceLength']}
+                                  for source, span in zip(config['sources'], spans)],
+                'spanAuthenticationCounts': {'proofVerifiedBlocks': sum(s['sourceBlocksRead'] for s in spans),
+                                             'aeadOpenedWinningRows': encrypted,
+                                             # Occurrences omitted by supersession, table exclusion, or tombstone GC.
+                                             'unopenedNonWinningSealedRowOccurrences': unopened}}
+               if spans else {}),
             'privateSourceBindings': {'configSha256': _sha256(config_path),
                                      'sources': config['sources'], 'epochKeysSha256': config['epochKeysSha256']},
             'sourceAuthentication': 'original-envelope-aead',
