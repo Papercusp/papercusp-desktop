@@ -38,6 +38,28 @@ def refused(value):
  write('config.json',config)
 result=valid();assert len(result['plans'])==1 and result['plans'][0]['rows']==[] and result['plans'][0]['sourceInput']==span
 assert result['spanAuthenticationCounts']=={'proofVerifiedBlocks':4,'aeadOpenedWinningRows':0,'unopenedNonWinningSealedRowOccurrences':2}
+# The hidden-lock field cannot silently take on a different D-177 meaning.
+paths=['packages/operator-core/lib/sync/hyperbee/read-merge.ts','packages/operator-core/lib/sync/hyperbee/log-snapshot.ts','packages/operator-core/lib/sync/hyperbee/seed-provider-corestore.ts','apps/operator/lib/release/cut-seed-cli.ts','packages/operator-core/lib/sync/hyperbee/seed-frozen-execution.ts','packages/operator-core/lib/sync/hyperbee/hive-epoch-aead.ts','apps/operator/bin/release/dependency-generation.sh']
+binding={'sourceCommit':'a'*40,'gitDirty':False,'nodeVersion':'v22.1.0','dependencyGeneration':'v1-'+'b'*64,'dependencyInputSha256':'c'*64,'installedPackagesSha256':'d'*64,'dependencyGenerationSnapshotSha256':'e'*64,'materializedTreesSha256':'f'*64,'directBlobs':[{'path':p,'sha256':'a'*64} for p in paths],
+ 'securityPackages':[{'path':'node_modules/'+n,'name':n,'version':'1.0.0','resolved':'https://registry.npmjs.org/'+n+'/-/fixture.tgz','integrity':'sha512-'+'A'*86+'==','files':[{'path':'package.json','sha256':'b'*64},{'path':'index.js','sha256':'c'*64}]} for n in ['hypercore','hyperbee','hypercore-crypto','sodium-native','sodium-universal']]}
+binding['installedPackages']=sorted([{k:p[k] for k in ('path','name','version')} for p in binding['securityPackages']],key=lambda p:p['path'])
+binding['installedPackagesSha256']=m.hashlib.sha256(json.dumps(binding['installedPackages'],separators=(',', ':')).encode()).hexdigest()
+bound=copy.deepcopy(config);bound['sources'][0]['sourceInput']['executionBinding']=binding
+write('config.json',bound);assert valid()['plans'][0]['sourceInput']['executionBinding']==binding
+for field in ['dependencyInputSha256','installedPackagesSha256','installedPackages','dependencyGenerationSnapshotSha256','materializedTreesSha256','securityPackages']:
+ bad=copy.deepcopy(bound);del bad['sources'][0]['sourceInput']['executionBinding'][field];refused(bad)
+bad=copy.deepcopy(bound);bad['sources'][0]['sourceInput']['executionBinding']['installedLockSha256']='a'*64;refused(bad)
+bad=copy.deepcopy(bound);bad['sources'][0]['sourceInput']['executionBinding']['installedPackages'][0]['version']='9.9.9';refused(bad)
+for change in ['missing-package','duplicate-package','bad-integrity','unsafe-file','duplicate-file','missing-metadata']:
+ bad=copy.deepcopy(bound);p=bad['sources'][0]['sourceInput']['executionBinding']['securityPackages']
+ if change=='missing-package':p.pop()
+ if change=='duplicate-package':p.append(copy.deepcopy(p[0]))
+ if change=='bad-integrity':p[0]['integrity']='sha256-'+'a'*64
+ if change=='unsafe-file':p[0]['files'][0]['path']='../index.js'
+ if change=='duplicate-file':p[0]['files'].append(copy.deepcopy(p[0]['files'][0]))
+ if change=='missing-metadata':p[0]['files'].pop(0)
+ refused(bad)
+write('config.json',config)
 for count in [3,5,10]:
  bad=copy.deepcopy(config);bad['sources'][0]['sourceBlocksRead']=count;bad['sources'][0]['sourceInput']['sourceBlocksRead']=count;refused(bad)
 for field,value in [('seedIndex',5),('coversUpTo',5),('chunkCount',5),('omittedPrefixBlocks',5),('coverage','full-log'),('snapshotSetSha256',None),('foldNow',True),('winners',[])]:

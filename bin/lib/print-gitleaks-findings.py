@@ -2141,14 +2141,19 @@ def _uuid_source_span(source: dict[str, object]) -> None:
         paths = {'packages/operator-core/lib/sync/hyperbee/read-merge.ts',
                  'packages/operator-core/lib/sync/hyperbee/log-snapshot.ts',
                  'packages/operator-core/lib/sync/hyperbee/seed-provider-corestore.ts',
-                 'apps/operator/lib/release/cut-seed-cli.ts'}
+                 'apps/operator/lib/release/cut-seed-cli.ts',
+                 'packages/operator-core/lib/sync/hyperbee/seed-frozen-execution.ts',
+                 'packages/operator-core/lib/sync/hyperbee/hive-epoch-aead.ts',
+                 'apps/operator/bin/release/dependency-generation.sh'}
+        hashes = {'dependencyInputSha256', 'installedPackagesSha256',
+                  'dependencyGenerationSnapshotSha256', 'materializedTreesSha256'}
         if (not isinstance(binding, dict)
-                or set(binding) != {'sourceCommit', 'gitDirty', 'nodeVersion', 'packageLockSha256',
-                                    'installedLockSha256', 'dependencyGeneration', 'directBlobs'}
+                or set(binding) != hashes | {'sourceCommit', 'gitDirty', 'nodeVersion',
+                                            'dependencyGeneration', 'installedPackages', 'securityPackages', 'directBlobs'}
                 or not re.fullmatch(r'[0-9a-f]{40}', str(binding['sourceCommit']))
                 or binding['gitDirty'] is not False
                 or not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', str(binding['nodeVersion']))
-                or any(not re.fullmatch(r'[0-9a-f]{64}', str(binding[k])) for k in ('packageLockSha256', 'installedLockSha256'))
+                or any(not re.fullmatch(r'[0-9a-f]{64}', str(binding[k])) for k in hashes)
                 or not re.fullmatch(r'v1-[0-9a-f]{64}', str(binding['dependencyGeneration']))
                 or not isinstance(binding['directBlobs'], list)
                 or len(binding['directBlobs']) != len(paths)
@@ -2157,6 +2162,54 @@ def _uuid_source_span(source: dict[str, object]) -> None:
                        for b in binding['directBlobs'])
                 or {b['path'] for b in binding['directBlobs']} != paths):
             raise ValueError('UUID frozen execution binding invalid')
+        # D-177's archive/member identities are independently re-derivable.
+        # Shape validation here is not an independent GO determination.
+        packages = binding['securityPackages']
+        names = {'hypercore', 'hyperbee', 'hypercore-crypto', 'sodium-native', 'sodium-universal'}
+        allowed = names | {'sodium-javascript'}
+        def safe_path(value):
+            return (isinstance(value, str) and value and not value.startswith('/')
+                    and not any(p in {'', '.', '..'} for p in value.split('/'))
+                    and not re.search(r'[\x00-\x1f\\]', value))
+        inventory = binding['installedPackages']
+        if (not isinstance(inventory, list) or not inventory
+                or any(not isinstance(p, dict) or set(p) != {'path', 'name', 'version'}
+                       or not safe_path(p['path']) or not isinstance(p['name'], str) or not p['name']
+                       or not isinstance(p['version'], str) or not p['version'] for p in inventory)
+                or [p['path'] for p in inventory] != sorted({p['path'] for p in inventory})
+                or hashlib.sha256(json.dumps([{'path':p['path'], 'name':p['name'], 'version':p['version']} for p in inventory],
+                                            separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+                   != binding['installedPackagesSha256']):
+            raise ValueError('UUID frozen installed package inventory invalid')
+        installed = {p['path']:p for p in inventory}
+        if not isinstance(packages, list) or not packages:
+            raise ValueError('UUID frozen security package inventory invalid')
+        seen = set()
+        for package in packages:
+            if (not isinstance(package, dict)
+                    or set(package) != {'path', 'name', 'version', 'resolved', 'integrity', 'files'}
+                    or package['name'] not in allowed
+                    or not safe_path(package['path'])
+                    or not package['path'].endswith('node_modules/' + package['name'])
+                    or package['path'] in seen
+                    or installed.get(package['path']) != {k:package[k] for k in ('path', 'name', 'version')}
+                    or not isinstance(package['version'], str) or not package['version']
+                    or not isinstance(package['resolved'], str) or not package['resolved'].startswith('https://')
+                    or not re.fullmatch(r'sha512-[A-Za-z0-9+/]{86}==', str(package['integrity']))
+                    or not isinstance(package['files'], list) or not package['files']):
+                raise ValueError('UUID frozen security package identity invalid')
+            seen.add(package['path'])
+            members = set()
+            for file in package['files']:
+                if (not isinstance(file, dict) or set(file) != {'path', 'sha256'}
+                        or not safe_path(file['path']) or file['path'] in members
+                        or not re.fullmatch(r'[0-9a-f]{64}', str(file['sha256']))):
+                    raise ValueError('UUID frozen security package file identity invalid')
+                members.add(file['path'])
+            if 'package.json' not in members:
+                raise ValueError('UUID frozen security package metadata missing')
+        if not names <= {p['name'] for p in packages}:
+            raise ValueError('UUID frozen security package coverage incomplete')
     length = source['sourceLength']
     if (any(type(span.get(k)) is not int or span[k] < 0 for k in
             ('seedIndex', 'coversUpTo', 'chunkCount', 'omittedPrefixBlocks', 'sourceBlocksRead', 'sealedRowOccurrences', 'foldNow'))
