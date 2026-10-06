@@ -2145,12 +2145,14 @@ def _uuid_source_span(source: dict[str, object]) -> None:
                  'packages/operator-core/lib/sync/hyperbee/seed-frozen-execution.ts',
                  'packages/operator-core/lib/sync/hyperbee/hive-epoch-aead.ts',
                  'apps/operator/bin/release/dependency-generation.sh',
-                 'scripts/check-lockfile-census.mjs'}
+                 'scripts/check-lockfile-census.mjs',
+                 'packages/operator-core/lib/sync/hyperbee/seed-module-census.mjs'}
         hashes = {'dependencyInputSha256', 'installedPackagesSha256',
                   'dependencyGenerationSnapshotSha256', 'materializedTreesSha256'}
         if (not isinstance(binding, dict)
                 or set(binding) != hashes | {'sourceCommit', 'gitDirty', 'nodeVersion',
-                                            'dependencyGeneration', 'installedPackages', 'securityPackages', 'directBlobs'}
+                                            'dependencyGeneration', 'installedPackages', 'securityPackages', 'directBlobs',
+                                            'excludedEntries', 'excludedEntryCount', 'loadedModulePaths'}
                 or not re.fullmatch(r'[0-9a-f]{40}', str(binding['sourceCommit']))
                 or binding['gitDirty'] is not False
                 or not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', str(binding['nodeVersion']))
@@ -2183,6 +2185,45 @@ def _uuid_source_span(source: dict[str, object]) -> None:
                    != binding['installedPackagesSha256']):
             raise ValueError('UUID frozen installed package inventory invalid')
         installed = {p['path']:p for p in inventory}
+        # D-178: the exclusion report is part of both execution records. This
+        # validates the narrow namespace and observed loads; GO still re-derives
+        # symlink reachability, publication drift and final artifact absence.
+        excluded = binding['excludedEntries']
+        root_tooling = {'.bin', '.cache', '.vite', '.vite-temp', '.astro', '.pnpm', '.store',
+                        '.package-lock.json', '.papercusp-isolated-snapshot',
+                        '.papercusp-dependency-generation', '.papercusp-source-package-lock.json'}
+        if (not isinstance(excluded, list) or type(binding['excludedEntryCount']) is not int
+                or binding['excludedEntryCount'] != len(excluded)
+                or any(not isinstance(e, dict) or set(e) != {'path', 'name', 'version'}
+                       or not safe_path(e['path']) for e in excluded)
+                or [e['path'] for e in excluded] != sorted({e['path'] for e in excluded})):
+            raise ValueError('UUID frozen excluded entry inventory invalid')
+        for entry in excluded:
+            leaf = entry['path'].rsplit('node_modules/', 1)
+            if len(leaf) != 2:
+                raise ValueError('UUID frozen excluded entry outside dependency namespace')
+            name = leaf[1]
+            leftover = re.fullmatch(r'(?:(@[^/]+)/)?\.([^/]+)-[A-Za-z0-9]{8}', name)
+            if leftover:
+                expected_name = ((leftover[1] + '/') if leftover[1] else '') + leftover[2]
+                if (entry['name'] != expected_name or not isinstance(entry['version'], str)
+                        or not entry['version']):
+                    raise ValueError('UUID frozen excluded entry metadata mismatch')
+            elif name not in root_tooling:
+                raise ValueError('UUID frozen excluded entry is not known tooling')
+            elif not ((entry['name'] is None and entry['version'] is None)
+                      or (isinstance(entry['name'], str) and entry['name']
+                          and isinstance(entry['version'], str) and entry['version'])):
+                raise ValueError('UUID frozen tooling metadata invalid')
+            if any(p == entry['path'] or p.startswith(entry['path'] + '/') for p in installed):
+                raise ValueError('UUID frozen installed inventory overlaps an excluded entry')
+        loaded = binding['loadedModulePaths']
+        if (not isinstance(loaded, list) or not loaded
+                or any(not safe_path(p) for p in loaded)
+                or loaded != sorted(set(loaded))
+                or 'packages/operator-core/lib/sync/hyperbee/seed-module-census.mjs' not in loaded
+                or any(p == e['path'] or p.startswith(e['path'] + '/') for p in loaded for e in excluded)):
+            raise ValueError('UUID frozen loaded module census invalid or reaches excluded tooling')
         if not isinstance(packages, list) or not packages:
             raise ValueError('UUID frozen security package inventory invalid')
         seen = set()

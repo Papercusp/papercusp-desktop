@@ -39,17 +39,29 @@ def refused(value):
 result=valid();assert len(result['plans'])==1 and result['plans'][0]['rows']==[] and result['plans'][0]['sourceInput']==span
 assert result['spanAuthenticationCounts']=={'proofVerifiedBlocks':4,'aeadOpenedWinningRows':0,'unopenedNonWinningSealedRowOccurrences':2}
 # The hidden-lock field cannot silently take on a different D-177 meaning.
-paths=['packages/operator-core/lib/sync/hyperbee/read-merge.ts','packages/operator-core/lib/sync/hyperbee/log-snapshot.ts','packages/operator-core/lib/sync/hyperbee/seed-provider-corestore.ts','apps/operator/lib/release/cut-seed-cli.ts','packages/operator-core/lib/sync/hyperbee/seed-frozen-execution.ts','packages/operator-core/lib/sync/hyperbee/hive-epoch-aead.ts','apps/operator/bin/release/dependency-generation.sh','scripts/check-lockfile-census.mjs']
+paths=['packages/operator-core/lib/sync/hyperbee/read-merge.ts','packages/operator-core/lib/sync/hyperbee/log-snapshot.ts','packages/operator-core/lib/sync/hyperbee/seed-provider-corestore.ts','apps/operator/lib/release/cut-seed-cli.ts','packages/operator-core/lib/sync/hyperbee/seed-frozen-execution.ts','packages/operator-core/lib/sync/hyperbee/hive-epoch-aead.ts','apps/operator/bin/release/dependency-generation.sh','scripts/check-lockfile-census.mjs','packages/operator-core/lib/sync/hyperbee/seed-module-census.mjs']
 binding={'sourceCommit':'a'*40,'gitDirty':False,'nodeVersion':'v22.1.0','dependencyGeneration':'v1-'+'b'*64,'dependencyInputSha256':'c'*64,'installedPackagesSha256':'d'*64,'dependencyGenerationSnapshotSha256':'e'*64,'materializedTreesSha256':'f'*64,'directBlobs':[{'path':p,'sha256':'a'*64} for p in paths],
  'securityPackages':[{'path':'node_modules/'+n,'name':n,'version':'1.0.0','resolved':'https://registry.npmjs.org/'+n+'/-/fixture.tgz','integrity':'sha512-'+'A'*86+'==','files':[{'path':'package.json','sha256':'b'*64},{'path':'index.js','sha256':'c'*64}]} for n in ['hypercore','hyperbee','hypercore-crypto','sodium-native','sodium-universal']]}
 binding['installedPackages']=sorted([{k:p[k] for k in ('path','name','version')} for p in binding['securityPackages']],key=lambda p:p['path'])
 binding['installedPackagesSha256']=m.hashlib.sha256(json.dumps(binding['installedPackages'],separators=(',', ':')).encode()).hexdigest()
+binding.update(excludedEntries=[],excludedEntryCount=0,loadedModulePaths=sorted([paths[2],paths[-1]]))
 bound=copy.deepcopy(config);bound['sources'][0]['sourceInput']['executionBinding']=binding
 write('config.json',bound);assert valid()['plans'][0]['sourceInput']['executionBinding']==binding
-for field in ['dependencyInputSha256','installedPackagesSha256','installedPackages','dependencyGenerationSnapshotSha256','materializedTreesSha256','securityPackages']:
+for field in ['dependencyInputSha256','installedPackagesSha256','installedPackages','dependencyGenerationSnapshotSha256','materializedTreesSha256','securityPackages','excludedEntries','excludedEntryCount','loadedModulePaths']:
  bad=copy.deepcopy(bound);del bad['sources'][0]['sourceInput']['executionBinding'][field];refused(bad)
 bad=copy.deepcopy(bound);bad['sources'][0]['sourceInput']['executionBinding']['installedLockSha256']='a'*64;refused(bad)
 bad=copy.deepcopy(bound);bad['sources'][0]['sourceInput']['executionBinding']['installedPackages'][0]['version']='9.9.9';refused(bad)
+excluded_bound=copy.deepcopy(bound);eb=excluded_bound['sources'][0]['sourceInput']['executionBinding']
+eb.update(excludedEntries=[{'path':'node_modules/@fixture/.x-1234abcd','name':'@fixture/x','version':'1.0.0'}],excludedEntryCount=1)
+write('config.json',excluded_bound);assert valid()['plans'][0]['sourceInput']['executionBinding']==eb
+for change in ['bad-count','unknown-dot','bad-name','loaded-excluded','no-preload']:
+ bad=copy.deepcopy(excluded_bound);b=bad['sources'][0]['sourceInput']['executionBinding']
+ if change=='bad-count':b['excludedEntryCount']=0
+ if change=='unknown-dot':b['excludedEntries'][0]['path']='node_modules/@fixture/.unknown'
+ if change=='bad-name':b['excludedEntries'][0]['name']='@fixture/wrong'
+ if change=='loaded-excluded':b['loadedModulePaths']=sorted(b['loadedModulePaths']+['node_modules/@fixture/.x-1234abcd/index.js'])
+ if change=='no-preload':b['loadedModulePaths']=[paths[2]]
+ refused(bad)
 for change in ['missing-package','duplicate-package','bad-integrity','unsafe-file','duplicate-file','missing-metadata']:
  bad=copy.deepcopy(bound);p=bad['sources'][0]['sourceInput']['executionBinding']['securityPackages']
  if change=='missing-package':p.pop()
