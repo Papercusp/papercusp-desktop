@@ -13,8 +13,9 @@ const ts = require('typescript');
 
 const desktopRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(desktopRoot, '..');
+// Overridable so scripts/mutation-probe.sh can point the suite at a mutated copy (copy-out mode).
 const builder = fs.readFileSync(
-  path.join(desktopRoot, 'bin/build-desktop-sidecar.sh'),
+  process.env.BUILD_DESKTOP_SIDECAR_PATH ?? path.join(desktopRoot, 'bin/build-desktop-sidecar.sh'),
   'utf8',
 );
 const sidecarVerifier = fs.readFileSync(
