@@ -2025,14 +2025,18 @@ if ! git -C "$MONOREPO" rev-parse --git-dir >/dev/null 2>&1; then
   echo "ERROR: dogfood pin: $MONOREPO is not a git repo; refusing an unpinned release" >&2
   exit 1
 fi
-_dogfood_pin_remote_sha="$(release_tag_remote_sha "$MONOREPO" "$TAG" "$PAPERCUP_DOGFOOD_CANONICAL_REMOTE")"
-if [[ "$_dogfood_pin_remote_sha" != "$EXPECTED_SOURCE_SHA" ]]; then
-  echo "ERROR: dogfood pin: $PAPERCUP_DOGFOOD_CANONICAL_REMOTE refs/tags/$TAG is ${_dogfood_pin_remote_sha:-<missing>}, expected $EXPECTED_SOURCE_SHA" >&2
-  echo "       Nothing has been modified. Create the tag first with release:cut{op:'prepare-tag',...,confirm:true}" >&2
-  echo "       (or PAPERCUSP_RELEASE_PREPARE_TAG_SHA=<sha> PAPERCUSP_RELEASE_PREPARE_TAG_CONFIRM=1 $0 $VERSION $CHANNEL)." >&2
-  exit 1
+if [[ "${PAPERCUSP_RELEASE_DEFER_TAG:-0}" == "1" ]]; then
+  echo "==> dogfood pin deferred: build-only $TAG at $EXPECTED_SOURCE_SHA; matching containment receipt required before tag binding/candidate/GO/publication"
+else
+  _dogfood_pin_remote_sha="$(release_tag_remote_sha "$MONOREPO" "$TAG" "$PAPERCUP_DOGFOOD_CANONICAL_REMOTE")"
+  if [[ "$_dogfood_pin_remote_sha" != "$EXPECTED_SOURCE_SHA" ]]; then
+    echo "ERROR: dogfood pin: $PAPERCUP_DOGFOOD_CANONICAL_REMOTE refs/tags/$TAG is ${_dogfood_pin_remote_sha:-<missing>}, expected $EXPECTED_SOURCE_SHA" >&2
+    echo "       Nothing has been modified. Create the tag first with release:cut{op:'prepare-tag',...,confirm:true}" >&2
+    echo "       (or PAPERCUSP_RELEASE_PREPARE_TAG_SHA=<sha> PAPERCUSP_RELEASE_PREPARE_TAG_CONFIRM=1 $0 $VERSION $CHANNEL)." >&2
+    exit 1
+  fi
+  echo "==> dogfood pin precondition: $TAG is at ${EXPECTED_SOURCE_SHA:0:12} on $PAPERCUP_DOGFOOD_CANONICAL_REMOTE"
 fi
-echo "==> dogfood pin precondition: $TAG is at ${EXPECTED_SOURCE_SHA:0:12} on $PAPERCUP_DOGFOOD_CANONICAL_REMOTE"
 
 # ── PRECHECK-ONLY EXIT ────────────────────────────────────────────────────────
 # THE LAST POINT AT WHICH THIS SCRIPT HAS TOUCHED NOTHING. Everything above is
@@ -2228,10 +2232,14 @@ bump_version_manifests "$ROOT"
 # pin is a precondition failure, not an invitation for the cutter to force-push.
 if git -C "$MONOREPO" rev-parse --git-dir >/dev/null 2>&1; then
   export PAPERCUP_DOGFOOD_REPO_REF="$TAG"
-  echo "==> dogfood pin: verifying $TAG at expected source ${EXPECTED_SOURCE_SHA:0:12}"
-  # Certify against PAPERCUP_DOGFOOD_CANONICAL_REMOTE (set by the read-only
-  # precondition above the PRECHECK-ONLY exit), not the inherited origin.
-  release_tag_prepare_local_exact "$MONOREPO" "$TAG" "$EXPECTED_SOURCE_SHA" "$PAPERCUP_DOGFOOD_CANONICAL_REMOTE"
+  if [[ "${PAPERCUSP_RELEASE_DEFER_TAG:-0}" == "1" ]]; then
+    # Bake the eventual clone ref into the bytes without creating a local ref.
+    echo "==> dogfood pin: $TAG metadata only; local tag preparation deferred"
+  else
+    echo "==> dogfood pin: verifying $TAG at expected source ${EXPECTED_SOURCE_SHA:0:12}"
+    # Certify against the public remote, not the inherited origin.
+    release_tag_prepare_local_exact "$MONOREPO" "$TAG" "$EXPECTED_SOURCE_SHA" "$PAPERCUP_DOGFOOD_CANONICAL_REMOTE"
+  fi
 else
   echo "ERROR: dogfood pin: $MONOREPO is not a git repo; refusing an unpinned release" >&2
   exit 1
@@ -3733,12 +3741,16 @@ else
 fi
 
 vh_begin tag
-echo "==> committing version bump"
-git -C "$ROOT" add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
-git -C "$ROOT" commit -m "release: $TAG" 2>&1 | tail -3 || echo "(nothing to commit)"
+if [[ "${PAPERCUSP_RELEASE_DEFER_TAG:-0}" == "1" ]]; then
+  echo "==> build-only: version commit and local $TAG deferred; isolated build residue retained"
+else
+  echo "==> committing version bump"
+  git -C "$ROOT" add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+  git -C "$ROOT" commit -m "release: $TAG" 2>&1 | tail -3 || echo "(nothing to commit)"
 
-echo "==> tagging $TAG (local)"
-git -C "$ROOT" tag -f "$TAG"
+  echo "==> tagging $TAG (local)"
+  git -C "$ROOT" tag -f "$TAG"
+fi
 
 # ── Canonical version writeback (WI-10001570) ───────────────────────────────
 # $ROOT is derived from where THIS script lives, so a cut launched against an
@@ -3754,7 +3766,9 @@ git -C "$ROOT" tag -f "$TAG"
 # commit and NO push: git-sync owns commit+push for the shared tree and sweeps
 # the submodule on its own schedule.
 CANONICAL_WRITEBACK_STATUS=0
-if [[ -z "${PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT:-}" ]]; then
+if [[ "${PAPERCUSP_RELEASE_DEFER_TAG:-0}" == "1" ]]; then
+  echo "==> canonical writeback: deferred for build-only run"
+elif [[ -z "${PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT:-}" ]]; then
   echo "==> canonical writeback: skipped (PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT unset)"
 elif ! _canon="$(cd "${PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT}" 2>/dev/null && pwd)"; then
   echo "⛔ canonical writeback: PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT=${PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT} is not a readable directory" >&2
@@ -3822,12 +3836,20 @@ fi
 # GitHub releases ever come back.
 echo
 echo "==> done (LOCAL-only — nothing was pushed to GitHub)"
-echo "    tag:       $TAG (local, not pushed)"
+if [[ "${PAPERCUSP_RELEASE_DEFER_TAG:-0}" == "1" ]]; then
+  echo "    tag:       $TAG (DEFERRED; build-only bytes, matching containment receipt and exact tag binding required)"
+else
+  echo "    tag:       $TAG (local, not pushed)"
+fi
 echo "    manifest:  $LATEST_JSON"
 [[ -f "$LATEST_SERVER_JSON" ]] && echo "    manifest (server): $LATEST_SERVER_JSON"
 echo "    notes:     $NOTES_FILE"
 echo "    artifacts: ${#ARTIFACTS[@]}"
-echo "    hand-off:  give the owner the paths + sha256 below."
+if [[ "${PAPERCUSP_RELEASE_DEFER_TAG:-0}" == "1" ]]; then
+  echo "    hand-off:  HELD — no candidate/GO/publication before matching receipt and exact tag binding."
+else
+  echo "    hand-off:  give the owner the paths + sha256 below."
+fi
 for f in "${ARTIFACTS[@]}"; do
   [[ -f "$f" ]] && echo "      $f  sha256:$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)"
 done
