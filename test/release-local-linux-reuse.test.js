@@ -1727,6 +1727,7 @@ function runArm64Collection({ includeArm64Artifact = true } = {}) {
     // collector-side signature guard, a5f47fb9); source its real definition,
     // as the linux/mac collection harnesses above do.
     `source ${JSON.stringify(path.join(root, 'bin', 'lib', 'release-artifacts.sh'))}`,
+    `source ${JSON.stringify(path.join(root, 'bin', 'lib', 'seed-reuse-age.sh'))}`,
     collectorHarness,
     'printf "COLLECTED=%s\\n" "${#ARTIFACTS[@]}"',
   ].join('\n');

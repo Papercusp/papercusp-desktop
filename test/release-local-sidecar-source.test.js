@@ -92,7 +92,7 @@ test('seed cut executes current tooling but exports the frozen Git source', (con
     'set -euo pipefail',
     'release_seed_cut_is_quiesced() { return 0; }',
     'release_seed_sparse_refused() { return 1; }',
-    'seed_uuid_row_drop_prepare() { printf "prepared\\n" > "$PREPARE_RECEIPT"; }',
+    'seed_uuid_row_drop_prepare() { SEED_UUID_ROW_DROP_ACTIVE=0; SEED_UUID_ROW_DROP_ARGS=(); printf "prepared\\n" > "$PREPARE_RECEIPT"; }',
     shellFunction(release, 'cut_release_seed'),
     'cut_release_seed',
   ].join('\n')], {

@@ -7,7 +7,11 @@
 # that supervisor to close only its reader fd via SIGUSR1. Other holders are
 # never signalled, and every wait remains bounded with holder diagnostics.
 
-SIDECAR_LOCK_WAIT="${PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-60}"
+# PAPERCUSP_UNATTENDED_LOCK_WAIT_SEC (EI-24961470606265468) is the ONE knob an
+# unattended caller (a systemd-run capacity build, a scheduled gate) sets so every
+# lock wait in the build chain becomes long enough to queue behind a peer build
+# instead of dying after a minute. The specific knob still wins when set.
+SIDECAR_LOCK_WAIT="${PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-${PAPERCUSP_UNATTENDED_LOCK_WAIT_SEC:-60}}"
 SIDECAR_READER_YIELD_AFTER="${PAPERCUSP_SIDECAR_READER_YIELD_AFTER_SEC:-5}"
 if ! [[ "$SIDECAR_LOCK_WAIT" =~ ^[0-9]+$ ]] || ! [[ "$SIDECAR_READER_YIELD_AFTER" =~ ^[0-9]+$ ]]; then
   echo "FATAL: PAPERCUSP_SIDECAR_LOCK_WAIT_SEC and PAPERCUSP_SIDECAR_READER_YIELD_AFTER_SEC must be non-negative integer seconds" >&2
