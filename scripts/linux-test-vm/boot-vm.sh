@@ -10,6 +10,13 @@
 #               give each VM a DISTINCT subnet: with the default, every VM is
 #               10.0.2.15, and hyperswarm holepunching exchanges local-address
 #               candidates — a peer dialing another's 10.0.2.15 reaches ITSELF.
+#   BOOT_DATA_DISK  extra qcow2 attached as a 2nd virtio disk (default: none).
+#               The guest sees it as /dev/disk/by-id/virtio-pcdata, whatever
+#               /dev/vdX it lands on. Create it yourself (qemu-img create -f qcow2)
+#               and delete it yourself; vmctl reset/down never touch it.
+#   BOOT_SHARE_RO   host_dir:tag exported READ-ONLY over virtio-9p (default: none).
+#               In the guest: sudo mount -t 9p -o trans=virtio,version=9p2000.L,ro,msize=524288 <tag> /mnt/x
+#               For feeding large host inputs (DB dumps) in without copying them.
 #
 # Matches the box convention (raw qemu, slirp hostfwd for SSH, SPICE for display)
 # used by the Mac/Windows build VMs. See build-system/vms.md.
@@ -34,6 +41,19 @@ read -r SSH_PORT SPICE_PORT OP_PORT <<<"$PORTS"
 
 seed_args=()
 [ -n "${BOOT_SEED:-}" ] && seed_args=(-drive "if=virtio,format=raw,file=$BOOT_SEED,readonly=on")
+
+extra_args=()
+if [ -n "${BOOT_DATA_DISK:-}" ]; then
+  [ -f "$BOOT_DATA_DISK" ] || die "BOOT_DATA_DISK not found: $BOOT_DATA_DISK"
+  extra_args+=(-drive "if=none,id=pcdata,format=qcow2,file=$BOOT_DATA_DISK,cache=writeback,discard=unmap"
+               -device "virtio-blk-pci,drive=pcdata,serial=pcdata")
+fi
+if [ -n "${BOOT_SHARE_RO:-}" ]; then
+  share_dir="${BOOT_SHARE_RO%:*}"; share_tag="${BOOT_SHARE_RO##*:}"
+  [ -d "$share_dir" ] && [ -n "$share_tag" ] && [ "$share_tag" != "$BOOT_SHARE_RO" ] \
+    || die "BOOT_SHARE_RO must be <existing host dir>:<tag>, got: $BOOT_SHARE_RO"
+  extra_args+=(-virtfs "local,path=$share_dir,mount_tag=$share_tag,security_model=none,readonly=on")
+fi
 
 # shellcheck disable=SC2206
 fed_nic=( ${FED_NIC:-} )
@@ -90,6 +110,7 @@ run_testvm_scoped "$NAME" "$VM_RAM_MB" qemu-system-x86_64 \
   -m "$VM_RAM_MB" -smp "$VM_CPUS" \
   -drive "if=virtio,format=qcow2,file=$DISK,cache=writeback,discard=unmap" \
   "${seed_args[@]}" \
+  "${extra_args[@]}" \
   -netdev "user,id=net0,net=${SLIRP_NET:-10.0.2.0/24},hostfwd=tcp::${SSH_PORT}-:22${op_hostfwd}" \
   -device virtio-net-pci,netdev=net0 \
   "${fed_nic[@]}" \

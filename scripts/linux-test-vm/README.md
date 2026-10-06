@@ -47,6 +47,14 @@ An instance name other than `clean`/`fed-a`/`fed-b`/`updater` gets its own
 overlay on the shared ad-hoc slot (SSH 2233, SPICE 127.0.0.1:5941), so only one
 ad-hoc instance can run at a time.
 
+**Big inputs or a big disk** (e.g. restoring production DB dumps in a clean room):
+`boot-vm.sh` takes `BOOT_DATA_DISK=/path/data.qcow2` (a 2nd virtio disk, seen in the
+guest as `/dev/disk/by-id/virtio-pcdata`) and `BOOT_SHARE_RO=/host/dir:tag` (a
+READ-ONLY virtio-9p export; mount it in the guest with
+`mount -t 9p -o trans=virtio,version=9p2000.L,ro,msize=524288 tag /mnt/x`). Both pass
+through `vmctl up`. You create and delete the data disk yourself; `reset`/`down`
+never touch it. Contract: `bin/lib/vm-boot-extra-drives.selftest.sh`.
+
 ## Release platform smoke: the Linux leg
 
 The release gate's Linux installed-update proof runs on this VM.
