@@ -2205,8 +2205,8 @@ def _uuid_source_span(source: dict[str, object]) -> None:
             name = leaf[1]
             leftover = None if name in root_tooling else re.fullmatch(r'(?:(@[^/]+)/)?\.([^/]+)-[A-Za-z0-9]{8}', name)
             if leftover:
-                expected_name = ((leftover[1] + '/') if leftover[1] else '') + leftover[2]
-                if (entry['name'] != expected_name or not isinstance(entry['version'], str)
+                if (not isinstance(entry['name'], str) or not entry['name']
+                        or not isinstance(entry['version'], str)
                         or not entry['version']):
                     raise ValueError('UUID frozen excluded entry metadata mismatch')
             elif name not in root_tooling:

@@ -54,6 +54,9 @@ bad=copy.deepcopy(bound);bad['sources'][0]['sourceInput']['executionBinding']['i
 excluded_bound=copy.deepcopy(bound);eb=excluded_bound['sources'][0]['sourceInput']['executionBinding']
 eb.update(excludedEntries=[{'path':'node_modules/@fixture/.x-1234abcd','name':'@fixture/x','version':'1.0.0'}],excludedEntryCount=1)
 write('config.json',excluded_bound);assert valid()['plans'][0]['sourceInput']['executionBinding']==eb
+alias=copy.deepcopy(excluded_bound);ab=alias['sources'][0]['sourceInput']['executionBinding']
+ab['excludedEntries']=[{'path':'node_modules/@typescript/.native-1234abcd','name':'@typescript/native-preview','version':'1.0.0'}]
+write('config.json',alias);assert valid()['plans'][0]['sourceInput']['executionBinding']==ab
 tooling=copy.deepcopy(bound);tb=tooling['sources'][0]['sourceInput']['executionBinding']
 tb.update(excludedEntries=[{'path':'node_modules/.papercusp-isolated-snapshot','name':None,'version':None}],excludedEntryCount=1)
 write('config.json',tooling);assert valid()['plans'][0]['sourceInput']['executionBinding']==tb
@@ -61,7 +64,7 @@ for change in ['bad-count','unknown-dot','bad-name','loaded-excluded','no-preloa
  bad=copy.deepcopy(excluded_bound);b=bad['sources'][0]['sourceInput']['executionBinding']
  if change=='bad-count':b['excludedEntryCount']=0
  if change=='unknown-dot':b['excludedEntries'][0]['path']='node_modules/@fixture/.unknown'
- if change=='bad-name':b['excludedEntries'][0]['name']='@fixture/wrong'
+ if change=='bad-name':b['excludedEntries'][0]['name']=''
  if change=='loaded-excluded':b['loadedModulePaths']=sorted(b['loadedModulePaths']+['node_modules/@fixture/.x-1234abcd/index.js'])
  if change=='no-preload':b['loadedModulePaths']=[paths[2]]
  refused(bad)
