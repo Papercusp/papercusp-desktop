@@ -49,6 +49,11 @@ bad=copy.deepcopy(config);bad['sources'][0]['sourceInput']['winners'][0]['dispos
 full=copy.deepcopy(config);s=full['sources'][0];s['sourceBlocksRead']=10;s['sourceInput'].update(coverage='full-log',seedIndex=0,coversUpTo=0,chunkCount=0,snapshotSetSha256=None,omittedPrefixBlocks=0,sourceBlocksRead=10)
 write('config.json',full);assert valid()['plans'][0]['sourceInput']['sourceBlocksRead']==10
 bad=copy.deepcopy(config);del bad['sources'][0]['sourceInput'];refused(bad)
+signed={'schema':'papercusp-original-signed-source-span-v1','sourceSelection':'enumerateOwnStoreCoreKeys',
+        'potId':'fixture-pot','stores':[{'kind':'corestore','meta':{'coreKeys':['a'*64],'coreLengths':{'a'*64:10},'sourceHeads':{'a'*64:span['sourceHead']}}}]}
+write('source.json',signed);config['sourceManifestSha256']=m._sha256(manifest);write('config.json',config);assert valid()['plans'][0]['sourceInput']==span
+signed['stores'][0]['meta']['sourceHeads']['a'*64]['treeHash']='0'*64
+write('source.json',signed);bad=copy.deepcopy(config);bad['sourceManifestSha256']=m._sha256(manifest);refused(bad)
 print('exact-original-span-guard-pass')
 `;
     const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8', timeout: 30_000 });

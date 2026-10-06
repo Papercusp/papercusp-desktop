@@ -2230,6 +2230,12 @@ def _uuid_census_inputs(config_path: Path) -> tuple[dict[str, object], dict[str,
         if len(stores) != 1 or manifest.get('potId') != config['potId']:
             raise ValueError('UUID source manifest coverage invalid')
         meta = stores[0]['meta']
+        if manifest.get('schema') == 'papercusp-original-signed-source-span-v1':
+            if (manifest.get('sourceSelection') != 'enumerateOwnStoreCoreKeys'
+                    or len(seen) != 1 or set(meta.get('sourceHeads', {})) != seen
+                    or any(meta['sourceHeads'].get(s['sourceKeyHex']) != s.get('sourceInput', {}).get('sourceHead')
+                           for s in config['sources'])):
+                raise ValueError('UUID original source selected-head coverage mismatch')
         if (set(meta['coreKeys']) != seen or len(meta['coreKeys']) != len(seen)
                 or any(meta['coreLengths'][s['sourceKeyHex']] != s['sourceLength']
                        or s.get('sourceBlocksRead') != s['sourceLength'] - s.get('sourceInput', {}).get('seedIndex', 0)
