@@ -740,4 +740,38 @@ if [[ "$FAIL" != 0 ]]; then
   echo "verify-sidecar-bundle: FAILED — the bundle depends on build-host state that will not ship." >&2
   exit 1
 fi
+# Qualify the FINAL pruned image, never a source checkout with prompt assets.
+# A bounded node child replaces GNU timeout (not available on the Mac builder).
+check_boot_import_closure() {
+  local side="$1"
+  "$side/bin/node" --input-type=module - "$side" <<'NODE'
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+const side = process.argv[2];
+const home = mkdtempSync(join(tmpdir(), 'papercusp-boot-imports-'));
+try {
+  const env = { ...process.env, HOME: home, PAPERCUSP_HOME: home,
+    PAPERCUSP_PROMPTS_DIR: join(side, 'prompts'), PAPERCUSP_HARNESS_DIR: join(side, 'harness'),
+    PAPERCUSP_WORKSPACES_DIR: join(home, 'workspaces'), PAPERCUSP_DISABLE_BACKGROUND_TASKS: '1',
+    PAPERCUSP_DBOS_ROUTINES: '0', PAPERCUSP_INTEGRATION_ROOT: '' };
+  for (const key of Object.keys(env)) {
+    if (/DATABASE_URL|PG_DATA_DIR|PG_SQL_DIR|ENV_SIDECAR|OVERRIDE.*STORE/.test(key)) delete env[key];
+  }
+  const result = spawnSync(join(side, 'bin/node'), [join(side, 'serve.mjs'), '--verify-boot-imports'],
+    { cwd: side, env, encoding: 'utf8', timeout: 60000, maxBuffer: 1024 * 1024 });
+  if (result.status !== 0 || !result.stdout?.includes('PAPERCUSP_BOOT_IMPORTS_OK')) {
+    process.stderr.write(`boot import closure FAILED: ${result.error?.message ?? result.status}\n${result.stderr ?? ''}`);
+    process.exitCode = 1;
+  }
+} finally { rmSync(home, { recursive: true, force: true }); }
+NODE
+}
+if [[ "$CROSS" == "0" ]]; then
+  echo "[boot] final packaged tool registry import closure"
+  check_boot_import_closure "$SIDECAR" || exit 1
+else
+  echo "[boot] cross image: executable import closure MUST be qualified on target before acceptance"
+fi
 echo "verify-sidecar-bundle: OK"

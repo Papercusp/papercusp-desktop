@@ -41,6 +41,35 @@ function extractFunction(name) {
 }
 
 const CHECK_SPA_RUNTIME_LAYOUT = extractFunction('check_spa_runtime_layout');
+const CHECK_BOOT_IMPORT_CLOSURE = extractFunction('check_boot_import_closure');
+
+function runBootCheck(body) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'packaged-boot-closure-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'bin'));
+    fs.symlinkSync(process.execPath, path.join(dir, 'bin/node'));
+    fs.writeFileSync(path.join(dir, 'serve.mjs'), body);
+    return spawnSync('bash', ['-c', `set -uo pipefail\n${CHECK_BOOT_IMPORT_CLOSURE}\ncheck_boot_import_closure "$1"`, 'check', dir], {
+      encoding: 'utf8', env: { ...process.env, ORIGINAL_HOME: process.env.HOME, HARNESS_ADMIN_DATABASE_URL: 'must-not-inherit', PAPERCUSP_INTEGRATION_ROOT: '/missing-build-tree' },
+    });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('packaged import closure qualifies isolated final-image imports, not build-host assets', () => {
+  const result = runBootCheck(`if (!process.argv.includes('--verify-boot-imports')) throw Error('wrong probe');
+    if (process.env.HARNESS_ADMIN_DATABASE_URL || process.env.PAPERCUSP_INTEGRATION_ROOT) throw Error('ambient host leaked');
+    if (process.env.HOME === process.env.ORIGINAL_HOME) throw Error('not isolated');
+    console.log('PAPERCUSP_BOOT_IMPORTS_OK');`);
+  assert.equal(result.status, 0, result.stderr);
+});
+test('packaged import closure refuses pruned eager persona reads and missing probe receipts', () => {
+  for (const body of ["throw Error('oracle.persona.md not found');", "console.log('not a boot receipt');"]) {
+    const result = runBootCheck(body);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /boot import closure FAILED/);
+  }
+  assert.match(script, /check_boot_import_closure "\$SIDECAR" \|\| exit 1/);
+});
 
 const ORT_FILES = [
   'ort-wasm-simd-threaded.jsep.mjs',
