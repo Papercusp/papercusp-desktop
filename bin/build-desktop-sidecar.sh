@@ -460,6 +460,23 @@ if [[ "$TARGET_OS" != "$_host_os" || "$TARGET_ARCH" != "$_host_arch" ]]; then
   echo "→ WI-5651 CROSS-baking sidecar for ${TARGET_OS}-${TARGET_ARCH} on a ${_host_os}-${_host_arch} host"
 fi
 
+# D186/D187: checked PRIVATE native inputs use the existing embedded-PG shim,
+# client-tool and Go CLI copy paths. No public/VM profile or support-floor change.
+# Validate before SPA/source assembly, and again immediately before consumption.
+DARWIN_NATIVE_INPUTS="${PAPERCUSP_DARWIN_NATIVE_INPUTS:-}"
+validate_darwin_native_inputs() {
+  [[ -n "$DARWIN_NATIVE_INPUTS" ]] || return 0
+  [[ "$TARGET_OS" == "darwin" && "$DISTRIBUTION_PROFILE" == "dogfood" ]] || {
+    echo "ERROR: private Darwin native inputs require a Darwin dogfood build" >&2; return 1;
+  }
+  [[ -n "${PAPERCUSP_DARWIN_NATIVE_INPUTS_SHA256:-}" ]] || {
+    echo "ERROR: private Darwin native input manifest checksum is required" >&2; return 1;
+  }
+  python3 "$HERE/lib/darwin-native-inputs.py" verify "$DARWIN_NATIVE_INPUTS" \
+    "$PAPERCUSP_DARWIN_NATIVE_INPUTS_SHA256" "$TARGET_ARCH" "$DISTRIBUTION_PROFILE" --require-runtime
+}
+validate_darwin_native_inputs || exit 1
+
 # HOST-TOOL PREFLIGHT (EI-24668318952454860 follow-up, WI-10003960 R-15): several
 # hard host-tool requirements used to be checked only at their point of use,
 # thousands of lines in, so a fresh build host paid a full multi-minute run per
@@ -3360,6 +3377,28 @@ NODE
     "$SIDECAR_DIR/apps/operator/runtime/vm-release-trust-toolchain.json"
   echo "  ✓ replaced npm PostgreSQL payload with pinned PostgreSQL $PAPERCUSP_VM_POSTGRES_VERSION + OpenSSL $PAPERCUSP_VM_OPENSSL_VERSION"
 fi
+if [[ -n "$DARWIN_NATIVE_INPUTS" ]]; then
+  validate_darwin_native_inputs || exit 1
+  _epg_platform_dir="$EMBEDDED_PG_DST/node_modules/@embedded-postgres/darwin-$TARGET_ARCH"
+  [[ -f "$_epg_platform_dir/package.json" ]] || { echo "ERROR: Darwin embedded-postgres path-export shim missing" >&2; exit 1; }
+  rm -rf "$_epg_platform_dir/native"
+  cp -a "$DARWIN_NATIVE_INPUTS/postgresql" "$_epg_platform_dir/native"
+  node - "$_epg_platform_dir/package.json" "$DARWIN_NATIVE_INPUTS/manifest.json" <<'NODE'
+const fs = require('node:fs');
+const pkg = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const input = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+pkg.papercuspNativePayload = {
+  originalNpmVersion: pkg.version, origin: 'qualified-homebrew-bottle-private',
+  version: input.postgresqlVersion, minimumMacOS: input.minimumMacOS,
+  manifestSha256: process.env.PAPERCUSP_DARWIN_NATIVE_INPUTS_SHA256,
+};
+pkg.version = `${input.postgresqlVersion}.0-papercusp.private.1`;
+fs.writeFileSync(process.argv[2], JSON.stringify(pkg, null, 2) + '\n');
+NODE
+  mkdir -p "$SIDECAR_DIR/apps/operator/runtime"
+  cp "$DARWIN_NATIVE_INPUTS/manifest.json" "$SIDECAR_DIR/apps/operator/runtime/darwin-native-inputs.json"
+  echo "private Darwin PostgreSQL bottle payload: $PAPERCUSP_DARWIN_NATIVE_INPUTS_SHA256 (actual floor in manifest; not public 10.15 qualification)" >> "$SOURCE_NOTE_FILE"
+fi
 # Sanity check: must have at least one @embedded-postgres/<platform> binary pkg
 if ! ls "$EMBEDDED_PG_DST/node_modules/@embedded-postgres" 2>/dev/null | grep -c . >/dev/null; then
   echo "ERROR: bundled embedded-postgres missing platform binary — node_modules install didn't include @embedded-postgres/*"
@@ -3618,6 +3657,11 @@ fetch_pgvector_darwin_bottle() {
 }
 echo "→ bundling pgvector into embedded-postgres (per platform)"
 pgvector_copied=0
+if [[ -n "$DARWIN_NATIVE_INPUTS" ]]; then
+  # The qualified payload already contains the exact ABI-matched extension.
+  _pgv_os="$TARGET_OS"
+  pgvector_copied=1
+else
 # WI-5651: route pgvector's platform off TARGET_OS (default host), NOT uname — a
 # cross darwin bundle must ship the darwin vector.dylib, not this linux host's .so.
 # TARGET_OS is already spelled linux|darwin|windows, matching the branches below.
@@ -3718,6 +3762,7 @@ if [[ "$_pgv_os" != "windows" && "${pgvector_copied:-0}" -eq 0 ]]; then
   esac
   exit 1
 fi
+fi # qualified native inputs / ordinary pgvector preparation
 
 # Surface real pg_dump / psql to the sidecar's $PATH so the snapshot
 # subsystem (packages/backup/src/hook.ts spawns `pg_dump` by bare name; the
@@ -3817,7 +3862,9 @@ fi
 # ships libpq/libintl/libcrypto/liblz4/libzstd for the server, so we REUSE those
 # and vendor ONLY readline — avoiding a duplicate multi-dylib closure in the app.
 _cross_darwin_pg_keg=""
-if [[ "$_cross_darwin" == "1" ]]; then
+if [[ -n "$DARWIN_NATIVE_INPUTS" ]]; then
+  _cross_darwin_pg_keg="${EMBEDDED_PG_BIN_DIR%/bin}"
+elif [[ "$_cross_darwin" == "1" ]]; then
   _brew_pg_ver="$(curl -fsSL "https://formulae.brew.sh/api/formula/postgresql@${EMBEDDED_PG_MAJOR}.json" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["versions"]["stable"])' 2>/dev/null)"
   [[ -n "$_brew_pg_ver" ]] || { echo "ERROR: could not resolve postgresql@${EMBEDDED_PG_MAJOR} stable version from the brew formula api"; exit 1; }
   _brew_pg_ver="$(_brew_ver_with_darwin_bottle "postgresql@${EMBEDDED_PG_MAJOR}" "$_brew_pg_ver" "$TARGET_ARCH" "homebrew/core/postgresql/${EMBEDDED_PG_MAJOR}")"
@@ -3920,6 +3967,13 @@ _cross_darwin_vendor_pg_tool() {
   while IFS= read -r dep; do
     [[ -n "$dep" ]] || continue
     case "$dep" in /usr/lib/*|/System/*) continue ;; esac      # macOS system libs — always present
+    case "$dep" in
+      @executable_path/*|@rpath/*) continue ;;
+      @loader_path/*)
+        # A qualified PG client moved from native/bin to sidecar/bin. Its
+        # loader-relative library offset must follow the new directory.
+        [[ -n "${DARWIN_NATIVE_INPUTS:-}" && "$vendor_dir" == "$SIDECAR_DIR/bin/.pg-lib" ]] || continue ;;
+    esac
     base="$(basename "$dep")"
     tgt=""
     if [[ -e "$nlibdir/$base" ]]; then
@@ -3938,7 +3992,7 @@ _cross_darwin_vendor_pg_tool() {
       echo "  native/lib ($nlibdir) nor vendored in $vendor_dir. It would dangle on a clean Mac."
       return 1
     fi
-  done < <(llvm-otool-18 -L "$tool" 2>/dev/null | awk 'NR>1{print $1}' | grep -vE '^@(executable_path|loader_path|rpath)/' || true)
+  done < <(llvm-otool-18 -L "$tool" 2>/dev/null | awk 'NR>1{print $1}')
   rcodesign sign "$tool" >/dev/null 2>&1 || { echo "ERROR: rcodesign ad-hoc sign failed for $tool"; return 1; }
 }
 
@@ -4183,7 +4237,12 @@ fi
 # got `spawn kopia ENOENT` and every snapshot silently shipped without a
 # kopia backup — same masked-dependency class as the pg_wrapper bug above.
 # kopia is a single fully-static Go binary (Apache-2.0) — vendor it.
-if [[ "$_cross_darwin" == "1" ]]; then
+if [[ -n "$DARWIN_NATIVE_INPUTS" ]]; then
+  cp "$DARWIN_NATIVE_INPUTS/bin/kopia" "$SIDECAR_DIR/bin/kopia"
+  chmod 755 "$SIDECAR_DIR/bin/kopia"
+  rcodesign sign "$SIDECAR_DIR/bin/kopia" || exit 1
+  echo "kopia: qualified private Darwin input $PAPERCUSP_DARWIN_NATIVE_INPUTS_SHA256" >> "$SOURCE_NOTE_FILE"
+elif [[ "$_cross_darwin" == "1" ]]; then
   # WI-5651: fetch the DARWIN kopia (Go static binary — links only macOS system
   # libs, so no dylib rewrite needed) matching the build host's kopia version. A
   # copied linux kopia would be an ELF the mac can't exec → silently dump-less
@@ -4578,7 +4637,13 @@ if [[ -n "$gh_archive" ]]; then
   gh_cache_bin="gh"
   [[ "$target_os" == "windows" ]] && gh_cache_bin="gh.exe"
   gh_cache_dir="$SIDECAR_BIN_CACHE/gh-${GH_VERSION}-${target_os}-${target_arch}"
-  if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+  if [[ -n "$DARWIN_NATIVE_INPUTS" ]]; then
+    gh_dst="$OMP_DIR/gh"
+    cp "$DARWIN_NATIVE_INPUTS/bin/gh" "$gh_dst"
+    chmod 755 "$gh_dst"
+    rcodesign sign "$gh_dst" || exit 1
+    echo "gh: qualified private Darwin input $PAPERCUSP_DARWIN_NATIVE_INPUTS_SHA256" >> "$SOURCE_NOTE_FILE"
+  elif [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
     [[ "$GH_VERSION" == "$PAPERCUSP_VM_GH_VERSION" ]] || {
       echo "ERROR: vm-release GitHub CLI override $GH_VERSION differs from pinned $PAPERCUSP_VM_GH_VERSION" >&2
       exit 1

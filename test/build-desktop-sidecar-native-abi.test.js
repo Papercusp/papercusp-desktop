@@ -20,6 +20,109 @@ const verifier = fs.readFileSync(
   'utf8',
 );
 
+const darwinInputHelper = path.join(desktopRoot, 'bin/lib/darwin-native-inputs.py');
+function pythonProbe(script) {
+  return spawnSync('python3', ['-c', [
+    'import importlib.util, pathlib, tempfile, json, hashlib, shutil',
+    `s=importlib.util.spec_from_file_location('native_inputs', ${JSON.stringify(darwinInputHelper)})`,
+    'm=importlib.util.module_from_spec(s); s.loader.exec_module(m)', script,
+  ].join('\n')], { encoding: 'utf8', timeout: 10_000 });
+}
+
+test('native minimum OS parser excludes adjacent linker/dylib versions and supports legacy macOS commands', () => {
+  const commands = 'Load command 0\n cmd LC_BUILD_VERSION\n platform macos\n minos 14.0\n sdk 15.2\n tool LD\n version 1115.7.3\nLoad command 1\n cmd LC_LOAD_DYLIB\n current version 78.3.0\nLoad command 2\n cmd LC_VERSION_MIN_MACOSX\n version 13.1\n sdk 14.0\n';
+  const result = pythonProbe(`assert m.minimum_os(${JSON.stringify(commands)}) == ['14.0', '13.1']\ntry: m.minimum_os('cmd LC_LOAD_DYLIB\\n version 1115.7.3\\n')\nexcept ValueError: pass\nelse: raise AssertionError('unmeasured minimum accepted')`);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test('private input validation rejects target, profile, file and rig-proof mismatches before assembly', () => {
+  const result = pythonProbe(`
+root=pathlib.Path(tempfile.mkdtemp())
+try:
+    required=['postgresql/bin/'+n for n in ('postgres','initdb','pg_ctl','pg_dump','pg_dumpall','pg_restore','psql')]
+    required+=['postgresql/lib/postgresql/vector.dylib','postgresql/share/postgresql/extension/vector.control','bin/gh','bin/kopia']
+    for name in required:
+        p=root/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(b'fixture'); p.chmod(0o755)
+    m.check_closure=lambda root,arch,floor: {n:{} for n in required if not n.endswith('.control')}
+    files=m.file_inventory(root)
+    manifest={'schemaVersion':'darwin-native-inputs/v1','privateOnly':True,'target':{'os':'darwin','arch':'x64'},'postgresqlVersion':'18.6','minimumMacOS':'14.0','files':files,'upstreamReceipts':[{'sha256':'a'*64}]}
+    def write():
+        (root/'manifest.json').write_text(json.dumps(manifest)); return m.sha(root/'manifest.json')
+    digest=write()
+    m.verify(root,digest,'x64','dogfood')
+    for arch,profile,expected in [('arm64','dogfood',digest),('x64','public',digest),('x64','vm-release',digest),('x64','dogfood','0'*64)]:
+        try: m.verify(root,expected,arch,profile)
+        except ValueError: pass
+        else: raise AssertionError('invalid input accepted')
+    try: m.verify(root,digest,'x64','dogfood',True)
+    except ValueError: pass
+    else: raise AssertionError('unqualified rig accepted')
+    manifest['runtimeQualification']={'target':manifest['target'],'minimumMacOS':'14.0','nativeFilesSha256':m.files_hash(files),'receiptSha256':'a'*64,'checks':{n:True for n in ('pgInitStartQueryStop','pgvector','gh','kopia')}}
+    digest=write(); m.verify(root,digest,'x64','dogfood',True)
+    (root/'bin/kopia').write_bytes(b'changed')
+    try: m.verify(root,digest,'x64','dogfood',True)
+    except ValueError: pass
+    else: raise AssertionError('changed native bytes accepted')
+finally: shutil.rmtree(root)
+`);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test('native closure rejects an unresolved or external loader path and an understated macOS floor', () => {
+  const result = pythonProbe(`
+root=pathlib.Path(tempfile.mkdtemp())
+try:
+    p=root/'postgres'; p.write_bytes(bytes.fromhex('cffaedfe')+b'fixture')
+    for dep,floor in [('@loader_path/missing.dylib','14.0'),('/opt/homebrew/lib/ambient.dylib','14.0'),('/usr/lib/libSystem.B.dylib','13.0')]:
+        m.inspect=lambda path,arch: {'minimumOS':['14.0'],'dylibs':[dep]}
+        try: m.check_closure(root,'x64',floor)
+        except ValueError: pass
+        else: raise AssertionError('bad closure accepted')
+    m.inspect=lambda path,arch: {'minimumOS':['14.0'],'dylibs':['/usr/lib/libSystem.B.dylib']}
+    assert len(m.check_closure(root,'x64','14.0'))==1
+finally: shutil.rmtree(root)
+`);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test('private native inputs fail before SPA assembly and require actual rig qualification', () => {
+  const start = builder.indexOf('validate_darwin_native_inputs()');
+  const end = builder.indexOf('validate_darwin_native_inputs || exit 1', start);
+  assert(start > 0 && end > start);
+  assert(end < builder.indexOf('→ building operator-vite SPA'));
+  const fn = builder.slice(start, end);
+  assert.match(fn, /--require-runtime/);
+  for (const profile of ['public', 'vm-release']) {
+    const result = spawnSync('bash', ['-c', [
+      'set -euo pipefail', 'DARWIN_NATIVE_INPUTS=/does-not-exist; TARGET_OS=darwin',
+      `DISTRIBUTION_PROFILE=${profile}`, fn, 'validate_darwin_native_inputs',
+    ].join('\n')], { encoding: 'utf8' });
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /Darwin dogfood/);
+  }
+});
+
+test('moved qualified PG clients resolve the normalized embedded library directory', () => {
+  const fn = builder.match(/_cross_darwin_vendor_pg_tool\(\) \{[\s\S]*?\n\}/)[0];
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-private-pg-client-'));
+  try {
+    const native = path.join(fixture, 'native');
+    const sidecar = path.join(fixture, 'sidecar');
+    fs.mkdirSync(path.join(native, 'lib'), { recursive: true });
+    fs.mkdirSync(path.join(sidecar, 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(native, 'lib/libpq.5.dylib'), 'fixture');
+    fs.writeFileSync(path.join(sidecar, 'bin/psql'), 'fixture');
+    const result = spawnSync('bash', ['-c', [
+      'set -euo pipefail', 'SIDECAR_DIR="$1/sidecar"; EMBEDDED_PG_BIN_DIR="$1/native/bin"; DARWIN_NATIVE_INPUTS="$1/input"',
+      'llvm-otool-18() { printf "psql:\\n  @loader_path/../lib/libpq.5.dylib (compatibility version 5.0.0)\\n"; }',
+      'llvm-install-name-tool-18() { printf "%s\\n" "$*"; }', 'rcodesign() { :; }', fn,
+      '_cross_darwin_vendor_pg_tool "$SIDECAR_DIR/bin/psql"',
+    ].join('\n'), 'fixture', fixture], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /-change @loader_path\/\.\.\/lib\/libpq\.5\.dylib @executable_path\/\.\.\/\.\.\/native\/lib\/libpq\.5\.dylib/);
+  } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
+});
+
 function runEsbuildTargetFixture({ wrongVersion = false, wrongFormat = false, missingPin = false, arch = 'x64' } = {}) {
   const match = builder.match(/align_darwin_esbuild_runtime_closures\(\) \{[\s\S]*?\n\}/);
   assert.ok(match, 'Darwin runtime esbuild alignment helper is missing');
