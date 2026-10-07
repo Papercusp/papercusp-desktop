@@ -35,6 +35,18 @@ function extractFunction(name) {
 
 const LDCONFIG_RESOLVER = extractFunction('resolve_ldconfig');
 
+test('clean-source native transformer validation follows dependency hydration and precedes SPA assembly', () => {
+  const install = builder.indexOf('(cd "$REPO_ROOT" && node scripts/npm-install-safe.mjs install');
+  const validation = builder.indexOf('papercusp_verify_transformers_native_target "$REPO_ROOT" "$TARGET_OS" "$TARGET_ARCH" || exit 1');
+  const spa = builder.indexOf('echo "→ building operator-vite SPA (vite build → locked sidecar snapshot)"');
+  assert.ok(install >= 0 && validation > install && spa > validation,
+    'installed native packages must be checked after clean-source installation, before expensive assembly');
+  const preinstall = builder.slice(0, install);
+  assert.doesNotMatch(preinstall, /papercusp_verify_transformers_native_target "\$REPO_ROOT"/);
+  assert.match(preinstall, /papercusp_verify_transformers_dependencies "\$REPO_ROOT" 0/,
+    'manifest and lock contract still fail before installation');
+});
+
 test('every sidecar esbuild package runner holds the host package-cache lease', () => {
   const runners = builder.split('\n').filter(line => line.includes('npx --yes esbuild@0.25.0'));
   assert.ok(runners.length >= 8, 'all sidecar bundle phases must be covered');

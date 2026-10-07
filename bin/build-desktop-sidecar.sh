@@ -455,10 +455,6 @@ if [[ "$TARGET_OS" != "$_host_os" || "$TARGET_ARCH" != "$_host_arch" ]]; then
   echo "→ WI-5651 CROSS-baking sidecar for ${TARGET_OS}-${TARGET_ARCH} on a ${_host_os}-${_host_arch} host"
 fi
 
-if [[ "$DISTRIBUTION_PROFILE" == "vm-release" || "${PAPERCUSP_TRANSFORMERS_VERIFY_PINNED:-0}" == "1" ]]; then
-  papercusp_verify_transformers_native_target "$REPO_ROOT" "$TARGET_OS" "$TARGET_ARCH" || exit 1
-fi
-
 # HOST-TOOL PREFLIGHT (EI-24668318952454860 follow-up, WI-10003960 R-15): several
 # hard host-tool requirements used to be checked only at their point of use,
 # thousands of lines in, so a fresh build host paid a full multi-minute run per
@@ -1292,6 +1288,9 @@ fi
 
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" || "${PAPERCUSP_TRANSFORMERS_VERIFY_PINNED:-0}" == "1" ]]; then
   papercusp_verify_transformers_dependencies "$REPO_ROOT" 1 || exit 1
+  # A managed cut starts without node_modules. Validate installed native bytes
+  # after dependency hydration, while still failing before SPA/model assembly.
+  papercusp_verify_transformers_native_target "$REPO_ROOT" "$TARGET_OS" "$TARGET_ARCH" || exit 1
 fi
 
 # Prepare the sidecar staging root before the Vite build. The singleflight seam
