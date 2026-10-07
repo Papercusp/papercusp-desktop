@@ -2,6 +2,8 @@
 Description=Papercusp Server
 Documentation=https://papercuspai.com
 ConditionFileIsExecutable=/usr/bin/papercusp-server
+StartLimitIntervalSec=600
+StartLimitBurst=6
 
 [Service]
 Type=simple
