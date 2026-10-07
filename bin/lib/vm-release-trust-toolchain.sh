@@ -634,16 +634,21 @@ tmp.replace(root / "manifest.json")
 PY
 }
 
-papercusp_prepare_vm_release_trust_toolchain() {
-  local cache_base="$1" target_os="$2" target_arch="$3"
-  local final_root="$cache_base/$PAPERCUSP_VM_TRUST_REVISION-linux-x64"
-  local work output go_archive go_bin leak
-
+papercusp_validate_vm_release_target() {
+  local target_os="$1" target_arch="$2"
   if [[ "$target_os" != "linux" || "$target_arch" != "x64" ]]; then
     echo "ERROR: vm-release's pinned trust toolchain currently supports only linux-x64" >&2
     echo "       requested: ${target_os}-${target_arch}; refusing to fall back to stale ambient binaries" >&2
     return 1
   fi
+}
+
+papercusp_prepare_vm_release_trust_toolchain() {
+  local cache_base="$1" target_os="$2" target_arch="$3"
+  local final_root="$cache_base/$PAPERCUSP_VM_TRUST_REVISION-linux-x64"
+  local work output go_archive go_bin leak
+
+  papercusp_validate_vm_release_target "$target_os" "$target_arch" || return $?
   _pc_vm_require_commands
   mkdir -p "$cache_base"
 

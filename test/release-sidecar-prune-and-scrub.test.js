@@ -696,7 +696,7 @@ function runBuilderOwnerPreflight({ audit, owner, advance = false }) {
     // Supplied for advance-only inputs, so the rejecting cases still prove they stop before any
     // filesystem work. The clean-tree guard itself keeps its own coverage in
     // test/provenance-sidecar-record.test.js.
-    env.PROVENANCE_SOURCE_GIT_HEAD = '0'.repeat(40);
+    env.PROVENANCE_SOURCE_GIT_HEAD = execFileSync('git', ['-C', env.REPO_ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     env.PROVENANCE_SOURCE_GIT_DIRTY = 'false';
   }
   if (owner !== undefined) env.PAPERCUSP_RELEASE_OWNER_NAME = owner;
@@ -710,12 +710,14 @@ function runBuilderOwnerPreflight({ audit, owner, advance = false }) {
   }
 }
 
-function runBuilderVmReleaseIdentityPreflight({ sha, version, advance = false }) {
+function runBuilderVmReleaseIdentityPreflight({ sha, version, advance = false, targetOs = 'linux', targetArch = 'x64' }) {
   const dir = tmp('vm-release-identity-preflight');
   const env = {
     ...process.env,
     PAPERCUSP_DISTRIBUTION_PROFILE: 'vm-release',
     PAPERCUSP_RELEASE_AUDIT: '0',
+    TARGET_OS: targetOs,
+    TARGET_ARCH: targetArch,
     // Rejecting cases use a missing repo to prove identity fails before the
     // first runtime-pin read. The admitted case advances safely to the missing
     // Papercusp dependency without starting a build.
@@ -735,7 +737,7 @@ function runBuilderVmReleaseIdentityPreflight({ sha, version, advance = false })
     // authoritative. Supplied for advance-only inputs, so the rejecting cases still prove
     // they stop at the identity gate before any filesystem work. The clean-source guard
     // keeps its own coverage in packages/operator-core/lib/sidecar-source-root-coherence.test.ts.
-    env.PROVENANCE_SOURCE_GIT_HEAD = '0'.repeat(40);
+    env.PROVENANCE_SOURCE_GIT_HEAD = execFileSync('git', ['-C', env.REPO_ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     env.PROVENANCE_SOURCE_GIT_DIRTY = 'false';
   }
   if (sha !== undefined) env.PAPERCUSP_BUILD_SHA = sha;
@@ -778,6 +780,36 @@ test('vm-release sidecar identity preflight admits an explicit immutable SHA and
   assert.match(output, /papercusp not found at/,
     'valid vm-release identity must advance past the preflight');
   assert.doesNotMatch(output, /vm-release requires non-empty PAPERCUSP_BUILD_SHA/);
+});
+
+test('vm-release rejects unsupported targets before source, dependency or staging work', () => {
+  for (const [targetOs, targetArch] of [['darwin', 'x64'], ['darwin', 'arm64'], ['linux', 'arm64'], ['windows', 'x64']]) {
+    const r = runBuilderVmReleaseIdentityPreflight({
+      sha: 'deadbeefcafefeed', version: '9.8.7-vm-test', targetOs, targetArch,
+    });
+    const output = `${r.stdout}${r.stderr}`;
+    assert.equal(r.status, 1, output);
+    assert.match(output, /pinned trust toolchain currently supports only linux-x64/);
+    assert.ok(output.includes(`requested: ${targetOs}-${targetArch}`), output);
+    assert.doesNotMatch(output, /transformers|could not read|papercusp not found|staging|vite/i,
+      'target rejection must precede dependency/source reads and expensive build phases');
+  }
+});
+
+test('vm-release trust preparation retains the target guard before creating cache output', () => {
+  const dir = tmp('vm-release-target-preflight');
+  const cache = path.join(dir, 'must-not-exist');
+  try {
+    const supported = spawnSync('bash', ['-c',
+      'source "$1"; papercusp_validate_vm_release_target linux x64', 'target-test', TRUST_TOOLCHAIN], { encoding: 'utf8' });
+    assert.equal(supported.status, 0, `${supported.stdout}${supported.stderr}`);
+    const refused = spawnSync('bash', ['-c',
+      'source "$1"; papercusp_prepare_vm_release_trust_toolchain "$2" darwin x64',
+      'target-test', TRUST_TOOLCHAIN, cache], { encoding: 'utf8' });
+    assert.equal(refused.status, 1, `${refused.stdout}${refused.stderr}`);
+    assert.match(refused.stderr, /requested: darwin-x64/);
+    assert.equal(fs.existsSync(cache), false, 'unsupported preparation must not create its cache');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('release-audited sidecar build accepts a missing owner name under D-112', () => {

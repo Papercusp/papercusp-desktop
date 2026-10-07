@@ -155,6 +155,33 @@ if [[ "$DISTRIBUTION_PROFILE" == "vm-release" \
   exit 2
 fi
 
+# Normalize the target before dependency/source preflights. An unsupported
+# vm-release target must fail before SPA builds, downloads or staging writes.
+# The trust helper owns the support contract and checks it again at preparation.
+_host_os=""
+case "$(uname -s)" in
+  Linux*)               _host_os="linux" ;;
+  Darwin*)              _host_os="darwin" ;;
+  MINGW*|MSYS*|CYGWIN*) _host_os="windows" ;;
+  *)                    _host_os="$(uname -s)" ;;
+esac
+_host_arch=""
+case "$(uname -m)" in
+  x86_64|amd64)  _host_arch="x64" ;;
+  arm64|aarch64) _host_arch="arm64" ;;
+  *)             _host_arch="$(uname -m)" ;;
+esac
+TARGET_OS="${TARGET_OS:-$_host_os}"
+TARGET_ARCH="${TARGET_ARCH:-$_host_arch}"
+# GNU Make reserves TARGET_ARCH; keep it shell-local so it cannot become a
+# spurious compiler input. Subprocess target flags are passed explicitly.
+export -n TARGET_ARCH
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+  # shellcheck source=lib/vm-release-trust-toolchain.sh
+  source "$HERE/lib/vm-release-trust-toolchain.sh"
+  papercusp_validate_vm_release_target "$TARGET_OS" "$TARGET_ARCH" || exit 1
+fi
+
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" || "${PAPERCUSP_TRANSFORMERS_VERIFY_PINNED:-0}" == "1" ]]; then
   papercusp_verify_transformers_dependencies "$REPO_ROOT" 0 || exit 1
 fi
@@ -427,28 +454,6 @@ fi
 # flows into: target_os/target_arch (external-binary section), the native-addon
 # prune (keeps the TARGET's prebuilds) + fetch (pulls the TARGET's per-platform
 # optional pkgs npm won't install cross), embedded-postgres, and pgvector.
-_host_os=""
-case "$(uname -s)" in
-  Linux*)               _host_os="linux" ;;
-  Darwin*)              _host_os="darwin" ;;
-  MINGW*|MSYS*|CYGWIN*) _host_os="windows" ;;
-  *)                    _host_os="$(uname -s)" ;;
-esac
-_host_arch=""
-case "$(uname -m)" in
-  x86_64|amd64)  _host_arch="x64" ;;
-  arm64|aarch64) _host_arch="arm64" ;;
-  *)             _host_arch="$(uname -m)" ;;
-esac
-TARGET_OS="${TARGET_OS:-$_host_os}"
-TARGET_ARCH="${TARGET_ARCH:-$_host_arch}"
-# GNU Make reserves TARGET_ARCH and appends it verbatim to its built-in compile
-# rules.  A caller-supplied environment value keeps its exported attribute after
-# the assignment above, so TARGET_ARCH=x64 made PostgreSQL invoke
-# `gcc ... x64 -c ...` and fail every object build.  The sidecar builder itself
-# still needs the normalized value, but subprocesses receive explicit target
-# flags at their call sites; keep this control variable shell-local.
-export -n TARGET_ARCH
 CROSS_BUILD=0
 if [[ "$TARGET_OS" != "$_host_os" || "$TARGET_ARCH" != "$_host_arch" ]]; then
   CROSS_BUILD=1
