@@ -290,8 +290,30 @@ _pc_vm_assert_module() {
   fi
 }
 
+_pc_vm_assert_go_target() {
+  local go_bin="$1" binary="$2" target_os="$3" target_arch="$4"
+  if ! "$go_bin" version -m "$binary" \
+      | awk -F '\t' -v os="$target_os" -v arch="$target_arch" \
+          '$2 == "build" && $3 == "GOOS=" os { found_os=1 }
+           $2 == "build" && $3 == "GOARCH=" arch { found_arch=1 }
+           END { exit found_os && found_arch ? 0 : 1 }'; then
+    echo "ERROR: $(basename "$binary") does not embed target $target_os/$target_arch" >&2
+    return 1
+  fi
+}
+
+# D-186: reuse this exact checksum-pinned source/dependency recipe for standalone
+# Darwin CLI input qualification. This does NOT widen vm-release's Linux-only
+# preparation entrypoint or build a Darwin trust subsystem. Cross-built CLIs
+# cannot be executed on this host: attest their embedded target/module metadata,
+# then require the ordinary final security scan and on-target protocol checks.
 _pc_vm_build_go_tools() {
   local work="$1" output="$2" go_bin="$3"
+  local target_os="${4:-linux}" target_arch="${5:-amd64}"
+  case "$target_os/$target_arch" in
+    linux/amd64|darwin/amd64|darwin/arm64) ;;
+    *) echo "ERROR: unsupported pinned Go CLI target $target_os/$target_arch" >&2; return 1 ;;
+  esac
   local gh_src="$work/gh-src" kopia_src="$work/kopia-src"
   mkdir -p "$gh_src" "$kopia_src" "$output/bin"
 
@@ -312,11 +334,14 @@ _pc_vm_build_go_tools() {
       "golang.org/x/net@$PAPERCUSP_VM_GH_X_NET_VERSION" \
       "golang.org/x/tools@$PAPERCUSP_VM_GH_X_TOOLS_VERSION" \
       "google.golang.org/grpc@$PAPERCUSP_VM_GH_GRPC_VERSION"
-    CGO_ENABLED=0 "$go_bin" build -trimpath -buildvcs=false \
+    CGO_ENABLED=0 GOOS="$target_os" GOARCH="$target_arch" "$go_bin" build -trimpath -buildvcs=false \
       -ldflags "-buildid= -X github.com/cli/cli/v2/internal/build.Version=${PAPERCUSP_VM_GH_VERSION}-papercusp.1 -X github.com/cli/cli/v2/internal/build.Date=2026-08-20" \
       -o "$output/bin/gh" ./cmd/gh
   )
-  "$output/bin/gh" --version | head -1 | grep -Fq "gh version ${PAPERCUSP_VM_GH_VERSION}-papercusp.1"
+  _pc_vm_assert_go_target "$go_bin" "$output/bin/gh" "$target_os" "$target_arch"
+  if [[ "$target_os/$target_arch" == "linux/amd64" ]]; then
+    "$output/bin/gh" --version | head -1 | grep -Fq "gh version ${PAPERCUSP_VM_GH_VERSION}-papercusp.1"
+  fi
   _pc_vm_assert_module "$go_bin" "$output/bin/gh" golang.org/x/crypto "$PAPERCUSP_VM_GH_X_CRYPTO_VERSION"
   _pc_vm_assert_module "$go_bin" "$output/bin/gh" golang.org/x/mod "$PAPERCUSP_VM_GH_X_MOD_VERSION"
   # Asserted because this is the security-relevant pin: `go get` raising a version and the
@@ -342,12 +367,15 @@ _pc_vm_build_go_tools() {
       "golang.org/x/net@$PAPERCUSP_VM_KOPIA_X_NET_VERSION" \
       "golang.org/x/text@$PAPERCUSP_VM_KOPIA_X_TEXT_VERSION" \
       "google.golang.org/grpc@$PAPERCUSP_VM_KOPIA_GRPC_VERSION"
-    CGO_ENABLED=0 "$go_bin" build -trimpath -buildvcs=false -tags nohtmlui \
+    CGO_ENABLED=0 GOOS="$target_os" GOARCH="$target_arch" "$go_bin" build -trimpath -buildvcs=false -tags nohtmlui \
       -ldflags "-buildid= -X github.com/kopia/kopia/repo.BuildVersion=${PAPERCUSP_VM_KOPIA_VERSION}-papercusp.1 -X github.com/kopia/kopia/repo.BuildInfo=$PAPERCUSP_VM_KOPIA_COMMIT -X github.com/kopia/kopia/repo.BuildGitHubRepo=kopia/kopia" \
       -o "$output/bin/kopia" github.com/kopia/kopia
   )
-  "$output/bin/kopia" --version | head -1 | grep -Fq "${PAPERCUSP_VM_KOPIA_VERSION}-papercusp.1"
-  "$output/bin/kopia" snapshot create --help >/dev/null
+  _pc_vm_assert_go_target "$go_bin" "$output/bin/kopia" "$target_os" "$target_arch"
+  if [[ "$target_os/$target_arch" == "linux/amd64" ]]; then
+    "$output/bin/kopia" --version | head -1 | grep -Fq "${PAPERCUSP_VM_KOPIA_VERSION}-papercusp.1"
+    "$output/bin/kopia" snapshot create --help >/dev/null
+  fi
   _pc_vm_assert_module "$go_bin" "$output/bin/kopia" golang.org/x/crypto "$PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION"
   _pc_vm_assert_module "$go_bin" "$output/bin/kopia" golang.org/x/mod "$PAPERCUSP_VM_KOPIA_X_MOD_VERSION"
   _pc_vm_assert_module "$go_bin" "$output/bin/kopia" golang.org/x/net "$PAPERCUSP_VM_KOPIA_X_NET_VERSION"
