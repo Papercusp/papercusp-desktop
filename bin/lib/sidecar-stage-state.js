@@ -6,6 +6,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const os = require('node:os');
 const { execFileSync, spawn } = require('node:child_process');
 
 function sha256(file) {
@@ -31,6 +32,18 @@ function writeJson(file, value) {
 
 function git(root, args) {
   return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).trim();
+}
+
+// Failure evidence is generated output, not product source. An old frozen
+// target cannot inherit the current producer's .gitignore; adjacent retention
+// would make the next source-clean preflight fail. Reuse one output-specific
+// namespace in the existing private stage mechanism, never a source exemption.
+function failureEvidenceRoot(finalDir, env = process.env) {
+  const key = crypto.createHash('sha256').update(path.resolve(finalDir)).digest('hex').slice(0, 24);
+  return path.resolve(env.PAPERCUSP_SIDECAR_FAILED_STAGE_ROOT || path.join(
+    env.XDG_STATE_HOME || path.join(env.HOME || os.homedir(), '.local', 'state'),
+    'papercusp', 'sidecar-failed-stages', key,
+  ));
 }
 
 function streamGitOutput(root, args, digest) {
@@ -78,6 +91,11 @@ async function captureIdentity(env = process.env) {
   const repoRoot = fs.realpathSync(env.SIDECAR_STAGE_REPO_ROOT);
   const desktopRoot = fs.realpathSync(env.SIDECAR_STAGE_DESKTOP_ROOT);
   const here = fs.realpathSync(env.SIDECAR_STAGE_HELPER_ROOT);
+  const failedStageRoot = path.resolve(env.SIDECAR_STAGE_FAILED_ROOT || failureEvidenceRoot(env.SIDECAR_STAGE_FINAL_DIR, env));
+  for (const source of [repoRoot, desktopRoot]) {
+    if (failedStageRoot === source || failedStageRoot.startsWith(`${source}${path.sep}`))
+      throw new Error('failed stage evidence root must be outside product source');
+  }
   const sourceHead = git(repoRoot, ['rev-parse', 'HEAD']);
   const desktopHead = git(desktopRoot, ['rev-parse', 'HEAD']);
   if (!/^[a-f0-9]{40}$/.test(sourceHead) || !/^[a-f0-9]{40}$/.test(desktopHead)) {
@@ -101,6 +119,7 @@ async function captureIdentity(env = process.env) {
     sourceState: sourceStateDigest, desktopState: desktopStateDigest,
     submodules: git(repoRoot, ['submodule', 'status', '--recursive']),
     finalDir: path.resolve(env.SIDECAR_STAGE_FINAL_DIR),
+    failedStageRoot,
     profile: env.PAPERCUSP_DISTRIBUTION_PROFILE,
     targetOs: env.SIDECAR_STAGE_TARGET_OS, targetArch: env.SIDECAR_STAGE_TARGET_ARCH,
     version: env.PAPERCUSP_DESKTOP_VERSION || '', buildSha: env.PAPERCUSP_BUILD_SHA || '',
@@ -156,7 +175,9 @@ function recordFailure(stage, identity, phase, exitCode) {
 
 function validateResume(stage, expected) {
   const absolute = path.resolve(stage);
-  const prefix = `${expected.finalDir}.failed-stage.`;
+  const prefix = expected.failedStageRoot
+    ? path.join(expected.failedStageRoot, `${path.basename(expected.finalDir)}.failed-stage.`)
+    : `${expected.finalDir}.failed-stage.`;
   if (!absolute.startsWith(prefix) || !/^[0-9]+$/.test(absolute.slice(prefix.length))) {
     throw new Error('resume requires a retained failed-stage sibling of this output');
   }
@@ -179,12 +200,14 @@ function validateResume(stage, expected) {
   return receipt;
 }
 
-module.exports = { captureIdentity, inventory, recordFailure, sourceState, validateResume, writeJson };
+module.exports = { captureIdentity, failureEvidenceRoot, inventory, recordFailure, sourceState, validateResume, writeJson };
 
 if (require.main === module) {
   try {
     const [command, file, ...args] = process.argv.slice(2);
-    if (command === 'capture') {
+    if (command === 'evidence-root') {
+      process.stdout.write(`${failureEvidenceRoot(file)}\n`);
+    } else if (command === 'capture') {
       captureIdentity().then(identity => writeJson(file, identity)).catch(error => {
         console.error('FATAL: sidecar stage: ' + error.message);
         process.exitCode = 1;

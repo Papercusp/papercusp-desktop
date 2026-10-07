@@ -569,6 +569,16 @@ fi
 SIDECAR_FINAL_DIR="$SIDECAR_DIR"
 SIDECAR_TMP_DIR="$SIDECAR_FINAL_DIR.tmp.$$"
 mkdir -p "$(dirname "$SIDECAR_FINAL_DIR")"
+# Private failure bytes and their receipt must not dirty a frozen product whose
+# historical .gitignore predates this producer (EI-25304807751758118).
+SIDECAR_FAILED_STAGE_ROOT="$(node "$HERE/lib/sidecar-stage-state.js" evidence-root "$SIDECAR_FINAL_DIR")"
+mkdir -p "$SIDECAR_FAILED_STAGE_ROOT"
+SIDECAR_FAILED_STAGE_ROOT="$(cd "$SIDECAR_FAILED_STAGE_ROOT" && pwd -P)"
+case "$SIDECAR_FAILED_STAGE_ROOT/" in
+  "$REPO_ROOT/"*|"$ROOT/"*)
+    echo "FATAL: sidecar failure evidence must live outside product source" >&2
+    exit 1 ;;
+esac
 # shellcheck source=lib/sidecar-lock-yield.sh
 source "$HERE/lib/sidecar-lock-yield.sh"
 SIDECAR_BUILD_LOCK="$SIDECAR_FINAL_DIR.build.lock"
@@ -848,7 +858,7 @@ __pc_finish_sidecar_build() {
   set +e
   if [[ "$status" == "0" && "${_sidecar_success:-0}" != "1" ]]; then status=1; fi
   if [[ "$status" != "0" || "${_sidecar_success:-0}" != "1" ]]; then
-    failed_stage="$SIDECAR_FINAL_DIR.failed-stage.$$"
+    failed_stage="${SIDECAR_FAILED_STAGE_ROOT:-$(dirname "$SIDECAR_FINAL_DIR")}/$(basename "$SIDECAR_FINAL_DIR").failed-stage.$$"
     if [[ "${_sidecar_published:-0}" == "1" && -d "$SIDECAR_FINAL_DIR" ]]; then
       mv "$SIDECAR_FINAL_DIR" "$SIDECAR_TMP_DIR"
     fi
@@ -890,6 +900,7 @@ trap '__pc_finish_sidecar_build "$?"' EXIT
 
 export SIDECAR_STAGE_REPO_ROOT="$REPO_ROOT" SIDECAR_STAGE_DESKTOP_ROOT="$ROOT"
 export SIDECAR_STAGE_HELPER_ROOT="$HERE" SIDECAR_STAGE_FINAL_DIR="$SIDECAR_FINAL_DIR"
+export SIDECAR_STAGE_FAILED_ROOT="$SIDECAR_FAILED_STAGE_ROOT"
 export SIDECAR_STAGE_TARGET_OS="$TARGET_OS" SIDECAR_STAGE_TARGET_ARCH="$TARGET_ARCH"
 node "$HERE/lib/sidecar-stage-state.js" capture "$_sidecar_stage_identity"
 if [[ -n "${PAPERCUSP_SIDECAR_RESUME_FROM:-}" ]]; then

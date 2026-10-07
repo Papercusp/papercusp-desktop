@@ -57,7 +57,8 @@ test('required local-model backend missing from a cross-target bundle is fatal, 
 test('native target preflight precedes expensive SPA assembly in the real producer', () => {
   const guard = builder.indexOf('papercusp_verify_transformers_native_target "$REPO_ROOT" "$TARGET_OS" "$TARGET_ARCH"');
   assert(guard > builder.indexOf('TARGET_ARCH="${TARGET_ARCH:-$_host_arch}"'));
-  assert(guard < builder.indexOf('→ building operator-vite SPA'));
+  assert(guard < builder.indexOf('→ building operator-vite SPA (vite build → locked sidecar snapshot)'));
+  assert(guard > builder.indexOf('papercusp_verify_transformers_dependencies "$REPO_ROOT" 1'));
 });
 
 test('existing runtime copier stages validated source-native bytes before target pruning', () => {

@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync, execFileSync } = require('node:child_process');
 const { makeDesktopTestScratchDirSync } = require('./test-scratch.cjs');
-const { captureIdentity, inventory, recordFailure, sourceState, validateResume, writeJson } = require('../bin/lib/sidecar-stage-state.js');
+const { captureIdentity, failureEvidenceRoot, inventory, recordFailure, sourceState, validateResume, writeJson } = require('../bin/lib/sidecar-stage-state.js');
 const bin = path.resolve(__dirname, '../bin');
 const builder = fs.readFileSync(path.join(bin, 'build-desktop-sidecar.sh'), 'utf8');
 const finish = builder.match(/^__pc_finish_sidecar_build\(\) \{\n[\s\S]*?^\}$/m)[0];
@@ -38,6 +38,7 @@ test('actual source capture detects same-HEAD source edits and binds both reposi
     const env = {
       SIDECAR_STAGE_REPO_ROOT: source.root, SIDECAR_STAGE_DESKTOP_ROOT: desktop.root,
       SIDECAR_STAGE_HELPER_ROOT: bin, SIDECAR_STAGE_FINAL_DIR: f.finalDir,
+      SIDECAR_STAGE_FAILED_ROOT: f.root,
       SIDECAR_STAGE_TARGET_OS: 'linux', SIDECAR_STAGE_TARGET_ARCH: 'x64',
       PROVENANCE_SOURCE_GIT_HEAD: source.head, PROVENANCE_SOURCE_GIT_DIRTY: 'false',
       PAPERCUSP_DISTRIBUTION_PROFILE: 'vm-release', PAPERCUSP_RELEASE_AUDIT: '1',
@@ -89,6 +90,60 @@ test('git-sync cannot collect private failed stages, receipts or cut identity sc
     assert.deepEqual(result, inputs);
     const source = spawnSync('git', ['-C', repo.root, 'check-ignore', 'bin/build-desktop-sidecar.sh']);
     assert.equal(source.status, 1, 'producer source must remain tracked');
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('failure evidence defaults to an output-scoped external state namespace, not the frozen source', () => {
+  const finalDir = '/immutable/product/desktop/src-tauri/sidecar';
+  const env = { HOME: '/private/home', XDG_STATE_HOME: '/private/state' };
+  const first = failureEvidenceRoot(finalDir, env);
+  assert(first.startsWith('/private/state/papercusp/sidecar-failed-stages/'));
+  assert.equal(failureEvidenceRoot(finalDir, env), first);
+  assert.notEqual(failureEvidenceRoot(`${finalDir}-other`, env), first);
+  assert.equal(failureEvidenceRoot(finalDir, { ...env, PAPERCUSP_SIDECAR_FAILED_STAGE_ROOT: '/owned/failure-bank' }), '/owned/failure-bank');
+  assert.match(builder, /SIDECAR_FAILED_STAGE_ROOT=.*evidence-root/);
+  assert.match(builder, /export SIDECAR_STAGE_FAILED_ROOT="\$SIDECAR_FAILED_STAGE_ROOT"/);
+});
+
+test('external failure retention leaves a frozen target with no new gitignore clean and resumes only bound bytes', () => {
+  const f = fixture();
+  try {
+    const product = gitFixture(path.join(f.root, 'product'));
+    const failedRoot = path.join(f.root, 'external-evidence');
+    fs.mkdirSync(failedRoot);
+    f.finalDir = path.join(product.root, 'sidecar');
+    f.identity = { ...f.identity, finalDir: f.finalDir, failedStageRoot: failedRoot };
+    const tmp = `${f.finalDir}.tmp.5678`;
+    const identityFile = path.join(f.root, 'identity.json');
+    fs.renameSync(f.stage, tmp);
+    writeJson(identityFile, f.identity);
+    const result = spawnSync('bash', ['-c', [
+      'set -euo pipefail', finish,
+      'SIDECAR_FINAL_DIR="$1"; SIDECAR_TMP_DIR="$2"; SIDECAR_FAILED_STAGE_ROOT="$3"; HERE="$4"',
+      '_sidecar_stage_identity="$5"; _sidecar_stage_phase=assembled',
+      '__pc_release_sidecar_publish_lock() { :; }',
+      trap, 'exit 1',
+    ].join('\n'), 'test', f.finalDir, tmp, failedRoot, bin, identityFile], { encoding: 'utf8' });
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(product.git(['status', '--porcelain', '--untracked-files=all']), '');
+    const stage = path.join(failedRoot, fs.readdirSync(failedRoot).find(name => /^sidecar\.failed-stage\.\d+$/.test(name)));
+    assert.equal(validateResume(stage, f.identity).accepted, false);
+    assert.throws(() => validateResume(stage, { ...f.identity, failedStageRoot: product.root }), /failed-stage sibling/);
+    fs.writeFileSync(path.join(stage, 'serve.mjs'), 'changed bytes');
+    assert.throws(() => validateResume(stage, f.identity), /changed/);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('stage identity refuses failure evidence placed inside immutable product source', async () => {
+  const f = fixture();
+  try {
+    const source = gitFixture(path.join(f.root, 'source'));
+    const desktop = gitFixture(path.join(f.root, 'desktop'));
+    await assert.rejects(captureIdentity({
+      SIDECAR_STAGE_REPO_ROOT: source.root, SIDECAR_STAGE_DESKTOP_ROOT: desktop.root,
+      SIDECAR_STAGE_HELPER_ROOT: bin, SIDECAR_STAGE_FINAL_DIR: f.finalDir,
+      SIDECAR_STAGE_FAILED_ROOT: path.join(source.root, 'generated-evidence'),
+    }), /must be outside product source/);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
