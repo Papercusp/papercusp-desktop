@@ -78,6 +78,100 @@ def is_macho(path):
                                   b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca")
 
 
+PG_PROGRAMS = ("postgres", "initdb", "pg_ctl", "pg_dump", "pg_dumpall", "pg_restore", "psql")
+
+
+def postgres_path_replacements(arch):
+    """PG path.c relocates only when the compiled bindir tail matches.
+
+    Homebrew's Cellar/.../bin tail does not match the npm native/bin layout.
+    Normalize the exact pinned PG18.6 C-string constants to ONE synthetic
+    prefix: bin, share/postgresql and lib/postgresql then relocate together.
+    No -L/extension-path workaround, host directory, or runtime API fork.
+    Shorter NUL-padded replacements preserve Mach-O offsets; LLVM + rcodesign
+    below still handle load commands and signatures on the NEW copied output.
+    """
+    prefix = {"x64": "/usr/local", "arm64": "/opt/homebrew"}[arch]
+    keg = prefix + "/Cellar/postgresql@18/18.6"
+    targets = {
+        "bindir": (keg + "/bin", "/bin"),
+        "sharedir": (prefix + "/share/postgresql@18", "/share/postgresql"),
+        "pkglibdir": (prefix + "/lib/postgresql@18", "/lib/postgresql"),
+        "libdir": (prefix + "/lib", "/lib"),
+        "sysconfdir": (prefix + "/etc/postgresql", "/etc/postgresql"),
+        "includedir": (prefix + "/include/postgresql@18", "/include/postgresql"),
+        "includedirserver": (prefix + "/include/postgresql@18/server", "/include/postgresql/server"),
+        "localedir": (keg + "/share/locale", "/share/locale"),
+        "docdir": (keg + "/share/doc/postgresql@18", "/share/doc/postgresql@18"),
+        "mandir": (keg + "/share/man", "/share/man"),
+    }
+    return {key: (old, "/__pcpg" + suffix) for key, (old, suffix) in targets.items()}
+
+
+def postgres_cstring_count(data, value):
+    # Exact NUL-bounded string, never a substring in another path/load command.
+    return data.count(b"\0" + value.encode() + b"\0")
+
+
+def normalize_postgres_paths(native, arch):
+    replacements = postgres_path_replacements(arch)
+    plans = []
+    records = {}
+    for path in sorted(native.rglob("*")):
+        if not path.is_file() or not is_macho(path):
+            continue
+        data = path.read_bytes()
+        relative = path.relative_to(native).as_posix()
+        counts = {}
+        for key, (old, new) in replacements.items():
+            if len(new.encode()) > len(old.encode()):
+                raise ValueError("PG compiled path replacement would move Mach-O offsets")
+            count = postgres_cstring_count(data, old)
+            if data.count(old.encode() + b"\0") != count:
+                raise ValueError(f"{path}: PG compiled path is not an exact C-string: {key}")
+            if count:
+                counts[key] = count
+                before = b"\0" + old.encode() + b"\0"
+                after = b"\0" + new.encode() + b"\0" * (len(old) - len(new) + 1)
+                data = data.replace(before, after)
+        if counts:
+            records[relative] = counts
+            plans.append((path, data))
+    # Validate the entire copy before any write (including missing constants).
+    for name in PG_PROGRAMS:
+        counts = records.get("bin/" + name, {})
+        if any(counts.get(key) != 1 for key in ("bindir", "sharedir", "pkglibdir")):
+            raise ValueError(f"PG {name}: expected exactly one compiled bin/share/pkglib C-string")
+    for path, data in plans:
+        path.write_bytes(data)
+    verify_postgres_paths(native, arch, records)
+    return records
+
+
+def verify_postgres_paths(native, arch, records):
+    observed = {}
+    for path in sorted(native.rglob("*")):
+        if not path.is_file() or not is_macho(path):
+            continue
+        data = path.read_bytes()
+        counts = {}
+        for key, (old, new) in postgres_path_replacements(arch).items():
+            if old.encode() + b"\0" in data:
+                raise ValueError(f"{path}: unrelocated compiled PG path: {key}")
+            count = postgres_cstring_count(data, new)
+            if count:
+                counts[key] = count
+        if counts:
+            observed[path.relative_to(native).as_posix()] = counts
+    for name in PG_PROGRAMS:
+        counts = observed.get("bin/" + name, {})
+        if any(counts.get(key) != 1 for key in ("bindir", "sharedir", "pkglibdir")):
+            raise ValueError(f"PG {name}: normalized bin/share/pkglib constants missing or ambiguous")
+    if observed != records:
+        raise ValueError("PG compiled path relocation inventory missing or mismatched")
+    return observed
+
+
 def inspect(path, arch):
     description = run("file", "-b", str(path)).strip()
     expected = "x86_64" if arch == "x64" else "arm64"
@@ -157,16 +251,19 @@ def verify(root, expected, arch, profile, require_runtime=False, require_securit
     actual = file_inventory(root)
     if actual != manifest.get("files"):
         raise ValueError("Darwin native input file inventory/checksum mismatch")
-    required = ["postgresql/bin/" + name for name in
-                ("postgres", "initdb", "pg_ctl", "pg_dump", "pg_dumpall", "pg_restore", "psql")]
-    required += ["postgresql/lib/postgresql/vector.dylib", "postgresql/share/postgresql/extension/vector.control", "bin/gh", "bin/kopia"]
+    required = ["postgresql/bin/" + name for name in PG_PROGRAMS]
+    required += ["postgresql/share/postgresql/postgres.bki", "postgresql/lib/postgresql/plpgsql.dylib",
+                 "postgresql/share/postgresql/extension/plpgsql.control",
+                 "postgresql/lib/postgresql/vector.dylib", "postgresql/share/postgresql/extension/vector.control",
+                 "bin/gh", "bin/kopia"]
     if any(name not in actual for name in required):
         raise ValueError("Darwin native input required server/client/pgvector/CLI file missing")
     if any(not os.access(root / name, os.X_OK) for name in required if "/bin/" in name or name.startswith("bin/")):
         raise ValueError("Darwin native input required executable mode missing")
     observations = check_closure(root, arch, manifest["minimumMacOS"])
-    if any(name not in observations for name in required if not name.endswith(".control")):
+    if any(name not in observations for name in required if not name.endswith((".control", ".bki"))):
         raise ValueError("required native input is not a measured Mach-O")
+    verify_postgres_paths(root / "postgresql", arch, manifest.get("postgresqlPathRelocation"))
     if not manifest.get("upstreamReceipts"):
         raise ValueError("Darwin native input upstream provenance missing")
     if require_runtime or require_security:
@@ -385,6 +482,7 @@ def assemble(args):
     for name in ("gh", "kopia"):
         shutil.copy2(args.go / "bin" / name, root / "bin" / name)
     make_copy_writable(root)
+    path_relocation = normalize_postgres_paths(native, args.arch)
 
     # Reuse exact dependency kegs selected from the PG bottle's upstream SBOM.
     # Resolve the entire emitted Mach-O population, including server plugins.
@@ -427,6 +525,7 @@ def assemble(args):
                 "target": {"os": "darwin", "arch": args.arch}, "postgresqlVersion": "18.6",
                 "minimumMacOS": measured, "public1015Compatible": False,
                 "files": files, "nativeFilesSha256": files_hash(files),
+                "postgresqlPathRelocation": path_relocation,
                 "upstreamReceipts": upstream, "runtimeQualification": None}
     (root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     verify(root, sha(root / "manifest.json"), args.arch, "dogfood")
