@@ -29,6 +29,39 @@ function pythonProbe(script) {
   ].join('\n')], { encoding: 'utf8', timeout: 10_000 });
 }
 
+// Exercise the real qualifier orchestration on this host without claiming a
+// native rig result. Only the input inventory/platform and native commands are fixtures.
+const nativeProtocolFixture = `
+from types import SimpleNamespace
+import sys, urllib.request
+root=pathlib.Path(tempfile.mkdtemp());calls=[];work_paths=set()
+manifest={'target':{'os':'darwin','arch':'x64'},'minimumMacOS':'14.0','files':{'fixture':'sha'}}
+m.verify=lambda *a,**kw:manifest
+m.file_inventory=lambda *a:manifest['files']
+m.platform.system=lambda:'Darwin';m.platform.machine=lambda:'x86_64';m.platform.mac_ver=lambda:('14.8','','')
+original_run=m.subprocess.run
+def native_command(command,**kwargs):
+    calls.append((command,kwargs))
+    work=pathlib.Path(kwargs['env']['HOME']).parent;work_paths.add(work)
+    stdout=''
+    if command[0].endswith('initdb'):
+        pathlib.Path(command[command.index('-D')+1]).mkdir()
+    elif command[0].endswith('pg_ctl'):
+        pid=pathlib.Path(command[command.index('-D')+1])/'postmaster.pid'
+        if command[-1]=='start':pid.write_text('fixture')
+        else:pid.unlink()
+    elif command[0].endswith('psql'):stdout='PostgreSQL 18.6\\nDO\\n5\\n'
+    elif command[0].endswith('gh'):
+        stdout=urllib.request.urlopen(command[-1],timeout=2).read().decode()
+    elif 'snapshot' in command:
+        operation=command[command.index('snapshot')+1]
+        if operation=='create':stdout=json.dumps({'rootEntry':{'obj':'fixture-object'}})
+        elif operation=='list':stdout=json.dumps([{'rootEntry':{'obj':'fixture-object'}}])
+        elif operation=='restore':shutil.copytree(work/'input',pathlib.Path(command[-1]))
+    return SimpleNamespace(returncode=0,stdout=stdout,stderr='')
+m.subprocess.run=native_command
+`;
+
 test('optimized PostgreSQL path writer rejects short literal padding but accepts original compiled layout for both architectures', () => {
   const result = pythonProbe(`
 import subprocess, os
@@ -199,7 +232,7 @@ try:
     except ValueError: pass
     else: raise AssertionError('unqualified rig accepted')
     import base64
-    receipt={'target':manifest['target'],'minimumMacOS':'14.0','nativeFilesSha256':m.files_hash(files),'checks':{n:True for n in m.RUNTIME_CHECKS},'evidence':['fixture-protocol-output']}
+    receipt={'schemaVersion':'darwin-native-protocol-receipt/v1','target':manifest['target'],'minimumMacOS':'14.0','nativeFilesSha256':m.files_hash(files),'checks':{n:True for n in m.RUNTIME_CHECKS},'evidence':['fixture-protocol-output']}
     raw=json.dumps(receipt).encode()
     manifest['runtimeQualification']={**receipt,'receiptSha256':hashlib.sha256(raw).hexdigest()}
     manifest['runtimeQualificationReceiptBase64']=base64.b64encode(raw).decode()
@@ -213,6 +246,14 @@ try:
     try:m.verify(root,write(),'x64','dogfood',True)
     except ValueError:pass
     else:raise AssertionError('receipt omitting stock PG library execution accepted')
+    # Even a hash-valid diagnostic claiming all checks cannot qualify.
+    for change in [{'diagnosticOnly':True},{'phase':'kopia'},{'schemaVersion':'darwin-native-protocol-diagnostic/v1'}]:
+        diagnostic={**receipt,**change};diagnostic_raw=json.dumps(diagnostic).encode()
+        manifest['runtimeQualification']={**diagnostic,'receiptSha256':hashlib.sha256(diagnostic_raw).hexdigest()}
+        manifest['runtimeQualificationReceiptBase64']=base64.b64encode(diagnostic_raw).decode()
+        try:m.verify(root,write(),'x64','dogfood',True)
+        except ValueError as e:assert 'diagnostics cannot qualify' in str(e)
+        else:raise AssertionError('hash-valid diagnostic accepted as qualification')
     manifest['runtimeQualification']={**receipt,'receiptSha256':hashlib.sha256(raw).hexdigest()}
     manifest['runtimeQualificationReceiptBase64']=base64.b64encode(raw).decode()
     manifest['runtimeQualification']['receiptSha256']='a'*64
@@ -279,6 +320,153 @@ try:
 finally:shutil.rmtree(root)
 `);
   assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+for (const phase of ['postgresql', 'gh', 'kopia', 'all']) {
+  test(`native ${phase} phase executes only its protocols and distinguishes diagnostics from qualification`, () => {
+    const result = pythonProbe(nativeProtocolFixture + `
+try:
+    phase=${JSON.stringify(phase)}
+    args=SimpleNamespace(root=root,sha256='sha',arch='x64',receipt=root/'receipt.json',evidence=root/'evidence',phase=phase)
+    m.qualify_runtime(args)
+    receipt=json.loads(args.receipt.read_text())
+    expected=m.RUNTIME_CHECKS if phase=='all' else m.RUNTIME_PHASES[phase]
+    assert receipt['checks']=={name:True for name in expected}
+    assert receipt['diagnosticOnly']==(phase!='all') and receipt['phase']==phase
+    assert receipt['schemaVersion']==('darwin-native-protocol-receipt/v1' if phase=='all' else 'darwin-native-protocol-diagnostic/v1')
+    assert {row['phase'] for row in receipt['evidence']}==({'postgresql','gh','kopia'} if phase=='all' else {phase})
+    assert all(row['status']=='passed' and row['exitCode']==0 for row in receipt['evidence'])
+    assert len(calls)==({'postgresql':4,'gh':1,'kopia':4,'all':9}[phase])
+    assert not any(work.exists() for work in work_paths)
+    for row in receipt['evidence']:
+        evidence=next(p for p in args.evidence.glob('*.json') if m.sha(p)==row['evidenceSha256'])
+        output=json.loads(evidence.read_text())
+        assert output['deadlineSeconds']==180
+        assert 0<output['timeoutSeconds']<= (30 if output['cleanup'] else 45)
+finally:shutil.rmtree(root)
+`);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+  });
+}
+
+for (const protocol of ['pg-start', 'pg-vector-query', 'gh-loopback-api', 'kopia-create-repo']) {
+  test(`native ${protocol} timeout preserves partial evidence and cleans up without a receipt`, () => {
+    const result = pythonProbe(nativeProtocolFixture + `
+try:
+    failure=${JSON.stringify(protocol)}
+    phase='postgresql' if failure.startswith('pg-') else ('gh' if failure.startswith('gh-') else 'kopia')
+    def timeout_command(command,**kwargs):
+        name='pg-start' if command[0].endswith('pg_ctl') and command[-1]=='start' else (
+             'pg-vector-query' if command[0].endswith('psql') else (
+             'gh-loopback-api' if command[0].endswith('gh') else (
+             'kopia-create-repo' if command[0].endswith('kopia') else 'other')))
+        if name==failure:
+            # pg-start can time out after starting the server; cleanup must still run.
+            if name=='pg-start':native_command(command,**kwargs)
+            else:
+                calls.append((command,kwargs));work_paths.add(pathlib.Path(kwargs['env']['HOME']).parent)
+            assert 0<kwargs['timeout']<=45
+            if failure=='kopia-create-repo':
+                # Reproduce Python's real text=True timeout bytes behavior quickly.
+                return original_run([sys.executable,'-c','import sys,time;print("partial stdout",flush=True);print("partial stderr",file=sys.stderr,flush=True);time.sleep(10)'],capture_output=True,text=True,timeout=0.2)
+            raise m.subprocess.TimeoutExpired(command,kwargs['timeout'],output=b'partial stdout\\xff',stderr=b'partial stderr')
+        return native_command(command,**kwargs)
+    m.subprocess.run=timeout_command
+    args=SimpleNamespace(root=root,sha256='sha',arch='x64',receipt=root/'receipt.json',evidence=root/'evidence',phase=phase)
+    try:m.qualify_runtime(args)
+    except ValueError as e:
+        assert failure+' timed out' in str(e)
+        assert isinstance(e.__cause__,m.subprocess.TimeoutExpired)
+    else:raise AssertionError('timeout accepted')
+    assert not args.receipt.exists()
+    records=[json.loads(p.read_text()) for p in args.evidence.glob('*.json')]
+    failed=next(row for row in records if row['protocol']==failure)
+    assert failed['phase']==phase and failed['status']=='timed-out' and failed['exitCode'] is None
+    assert 'partial stdout' in failed['stdout'] and 'partial stderr' in failed['stderr']
+    assert failed['elapsedSeconds']>=0 and failed['runElapsedSeconds']>=failed['elapsedSeconds']
+    assert 0<failed['timeoutSeconds']<=45 and failed['deadlineSeconds']==180
+    assert failed['remainingSecondsAtStart']<=180 and failed['argv']
+    assert not any(work.exists() for work in work_paths)
+    if phase=='postgresql':assert any(row['protocol']=='pg-stop' and row['cleanup'] and row['status']=='passed' for row in records)
+finally:shutil.rmtree(root)
+`);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+  });
+}
+
+test('native deadline exhaustion records the refused step and still stops PostgreSQL', () => {
+  const result = pythonProbe(nativeProtocolFixture + `
+try:
+    clock=[0.0]
+    m.time.monotonic=lambda:clock[0]
+    def expired_command(command,**kwargs):
+        result=native_command(command,**kwargs)
+        if command[0].endswith('pg_ctl') and command[-1]=='start':clock[0]=181.0
+        return result
+    m.subprocess.run=expired_command
+    args=SimpleNamespace(root=root,sha256='sha',arch='x64',receipt=root/'receipt.json',evidence=root/'evidence',phase='postgresql')
+    try:m.qualify_runtime(args)
+    except ValueError as e:assert '180s deadline' in str(e)
+    else:raise AssertionError('expired deadline accepted')
+    records=[json.loads(p.read_text()) for p in args.evidence.glob('*.json')]
+    refused=next(row for row in records if row['protocol']=='pg-vector-query')
+    assert refused['status']=='deadline-exceeded' and refused['exitCode'] is None
+    assert refused['timeoutSeconds']==0 and refused['remainingSecondsAtStart']==-1
+    assert not any(c[0].endswith('psql') for c,kw in calls)
+    assert any(row['protocol']=='pg-stop' and row['timeoutSeconds']==30 for row in records)
+    assert not args.receipt.exists() and not any(work.exists() for work in work_paths)
+finally:shutil.rmtree(root)
+`);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test('native cleanup timeout keeps the primary failed query and records both failures', () => {
+  const result = pythonProbe(nativeProtocolFixture + `
+try:
+    def failed_command(command,**kwargs):
+        if command[0].endswith('psql'):
+            calls.append((command,kwargs));return SimpleNamespace(returncode=1,stdout='',stderr='query failed')
+        if command[0].endswith('pg_ctl') and command[-1]=='stop':
+            assert kwargs['timeout']==30
+            raise m.subprocess.TimeoutExpired(command,30,output=b'stop partial',stderr=b'stop failed')
+        return native_command(command,**kwargs)
+    m.subprocess.run=failed_command
+    args=SimpleNamespace(root=root,sha256='sha',arch='x64',receipt=root/'receipt.json',evidence=root/'evidence',phase='postgresql')
+    try:m.qualify_runtime(args)
+    except ValueError as e:assert 'pg-vector-query failed' in str(e)
+    else:raise AssertionError('failure accepted')
+    records=[json.loads(p.read_text()) for p in args.evidence.glob('*.json')]
+    assert any(r['protocol']=='pg-vector-query' and r['status']=='failed' for r in records)
+    assert any(r['protocol']=='pg-stop' and r['status']=='timed-out' and r['cleanup'] for r in records)
+    assert not args.receipt.exists() and not any(work.exists() for work in work_paths)
+finally:shutil.rmtree(root)
+`);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test('bind-runtime rejects diagnostics and incomplete receipts before creating a qualified bank', () => {
+  const result = pythonProbe(nativeProtocolFixture + `
+try:
+    receipt={'schemaVersion':'darwin-native-protocol-receipt/v1','target':manifest['target'],'minimumMacOS':'14.0',
+             'nativeFilesSha256':m.files_hash(manifest['files']),'checks':{n:True for n in m.RUNTIME_CHECKS},'evidence':['fixture']}
+    for change in [{'schemaVersion':'darwin-native-protocol-diagnostic/v1'},{'diagnosticOnly':True},{'phase':'gh'},
+                   {'checks':{'kopia':True}}]:
+        candidate={**receipt,**change}
+        source=root/'receipt.json';source.write_text(json.dumps(candidate))
+        out=root/'qualified'
+        try:m.bind_runtime(SimpleNamespace(root=root,sha256='sha',arch='x64',receipt=source,out=out))
+        except ValueError as e:assert 'diagnostics cannot qualify' in str(e)
+        else:raise AssertionError('diagnostic/incomplete receipt bound')
+        assert not out.exists()
+finally:shutil.rmtree(root)
+`);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test('qualify-runtime CLI exposes bounded phase selection with all as the default', () => {
+  const result = spawnSync('python3', [darwinInputHelper, 'qualify-runtime', '--help'], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /--phase \{all,postgresql,gh,kopia\}/);
 });
 
 test('private native inputs fail before SPA assembly and require actual rig qualification', () => {

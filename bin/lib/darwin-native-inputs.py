@@ -80,6 +80,11 @@ def is_macho(path):
 
 PG_PROGRAMS = ("postgres", "initdb", "pg_ctl", "pg_dump", "pg_dumpall", "pg_restore", "psql")
 RUNTIME_CHECKS = ("pgInitStartQueryStop", "plpgsqlAndEncodingConversion", "pgvector", "gh", "kopia")
+RUNTIME_PHASES = {
+    "postgresql": RUNTIME_CHECKS[:3],
+    "gh": ("gh",),
+    "kopia": ("kopia",),
+}
 
 
 PG_KEG = "Cellar/postgresql@18/18.6"
@@ -254,6 +259,18 @@ def check_closure(root, arch, floor):
     return observations
 
 
+def validate_runtime_receipt(receipt, manifest, actual):
+    if (receipt.get("schemaVersion") != "darwin-native-protocol-receipt/v1"
+            or receipt.get("diagnosticOnly", False) is not False
+            or receipt.get("phase", "all") != "all"
+            or receipt.get("nativeFilesSha256") != files_hash(actual)
+            or receipt.get("target") != manifest["target"]
+            or receipt.get("minimumMacOS") != manifest["minimumMacOS"]
+            or not receipt.get("evidence")
+            or any(receipt.get("checks", {}).get(key) is not True for key in RUNTIME_CHECKS)):
+        raise ValueError("exact native input rig runtime qualification missing or mismatched; diagnostics cannot qualify")
+
+
 def verify(root, expected, arch, profile, require_runtime=False, require_security=False):
     manifest_path = root / "manifest.json"
     if sha(manifest_path) != expected:
@@ -302,12 +319,7 @@ def verify(root, expected, arch, profile, require_runtime=False, require_securit
         if (not raw or hashlib.sha256(raw).hexdigest() != receipt.get("receiptSha256")
                 or json.loads(raw) != {k: v for k, v in receipt.items() if k != "receiptSha256"}):
             raise ValueError("native rig receipt SHA-256 must bind actual immutable receipt bytes")
-        if (receipt.get("nativeFilesSha256") != files_hash(actual)
-                or receipt.get("target") != manifest["target"]
-                or receipt.get("minimumMacOS") != manifest["minimumMacOS"]
-                or not re.fullmatch(r"[0-9a-f]{64}", receipt.get("receiptSha256", ""))
-                or any(receipt.get("checks", {}).get(key) is not True for key in RUNTIME_CHECKS)):
-            raise ValueError("exact native input rig runtime qualification missing or mismatched")
+        validate_runtime_receipt(receipt, manifest, actual)
     return manifest
 
 
@@ -353,8 +365,7 @@ def bind_runtime(args):
     manifest = verify(source, args.sha256, args.arch, "dogfood")
     raw = args.receipt.read_bytes()
     receipt = json.loads(raw)
-    if not receipt.get("evidence"):
-        raise ValueError("rig receipt requires actual protocol output evidence references")
+    validate_runtime_receipt(receipt, manifest, manifest["files"])
     receipt["receiptSha256"] = hashlib.sha256(raw).hexdigest()
     manifest["runtimeQualification"] = receipt
     manifest["runtimeQualificationReceiptBase64"] = base64.b64encode(raw).decode()
@@ -368,6 +379,9 @@ def bind_runtime(args):
 
 def qualify_runtime(args):
     """Input-only protocols in disposable state; the caller owns the rig lock."""
+    phase = getattr(args, "phase", "all")
+    if phase != "all" and phase not in RUNTIME_PHASES:
+        raise ValueError("unknown native protocol phase")
     root = args.root.resolve()
     manifest = verify(root, args.sha256, args.arch, "dogfood", require_security=True)
     expected_arch = "x86_64" if args.arch == "x64" else "arm64"
@@ -378,6 +392,7 @@ def qualify_runtime(args):
         raise ValueError("runtime receipt and external evidence must be fresh paths")
     args.evidence.mkdir(parents=True)
     observations = []
+    checks = {}
     started = time.monotonic()
     before = file_inventory(root)
     with tempfile.TemporaryDirectory(prefix="pc-native-", dir="/tmp") as temporary:
@@ -390,46 +405,77 @@ def qualify_runtime(args):
                "KOPIA_PASSWORD": "local-fixture-only"}
 
         def execute(name, command, cleanup=False):
-            remaining = 180 - (time.monotonic() - started)
+            step_started = time.monotonic()
+            remaining = 180 - (step_started - started)
+            timeout = 30 if cleanup else max(0, min(45, remaining))
+            argv = [str(x) for x in command]
+
+            def save(status, exit_code, stdout="", stderr="", error=None):
+                # TimeoutExpired can carry bytes even with text=True.
+                def decoded(value):
+                    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else (value or "")
+                output = {"protocol": name, "phase": active_phase, "argv": argv,
+                          "status": status, "exitCode": exit_code, "cleanup": cleanup,
+                          "stdout": decoded(stdout), "stderr": decoded(stderr),
+                          "elapsedSeconds": time.monotonic() - step_started,
+                          "runElapsedSeconds": time.monotonic() - started,
+                          "timeoutSeconds": timeout, "deadlineSeconds": 180,
+                          "remainingSecondsAtStart": remaining}
+                if error:
+                    output["error"] = error
+                evidence = args.evidence / (str(len(observations)) + "-" + name + ".json")
+                evidence.write_text(json.dumps(output, indent=2) + "\n")
+                # Raw rig identities/paths stay external; receipts carry hashes.
+                observations.append({"protocol": name, "phase": active_phase, "status": status,
+                                     "exitCode": exit_code, "cleanup": cleanup,
+                                     "evidenceSha256": sha(evidence)})
+
             if remaining <= 0 and not cleanup:
-                raise ValueError("native protocol qualification exceeded its 180s deadline")
-            result = subprocess.run([str(x) for x in command], env=env, capture_output=True,
-                                    text=True, timeout=30 if cleanup else min(45, remaining))
-            output = {"argv": [str(x) for x in command], "exitCode": result.returncode,
-                      "stdout": result.stdout, "stderr": result.stderr}
-            evidence = args.evidence / (str(len(observations)) + "-" + name + ".json")
-            evidence.write_text(json.dumps(output, indent=2) + "\n")
-            # The safe receipt ships only hashes; raw rig identities/paths stay
-            # in external evidence and remain subject to final privacy checks.
-            observations.append({"protocol": name, "exitCode": result.returncode,
-                                 "evidenceSha256": sha(evidence)})
+                save("deadline-exceeded", None)
+                raise ValueError("native protocol qualification exceeded its 180s deadline; see external evidence")
+            try:
+                result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=timeout)
+            except subprocess.TimeoutExpired as error:
+                save("timed-out", None, error.stdout, error.stderr, str(error))
+                raise ValueError(f"native protocol {name} timed out; see external evidence") from error
+            except OSError as error:
+                save("spawn-error", None, error=str(error))
+                raise ValueError(f"native protocol {name} could not start; see external evidence") from error
+            save("passed" if result.returncode == 0 else "failed", result.returncode, result.stdout, result.stderr)
             if result.returncode:
                 raise ValueError(f"native protocol {name} failed; see external evidence")
             return result.stdout
 
-        pg = root / "postgresql/bin"
-        data = work / "pg-data"
-        with socket.socket() as listener:
-            listener.bind(("127.0.0.1", 0))
-            port = listener.getsockname()[1]
-        try:
-            execute("initdb", [pg / "initdb", "--encoding=UTF8", "--locale=C", "--auth=trust", "-D", data])
-            execute("pg-start", [pg / "pg_ctl", "-D", data, "-l", work / "postgres.log", "-w", "-t", "30", "-o",
-                                 f"-p {port} -h 127.0.0.1 -k {work / 'socket'}", "start"])
-            query = execute("pg-vector-query", [pg / "psql", "-h", "127.0.0.1", "-p", str(port), "-d", "postgres",
-                                                "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c",
-                                                "SELECT version(); CREATE EXTENSION vector; "
-                                                "DO $$ BEGIN "
-                                                "IF convert_to(convert_from(decode('e9','hex'),'LATIN1'),'LATIN1') "
-                                                "<> decode('e9','hex') THEN "
-                                                "RAISE EXCEPTION 'encoding conversion roundtrip failed'; "
-                                                "END IF; END $$; "
-                                                "SELECT '[1,2]'::vector <-> '[4,6]'::vector;"])
-            if "PostgreSQL 18.6" not in query or query.strip().splitlines()[-1] != "5":
-                raise ValueError("native PostgreSQL version/vector result mismatch")
-        finally:
-            if (data / "postmaster.pid").exists():
-                execute("pg-stop", [pg / "pg_ctl", "-D", data, "-m", "fast", "-w", "-t", "20", "stop"], cleanup=True)
+        def postgresql():
+            pg = root / "postgresql/bin"
+            data = work / "pg-data"
+            with socket.socket() as listener:
+                listener.bind(("127.0.0.1", 0))
+                port = listener.getsockname()[1]
+            try:
+                execute("initdb", [pg / "initdb", "--encoding=UTF8", "--locale=C", "--auth=trust", "-D", data])
+                execute("pg-start", [pg / "pg_ctl", "-D", data, "-l", work / "postgres.log", "-w", "-t", "30", "-o",
+                                     f"-p {port} -h 127.0.0.1 -k {work / 'socket'}", "start"])
+                query = execute("pg-vector-query", [pg / "psql", "-h", "127.0.0.1", "-p", str(port), "-d", "postgres",
+                                                    "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c",
+                                                    "SELECT version(); CREATE EXTENSION vector; "
+                                                    "DO $$ BEGIN "
+                                                    "IF convert_to(convert_from(decode('e9','hex'),'LATIN1'),'LATIN1') "
+                                                    "<> decode('e9','hex') THEN "
+                                                    "RAISE EXCEPTION 'encoding conversion roundtrip failed'; "
+                                                    "END IF; END $$; "
+                                                    "SELECT '[1,2]'::vector <-> '[4,6]'::vector;"])
+                if "PostgreSQL 18.6" not in query or query.strip().splitlines()[-1] != "5":
+                    raise ValueError("native PostgreSQL version/vector result mismatch")
+            finally:
+                primary_failure = sys.exc_info()[0] is not None
+                if (data / "postmaster.pid").exists():
+                    try:
+                        execute("pg-stop", [pg / "pg_ctl", "-D", data, "-m", "fast", "-w", "-t", "20", "stop"], cleanup=True)
+                    except ValueError:
+                        # Both failures have evidence; preserve the original cause.
+                        if not primary_failure:
+                            raise
 
         class Fixture(BaseHTTPRequestHandler):
             calls = 0
@@ -447,42 +493,50 @@ def qualify_runtime(args):
             def log_message(self, *unused):
                 pass
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            response = execute("gh-loopback-api", [root / "bin/gh", "api", f"http://127.0.0.1:{server.server_port}/fixture"])
-            if json.loads(response) != {"nativeQualification": "ok"} or Fixture.calls != 1:
-                raise ValueError("GitHub CLI did not complete the exact loopback fixture")
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join()
+        def gh():
+            server = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                response = execute("gh-loopback-api", [root / "bin/gh", "api", f"http://127.0.0.1:{server.server_port}/fixture"])
+                if json.loads(response) != {"nativeQualification": "ok"} or Fixture.calls != 1:
+                    raise ValueError("GitHub CLI did not complete the exact loopback fixture")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
 
-        kopia = root / "bin/kopia"
-        config = work / "kopia.config"
-        prefix = [kopia, "--config-file", config]
-        payload = work / "input/payload.txt"
-        payload.write_text("papercusp native snapshot protocol\n")
-        execute("kopia-create-repo", prefix + ["repository", "create", "filesystem", "--path", work / "repository",
-                                             "--password", "local-fixture-only"])
-        snapshot = json.loads(execute("kopia-snapshot", prefix + ["snapshot", "create", work / "input", "--json"]))
-        identifier = snapshot["rootEntry"]["obj"]
-        listed = json.loads(execute("kopia-list", prefix + ["snapshot", "list", "--all", "--json"]))
-        if not any(item.get("rootEntry", {}).get("obj") == identifier for item in listed):
-            raise ValueError("native Kopia snapshot missing from repository list")
-        execute("kopia-restore", prefix + ["snapshot", "restore", identifier, work / "restored"])
-        if sha(payload) != sha(work / "restored/payload.txt"):
-            raise ValueError("native Kopia restore hash mismatch")
+        def kopia():
+            prefix = [root / "bin/kopia", "--config-file", work / "kopia.config"]
+            payload = work / "input/payload.txt"
+            payload.write_text("papercusp native snapshot protocol\n")
+            execute("kopia-create-repo", prefix + ["repository", "create", "filesystem", "--path", work / "repository",
+                                                 "--password", "local-fixture-only"])
+            snapshot = json.loads(execute("kopia-snapshot", prefix + ["snapshot", "create", work / "input", "--json"]))
+            identifier = snapshot["rootEntry"]["obj"]
+            listed = json.loads(execute("kopia-list", prefix + ["snapshot", "list", "--all", "--json"]))
+            if not any(item.get("rootEntry", {}).get("obj") == identifier for item in listed):
+                raise ValueError("native Kopia snapshot missing from repository list")
+            execute("kopia-restore", prefix + ["snapshot", "restore", identifier, work / "restored"])
+            if sha(payload) != sha(work / "restored/payload.txt"):
+                raise ValueError("native Kopia restore hash mismatch")
+
+        for active_phase, protocol in (("postgresql", postgresql), ("gh", gh), ("kopia", kopia)):
+            if phase == "all" or phase == active_phase:
+                protocol()
+                checks.update({name: True for name in RUNTIME_PHASES[active_phase]})
     if file_inventory(root) != before:
         raise ValueError("native protocol execution mutated exact input bytes")
-    receipt = {"schemaVersion": "darwin-native-protocol-receipt/v1", "target": manifest["target"],
+    diagnostic = phase != "all"
+    receipt = {"schemaVersion": "darwin-native-protocol-diagnostic/v1" if diagnostic else "darwin-native-protocol-receipt/v1",
+               "diagnosticOnly": diagnostic, "phase": phase, "target": manifest["target"],
                "minimumMacOS": manifest["minimumMacOS"], "rigMacOS": platform.mac_ver()[0],
                "nativeFilesSha256": files_hash(before), "at": datetime.now(timezone.utc).isoformat(),
-               "checks": {name: True for name in RUNTIME_CHECKS},
+               "checks": checks,
                "evidence": observations, "installerAccepted": False}
     args.receipt.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
-    print(json.dumps({"receiptSha256": sha(args.receipt), "nativeFilesSha256": files_hash(before), "installerAccepted": False}))
+    print(json.dumps({"receiptSha256": sha(args.receipt), "nativeFilesSha256": files_hash(before),
+                      "diagnosticOnly": diagnostic, "phase": phase, "installerAccepted": False}))
 
 
 def assemble(args):
@@ -589,6 +643,8 @@ def main():
     qualify.add_argument("arch", choices=("x64", "arm64"))
     qualify.add_argument("receipt", type=Path)
     qualify.add_argument("evidence", type=Path)
+    qualify.add_argument("--phase", choices=("all", *RUNTIME_PHASES), default="all",
+                         help="run one diagnostic phase; only all can produce a qualification receipt")
     security = sub.add_parser("bind-security")
     security.add_argument("root", type=Path)
     security.add_argument("sha256")
