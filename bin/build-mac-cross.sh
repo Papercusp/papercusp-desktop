@@ -301,10 +301,35 @@ fi
 
 # ── Info.plist generator: Tauri's computed CFBundle* keys, then src-tauri/
 # Info.plist merged ON TOP (mic + ATS). plistlib keeps it byte-valid. ───────────
-gen_info_plist() { # $1=identifier $2=productName $3=out_plist
-  python3 - "$1" "$2" "$VERSION" "$SRC_TAURI/Info.plist" "$3" <<'PY'
-import sys, plistlib
-ident, name, ver, userplist, out = sys.argv[1:6]
+gen_info_plist() { # $1=identifier $2=productName $3=out_plist $4=main|tutorial
+  python3 - "$1" "$2" "$VERSION" "$SRC_TAURI/Info.plist" "$3" \
+    "$SRC_TAURI/tauri.conf.json" "${PAPERCUSP_DARWIN_NATIVE_INPUTS:-}" \
+    "$DARWIN_SIDECAR/apps/operator/runtime/darwin-native-inputs.json" "${4:-main}" <<'PY'
+import sys, plistlib, json, re
+from pathlib import Path
+ident, name, ver, userplist, out, config, native_inputs, native_manifest, launcher = sys.argv[1:10]
+
+def os_version(value, label):
+    if not isinstance(value, str) or not re.fullmatch(r"[1-9]\d*(?:\.\d+){0,2}", value):
+        raise ValueError(f"{label} must declare a valid minimum macOS version")
+    parts = tuple(map(int, value.split('.')))
+    return parts + (0,) * (3 - len(parts))
+
+with open(config) as f:
+    configured = json.load(f).get('bundle', {}).get('macOS', {}).get('minimumSystemVersion')
+floors = [(os_version(configured, 'tauri.conf.json'), configured)]
+if native_inputs or Path(native_manifest).exists():
+    # Consume the payload's copied manifest even during a later packaging-only
+    # resume whose caller no longer supplies the original native-input env.
+    with open(native_manifest) as f:
+        qualified = json.load(f).get('minimumMacOS')
+    floors.append((os_version(qualified, 'qualified native manifest'), qualified))
+with open(userplist, 'rb') as f:
+    user = plistlib.load(f)
+if 'LSMinimumSystemVersion' in user:
+    override = user['LSMinimumSystemVersion']
+    floors.append((os_version(override, 'Info.plist'), override))
+
 d = {
     "CFBundleDevelopmentRegion": "English",
     "CFBundleDisplayName": name,
@@ -317,14 +342,24 @@ d = {
     "CFBundleVersion": ver,
     "CSResourcesFileMapped": True,
     "LSApplicationCategoryType": "public.app-category.developer-tools",
-    "LSMinimumSystemVersion": "10.15",
     "CFBundleIconFile": "icon.icns",
     "LSRequiresCarbon": True,
     "NSHighResolutionCapable": True,
 }
 
-with open(userplist, "rb") as f:
-    d.update(plistlib.load(f))   # user keys (mic, ATS) win — same order as Tauri
+if launcher == 'tutorial':
+    d = {
+        'CFBundleName': name, 'CFBundleDisplayName': name,
+        'CFBundleIdentifier': ident, 'CFBundleVersion': '1',
+        'CFBundleShortVersionString': '1.0', 'CFBundlePackageType': 'APPL',
+        'CFBundleExecutable': 'papercusp-tutorial', 'CFBundleIconFile': 'icon.icns',
+        'LSUIElement': True, 'NSHighResolutionCapable': True,
+    }
+else:
+    d.update(user)   # user keys (mic, ATS) win — same order as Tauri
+# D-192: apply AFTER user keys, for both launchers. A lower override cannot
+# advertise an OS on which the selected, qualified native payload cannot run.
+d['LSMinimumSystemVersion'] = max(floors, key=lambda row: row[0])[1]
 with open(out, "wb") as f:
     plistlib.dump(d, f)
 PY
@@ -476,25 +511,8 @@ build_tutorial_app() { # $1=dest dir (dmg stage)
   local tut="$1/Papercusp Tutorial & Setup.app"
   rm -rf "$tut"
   mkdir -p "$tut/Contents/MacOS" "$tut/Contents/Resources"
-  cat > "$tut/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleName</key><string>Papercusp Tutorial &amp; Setup</string>
-  <key>CFBundleDisplayName</key><string>Papercusp Tutorial &amp; Setup</string>
-  <key>CFBundleIdentifier</key><string>com.papercusp.tutorial</string>
-  <key>CFBundleVersion</key><string>1</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleExecutable</key><string>papercusp-tutorial</string>
-  <key>CFBundleIconFile</key><string>icon.icns</string>
-  <key>LSMinimumSystemVersion</key><string>10.15</string>
-  <key>LSUIElement</key><true/>
-  <key>NSHighResolutionCapable</key><true/>
-</dict>
-</plist>
-PLIST
+  gen_info_plist com.papercusp.tutorial 'Papercusp Tutorial & Setup' \
+    "$tut/Contents/Info.plist" tutorial
   cp "$SRC_TAURI/icons/icon.icns" "$tut/Contents/Resources/icon.icns" 2>/dev/null || true
   cat > "$tut/Contents/MacOS/papercusp-tutorial" <<'EXEC'
 #!/bin/bash
