@@ -247,9 +247,12 @@ test('sidecar build restores Cargo from CARGO_HOME before the expensive build', 
 
 test('sidecar target architecture stays shell-local before native GNU Make builds', () => {
   const start = builder.indexOf('TARGET_OS="${TARGET_OS:-$_host_os}"');
-  const end = builder.indexOf('CROSS_BUILD=0', start);
+  // Stop at normalization's own boundary: release preflights now occur before
+  // CROSS_BUILD and require the complete builder environment.
+  const unexport = builder.indexOf('export -n TARGET_ARCH', start);
+  const end = builder.indexOf('\n', unexport);
   const trustBuild = builder.indexOf('papercusp_prepare_vm_release_trust_toolchain', end);
-  assert(start >= 0 && end > start, 'could not isolate target normalization');
+  assert(start >= 0 && unexport > start && end > unexport, 'could not isolate target normalization');
   assert(trustBuild > end, 'native trust build must follow target normalization');
 
   const normalization = builder.slice(start, end);
