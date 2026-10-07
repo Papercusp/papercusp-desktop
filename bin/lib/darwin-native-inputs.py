@@ -148,7 +148,7 @@ def normalize_postgres_paths(native, arch):
     return records
 
 
-def verify_postgres_paths(native, arch, records):
+def collect_postgres_paths(native, arch):
     observed = {}
     for path in sorted(native.rglob("*")):
         if not path.is_file() or not is_macho(path):
@@ -167,6 +167,11 @@ def verify_postgres_paths(native, arch, records):
         counts = observed.get("bin/" + name, {})
         if any(counts.get(key) != 1 for key in ("bindir", "sharedir", "pkglibdir")):
             raise ValueError(f"PG {name}: normalized bin/share/pkglib constants missing or ambiguous")
+    return observed
+
+
+def verify_postgres_paths(native, arch, records):
+    observed = collect_postgres_paths(native, arch)
     if observed != records:
         raise ValueError("PG compiled path relocation inventory missing or mismatched")
     return observed
@@ -482,7 +487,7 @@ def assemble(args):
     for name in ("gh", "kopia"):
         shutil.copy2(args.go / "bin" / name, root / "bin" / name)
     make_copy_writable(root)
-    path_relocation = normalize_postgres_paths(native, args.arch)
+    normalize_postgres_paths(native, args.arch)
 
     # Reuse exact dependency kegs selected from the PG bottle's upstream SBOM.
     # Resolve the entire emitted Mach-O population, including server plugins.
@@ -519,6 +524,9 @@ def assemble(args):
             run("llvm-install-name-tool-18", "-id", "@loader_path/" + path.name, str(path))
         run("rcodesign", "sign", str(path))
     observations = check_closure(root, args.arch, args.floor)
+    # Dylib closure can copy a normalized library under its short soname.
+    # Bind the FINAL emitted population, not the pre-closure path inventory.
+    path_relocation = collect_postgres_paths(native, args.arch)
     measured = max((v for info in observations.values() for v in info["minimumOS"]), key=version)
     files = file_inventory(root)
     manifest = {"schemaVersion": "darwin-native-inputs/v1", "privateOnly": True,
