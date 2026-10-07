@@ -79,6 +79,7 @@ def is_macho(path):
 
 
 PG_PROGRAMS = ("postgres", "initdb", "pg_ctl", "pg_dump", "pg_dumpall", "pg_restore", "psql")
+RUNTIME_CHECKS = ("pgInitStartQueryStop", "plpgsqlAndEncodingConversion", "pgvector", "gh", "kopia")
 
 
 def postgres_path_replacements(arch):
@@ -291,8 +292,7 @@ def verify(root, expected, arch, profile, require_runtime=False, require_securit
                 or receipt.get("target") != manifest["target"]
                 or receipt.get("minimumMacOS") != manifest["minimumMacOS"]
                 or not re.fullmatch(r"[0-9a-f]{64}", receipt.get("receiptSha256", ""))
-                or any(receipt.get("checks", {}).get(key) is not True for key in
-                       ("pgInitStartQueryStop", "pgvector", "gh", "kopia"))):
+                or any(receipt.get("checks", {}).get(key) is not True for key in RUNTIME_CHECKS)):
             raise ValueError("exact native input rig runtime qualification missing or mismatched")
     return manifest
 
@@ -404,7 +404,13 @@ def qualify_runtime(args):
                                  f"-p {port} -h 127.0.0.1 -k {work / 'socket'}", "start"])
             query = execute("pg-vector-query", [pg / "psql", "-h", "127.0.0.1", "-p", str(port), "-d", "postgres",
                                                 "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c",
-                                                "SELECT version(); CREATE EXTENSION vector; SELECT '[1,2]'::vector <-> '[4,6]'::vector;"])
+                                                "SELECT version(); CREATE EXTENSION vector; "
+                                                "DO $$ BEGIN "
+                                                "IF convert_to(convert_from(decode('e9','hex'),'LATIN1'),'LATIN1') "
+                                                "<> decode('e9','hex') THEN "
+                                                "RAISE EXCEPTION 'encoding conversion roundtrip failed'; "
+                                                "END IF; END $$; "
+                                                "SELECT '[1,2]'::vector <-> '[4,6]'::vector;"])
             if "PostgreSQL 18.6" not in query or query.strip().splitlines()[-1] != "5":
                 raise ValueError("native PostgreSQL version/vector result mismatch")
         finally:
@@ -459,7 +465,7 @@ def qualify_runtime(args):
     receipt = {"schemaVersion": "darwin-native-protocol-receipt/v1", "target": manifest["target"],
                "minimumMacOS": manifest["minimumMacOS"], "rigMacOS": platform.mac_ver()[0],
                "nativeFilesSha256": files_hash(before), "at": datetime.now(timezone.utc).isoformat(),
-               "checks": {name: True for name in ("pgInitStartQueryStop", "pgvector", "gh", "kopia")},
+               "checks": {name: True for name in RUNTIME_CHECKS},
                "evidence": observations, "installerAccepted": False}
     args.receipt.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     print(json.dumps({"receiptSha256": sha(args.receipt), "nativeFilesSha256": files_hash(before), "installerAccepted": False}))

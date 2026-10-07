@@ -191,11 +191,22 @@ try:
     except ValueError: pass
     else: raise AssertionError('unqualified rig accepted')
     import base64
-    receipt={'target':manifest['target'],'minimumMacOS':'14.0','nativeFilesSha256':m.files_hash(files),'checks':{n:True for n in ('pgInitStartQueryStop','pgvector','gh','kopia')},'evidence':['fixture-protocol-output']}
+    receipt={'target':manifest['target'],'minimumMacOS':'14.0','nativeFilesSha256':m.files_hash(files),'checks':{n:True for n in m.RUNTIME_CHECKS},'evidence':['fixture-protocol-output']}
     raw=json.dumps(receipt).encode()
     manifest['runtimeQualification']={**receipt,'receiptSha256':hashlib.sha256(raw).hexdigest()}
     manifest['runtimeQualificationReceiptBase64']=base64.b64encode(raw).decode()
     digest=write(); m.verify(root,digest,'x64','dogfood',True)
+    # Recompute a valid receipt hash without the new stock-library check:
+    # integrity alone must not admit an older, incomplete protocol receipt.
+    incomplete=json.loads(json.dumps(receipt));del incomplete['checks']['plpgsqlAndEncodingConversion']
+    incomplete_raw=json.dumps(incomplete).encode()
+    manifest['runtimeQualification']={**incomplete,'receiptSha256':hashlib.sha256(incomplete_raw).hexdigest()}
+    manifest['runtimeQualificationReceiptBase64']=base64.b64encode(incomplete_raw).decode()
+    try:m.verify(root,write(),'x64','dogfood',True)
+    except ValueError:pass
+    else:raise AssertionError('receipt omitting stock PG library execution accepted')
+    manifest['runtimeQualification']={**receipt,'receiptSha256':hashlib.sha256(raw).hexdigest()}
+    manifest['runtimeQualificationReceiptBase64']=base64.b64encode(raw).decode()
     manifest['runtimeQualification']['receiptSha256']='a'*64
     try: m.verify(root,write(),'x64','dogfood',True)
     except ValueError: pass
@@ -243,7 +254,11 @@ try:
             data=pathlib.Path(command[command.index('-D')+1]);data.mkdir()
         if command[0].endswith('pg_ctl') and command[-1]=='start':
             data=pathlib.Path(command[command.index('-D')+1]);(data/'postmaster.pid').write_text('fixture')
-        if command[0].endswith('psql'):return SimpleNamespace(returncode=1,stdout='',stderr='query failed')
+        if command[0].endswith('psql'):
+            query=command[command.index('-c')+1]
+            assert 'DO $$ BEGIN' in query and 'convert_from' in query and 'convert_to' in query
+            assert 'ON_ERROR_STOP=1' in command and 'LATIN1' in query
+            return SimpleNamespace(returncode=1,stdout='',stderr='query failed')
         return SimpleNamespace(returncode=0,stdout='',stderr='')
     m.subprocess.run=execute
     args=SimpleNamespace(root=root,sha256='sha',arch='x64',receipt=root/'receipt.json',evidence=root/'evidence')
