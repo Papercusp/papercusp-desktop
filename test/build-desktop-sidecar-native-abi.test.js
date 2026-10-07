@@ -60,6 +60,13 @@ test('native target preflight precedes expensive SPA assembly in the real produc
   assert(guard < builder.indexOf('→ building operator-vite SPA'));
 });
 
+test('existing runtime copier stages validated source-native bytes before target pruning', () => {
+  const start = builder.indexOf('if [[ "$cur" == "onnxruntime-node" ]]');
+  const end = builder.indexOf('prune_foreign_onnx_bins "$dest"', start);
+  assert(start > 0 && end > start);
+  assert.match(builder.slice(start, end), /papercusp_verify_transformers_native_target "\$REPO_ROOT" "\$TARGET_OS" "\$TARGET_ARCH" "\$dest"/);
+});
+
 function extractAlignmentFunction(source) {
   const match = source.match(
     /align_better_sqlite3_native\(\) \{[\s\S]*?\n\}\n\n# Windows packaging/,

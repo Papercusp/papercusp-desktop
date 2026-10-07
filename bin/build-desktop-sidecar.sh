@@ -2321,6 +2321,12 @@ copy_pkg_closure() {
     # @huggingface/transformers, whose models were just relocated above. There is
     # no longer any package for which a shipped `.cache/` is legitimate.
     rm -rf "$dest/.cache"
+    if [[ "$cur" == "onnxruntime-node" ]]; then
+      # D-180: upstream omitted Intel macOS from the pinned registry package.
+      # Import only an exact-version, hash-bound upstream source-build closure
+      # through the existing native copier; never modify the dependency donor.
+      papercusp_verify_transformers_native_target "$REPO_ROOT" "$TARGET_OS" "$TARGET_ARCH" "$dest" || exit 1
+    fi
     prune_foreign_prebuilds "$dest"
     prune_foreign_onnx_bins "$dest"
     prune_onnx_gpu_providers "$dest"
