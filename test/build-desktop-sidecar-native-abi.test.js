@@ -20,6 +20,81 @@ const verifier = fs.readFileSync(
   'utf8',
 );
 
+function runEsbuildTargetFixture({ wrongVersion = false, wrongFormat = false, missingPin = false, arch = 'x64' } = {}) {
+  const match = builder.match(/align_darwin_esbuild_runtime_closures\(\) \{[\s\S]*?\n\}/);
+  assert.ok(match, 'Darwin runtime esbuild alignment helper is missing');
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-esbuild-target-'));
+  const nm = path.join(fixture, 'node_modules');
+  const roots = [
+    path.join(nm, 'esbuild'),
+    path.join(nm, 'lost-pixel/node_modules/esbuild'),
+  ];
+  const versions = ['0.28.2', '0.24.0'];
+  const target = `@esbuild/darwin-${arch}`;
+  try {
+    fs.mkdirSync(path.join(nm, 'lost-pixel'), { recursive: true });
+    fs.writeFileSync(path.join(nm, 'lost-pixel/package.json'), '{"name":"lost-pixel","version":"3.22.0"}');
+    for (const [i, root] of roots.entries()) {
+      fs.mkdirSync(path.join(root, 'bin'), { recursive: true });
+      fs.mkdirSync(path.join(root, 'lib'), { recursive: true });
+      fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+        name: 'esbuild', version: versions[i],
+        optionalDependencies: missingPin ? {} : { [target]: versions[i] },
+      }));
+      fs.writeFileSync(path.join(root, 'lib/main.js'), '// runtime consumer entrypoint');
+      fs.writeFileSync(path.join(root, 'bin/esbuild'), 'ELF host optimized CLI');
+      fs.writeFileSync(path.join(root, 'lib/downloaded-@esbuild-linux-x64-esbuild'), 'ELF host fallback');
+      const host = path.join(path.dirname(root), '@esbuild/linux-x64/bin');
+      fs.mkdirSync(host, { recursive: true });
+      fs.writeFileSync(path.join(host, 'esbuild'), 'ELF optional dependency');
+    }
+    const result = spawnSync('bash', ['-c', [
+      'set -euo pipefail', 'TARGET_OS=darwin; TARGET_ARCH="$2"',
+      'fetch_cross_npm_pkg() {',
+      '  local spec="$1" nm="$2" name="${1%@*}" version="${1##*@}"',
+      '  mkdir -p "$nm/$name/bin"',
+      wrongVersion ? '  version=0.0.1' : ':',
+      '  printf \'{"name":"%s","version":"%s"}\\n\' "$name" "$version" > "$nm/$name/package.json"',
+      wrongFormat ? '  printf "ELF x86-64\\n" > "$nm/$name/bin/esbuild"' :
+        '  printf "Mach-O %s\\n" "$([[ "$TARGET_ARCH" == x64 ]] && echo x86_64 || echo arm64)" > "$nm/$name/bin/esbuild"',
+      '}',
+      'file() { cat "${@: -1}"; }',
+      match[0],
+      'align_darwin_esbuild_runtime_closures "$1"',
+    ].join('\n'), 'fixture', fixture, arch], { encoding: 'utf8', timeout: 10_000 });
+    if (result.status === 0) {
+      const { createRequire } = require('node:module');
+      for (const [i, root] of roots.entries()) {
+        const resolved = createRequire(path.join(root, 'lib/main.js')).resolve(`${target}/package.json`);
+        assert.equal(JSON.parse(fs.readFileSync(resolved, 'utf8')).version, versions[i]);
+        const binary = path.join(path.dirname(resolved), 'bin/esbuild');
+        assert.deepEqual(fs.readFileSync(path.join(root, 'bin/esbuild')), fs.readFileSync(binary));
+        assert.equal(fs.existsSync(path.join(root, 'lib/downloaded-@esbuild-linux-x64-esbuild')), false);
+        assert.equal(fs.existsSync(path.join(path.dirname(root), '@esbuild/linux-x64')), false);
+      }
+      assert.equal(JSON.parse(fs.readFileSync(path.join(nm, 'lost-pixel/package.json'), 'utf8')).version, '3.22.0');
+    }
+    return result;
+  } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
+}
+
+test('Darwin runtime esbuild replaces all three host-binary paths while preserving nested versions and lost-pixel', () => {
+  for (const arch of ['x64', 'arm64']) {
+    const result = runEsbuildTargetFixture({ arch });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+  }
+  const call = builder.indexOf('align_darwin_esbuild_runtime_closures "$SIDECAR_DIR" || exit 1');
+  assert(call > builder.indexOf('copy_pkg_closure lost-pixel'));
+  assert(call < builder.indexOf('assert_runtime_dependency_closure "$SIDECAR_DIR" || exit 1'));
+});
+
+test('Darwin runtime esbuild refuses missing exact platform pin, wrong version, and host ELF', () => {
+  for (const options of [{ missingPin: true }, { wrongVersion: true }, { wrongFormat: true }]) {
+    const result = runEsbuildTargetFixture(options);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+  }
+});
+
 test('required local-model backend missing from a cross-target bundle is fatal, not advisory', () => {
   const start = verifier.indexOf('REQUIRED_NATIVE_MODULES="');
   const end = verifier.indexOf('\nelse\n  NODE_BIN=""', start);

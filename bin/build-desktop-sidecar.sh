@@ -1727,6 +1727,62 @@ opt_dep_version() {
   local pkg_json="$1" dep="$2"
   node -e "try{const d=require('$pkg_json').optionalDependencies||{};process.stdout.write(String(d['$dep']||''))}catch(e){}" 2>/dev/null
 }
+# EI-25315505210556800 / D-186: a runtime package such as lost-pixel may
+# contain a nested esbuild installed on the Linux build host. cp -aL copies
+# THREE host executables: @esbuild/linux-*/bin/esbuild, the optimized CLI
+# bin/esbuild, and lib/downloaded-*. Merely fetching a Darwin optional package
+# does not replace the latter two. Keep every JS package/version and its actual
+# requester topology; replace only these platform-selected executable inputs.
+# This runs AFTER closure traversal, so a later copier visit cannot restore a
+# host binary. The existing npm fetcher supplies the exact optional-dep version.
+align_darwin_esbuild_runtime_closures() {
+  local root="$1"
+  [[ "$TARGET_OS" == "darwin" ]] || return 0
+  local target="@esbuild/darwin-${TARGET_ARCH}" expected_arch
+  case "$TARGET_ARCH" in
+    x64) expected_arch="x86_64" ;;
+    arm64) expected_arch="arm64" ;;
+    *) echo "ERROR: unsupported Darwin esbuild target $TARGET_ARCH" >&2; return 1 ;;
+  esac
+  local manifest pkg_dir version pinned actual binary description scoped
+  while IFS= read -r -d '' manifest; do
+    pkg_dir="${manifest%/package.json}"
+    version="$(node -e 'process.stdout.write(String(require(process.argv[1]).version||""))' "$manifest")" || return 1
+    pinned="$(node -e 'const p=require(process.argv[1]);process.stdout.write(String((p.optionalDependencies||{})[process.argv[2]]||""))' "$manifest" "$target")" || return 1
+    [[ -n "$version" && "$pinned" == "$version" ]] || {
+      echo "ERROR: runtime esbuild $version has no exact $target optional dependency" >&2
+      return 1
+    }
+    fetch_cross_npm_pkg "$target@$pinned" "$pkg_dir/node_modules" || return 1
+    actual="$(node -e 'process.stdout.write(String(require(process.argv[1]).version||""))' "$pkg_dir/node_modules/$target/package.json")" || return 1
+    [[ "$actual" == "$pinned" ]] || {
+      echo "ERROR: runtime $target version $actual differs from esbuild $pinned" >&2
+      return 1
+    }
+    binary="$pkg_dir/node_modules/$target/bin/esbuild"
+    [[ -s "$binary" ]] || { echo "ERROR: missing runtime $target executable" >&2; return 1; }
+    description="$(file -b "$binary")" || return 1
+    [[ "$description" == *Mach-O* && "$description" == *"$expected_arch"* ]] || {
+      echo "ERROR: runtime $target is not Mach-O $expected_arch ($description)" >&2
+      return 1
+    }
+    # esbuild/install.js's optimized CLI is a host binary, not a JS source file.
+    # Its downloaded-* files are installation fallbacks for the same selector.
+    mkdir -p "$pkg_dir/bin"
+    rm -f "$pkg_dir/bin/esbuild"
+    cp "$binary" "$pkg_dir/bin/esbuild" || return 1
+    chmod 755 "$pkg_dir/bin/esbuild" "$binary" || return 1
+    find "$pkg_dir/lib" -maxdepth 1 -type f -name 'downloaded-*' -delete || return 1
+    echo "  ✓ runtime esbuild $version: exact darwin-${TARGET_ARCH} executable closure"
+  done < <(find "$root/node_modules" -type f -path '*/node_modules/esbuild/package.json' -print0)
+  # Optional foreign packages can also arrive inside a parent cp -aL. They
+  # cannot be selected by esbuild's Darwin process.platform/process.arch map.
+  # Retain target packages at every nesting level, including distinct versions.
+  while IFS= read -r -d '' scoped; do
+    [[ "$(basename "$scoped")" == "darwin-${TARGET_ARCH}" ]] && continue
+    rm -rf "$scoped" || return 1
+  done < <(find "$root/node_modules" -type d -path '*/node_modules/@esbuild/*' -prune -print0)
+}
 # WI-10004350: a nested runtime package bundled into the sidecar installs from
 # its COMMITTED lock. A lockless `npm install` resolves the newest in-range
 # versions at build time: two 0.0.26 cuts of one source shipped pg 8.23.0 and
@@ -2733,6 +2789,7 @@ echo "→ pruning vendored test fixtures from sidecar (release-privacy, WI-37620
 prune_vendored_test_fixtures "$SIDECAR_DIR"
 
 echo "→ verifying every required Node runtime dependency resolves inside the assembled sidecar"
+align_darwin_esbuild_runtime_closures "$SIDECAR_DIR" || exit 1
 assert_runtime_dependency_closure "$SIDECAR_DIR" || exit 1
 
 echo "→ verifying no ONNX GPU execution providers survive in the sidecar (WI-38682)"
