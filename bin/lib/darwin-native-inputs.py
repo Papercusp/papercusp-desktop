@@ -507,7 +507,9 @@ def qualify_runtime(args):
                 thread.join()
 
         def kopia():
-            prefix = [root / "bin/kopia", "--config-file", work / "kopia.config"]
+            # The fixture password is already supplied in KOPIA_PASSWORD. Avoid
+            # Kopia's default macOS Keychain persistence (an interactive child).
+            prefix = [root / "bin/kopia", "--config-file", work / "kopia.config", "--no-persist-credentials"]
             payload = work / "input/payload.txt"
             payload.write_text("papercusp native snapshot protocol\n")
             execute("kopia-create-repo", prefix + ["repository", "create", "filesystem", "--path", work / "repository",

@@ -349,6 +349,28 @@ finally:shutil.rmtree(root)
   });
 }
 
+test('native Kopia protocols select no credential persistence and retain password access for the full roundtrip', () => {
+  const result = pythonProbe(nativeProtocolFixture + `
+try:
+    persistence_attempts=[]
+    def unattended_command(command,**kwargs):
+        assert command[0].endswith('kopia')
+        if '--no-persist-credentials' not in command:
+            persistence_attempts.append(command)
+            raise m.subprocess.TimeoutExpired(command,kwargs['timeout'],stderr=b'keyring persistence waiting for interactive child')
+        assert kwargs['env']['KOPIA_PASSWORD']=='local-fixture-only'
+        return native_command(command,**kwargs)
+    m.subprocess.run=unattended_command
+    args=SimpleNamespace(root=root,sha256='sha',arch='x64',receipt=root/'receipt.json',evidence=root/'evidence',phase='kopia')
+    m.qualify_runtime(args)
+    assert not persistence_attempts and len(calls)==4
+    assert json.loads(args.receipt.read_text())['checks']=={'kopia':True}
+    assert not any(work.exists() for work in work_paths)
+finally:shutil.rmtree(root)
+`);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
 for (const protocol of ['pg-start', 'pg-vector-query', 'gh-loopback-api', 'kopia-create-repo']) {
   test(`native ${protocol} timeout preserves partial evidence and cleans up without a receipt`, () => {
     const result = pythonProbe(nativeProtocolFixture + `
