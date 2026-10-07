@@ -199,6 +199,18 @@ checked_command() {
   fi
 }
 
+compile_harness() {
+  local status
+  if WINEPREFIX="$TESTPREFIX" timeout 300 xvfb-run -a wine "$ISCC_EXE" "$HARNESS_WIN" \
+      >"$WORK/iscc.log" 2>&1; then
+    return 0
+  else
+    status=$?
+  fi
+  tail -30 "$WORK/iscc.log" >&2
+  fail "ISCC invocation failed (exit $status); case measured nothing (diagnostics: $WORK/iscc.log)"
+}
+
 # Exercise the same reporting helpers with mocked instruments before checking
 # for the optional Windows toolchain. This keeps failure-vs-product verdicts in
 # the project's existing shell self-test, including on hosts that skip Wine.
@@ -219,6 +231,14 @@ exec "$@"
 MOCK_XVFB
   cat >"$mockbin/wine" <<'MOCK_WINE'
 #!/usr/bin/env bash
+if [[ "${1:-}" == fake-iscc ]]; then
+  [[ "${WINEPREFIX:-}" == "${EXPECTED_COMPILER_PREFIX:-}" ]] || exit 61
+  case "${MOCK_COMPILER_MODE:-success}" in
+    startup-failure) printf 'wine: a wine server seems to be running, but I cannot connect to it.\n' >&2; exit 19 ;;
+    syntax-failure) printf 'Error on line 12: Unknown identifier.\n' >&2; exit 2 ;;
+  esac
+  exit 0
+fi
 if [[ "${1:-}" == "reg" && "${2:-}" == "query" ]]; then
   case "${MOCK_REG_MODE:-readable}" in
     readable)
@@ -297,6 +317,20 @@ MOCK_WINE
   [[ $status -eq 1 && $output == *"case measured nothing"* ]] || fail "failed install fixture lacked an unmeasured-case diagnostic"
   [[ -s "$WORK/install-fault.log" ]] || fail "failed install fixture did not retain its log"
   ok "install failures stop guard assertions and retain their log"
+
+  local ISCC_EXE=fake-iscc HARNESS_WIN='Z:\harness.iss'
+  local EXPECTED_COMPILER_PREFIX="$TESTPREFIX" MOCK_COMPILER_MODE=success
+  export EXPECTED_COMPILER_PREFIX MOCK_COMPILER_MODE
+  compile_harness || fail "compiler did not use the owned test prefix"
+  ok "compiler uses the owned prefix rather than the shared provisioned prefix"
+  for MOCK_COMPILER_MODE in startup-failure syntax-failure; do
+    if output=$(compile_harness 2>&1); then
+      fail "failed compiler fixture was allowed to reach product assertions"
+    fi
+    [[ $output == *"ISCC invocation failed"* && $output == *"case measured nothing"* ]] || fail "compiler failure lost its instrument diagnostic"
+    [[ -s "$WORK/iscc.log" ]] || fail "compiler failure did not retain its log"
+  done
+  ok "Wine startup and compiler failures retain diagnostics and fail the test"
 
   rm -rf "$root"
 }
@@ -397,21 +431,17 @@ end;
 PROBE
 } > "$WORK/harness.iss"
 
-HARNESS_WIN="$(WINEPREFIX="$WINEPREFIX_INNO" winepath -w "$WORK/harness.iss" 2>/dev/null)"
+# Reading ISCC from the provisioned directory does not require its shared
+# wineserver. Boot and use the test's owned prefix (EI-25284908496408631).
+WINEPREFIX="$TESTPREFIX" timeout 300 xvfb-run -a wineboot -i >"$WORK/wineboot.log" 2>&1
+[[ -d "$TESTPREFIX/drive_c" ]] || { tail -5 "$WORK/wineboot.log"; fail "could not boot a test wine prefix"; }
+HARNESS_WIN="$(WINEPREFIX="$TESTPREFIX" winepath -w "$WORK/harness.iss" 2>/dev/null)"
 [[ -n "$HARNESS_WIN" ]] || fail "winepath could not map $WORK/harness.iss"
 
-if ! WINEPREFIX="$WINEPREFIX_INNO" timeout 300 xvfb-run -a wine "$ISCC_EXE" "$HARNESS_WIN" \
-     > "$WORK/iscc.log" 2>&1; then
-  echo "--- ISCC output ---"; tail -30 "$WORK/iscc.log"
-  fail "the [Code] section did not compile (a syntax/identifier error in papercusp.iss)"
-fi
+compile_harness
 HARNESS_EXE="$WORK/out/uninst-harness.exe"
 [[ -f "$HARNESS_EXE" ]] || fail "ISCC reported success but produced no harness exe"
 echo "  [Code] section compiles ✓"
-
-# ── Boot the throwaway prefix ────────────────────────────────────────────────
-WINEPREFIX="$TESTPREFIX" timeout 300 xvfb-run -a wineboot -i >"$WORK/wineboot.log" 2>&1
-[[ -d "$TESTPREFIX/drive_c" ]] || { tail -5 "$WORK/wineboot.log"; fail "could not boot a test wine prefix"; }
 
 RUN_KEY='HKCU\Software\Microsoft\Windows\CurrentVersion\Run'
 APPROVED_KEY='HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'

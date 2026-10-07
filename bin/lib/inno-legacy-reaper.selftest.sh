@@ -83,20 +83,19 @@ CODE_LINE="$(grep -n '^\[Code\]' "$ISS" | head -1 | cut -d: -f1)"
   sed -n "${CODE_LINE},\$p" "$ISS"
 } > "$WORK/harness.iss"
 
-WORK_WIN="$(WINEPREFIX="$WINEPREFIX_INNO" winepath -w "$WORK/harness.iss" 2>/dev/null)"
+# Compilation shares the test's private prefix, never the provisioned Wine server.
+WINEPREFIX="$TESTPREFIX" timeout 300 xvfb-run -a wineboot -i >"$WORK/wineboot.log" 2>&1
+[[ -d "$TESTPREFIX/drive_c" ]] || { tail -5 "$WORK/wineboot.log"; fail "could not boot a test wine prefix"; }
+WORK_WIN="$(WINEPREFIX="$TESTPREFIX" winepath -w "$WORK/harness.iss" 2>/dev/null)"
 [[ -n "$WORK_WIN" ]] || fail "winepath could not map $WORK/harness.iss"
 
-if ! WINEPREFIX="$WINEPREFIX_INNO" timeout 300 xvfb-run -a wine "$ISCC_EXE" "$WORK_WIN" \
+if ! WINEPREFIX="$TESTPREFIX" timeout 300 xvfb-run -a wine "$ISCC_EXE" "$WORK_WIN" \
      > "$WORK/iscc.log" 2>&1; then
   echo "--- ISCC output ---"; tail -30 "$WORK/iscc.log"
-  fail "the [Code] section did not compile (a syntax/identifier error in papercusp.iss)"
+  fail "ISCC invocation failed; case measured nothing (diagnostics: $WORK/iscc.log)"
 fi
 HARNESS_EXE="$WORK/out/reaper-harness.exe"
 [[ -f "$HARNESS_EXE" ]] || fail "ISCC reported success but produced no harness exe"
-
-# ── Boot the throwaway prefix ────────────────────────────────────────────────
-WINEPREFIX="$TESTPREFIX" timeout 300 xvfb-run -a wineboot -i >"$WORK/wineboot.log" 2>&1
-[[ -d "$TESTPREFIX/drive_c" ]] || { tail -5 "$WORK/wineboot.log"; fail "could not boot a test wine prefix"; }
 
 REG_ROOT='HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall'
 wreg() { WINEPREFIX="$TESTPREFIX" xvfb-run -a wine reg "$@" >/dev/null 2>&1; }
