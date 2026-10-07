@@ -99,6 +99,44 @@ finally: shutil.rmtree(root)
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
+test('PG assembly binds the final relocated dylib aliases created by dependency closure', () => {
+  const result = pythonProbe(`
+from types import SimpleNamespace
+root=pathlib.Path(tempfile.mkdtemp())
+try:
+    keg=root/'keg'; vector=root/'vector'; go=root/'go'; out=root/'out'
+    original=bytes.fromhex('cffaedfe')+b'\\0'+b'\\0'.join(old.encode() for old,new in m.postgres_path_replacements('x64').values())+b'\\0'
+    fixtures={**{'bin/'+n:original for n in m.PG_PROGRAMS},
+              'lib/postgresql/libecpg.6.dylib':original,
+              'lib/postgresql/plpgsql.dylib':bytes.fromhex('cffaedfe')+b'\\0fixture',
+              'share/postgresql/postgres.bki':b'fixture',
+              'share/postgresql/extension/plpgsql.control':b'fixture'}
+    for name,data in fixtures.items():
+        p=keg/name; p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(data);p.chmod(0o755)
+    for name in ['vector.dylib','extension/vector.control']:
+        p=vector/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(bytes.fromhex('cffaedfe')+b'fixture')
+    for name in ['gh','kopia']:
+        p=go/'bin'/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(bytes.fromhex('cffaedfe')+b'fixture');p.chmod(0o755)
+    receipt=root/'receipt.json';receipt.write_text('{}')
+    m.inspect=lambda p,arch:{'format':'fixture','minimumOS':['14.0'],'dylibs':['/usr/local/lib/libecpg.6.dylib'] if p.name=='postgres' else []}
+    m.run=lambda *a:''
+    m.check_closure=lambda r,arch,floor:{p.relative_to(r).as_posix():{'minimumOS':['14.0']} for p in r.rglob('*') if p.is_file() and m.is_macho(p)}
+    args=SimpleNamespace(out=out,keg=keg,vector=vector,go=go,receipt=[receipt],dependency=[],arch='x64',floor='14.0')
+    m.assemble(args)
+    manifest=json.loads((out/'manifest.json').read_text())
+    assert manifest['postgresqlPathRelocation']['lib/libecpg.6.dylib']['pkglibdir']==1
+    assert manifest['postgresqlPathRelocation']['lib/postgresql/libecpg.6.dylib']['pkglibdir']==1
+    m.verify(out,m.sha(out/'manifest.json'),'x64','dogfood')
+    del manifest['postgresqlPathRelocation']['lib/libecpg.6.dylib']
+    (out/'manifest.json').write_text(json.dumps(manifest))
+    try:m.verify(out,m.sha(out/'manifest.json'),'x64','dogfood')
+    except ValueError:pass
+    else:raise AssertionError('pre-closure relocation inventory accepted')
+finally:shutil.rmtree(root)
+`);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
 test('native minimum OS parser excludes adjacent linker/dylib versions and supports legacy macOS commands', () => {
   const commands = 'Load command 0\n cmd LC_BUILD_VERSION\n platform macos\n minos 14.0\n sdk 15.2\n tool LD\n version 1115.7.3\nLoad command 1\n cmd LC_LOAD_DYLIB\n current version 78.3.0\nLoad command 2\n cmd LC_VERSION_MIN_MACOSX\n version 13.1\n sdk 14.0\n';
   const result = pythonProbe(`assert m.minimum_os(${JSON.stringify(commands)}) == ['14.0', '13.1']\ntry: m.minimum_os('cmd LC_LOAD_DYLIB\\n version 1115.7.3\\n')\nexcept ValueError: pass\nelse: raise AssertionError('unmeasured minimum accepted')`);
