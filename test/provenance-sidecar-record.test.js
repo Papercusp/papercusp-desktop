@@ -413,6 +413,77 @@ test('Mac VM build verifies the sidecar pui generation before packaging without 
   );
 });
 
+function sourceIdentityFixture() {
+  const root = tmp();
+  const git = (args) => {
+    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git(['init', '-q']);
+  git(['config', 'user.email', 'provenance@test']);
+  git(['config', 'user.name', 'Provenance Test']);
+  git(['config', 'commit.gpgsign', 'false']);
+  fs.writeFileSync(path.join(root, 'source.txt'), root);
+  git(['add', '.']);
+  git(['commit', '-qm', 'source identity fixture']);
+  return { root, head: git(['rev-parse', 'HEAD']) };
+}
+
+function runSourceIdentityPreflight(root, head) {
+  return spawnSync('bash', [path.join(BIN, 'build-desktop-sidecar.sh')], {
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: {
+      ...process.env,
+      REPO_ROOT: root,
+      PAPERCUSP_DISTRIBUTION_PROFILE: 'dogfood',
+      PAPERCUSP_RELEASE_AUDIT: '1',
+      PAPERCUSP_TRANSFORMERS_VERIFY_PINNED: '0',
+      PROVENANCE_SOURCE_GIT_HEAD: head,
+      PROVENANCE_SOURCE_GIT_DIRTY: 'false',
+    },
+  });
+}
+
+test('sidecar preflight refuses a desktop SHA supplied for a different monorepo source', () => {
+  const monorepo = sourceIdentityFixture();
+  const desktop = sourceIdentityFixture();
+  assert.notEqual(monorepo.head, desktop.head);
+  const result = runSourceIdentityPreflight(monorepo.root, desktop.head);
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /source identity mismatch at entry/);
+  assert.ok(result.stderr.includes(monorepo.head));
+  assert.ok(result.stderr.includes(desktop.head));
+  assert.doesNotMatch(`${result.stdout}${result.stderr}`, /npm install|esbuild-bundling|building operator-vite/);
+  assert.equal(fs.existsSync(path.join(monorepo.root, 'node_modules')), false);
+});
+
+test('sidecar preflight accepts the matching monorepo SHA before later input guards', () => {
+  const monorepo = sourceIdentityFixture();
+  const builder = fs.readFileSync(path.join(BIN, 'build-desktop-sidecar.sh'), 'utf8');
+  const guard = builder.match(/if \[\[ "\$\{PAPERCUSP_RELEASE_AUDIT:-0\}" == "1" \]\]; then\n  _provenance_entry_head=[\s\S]*?unset _provenance_entry_head\nfi/);
+  assert.ok(guard, 'entry source identity guard must remain executable');
+  const result = spawnSync('bash', ['-c', guard[0]], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      REPO_ROOT: monorepo.root,
+      PAPERCUSP_RELEASE_AUDIT: '1',
+      PROVENANCE_SOURCE_GIT_HEAD: monorepo.head,
+    },
+  });
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.doesNotMatch(result.stderr, /source identity mismatch at entry/);
+});
+
+test('sidecar preflight refuses an explicitly empty source SHA', () => {
+  const monorepo = sourceIdentityFixture();
+  const result = runSourceIdentityPreflight(monorepo.root, '');
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /source identity mismatch at entry/);
+});
+
 test('release-audited sidecar fails closed on dirty or moving source before publish', () => {
   const builder = fs.readFileSync(path.join(BIN, 'build-desktop-sidecar.sh'), 'utf8');
   const dirtyGuardAt = builder.indexOf('release-audited sidecar requires a clean source tree');
