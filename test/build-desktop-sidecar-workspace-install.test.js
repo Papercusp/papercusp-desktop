@@ -39,8 +39,115 @@ test('every sidecar esbuild package runner holds the host package-cache lease', 
   const runners = builder.split('\n').filter(line => line.includes('npx --yes esbuild@0.25.0'));
   assert.ok(runners.length >= 8, 'all sidecar bundle phases must be covered');
   for (const runner of runners) {
-    assert.ok(runner.includes('node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx'), runner);
+    assert.ok(runner.includes('run_sidecar_cached_package npx'), runner);
   }
+  assert.match(extractFunction('run_sidecar_cached_package'), /helper\.withPackageCacheReadLease\(/);
+  assert.doesNotMatch(builder, /--exec-under-cache-lock -- npx/);
+});
+
+const CACHE_PACKAGE_RUNNER = extractFunction('run_sidecar_cached_package');
+
+function runCachePackageFixture({ helper, command = [], childStatus = 0 } = {}) {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "pc-cache-runner's target-"));
+  try {
+    fs.mkdirSync(path.join(fixture, 'scripts'));
+    fs.writeFileSync(path.join(fixture, 'scripts/npm-install-safe.mjs'), helper);
+    const record = path.join(fixture, 'child.json');
+    const child = path.join(fixture, 'child.mjs');
+    fs.writeFileSync(child, [
+      'import { writeFileSync } from "node:fs";',
+      'writeFileSync(process.env.PC_CACHE_CHILD_RECORD, JSON.stringify({',
+      '  args: process.argv.slice(2), cwd: process.cwd(), lease: process.env.PC_CACHE_LEASE,',
+      '}));',
+      `process.exit(${childStatus});`,
+    ].join('\n'));
+    const result = childProcess.spawnSync('bash', ['-c', [
+      'set -euo pipefail',
+      CACHE_PACKAGE_RUNNER,
+      'run_sidecar_cached_package "$@"',
+    ].join('\n'), 'fixture', ...(command.length ? command : [process.execPath, child, 'space argument', "apostrophe's argument", '--platform=node'])], {
+      encoding: 'utf8',
+      timeout: 10_000,
+      env: { ...process.env, REPO_ROOT: fixture, WEB_DIR: fixture, PC_CACHE_CHILD_RECORD: record },
+    });
+    return {
+      ...result,
+      fixture,
+      child: fs.existsSync(record) ? JSON.parse(fs.readFileSync(record, 'utf8')) : null,
+    };
+  } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
+}
+
+const LEGACY_CACHE_HELPER = [
+  // Same historical CLI shape as the frozen target: the newer flag would install.
+  'export function parseCliArgs(args) { return { npmArgs: ["install", ...args] }; }',
+  'export async function withPackageCacheReadLease(fn) {',
+  '  process.env.PC_CACHE_LEASE = "held";',
+  '  try { return await fn(); } finally { delete process.env.PC_CACHE_LEASE; }',
+  '}',
+].join('\n');
+
+test('frozen helper with no new CLI flag runs exact child arguments inside its existing cache lease', () => {
+  const result = runCachePackageFixture({ helper: LEGACY_CACHE_HELPER });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual(result.child.args, ['space argument', "apostrophe's argument", '--platform=node']);
+  assert.equal(result.child.cwd, result.fixture);
+  assert.equal(result.child.lease, 'held');
+});
+
+test('package-cache runner propagates a failing child instead of swallowing it', () => {
+  const result = runCachePackageFixture({ helper: LEGACY_CACHE_HELPER, childStatus: 29 });
+  assert.equal(result.status, 29, result.stdout + result.stderr);
+  assert.equal(result.child.lease, 'held');
+});
+
+test('helper preflight is non-mutating and precedes expensive producer work', () => {
+  const result = runCachePackageFixture({
+    helper: 'export function withPackageCacheReadLease() { throw new Error("preflight must not enter cache"); }',
+    command: ['--check'],
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.child, null);
+  const guard = builder.indexOf('run_sidecar_cached_package --check || exit 1');
+  assert(guard > 0);
+  assert(guard > builder.indexOf('source identity mismatch at entry'));
+  assert(guard > builder.indexOf('requires a clean source tree at cut start'));
+  assert(guard < builder.indexOf('node scripts/npm-install-safe.mjs install'));
+  assert(guard < builder.indexOf('→ building operator-vite SPA'));
+});
+
+test('missing shared cache API refuses both preflight and execution before any child runs', () => {
+  for (const command of [['--check'], []]) {
+    const result = runCachePackageFixture({ helper: 'export const oldHelper = true;', command });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /lacks withPackageCacheReadLease/);
+    assert.equal(result.child, null);
+  }
+});
+
+test('cache lease refusal and missing command are fatal without a bare-run fallback', () => {
+  const refused = runCachePackageFixture({
+    helper: 'export function withPackageCacheReadLease() { throw new Error("cache writer held"); }',
+  });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /cache writer held/);
+  assert.equal(refused.child, null);
+  const missing = runCachePackageFixture({
+    helper: LEGACY_CACHE_HELPER, command: ['pc-nonexistent-cache-runner-command'],
+  });
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /ENOENT/);
+  assert.equal(missing.child, null);
+});
+
+test('current maintained npm helper satisfies the producer cache API preflight', () => {
+  const result = childProcess.spawnSync('bash', ['-c', [
+    'set -euo pipefail', CACHE_PACKAGE_RUNNER, 'run_sidecar_cached_package --check',
+  ].join('\n')], {
+    encoding: 'utf8', timeout: 10_000,
+    env: { ...process.env, REPO_ROOT: repoRoot, WEB_DIR: path.join(repoRoot, 'apps/operator') },
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
 function runLdconfigResolver(pathValue) {
