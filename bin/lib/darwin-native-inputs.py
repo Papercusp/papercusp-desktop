@@ -97,6 +97,14 @@ def files_hash(files):
     return hashlib.sha256(canonical(files)).hexdigest()
 
 
+def make_copy_writable(root):
+    # Homebrew kegs intentionally ship 0555 dirs/executables. rcodesign needs
+    # to replace files beside the target; writable files alone are insufficient.
+    # Touch ONLY the newly copied normalization output, never the upstream keg.
+    for path in [root, *root.rglob("*")]:
+        path.chmod(path.stat().st_mode | 0o200)
+
+
 def check_closure(root, arch, floor):
     observations = {}
     for path in sorted(root.rglob("*")):
@@ -178,6 +186,7 @@ def assemble(args):
     (root / "bin").mkdir()
     for name in ("gh", "kopia"):
         shutil.copy2(args.go / "bin" / name, root / "bin" / name)
+    make_copy_writable(root)
 
     # Reuse exact dependency kegs selected from the PG bottle's upstream SBOM.
     # Resolve the entire emitted Mach-O population, including server plugins.
@@ -206,6 +215,7 @@ def assemble(args):
             target = native / "lib" / base
             if not target.exists():
                 shutil.copy2(sources[0][0], target)
+                target.chmod(target.stat().st_mode | 0o200)
                 pending.append(target)
             replacement = "@loader_path/" + os.path.relpath(target, path.parent)
             run("llvm-install-name-tool-18", "-change", dep, replacement, str(path))
