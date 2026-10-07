@@ -17,7 +17,7 @@ fi
 command -v cargo >/dev/null 2>&1 || { echo "FATAL: cargo not resolvable (checked PATH and ~/.cargo/bin) — install rustup or fix PATH" >&2; exit 12; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ROOT="$(cd "${PAPERCUSP_DESKTOP_TARGET_ROOT:-$SCRIPT_DIR/..}" && pwd)"
 PROFILE="release"
 TAURI_SUBCOMMAND="build"
 BUNDLE_ARGS=(--bundles deb)

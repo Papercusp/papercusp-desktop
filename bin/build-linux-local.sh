@@ -65,8 +65,11 @@ if [[ -z "${PAPERCUSP_BUILD_LINUX_SELF_SNAPSHOT:-}" ]]; then
 fi
 trap 'rm -rf -- "${PAPERCUSP_BUILD_LINUX_SNAPSHOT_DIR:-}"' EXIT
 
-ROOT="${PAPERCUSP_BUILD_LINUX_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-HERE="$ROOT/bin"
+# The self-snapshot remembers the immutable producer root. D-181 keeps that
+# helper root separate from the frozen product/output root, as the sidecar and
+# Mac producers already do; no new configuration or source overlay is needed.
+HERE="${PAPERCUSP_BUILD_LINUX_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/bin"
+ROOT="$(cd "${PAPERCUSP_DESKTOP_TARGET_ROOT:-$HERE/..}" && pwd)"
 cd "$ROOT"
 
 # D-043 / P-049: customer VM releases are a separate, explicit packaging
@@ -254,14 +257,14 @@ case "${PAPERCUSP_REUSE_SIDECAR:-0}" in
   0)
     echo "==> [1/5] building sidecar (build-desktop-sidecar.sh)"
     PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_DESKTOP_VERSION="$VERSION" \
-      bash "$ROOT/bin/build-desktop-sidecar.sh"
+      bash "$HERE/build-desktop-sidecar.sh"
 
     if [[ "$DISTRIBUTION_PROFILE" == "dogfood" ]]; then
       echo "==> [2/5] staging env-sidecars (stage-env-sidecars.sh)"
-      bash "$ROOT/bin/stage-env-sidecars.sh"
+      bash "$HERE/stage-env-sidecars.sh"
 
       echo "==> [3/5] staging source tree / all-5-buttons bundle (stage-source-tree.sh)"
-      bash "$ROOT/bin/stage-source-tree.sh"
+      bash "$HERE/stage-source-tree.sh"
       hold_sidecar_read_lock
     else
       echo "==> [2-3/5] vm-release — skipping env-sidecars and editable source staging"
@@ -295,20 +298,20 @@ case "${PAPERCUSP_REUSE_SIDECAR:-0}" in
     # Reuse the maintained provenance verifier here so the mixed-SHA package is
     # rejected before Cargo/Tauri work instead of after a clean-VM install.
     if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
-      if ! bash "$ROOT/bin/verify-provenance.sh" "$ROOT/src-tauri/sidecar" \
+      if ! bash "$HERE/verify-provenance.sh" "$ROOT/src-tauri/sidecar" \
         --health-sha "$BUILD_SHA" --allow-dirty; then
         echo "ERROR: vm-release sidecar reuse must match build SHA $BUILD_SHA; rebuild without PAPERCUSP_REUSE_SIDECAR=1" >&2
         exit 1
       fi
     fi
-    bash "$ROOT/bin/verify-sidecar-bundle.sh" "$ROOT/src-tauri/sidecar"
+    bash "$HERE/verify-sidecar-bundle.sh" "$ROOT/src-tauri/sidecar"
     # Reuse is a byte-for-byte packaging shortcut, not a release-policy bypass.
     # A sidecar assembled by a dev/background producer can be structurally valid
     # while still carrying that producer's local identity in SPA/docs content.
     # Catch that before the Rust build instead of several minutes later in the
     # AppImage's final assembled-tree scan (WI-40598).
     if [[ "$DISTRIBUTION_PROFILE" == "dogfood" ]]; then
-      python3 "$ROOT/bin/audit-release-bundle.py" \
+      python3 "$HERE/audit-release-bundle.py" \
         --scan-dir "$ROOT/src-tauri/sidecar"
     else
       echo "==> vm-release reused runtime will be identity-scanned from the finished .deb"
@@ -388,7 +391,7 @@ if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
     exit 1
   }
   for deb in "${vm_release_debs[@]}"; do
-    bash "$ROOT/bin/repack-deb-xz.sh" "$deb"
+    bash "$HERE/repack-deb-xz.sh" "$deb"
     [[ -f "$deb.sig" && "$deb.sig" -nt "$VM_RELEASE_FRESHNESS_MARKER" ]] || {
       echo "ERROR: vm-release package is not accompanied by a fresh updater signature: $deb.sig" >&2
       exit 1
@@ -397,7 +400,7 @@ if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
   done
 else
   for deb in "$SRC_ROOT"/release/bundle/deb/*_"$VERSION"_*.deb; do
-    [[ -f "$deb" ]] && bash "$ROOT/bin/repack-deb-xz.sh" "$deb"
+    [[ -f "$deb" ]] && bash "$HERE/repack-deb-xz.sh" "$deb"
   done
 fi
 

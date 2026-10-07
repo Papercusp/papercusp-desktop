@@ -2,6 +2,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const os = require('node:os');
+const { spawnSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
 const linuxScript = fs.readFileSync(path.join(root, 'bin/build-linux-local.sh'), 'utf8');
@@ -13,6 +15,58 @@ const hetznerRigScript = fs.readFileSync(path.join(root, 'bin/lib/deb-hetzner-ri
 const vmConfig = JSON.parse(
   fs.readFileSync(path.join(root, 'src-tauri/tauri.vm-release.conf.json'), 'utf8'),
 );
+
+test('Linux self-snapshot keeps current helpers while selecting a frozen product root', () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-linux-source-seam-'));
+  try {
+    const tooling = path.join(fixture, 'tooling');
+    const product = path.join(fixture, 'product');
+    for (const dir of [tooling, product]) fs.mkdirSync(path.join(dir, 'bin/lib'), { recursive: true });
+    const entry = path.join(tooling, 'bin/build-linux-local.sh');
+    fs.writeFileSync(entry, linuxScript);
+    fs.writeFileSync(path.join(tooling, 'bin/lib/distribution-profile.sh'), 'printf "tooling=%s\\nproduct=%s\\n" "$HERE" "$ROOT"\nexit 0\n');
+    fs.writeFileSync(path.join(product, 'bin/lib/distribution-profile.sh'), 'echo wrong-frozen-helper\nexit 71\n');
+    for (const target of ['', product]) {
+      const result = spawnSync('bash', [entry], { encoding: 'utf8', env: { ...process.env,
+        PAPERCUSP_BUILD_LINUX_SELF_SNAPSHOT: '', PAPERCUSP_BUILD_LINUX_ROOT: '',
+        PAPERCUSP_DESKTOP_TARGET_ROOT: target,
+      } });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.equal(result.stdout, `tooling=${tooling}/bin\nproduct=${target || tooling}\n`);
+    }
+  } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
+});
+
+test('Linux reuse qualification runs the maintained tooling verifier and audit', () => {
+  const reuse = linuxScript.slice(linuxScript.indexOf('case "${PAPERCUSP_REUSE_SIDECAR:-0}"'), linuxScript.indexOf('echo "==> [4/5]'));
+  assert.match(reuse, /bash "\$HERE\/verify-provenance.sh"/);
+  assert.match(reuse, /bash "\$HERE\/verify-sidecar-bundle.sh"/);
+  assert.match(reuse, /python3 "\$HERE\/audit-release-bundle.py"/);
+  assert.doesNotMatch(reuse, /\$ROOT\/bin\//);
+});
+
+test('current Debian repacker invokes Tauri from the frozen product directory', () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-repacker-source-seam-'));
+  try {
+    const tooling = path.join(fixture, 'tooling');
+    const product = path.join(fixture, 'product');
+    const fakeBin = path.join(fixture, 'fake-bin');
+    const receipt = path.join(fixture, 'cwd.txt');
+    fs.mkdirSync(path.join(tooling, 'bin'), { recursive: true });
+    fs.mkdirSync(product);
+    fs.mkdirSync(fakeBin);
+    const entry = path.join(tooling, 'bin/build-deb-repacked.sh');
+    fs.copyFileSync(path.join(root, 'bin/build-deb-repacked.sh'), entry);
+    fs.writeFileSync(path.join(fakeBin, 'cargo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(fakeBin, 'tauri'), '#!/bin/sh\nprintf "%s" "$PWD" > "$PC_TEST_CWD"\nexit 77\n', { mode: 0o755 });
+    const result = spawnSync('bash', [entry], { encoding: 'utf8', env: { ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH}`, PAPERCUSP_DESKTOP_TARGET_ROOT: product,
+      TAURI_SIGNING_PRIVATE_KEY: 'fixture-only', PC_TEST_CWD: receipt,
+    } });
+    assert.equal(result.status, 77, result.stdout + result.stderr);
+    assert.equal(fs.readFileSync(receipt, 'utf8'), product);
+  } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
+});
 
 const expectedVmResources = [
   'sidecar/apps/**/*',
@@ -79,8 +133,8 @@ test('dogfood remains the absent-knob default with both roles and developer stag
     linuxScript.indexOf('# Never clobber a caller-supplied key'),
   );
   assert.match(freshSidecar, /DISTRIBUTION_PROFILE" == "dogfood"/);
-  assert.match(freshSidecar, /bash "\$ROOT\/bin\/stage-env-sidecars\.sh"/);
-  assert.match(freshSidecar, /bash "\$ROOT\/bin\/stage-source-tree\.sh"/);
+  assert.match(freshSidecar, /bash "\$HERE\/stage-env-sidecars\.sh"/);
+  assert.match(freshSidecar, /bash "\$HERE\/stage-source-tree\.sh"/);
   assert.match(freshSidecar, /src-tauri\/sidecar\/env-sidecars\/staging/);
   assert.match(freshSidecar, /src-tauri\/sidecar\/source\.tar\.zst/);
   assert.match(
@@ -116,7 +170,7 @@ test('vm-release is fail-closed, Server-only and disables source staging', () =>
 test('the sidecar provenance receives the immutable build SHA and version', () => {
   assert.match(
     linuxScript,
-    /PAPERCUSP_BUILD_SHA="\$BUILD_SHA" PAPERCUSP_DESKTOP_VERSION="\$VERSION" \\\n\s+bash "\$ROOT\/bin\/build-desktop-sidecar\.sh"/,
+    /PAPERCUSP_BUILD_SHA="\$BUILD_SHA" PAPERCUSP_DESKTOP_VERSION="\$VERSION" \\\n\s+bash "\$HERE\/build-desktop-sidecar\.sh"/,
     'the sidecar provenance emitter must not fall back to empty SHA or unknown version',
   );
 });
@@ -126,8 +180,8 @@ test('vm-release sidecar reuse rejects provenance that differs from the launcher
     linuxScript.indexOf('case "${PAPERCUSP_REUSE_SIDECAR:-0}"'),
     linuxScript.indexOf('# Never clobber a caller-supplied key'),
   );
-  const verifierAt = reuseBlock.indexOf('bin/verify-provenance.sh');
-  const structureAt = reuseBlock.indexOf('bin/verify-sidecar-bundle.sh');
+  const verifierAt = reuseBlock.indexOf('verify-provenance.sh');
+  const structureAt = reuseBlock.indexOf('verify-sidecar-bundle.sh');
 
   assert.ok(verifierAt >= 0, 'vm-release reuse must run the maintained provenance verifier');
   assert.ok(
