@@ -5,14 +5,22 @@ This does not qualify a public profile. LLVM performs the same load-command
 rewrites as build-desktop-sidecar.sh; rcodesign re-signs each modified Mach-O.
 """
 import argparse
+import base64
 import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import datetime, timezone
+import socket
 
 
 def sha(path):
@@ -36,15 +44,22 @@ def minimum_os(commands):
     # Adjacent LC_LOAD_DYLIB/current version and LC_BUILD_VERSION tool versions
     # are not OS requirements. Old LC_VERSION_MIN_MACOSX uses `version`.
     command = None
+    platform = None
     values = []
     for line in commands.splitlines():
         match = re.match(r"\s*cmd\s+(LC_\w+)\s*$", line)
         if match:
             command = match[1]
+            platform = None
+        match = re.match(r"\s*platform\s+(\w+)\s*$", line)
+        if match:
+            platform = match[1].lower()
         field = "minos" if command == "LC_BUILD_VERSION" else (
             "version" if command == "LC_VERSION_MIN_MACOSX" else None)
         match = re.match(r"\s*" + field + r"\s+(\d+(?:\.\d+)*)\s*$", line) if field else None
         if match:
+            if command == "LC_BUILD_VERSION" and platform not in ("1", "macos"):
+                raise ValueError("LC_BUILD_VERSION is not measured macOS platform")
             values.append(match[1])
             command = None
     if not values:
@@ -68,12 +83,13 @@ def inspect(path, arch):
     expected = "x86_64" if arch == "x64" else "arm64"
     if "Mach-O" not in description or expected not in description:
         raise ValueError(f"{path}: not Mach-O {expected}: {description}")
-    loads = run("llvm-otool-18", "-L", str(path)).splitlines()[1:]
+    otool = shutil.which("llvm-otool-18") or "otool"
+    loads = run(otool, "-L", str(path)).splitlines()[1:]
     deps = [line.strip().split(" (compatibility version", 1)[0] for line in loads if line.strip()]
-    identity = run("llvm-otool-18", "-D", str(path)).splitlines()[1:]
+    identity = run(otool, "-D", str(path)).splitlines()[1:]
     if identity and deps and deps[0] == identity[0].strip():
         deps.pop(0)  # LC_ID_DYLIB is not a dependency.
-    return {"format": description, "minimumOS": minimum_os(run("llvm-otool-18", "-l", str(path))),
+    return {"format": description, "minimumOS": minimum_os(run(otool, "-l", str(path))),
             "dylibs": deps}
 
 
@@ -155,6 +171,10 @@ def verify(root, expected, arch, profile, require_runtime=False):
         raise ValueError("Darwin native input upstream provenance missing")
     if require_runtime:
         receipt = manifest.get("runtimeQualification") or {}
+        raw = base64.b64decode(manifest.get("runtimeQualificationReceiptBase64", ""), validate=True)
+        if (not raw or hashlib.sha256(raw).hexdigest() != receipt.get("receiptSha256")
+                or json.loads(raw) != {k: v for k, v in receipt.items() if k != "receiptSha256"}):
+            raise ValueError("native rig receipt SHA-256 must bind actual immutable receipt bytes")
         if (receipt.get("nativeFilesSha256") != files_hash(actual)
                 or receipt.get("target") != manifest["target"]
                 or receipt.get("minimumMacOS") != manifest["minimumMacOS"]
@@ -163,6 +183,137 @@ def verify(root, expected, arch, profile, require_runtime=False):
                        ("pgInitStartQueryStop", "pgvector", "gh", "kopia"))):
             raise ValueError("exact native input rig runtime qualification missing or mismatched")
     return manifest
+
+
+def bind_runtime(args):
+    # Preserve the static manifest; qualification produces a NEW input bank.
+    source = args.root.resolve()
+    manifest = verify(source, args.sha256, args.arch, "dogfood")
+    raw = args.receipt.read_bytes()
+    receipt = json.loads(raw)
+    if not receipt.get("evidence"):
+        raise ValueError("rig receipt requires actual protocol output evidence references")
+    receipt["receiptSha256"] = hashlib.sha256(raw).hexdigest()
+    manifest["runtimeQualification"] = receipt
+    manifest["runtimeQualificationReceiptBase64"] = base64.b64encode(raw).decode()
+    if args.out.exists():
+        raise ValueError("qualified native output must be fresh; refusing overwrite")
+    shutil.copytree(source, args.out)
+    (args.out / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    verify(args.out.resolve(), sha(args.out / "manifest.json"), args.arch, "dogfood", True)
+    print(json.dumps({"manifestSha256": sha(args.out / "manifest.json"), "receiptSha256": receipt["receiptSha256"]}))
+
+
+def qualify_runtime(args):
+    """Input-only protocols in disposable state; the caller owns the rig lock."""
+    root = args.root.resolve()
+    manifest = verify(root, args.sha256, args.arch, "dogfood")
+    expected_arch = "x86_64" if args.arch == "x64" else "arm64"
+    if (platform.system() != "Darwin" or platform.machine() != expected_arch
+            or version(platform.mac_ver()[0]) < version(manifest["minimumMacOS"])):
+        raise ValueError("runtime rig OS/architecture does not satisfy the exact native input")
+    if args.receipt.exists() or args.evidence.exists():
+        raise ValueError("runtime receipt and external evidence must be fresh paths")
+    args.evidence.mkdir(parents=True)
+    observations = []
+    started = time.monotonic()
+    before = file_inventory(root)
+    with tempfile.TemporaryDirectory(prefix="papercusp-native-protocol-") as temporary:
+        work = Path(temporary)
+        for name in ("home", "socket", "input"):
+            (work / name).mkdir()
+        env = {"PATH": os.environ["PATH"], "HOME": str(work / "home"), "LANG": "C",
+               "TMPDIR": temporary, "GH_CONFIG_DIR": str(work / "gh-config"),
+               "GH_TOKEN": "local-fixture-only", "GH_PROMPT_DISABLED": "1"}
+
+        def execute(name, command, cleanup=False):
+            remaining = 180 - (time.monotonic() - started)
+            if remaining <= 0 and not cleanup:
+                raise ValueError("native protocol qualification exceeded its 180s deadline")
+            result = subprocess.run([str(x) for x in command], env=env, capture_output=True,
+                                    text=True, timeout=30 if cleanup else min(45, remaining))
+            output = {"argv": [str(x) for x in command], "exitCode": result.returncode,
+                      "stdout": result.stdout, "stderr": result.stderr}
+            evidence = args.evidence / (str(len(observations)) + "-" + name + ".json")
+            evidence.write_text(json.dumps(output, indent=2) + "\n")
+            # The safe receipt ships only hashes; raw rig identities/paths stay
+            # in external evidence and remain subject to final privacy checks.
+            observations.append({"protocol": name, "exitCode": result.returncode,
+                                 "evidenceSha256": sha(evidence)})
+            if result.returncode:
+                raise ValueError(f"native protocol {name} failed; see external evidence")
+            return result.stdout
+
+        pg = root / "postgresql/bin"
+        data = work / "pg-data"
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        try:
+            execute("initdb", [pg / "initdb", "--encoding=UTF8", "--locale=C", "--auth=trust", "-D", data])
+            execute("pg-start", [pg / "pg_ctl", "-D", data, "-l", work / "postgres.log", "-w", "-t", "30", "-o",
+                                 f"-p {port} -h 127.0.0.1 -k {work / 'socket'}", "start"])
+            query = execute("pg-vector-query", [pg / "psql", "-h", "127.0.0.1", "-p", str(port), "-d", "postgres",
+                                                "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c",
+                                                "SELECT version(); CREATE EXTENSION vector; SELECT '[1,2]'::vector <-> '[4,6]'::vector;"])
+            if "PostgreSQL 18.6" not in query or query.strip().splitlines()[-1] != "5":
+                raise ValueError("native PostgreSQL version/vector result mismatch")
+        finally:
+            if (data / "postmaster.pid").exists():
+                execute("pg-stop", [pg / "pg_ctl", "-D", data, "-m", "fast", "-w", "-t", "20", "stop"], cleanup=True)
+
+        class Fixture(BaseHTTPRequestHandler):
+            calls = 0
+
+            def do_GET(self):
+                Fixture.calls += 1
+                if self.path != "/fixture":
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"nativeQualification":"ok"}')
+
+            def log_message(self, *unused):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            response = execute("gh-loopback-api", [root / "bin/gh", "api", f"http://127.0.0.1:{server.server_port}/fixture"])
+            if json.loads(response) != {"nativeQualification": "ok"} or Fixture.calls != 1:
+                raise ValueError("GitHub CLI did not complete the exact loopback fixture")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+        kopia = root / "bin/kopia"
+        config = work / "kopia.config"
+        prefix = [kopia, "--config-file", config]
+        payload = work / "input/payload.txt"
+        payload.write_text("papercusp native snapshot protocol\n")
+        execute("kopia-create-repo", prefix + ["repository", "create", "filesystem", "--path", work / "repository",
+                                             "--password", "local-fixture-only"])
+        snapshot = json.loads(execute("kopia-snapshot", prefix + ["snapshot", "create", work / "input", "--json"]))
+        identifier = snapshot["rootEntry"]["obj"]
+        listed = json.loads(execute("kopia-list", prefix + ["snapshot", "list", "--all", "--json"]))
+        if not any(item.get("rootEntry", {}).get("obj") == identifier for item in listed):
+            raise ValueError("native Kopia snapshot missing from repository list")
+        execute("kopia-restore", prefix + ["snapshot", "restore", identifier, work / "restored"])
+        if sha(payload) != sha(work / "restored/payload.txt"):
+            raise ValueError("native Kopia restore hash mismatch")
+    if file_inventory(root) != before:
+        raise ValueError("native protocol execution mutated exact input bytes")
+    receipt = {"schemaVersion": "darwin-native-protocol-receipt/v1", "target": manifest["target"],
+               "minimumMacOS": manifest["minimumMacOS"], "rigMacOS": platform.mac_ver()[0],
+               "nativeFilesSha256": files_hash(before), "at": datetime.now(timezone.utc).isoformat(),
+               "checks": {name: True for name in ("pgInitStartQueryStop", "pgvector", "gh", "kopia")},
+               "evidence": observations, "installerAccepted": False}
+    args.receipt.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    print(json.dumps({"receiptSha256": sha(args.receipt), "nativeFilesSha256": files_hash(before), "installerAccepted": False}))
 
 
 def assemble(args):
@@ -252,9 +403,25 @@ def main():
     check.add_argument("arch", choices=("x64", "arm64"))
     check.add_argument("profile")
     check.add_argument("--require-runtime", action="store_true")
+    bind = sub.add_parser("bind-runtime")
+    bind.add_argument("root", type=Path)
+    bind.add_argument("sha256")
+    bind.add_argument("arch", choices=("x64", "arm64"))
+    bind.add_argument("receipt", type=Path)
+    bind.add_argument("out", type=Path)
+    qualify = sub.add_parser("qualify-runtime")
+    qualify.add_argument("root", type=Path)
+    qualify.add_argument("sha256")
+    qualify.add_argument("arch", choices=("x64", "arm64"))
+    qualify.add_argument("receipt", type=Path)
+    qualify.add_argument("evidence", type=Path)
     args = parser.parse_args()
     if args.command == "assemble":
         assemble(args)
+    elif args.command == "bind-runtime":
+        bind_runtime(args)
+    elif args.command == "qualify-runtime":
+        qualify_runtime(args)
     else:
         verify(args.root.resolve(), args.sha256, args.arch, args.profile, args.require_runtime)
         print("PRIVATE_DARWIN_NATIVE_INPUTS_OK")
