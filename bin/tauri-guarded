@@ -271,6 +271,18 @@ if [[ "$__subcommand" == "dev" ]]; then
       echo "FATAL: the restricted-write fence refused \`tauri dev\` (see the RESTRICTED_HOLD_REFUSED line above); nothing was booted." >&2
       exit 1
     fi
+
+    # The operator binds to the canonical workspace runtime root, but a native
+    # dev shell with no explicit PAPERCUSP_HOME otherwise reads ~/.papercusp.
+    # Resolve once BEFORE tauri spawns either process so its IPC reader and the
+    # beforeDevCommand's writer inherit the same directory. Reuse the operator
+    # resolver (including explicit roots, workspace registry and legacy fallback)
+    # rather than maintaining a second shell/Rust workspace-path algorithm.
+    if [[ -z "${PAPERCUSP_HOME:-}" ]]; then
+      PAPERCUSP_HOME="$(cd "$__pc_superproject" && node --import tsx --input-type=module -e \
+        'import { papercuspRoot } from "./packages/operator-core/lib/papercusp-root.ts"; process.stdout.write(papercuspRoot());')"
+      export PAPERCUSP_HOME
+    fi
   fi
 
   # Sourced, not executed: it exports CARGO_TARGET_DIR and holds a lock fd on the
