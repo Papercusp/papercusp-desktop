@@ -82,31 +82,40 @@ PG_PROGRAMS = ("postgres", "initdb", "pg_ctl", "pg_dump", "pg_dumpall", "pg_rest
 RUNTIME_CHECKS = ("pgInitStartQueryStop", "plpgsqlAndEncodingConversion", "pgvector", "gh", "kopia")
 
 
-def postgres_path_replacements(arch):
-    """PG path.c relocates only when the compiled bindir tail matches.
+PG_KEG = "Cellar/postgresql@18/18.6"
+PG_ALIASES = {
+    "bin": PG_KEG + "/bin",
+    "lib/postgresql": "../" + PG_KEG + "/lib/postgresql",
+    "lib/postgresql@18": "../" + PG_KEG + "/lib/postgresql",
+    "share/postgresql": "../" + PG_KEG + "/share/postgresql",
+    "share/postgresql@18": "../" + PG_KEG + "/share/postgresql",
+}
 
-    Homebrew's Cellar/.../bin tail does not match the npm native/bin layout.
-    Normalize the exact pinned PG18.6 C-string constants to ONE synthetic
-    prefix: bin, share/postgresql and lib/postgresql then relocate together.
-    No -L/extension-path workaround, host directory, or runtime API fork.
-    Shorter NUL-padded replacements preserve Mach-O offsets; LLVM + rcodesign
-    below still handle load commands and signatures on the NEW copied output.
+
+def postgres_compiled_paths(arch):
+    """Preserve constants AND compiler-folded lengths: never patch C strings.
+
+    The measured PG18.6 writer bakes strlen(PGBINDIR) into machine code.
+    Shorter NUL-padded literals therefore silently break tail matching. Keep
+    the original keg under its compiled Cellar suffix, expose the existing
+    native/bin API via contained aliases, and let stock PG realpath/relocation
+    resolve both global share/pkglib and keg-local locale/doc paths.
     """
     prefix = {"x64": "/usr/local", "arm64": "/opt/homebrew"}[arch]
     keg = prefix + "/Cellar/postgresql@18/18.6"
     targets = {
-        "bindir": (keg + "/bin", "/bin"),
-        "sharedir": (prefix + "/share/postgresql@18", "/share/postgresql"),
-        "pkglibdir": (prefix + "/lib/postgresql@18", "/lib/postgresql"),
-        "libdir": (prefix + "/lib", "/lib"),
-        "sysconfdir": (prefix + "/etc/postgresql", "/etc/postgresql"),
-        "includedir": (prefix + "/include/postgresql@18", "/include/postgresql"),
-        "includedirserver": (prefix + "/include/postgresql@18/server", "/include/postgresql/server"),
-        "localedir": (keg + "/share/locale", "/share/locale"),
-        "docdir": (keg + "/share/doc/postgresql@18", "/share/doc/postgresql@18"),
-        "mandir": (keg + "/share/man", "/share/man"),
+        "bindir": (keg + "/bin", PG_KEG + "/bin"),
+        "sharedir": (prefix + "/share/postgresql@18", "share/postgresql@18"),
+        "pkglibdir": (prefix + "/lib/postgresql@18", "lib/postgresql@18"),
+        "libdir": (prefix + "/lib", "lib"),
+        "sysconfdir": (prefix + "/etc/postgresql", "etc/postgresql"),
+        "includedir": (prefix + "/include/postgresql@18", "include/postgresql"),
+        "includedirserver": (prefix + "/include/postgresql@18/server", "include/postgresql/server"),
+        "localedir": (keg + "/share/locale", PG_KEG + "/share/locale"),
+        "docdir": (keg + "/share/doc/postgresql@18", PG_KEG + "/share/doc/postgresql@18"),
+        "mandir": (keg + "/share/man", PG_KEG + "/share/man"),
     }
-    return {key: (old, "/__pcpg" + suffix) for key, (old, suffix) in targets.items()}
+    return targets
 
 
 def postgres_cstring_count(data, value):
@@ -115,59 +124,52 @@ def postgres_cstring_count(data, value):
 
 
 def normalize_postgres_paths(native, arch):
-    replacements = postgres_path_replacements(arch)
-    plans = []
-    records = {}
-    for path in sorted(native.rglob("*")):
-        if not path.is_file() or not is_macho(path):
-            continue
-        data = path.read_bytes()
-        relative = path.relative_to(native).as_posix()
-        counts = {}
-        for key, (old, new) in replacements.items():
-            if len(new.encode()) > len(old.encode()):
-                raise ValueError("PG compiled path replacement would move Mach-O offsets")
-            count = postgres_cstring_count(data, old)
-            if data.count(old.encode() + b"\0") != count:
-                raise ValueError(f"{path}: PG compiled path is not an exact C-string: {key}")
-            if count:
-                counts[key] = count
-                before = b"\0" + old.encode() + b"\0"
-                after = b"\0" + new.encode() + b"\0" * (len(old) - len(new) + 1)
-                data = data.replace(before, after)
-        if counts:
-            records[relative] = counts
-            plans.append((path, data))
-    # Validate the entire copy before any write (including missing constants).
-    for name in PG_PROGRAMS:
-        counts = records.get("bin/" + name, {})
-        if any(counts.get(key) != 1 for key in ("bindir", "sharedir", "pkglibdir")):
-            raise ValueError(f"PG {name}: expected exactly one compiled bin/share/pkglib C-string")
-    for path, data in plans:
-        path.write_bytes(data)
+    # Validate before moving anything; never mutate previously patched inputs.
+    collect_postgres_paths(native, arch, laid_out=False)
+    if (native / "Cellar").exists() or any((native / n).is_symlink() for n in ("bin", "lib", "share")):
+        raise ValueError("PG native layout must be a fresh unmodified keg copy")
+    keg = native / PG_KEG
+    keg.mkdir(parents=True)
+    for name in ("bin", "lib", "share"):
+        (native / name).rename(keg / name)
+    (native / "lib").mkdir()
+    (native / "share").mkdir()
+    for name, target in PG_ALIASES.items():
+        (native / name).symlink_to(target, target_is_directory=True)
+    records = collect_postgres_paths(native, arch)
     verify_postgres_paths(native, arch, records)
     return records
 
 
-def collect_postgres_paths(native, arch):
+def verify_postgres_aliases(native):
+    for name, target in PG_ALIASES.items():
+        path = native / name
+        if (not path.is_symlink() or os.readlink(path) != target
+                or not path.resolve().is_relative_to(native.resolve()) or not path.is_dir()):
+            raise ValueError(f"PG native alias missing, changed, or escaping input: {name}")
+
+
+def collect_postgres_paths(native, arch, laid_out=True):
+    if laid_out:
+        verify_postgres_aliases(native)
     observed = {}
     for path in sorted(native.rglob("*")):
         if not path.is_file() or not is_macho(path):
             continue
         data = path.read_bytes()
         counts = {}
-        for key, (old, new) in postgres_path_replacements(arch).items():
-            if old.encode() + b"\0" in data:
-                raise ValueError(f"{path}: unrelocated compiled PG path: {key}")
-            count = postgres_cstring_count(data, new)
+        if b"/__pcpg/" in data:
+            raise ValueError(f"{path}: refused constant-fold-unsafe PG string patch")
+        for key, (old, logical) in postgres_compiled_paths(arch).items():
+            count = postgres_cstring_count(data, old)
             if count:
                 counts[key] = count
         if counts:
             observed[path.relative_to(native).as_posix()] = counts
     for name in PG_PROGRAMS:
-        counts = observed.get("bin/" + name, {})
+        counts = observed.get((PG_KEG + "/" if laid_out else "") + "bin/" + name, {})
         if any(counts.get(key) != 1 for key in ("bindir", "sharedir", "pkglibdir")):
-            raise ValueError(f"PG {name}: normalized bin/share/pkglib constants missing or ambiguous")
+            raise ValueError(f"PG {name}: original bin/share/pkglib constants missing or ambiguous")
     return observed
 
 
@@ -203,7 +205,16 @@ def file_inventory(root):
         if path == root / "manifest.json":
             continue
         if path.is_symlink():
-            raise ValueError(f"native input symlink is not inventoried: {path}")
+            relative = path.relative_to(root).as_posix()
+            expected = {"postgresql/" + name: target for name, target in PG_ALIASES.items()}
+            target = os.readlink(path)
+            if (expected.get(relative) != target or not path.is_dir()
+                    or not path.resolve().is_relative_to((root / "postgresql").resolve())):
+                raise ValueError(f"native input symlink is not an allowed contained PG alias: {path}")
+            # Domain-separated target digest keeps files_hash binding BOTH file
+            # content and alias routing, without pretending a link is file bytes.
+            files[relative] = hashlib.sha256(b"symlink\0" + target.encode()).hexdigest()
+            continue
         if path.is_file():
             files[path.relative_to(root).as_posix()] = sha(path)
     return files
@@ -262,6 +273,9 @@ def verify(root, expected, arch, profile, require_runtime=False, require_securit
                  "postgresql/share/postgresql/extension/plpgsql.control",
                  "postgresql/lib/postgresql/vector.dylib", "postgresql/share/postgresql/extension/vector.control",
                  "bin/gh", "bin/kopia"]
+    # Path exports stay native/bin, but inventories/observations cover canonical
+    # physical files, not duplicated or silently dereferenced alias directories.
+    required = [(root / name).resolve().relative_to(root.resolve()).as_posix() for name in required]
     if any(name not in actual for name in required):
         raise ValueError("Darwin native input required server/client/pgvector/CLI file missing")
     if any(not os.access(root / name, os.X_OK) for name in required if "/bin/" in name or name.startswith("bin/")):
@@ -326,7 +340,7 @@ def bind_security(args):
     manifest["nativeFilesSha256"] = files_hash(actual)
     manifest["securityQualification"] = {"summarySha256": sha(summary_path), "evidence": summary["evidence"],
                                          "scope": "native-inputs-only-not-final-candidate"}
-    shutil.copytree(source, args.out)
+    shutil.copytree(source, args.out, symlinks=True)
     (args.out / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     verify(args.out.resolve(), sha(args.out / "manifest.json"), args.arch, "dogfood", require_security=True)
     print(json.dumps({"manifestSha256": sha(args.out / "manifest.json"), "nativeFilesSha256": files_hash(actual),
@@ -346,7 +360,7 @@ def bind_runtime(args):
     manifest["runtimeQualificationReceiptBase64"] = base64.b64encode(raw).decode()
     if args.out.exists():
         raise ValueError("qualified native output must be fresh; refusing overwrite")
-    shutil.copytree(source, args.out)
+    shutil.copytree(source, args.out, symlinks=True)
     (args.out / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     verify(args.out.resolve(), sha(args.out / "manifest.json"), args.arch, "dogfood", True)
     print(json.dumps({"manifestSha256": sha(args.out / "manifest.json"), "receiptSha256": receipt["receiptSha256"]}))
@@ -498,7 +512,7 @@ def assemble(args):
     # Reuse exact dependency kegs selected from the PG bottle's upstream SBOM.
     # Resolve the entire emitted Mach-O population, including server plugins.
     candidates = {}
-    for folder in [native / "lib", *args.dependency]:
+    for folder in [native / PG_KEG / "lib", native / "lib", *args.dependency]:
         for path in sorted(folder.rglob("*.dylib")):
             if path.is_file():
                 candidates.setdefault(path.name, []).append((path, sha(path)))

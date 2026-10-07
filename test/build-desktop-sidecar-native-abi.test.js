@@ -29,90 +29,97 @@ function pythonProbe(script) {
   ].join('\n')], { encoding: 'utf8', timeout: 10_000 });
 }
 
-test('PG bottle path normalization preserves bytes and relocates share plus $libdir for both architectures', () => {
+test('optimized PostgreSQL path writer rejects short literal padding but accepts original compiled layout for both architectures', () => {
   const result = pythonProbe(`
+import subprocess, os
 root=pathlib.Path(tempfile.mkdtemp())
 try:
-    for arch in ('x64','arm64'):
-        native=root/arch
-        paths=m.postgres_path_replacements(arch)
-        original=bytes.fromhex('cffaedfe')+b'UNTOUCHED\\0'
-        for old,new in paths.values(): original+=old.encode()+b'\\0'
-        original+=b'UNCHANGED-TRAILER'
+    fixture=pathlib.Path(${JSON.stringify(path.join(desktopRoot, 'test/fixtures/postgres-compiled-path.c'))})
+    for arch,prefix in [('x64','/usr/local'),('arm64','/opt/homebrew')]:
+        native=root/arch/'postgresql'; (native/'bin').mkdir(parents=True)
+        for folder in ['lib/postgresql','share/postgresql']: (native/folder).mkdir(parents=True)
+        program=native/'bin/initdb'
+        subprocess.run(['cc','-O2','-DPREFIX="'+prefix+'"',str(fixture),'-o',str(program)],check=True)
+        original=program.read_bytes()
+        original_paths=m.postgres_compiled_paths(arch)
+        # Actual optimized C writer, not a Python commonpath prediction:
+        # old native/bin layout fails and literal shortening STILL fails.
+        before=subprocess.check_output([str(program)],text=True).splitlines()
+        assert before==[prefix+'/share/postgresql@18',prefix+'/lib/postgresql@18']
+        data=original
+        for key,(old,suffix) in original_paths.items():
+            new='/__pcpg/'+('bin' if key=='bindir' else suffix)
+            if old.encode()+b'\\0' in data:
+                assert len(new)<=len(old)
+                data=data.replace(old.encode()+b'\\0',new.encode()+b'\\0'*(len(old)-len(new)+1))
+        assert data!=original
+        program.write_bytes(data)
+        failed=subprocess.check_output([str(program)],text=True).splitlines()
+        assert failed==['/__pcpg/share/postgresql@18','/__pcpg/lib/postgresql@18'],failed
+        program.write_bytes(original)
         for name in m.PG_PROGRAMS:
-            p=native/'bin'/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(original)
+            if name!='initdb': shutil.copy2(program,native/'bin'/name)
+        # The real ELF fixture has original core constants; normalizer moves
+        # layout only. Mark it Mach-O for the isolated path collector, not for
+        # any architecture/security assertion.
+        m.is_macho=lambda p:p.is_file()
         receipt=m.normalize_postgres_paths(native,arch)
+        assert program.read_bytes()==original
+        got=subprocess.check_output([str(program)],text=True).splitlines()
+        assert got==[str(native/'share/postgresql@18'),str(native/'lib/postgresql@18')],got
+        assert all(pathlib.Path(p).resolve().is_relative_to(native.resolve()) for p in got)
         assert m.verify_postgres_paths(native,arch,receipt)==receipt
-        data=(native/'bin/postgres').read_bytes()
-        assert len(data)==len(original) and data.endswith(b'UNCHANGED-TRAILER')
-        for key,(old,new) in paths.items():
-            assert old.encode()+b'\\0' not in data
-            assert data.count(new.encode()+b'\\0')==1
-            assert receipt['bin/postgres'][key]==1
-        # PostgreSQL path.c make_relative_path requires the bindir tail to
-        # match after the common prefix. Same prefix + bin now relocates
-        # both PGSHAREDIR and PKGLIBDIR; original Cellar/.../bin did not.
-        compiled_bin=paths['bindir'][1]
-        for key,suffix in [('sharedir','share/postgresql'),('pkglibdir','lib/postgresql')]:
-            target=paths[key][1]
-            prefix=__import__('posixpath').commonpath([compiled_bin,target])
-            assert compiled_bin[len(prefix)+1:]=='bin'
-            assert target[len(prefix)+1:]==suffix
-            actual=(native/'bin/postgres').resolve()
-            relocated=actual.parent.parent/suffix
-            assert relocated.is_relative_to(native.resolve())
-        # Old inputs must fail even if inventory/hash metadata is rewritten.
-        (native/'bin/initdb').write_bytes(original)
-        try: m.verify_postgres_paths(native,arch,receipt)
-        except ValueError: pass
-        else: raise AssertionError('unrelocated compiled Homebrew paths accepted')
-finally: shutil.rmtree(root)
+        shutil.copytree(native.parent,root/(arch+'-moved'),symlinks=True)
+        moved=root/(arch+'-moved')/'postgresql'
+        got=subprocess.check_output([str(moved/'bin/initdb')],text=True).splitlines()
+        assert got==[str(moved/'share/postgresql@18'),str(moved/'lib/postgresql@18')],got
+finally:shutil.rmtree(root)
 `);
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
-test('PG relocation refuses incomplete, ambiguous and forged compiled path evidence without writing', () => {
+test('native inventory binds only exact contained PG layout aliases and rejects external, broken, or changed routing', () => {
   const result = pythonProbe(`
-root=pathlib.Path(tempfile.mkdtemp())
+import os
+root=pathlib.Path(tempfile.mkdtemp());native=root/'postgresql'
 try:
-    paths=m.postgres_path_replacements('x64')
-    original=bytes.fromhex('cffaedfe')+b'\\0'+b'\\0'.join(old.encode() for old,new in paths.values())+b'\\0'
+    original=bytes.fromhex('cffaedfe')+b'\\0'+b'\\0'.join(old.encode() for old,suffix in m.postgres_compiled_paths('x64').values())+b'\\0'
     for name in m.PG_PROGRAMS:
-        p=root/'bin'/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(original)
-    p=root/'bin/initdb'
-    for changed in [original.replace(paths['bindir'][0].encode(),b'X'*len(paths['bindir'][0])),
-                    original+b'\\0'+paths['bindir'][0].encode()+b'\\0']:
-        p.write_bytes(changed)
-        before=m.file_inventory(root)
-        try: m.normalize_postgres_paths(root,'x64')
-        except ValueError: pass
-        else: raise AssertionError('unexpected compiled constants accepted')
-        assert m.file_inventory(root)==before
-    p.write_bytes(original)
-    receipt=m.normalize_postgres_paths(root,'x64')
-    for forged in [None, {}, {**receipt,'bin/initdb':{'bindir':1}}]:
-        try: m.verify_postgres_paths(root,'x64',forged)
-        except ValueError: pass
-        else: raise AssertionError('forged relocation evidence accepted')
-finally: shutil.rmtree(root)
+        p=native/'bin'/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(original)
+    for folder in ['lib/postgresql','share/postgresql']: (native/folder).mkdir(parents=True)
+    receipt=m.normalize_postgres_paths(native,'x64');before=m.file_inventory(root)
+    assert len([k for k in before if k.startswith('postgresql/') and k in {'postgresql/'+n for n in m.PG_ALIASES}])==5
+    for target in ['/tmp','Cellar/absent/bin',m.PG_KEG+'/lib']:
+        link=native/'bin';link.unlink();link.symlink_to(target)
+        try:m.file_inventory(root)
+        except ValueError:pass
+        else:raise AssertionError('unsafe alias accepted')
+        try:m.verify_postgres_paths(native,'x64',receipt)
+        except ValueError:pass
+        else:raise AssertionError('unsafe runtime layout accepted')
+    (native/'bin').unlink();(native/'bin').symlink_to(m.PG_ALIASES['bin'])
+    assert m.file_inventory(root)==before
+    (root/'unregistered-link').symlink_to(native)
+    try:m.file_inventory(root)
+    except ValueError:pass
+    else:raise AssertionError('unregistered alias accepted')
+finally:shutil.rmtree(root)
 `);
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
-test('PG assembly binds the final relocated dylib aliases created by dependency closure', () => {
+test('PG assembly inventories final dylib aliases and preserves compiled path layout through copying', () => {
   const result = pythonProbe(`
 from types import SimpleNamespace
 root=pathlib.Path(tempfile.mkdtemp())
 try:
-    keg=root/'keg'; vector=root/'vector'; go=root/'go'; out=root/'out'
-    original=bytes.fromhex('cffaedfe')+b'\\0'+b'\\0'.join(old.encode() for old,new in m.postgres_path_replacements('x64').values())+b'\\0'
-    fixtures={**{'bin/'+n:original for n in m.PG_PROGRAMS},
-              'lib/postgresql/libecpg.6.dylib':original,
+    keg=root/'keg';vector=root/'vector';go=root/'go';out=root/'out'
+    original=bytes.fromhex('cffaedfe')+b'\\0'+b'\\0'.join(old.encode() for old,suffix in m.postgres_compiled_paths('x64').values())+b'\\0'
+    fixtures={**{'bin/'+n:original for n in m.PG_PROGRAMS},'lib/postgresql/libecpg.6.dylib':original,
               'lib/postgresql/plpgsql.dylib':bytes.fromhex('cffaedfe')+b'\\0fixture',
-              'share/postgresql/postgres.bki':b'fixture',
-              'share/postgresql/extension/plpgsql.control':b'fixture'}
+              'share/postgresql/postgres.bki':b'fixture','share/postgresql/extension/plpgsql.control':b'fixture'}
     for name,data in fixtures.items():
-        p=keg/name; p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(data);p.chmod(0o755)
+        p=keg/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(data);p.chmod(0o755)
     for name in ['vector.dylib','extension/vector.control']:
         p=vector/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(bytes.fromhex('cffaedfe')+b'fixture')
     for name in ['gh','kopia']:
@@ -121,17 +128,18 @@ try:
     m.inspect=lambda p,arch:{'format':'fixture','minimumOS':['14.0'],'dylibs':['/usr/local/lib/libecpg.6.dylib'] if p.name=='postgres' else []}
     m.run=lambda *a:''
     m.check_closure=lambda r,arch,floor:{p.relative_to(r).as_posix():{'minimumOS':['14.0']} for p in r.rglob('*') if p.is_file() and m.is_macho(p)}
-    args=SimpleNamespace(out=out,keg=keg,vector=vector,go=go,receipt=[receipt],dependency=[],arch='x64',floor='14.0')
-    m.assemble(args)
+    m.assemble(SimpleNamespace(out=out,keg=keg,vector=vector,go=go,receipt=[receipt],dependency=[],arch='x64',floor='14.0'))
     manifest=json.loads((out/'manifest.json').read_text())
     assert manifest['postgresqlPathRelocation']['lib/libecpg.6.dylib']['pkglibdir']==1
-    assert manifest['postgresqlPathRelocation']['lib/postgresql/libecpg.6.dylib']['pkglibdir']==1
+    assert manifest['postgresqlPathRelocation'][m.PG_KEG+'/lib/postgresql/libecpg.6.dylib']['pkglibdir']==1
     m.verify(out,m.sha(out/'manifest.json'),'x64','dogfood')
-    del manifest['postgresqlPathRelocation']['lib/libecpg.6.dylib']
-    (out/'manifest.json').write_text(json.dumps(manifest))
+    shutil.copytree(out,root/'copied',symlinks=True)
+    assert m.file_inventory(root/'copied')==manifest['files']
+    m.verify(root/'copied',m.sha(root/'copied/manifest.json'),'x64','dogfood')
+    del manifest['postgresqlPathRelocation']['lib/libecpg.6.dylib'];(out/'manifest.json').write_text(json.dumps(manifest))
     try:m.verify(out,m.sha(out/'manifest.json'),'x64','dogfood')
     except ValueError:pass
-    else:raise AssertionError('pre-closure relocation inventory accepted')
+    else:raise AssertionError('pre-closure inventory accepted')
 finally:shutil.rmtree(root)
 `);
   assert.equal(result.status, 0, result.stdout + result.stderr);
@@ -169,10 +177,10 @@ try:
     for name in required:
         data=b'fixture'
         if name.startswith('postgresql/bin/'):
-            data=bytes.fromhex('cffaedfe')+b'\\0'+b'\\0'.join(old.encode() for old,new in m.postgres_path_replacements('x64').values())+b'\\0'
+            data=bytes.fromhex('cffaedfe')+b'\\0'+b'\\0'.join(old.encode() for old,suffix in m.postgres_compiled_paths('x64').values())+b'\\0'
         p=root/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(data); p.chmod(0o755)
     relocation=m.normalize_postgres_paths(root/'postgresql','x64')
-    m.check_closure=lambda root,arch,floor: {n:{} for n in required if not n.endswith(('.control','.bki'))}
+    m.check_closure=lambda root,arch,floor: {(root/n).resolve().relative_to(root.resolve()).as_posix():{} for n in required if not n.endswith(('.control','.bki'))}
     attestation=root/'apps/operator/runtime/vm-release-vulnerability-attestation.json'
     attestation.parent.mkdir(parents=True)
     attestation.write_text(json.dumps({'result':{'status':'green','gatedMatches':0},'evidence':{'sbomSha256':'b'*64,'grypeReportSha256':'c'*64}}))
