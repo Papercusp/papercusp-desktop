@@ -61,8 +61,12 @@ try:
     for name in required:
         p=root/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(b'fixture'); p.chmod(0o755)
     m.check_closure=lambda root,arch,floor: {n:{} for n in required if not n.endswith('.control')}
+    attestation=root/'apps/operator/runtime/vm-release-vulnerability-attestation.json'
+    attestation.parent.mkdir(parents=True)
+    attestation.write_text(json.dumps({'result':{'status':'green','gatedMatches':0},'evidence':{'sbomSha256':'b'*64,'grypeReportSha256':'c'*64}}))
     files=m.file_inventory(root)
     manifest={'schemaVersion':'darwin-native-inputs/v1','privateOnly':True,'target':{'os':'darwin','arch':'x64'},'postgresqlVersion':'18.6','minimumMacOS':'14.0','files':files,'upstreamReceipts':[{'sha256':'a'*64}]}
+    manifest['securityQualification']={'summarySha256':m.sha(attestation),'evidence':{'sbomSha256':'b'*64,'grypeReportSha256':'c'*64}}
     def write():
         (root/'manifest.json').write_text(json.dumps(manifest)); return m.sha(root/'manifest.json')
     digest=write()

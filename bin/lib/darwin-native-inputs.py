@@ -100,7 +100,7 @@ def system_dep(dep):
 def file_inventory(root):
     files = {}
     for path in sorted(root.rglob("*")):
-        if path.name == "manifest.json":
+        if path == root / "manifest.json":
             continue
         if path.is_symlink():
             raise ValueError(f"native input symlink is not inventoried: {path}")
@@ -143,7 +143,7 @@ def check_closure(root, arch, floor):
     return observations
 
 
-def verify(root, expected, arch, profile, require_runtime=False):
+def verify(root, expected, arch, profile, require_runtime=False, require_security=False):
     manifest_path = root / "manifest.json"
     if sha(manifest_path) != expected:
         raise ValueError("Darwin native input manifest SHA-256 mismatch")
@@ -169,6 +169,16 @@ def verify(root, expected, arch, profile, require_runtime=False):
         raise ValueError("required native input is not a measured Mach-O")
     if not manifest.get("upstreamReceipts"):
         raise ValueError("Darwin native input upstream provenance missing")
+    if require_runtime or require_security:
+        security = manifest.get("securityQualification") or {}
+        attestation = root / "apps/operator/runtime/vm-release-vulnerability-attestation.json"
+        if not attestation.is_file() or sha(attestation) != security.get("summarySha256"):
+            raise ValueError("exact native input security attestation missing or mismatched")
+        summary = json.loads(attestation.read_text())
+        if summary.get("result", {}).get("status") != "green" or summary["result"].get("gatedMatches") != 0:
+            raise ValueError("native input security verdict is not zero High/Critical")
+        if summary.get("evidence") != security.get("evidence"):
+            raise ValueError("native input security evidence hashes mismatch")
     if require_runtime:
         receipt = manifest.get("runtimeQualification") or {}
         raw = base64.b64decode(manifest.get("runtimeQualificationReceiptBase64", ""), validate=True)
@@ -183,6 +193,42 @@ def verify(root, expected, arch, profile, require_runtime=False):
                        ("pgInitStartQueryStop", "pgvector", "gh", "kopia"))):
             raise ValueError("exact native input rig runtime qualification missing or mismatched")
     return manifest
+
+
+def bind_security(args):
+    """Retain scanner-created attestation in a NEW, fully inventoried input bank."""
+    source = args.root.resolve()
+    manifest_path = source / "manifest.json"
+    if sha(manifest_path) != args.sha256:
+        raise ValueError("pre-security manifest checksum mismatch")
+    manifest = json.loads(manifest_path.read_text())
+    actual = file_inventory(source)
+    attestation = "apps/operator/runtime/vm-release-vulnerability-attestation.json"
+    original = manifest["files"]
+    if (any(actual.get(name) != digest for name, digest in original.items())
+            or set(actual) - set(original) != {attestation}):
+        raise ValueError("scanner changed original native bytes or added unrecorded files")
+    summary_path = args.evidence / "summary.json"
+    summary = json.loads(summary_path.read_text())
+    if sha(summary_path) != actual[attestation]:
+        raise ValueError("scanner attestation differs from immutable summary")
+    for name, field in (("sbom.cdx.json", "sbomSha256"), ("grype.json", "grypeReportSha256")):
+        if sha(args.evidence / name) != summary["evidence"][field]:
+            raise ValueError("actual scanner evidence checksum mismatch")
+    report = json.loads((args.evidence / "grype.json").read_text())
+    if any(str(x.get("vulnerability", {}).get("severity", "")).lower() in ("high", "critical") for x in report["matches"]):
+        raise ValueError("native input scanner report contains High/Critical")
+    if args.out.exists():
+        raise ValueError("security-qualified output must be fresh; refusing overwrite")
+    manifest["files"] = actual
+    manifest["nativeFilesSha256"] = files_hash(actual)
+    manifest["securityQualification"] = {"summarySha256": sha(summary_path), "evidence": summary["evidence"],
+                                         "scope": "native-inputs-only-not-final-candidate"}
+    shutil.copytree(source, args.out)
+    (args.out / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    verify(args.out.resolve(), sha(args.out / "manifest.json"), args.arch, "dogfood", require_security=True)
+    print(json.dumps({"manifestSha256": sha(args.out / "manifest.json"), "nativeFilesSha256": files_hash(actual),
+                      "securitySummarySha256": sha(summary_path), "rigAccepted": False}))
 
 
 def bind_runtime(args):
@@ -207,7 +253,7 @@ def bind_runtime(args):
 def qualify_runtime(args):
     """Input-only protocols in disposable state; the caller owns the rig lock."""
     root = args.root.resolve()
-    manifest = verify(root, args.sha256, args.arch, "dogfood")
+    manifest = verify(root, args.sha256, args.arch, "dogfood", require_security=True)
     expected_arch = "x86_64" if args.arch == "x64" else "arm64"
     if (platform.system() != "Darwin" or platform.machine() != expected_arch
             or version(platform.mac_ver()[0]) < version(manifest["minimumMacOS"])):
@@ -415,6 +461,12 @@ def main():
     qualify.add_argument("arch", choices=("x64", "arm64"))
     qualify.add_argument("receipt", type=Path)
     qualify.add_argument("evidence", type=Path)
+    security = sub.add_parser("bind-security")
+    security.add_argument("root", type=Path)
+    security.add_argument("sha256")
+    security.add_argument("arch", choices=("x64", "arm64"))
+    security.add_argument("evidence", type=Path)
+    security.add_argument("out", type=Path)
     args = parser.parse_args()
     if args.command == "assemble":
         assemble(args)
@@ -422,6 +474,8 @@ def main():
         bind_runtime(args)
     elif args.command == "qualify-runtime":
         qualify_runtime(args)
+    elif args.command == "bind-security":
+        bind_security(args)
     else:
         verify(args.root.resolve(), args.sha256, args.arch, args.profile, args.require_runtime)
         print("PRIVATE_DARWIN_NATIVE_INPUTS_OK")
