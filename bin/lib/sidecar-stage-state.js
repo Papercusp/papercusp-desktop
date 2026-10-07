@@ -6,7 +6,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 
 function sha256(file) {
   const hash = crypto.createHash('sha256');
@@ -33,18 +33,48 @@ function git(root, args) {
   return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).trim();
 }
 
-function sourceState(root) {
+function streamGitOutput(root, args, digest) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', ['-C', root, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const stderr = [];
+    let stderrBytes = 0;
+    child.stdout.on('data', chunk => digest.update(chunk));
+    child.stderr.on('data', chunk => {
+      if (stderrBytes >= 8192) return;
+      const part = chunk.subarray(0, 8192 - stderrBytes);
+      stderr.push(part);
+      stderrBytes += part.length;
+    });
+    child.once('error', reject);
+    child.once('close', (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const detail = Buffer.concat(stderr).toString('utf8').trim();
+      reject(new Error(
+        'git ' + args.join(' ') + ' failed with ' + (signal || code)
+        + (detail ? ': ' + detail : ''),
+      ));
+    });
+  });
+}
+
+async function sourceState(root) {
   // HEAD alone cannot observe uncommitted edits at the same commit. Include
   // nested tracked diffs and untracked source status, without storing the text.
   const digest = crypto.createHash('sha256');
   for (const args of [
     ['diff', '--no-ext-diff', '--binary', '--submodule=diff', 'HEAD'],
     ['status', '--porcelain=v1', '--untracked-files=normal'],
-  ]) digest.update(JSON.stringify(args)).update(git(root, args));
+  ]) {
+    digest.update(JSON.stringify(args));
+    await streamGitOutput(root, args, digest);
+  }
   return digest.digest('hex');
 }
 
-function captureIdentity(env = process.env) {
+async function captureIdentity(env = process.env) {
   const repoRoot = fs.realpathSync(env.SIDECAR_STAGE_REPO_ROOT);
   const desktopRoot = fs.realpathSync(env.SIDECAR_STAGE_DESKTOP_ROOT);
   const here = fs.realpathSync(env.SIDECAR_STAGE_HELPER_ROOT);
@@ -64,9 +94,11 @@ function captureIdentity(env = process.env) {
     path.join(desktopRoot, 'bin/verify-sidecar-bundle.sh'),
     path.join(repoRoot, 'package-lock.json'),
   ].map(file => ({ file: fs.realpathSync(file), sha256: sha256(file) }));
+  const sourceStateDigest = await sourceState(repoRoot);
+  const desktopStateDigest = await sourceState(desktopRoot);
   return {
     repoRoot, desktopRoot, sourceHead, desktopHead,
-    sourceState: sourceState(repoRoot), desktopState: sourceState(desktopRoot),
+    sourceState: sourceStateDigest, desktopState: desktopStateDigest,
     submodules: git(repoRoot, ['submodule', 'status', '--recursive']),
     finalDir: path.resolve(env.SIDECAR_STAGE_FINAL_DIR),
     profile: env.PAPERCUSP_DISTRIBUTION_PROFILE,
@@ -147,12 +179,17 @@ function validateResume(stage, expected) {
   return receipt;
 }
 
-module.exports = { captureIdentity, inventory, recordFailure, validateResume, writeJson };
+module.exports = { captureIdentity, inventory, recordFailure, sourceState, validateResume, writeJson };
 
 if (require.main === module) {
   try {
     const [command, file, ...args] = process.argv.slice(2);
-    if (command === 'capture') writeJson(file, captureIdentity());
+    if (command === 'capture') {
+      captureIdentity().then(identity => writeJson(file, identity)).catch(error => {
+        console.error('FATAL: sidecar stage: ' + error.message);
+        process.exitCode = 1;
+      });
+    }
     else if (command === 'retain') {
       recordFailure(file, JSON.parse(fs.readFileSync(args[0], 'utf8')), args[1], Number(args[2]));
     } else if (command === 'validate') {

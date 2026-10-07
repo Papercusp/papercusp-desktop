@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync, execFileSync } = require('node:child_process');
 const { makeDesktopTestScratchDirSync } = require('./test-scratch.cjs');
-const { captureIdentity, inventory, recordFailure, validateResume, writeJson } = require('../bin/lib/sidecar-stage-state.js');
+const { captureIdentity, inventory, recordFailure, sourceState, validateResume, writeJson } = require('../bin/lib/sidecar-stage-state.js');
 const bin = path.resolve(__dirname, '../bin');
 const builder = fs.readFileSync(path.join(bin, 'build-desktop-sidecar.sh'), 'utf8');
 const finish = builder.match(/^__pc_finish_sidecar_build\(\) \{\n[\s\S]*?^\}$/m)[0];
@@ -25,10 +25,10 @@ function gitFixture(root) {
   const head = git(['commit-tree', tree], 'fixture\n');
   git(['update-ref', 'HEAD', head]);
   git(['read-tree', 'HEAD']);
-  return { root, head };
+  return { root, head, git };
 }
 
-test('actual source capture detects same-HEAD source edits and binds both repositories', () => {
+test('actual source capture detects same-HEAD source edits and binds both repositories', async () => {
   const f = fixture();
   try {
     const source = gitFixture(path.join(f.root, 'source'));
@@ -42,17 +42,33 @@ test('actual source capture detects same-HEAD source edits and binds both reposi
       PROVENANCE_SOURCE_GIT_HEAD: source.head, PROVENANCE_SOURCE_GIT_DIRTY: 'false',
       PAPERCUSP_DISTRIBUTION_PROFILE: 'vm-release', PAPERCUSP_RELEASE_AUDIT: '1',
     };
-    const first = captureIdentity(env);
+    const first = await captureIdentity(env);
     assert.equal(first.sourceHead, source.head);
     assert.equal(first.desktopHead, desktop.head);
-    assert.deepEqual(captureIdentity(env), first);
+    assert.deepEqual(await captureIdentity(env), first);
     recordFailure(f.stage, first, 'assembled', 1);
     fs.writeFileSync(path.join(source.root, 'package-lock.json'), '{"changed":true}\n');
-    const changed = captureIdentity(env);
+    const changed = await captureIdentity(env);
     assert.equal(changed.sourceHead, first.sourceHead);
     assert.notEqual(changed.sourceState, first.sourceState);
     assert.throws(() => validateResume(f.stage, changed), /identity changed/);
-    assert.throws(() => captureIdentity({ ...env, PROVENANCE_SOURCE_GIT_HEAD: 'd'.repeat(40) }), /differs from REPO_ROOT/);
+    await assert.rejects(captureIdentity({ ...env, PROVENANCE_SOURCE_GIT_HEAD: 'd'.repeat(40) }), /differs from REPO_ROOT/);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('source-state capture streams Git diff output larger than the child-process buffer', async () => {
+  const f = fixture();
+  try {
+    const { root, git } = gitFixture(path.join(f.root, 'large-source'));
+    const bytes = 33 * 1024 * 1024;
+    const sourceFile = path.join(root, 'large.txt');
+    fs.writeFileSync(sourceFile, Buffer.alloc(bytes, 0x61));
+    git(['add', 'large.txt']);
+    git(['commit', '-qm', 'large baseline']);
+    fs.writeFileSync(sourceFile, Buffer.alloc(bytes, 0x62));
+
+    const state = await sourceState(root);
+    assert.match(state, /^[a-f0-9]{64}$/);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
