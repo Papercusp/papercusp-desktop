@@ -3586,23 +3586,33 @@ fetch_brew_keg() {
 # real error. Callers: postgresql@major, readline, git, pcre2/gettext.
 _brew_ver_with_darwin_bottle() {
   local formula="$1" ver="$2" arch="$3" repo="$4"
-  local brew_arch; case "$arch" in x64) brew_arch=amd64 ;; arm64) brew_arch=arm64 ;; *) printf '%s\n' "$ver"; return 0 ;; esac
+  # Private native preparation can constrain the bottle to the rig's OS.
+  # Default callers retain architecture-only selection.
+  local max_macos="${5:-0}"
+  local brew_arch; case "$arch" in x64) brew_arch=amd64 ;; arm64) brew_arch=arm64 ;; *)
+    [[ "$max_macos" == 0 ]] || return 1
+    printf '%s\n' "$ver"; return 0 ;; esac
   local token; token="$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])' 2>/dev/null)"
-  [[ -n "$token" ]] || { printf '%s\n' "$ver"; return 0; }
+  [[ -n "$token" ]] || {
+    [[ "$max_macos" == 0 ]] || return 1
+    printf '%s\n' "$ver"; return 0;
+  }
   _bvwdb_has_darwin() {
     curl -fsSL -H "Authorization: Bearer $token" -H "Accept: application/vnd.oci.image.index.v1+json" \
       "https://ghcr.io/v2/${repo}/manifests/$1" 2>/dev/null | python3 -c '
-import sys,json
-want=sys.argv[1]
+import sys,json,re
+want=sys.argv[1]; ceiling=int(sys.argv[2])
 try: idx=json.load(sys.stdin)
 except Exception: sys.exit(1)
 for m in idx.get("manifests",[]):
     p=m.get("platform",{}) or {}
-    if p.get("os")=="darwin" and p.get("architecture")==want: sys.exit(0)
-sys.exit(1)' "$brew_arch"
+    if p.get("os")=="darwin" and p.get("architecture")==want:
+        match=re.search(r"(\d+)",p.get("os.version", ""))
+        if not ceiling or (match and int(match.group(1))<=ceiling): sys.exit(0)
+sys.exit(1)' "$brew_arch" "$max_macos"
   }
   if _bvwdb_has_darwin "$ver"; then printf '%s\n' "$ver"; return 0; fi
-  echo "  ⚠ bottle($formula): v$ver ships no darwin/$brew_arch bottle (Homebrew dropped Intel-mac bottles for it) — probing older tags" >&2
+  echo "  ⚠ bottle($formula): v$ver has no eligible darwin/$brew_arch bottle (macOS ceiling $max_macos; 0 is unrestricted) — probing older tags" >&2
   local tags; tags="$(curl -fsSL -H "Authorization: Bearer $token" "https://ghcr.io/v2/${repo}/tags/list?n=100" 2>/dev/null | python3 -c 'import sys,json;print("\n".join(json.load(sys.stdin).get("tags",[])))' 2>/dev/null | grep -E '^[0-9]' | sort -rV)"
   local t probed=0
   while IFS= read -r t; do
@@ -3613,6 +3623,10 @@ sys.exit(1)' "$brew_arch"
       printf '%s\n' "$t"; return 0
     fi
   done <<< "$tags"
+  if [[ "$max_macos" != 0 ]]; then
+    echo "ERROR: bottle($formula): no pinned darwin/$brew_arch version supports macOS <=$max_macos" >&2
+    return 1
+  fi
   printf '%s\n' "$ver"; return 0
 }
 

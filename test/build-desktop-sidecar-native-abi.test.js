@@ -35,6 +35,23 @@ test('native minimum OS parser excludes adjacent linker/dylib versions and suppo
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
+test('normalization makes the copied bottle writable for signer replacement without changing source modes', () => {
+  const result = pythonProbe(`
+root=pathlib.Path(tempfile.mkdtemp())
+try:
+    source=root/'source'; source.mkdir(); (source/'pg_regress').write_bytes(b'fixture')
+    source.chmod(0o555); (source/'pg_regress').chmod(0o555)
+    shutil.copytree(source,root/'copy'); m.make_copy_writable(root/'copy')
+    assert (source.stat().st_mode & 0o777)==0o555
+    assert ((source/'pg_regress').stat().st_mode & 0o777)==0o555
+    assert (root/'copy').stat().st_mode & 0o200
+    assert (root/'copy/pg_regress').stat().st_mode & 0o200
+finally:
+    m.make_copy_writable(root); shutil.rmtree(root)
+`);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
 test('private input validation rejects target, profile, file and rig-proof mismatches before assembly', () => {
   const result = pythonProbe(`
 root=pathlib.Path(tempfile.mkdtemp())
@@ -57,8 +74,18 @@ try:
     try: m.verify(root,digest,'x64','dogfood',True)
     except ValueError: pass
     else: raise AssertionError('unqualified rig accepted')
-    manifest['runtimeQualification']={'target':manifest['target'],'minimumMacOS':'14.0','nativeFilesSha256':m.files_hash(files),'receiptSha256':'a'*64,'checks':{n:True for n in ('pgInitStartQueryStop','pgvector','gh','kopia')}}
+    import base64
+    receipt={'target':manifest['target'],'minimumMacOS':'14.0','nativeFilesSha256':m.files_hash(files),'checks':{n:True for n in ('pgInitStartQueryStop','pgvector','gh','kopia')},'evidence':['fixture-protocol-output']}
+    raw=json.dumps(receipt).encode()
+    manifest['runtimeQualification']={**receipt,'receiptSha256':hashlib.sha256(raw).hexdigest()}
+    manifest['runtimeQualificationReceiptBase64']=base64.b64encode(raw).decode()
     digest=write(); m.verify(root,digest,'x64','dogfood',True)
+    manifest['runtimeQualification']['receiptSha256']='a'*64
+    try: m.verify(root,write(),'x64','dogfood',True)
+    except ValueError: pass
+    else: raise AssertionError('arbitrary receipt token accepted')
+    manifest['runtimeQualification']['receiptSha256']=hashlib.sha256(raw).hexdigest()
+    digest=write()
     (root/'bin/kopia').write_bytes(b'changed')
     try: m.verify(root,digest,'x64','dogfood',True)
     except ValueError: pass
@@ -81,6 +108,36 @@ try:
     m.inspect=lambda path,arch: {'minimumOS':['14.0'],'dylibs':['/usr/lib/libSystem.B.dylib']}
     assert len(m.check_closure(root,'x64','14.0'))==1
 finally: shutil.rmtree(root)
+`);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test('native protocols stop the owned PostgreSQL and emit no success receipt after a failed query', () => {
+  const result = pythonProbe(`
+from types import SimpleNamespace
+root=pathlib.Path(tempfile.mkdtemp());calls=[]
+try:
+    manifest={'target':{'os':'darwin','arch':'x64'},'minimumMacOS':'14.0'}
+    m.verify=lambda *a:manifest
+    m.file_inventory=lambda *a:{'fixture':'sha'}
+    m.platform.system=lambda:'Darwin';m.platform.machine=lambda:'x86_64';m.platform.mac_ver=lambda:('14.8','','')
+    def execute(command,**kwargs):
+        calls.append(command)
+        if command[0].endswith('initdb'):
+            data=pathlib.Path(command[command.index('-D')+1]);data.mkdir()
+        if command[0].endswith('pg_ctl') and command[-1]=='start':
+            data=pathlib.Path(command[command.index('-D')+1]);(data/'postmaster.pid').write_text('fixture')
+        if command[0].endswith('psql'):return SimpleNamespace(returncode=1,stdout='',stderr='query failed')
+        return SimpleNamespace(returncode=0,stdout='',stderr='')
+    m.subprocess.run=execute
+    args=SimpleNamespace(root=root,sha256='sha',arch='x64',receipt=root/'receipt.json',evidence=root/'evidence')
+    try:m.qualify_runtime(args)
+    except ValueError as e:assert 'pg-vector-query failed' in str(e)
+    else:raise AssertionError('query failure accepted')
+    assert any(c[0].endswith('pg_ctl') and c[-1]=='stop' for c in calls)
+    assert not args.receipt.exists()
+    assert len(list(args.evidence.glob('*.json')))==4
+finally:shutil.rmtree(root)
 `);
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
@@ -326,6 +383,26 @@ test('pgvector stops before downloading when target bottle selection fails', () 
   const result = runPgvectorBottleFixture({ selectFails: true });
   assert.equal(result.status, 1);
   assert.equal(result.fetchArgs, null);
+});
+
+test('private bottle selection requires the rig macOS floor and fails closed without an eligible version', () => {
+  const fn = builder.match(/_brew_ver_with_darwin_bottle\(\) \{[\s\S]*?\n\}/)[0];
+  for (const eligible of [true, false]) {
+    const result = spawnSync('bash', ['-c', [
+      'set -euo pipefail',
+      'curl() {',
+      '  case "${@: -1}" in',
+      '    *token*) printf \'{"token":"fixture"}\\n\' ;;',
+      '    *tags/list*) printf \'{"tags":["0.8.7","0.8.6"]}\\n\' ;;',
+      '    */manifests/0.8.7) printf \'{"manifests":[{"platform":{"os":"darwin","architecture":"arm64","os.version":"macOS 15.8"}}]}\\n\' ;;',
+      `    */manifests/0.8.6) printf '{"manifests":[{"platform":{"os":"darwin","architecture":"arm64","os.version":"macOS ${eligible ? '14.8' : '15.8'}"}}]}\\n' ;;`,
+      '    *) return 9 ;;', '  esac', '}', fn,
+      '_brew_ver_with_darwin_bottle pgvector 0.8.7 arm64 homebrew/core/pgvector 14',
+    ].join('\n')], { encoding: 'utf8', timeout: 10_000 });
+    assert.equal(result.status, eligible ? 0 : 1, result.stdout + result.stderr);
+    if (eligible) assert.equal(result.stdout.trim(), '0.8.6');
+    else assert.match(result.stderr, /no pinned darwin\/arm64 version supports macOS <=14/);
+  }
 });
 
 test('desktop worker builds before Node staging and is executed by the finished-bundle verifier', () => {
