@@ -255,7 +255,11 @@ assert_vm_release_deb_runtime_only() {
   # WI-10003906 / P-017) on the same expanded tree: every native binary, model file
   # and Syft package must map to a reviewed component in scripts/installer-components.json.
   # Report-only for now (owner decision 2026-09-29): findings print, the release continues.
-  python3 "$HERE/audit-release-bundle.py" --scan-artifact --licenses "$deb"
+  # The immutable producer may be a desktop-only clone while ROOT selects a
+  # separate product checkout. The license checker lives in that product's
+  # superproject, so resolve its existing root seam independently of HERE.
+  PAPERCUSP_REPO_ROOT="${PAPERCUSP_REPO_ROOT:-$ROOT/..}" \
+    python3 "$HERE/audit-release-bundle.py" --scan-artifact --licenses "$deb"
 }
 
 # EI-25352011633941083: a full build can finish source/sidecar/Rust/Tauri and

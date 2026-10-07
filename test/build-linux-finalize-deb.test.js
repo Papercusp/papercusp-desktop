@@ -9,7 +9,8 @@ const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 
 const desktop = path.resolve(__dirname, '..');
-const source = fs.readFileSync(path.join(desktop, 'bin/build-linux-local.sh'), 'utf8');
+const source = fs.readFileSync(process.env.BUILD_LINUX_FINALIZATION_SCRIPT
+  || path.join(desktop, 'bin/build-linux-local.sh'), 'utf8');
 function shellFunction(name) {
   const start = source.indexOf(`${name}() {`);
   const end = source.indexOf('\n}\n', start);
@@ -123,6 +124,26 @@ test('changed artifact, signature, provenance and receipt identity refuse before
     const result = run(f);
     assert.notEqual(result.status, 0);
     assert.deepEqual(calls(f), []);
+  }
+});
+
+test('split-root finalization audits use the product superproject and preserve an explicit root', t => {
+  for (const override of ['', '/explicit-product-superproject']) {
+    const f = fixture(t);
+    fs.writeFileSync(path.join(f.here, 'audit-release-bundle.py'), [
+      'import os,sys',
+      "actual=os.path.realpath(os.environ.get('PAPERCUSP_REPO_ROOT',''))",
+      "expected=os.path.realpath(os.environ['EXPECTED_AUDIT_REPO'])",
+      "assert actual==expected,(actual,expected)",
+      "with open(os.environ['CALL_LOG'],'a') as out:out.write('audit '+actual+'\\n')",
+    ].join('\n'));
+    const expected = override || path.dirname(f.root);
+    const result = run(f, { PAPERCUSP_REPO_ROOT: override, EXPECTED_AUDIT_REPO: expected });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(calls(f).filter(line => line.startsWith('audit ')).length, 2);
+    assert.deepEqual(calls(f).filter(line => line.startsWith('audit ')),
+      [`audit ${expected}`, `audit ${expected}`]);
+    assert.equal(calls(f).includes('unexpected-full-build'), false);
   }
 });
 
