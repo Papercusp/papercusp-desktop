@@ -45,9 +45,16 @@ rig_profile_apply || exit 2
 BG_HOST_FENCE_CALL="$HOME/.local/bin/ptool"
 
 source_preflight=0
+local_source_out=''
 if [ "${1:-}" = '--source-preflight' ]; then
   source_preflight=1
   shift
+elif [ "${1:-}" = '--local-source-out' ]; then
+  source_preflight=1
+  local_source_out="${2:-}"
+  [ -n "$local_source_out" ] && [ "${local_source_out#/}" != "$local_source_out" ] \
+    && [ ! -e "$local_source_out" ] || fail 'local source output must be a fresh absolute path'
+  shift 2
 fi
 evidence_out="${1:-}"
 trust_out="${2:-}"
@@ -317,8 +324,11 @@ done < <(git -C "$REPO_ROOT" config --blob "$source_sha:.gitmodules" \
 stage_pinned_source() {
   local host="$1" i sm_path
   shift
+  local source_paths=(packages libs scripts package.json tsconfig.base.json)
+  # The local legs also need candidate app/config files, not the live test graph.
+  [ -z "$local_source_out" ] || source_paths=()
   git -C "$REPO_ROOT" archive --format=tar "$source_sha" -- \
-    packages libs scripts package.json tsconfig.base.json \
+    "${source_paths[@]}" \
     | "$@" \
     || fail "could not stage the pinned superproject source snapshot on the $host"
   for i in "${!staged_submodules[@]}"; do
@@ -329,7 +339,12 @@ stage_pinned_source() {
   done
 }
 
-tower_source="$(mktemp -d "${TMPDIR:-/tmp}/hive-git-physical-tower-source.XXXXXX")"
+if [ -n "$local_source_out" ]; then
+  tower_source="$local_source_out"
+  mkdir "$tower_source" || fail 'could not create local candidate source output'
+else
+  tower_source="$(mktemp -d "${TMPDIR:-/tmp}/hive-git-physical-tower-source.XXXXXX")"
+fi
 # cleanup() (installed below) removes the snapshot too; until then this narrower
 # trap keeps an early refusal from leaking a multi-hundred-MB tree.
 trap 'rm -rf -- "$tower_source"' EXIT
@@ -365,6 +380,14 @@ if [ -n "$uncommitted_drill_sources" ]; then
     "$uncommitted_drill_sources" >&2
 fi
 # PINNED-SOURCE-END
+
+# Reuse the same pin/archive/dependency overlay for wrapper local legs. This mode
+# is offline: it must return before remote preflights, resource leases or any ssh.
+if [ -n "$local_source_out" ]; then
+  trap - EXIT
+  printf 'local candidate source ready: %s %s\n' "$source_sha" "$tower_source"
+  exit 0
+fi
 
 # Phase E is the only phase that touches GitHub remotes. Prove the fixed canary
 # has both configured remotes, authenticated push permission, and the exact

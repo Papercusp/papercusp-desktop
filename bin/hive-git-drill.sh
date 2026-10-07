@@ -80,6 +80,7 @@ DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$DESKTOP_DIR/bin/lib/federation-asserts.sh"
 
 REPO_DIR="${PAPERCUSP_REPO_DIR:-/home/marsh-office/papercupai-workspace/papercusp}"
+LIVE_REPO_DIR="$REPO_DIR"
 # lib/sync/hive-git -> lib/sync/pot-git (renamed 2026-07-09/10) — defined once,
 # up front, so every leg below (A/B/C/D/F) sees it; a leg-local redefinition
 # right before its own heredoc is what silently broke LEG D previously (the
@@ -216,6 +217,16 @@ skipp(){ echo "  ⏭ SKIP $*"; SKIPPED=$((SKIPPED+1)); }
 printf '#!/usr/bin/env bash\nfor p in $(pgrep -f "%s"); do [ "$p" = "$$" ] || [ "$p" = "$PPID" ] || kill -9 "$p" 2>/dev/null; done\necho stopped\n' "$WORK" > "$WORK/stop.sh"; chmod +x "$WORK/stop.sh"
 cleanup() { [ -n "${KEEP_UP:-}" ] && { echo "KEEP_UP=1 — sidecar left running; $WORK/stop.sh to stop"; return; }; bash "$WORK/stop.sh" >/dev/null 2>&1; }
 trap cleanup EXIT
+
+# A candidate-pinned physical run must not exercise live local tests against its
+# older bundled schema. Reuse the canonical probe's offline snapshot producer.
+if [ -n "${HIVE_GIT_PHYSICAL_SOURCE_REF:-}" ] && [ -z "$PHYSICAL_ONLY" ]; then
+  HIVE_GIT_PHYSICAL_PLAN=p2p-git-live-activation-2026-07-09 \
+    "$DESKTOP_DIR/bin/vm-rig/hive-git-physical-probe.sh" --local-source-out "$WORK/local-source" \
+    >"$WORK/local-source.log" 2>&1 || { cat "$WORK/local-source.log"; exit 2; }
+  REPO_DIR="$WORK/local-source"
+  HGGIT="$REPO_DIR/packages/operator-core/lib/sync/pot-git"
+fi
 
 # ── Verification-harness contract (expensive-verification-loops P-006) ───────
 # Bracket mode over the drill's own sections. The drill never aborts on a failed check
@@ -468,7 +479,7 @@ if [ -n "$physical_probe_cmd" ]; then
     bad "physical E/G adapter requires a durable capability:bash background task enrollment"
   else
     physical_probe_rc=0
-    HIVE_GIT_PHYSICAL_PLAN=p2p-git-live-activation-2026-07-09 \
+    PAPERCUSP_REPO_DIR="$LIVE_REPO_DIR" HIVE_GIT_PHYSICAL_PLAN=p2p-git-live-activation-2026-07-09 \
       HIVE_GIT_PHYSICAL_PHASES="$PHYSICAL_ONLY" \
       "$physical_probe_cmd" "$physical_evidence_file" "$physical_trust_file" \
       >"$WORK/physical-probe.stdout" 2>"$WORK/physical-probe.stderr" || physical_probe_rc=$?
