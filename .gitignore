@@ -41,6 +41,11 @@ src-tauri/gen/
 src-tauri/sidecar/
 src-tauri/sidecar.tmp.*/
 src-tauri/sidecar.old.*/
+# Failed stages/receipts are private producer evidence, never release source.
+src-tauri/sidecar.failed-stage.*/
+src-tauri/sidecar.failed-stage.*.resume.json*
+src-tauri/sidecar.failed-prior.*/
+src-tauri/sidecar.tmp.*.identity.json*
 src-tauri/sidecar.lock
 src-tauri/sidecar.lockdir/
 

@@ -644,14 +644,17 @@ test('a daemon-capable child with fd 9 closed cannot retain the parent flock', (
 // `sidecar.old.<pid>` dirs, one of them 2.5G, were found stranded on one box
 // from exactly this gap. The fix folds OLD_DIR into the same EXIT trap that
 // already reaps SIDECAR_TMP_DIR/SIDECAR_LOCKDIR.
-test('EI-18775478513129278 sibling / WI-6557: the EXIT trap also reaps OLD_DIR, not just SIDECAR_TMP_DIR/SIDECAR_LOCKDIR', () => {
+const FINISH_FN = (builder.match(/^__pc_finish_sidecar_build\(\) \{\n[\s\S]*?^\}$/m) || [])[0];
+test('WI-6557: the EXIT trap handles prior output and releases lockdirs', () => {
   const trapLines = builder.match(/^trap '[^\n]*' EXIT$/gm) || [];
   assert.equal(trapLines.length, 1, 'expected exactly one top-level EXIT trap in the script');
   assert.match(
-    trapLines[0],
-    /\$\{OLD_DIR:\+"\$OLD_DIR"\}/,
-    'the EXIT trap must also reap $OLD_DIR (the outgoing sidecar tree) or a mid-publish failure strands it permanently',
+    trapLines[0], /__pc_finish_sidecar_build/, 'EXIT must invoke the shipped lifecycle handler',
   );
+  assert(FINISH_FN);
+  assert.match(FINISH_FN, /\$\{OLD_DIR:\+"\$OLD_DIR"\}/);
+  assert.match(FINISH_FN, /SIDECAR_BUILD_LOCKDIR/);
+  assert.match(FINISH_FN, /SIDECAR_PUBLISH_LOCKDIR/);
 });
 
 // Behavioral counterpart of the guard above: actually RUNS the exact trap
@@ -662,7 +665,7 @@ test('EI-18775478513129278 sibling / WI-6557: the EXIT trap also reaps OLD_DIR, 
 // gone afterward. A static text match alone cannot prove the trap syntax is
 // correct bash (e.g. that `${OLD_DIR:+...}` really is safe under this
 // script's `set -u` before OLD_DIR is ever assigned).
-test('WI-6557: the real EXIT trap line removes OLD_DIR on a mid-publish failure (behavioral)', () => {
+test('WI-6557: the real EXIT handler restores OLD_DIR and preserves failed stage on mid-publish failure', () => {
   const trapLine = (builder.match(/^trap '[^\n]*' EXIT$/m) || [])[0];
   assert(trapLine, 'could not locate the EXIT trap line in build-desktop-sidecar.sh');
 
@@ -677,7 +680,9 @@ test('WI-6557: the real EXIT trap line removes OLD_DIR on a mid-publish failure 
     const script = [
       'set -euo pipefail',
       `SIDECAR_TMP_DIR=${JSON.stringify(sidecarTmpDir)}`,
-      'SIDECAR_LOCKDIR=""',
+      `SIDECAR_FINAL_DIR=${JSON.stringify(path.join(tmp, 'sidecar'))}`,
+      '__pc_release_sidecar_publish_lock() { :; }',
+      FINISH_FN,
       trapLine, // the ACTUAL line from the shipped script
       `OLD_DIR=${JSON.stringify(oldDir)}`, // mimics the real script's later assignment
       'exit 1', // simulate a failure AFTER the swap but BEFORE the explicit success-path rm -rf
@@ -685,8 +690,10 @@ test('WI-6557: the real EXIT trap line removes OLD_DIR on a mid-publish failure 
 
     const result = spawnSync('bash', ['-c', script]);
     assert.equal(result.status, 1, 'the sandbox script should still exit 1 (the trap must not swallow the failure)');
-    assert.equal(fs.existsSync(oldDir), false, 'OLD_DIR must be reaped by the EXIT trap on a mid-publish failure');
-    assert.equal(fs.existsSync(sidecarTmpDir), false, 'SIDECAR_TMP_DIR must still be reaped too (pre-existing behavior)');
+    assert.equal(fs.existsSync(oldDir), false, 'OLD_DIR must not be stranded after restoring prior output');
+    assert.equal(fs.existsSync(path.join(tmp, 'sidecar', 'a-real-2.5g-build-would-have-files-like-this')), true);
+    assert.equal(fs.existsSync(sidecarTmpDir), false, 'failed temp must move to a durable failed-stage path');
+    assert.equal(fs.readdirSync(tmp).filter(name => /^sidecar\.failed-stage\.[0-9]+$/.test(name)).length, 1);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
