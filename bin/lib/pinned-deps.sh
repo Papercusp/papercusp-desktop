@@ -120,7 +120,7 @@ papercusp_pinned_deps_snapshot() {
   local _donor="${1:-}"
   local _snap="${2:-}"
   local _copy_mode="${3:-hardlink}"
-  local _rel _src _dst _tmp _old _n=0 _fail=0
+  local _rel _src _dst _tmp _old _n=0 _fail=0 _legacy _legacy_count _legacy_path
   case "$_copy_mode" in
     hardlink|copy) ;;
     *) echo "ERROR: snapshot mode must be hardlink or copy." >&2; return 2 ;;
@@ -133,6 +133,16 @@ papercusp_pinned_deps_snapshot() {
   if [ ! -d "$_donor" ]; then
     echo "ERROR: dependency donor is not a directory: $_donor" >&2
     return 2
+  fi
+
+  if [ "$_copy_mode" = copy ]; then
+    local _generation_helper
+    _generation_helper="$(dirname "${BASH_SOURCE[0]}")/../../../apps/operator/bin/release/dependency-generation.sh"
+    if ! command -v rsync >/dev/null 2>&1 || [ ! -f "$_generation_helper" ]; then
+      echo "ERROR: independent snapshots require rsync and the maintained dependency copy progress helper." >&2
+      return 1
+    fi
+    source "$_generation_helper" || return 1
   fi
 
   # Hardlinks cannot cross filesystems, and the failure mode without this check is a
@@ -159,6 +169,9 @@ papercusp_pinned_deps_snapshot() {
   fi
 
   mkdir -p "$_snap" || return 1
+  # A retry may fail even when this root holds an earlier complete snapshot.
+  # Its old success receipt must not attest this new attempt.
+  rm -f "$_snap/.papercusp-pinned-deps" || return 1
 
   while IFS= read -r _rel; do
     [ -n "$_rel" ] || continue
@@ -180,7 +193,65 @@ papercusp_pinned_deps_snapshot() {
     fi
 
     mkdir -p "$(dirname "$_dst")" || { _fail=1; continue; }
-    rm -rf "$_tmp" 2>/dev/null
+    if [ "$_copy_mode" = copy ]; then
+      # Earlier trees may already have been published before interruption. A
+      # byte/metadata dry run plus single-link files permits unchanged reuse;
+      # shared inodes or any difference take the independent staging path.
+      local _changes _linked
+      if [ -d "$_dst" ] && [ ! -L "$_dst" ]; then
+        _linked="$(find "$_dst" -type f -links +1 -print -quit)" || { _fail=1; continue; }
+        if [ -z "$_linked" ]; then
+          echo "verifying completed snapshot $_rel (checksums, independent inodes)"
+          if ! _changes="$(rsync -aH --checksum --dry-run --delete --itemize-changes "$_src/" "$_dst/")"; then
+            _fail=1
+            continue
+          fi
+          if [ -z "$_changes" ]; then
+            echo "  reused verified completed snapshot $_rel"
+            _n=$((_n + 1))
+            continue
+          fi
+        fi
+      fi
+      _tmp="$_dst.pinned-deps-tmp"
+      # Adopt exactly one old PID-specific staging tree. It is untrusted input:
+      # rsync checks every reused file's bytes, metadata, type and link text.
+      # Ambiguity is a refusal, never permission to delete retained progress.
+      if [ ! -e "$_tmp" ] && [ ! -L "$_tmp" ]; then
+        _legacy_count=0
+        _legacy_path=''
+        for _legacy in "$_dst".pinned-deps-tmp.*; do
+          [ -e "$_legacy" ] || [ -L "$_legacy" ] || continue
+          _legacy_count=$((_legacy_count + 1))
+          _legacy_path="$_legacy"
+        done
+        if [ "$_legacy_count" -gt 1 ]; then
+          echo "  REFUSING ambiguous retained staging trees for $_rel" >&2
+          _fail=1
+          continue
+        fi
+        if [ "$_legacy_count" -eq 1 ]; then
+          if [ -L "$_legacy_path" ] || [ ! -d "$_legacy_path" ]; then
+            echo "  REFUSING unsafe retained staging tree: $_legacy_path" >&2
+            _fail=1
+            continue
+          fi
+          mv "$_legacy_path" "$_tmp" || { _fail=1; continue; }
+        fi
+      fi
+      if [ -L "$_tmp" ] || { [ -e "$_tmp" ] && [ ! -d "$_tmp" ]; }; then
+        echo "  REFUSING unsafe staging tree: $_tmp" >&2
+        _fail=1
+        continue
+      fi
+      mkdir -p "$_tmp" || { _fail=1; continue; }
+      # A retained hardlink could couple this copy to its donor or an old
+      # mounted lower layer. Unlink it in staging before rsync applies metadata;
+      # -H then recreates donor hardlink groups with independent inodes.
+      find "$_tmp" -type f -links +1 -exec rm -f -- {} + || { _fail=1; continue; }
+    else
+      rm -rf "$_tmp" 2>/dev/null
+    fi
 
     # Build beside the destination and swap with renames, never in place. A snapshot root is
     # cheap to rebuild but it may be the lowerdir of a mounted overlay while we run, and a
@@ -188,13 +259,18 @@ papercusp_pinned_deps_snapshot() {
     local _copy_rc=0
     echo "snapshotting $_rel (mode=$_copy_mode)"
     if [ "$_copy_mode" = copy ]; then
-      cp -a "$_src" "$_tmp" 2>/dev/null || _copy_rc=$?
+      echo "  verifying retained staging bytes before reuse: $_tmp"
+      dependency_generation_copy_with_progress "$_src" "$_tmp" --rsync-checksum || _copy_rc=$?
     else
       cp -al "$_src" "$_tmp" 2>/dev/null || _copy_rc=$?
     fi
     if [ "$_copy_rc" -ne 0 ]; then
       echo "  FAILED to snapshot $_rel" >&2
-      rm -rf "$_tmp" 2>/dev/null
+      if [ "$_copy_mode" = copy ]; then
+        echo "  retained resumable staging tree: $_tmp (not a completed snapshot)" >&2
+      else
+        rm -rf "$_tmp" 2>/dev/null
+      fi
       _fail=1
       continue
     fi
@@ -202,7 +278,7 @@ papercusp_pinned_deps_snapshot() {
     if [ -e "$_dst" ]; then
       if ! mv "$_dst" "$_old" 2>/dev/null; then
         echo "  FAILED to retire the previous snapshot of $_rel" >&2
-        rm -rf "$_tmp" 2>/dev/null
+        [ "$_copy_mode" = copy ] || rm -rf "$_tmp" 2>/dev/null
         _fail=1
         continue
       fi
@@ -210,7 +286,7 @@ papercusp_pinned_deps_snapshot() {
     if ! mv "$_tmp" "$_dst" 2>/dev/null; then
       echo "  FAILED to publish the snapshot of $_rel" >&2
       [ -e "$_old" ] && mv "$_old" "$_dst" 2>/dev/null
-      rm -rf "$_tmp" 2>/dev/null
+      [ "$_copy_mode" = copy ] || rm -rf "$_tmp" 2>/dev/null
       _fail=1
       continue
     fi
