@@ -43,6 +43,61 @@ function extractFunction(name) {
 const CHECK_SPA_RUNTIME_LAYOUT = extractFunction('check_spa_runtime_layout');
 const CHECK_BOOT_IMPORT_CLOSURE = extractFunction('check_boot_import_closure');
 
+// EI-25314848971418539: execute the real source lookup and protocol derivation,
+// with distinct protocol versions beside the tooling and selected product.
+const protocolLookupStart = script.indexOf('_verify_here=');
+const protocolLookupEnd = script.indexOf('if [[ ! -f "$_ri" ]]; then', protocolLookupStart);
+assert.ok(protocolLookupStart >= 0 && protocolLookupEnd > protocolLookupStart);
+const PROTOCOL_LOOKUP = script.slice(protocolLookupStart, protocolLookupEnd);
+
+function runProtocolLookup(overrides = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-verifier-source-'));
+  try {
+    const tooling = path.join(dir, 'tooling');
+    const product = path.join(dir, 'product');
+    const verifier = path.join(tooling, 'papercusp-desktop/bin/verify-sidecar-bundle.sh');
+    const helper = path.join(path.dirname(verifier), 'lib/source-roots.sh');
+    fs.mkdirSync(path.dirname(helper), { recursive: true });
+    fs.copyFileSync(path.resolve(__dirname, '../bin/lib/source-roots.sh'), helper);
+    for (const [root, version] of [[tooling, 'v111'], [product, 'v987']]) {
+      const source = path.join(root, 'libs/generic/deployment-driver/src/workspace-host-remote-initializer.ts');
+      fs.mkdirSync(path.dirname(source), { recursive: true });
+      fs.writeFileSync(source, `export const WORKSPACE_HOST_REMOTE_INITIALIZER_PROTOCOL_VERSION =\n  'papercusp-gcp-iap-initialization-${version}';\n`);
+    }
+    fs.mkdirSync(path.join(product, 'papercusp-desktop'));
+    const env = { ...process.env, REPO_ROOT: '', PAPERCUSP_DESKTOP_TARGET_ROOT: '' };
+    if (overrides.repo) env.REPO_ROOT = overrides.repo === 'missing' ? path.join(dir, 'absent') : product;
+    if (overrides.desktop) env.PAPERCUSP_DESKTOP_TARGET_ROOT = path.join(product, 'papercusp-desktop');
+    const result = spawnSync('bash', ['-c', `set -uo pipefail\nFAIL=0\nfail() { echo "$*" >&2; FAIL=1; }\n${PROTOCOL_LOOKUP}\nprintf '%s\\n' "$_ri_ver"\nexit "$FAIL"`, verifier], { encoding: 'utf8', env });
+    return { status: result.status, out: result.stdout, err: result.stderr };
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('verifier preserves the adjacent product source default', () => {
+  const result = runProtocolLookup();
+  assert.equal(result.status, 0, result.err);
+  assert.equal(result.out.trim(), 'papercusp-gcp-iap-initialization-v111');
+});
+
+test('verifier derives the protocol from REPO_ROOT instead of the tooling checkout', () => {
+  const result = runProtocolLookup({ repo: true });
+  assert.equal(result.status, 0, result.err);
+  assert.equal(result.out.trim(), 'papercusp-gcp-iap-initialization-v987');
+});
+
+test('verifier honors a separate desktop target when REPO_ROOT is absent', () => {
+  const result = runProtocolLookup({ desktop: true });
+  assert.equal(result.status, 0, result.err);
+  assert.equal(result.out.trim(), 'papercusp-gcp-iap-initialization-v987');
+});
+
+test('a missing selected source refuses instead of falling back to tooling protocol', () => {
+  const result = runProtocolLookup({ repo: 'missing', desktop: true });
+  assert.equal(result.status, 1);
+  assert.match(result.err, /refusing a vacuous content assertion/);
+  assert.equal(result.out.trim(), '__UNDERIVABLE_INITIALIZER_PROTOCOL_VERSION__');
+});
+
 function runBootCheck(body) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'packaged-boot-closure-'));
   try {

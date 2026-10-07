@@ -605,7 +605,13 @@ _ri="$BIN/papercusp-remote-initializer"
 # shows up against a real host"); it was documented but never implemented here, so every protocol
 # bump re-armed the same trap. Matches the CONSTANT declaration, not the older example version
 # that still appears in that file's leading doc comment.
-_ri_src="$(cd "$(dirname "$0")/../.." && pwd)/libs/generic/deployment-driver/src/workspace-host-remote-initializer.ts"
+# A pinned tooling checkout can be separate from the product it verifies.
+# Resolve the same selected product root as the producer, rather than reading
+# a different protocol (or no source at all) beside the verifier's own checkout.
+_verify_here="$(cd "$(dirname "$0")" && pwd)"
+source "$_verify_here/lib/source-roots.sh"
+_ri_repo="$(papercusp_repo_root "${PAPERCUSP_DESKTOP_TARGET_ROOT:-$_verify_here/..}")"
+_ri_src="$_ri_repo/libs/generic/deployment-driver/src/workspace-host-remote-initializer.ts"
 # Quote-AGNOSTIC on purpose: the TS formatter has flipped this constant between single and
 # double quotes (build #2 2026-09-01 failed here when the source moved to double quotes while
 # this regex demanded single) — match either and strip both.
