@@ -281,7 +281,11 @@ NODE
 # sign, finalize) then runs bytes that cannot change under the run, and one
 # commit names the run's source. The working tree's dirtiness stops mattering:
 # uncommitted edits are simply not part of the run, and the probe says so.
-source_sha="$(git -C "$REPO_ROOT" rev-parse --verify 'HEAD^{commit}')" \
+# HIVE_GIT_PHYSICAL_SOURCE_REF selects a candidate without switching the shared tree.
+# Exercised offline by physical-drill-preflight.test.ts.
+# SOURCE-PIN-BEGIN
+source_ref="${HIVE_GIT_PHYSICAL_SOURCE_REF:-HEAD}"
+source_sha="$(git -C "$REPO_ROOT" rev-parse --verify --end-of-options "$source_ref^{commit}")" \
   || fail 'could not resolve the tower superproject commit to pin'
 # Submodules are enumerated from .gitmodules, not a hand-list, so adding a
 # submodule cannot silently re-arm the WI-39361 trap (see the VM staging note).
@@ -292,14 +296,19 @@ while IFS= read -r sm_path; do
   case "$sm_path" in libs/*) ;; *) continue ;; esac
   [ -e "$REPO_ROOT/$sm_path/.git" ] \
     || fail "required submodule is not initialised on the tower: $sm_path"
-  sm_sha="$(git -C "$REPO_ROOT/$sm_path" rev-parse --verify 'HEAD^{commit}')" \
-    || fail "could not resolve the submodule commit to pin: $sm_path"
+  sm_entry="$(git -C "$REPO_ROOT" ls-tree "$source_sha" -- "$sm_path")"
+  read -r sm_mode sm_type sm_sha sm_name <<< "$sm_entry"
+  [ "$sm_mode" = 160000 ] && [ "$sm_type" = commit ] && [ "$sm_name" = "$sm_path" ] \
+    || fail "candidate has no submodule gitlink: $sm_path"
+  git -C "$REPO_ROOT/$sm_path" cat-file -e "$sm_sha^{commit}" \
+    || fail "candidate submodule commit is unavailable: $sm_path@$sm_sha"
   staged_submodules+=("$sm_path")
   staged_submodule_shas+=("$sm_sha")
-done < <(git -C "$REPO_ROOT" config --file "$REPO_ROOT/.gitmodules" \
+done < <(git -C "$REPO_ROOT" config --blob "$source_sha:.gitmodules" \
   --get-regexp '^submodule\..*\.path$' | awk '{ print $2 }')
 [ "${#staged_submodules[@]}" -gt 0 ] \
   || fail 'no libs/ submodules were staged — .gitmodules is unreadable or empty'
+# SOURCE-PIN-END
 
 # Stream the PINNED source into one host. "$@" is the extracting command: a
 # local tar for the tower snapshot, an ssh-wrapped tar for the VM. The pinned
