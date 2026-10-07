@@ -142,15 +142,18 @@ PY
 # bytes before a cross-build pays for SPA/Rust/model assembly. Never borrow a
 # different runtime version or another architecture's binding.
 papercusp_verify_transformers_native_target() {
-  local repo_root="$1" target_os="$2" target_arch="$3" dependency_contract
+  local repo_root="$1" target_os="$2" target_arch="$3" dependency_contract stage_package="${4:-}"
   dependency_contract="$(papercusp_verify_transformers_dependencies "$repo_root" 1)" || return $?
-  node - "$repo_root" "$target_os" "$target_arch" "$dependency_contract" <<'NODE'
+  node - "$repo_root" "$target_os" "$target_arch" "$dependency_contract" \
+    "${PAPERCUSP_SIDECAR_BIN_CACHE:-$HOME/.cache/papercusp-sidecar-bins}" "$stage_package" <<'NODE'
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { createRequire } = require('node:module');
-const [root, target, arch, text] = process.argv.slice(2);
+const [root, target, arch, text, cacheRoot, stagePackage] = process.argv.slice(2);
 const platform = target === 'windows' ? 'win32' : target;
 function fail(message) { throw new Error(message); }
+function digest(file) { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); }
 function targetBytes(file) {
   const fd = fs.openSync(file, 'r');
   const header = Buffer.alloc(4096);
@@ -193,11 +196,66 @@ try {
     const runtime = JSON.parse(fs.readFileSync(runtimeJson));
     if (runtime.version !== expected) fail(`onnxruntime-node version differs from transformers pin ${expected}`);
     if (checked.has(runtimeJson)) continue;
-    const nativeDir = path.join(path.dirname(runtimeJson), 'bin/napi-v6', platform, arch);
-    targetBytes(path.join(nativeDir, 'onnxruntime_binding.node'));
+    let nativeDir = path.join(path.dirname(runtimeJson), 'bin/napi-v6', platform, arch);
     const library = platform === 'darwin' ? `libonnxruntime.${expected}.dylib`
       : platform === 'linux' ? 'libonnxruntime.so.1' : 'onnxruntime.dll';
-    targetBytes(path.join(nativeDir, library));
+    const files = ['onnxruntime_binding.node', library];
+    let receipt;
+    // Reuse the sidecar's existing binary cache. A source-built closure is an
+    // exact-version fallback, never a replacement for an invalid installed one.
+    if (files.some(file => !fs.existsSync(path.join(nativeDir, file)))) {
+      for (const file of files) if (fs.existsSync(path.join(nativeDir, file))) targetBytes(path.join(nativeDir, file));
+      const missingBinding = path.join(nativeDir, 'onnxruntime_binding.node');
+      nativeDir = path.join(cacheRoot, `onnxruntime-node-${expected}-${platform}-${arch}`);
+      if (!fs.existsSync(path.join(nativeDir, 'source-build.json'))) fail(`missing pinned target closure: ${missingBinding}; no qualified source-built cache`);
+      receipt = JSON.parse(fs.readFileSync(path.join(nativeDir, 'source-build.json')));
+      // This fallback repairs the measured missing Intel binding of this exact
+      // upstream release. A future pin needs its own measured source identity.
+      if (platform !== 'darwin' || arch !== 'x64' || expected !== '1.24.3'
+          || receipt.sourceSha !== '3a728b75062256951b6e19ce718907cf1a1d4cf0') {
+        fail('source-built native cache is not the qualified upstream release source');
+      }
+      if (receipt.kind !== 'onnxruntime-node-source-build' || receipt.version !== expected
+          || receipt.platform !== platform || receipt.arch !== arch
+          || receipt.upstream !== 'https://github.com/microsoft/onnxruntime'
+          || receipt.tag !== `v${expected}` || !/^[0-9a-f]{40}$/.test(receipt.sourceSha || '')
+          || !receipt.toolchain?.clang || !receipt.toolchain?.cmake || !receipt.toolchain?.node
+          || !receipt.dependencyLockSha256 || !/^[0-9a-f]{64}$/.test(receipt.dependencyLockSha256)
+          || !Array.isArray(receipt.linkage) || !receipt.linkage.length
+          || receipt.bindingLoad !== 'passed') fail('source-built native cache has incomplete or mismatched provenance');
+      if (receipt.linkage.length !== files.length || files.some(file => !receipt.linkage.some(entry => entry.file === file))
+          || receipt.linkage.some(entry => !Array.isArray(entry.dependencies) || !entry.dependencies.length
+            || entry.dependencies.some(dependency => typeof dependency !== 'string'
+              || (!dependency.startsWith('/System/Library/') && !dependency.startsWith('/usr/lib/')
+                && dependency !== `@rpath/${library}` && dependency !== `@loader_path/${library}`)))) {
+        fail('source-built native cache has non-portable or incomplete linkage closure');
+      }
+      if (Object.keys(receipt.files || {}).sort().join(',') !== files.slice().sort().join(',')) {
+        fail('source-built native cache file inventory differs from the required CPU closure');
+      }
+      for (const file of files) if (digest(path.join(nativeDir, file)) !== receipt.files[file]) {
+        fail(`source-built native cache digest mismatch: ${file}`);
+      }
+      const notices = ['LICENSE', 'ThirdPartyNotices.txt'];
+      if (Object.keys(receipt.licenses || {}).sort().join(',') !== notices.slice().sort().join(',')) fail('source-built native cache lacks upstream license inventory');
+      for (const file of notices) if (!/^[0-9a-f]{64}$/.test(receipt.licenses[file])
+          || digest(path.join(nativeDir, file)) !== receipt.licenses[file]) fail(`source-built license digest mismatch: ${file}`);
+    }
+    for (const file of files) targetBytes(path.join(nativeDir, file));
+    if (stagePackage && receipt) {
+      const staged = JSON.parse(fs.readFileSync(path.join(stagePackage, 'package.json')));
+      if (staged.name !== 'onnxruntime-node' || staged.version !== expected) fail('staged runtime differs from the exact source-build pin');
+      const destination = path.join(stagePackage, 'bin/napi-v6', platform, arch);
+      fs.mkdirSync(destination, { recursive: true });
+      for (const file of files) {
+        fs.copyFileSync(path.join(nativeDir, file), path.join(destination, file));
+        if (digest(path.join(destination, file)) !== receipt.files[file]) fail(`staged source-build digest mismatch: ${file}`);
+      }
+      fs.writeFileSync(path.join(stagePackage, 'native-source-build.json'), JSON.stringify(receipt, null, 2) + '\n');
+      const licenseDir = path.join(stagePackage, 'native-source-licenses');
+      fs.mkdirSync(licenseDir, { recursive: true });
+      for (const file of Object.keys(receipt.licenses)) fs.copyFileSync(path.join(nativeDir, file), path.join(licenseDir, file));
+    }
     checked.add(runtimeJson);
   }
   if (!checked.size) fail('no pinned local-model native runtime resolved');

@@ -46,11 +46,83 @@ function nativeTargetFixture() {
     fs.writeFileSync(path.join(dir, library), bytes);
     return dir;
   }
-  const probe = (os, arch) => spawnSync('bash', ['-c', 'source "$1"; papercusp_verify_transformers_native_target "$2" "$3" "$4"', 'test', lib, root, os, arch], {
-    encoding: 'utf8', env: { ...process.env, PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT: contract },
+  const cache = path.join(root, 'bin-cache');
+  const probe = (os, arch, stage = '') => spawnSync('bash', ['-c', 'source "$1"; papercusp_verify_transformers_native_target "$2" "$3" "$4" "$5"', 'test', lib, root, os, arch, stage], {
+    encoding: 'utf8', env: { ...process.env, PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT: contract, PAPERCUSP_SIDECAR_BIN_CACHE: cache },
   });
-  return { root, runtime, writeTarget, probe };
+  function sourceCache() {
+    const dir = path.join(cache, 'onnxruntime-node-1.24.3-darwin-x64');
+    fs.mkdirSync(dir, { recursive: true });
+    const source = writeTarget('darwin', 'x64');
+    const files = {};
+    for (const name of ['onnxruntime_binding.node', 'libonnxruntime.1.24.3.dylib']) {
+      const bytes = fs.readFileSync(path.join(source, name));
+      fs.writeFileSync(path.join(dir, name), bytes);
+      files[name] = sha(bytes);
+    }
+    fs.rmSync(source, { recursive: true });
+    const receipt = { kind: 'onnxruntime-node-source-build', version: '1.24.3', platform: 'darwin', arch: 'x64',
+      upstream: 'https://github.com/microsoft/onnxruntime', tag: 'v1.24.3', sourceSha: '3a728b75062256951b6e19ce718907cf1a1d4cf0',
+      toolchain: { clang: 'fixture clang', cmake: 'fixture cmake', node: 'fixture node' },
+      dependencyLockSha256: 'b'.repeat(64), bindingLoad: 'passed', files,
+      linkage: Object.keys(files).map(file => ({ file, dependencies: ['/usr/lib/libSystem.B.dylib'] })) };
+    receipt.licenses = {};
+    for (const file of ['LICENSE', 'ThirdPartyNotices.txt']) {
+      const text = `fixture upstream ${file}`;
+      fs.writeFileSync(path.join(dir, file), text);
+      receipt.licenses[file] = sha(text);
+    }
+    const save = () => fs.writeFileSync(path.join(dir, 'source-build.json'), JSON.stringify(receipt));
+    save();
+    return { dir, receipt, save };
+  }
+  return { root, runtime, writeTarget, probe, sourceCache };
 }
+
+test('same-version upstream source cache stages the missing Intel closure without mutating dependencies', () => {
+  const f = nativeTargetFixture();
+  try {
+    const cache = f.sourceCache();
+    assert.equal(f.probe('darwin', 'x64').status, 0);
+    const staged = path.join(f.root, 'assembled/onnxruntime-node');
+    fs.mkdirSync(staged, { recursive: true });
+    fs.copyFileSync(path.join(f.runtime, 'package.json'), path.join(staged, 'package.json'));
+    const result = f.probe('darwin', 'x64', staged);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(fs.existsSync(path.join(f.runtime, 'bin/napi-v6/darwin/x64')), false);
+    for (const [name, digest] of Object.entries(cache.receipt.files)) {
+      assert.equal(sha(fs.readFileSync(path.join(staged, 'bin/napi-v6/darwin/x64', name))), digest);
+    }
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(staged, 'native-source-build.json'))), cache.receipt);
+    for (const [name, digest] of Object.entries(cache.receipt.licenses)) assert.equal(sha(fs.readFileSync(path.join(staged, 'native-source-licenses', name))), digest);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('source cache refuses stale bytes, version/source/target gaps and non-portable linkage before staging', () => {
+  for (const defect of ['bytes', 'version', 'source', 'wrong-source', 'arch', 'load', 'toolchain', 'inventory', 'linkage', 'license', 'staged-version']) {
+    const f = nativeTargetFixture();
+    try {
+      const c = f.sourceCache();
+      if (defect === 'bytes') fs.appendFileSync(path.join(c.dir, 'onnxruntime_binding.node'), 'changed');
+      if (defect === 'version') c.receipt.version = '1.23.2';
+      if (defect === 'source') delete c.receipt.sourceSha;
+      if (defect === 'wrong-source') c.receipt.sourceSha = 'a'.repeat(40);
+      if (defect === 'arch') c.receipt.arch = 'arm64';
+      if (defect === 'load') c.receipt.bindingLoad = 'unverified';
+      if (defect === 'toolchain') delete c.receipt.toolchain.clang;
+      if (defect === 'inventory') c.receipt.files['extra.dylib'] = 'c'.repeat(64);
+      if (defect === 'linkage') c.receipt.linkage[0].dependencies = ['/Users/builder/private/lib.dylib'];
+      if (defect === 'license') fs.appendFileSync(path.join(c.dir, 'LICENSE'), 'changed');
+      c.save();
+      const staged = path.join(f.root, 'assembled/onnxruntime-node');
+      fs.mkdirSync(staged, { recursive: true });
+      fs.writeFileSync(path.join(staged, 'package.json'), JSON.stringify({ name: 'onnxruntime-node', version: defect === 'staged-version' ? '1.23.2' : '1.24.3' }));
+      const result = f.probe('darwin', 'x64', staged);
+      assert.equal(result.status, 1, `${defect}: ${result.stdout}${result.stderr}`);
+      assert.equal(fs.existsSync(path.join(staged, 'bin')), false, defect);
+    } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+  }
+});
 
 test('pinned native preflight accepts matching target binding and runtime library for each supported shape', () => {
   const f = nativeTargetFixture();
