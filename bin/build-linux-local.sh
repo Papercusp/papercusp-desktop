@@ -23,6 +23,11 @@
 #   PAPERCUSP_SKIP_SEED_CUT=1 bin/build-linux-local.sh   # reuse committed seed
 #   PAPERCUSP_DISTRIBUTION_PROFILE=vm-release bin/build-linux-local.sh
 #                                                   # immutable Server-only VM package
+#   PAPERCUSP_DISTRIBUTION_PROFILE=vm-release bin/build-linux-local.sh \
+#     --finalize-deb <completed.deb> <input-receipt.json>
+#     # Resume only packaging: receipt binds initial package/signature and
+#     # sidecar provenance. Use a separate compression-stage execution budget;
+#     # repack-deb-xz.sh documents a measured 55-minute xz stage on model payloads.
 #
 # Env passthrough (same knobs as release-local.sh's Linux leg):
 #   PAPERCUSP_DISTRIBUTION_PROFILE
@@ -252,6 +257,77 @@ assert_vm_release_deb_runtime_only() {
   # Report-only for now (owner decision 2026-09-29): findings print, the release continues.
   python3 "$HERE/audit-release-bundle.py" --scan-artifact --licenses "$deb"
 }
+
+# EI-25352011633941083: a full build can finish source/sidecar/Rust/Tauri and
+# still hit its enclosing deadline in xz. Extend this producer's existing
+# package guards; resuming finalization must never rebuild or relabel inputs.
+finalize_existing_vm_release_deb() {
+  local deb="${1:?completed deb required}" receipt="${2:?input receipt required}"
+  local sidecar="$ROOT/src-tauri/sidecar" source_sha public_key
+  [[ "$DISTRIBUTION_PROFILE" == vm-release ]] || {
+    echo 'ERROR: --finalize-deb requires vm-release' >&2; return 2;
+  }
+  source_sha="$(python3 - "$deb" "$receipt" "$VERSION" "$sidecar/build-provenance.json" <<'PY'
+import hashlib,json,re,sys
+from pathlib import Path
+deb,receipt,version,provenance=map(Path,sys.argv[1:])
+version=str(version)
+def digest(path):
+    with open(path,'rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
+r=json.loads(receipt.read_text())
+if (r.get('kind')!='linux-completed-package-finalization-input/v1'
+        or r.get('profile')!='vm-release' or r.get('version')!=version
+        or not isinstance(r.get('sourceSha'),str)
+        or not re.fullmatch(r'[0-9a-f]{40}',r['sourceSha'])):
+    raise ValueError('invalid completed-package finalization receipt')
+a=r['artifact']
+if (Path(a['path']).resolve()!=deb.resolve()
+        or digest(deb)!=a['sha256']
+        or digest(str(deb)+'.sig')!=a['signatureSha256']
+        or digest(provenance)!=r['sidecarBuildProvenanceSha256']):
+    raise ValueError('finalization input bytes do not match the receipt')
+p=json.loads(provenance.read_text())
+if (p.get('gitHead')!=r['sourceSha'] or p.get('gitDirty') is not False
+        or p.get('version')!=version):
+    raise ValueError('sidecar source/version does not match finalization receipt')
+print(r['sourceSha'])
+PY
+  )" || return 2
+  [[ "$(dpkg-deb -f "$deb" Package)" == papercusp-server \
+     && "$(dpkg-deb -f "$deb" Version)" == "$VERSION" ]] || {
+    echo 'ERROR: finalization requires the exact Server package/version' >&2; return 2;
+  }
+  public_key="$(python3 - "$ROOT/src-tauri/tauri.conf.json" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))['plugins']['updater']['pubkey'])
+PY
+  )" || return 2
+  echo 'finalize-existing: phase=input-signature'
+  node "$HERE/verify-tauri-signature.mjs" "$public_key" "$deb" "$deb.sig" --json || return 2
+  # Retain every existing runtime-only/privacy/license guard before the costly
+  # stage as well as after it; a signed wrong-profile payload is still wrong.
+  echo 'finalize-existing: phase=input-runtime-only'
+  assert_vm_release_deb_runtime_only "$deb" || return 2
+  export TAURI_SIGNING_PRIVATE_KEY="${TAURI_SIGNING_PRIVATE_KEY:-$KEY_FILE}"
+  export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
+  echo 'finalize-existing: phase=repack-and-sign'
+  bash "$HERE/repack-deb-xz.sh" "$deb" || return 1
+  echo 'finalize-existing: phase=final-runtime-only'
+  assert_vm_release_deb_runtime_only "$deb" || return 1
+  echo 'finalize-existing: phase=final-signature'
+  node "$HERE/verify-tauri-signature.mjs" "$public_key" "$deb" "$deb.sig" --json || return 1
+  echo 'finalize-existing: phase=provenance'
+  PROVENANCE_SIDECAR_DIR="$sidecar" \
+  PROVENANCE_SOURCE_GIT_HEAD="$source_sha" PROVENANCE_SOURCE_GIT_DIRTY=false \
+    bash "$HERE/emit-build-provenance.sh" "$(dirname "$deb")" "$VERSION" "$source_sha" true "$deb" "$deb.sig" || return 1
+  echo "finalize-existing: complete $deb; installer acceptance remains separate"
+}
+
+if [[ "${1:-}" == --finalize-deb ]]; then
+  [[ $# == 3 ]] || { echo 'usage: --finalize-deb <completed.deb> <input-receipt.json>' >&2; exit 2; }
+  finalize_existing_vm_release_deb "$2" "$3"
+  exit $?
+fi
 
 case "${PAPERCUSP_REUSE_SIDECAR:-0}" in
   0)
