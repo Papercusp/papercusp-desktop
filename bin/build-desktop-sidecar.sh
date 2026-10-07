@@ -172,6 +172,17 @@ if [[ -z "${PROVENANCE_SOURCE_GIT_HEAD+x}" && -x "$HERE/emit-build-provenance.sh
   unset _provenance_source_output _provenance_source_fields _provenance_source_line
 fi
 
+if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" ]]; then
+  _provenance_entry_head="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+  if [[ -z "${PROVENANCE_SOURCE_GIT_HEAD:-}" \
+     || "$_provenance_entry_head" != "$PROVENANCE_SOURCE_GIT_HEAD" ]]; then
+    echo "ERROR: release-audited sidecar source identity mismatch at entry (expected=$_provenance_entry_head, supplied=${PROVENANCE_SOURCE_GIT_HEAD:-unset})." >&2
+    echo "       PROVENANCE_SOURCE_GIT_HEAD must identify REPO_ROOT's JavaScript source, not the desktop packaging repository." >&2
+    exit 1
+  fi
+  unset _provenance_entry_head
+fi
+
 # Release-audited cuts must start from a clean source snapshot. The provenance
 # verifier already rejects gitDirty=true after the expensive build, but doing
 # the same check here fails before dependency/toolchain work and prevents a
@@ -1199,7 +1210,7 @@ papercusp_ensure_host_worker_bundler "$HERE/../../apps/operator/bin/bundle-host-
 assert_esm_require_shim() {
   local f
   for f in "$@"; do
-    if grep -q 'Dynamic require of' "$f" && ! head -c 2048 "$f" | grep -q 'createRequire'; then
+    if grep -q 'Dynamic require of' "$f" && ! head -c 2048 "$f" | grep -c 'createRequire' >/dev/null; then
       echo "ERROR: $f reaches a CommonJS require() but has no createRequire banner, so it throws" >&2
       echo "       'Dynamic require of ... is not supported' at load. Bundle it with --banner:js=\"\$HOST_BANNER\"." >&2
       return 1
