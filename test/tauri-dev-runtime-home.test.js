@@ -35,6 +35,9 @@ function runGuard({ explicitHome = '', workspace = true, corrupt = false, comman
         HOME: home,
         PAPERCUSP_WORKSPACES_ROOT: workspaces,
         PAPERCUSP_WORKSPACE: 'fixture-workspace',
+        // The canonical resolver reads the process pin before registry.current.
+        // Never inherit the outer test-ledger's real workspace into this fixture.
+        PAPERCUSP_WORKSPACE_ID: corrupt || !workspace ? '' : 'fixture-workspace',
         PAPERCUSP_HOME: explicitHome,
         CARGO_TARGET_DIR: join(root, 'cargo-target'),
         PAPERCUSP_SIDECAR_LOCK: join(root, 'sidecar.lock'),
