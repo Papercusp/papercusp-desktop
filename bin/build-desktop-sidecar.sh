@@ -174,7 +174,8 @@ fi
 
 if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" ]]; then
   _provenance_entry_head="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')"
-  if [[ -z "${PROVENANCE_SOURCE_GIT_HEAD:-}" \
+  if [[ "$_provenance_entry_head" == "unknown" \
+     || -z "${PROVENANCE_SOURCE_GIT_HEAD:-}" \
      || "$_provenance_entry_head" != "$PROVENANCE_SOURCE_GIT_HEAD" ]]; then
     echo "ERROR: release-audited sidecar source identity mismatch at entry (expected=$_provenance_entry_head, supplied=${PROVENANCE_SOURCE_GIT_HEAD:-unset})." >&2
     echo "       PROVENANCE_SOURCE_GIT_HEAD must identify REPO_ROOT's JavaScript source, not the desktop packaging repository." >&2
