@@ -35,6 +35,14 @@ function extractFunction(name) {
 
 const LDCONFIG_RESOLVER = extractFunction('resolve_ldconfig');
 
+test('every sidecar esbuild package runner holds the host package-cache lease', () => {
+  const runners = builder.split('\n').filter(line => line.includes('npx --yes esbuild@0.25.0'));
+  assert.ok(runners.length >= 8, 'all sidecar bundle phases must be covered');
+  for (const runner of runners) {
+    assert.ok(runner.includes('node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx'), runner);
+  }
+});
+
 function runLdconfigResolver(pathValue) {
   const bash = ['/usr/bin/bash', '/bin/bash'].find((candidate) => fs.existsSync(candidate));
   assert.ok(bash, 'a bash interpreter is required to exercise the builder helper');
