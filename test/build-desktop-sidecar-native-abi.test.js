@@ -122,7 +122,7 @@ from types import SimpleNamespace
 root=pathlib.Path(tempfile.mkdtemp());calls=[]
 try:
     manifest={'target':{'os':'darwin','arch':'x64'},'minimumMacOS':'14.0'}
-    m.verify=lambda *a:manifest
+    m.verify=lambda *a,**kw:manifest
     m.file_inventory=lambda *a:{'fixture':'sha'}
     m.platform.system=lambda:'Darwin';m.platform.machine=lambda:'x86_64';m.platform.mac_ver=lambda:('14.8','','')
     def execute(command,**kwargs):
@@ -161,6 +161,29 @@ test('private native inputs fail before SPA assembly and require actual rig qual
     assert.equal(result.status, 1, result.stdout + result.stderr);
     assert.match(result.stderr, /Darwin dogfood/);
   }
+});
+
+test('post-scan binding refuses changed native bytes and unrecorded scanner additions', () => {
+  const result = pythonProbe(`
+from types import SimpleNamespace
+root=pathlib.Path(tempfile.mkdtemp())
+try:
+    p=root/'native';p.mkdir();(p/'postgres').write_bytes(b'original')
+    files=m.file_inventory(p)
+    manifest=p/'manifest.json';manifest.write_text(json.dumps({'files':files}))
+    expected=m.sha(manifest)
+    a=p/'apps/operator/runtime/vm-release-vulnerability-attestation.json';a.parent.mkdir(parents=True);a.write_text('{}')
+    args=SimpleNamespace(root=p,sha256=expected,arch='x64',evidence=root/'evidence',out=root/'out')
+    for changed in ['native','extra']:
+        (p/'postgres').write_bytes(b'changed' if changed=='native' else b'original')
+        if changed=='extra':(p/'unrecorded').write_bytes(b'extra')
+        try:m.bind_security(args)
+        except ValueError as e:assert 'changed original native bytes or added unrecorded files' in str(e)
+        else:raise AssertionError('scanner mutation accepted')
+        assert not args.out.exists()
+finally:shutil.rmtree(root)
+`);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
 test('moved qualified PG clients resolve the normalized embedded library directory', () => {

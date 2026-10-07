@@ -264,13 +264,14 @@ def qualify_runtime(args):
     observations = []
     started = time.monotonic()
     before = file_inventory(root)
-    with tempfile.TemporaryDirectory(prefix="papercusp-native-protocol-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="pc-native-", dir="/tmp") as temporary:
         work = Path(temporary)
         for name in ("home", "socket", "input"):
             (work / name).mkdir()
         env = {"PATH": os.environ["PATH"], "HOME": str(work / "home"), "LANG": "C",
                "TMPDIR": temporary, "GH_CONFIG_DIR": str(work / "gh-config"),
-               "GH_TOKEN": "local-fixture-only", "GH_PROMPT_DISABLED": "1"}
+               "GH_TOKEN": "local-fixture-only", "GH_PROMPT_DISABLED": "1",
+               "KOPIA_PASSWORD": "local-fixture-only"}
 
         def execute(name, command, cleanup=False):
             remaining = 180 - (time.monotonic() - started)
