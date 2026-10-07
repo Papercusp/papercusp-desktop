@@ -484,6 +484,12 @@ test('sidecar preflight refuses an explicitly empty source SHA', () => {
   assert.match(result.stderr, /source identity mismatch at entry/);
 });
 
+test('sidecar preflight refuses unknown source identity even when the supplied value matches', () => {
+  const result = runSourceIdentityPreflight(tmp(), 'unknown');
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /source identity mismatch at entry/);
+});
+
 test('release-audited sidecar fails closed on dirty or moving source before publish', () => {
   const builder = fs.readFileSync(path.join(BIN, 'build-desktop-sidecar.sh'), 'utf8');
   const dirtyGuardAt = builder.indexOf('release-audited sidecar requires a clean source tree');
