@@ -125,6 +125,10 @@ if [[ "$DISTRIBUTION_PROFILE" == "vm-release" \
   exit 2
 fi
 
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" || "${PAPERCUSP_TRANSFORMERS_VERIFY_PINNED:-0}" == "1" ]]; then
+  papercusp_verify_transformers_dependencies "$REPO_ROOT" 0 || exit 1
+fi
+
 # Direct sidecar builds are release producers too. Preserve the source state at
 # entry, before dependency generations/npm installs mutate tracked build state;
 # emit-build-provenance.sh records the later checkout separately as *AtEmit.
@@ -1126,6 +1130,10 @@ done
 if [[ "$dep_check_ok" -ne 1 ]]; then
   echo "FATAL: dependency-resolution check still failing after $dep_check_attempts attempts with delay — this is a REAL un-extracted dependency, not a transient race. See the dep-check output above for exactly which package(s)."
   exit 1
+fi
+
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" || "${PAPERCUSP_TRANSFORMERS_VERIFY_PINNED:-0}" == "1" ]]; then
+  papercusp_verify_transformers_dependencies "$REPO_ROOT" 1 || exit 1
 fi
 
 # Prepare the sidecar staging root before the Vite build. The singleflight seam

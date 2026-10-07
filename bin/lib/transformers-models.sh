@@ -35,6 +35,108 @@ PAPERCUSP_TRANSFORMERS_MODELS=(harrier-oss-v1-0.6b-ONNX embeddinggemma-300m-ONNX
 PAPERCUSP_TRANSFORMERS_MODELS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT_DEFAULT="$PAPERCUSP_TRANSFORMERS_MODELS_LIB_DIR/../../src-tauri/distribution-contract.json"
 
+papercusp_verify_transformers_dependencies() {
+  local repo_root="${1:-}" check_installed="${2:-0}"
+  local contract="${PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT:-$PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT_DEFAULT}"
+  [ -n "$repo_root" ] || return 2
+  python3 - "$contract" "$repo_root" "$check_installed" <<'PY'
+import json
+import os
+import posixpath
+import re
+import sys
+
+contract_path, repo_root, check_installed = sys.argv[1:]
+package_name = "@huggingface/transformers"
+package_suffix = "node_modules/" + package_name
+
+def fail(message):
+    sys.exit("FATAL: transformers dependency contract mismatch: " + message)
+
+def read_object(path):
+    try:
+        with open(path, encoding="utf-8") as source:
+            document = json.load(source)
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"cannot read {path}: {exc}")
+    if not isinstance(document, dict):
+        fail(f"{path} must contain a JSON object")
+    return document
+
+contract = read_object(contract_path)
+matches = [
+    pack for pack in contract.get("server", {}).get("optionalPacks", [])
+    if pack.get("name") == "local-models"
+]
+if len(matches) != 1:
+    fail("distribution contract must declare exactly one local-models pack")
+expected = matches[0].get("compatibility", {}).get("transformersPackage")
+if not isinstance(expected, str) or not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", expected):
+    fail("local-models must pin an exact transformersPackage version")
+
+lock = read_object(os.path.join(repo_root, "package-lock.json"))
+packages = lock.get("packages")
+if not isinstance(packages, dict):
+    fail("root lock must contain a packages map")
+consumers = []
+resolutions = {}
+locked_count = 0
+for relative_path, entry in packages.items():
+    if not isinstance(entry, dict):
+        fail(f"invalid lock entry at {relative_path}")
+    if relative_path == package_suffix or relative_path.endswith("/" + package_suffix):
+        locked_count += 1
+        if entry.get("version") != expected:
+            fail(f"lock entry {relative_path} expects {expected}, got {entry.get('version')}")
+    if "node_modules" in relative_path.split("/"):
+        continue
+    declaration = entry.get("dependencies", {}).get(package_name)
+    if declaration is None:
+        continue
+    if declaration != expected:
+        fail(f"lock declaration {relative_path} must pin {expected}, got {declaration}")
+    manifest = read_object(os.path.join(repo_root, relative_path, "package.json"))
+    actual = manifest.get("dependencies", {}).get(package_name)
+    if actual != expected:
+        fail(f"package declaration {relative_path} must pin {expected}, got {actual}")
+    candidates = []
+    directory = relative_path
+    while True:
+        candidates.append(posixpath.join(directory, package_suffix))
+        if not directory:
+            break
+        directory = posixpath.dirname(directory)
+    locked_path = next((candidate for candidate in candidates if candidate in packages), None)
+    if locked_path is None:
+        fail(f"root lock cannot resolve {package_name} from {relative_path}")
+    if check_installed == "1":
+        installed_path = next((
+            candidate for candidate in candidates
+            if os.path.isdir(os.path.join(repo_root, candidate))
+        ), None)
+        if installed_path is None:
+            fail(f"cannot read installed {package_name} from {relative_path}")
+        installed = read_object(os.path.join(repo_root, installed_path, "package.json"))
+        if installed.get("name") != package_name or installed.get("version") != expected:
+            fail(f"installed package expects {package_name}@{expected}, got {installed.get('name')}@{installed.get('version')}")
+        if installed_path != locked_path:
+            fail(f"installed resolution from {relative_path} expects {locked_path}, got {installed_path}")
+    consumers.append(relative_path)
+    resolutions[relative_path] = locked_path
+if not locked_count:
+    fail(f"root lock must resolve {package_name}")
+if not consumers:
+    fail("root lock declares no workspace consumers of transformers")
+print(json.dumps({
+    "ok": True,
+    "transformersPackage": expected,
+    "consumers": sorted(consumers),
+    "resolutions": resolutions,
+    "installedChecked": check_installed == "1",
+}))
+PY
+}
+
 # P-314: `distribution-contract.json` is already the customer-release manifest.
 # The `local-models` pack inside it now owns exact revisions, compatibility and
 # per-file content identity; do not create a second model manifest beside it.
@@ -458,9 +560,10 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     present) shift; papercusp_transformers_models_present "$@" ;;
     names) printf '%s\n' "${PAPERCUSP_TRANSFORMERS_MODELS[@]}" ;;
     verify) shift; papercusp_verify_transformers_model_pack "$@" ;;
+    dependencies) shift; papercusp_verify_transformers_dependencies "$@" ;;
     fetch) shift; papercusp_fetch_transformers_models "$@" ;;
     *)
-      echo "usage: $0 {stage|present|names|verify|fetch} <models_root>" >&2
+      echo "usage: $0 {stage|present|names|verify|fetch} <models_root> | dependencies <repo_root> [check_installed]" >&2
       exit 2
       ;;
   esac
