@@ -29,6 +29,76 @@ function pythonProbe(script) {
   ].join('\n')], { encoding: 'utf8', timeout: 10_000 });
 }
 
+test('PG bottle path normalization preserves bytes and relocates share plus $libdir for both architectures', () => {
+  const result = pythonProbe(`
+root=pathlib.Path(tempfile.mkdtemp())
+try:
+    for arch in ('x64','arm64'):
+        native=root/arch
+        paths=m.postgres_path_replacements(arch)
+        original=bytes.fromhex('cffaedfe')+b'UNTOUCHED\\0'
+        for old,new in paths.values(): original+=old.encode()+b'\\0'
+        original+=b'UNCHANGED-TRAILER'
+        for name in m.PG_PROGRAMS:
+            p=native/'bin'/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(original)
+        receipt=m.normalize_postgres_paths(native,arch)
+        assert m.verify_postgres_paths(native,arch,receipt)==receipt
+        data=(native/'bin/postgres').read_bytes()
+        assert len(data)==len(original) and data.endswith(b'UNCHANGED-TRAILER')
+        for key,(old,new) in paths.items():
+            assert old.encode()+b'\\0' not in data
+            assert data.count(new.encode()+b'\\0')==1
+            assert receipt['bin/postgres'][key]==1
+        # PostgreSQL path.c make_relative_path requires the bindir tail to
+        # match after the common prefix. Same prefix + bin now relocates
+        # both PGSHAREDIR and PKGLIBDIR; original Cellar/.../bin did not.
+        compiled_bin=paths['bindir'][1]
+        for key,suffix in [('sharedir','share/postgresql'),('pkglibdir','lib/postgresql')]:
+            target=paths[key][1]
+            prefix=__import__('posixpath').commonpath([compiled_bin,target])
+            assert compiled_bin[len(prefix)+1:]=='bin'
+            assert target[len(prefix)+1:]==suffix
+            actual=(native/'bin/postgres').resolve()
+            relocated=actual.parent.parent/suffix
+            assert relocated.is_relative_to(native.resolve())
+        # Old inputs must fail even if inventory/hash metadata is rewritten.
+        (native/'bin/initdb').write_bytes(original)
+        try: m.verify_postgres_paths(native,arch,receipt)
+        except ValueError: pass
+        else: raise AssertionError('unrelocated compiled Homebrew paths accepted')
+finally: shutil.rmtree(root)
+`);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test('PG relocation refuses incomplete, ambiguous and forged compiled path evidence without writing', () => {
+  const result = pythonProbe(`
+root=pathlib.Path(tempfile.mkdtemp())
+try:
+    paths=m.postgres_path_replacements('x64')
+    original=bytes.fromhex('cffaedfe')+b'\\0'+b'\\0'.join(old.encode() for old,new in paths.values())+b'\\0'
+    for name in m.PG_PROGRAMS:
+        p=root/'bin'/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(original)
+    p=root/'bin/initdb'
+    for changed in [original.replace(paths['bindir'][0].encode(),b'X'*len(paths['bindir'][0])),
+                    original+b'\\0'+paths['bindir'][0].encode()+b'\\0']:
+        p.write_bytes(changed)
+        before=m.file_inventory(root)
+        try: m.normalize_postgres_paths(root,'x64')
+        except ValueError: pass
+        else: raise AssertionError('unexpected compiled constants accepted')
+        assert m.file_inventory(root)==before
+    p.write_bytes(original)
+    receipt=m.normalize_postgres_paths(root,'x64')
+    for forged in [None, {}, {**receipt,'bin/initdb':{'bindir':1}}]:
+        try: m.verify_postgres_paths(root,'x64',forged)
+        except ValueError: pass
+        else: raise AssertionError('forged relocation evidence accepted')
+finally: shutil.rmtree(root)
+`);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
 test('native minimum OS parser excludes adjacent linker/dylib versions and supports legacy macOS commands', () => {
   const commands = 'Load command 0\n cmd LC_BUILD_VERSION\n platform macos\n minos 14.0\n sdk 15.2\n tool LD\n version 1115.7.3\nLoad command 1\n cmd LC_LOAD_DYLIB\n current version 78.3.0\nLoad command 2\n cmd LC_VERSION_MIN_MACOSX\n version 13.1\n sdk 14.0\n';
   const result = pythonProbe(`assert m.minimum_os(${JSON.stringify(commands)}) == ['14.0', '13.1']\ntry: m.minimum_os('cmd LC_LOAD_DYLIB\\n version 1115.7.3\\n')\nexcept ValueError: pass\nelse: raise AssertionError('unmeasured minimum accepted')`);
@@ -57,15 +127,19 @@ test('private input validation rejects target, profile, file and rig-proof misma
 root=pathlib.Path(tempfile.mkdtemp())
 try:
     required=['postgresql/bin/'+n for n in ('postgres','initdb','pg_ctl','pg_dump','pg_dumpall','pg_restore','psql')]
-    required+=['postgresql/lib/postgresql/vector.dylib','postgresql/share/postgresql/extension/vector.control','bin/gh','bin/kopia']
+    required+=['postgresql/share/postgresql/postgres.bki','postgresql/lib/postgresql/plpgsql.dylib','postgresql/share/postgresql/extension/plpgsql.control','postgresql/lib/postgresql/vector.dylib','postgresql/share/postgresql/extension/vector.control','bin/gh','bin/kopia']
     for name in required:
-        p=root/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(b'fixture'); p.chmod(0o755)
-    m.check_closure=lambda root,arch,floor: {n:{} for n in required if not n.endswith('.control')}
+        data=b'fixture'
+        if name.startswith('postgresql/bin/'):
+            data=bytes.fromhex('cffaedfe')+b'\\0'+b'\\0'.join(old.encode() for old,new in m.postgres_path_replacements('x64').values())+b'\\0'
+        p=root/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(data); p.chmod(0o755)
+    relocation=m.normalize_postgres_paths(root/'postgresql','x64')
+    m.check_closure=lambda root,arch,floor: {n:{} for n in required if not n.endswith(('.control','.bki'))}
     attestation=root/'apps/operator/runtime/vm-release-vulnerability-attestation.json'
     attestation.parent.mkdir(parents=True)
     attestation.write_text(json.dumps({'result':{'status':'green','gatedMatches':0},'evidence':{'sbomSha256':'b'*64,'grypeReportSha256':'c'*64}}))
     files=m.file_inventory(root)
-    manifest={'schemaVersion':'darwin-native-inputs/v1','privateOnly':True,'target':{'os':'darwin','arch':'x64'},'postgresqlVersion':'18.6','minimumMacOS':'14.0','files':files,'upstreamReceipts':[{'sha256':'a'*64}]}
+    manifest={'schemaVersion':'darwin-native-inputs/v1','privateOnly':True,'target':{'os':'darwin','arch':'x64'},'postgresqlVersion':'18.6','minimumMacOS':'14.0','files':files,'postgresqlPathRelocation':relocation,'upstreamReceipts':[{'sha256':'a'*64}]}
     manifest['securityQualification']={'summarySha256':m.sha(attestation),'evidence':{'sbomSha256':'b'*64,'grypeReportSha256':'c'*64}}
     def write():
         (root/'manifest.json').write_text(json.dumps(manifest)); return m.sha(root/'manifest.json')
