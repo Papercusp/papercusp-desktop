@@ -40,7 +40,7 @@
     "test:appimage-hook-paths": "node --test --test-global-setup=test/monorepo-host-preflight.mjs test/appimage-hook-path-normalization.test.js",
     "test:appimage-runtime": "node --test --test-global-setup=test/monorepo-host-preflight.mjs test/appimage-runtime-isolation.test.js",
     "test:appimage-pristine": "node --test --test-global-setup=test/monorepo-host-preflight.mjs test/appimage-pristine-derivation.test.js test/appimage-pristine-leg-wiring.test.js",
-    "test:provenance-sidecar": "node --test --test-global-setup=test/monorepo-host-preflight.mjs test/provenance-sidecar-record.test.js",
+    "test:provenance-sidecar": "node --test --test-global-setup=test/monorepo-host-preflight.mjs test/provenance-sidecar-record.test.js test/sharp-security-pin.test.js",
     "test:deb-bundle-lock-path": "node --test --test-global-setup=test/monorepo-host-preflight.mjs test/build-deb-bundle-lock-path.test.js",
     "test:deb-build-timeout": "node --test --test-global-setup=test/monorepo-host-preflight.mjs test/build-deb-build-timeout.test.js",
     "test:deb-signing-key": "node --test --test-global-setup=test/monorepo-host-preflight.mjs test/build-deb-signing-key.test.js",
