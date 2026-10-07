@@ -20,6 +20,46 @@ const verifier = fs.readFileSync(
   'utf8',
 );
 
+test('required local-model backend missing from a cross-target bundle is fatal, not advisory', () => {
+  const start = verifier.indexOf('REQUIRED_NATIVE_MODULES="');
+  const end = verifier.indexOf('\nelse\n  NODE_BIN=""', start);
+  assert(start > 0 && end > start);
+  const nativeBlock = verifier.slice(start, end) + '\nfi';
+  const required = verifier.match(/REQUIRED_NATIVE_MODULES="\n([\s\S]*?)\n"/)[1].trim().split('\n');
+  assert(required.includes('onnxruntime-node'));
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-required-onnx-'));
+  try {
+    for (const module of required) {
+      const dir = path.join(fixture, 'node_modules', module);
+      fs.mkdirSync(dir, { recursive: true });
+      if (module !== 'onnxruntime-node') fs.writeFileSync(path.join(dir, 'fixture.node'), 'target-format fixture');
+    }
+    // An arm64 binding exists, but the Intel runtime cannot resolve it.
+    const arm = path.join(fixture, 'node_modules/onnxruntime-node/bin/napi-v6/darwin/arm64');
+    fs.mkdirSync(arm, { recursive: true });
+    fs.writeFileSync(path.join(arm, 'onnxruntime_binding.node'), 'target-format fixture');
+    const probe = () => spawnSync('bash', ['-c', [
+      'set -uo pipefail', 'FAIL=0; CROSS=1; TARGET_OS_N=darwin; TARGET_ARCH_N=x64',
+      'SIDECAR="$1"', 'fail() { echo "$*"; FAIL=1; }', 'ok() { :; }',
+      '_is_target_format() { test -s "$1"; }', nativeBlock, 'exit "$FAIL"',
+    ].join('\n'), 'test', fixture], { encoding: 'utf8' });
+    const missing = probe();
+    assert.equal(missing.status, 1, missing.stdout + missing.stderr);
+    assert.match(missing.stdout, /onnxruntime-node: no darwin-x64/);
+    const intel = path.join(fixture, 'node_modules/onnxruntime-node/bin/napi-v6/darwin/x64');
+    fs.mkdirSync(intel, { recursive: true });
+    fs.writeFileSync(path.join(intel, 'onnxruntime_binding.node'), 'target-format fixture');
+    const complete = probe();
+    assert.equal(complete.status, 0, complete.stdout + complete.stderr);
+  } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
+});
+
+test('native target preflight precedes expensive SPA assembly in the real producer', () => {
+  const guard = builder.indexOf('papercusp_verify_transformers_native_target "$REPO_ROOT" "$TARGET_OS" "$TARGET_ARCH"');
+  assert(guard > builder.indexOf('TARGET_ARCH="${TARGET_ARCH:-$_host_arch}"'));
+  assert(guard < builder.indexOf('→ building operator-vite SPA'));
+});
+
 function extractAlignmentFunction(source) {
   const match = source.match(
     /align_better_sqlite3_native\(\) \{[\s\S]*?\n\}\n\n# Windows packaging/,
@@ -121,6 +161,19 @@ test('desktop worker builds before Node staging and is executed by the finished-
   try {
     fs.mkdirSync(fakeBin, { recursive: true });
     fs.mkdirSync(bin, { recursive: true });
+    fs.mkdirSync(path.join(fixture, 'scripts'));
+    fs.writeFileSync(path.join(fixture, 'scripts/npm-install-safe.mjs'), [
+      'import assert from "node:assert/strict";',
+      'import { spawnSync } from "node:child_process";',
+      'const args = process.argv.slice(2);',
+      'assert.equal(args[0], "--repo-root");',
+      'assert.equal(args[1], process.env.WEB_DIR);',
+      'assert.equal(args[2], "--exec-under-cache-lock");',
+      'assert.equal(args[3], "--");',
+      'assert.equal(args[4], "npx");',
+      'const result = spawnSync(args[4], args.slice(5), { stdio: "inherit" });',
+      'process.exit(result.status ?? 1);',
+    ].join('\n'));
     fs.writeFileSync(path.join(fakeBin, 'npx'), [
       '#!/bin/sh',
       'for arg in "$@"; do',

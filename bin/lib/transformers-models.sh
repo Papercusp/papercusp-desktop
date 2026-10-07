@@ -137,6 +137,78 @@ print(json.dumps({
 PY
 }
 
+# EI-25296411034890787: packaged local models require their EXACT Node backend,
+# even when its import is deferred until after boot. Check installed target
+# bytes before a cross-build pays for SPA/Rust/model assembly. Never borrow a
+# different runtime version or another architecture's binding.
+papercusp_verify_transformers_native_target() {
+  local repo_root="$1" target_os="$2" target_arch="$3" dependency_contract
+  dependency_contract="$(papercusp_verify_transformers_dependencies "$repo_root" 1)" || return $?
+  node - "$repo_root" "$target_os" "$target_arch" "$dependency_contract" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const { createRequire } = require('node:module');
+const [root, target, arch, text] = process.argv.slice(2);
+const platform = target === 'windows' ? 'win32' : target;
+function fail(message) { throw new Error(message); }
+function targetBytes(file) {
+  const fd = fs.openSync(file, 'r');
+  const header = Buffer.alloc(4096);
+  let n;
+  try { n = fs.readSync(fd, header); } finally { fs.closeSync(fd); }
+  if (n < 24) fail(`missing or truncated native target bytes: ${file}`);
+  const cpu = arch === 'x64' ? 0x1000007 : arch === 'arm64' ? 0x100000c : 0;
+  if (platform === 'darwin') {
+    const magic = header.readUInt32BE(0);
+    if ((magic === 0xcffaedfe && header.readUInt32LE(4) === cpu)
+        || (magic === 0xfeedfacf && header.readUInt32BE(4) === cpu)) return;
+    if (magic === 0xcafebabe || magic === 0xbebafeca) {
+      const read = offset => magic === 0xcafebabe ? header.readUInt32BE(offset) : header.readUInt32LE(offset);
+      const count = read(4);
+      if (count > 0 && count <= 32 && n >= 8 + count * 20) {
+        for (let i = 0; i < count; i++) if (read(8 + i * 20) === cpu) return;
+      }
+    }
+  } else if (platform === 'linux' && header.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) {
+    const machine = header[5] === 1 ? header.readUInt16LE(18) : header.readUInt16BE(18);
+    if (machine === (arch === 'x64' ? 62 : arch === 'arm64' ? 183 : -1)) return;
+  } else if (platform === 'win32' && header.subarray(0, 2).toString() === 'MZ' && n >= 64) {
+    const pe = header.readUInt32LE(0x3c);
+    if (pe + 6 <= n && header.subarray(pe, pe + 4).equals(Buffer.from([0x50, 0x45, 0, 0]))) {
+      if (header.readUInt16LE(pe + 4) === (arch === 'x64' ? 0x8664 : arch === 'arm64' ? 0xaa64 : -1)) return;
+    }
+  }
+  fail(`native bytes do not match ${platform}-${arch}: ${file}`);
+}
+try {
+  if (!['linux', 'darwin', 'win32'].includes(platform) || !['x64', 'arm64'].includes(arch)) fail('unsupported native target');
+  const dependencies = JSON.parse(text);
+  const checked = new Set();
+  for (const relative of Object.values(dependencies.resolutions)) {
+    const tfPath = path.join(root, relative, 'package.json');
+    const tf = JSON.parse(fs.readFileSync(tfPath));
+    const expected = tf.dependencies?.['onnxruntime-node'];
+    if (typeof expected !== 'string' || !/^\d+\.\d+\.\d+$/.test(expected)) fail('transformers must declare an exact onnxruntime-node version');
+    const runtimeJson = createRequire(tfPath).resolve('onnxruntime-node/package.json');
+    const runtime = JSON.parse(fs.readFileSync(runtimeJson));
+    if (runtime.version !== expected) fail(`onnxruntime-node version differs from transformers pin ${expected}`);
+    if (checked.has(runtimeJson)) continue;
+    const nativeDir = path.join(path.dirname(runtimeJson), 'bin/napi-v6', platform, arch);
+    targetBytes(path.join(nativeDir, 'onnxruntime_binding.node'));
+    const library = platform === 'darwin' ? `libonnxruntime.${expected}.dylib`
+      : platform === 'linux' ? 'libonnxruntime.so.1' : 'onnxruntime.dll';
+    targetBytes(path.join(nativeDir, library));
+    checked.add(runtimeJson);
+  }
+  if (!checked.size) fail('no pinned local-model native runtime resolved');
+  console.log(`verified pinned local-model native target ${platform}-${arch} (${checked.size} runtime closure(s)); on-target inference remains required`);
+} catch (error) {
+  console.error(`FATAL: local-model native preflight: ${error.message}`);
+  process.exitCode = 1;
+}
+NODE
+}
+
 # P-314: `distribution-contract.json` is already the customer-release manifest.
 # The `local-models` pack inside it now owns exact revisions, compatibility and
 # per-file content identity; do not create a second model manifest beside it.

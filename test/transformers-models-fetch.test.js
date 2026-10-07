@@ -12,10 +12,85 @@ const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 
 const lib = path.resolve(__dirname, '..', 'bin/lib/transformers-models.sh');
 const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+
+function nativeTargetFixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tf-native-target-'));
+  const tf = path.join(root, 'node_modules/@huggingface/transformers');
+  const runtime = path.join(root, 'node_modules/onnxruntime-node');
+  fs.mkdirSync(tf, { recursive: true });
+  fs.mkdirSync(runtime, { recursive: true });
+  fs.mkdirSync(path.join(root, 'apps/operator'), { recursive: true });
+  const declaration = { dependencies: { '@huggingface/transformers': '4.2.0' } };
+  fs.writeFileSync(path.join(root, 'apps/operator/package.json'), JSON.stringify(declaration));
+  fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({ packages: {
+    'apps/operator': declaration,
+    'node_modules/@huggingface/transformers': { version: '4.2.0' },
+  } }));
+  fs.writeFileSync(path.join(tf, 'package.json'), JSON.stringify({ name: '@huggingface/transformers', version: '4.2.0', dependencies: { 'onnxruntime-node': '1.24.3' } }));
+  fs.writeFileSync(path.join(runtime, 'package.json'), JSON.stringify({ name: 'onnxruntime-node', version: '1.24.3' }));
+  const contract = path.join(root, 'contract.json');
+  fs.writeFileSync(contract, JSON.stringify({ server: { optionalPacks: [{ name: 'local-models', compatibility: { transformersPackage: '4.2.0' } }] } }));
+  function writeTarget(os, arch) {
+    const bytes = Buffer.alloc(128);
+    if (os === 'darwin') { bytes.writeUInt32BE(0xcffaedfe, 0); bytes.writeUInt32LE(arch === 'x64' ? 0x1000007 : 0x100000c, 4); }
+    else if (os === 'linux') { bytes.set([0x7f, 0x45, 0x4c, 0x46]); bytes[5] = 1; bytes.writeUInt16LE(arch === 'x64' ? 62 : 183, 18); }
+    else { bytes.write('MZ'); bytes.writeUInt32LE(64, 0x3c); bytes.set([0x50, 0x45, 0, 0], 64); bytes.writeUInt16LE(arch === 'x64' ? 0x8664 : 0xaa64, 68); }
+    const dir = path.join(runtime, 'bin/napi-v6', os, arch);
+    fs.mkdirSync(dir, { recursive: true });
+    const library = os === 'darwin' ? 'libonnxruntime.1.24.3.dylib' : os === 'linux' ? 'libonnxruntime.so.1' : 'onnxruntime.dll';
+    fs.writeFileSync(path.join(dir, 'onnxruntime_binding.node'), bytes);
+    fs.writeFileSync(path.join(dir, library), bytes);
+    return dir;
+  }
+  const probe = (os, arch) => spawnSync('bash', ['-c', 'source "$1"; papercusp_verify_transformers_native_target "$2" "$3" "$4"', 'test', lib, root, os, arch], {
+    encoding: 'utf8', env: { ...process.env, PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT: contract },
+  });
+  return { root, runtime, writeTarget, probe };
+}
+
+test('pinned native preflight accepts matching target binding and runtime library for each supported shape', () => {
+  const f = nativeTargetFixture();
+  try {
+    for (const os of ['darwin', 'linux', 'win32']) for (const arch of ['x64', 'arm64']) {
+      f.writeTarget(os, arch);
+      const result = f.probe(os === 'win32' ? 'windows' : os, arch);
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.match(result.stdout, /on-target inference remains required/);
+    }
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('Darwin arm64-only package cannot pass Intel native preflight', () => {
+  const f = nativeTargetFixture();
+  try {
+    f.writeTarget('darwin', 'arm64');
+    const result = f.probe('darwin', 'x64');
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /darwin\/x64\/onnxruntime_binding.node/);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('native preflight refuses wrong architecture, missing library, truncated bytes and version substitution', () => {
+  for (const failure of ['wrong-architecture', 'missing-library', 'truncated', 'version']) {
+    const f = nativeTargetFixture();
+    try {
+      const dir = f.writeTarget('darwin', 'x64');
+      if (failure === 'wrong-architecture') {
+        const arm = f.writeTarget('darwin', 'arm64');
+        fs.copyFileSync(path.join(arm, 'onnxruntime_binding.node'), path.join(dir, 'onnxruntime_binding.node'));
+      } else if (failure === 'missing-library') fs.rmSync(path.join(dir, 'libonnxruntime.1.24.3.dylib'));
+      else if (failure === 'truncated') fs.writeFileSync(path.join(dir, 'onnxruntime_binding.node'), 'bad');
+      else fs.writeFileSync(path.join(f.runtime, 'package.json'), JSON.stringify({ name: 'onnxruntime-node', version: '1.23.2' }));
+      const result = f.probe('darwin', 'x64');
+      assert.equal(result.status, 1, `${failure}: ${result.stdout}${result.stderr}`);
+      assert.match(result.stderr, /FATAL: local-model native preflight/);
+    } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+  }
+});
 
 const REV = 'a'.repeat(40);
 const FILES = {
