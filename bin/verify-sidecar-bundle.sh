@@ -438,19 +438,11 @@ quickbit-native
 rabin-native
 simdle-native
 fs-native-extensions
-"
-# ADVISORY (reported, never fatal): natives that are LAZILY imported, so a missing
-# one degrades a feature instead of killing boot — and which upstream does not ship
-# for every arch we build on.
-#   onnxruntime-node: upstream ships bin/napi-v6/darwin/**arm64 only** — there is NO
-#   darwin-x64 binding, so on the Intel mac build VM it CANNOT load, ever. It is also
-#   deliberately kept off the boot path (voice-node/kokoro-local.ts: "Dynamic import
-#   keeps onnxruntime-node's native load OFF the operator boot path"). Requiring it
-#   would red every mac cut forever for a condition that is upstream's shape, not our
-#   defect. Report it; never fail on it.
-OPTIONAL_NATIVE_MODULES="
 onnxruntime-node
 "
+# Deferred import changes boot timing, not the packaged local-model contract.
+# Missing ONNX cannot be advisory: the required Harrier/Gemma backends need it.
+OPTIONAL_NATIVE_MODULES=""
 echo "[6/7] native modules load under the bundled node"
  # Cross-target bundles cannot execute their foreign bundled node on this host. Initialize the
  # variable before the branch so the later platform-independent workspace-host probe can safely
@@ -469,6 +461,7 @@ if [[ "$CROSS" == "1" ]]; then
     # Some natives ship their binary in a SIBLING per-platform package, not in
     # the JS package dir — include the target's platform package for those.
     case "$m" in
+      onnxruntime-node) dirs="$SIDECAR/node_modules/$m/bin/napi-v6/${TARGET_OS_N/windows/win32}/$TARGET_ARCH_N" ;;
       sharp) dirs="$dirs $SIDECAR/node_modules/@img/sharp-${TARGET_OS_N}-${TARGET_ARCH_N} $SIDECAR/node_modules/@img/sharp-libvips-${TARGET_OS_N}-${TARGET_ARCH_N}" ;;
       @lydell/node-pty) dirs="$dirs $SIDECAR/node_modules/@lydell/node-pty-${TARGET_OS_N}-${TARGET_ARCH_N}" ;;
     esac

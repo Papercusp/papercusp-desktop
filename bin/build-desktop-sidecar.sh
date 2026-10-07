@@ -421,6 +421,10 @@ if [[ "$TARGET_OS" != "$_host_os" || "$TARGET_ARCH" != "$_host_arch" ]]; then
   echo "→ WI-5651 CROSS-baking sidecar for ${TARGET_OS}-${TARGET_ARCH} on a ${_host_os}-${_host_arch} host"
 fi
 
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" || "${PAPERCUSP_TRANSFORMERS_VERIFY_PINNED:-0}" == "1" ]]; then
+  papercusp_verify_transformers_native_target "$REPO_ROOT" "$TARGET_OS" "$TARGET_ARCH" || exit 1
+fi
+
 # HOST-TOOL PREFLIGHT (EI-24668318952454860 follow-up, WI-10003960 R-15): several
 # hard host-tool requirements used to be checked only at their point of use,
 # thousands of lines in, so a fresh build host paid a full multi-minute run per
@@ -583,8 +587,9 @@ fi
 __pc_acquire_sidecar_publish_lock() {
   if command -v flock >/dev/null 2>&1; then
     exec 9>"$SIDECAR_FINAL_DIR.lock"
-    __pc_acquire_sidecar_flock "$SIDECAR_FINAL_DIR.lock"
-    return $?
+    __pc_acquire_sidecar_flock "$SIDECAR_FINAL_DIR.lock" || return $?
+    _sidecar_publish_locked=1
+    return 0
   fi
 
   SIDECAR_PUBLISH_LOCKDIR="$SIDECAR_FINAL_DIR.lockdir"
@@ -607,9 +612,11 @@ __pc_acquire_sidecar_publish_lock() {
     sleep 1
   done
   echo "$$" > "$SIDECAR_PUBLISH_LOCKDIR/pid"
+  _sidecar_publish_locked=1
 }
 
 __pc_release_sidecar_publish_lock() {
+  [[ "${_sidecar_publish_locked:-0}" == "1" ]] || return 0
   if command -v flock >/dev/null 2>&1; then
     flock -u 9 || true
     exec 9>&-
@@ -617,6 +624,7 @@ __pc_release_sidecar_publish_lock() {
     rm -rf "$SIDECAR_PUBLISH_LOCKDIR"
     SIDECAR_PUBLISH_LOCKDIR=""
   fi
+  _sidecar_publish_locked=0
 }
 
 # EI-21830176050381484: build.rs may recreate the resource-glob placeholder in
@@ -760,7 +768,111 @@ papercusp_require_free_gb "$SIDECAR_DIR" "${PAPERCUSP_SIDECAR_MIN_FREE_GB:-8}" "
 # already-gone path is a silent no-op; the trap never fires MID-run (only at
 # actual process exit), so it cannot race the overlay-preservation read that
 # copies FROM OLD_DIR just after the swap.
-trap 'rm -rf "$SIDECAR_TMP_DIR" ${SIDECAR_BUILD_LOCKDIR:+"$SIDECAR_BUILD_LOCKDIR"} ${SIDECAR_PUBLISH_LOCKDIR:+"$SIDECAR_PUBLISH_LOCKDIR"} ${OLD_DIR:+"$OLD_DIR"}; [[ -z "${_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST:-}" ]] || rm -f "$_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST"' EXIT
+assert_no_transformers_model_fragments() {
+  local models_root="$1"
+  local fragments
+  [[ -d "$models_root" ]] || return 0
+  if ! fragments="$(find "$models_root" -type f \( \
+    -name '*.tmp.*' -o -name '*.partial' -o -name '*.part' \
+  \) 2>/dev/null)"; then
+    echo "FATAL: unable to inspect the preserved transformers models for download fragments (EI-21121880496840788)" >&2
+    return 1
+  fi
+  [[ -z "$fragments" ]] && return 0
+  echo "FATAL: transformers model download fragment(s) survived sidecar staging — these temporary files must never ship (EI-21121880496840788):" >&2
+  echo "$fragments" >&2
+  return 1
+}
+assert_sidecar_db_sql_matches_source() {
+  local phase="$1"
+  local source_names shipped_names source_count shipped_count source_max shipped_max
+  source_names="$(find "$PAPERCUSP_ROOT/libs/db/sql" -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | LC_ALL=C sort)"
+  shipped_names="$(find "$SIDECAR_DIR/db-sql" -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | LC_ALL=C sort)"
+  source_count="$(printf '%s\n' "$source_names" | sed '/^$/d' | wc -l | tr -d ' ')"
+  shipped_count="$(printf '%s\n' "$shipped_names" | sed '/^$/d' | wc -l | tr -d ' ')"
+  source_max="$(printf '%s\n' "$source_names" | grep -oE '^[0-9]+' | sort -n | tail -1)"
+  shipped_max="$(printf '%s\n' "$shipped_names" | grep -oE '^[0-9]+' | sort -n | tail -1)"
+  if [[ -z "$source_names" || "$source_names" != "$shipped_names" ]]; then
+    echo "ERROR: shipped sidecar/db-sql/ differs from source during $phase"
+    echo "       shipped highest=$shipped_max count=$shipped_count; source highest=$source_max count=$source_count"
+    echo "       missing from shipped payload:"
+    comm -23 <(printf '%s\n' "$source_names") <(printf '%s\n' "$shipped_names") | sed 's/^/         - /'
+    echo "       unexpected in shipped payload:"
+    comm -13 <(printf '%s\n' "$source_names") <(printf '%s\n' "$shipped_names") | sed 's/^/         + /'
+    echo "       refusing a runtime schema that differs from the set this build claims to ship."
+    exit 1
+  fi
+  echo "    ✓ shipped db-sql/ exact filename set matches source during $phase (highest migration $source_max, $source_count files)"
+}
+
+# EI-25295077098365519: private phase evidence extends the existing producer.
+# A retained assembly must match every byte and immutable input, then re-enter
+# every qualification gate. It is never an accepted sidecar.
+_sidecar_stage_phase="assembling"
+_sidecar_published=0
+_sidecar_success=0
+_sidecar_stage_identity="$SIDECAR_TMP_DIR.identity.json"
+__pc_finish_sidecar_build() {
+  local status="$1" failed_stage
+  trap - EXIT
+  set +e
+  if [[ "$status" == "0" && "${_sidecar_success:-0}" != "1" ]]; then status=1; fi
+  if [[ "$status" != "0" || "${_sidecar_success:-0}" != "1" ]]; then
+    failed_stage="$SIDECAR_FINAL_DIR.failed-stage.$$"
+    if [[ "${_sidecar_published:-0}" == "1" && -d "$SIDECAR_FINAL_DIR" ]]; then
+      mv "$SIDECAR_FINAL_DIR" "$SIDECAR_TMP_DIR"
+    fi
+    if [[ -d "$SIDECAR_TMP_DIR" ]]; then
+      if [[ ! -e "$failed_stage" ]] && mv "$SIDECAR_TMP_DIR" "$failed_stage"; then
+        echo "FATAL: unaccepted sidecar stage retained at $failed_stage (phase=${_sidecar_stage_phase:-assembling}, exit=$status)" >&2
+      else
+        echo "ERROR: could not relocate failed stage; preserved at $SIDECAR_TMP_DIR" >&2
+      fi
+    fi
+    if [[ -n "${OLD_DIR:-}" && -d "$OLD_DIR" ]]; then
+      if [[ ! -e "$SIDECAR_FINAL_DIR" ]]; then
+        mv "$OLD_DIR" "$SIDECAR_FINAL_DIR"
+      elif __pc_is_cargo_sidecar_placeholder "$SIDECAR_FINAL_DIR"; then
+        rm -rf "$SIDECAR_FINAL_DIR"
+        mv "$OLD_DIR" "$SIDECAR_FINAL_DIR"
+      else
+        mv "$OLD_DIR" "$SIDECAR_FINAL_DIR.failed-prior.$$"
+        echo "ERROR: another writer occupies final output; prior sidecar preserved separately" >&2
+      fi
+    fi
+    # Restore readers before the potentially large failed-byte inventory.
+    # The build lock still owns this output's producer/evidence transaction.
+    __pc_release_sidecar_publish_lock
+    if [[ -d "$failed_stage" && -f "${_sidecar_stage_identity:-}" ]]; then
+      node "$HERE/lib/sidecar-stage-state.js" retain "$failed_stage" \
+        "$_sidecar_stage_identity" "${_sidecar_stage_phase:-assembling}" "$status" \
+        || echo "ERROR: failed bytes retained but resume receipt unavailable" >&2
+    fi
+  else
+    rm -rf "$SIDECAR_TMP_DIR" ${OLD_DIR:+"$OLD_DIR"}
+  fi
+  rm -rf ${SIDECAR_BUILD_LOCKDIR:+"$SIDECAR_BUILD_LOCKDIR"} ${SIDECAR_PUBLISH_LOCKDIR:+"$SIDECAR_PUBLISH_LOCKDIR"}
+  [[ -z "${_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST:-}" ]] || rm -f "$_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST"
+  [[ -z "${_sidecar_stage_identity:-}" ]] || rm -f "$_sidecar_stage_identity"
+  exit "$status"
+}
+trap '__pc_finish_sidecar_build "$?"' EXIT
+
+export SIDECAR_STAGE_REPO_ROOT="$REPO_ROOT" SIDECAR_STAGE_DESKTOP_ROOT="$ROOT"
+export SIDECAR_STAGE_HELPER_ROOT="$HERE" SIDECAR_STAGE_FINAL_DIR="$SIDECAR_FINAL_DIR"
+export SIDECAR_STAGE_TARGET_OS="$TARGET_OS" SIDECAR_STAGE_TARGET_ARCH="$TARGET_ARCH"
+node "$HERE/lib/sidecar-stage-state.js" capture "$_sidecar_stage_identity"
+if [[ -n "${PAPERCUSP_SIDECAR_RESUME_FROM:-}" ]]; then
+  node "$HERE/lib/sidecar-stage-state.js" validate \
+    "$PAPERCUSP_SIDECAR_RESUME_FROM" "$_sidecar_stage_identity"
+  [[ ! -e "$SIDECAR_TMP_DIR" ]] || { echo "FATAL: resume destination already exists" >&2; exit 1; }
+  mv "$PAPERCUSP_SIDECAR_RESUME_FROM" "$SIDECAR_TMP_DIR"
+  _sidecar_stage_phase="assembled"
+  echo "→ resumed byte-validated sidecar assembly; rerunning qualification"
+fi
+
+# Assembly-only work. Resume rejoins below, before profile pruning and gates.
+if [[ -z "${PAPERCUSP_SIDECAR_RESUME_FROM:-}" ]]; then
 
 # ---------------------------------------------------------------------------
 # operator-vite migration (Phase F3 / G4). The desktop UI is no longer a
@@ -1284,7 +1396,7 @@ for np in "${NATIVE_PKGS[@]}"; do HOST_EXTERNALS+=( "--external:$np" ); done
 # (install-size-audit 2026-07-07, owner-directed). Full --minify would save a
 # further ~6MB but is left out for that name-dependency risk.
 MINIFY_ARGS=(--minify-whitespace --minify-syntax)
-(cd "$WEB_DIR" && npx --yes esbuild@0.25.0 bin/serve.ts \
+(cd "$WEB_DIR" && node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx --yes esbuild@0.25.0 bin/serve.ts \
   --bundle --platform=node --format=esm --target=node22 \
   "${MINIFY_ARGS[@]}" \
   --outfile="$SIDECAR_DIR/serve.mjs" \
@@ -1379,7 +1491,7 @@ if [[ ! -f "$SIDECAR_DIR/opusscript_native_wasm.wasm" ]]; then
 fi
 
 echo "→ esbuild-bundling packaged MCP proxy → $SIDECAR_DIR/mcp-proxy.mjs"
-(cd "$WEB_DIR" && npx --yes esbuild@0.25.0 bin/mcp-proxy.ts \
+(cd "$WEB_DIR" && node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx --yes esbuild@0.25.0 bin/mcp-proxy.ts \
   --bundle --platform=node --format=esm --target=node22 \
   "${MINIFY_ARGS[@]}" \
   --outfile="$SIDECAR_DIR/mcp-proxy.mjs" \
@@ -1426,7 +1538,7 @@ for _psu_cli in psu:psu-launcher ptool:ptool onboard:onboard-launcher tutorial-r
     echo "ERROR: $WEB_DIR/scripts/$_psu_src.mjs not found — psu cannot ship"
     exit 1
   fi
-  (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 "scripts/$_psu_src.mjs" \
+  (cd "$WEB_DIR" && node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx --yes esbuild@0.25.0 "scripts/$_psu_src.mjs" \
     --bundle --platform=node --format=esm --target=node22 \
     "${MINIFY_ARGS[@]}" \
     --outfile="$SIDECAR_DIR/scripts/$_psu_out.mjs" \
@@ -1466,7 +1578,7 @@ if [[ ! -f "$_project_history_src" ]]; then
   echo "ERROR: $_project_history_src not found — project-history cannot ship"
   exit 1
 fi
-(cd "$WEB_DIR" && npx --yes esbuild@0.25.0 "$_project_history_src" \
+(cd "$WEB_DIR" && node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx --yes esbuild@0.25.0 "$_project_history_src" \
   --bundle --platform=node --format=esm --target=node22 \
   "${MINIFY_ARGS[@]}" \
   --outfile="$SIDECAR_DIR/scripts/project-history.mjs" \
@@ -1760,21 +1872,6 @@ prune_transformers_model_fragments() {
 # `models/` dir since D-178).  This is deliberately fail-closed: a future
 # downloader/layout change must stop the build rather than silently shipping
 # another multi-hundred-MiB fragment set.
-assert_no_transformers_model_fragments() {
-  local models_root="$1"
-  local fragments
-  [[ -d "$models_root" ]] || return 0
-  if ! fragments="$(find "$models_root" -type f \( \
-    -name '*.tmp.*' -o -name '*.partial' -o -name '*.part' \
-  \) 2>/dev/null)"; then
-    echo "FATAL: unable to inspect the preserved transformers models for download fragments (EI-21121880496840788)" >&2
-    return 1
-  fi
-  [[ -z "$fragments" ]] && return 0
-  echo "FATAL: transformers model download fragment(s) survived sidecar staging — these temporary files must never ship (EI-21121880496840788):" >&2
-  echo "$fragments" >&2
-  return 1
-}
 # ── Derived privacy/scratch excludes for the tree copiers (WI-4419, D-178) ────
 #
 # `bin/stage-source-tree.sh` does not hand-maintain its exclude list: it asks
@@ -2662,7 +2759,7 @@ if [[ -d "$OMP_HOOK_SRC_DIR" ]]; then
         echo "ERROR: vm-release requires OMP hook source $OMP_HOOK_SRC_DIR/$omp_hook_entry.ts" >&2
         exit 1
       }
-      (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 \
+      (cd "$WEB_DIR" && node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx --yes esbuild@0.25.0 \
         "scripts/hooks/omp/$omp_hook_entry.ts" \
         --bundle --platform=node --format=esm --target=node20 \
         --outfile="$OMP_HOOK_DST_DIR/$omp_hook_entry.mjs")
@@ -2955,7 +3052,7 @@ for b in invoke-once run assemble-prompt get-plan-context; do
   if [[ -f "$ORCH_SRC/bin/$b.ts" ]]; then
     # The shared ESM banner is load-bearing here, exactly as for project-history.mjs: invoke-once
     # and assemble-prompt reach yaml's CommonJS path (WI-10006694).
-    (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 "$ORCH_SRC/bin/$b.ts" \
+    (cd "$WEB_DIR" && node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx --yes esbuild@0.25.0 "$ORCH_SRC/bin/$b.ts" \
       --bundle --platform=node --format=esm --target=node22 \
       "${MINIFY_ARGS[@]}" \
       --outfile="$ORCH_DST/bin/$b.mjs" \
@@ -3019,7 +3116,7 @@ for _wh_entrypoint in papercusp-remote-initializer papercusp-deliver-material; d
   # The TypeScript entrypoint owns its `#!/usr/bin/env node` line and esbuild preserves it. Do not
   # add the same text with `--banner:js`: that produces a second shebang on line 2, which Node
   # parses as JavaScript and rejects before the program can enforce argv or read its request.
-  (cd "$WEB_DIR" && npx --yes esbuild@0.25.0 "$_wh_src" \
+  (cd "$WEB_DIR" && node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx --yes esbuild@0.25.0 "$_wh_src" \
     --bundle --platform=node --format=esm --target=node22 \
     "${MINIFY_ARGS[@]}" \
     --outfile="$_wh_bin")
@@ -3046,7 +3143,7 @@ REMOTE_INIT_BIN="$SIDECAR_DIR/bin/papercusp-remote-initializer"
 # D-363: self-contained worker; the optional pack copies only it and Node across
 # the Unix identity boundary. No operator store, environment or node_modules grant.
 DESKTOP_SESSION_BIN="$SIDECAR_DIR/bin/papercusp-desktop-session.cjs"
-(cd "$WEB_DIR" && npx --yes esbuild@0.25.0 \
+(cd "$WEB_DIR" && node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx --yes esbuild@0.25.0 \
   "$REPO_ROOT/packages/operator-core/bin/workspace-desktop-session.ts" \
   --bundle --platform=node --format=cjs --target=node22 \
   "${MINIFY_ARGS[@]}" --outfile="$DESKTOP_SESSION_BIN")
@@ -4165,27 +4262,6 @@ fi
 # production migrations whose filenames contained `test` or `spec`, AFTER the seed build
 # had successfully validated the complete set. Count/highest were never re-read, so a
 # signed bundle differed from the schema that its own green build had exercised.
-assert_sidecar_db_sql_matches_source() {
-  local phase="$1"
-  local source_names shipped_names source_count shipped_count source_max shipped_max
-  source_names="$(find "$PAPERCUSP_ROOT/libs/db/sql" -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | LC_ALL=C sort)"
-  shipped_names="$(find "$SIDECAR_DIR/db-sql" -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | LC_ALL=C sort)"
-  source_count="$(printf '%s\n' "$source_names" | sed '/^$/d' | wc -l | tr -d ' ')"
-  shipped_count="$(printf '%s\n' "$shipped_names" | sed '/^$/d' | wc -l | tr -d ' ')"
-  source_max="$(printf '%s\n' "$source_names" | grep -oE '^[0-9]+' | sort -n | tail -1)"
-  shipped_max="$(printf '%s\n' "$shipped_names" | grep -oE '^[0-9]+' | sort -n | tail -1)"
-  if [[ -z "$source_names" || "$source_names" != "$shipped_names" ]]; then
-    echo "ERROR: shipped sidecar/db-sql/ differs from source during $phase"
-    echo "       shipped highest=$shipped_max count=$shipped_count; source highest=$source_max count=$source_count"
-    echo "       missing from shipped payload:"
-    comm -23 <(printf '%s\n' "$source_names") <(printf '%s\n' "$shipped_names") | sed 's/^/         - /'
-    echo "       unexpected in shipped payload:"
-    comm -13 <(printf '%s\n' "$source_names") <(printf '%s\n' "$shipped_names") | sed 's/^/         + /'
-    echo "       refusing a runtime schema that differs from the set this build claims to ship."
-    exit 1
-  fi
-  echo "    ✓ shipped db-sql/ exact filename set matches source during $phase (highest migration $source_max, $source_count files)"
-}
 assert_sidecar_db_sql_matches_source "pre-seed copy"
 
 # ── Pre-migrated LOGICAL seed (desktop first-boot fast path) ────────────────
@@ -5031,6 +5107,9 @@ if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
   bash "$HERE/install-workspace-host-entrypoints.sh" --release-root "$SIDECAR_DIR"
 fi
 
+_sidecar_stage_phase="assembled"
+fi # assembly-only work; retained stages always rerun qualification below
+
 # ── D-043/P-052 immutable runtime-only profile ──────────────────────────────
 # Run after every sidecar copy/overlay step and before the runtime verifier and
 # atomic publish. The Python gate owns both the prune predicate and the audit
@@ -5297,6 +5376,7 @@ if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" ]]; then
   unset _provenance_current_head
 fi
 mv "$SIDECAR_TMP_DIR" "$SIDECAR_FINAL_DIR"
+_sidecar_published=1
 _tmp_base="$(basename "$SIDECAR_TMP_DIR")"
 if [[ -d "$SIDECAR_FINAL_DIR/$_tmp_base" ]]; then
   _squat_dir="$SIDECAR_FINAL_DIR.squat.$$"
@@ -5308,6 +5388,7 @@ if [[ -d "$SIDECAR_FINAL_DIR/$_tmp_base" ]]; then
   else
     mv "$SIDECAR_FINAL_DIR" "$SIDECAR_TMP_DIR"
     mv "$_squat_dir" "$SIDECAR_FINAL_DIR"
+    _sidecar_published=0
     echo "FATAL: a non-placeholder sidecar raced the final publish rename; restored and preserved that writer's output instead of deleting it." >&2
     echo "       This staged build was not published. Re-run after the competing writer exits." >&2
     exit 6
@@ -5324,17 +5405,9 @@ SIDECAR_DIR="$SIDECAR_FINAL_DIR"
 # atomically restore the prior published sidecar rather than stranding readers.
 echo "→ re-verifying atomically published sidecar at its final path"
 if ! "$ROOT/bin/verify-sidecar-bundle.sh" "$SIDECAR_DIR" --target-os "$TARGET_OS" --target-arch "$TARGET_ARCH"; then
-  _failed_publish="$SIDECAR_FINAL_DIR.failed-post-publish.$$"
-  mv "$SIDECAR_FINAL_DIR" "$_failed_publish"
-  if [[ -d "$OLD_DIR" ]]; then
-    mv "$OLD_DIR" "$SIDECAR_FINAL_DIR"
-    echo "FATAL: final-path sidecar verification failed; restored prior sidecar and preserved failed bytes at $_failed_publish" >&2
-  else
-    echo "FATAL: final-path sidecar verification failed; preserved failed bytes at $_failed_publish (no prior sidecar existed)" >&2
-  fi
+  echo "FATAL: final-path sidecar verification failed; preserving failed bytes and restoring prior sidecar" >&2
   exit 1
 fi
-rm -rf "$OLD_DIR"
 
 # ── Provenance (EI-19446480107603858) ────────────────────────────────────────
 # Record WHAT SOURCE this sidecar was baked from, using the SAME shared emitter
@@ -5415,7 +5488,10 @@ NODE
   echo "→ recorded release identity-audit attestation in .sidecar-build-stamp"
 fi
 
-# Publication and its final metadata writes are complete. Release readers
+# Publication and ALL final qualification/metadata writes are complete.
+rm -rf "$OLD_DIR"
+_sidecar_success=1
+# Release readers
 # before the non-mutating size/report epilogue.
 __pc_release_sidecar_publish_lock
 
