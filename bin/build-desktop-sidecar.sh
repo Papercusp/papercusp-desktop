@@ -75,6 +75,36 @@ REPO_ROOT="$(papercusp_repo_root "$ROOT")"
 PAPERCUSP_ROOT="${PAPERCUSP_ROOT:-$REPO_ROOT/libs/papercusp}"
 WEB_DIR="$REPO_ROOT/apps/operator"
 
+# EI-25303483644209158: a newer producer may target an older immutable product
+# whose npm wrapper has no --exec-under-cache-lock CLI flag. Passing that flag
+# becomes `npm install ...` and mutates the target instead of running esbuild.
+# Reuse the target's existing host-wide cache lease API, not its evolving CLI.
+# No fallback to a bare npx or repo-only reader: neither protects the shared cache.
+run_sidecar_cached_package() {
+  node --input-type=module - "$REPO_ROOT/scripts/npm-install-safe.mjs" "$WEB_DIR" "$@" <<'SIDECAR_CACHE_RUNNER'
+  import { spawnSync } from 'node:child_process';
+  import { pathToFileURL } from 'node:url';
+  const [helperPath, cwd, ...commandArgs] = process.argv.slice(2);
+  try {
+    const helper = await import(pathToFileURL(helperPath).href);
+    if (typeof helper.withPackageCacheReadLease !== 'function')
+      throw new Error('target npm helper lacks withPackageCacheReadLease; refusing an unguarded package runner');
+    if (commandArgs.length === 1 && commandArgs[0] === '--check') process.exit(0);
+    if (!commandArgs.length || commandArgs[0] === '--check')
+      throw new Error('cache-guarded package runner requires a command');
+    process.exitCode = await helper.withPackageCacheReadLease(() => {
+      const result = spawnSync(commandArgs[0], commandArgs.slice(1), {
+        cwd, env: process.env, stdio: 'inherit',
+      });
+      if (result.error) throw result.error;
+      return result.status ?? 1;
+    });
+  } catch (error) {
+    console.error(`FATAL: sidecar package-cache helper contract: ${error.message}`);
+    process.exitCode = 1;
+  }
+SIDECAR_CACHE_RUNNER
+}
 # D-112 makes the final release identity audit machine-only. Owner name/email are
 # legitimate release content (especially inside the required full-history seed), so
 # PAPERCUSP_RELEASE_AUDIT=1 must not depend on either owner-identity variable.
@@ -194,6 +224,10 @@ if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" \
   echo "       Wait for the source tree to settle and retry; refusing to build mixed-provenance bytes." >&2
   exit 1
 fi
+
+# Keep source identity/cleanliness refusals first, then detect an incompatible
+# helper before SPA assembly, downloads or npm writes.
+run_sidecar_cached_package --check || exit 1
 
 # EI-21832562420831737: having DEMANDED an immutable source sha above, refuse to read a tree
 # that holds anything else. Nothing did: the release audit, SBOM and vulnerability gates all
@@ -1396,7 +1430,7 @@ for np in "${NATIVE_PKGS[@]}"; do HOST_EXTERNALS+=( "--external:$np" ); done
 # (install-size-audit 2026-07-07, owner-directed). Full --minify would save a
 # further ~6MB but is left out for that name-dependency risk.
 MINIFY_ARGS=(--minify-whitespace --minify-syntax)
-(cd "$WEB_DIR" && node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx --yes esbuild@0.25.0 bin/serve.ts \
+(cd "$WEB_DIR" && run_sidecar_cached_package npx --yes esbuild@0.25.0 bin/serve.ts \
   --bundle --platform=node --format=esm --target=node22 \
   "${MINIFY_ARGS[@]}" \
   --outfile="$SIDECAR_DIR/serve.mjs" \
@@ -1491,7 +1525,7 @@ if [[ ! -f "$SIDECAR_DIR/opusscript_native_wasm.wasm" ]]; then
 fi
 
 echo "→ esbuild-bundling packaged MCP proxy → $SIDECAR_DIR/mcp-proxy.mjs"
-(cd "$WEB_DIR" && node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx --yes esbuild@0.25.0 bin/mcp-proxy.ts \
+(cd "$WEB_DIR" && run_sidecar_cached_package npx --yes esbuild@0.25.0 bin/mcp-proxy.ts \
   --bundle --platform=node --format=esm --target=node22 \
   "${MINIFY_ARGS[@]}" \
   --outfile="$SIDECAR_DIR/mcp-proxy.mjs" \
@@ -1538,7 +1572,7 @@ for _psu_cli in psu:psu-launcher ptool:ptool onboard:onboard-launcher tutorial-r
     echo "ERROR: $WEB_DIR/scripts/$_psu_src.mjs not found — psu cannot ship"
     exit 1
   fi
-  (cd "$WEB_DIR" && node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx --yes esbuild@0.25.0 "scripts/$_psu_src.mjs" \
+  (cd "$WEB_DIR" && run_sidecar_cached_package npx --yes esbuild@0.25.0 "scripts/$_psu_src.mjs" \
     --bundle --platform=node --format=esm --target=node22 \
     "${MINIFY_ARGS[@]}" \
     --outfile="$SIDECAR_DIR/scripts/$_psu_out.mjs" \
@@ -1578,7 +1612,7 @@ if [[ ! -f "$_project_history_src" ]]; then
   echo "ERROR: $_project_history_src not found — project-history cannot ship"
   exit 1
 fi
-(cd "$WEB_DIR" && node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx --yes esbuild@0.25.0 "$_project_history_src" \
+(cd "$WEB_DIR" && run_sidecar_cached_package npx --yes esbuild@0.25.0 "$_project_history_src" \
   --bundle --platform=node --format=esm --target=node22 \
   "${MINIFY_ARGS[@]}" \
   --outfile="$SIDECAR_DIR/scripts/project-history.mjs" \
@@ -2765,7 +2799,7 @@ if [[ -d "$OMP_HOOK_SRC_DIR" ]]; then
         echo "ERROR: vm-release requires OMP hook source $OMP_HOOK_SRC_DIR/$omp_hook_entry.ts" >&2
         exit 1
       }
-      (cd "$WEB_DIR" && node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx --yes esbuild@0.25.0 \
+      (cd "$WEB_DIR" && run_sidecar_cached_package npx --yes esbuild@0.25.0 \
         "scripts/hooks/omp/$omp_hook_entry.ts" \
         --bundle --platform=node --format=esm --target=node20 \
         --outfile="$OMP_HOOK_DST_DIR/$omp_hook_entry.mjs")
@@ -3058,7 +3092,7 @@ for b in invoke-once run assemble-prompt get-plan-context; do
   if [[ -f "$ORCH_SRC/bin/$b.ts" ]]; then
     # The shared ESM banner is load-bearing here, exactly as for project-history.mjs: invoke-once
     # and assemble-prompt reach yaml's CommonJS path (WI-10006694).
-    (cd "$WEB_DIR" && node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx --yes esbuild@0.25.0 "$ORCH_SRC/bin/$b.ts" \
+    (cd "$WEB_DIR" && run_sidecar_cached_package npx --yes esbuild@0.25.0 "$ORCH_SRC/bin/$b.ts" \
       --bundle --platform=node --format=esm --target=node22 \
       "${MINIFY_ARGS[@]}" \
       --outfile="$ORCH_DST/bin/$b.mjs" \
@@ -3122,7 +3156,7 @@ for _wh_entrypoint in papercusp-remote-initializer papercusp-deliver-material; d
   # The TypeScript entrypoint owns its `#!/usr/bin/env node` line and esbuild preserves it. Do not
   # add the same text with `--banner:js`: that produces a second shebang on line 2, which Node
   # parses as JavaScript and rejects before the program can enforce argv or read its request.
-  (cd "$WEB_DIR" && node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx --yes esbuild@0.25.0 "$_wh_src" \
+  (cd "$WEB_DIR" && run_sidecar_cached_package npx --yes esbuild@0.25.0 "$_wh_src" \
     --bundle --platform=node --format=esm --target=node22 \
     "${MINIFY_ARGS[@]}" \
     --outfile="$_wh_bin")
@@ -3149,7 +3183,7 @@ REMOTE_INIT_BIN="$SIDECAR_DIR/bin/papercusp-remote-initializer"
 # D-363: self-contained worker; the optional pack copies only it and Node across
 # the Unix identity boundary. No operator store, environment or node_modules grant.
 DESKTOP_SESSION_BIN="$SIDECAR_DIR/bin/papercusp-desktop-session.cjs"
-(cd "$WEB_DIR" && node "$REPO_ROOT/scripts/npm-install-safe.mjs" --repo-root "$WEB_DIR" --exec-under-cache-lock -- npx --yes esbuild@0.25.0 \
+(cd "$WEB_DIR" && run_sidecar_cached_package npx --yes esbuild@0.25.0 \
   "$REPO_ROOT/packages/operator-core/bin/workspace-desktop-session.ts" \
   --bundle --platform=node --format=cjs --target=node22 \
   "${MINIFY_ARGS[@]}" --outfile="$DESKTOP_SESSION_BIN")

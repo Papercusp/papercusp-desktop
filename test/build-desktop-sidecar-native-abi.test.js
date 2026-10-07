@@ -170,16 +170,7 @@ test('desktop worker builds before Node staging and is executed by the finished-
     fs.mkdirSync(bin, { recursive: true });
     fs.mkdirSync(path.join(fixture, 'scripts'));
     fs.writeFileSync(path.join(fixture, 'scripts/npm-install-safe.mjs'), [
-      'import assert from "node:assert/strict";',
-      'import { spawnSync } from "node:child_process";',
-      'const args = process.argv.slice(2);',
-      'assert.equal(args[0], "--repo-root");',
-      'assert.equal(args[1], process.env.WEB_DIR);',
-      'assert.equal(args[2], "--exec-under-cache-lock");',
-      'assert.equal(args[3], "--");',
-      'assert.equal(args[4], "npx");',
-      'const result = spawnSync(args[4], args.slice(5), { stdio: "inherit" });',
-      'process.exit(result.status ?? 1);',
+      'export function withPackageCacheReadLease(fn) { return fn(); }',
     ].join('\n'));
     fs.writeFileSync(path.join(fakeBin, 'npx'), [
       '#!/bin/sh',
@@ -201,6 +192,7 @@ test('desktop worker builds before Node staging and is executed by the finished-
     const built = spawnSync('bash', ['-c', [
       'set -euo pipefail',
       'MINIFY_ARGS=()',
+      builder.match(/run_sidecar_cached_package\(\) \{[\s\S]*?\n\}/)[0],
       builder.slice(buildStart, buildEnd),
     ].join('\n')], { env, encoding: 'utf8', timeout: 10_000 });
     assert.equal(built.status, 0, `${built.stdout}${built.stderr}`);
