@@ -22,11 +22,13 @@ function functionBody(name) {
 const packagingNames = ['gen_info_plist', 'strip_mac_signing_xattrs',
   'verify_mac_signing_xattrs', 'sign_app', 'make_updater', 'build_tutorial_app', 'make_dmg'];
 function exportPackaging(script = sourcePath) {
-  return spawnSync('bash', [script, '--export-packaging-functions'], {
+  const result = spawnSync('bash', [script, '--export-packaging-functions'], {
     encoding: 'utf8', timeout: 10_000,
     // Export must precede source/toolchain/key discovery, not merely skip cargo.
     env: { ...process.env, PAPERCUSP_DESKTOP_TARGET_ROOT: '/missing-export-product-root' },
   });
+  if (result.error) result.stderr += `\npackaging export subprocess: ${result.error.code}; signal=${result.signal}\n`;
+  return result;
 }
 
 test('packaging export parses all seven real functions and invokes the complete plist writer', t => {
@@ -152,6 +154,9 @@ if (env.SIGNER_MODE === 'empty') fs.writeFileSync(args.at(-1) + '.sig', '');
     VERSION: '0.0.26', DMG_ARCH: 'x64', MAC_CERT_P12: '',
     DMG_TOOL: path.join(bin, 'dmg'), HFSPLUS_TOOL: path.join(bin, 'hfsplus'),
     PAPERCUSP_HFSPLUS_PREFLIGHT_SCRIPT: preflight,
+    PAPERCUSP_RELEASE_RETENTION_ROOT: path.join(root, 'retention'),
+    PAPERCUSP_RELEASE_DELETION_AUDIT_PATH: path.join(root, 'deletion-audit.tsv'),
+    PAPERCUSP_DISK_RESERVATION_DIR: path.join(root, 'reservations'),
     PAPERCUSP_DMG_NO_MOUNT: '1', TAURI_CLI_VERSION: '2.11.0',
     KEY_FILE: key, KEY_PASSWORD: password,
     SIGNER_RECORD: record, SIGNER_MODE: mode, EXPECT_PASSWORD: password };
@@ -225,8 +230,65 @@ for (const phase of ['mkfs', 'addall', 'chmod', 'convert']) {
     const attempt = fs.readdirSync(logs);
     assert.equal(attempt.length, 1);
     assert.match(fs.readFileSync(path.join(logs, attempt[0], `${phase}.log`), 'utf8'), new RegExp(message));
+    const leases = fs.readdirSync(f.env.PAPERCUSP_RELEASE_RETENTION_ROOT)
+      .filter(name => name.startsWith('lease-'));
+    assert.equal(leases.length, 1, 'failed packaging must retain its scratch lease');
+    const lease = fs.readFileSync(path.join(f.env.PAPERCUSP_RELEASE_RETENTION_ROOT, leases[0]), 'utf8');
+    const paths = lease.split('\n').filter(line => line.startsWith('path=')).map(line => line.slice(5));
+    assert.equal(paths.length, 3);
+    assert.ok(paths.every(p => fs.existsSync(p)), 'lease binds preserved stage, raw image, and diagnostics');
+    assert.ok(Number(lease.match(/^expires_ns=(\d+)$/m)[1]) > Date.now() * 1e6, 'failure lease has a bounded lifetime');
   });
 }
+
+test('DMG packaging refuses insufficient scratch space before allocating an image', t => {
+  const f = fixture(t);
+  fs.writeFileSync(path.join(f.root, 'bin/df'),
+    '#!/bin/sh\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 100 100 0 100%% /fixture\\n"\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(f.root, 'bin/dd'), '#!/bin/sh\ntouch "$ROOT/image-started"\n', { mode: 0o755 });
+  const result = run(f);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /insufficient disk/);
+  assert.equal(fs.existsSync(path.join(f.root, 'image-started')), false);
+  assert.equal(fs.existsSync(f.env.PAPERCUSP_RELEASE_RETENTION_ROOT), false);
+});
+
+test('DMG packaging reserves concurrent scratch and output footprint on a shared filesystem', t => {
+  const f = fixture(t);
+  fs.writeFileSync(path.join(f.root, 'bin/df'),
+    '#!/bin/sh\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 40000000 0 18874368 0%% /fixture\\n"\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(f.root, 'bin/du'), '#!/bin/sh\nprintf "5368709120\\tfixture\\n"\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(f.root, 'bin/dd'), '#!/bin/sh\ntouch "$ROOT/image-started"\n', { mode: 0o755 });
+  const result = run(f);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /DMG scratch and output/);
+  assert.equal(fs.existsSync(path.join(f.root, 'image-started')), false);
+});
+
+test('DMG packaging checks output space separately when scratch is on another filesystem', t => {
+  const f = fixture(t);
+  fs.writeFileSync(path.join(f.root, 'bin/df'), `#!/bin/sh
+case "$2" in *bundle/dmg*) available=0; mount=/output ;; *) available=8388608; mount=/scratch ;; esac
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 10000000 0 %s 0%% %s\\n' "$available" "$mount"
+`, { mode: 0o755 });
+  fs.writeFileSync(path.join(f.root, 'bin/dd'), '#!/bin/sh\ntouch "$ROOT/image-started"\n', { mode: 0o755 });
+  const result = run(f);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /DMG output disk reservation failed/);
+  assert.equal(fs.existsSync(path.join(f.root, 'image-started')), false);
+});
+
+test('successful DMG conversion releases scratch leases and filesystem reservations', t => {
+  const f = fixture(t);
+  const result = run(f);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual(fs.readdirSync(f.env.PAPERCUSP_RELEASE_RETENTION_ROOT).filter(n => n.startsWith('lease-')), []);
+  const reservations = fs.existsSync(f.env.PAPERCUSP_DISK_RESERVATION_DIR)
+    ? fs.readdirSync(f.env.PAPERCUSP_DISK_RESERVATION_DIR).flatMap(n =>
+      fs.readdirSync(path.join(f.env.PAPERCUSP_DISK_RESERVATION_DIR, n)).filter(p => p.endsWith('.res')))
+    : [];
+  assert.deepEqual(reservations, []);
+});
 
 test('allocation preflight rejects catalog corruption even when the HFS utility reports success', t => {
   const f = fixture(t);

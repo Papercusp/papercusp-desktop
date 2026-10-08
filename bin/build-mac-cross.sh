@@ -620,9 +620,40 @@ make_dmg() { # $1=app $2=productName
     fail "HFS allocation preflight failed for $name; diagnostics: $diagnostics"
   fi
   [[ -x "$qualified_tool" ]] || fail "HFS preparation returned no executable: $qualified_tool"
+  # Reserve the real scratch/output filesystems before a multi-GB copy or dd.
+  # Keep failed scratch visible to the same retention reader used by release cuts.
+  source "$HERE/lib/disk-preflight.sh"
+  source "$HERE/lib/release-artifacts.sh"
+  local scratch_root="${TMPDIR:-/tmp}" app_bytes image_bytes scratch_gb output_gb
+  app_bytes="$(du -sb "$app" | cut -f1)"
+  image_bytes=$(( (app_bytes/1024/1024 + app_bytes/1024/1024/4 + 301) * 1024 * 1024 ))
+  local PAPERCUSP_DISK_RESERVATION_FILE="" scratch_reservation="" output_reservation=""
+  if [[ "$(papercusp_mount_key "$scratch_root")" == "$(papercusp_mount_key "$OUT_BUNDLE/dmg")" ]]; then
+    scratch_gb=$(( (app_bytes + 2*image_bytes + 16*1024*1024 + 1073741823) / 1073741824 ))
+    papercusp_require_free_gb "$scratch_root" "$scratch_gb" "DMG scratch and output for $name" \
+      || fail "DMG disk reservation failed before staging $name"
+    scratch_reservation="$PAPERCUSP_DISK_RESERVATION_FILE"
+  else
+    scratch_gb=$(( (app_bytes + image_bytes + 1073741823) / 1073741824 ))
+    output_gb=$(( (image_bytes + 16*1024*1024 + 1073741823) / 1073741824 ))
+    papercusp_require_free_gb "$scratch_root" "$scratch_gb" "DMG scratch for $name" \
+      || fail "DMG scratch disk reservation failed before staging $name"
+    scratch_reservation="$PAPERCUSP_DISK_RESERVATION_FILE"
+    PAPERCUSP_DISK_RESERVATION_FILE=""
+    papercusp_require_free_gb "$OUT_BUNDLE/dmg" "$output_gb" "DMG output for $name" \
+      || fail "DMG output disk reservation failed before staging $name"
+    output_reservation="$PAPERCUSP_DISK_RESERVATION_FILE"
+  fi
   local stage raw; stage="$(mktemp -d)"; raw="$(mktemp)"
-  cp -a "$app" "$stage/"
-  build_tutorial_app "$stage"
+  local scratch_tag="dmg-scratch-$$-$RANDOM-$RANDOM"
+  if ! PAPERCUSP_RELEASE_RETENTION_TTL_SEC="${PAPERCUSP_RELEASE_RETENTION_TTL_SEC:-86400}" \
+      release_artifacts_retention_lease_acquire "$scratch_tag" "$stage" "$raw" "$diagnostics" >/dev/null; then
+    rm -f "$raw"; rmdir "$stage"
+    fail "DMG scratch retention registration failed before staging $name"
+  fi
+  echo "    dmg: scratch retention $(release_artifacts_retention_lease_path "$scratch_tag")"
+  cp -a "$app" "$stage/" || fail "DMG app staging failed; retained scratch: $stage; raw: $raw"
+  build_tutorial_app "$stage" || fail "DMG tutorial staging failed; retained scratch: $stage; raw: $raw"
 
   # Size the HFS+ image with GENEROUS slack: content + 25% + 300MB. HFS+ needs
   # headroom beyond the raw bytes for its catalog/extents B-trees + allocation
@@ -632,7 +663,8 @@ make_dmg() { # $1=app $2=productName
   # UDIF convert, so oversizing the raw image barely affects the final dmg.
   local bytes mb; bytes=$(du -sb "$stage" | cut -f1); mb=$(( bytes/1024/1024 + bytes/1024/1024/4 + 300 ))
   echo "    dmg: $(basename "$dmg") (staging $((bytes/1024/1024))MB → ${mb}MB image)"
-  dd if=/dev/zero of="$raw" bs=1M count="$mb" status=none
+  dd if=/dev/zero of="$raw" bs=1M count="$mb" status=none \
+    || fail "DMG image allocation failed; retained scratch: $stage; raw: $raw"
   if ! mkfs.hfsplus -v "$name" "$raw" >"$diagnostics/mkfs.log" 2>&1; then
     tail -n 80 "$diagnostics/mkfs.log" >&2
     fail "mkfs.hfsplus failed for $name; diagnostics: $diagnostics; stage: $stage; raw: $raw"
@@ -683,6 +715,10 @@ make_dmg() { # $1=app $2=productName
     fail "dmg UDIF conversion failed for $name; diagnostics: $diagnostics; stage: $stage; raw: $raw"
   fi
   rm -f "$raw"; rm -rf "$stage"
+  release_artifacts_retention_lease_release "$scratch_tag" \
+    || fail "DMG converted, but scratch retention release failed for $scratch_tag"
+  [[ -z "$scratch_reservation" ]] || rm -f "$scratch_reservation"
+  [[ -z "$output_reservation" ]] || rm -f "$output_reservation"
 
   # Structurally verify the app + its binary actually landed in the image BEFORE
   # signing. Capture the listing to a var and grep THAT — NEVER `7z l | grep -q`:
