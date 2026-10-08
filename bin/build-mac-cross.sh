@@ -498,11 +498,13 @@ make_updater() { # $1=app $2=productName
   ( cd "$(dirname "$app")" \
       && tar --owner=0 --group=0 --numeric-owner -czf "$tgz" "$name.app" ) \
     || fail "tar of $name.app failed"
+  # Require a fresh signature for these bytes, even after a packaging retry.
+  rm -f "$tgz.sig"
   # Strip the two env vars a newer tauri CLI rejects alongside --private-key-path.
   ( cd "$ROOT" && env -u TAURI_SIGNING_PRIVATE_KEY -u TAURI_SIGNING_PRIVATE_KEY_PATH \
       npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri signer sign --private-key-path "$KEY_FILE" --password "$KEY_PASSWORD" "$tgz" >/dev/null ) \
     || fail "tauri signer failed for $tgz"
-  [[ -f "$tgz.sig" ]] || fail "tauri signer produced no .sig for $tgz"
+  [[ -s "$tgz.sig" ]] || fail "tauri signer produced no .sig for $tgz"
 }
 
 # ── "Papercusp Tutorial & Setup.app" baked into the DMG (WI-2945) — parity with
@@ -618,7 +620,11 @@ make_dmg() { # $1=app $2=productName
   local _key="$KEY_FILE"
   [[ -f "$_key" ]] && _key="$(cat "$_key")"
   [[ -n "$_key" ]] || fail "no updater signing key content for $dmg"
-  ( cd "$ROOT" && TAURI_SIGNING_PRIVATE_KEY="$_key" \
+  rm -f "$dmg.sig"
+  # Once resolved to content, remove the inherited path option in this child
+  # only. Tauri rejects both options, even when they arrive through env.
+  ( cd "$ROOT" && unset TAURI_SIGNING_PRIVATE_KEY_PATH
+      TAURI_SIGNING_PRIVATE_KEY="$_key" \
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$KEY_PASSWORD" \
       npx --yes -p "@tauri-apps/cli@$TAURI_CLI_VERSION" tauri signer sign "$dmg" >/dev/null ) \
     || fail "tauri signer failed for $dmg"
