@@ -1875,6 +1875,31 @@ def audit_vulnerabilities(args):
         print(f"AUDIT ERROR: syft scan failed ({syft_result.returncode}): "
               f"{detail[:1000]}", file=sys.stderr)
         return 2
+    # A zero-match verdict is meaningful only after packages were identified.
+    # In particular, Syft can successfully scan a compiled Rust GUI and emit an
+    # empty SBOM. Grype then succeeds with zero matches; that is missing coverage,
+    # never evidence that the binary has no vulnerable dependencies.
+    try:
+        with open(sbom_path, encoding="utf-8") as source:
+            sbom_components = json.load(source).get("components")
+        if not isinstance(sbom_components, list):
+            raise ValueError("components must be an array")
+        catalogued_packages = [
+            component for component in sbom_components
+            if isinstance(component, dict)
+            and isinstance(component.get("name"), str)
+            and component["name"].strip()
+            and isinstance(component.get("version"), str)
+            and component["version"].strip()
+            and isinstance(component.get("purl"), str)
+            and component["purl"].startswith("pkg:")
+        ]
+        if not catalogued_packages:
+            raise ValueError("SBOM catalogued 0 identifiable packages; "
+                             "vulnerability coverage is unmeasured")
+    except (OSError, json.JSONDecodeError, AttributeError, ValueError) as exc:
+        print(f"AUDIT ERROR: SBOM coverage is unjudgeable: {exc}", file=sys.stderr)
+        return 2
     # ── SBOM COVERAGE ASSERTION (EI-21925061645614369) ────────────────────────────
     # The flag above fixes the blindness; this is what stops it coming back unnoticed.
     # Cataloger tags are UPSTREAM data — one retag in a future syft and the npm leg silently
@@ -1969,6 +1994,9 @@ def audit_vulnerabilities(args):
             "grypeVersion": grype_version.get("version"),
             "grypeDbSchema": db_status.get("schemaVersion"),
             "grypeDbBuilt": db_built.isoformat().replace("+00:00", "Z"),
+        },
+        "coverage": {
+            "cataloguedPackages": len(catalogued_packages),
         },
         "evidence": {
             "sbomSha256": _sha256_file(sbom_path),
