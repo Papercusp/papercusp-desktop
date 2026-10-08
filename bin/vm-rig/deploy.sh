@@ -40,7 +40,7 @@ scp -q -o ConnectTimeout=10 -o StrictHostKeyChecking=no "$MCP_CALL" "$VM:$remote
 ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no "$VM" "
   set -e
   persistent=\"\$HOME/.papercusp/vm-rig\"
-  mkdir -p \"\$persistent\"
+  mkdir -p \"\$persistent/scripts\" \"\$persistent/apps/operator/scripts\"
   shasum -a 256 '$remote_vmcall' | grep -q '^$vmcall_hash '
   shasum -a 256 '$remote_mcp' | grep -q '^$mcp_hash '
   install -m 0755 '$remote_vmcall' \"\$persistent/vmcall.sh\"
