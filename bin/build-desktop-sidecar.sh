@@ -1333,7 +1333,12 @@ fi
 # held; later packaging steps consume that stable snapshot instead of rereading
 # the shared live dist/ after another build can start.
 rm -rf "$SIDECAR_DIR"
-mkdir -p "$SIDECAR_DIR/spa" "$SIDECAR_DIR/node_modules/@lydell"
+mkdir -p "$SIDECAR_DIR/spa" "$SIDECAR_DIR/node_modules/@lydell" "$SIDECAR_DIR/bin"
+# Initialize the shared provenance note once, with the fresh assembly root.
+# Private Darwin PostgreSQL writes before the client-tool wiring below; a later
+# reset would also erase that payload receipt from the shipping note.
+SOURCE_NOTE_FILE="$SIDECAR_DIR/bin/.pg-tools-source"
+> "$SOURCE_NOTE_FILE"
 
 echo "→ building operator-vite SPA (vite build → locked sidecar snapshot)"
 # PAPERCUSP_RETAIN_DIST_CHUNKS=0 — this is a PACKAGING build. The
@@ -3811,8 +3816,6 @@ if [[ -z "$EMBEDDED_PG_BIN_DIR" ]]; then
   exit 1
 fi
 echo "→ wiring pg_dump / psql / pg_dumpall into $SIDECAR_DIR/bin/"
-SOURCE_NOTE_FILE="$SIDECAR_DIR/bin/.pg-tools-source"
-> "$SOURCE_NOTE_FILE"
 
 # shellcheck source=lib/sidecar-source-note.sh
 source "$HERE/lib/sidecar-source-note.sh"

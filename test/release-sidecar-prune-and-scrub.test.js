@@ -1085,6 +1085,91 @@ test('sidecar source-note producer refuses an unredacted user-root path before w
   }
 });
 
+function runSourceNoteAssemblyFixture(sh) {
+  const dir = tmp('source-note-assembly');
+  const sidecar = path.join(dir, 'sidecar');
+  const inputs = path.join(dir, 'darwin-inputs');
+  const embedded = path.join(dir, 'embedded');
+  const platform = path.join(embedded, 'node_modules/@embedded-postgres/darwin-x64');
+  const note = path.join(sidecar, 'bin/.pg-tools-source');
+  try {
+    fs.mkdirSync(path.dirname(note), { recursive: true });
+    fs.writeFileSync(note, 'stale assembly receipt\n');
+    fs.mkdirSync(path.join(inputs, 'postgresql/bin'), { recursive: true });
+    fs.writeFileSync(path.join(inputs, 'postgresql/bin/postgres'), 'qualified fixture payload');
+    fs.writeFileSync(path.join(inputs, 'manifest.json'), JSON.stringify({
+      postgresqlVersion: '18.6', minimumMacOS: '17.0',
+    }));
+    fs.mkdirSync(path.join(platform, 'native'), { recursive: true });
+    fs.writeFileSync(path.join(platform, 'package.json'), JSON.stringify({ version: '18.1.0' }));
+
+    // Execute the real staging reset and private-PG branch. The fixture supplies
+    // already-qualified native inputs; qualification itself has its own suite.
+    const reset = sh.indexOf('rm -rf "$SIDECAR_DIR"');
+    const spa = sh.indexOf('echo "→ building operator-vite SPA', reset);
+    const privateStart = sh.indexOf('if [[ -n "$DARWIN_NATIVE_INPUTS" ]]; then\n  validate_darwin_native_inputs');
+    const privateEnd = sh.indexOf('# Sanity check: must have at least one @embedded-postgres/', privateStart);
+    assert.ok(reset >= 0 && spa > reset && privateStart > spa && privateEnd > privateStart,
+      'producer fixture must bind the actual assembly and private-PG boundaries');
+    // Exercise every later note writer in its production order, including the
+    // mutually exclusive Kopia sources. Keep assignments/resets too, so a late
+    // truncation cannot silently discard the earlier Darwin payload receipt.
+    const laterWrites = sh.slice(privateEnd).replace(/\\\n\s*/g, ' ').split('\n')
+      .filter(line => line.includes('SOURCE_NOTE_FILE') && !line.trimStart().startsWith('#'));
+    assert.ok(laterWrites.some(line => line.includes('papercusp_append_pg_tool_source_note')));
+    assert.ok(laterWrites.some(line => line.includes('gh: qualified private Darwin input')));
+    const script = [
+      'set -euo pipefail',
+      `source ${JSON.stringify(SOURCE_NOTE_HELPER)}`,
+      'validate_darwin_native_inputs() { return 0; }',
+      sh.slice(reset, spa),
+      sh.slice(privateStart, privateEnd),
+      ...laterWrites,
+    ].join('\n');
+    const env = { ...process.env, SIDECAR_DIR: sidecar, SIDECAR_TMP_DIR: sidecar,
+      DARWIN_NATIVE_INPUTS: inputs, EMBEDDED_PG_DST: embedded, TARGET_ARCH: 'x64',
+      PAPERCUSP_DARWIN_NATIVE_INPUTS_SHA256: 'a'.repeat(64),
+      PAPERCUSP_VM_KOPIA_VERSION: '0.24.0', PAPERCUSP_VM_KOPIA_COMMIT: 'fixture-commit',
+      _kopia_ver: '0.24.0', _kopia_arch: 'amd64', _kopia_src: '/usr/bin/kopia',
+      tool: 'psql', method: 'copy', src: '/usr/lib/postgresql/18/bin/psql' };
+    delete env.SOURCE_NOTE_FILE;
+    const result = spawnSync('bash', ['-c', script], { encoding: 'utf8', env });
+    return { status: result.status, output: `${result.stdout}${result.stderr}`,
+      note: fs.existsSync(note) ? fs.readFileSync(note, 'utf8') : '',
+      package: JSON.parse(fs.readFileSync(path.join(platform, 'package.json'), 'utf8')) };
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('sidecar assembly initializes the note before private Darwin PG and preserves all later tool receipts', () => {
+  // An exact retained producer can run this same conventional test as a
+  // counterfactual without editing that immutable source bank.
+  const producer = process.env.PAPERCUSP_SOURCE_NOTE_TEST_PRODUCER
+    || path.join(root, 'bin/build-desktop-sidecar.sh');
+  const result = runSourceNoteAssemblyFixture(fs.readFileSync(producer, 'utf8'));
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.note, /private Darwin PostgreSQL bottle payload: a{64}/);
+  assert.match(result.note, /psql: copy \(\/usr\/lib\/postgresql\/18\/bin\/psql\)/);
+  assert.match(result.note, /kopia: pinned source build/);
+  assert.match(result.note, /kopia: qualified private Darwin input/);
+  assert.match(result.note, /kopia: cross-fetch/);
+  assert.match(result.note, /kopia: copy \(from system PATH\)/);
+  assert.match(result.note, /gh: qualified private Darwin input/);
+  assert.doesNotMatch(result.note, /stale assembly receipt/);
+  assert.equal(result.package.papercuspNativePayload.origin, 'qualified-homebrew-bottle-private');
+  assert.equal(result.package.papercuspNativePayload.manifestSha256, 'a'.repeat(64));
+});
+
+test('source-note assembly guard detects a late reset erasing the Darwin payload receipt', () => {
+  const sh = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
+  const mutated = sh.replace('echo "→ wiring pg_dump / psql / pg_dumpall into $SIDECAR_DIR/bin/"',
+    'echo "→ wiring pg_dump / psql / pg_dumpall into $SIDECAR_DIR/bin/"\n> "$SOURCE_NOTE_FILE"');
+  assert.notEqual(mutated, sh);
+  const result = runSourceNoteAssemblyFixture(mutated);
+  assert.equal(result.status, 0, result.output);
+  assert.doesNotMatch(result.note, /private Darwin PostgreSQL bottle payload/);
+  assert.match(result.note, /gh: qualified private Darwin input/);
+});
+
 test('build-desktop-sidecar routes path-bearing source-note writes through the producer guard', () => {
   const sh = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
   assert.match(sh, /source "\$HERE\/lib\/sidecar-source-note\.sh"/);
@@ -1391,6 +1476,9 @@ test('build-mac-cross Info.plist generator closes its Python heredoc before shel
   const dir = tmp('mac-plist-heredoc');
   const input = path.join(dir, 'Info.plist');
   const output = path.join(dir, 'Generated.plist');
+  fs.writeFileSync(path.join(dir, 'tauri.conf.json'), JSON.stringify({
+    bundle: { macOS: { minimumSystemVersion: '10.15' } },
+  }));
   fs.writeFileSync(input, [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
@@ -1401,6 +1489,8 @@ test('build-mac-cross Info.plist generator closes its Python heredoc before shel
       'set -euo pipefail',
       'VERSION=0.0.0-test',
       `SRC_TAURI=${JSON.stringify(dir)}`,
+      `DARWIN_SIDECAR=${JSON.stringify(path.join(dir, 'sidecar'))}`,
+      'PAPERCUSP_DARWIN_NATIVE_INPUTS=',
       fn,
       `gen_info_plist com.papercusp.synthetic 'Synthetic App' ${JSON.stringify(output)}`,
     ].join('\n')], { encoding: 'utf8' });
@@ -1408,6 +1498,7 @@ test('build-mac-cross Info.plist generator closes its Python heredoc before shel
     const generated = fs.readFileSync(output, 'utf8');
     assert.match(generated, /com\.papercusp\.synthetic/);
     assert.match(generated, /Synthetic fixture/);
+    assert.match(generated, /<key>LSMinimumSystemVersion<\/key>\s*<string>10\.15<\/string>/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
