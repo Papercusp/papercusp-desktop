@@ -473,6 +473,19 @@ assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out $
 # sign seals them into CodeResources. ─────────────────────────────────────────
 sign_app() { # $1=app
   local app="$1" args=(--entitlements-xml-path "$ENTITLEMENTS")
+  local pui_sidecar="$app/Contents/Resources/sidecar" pui_helper="" pui_previous=""
+
+  if [[ -f "$pui_sidecar/bin/pui" || -f "$pui_sidecar/pui-install.json" ]]; then
+    source "$HERE/lib/source-roots.sh"
+    # The signing algorithm and its manifest writer are one tooling generation;
+    # the selected product checkout can intentionally retain an older writer.
+    pui_helper="$(papercusp_repo_root "$HERE/.." "")/apps/tui/scripts/write-install-manifest.py"
+    python3 "$pui_helper" verify --manifest "$pui_sidecar/pui-install.json" \
+      --binary "$pui_sidecar/bin/pui" --companion "$pui_sidecar/pui-companion.wasm" \
+      || fail "PUI generation does not verify before app signing"
+    pui_previous="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["binarySha256"])' "$pui_sidecar/pui-install.json")" \
+      || fail "cannot capture the pre-sign PUI generation"
+  fi
 
   [[ -n "$MAC_CERT_P12" ]] && args+=(--p12-file "$MAC_CERT_P12" --p12-password "${MAC_SIGN_P12_PASSWORD:-}")
   echo "    signing $(basename "$app") (rcodesign${MAC_CERT_P12:+, cert})"
@@ -480,6 +493,18 @@ sign_app() { # $1=app
     || fail "rcodesign failed to sign $app"
   [[ -f "$app/Contents/_CodeSignature/CodeResources" ]] \
     || fail "signing produced no _CodeSignature for $app"
+  if [[ -n "$pui_previous" ]]; then
+    # Deep signing changes nested Mach-O bytes. Rebind only that digest, then
+    # reseal the outer bundle without rewriting the signed nested binaries.
+    python3 "$pui_helper" rebind-binary --manifest "$pui_sidecar/pui-install.json" \
+      --binary "$pui_sidecar/bin/pui" --companion "$pui_sidecar/pui-companion.wasm" \
+      --previous-binary-sha256 "$pui_previous" || fail "cannot bind the signed PUI generation"
+    rcodesign sign "${args[@]}" --shallow "$app" >/dev/null 2>&1 \
+      || fail "rcodesign failed to reseal the PUI generation in $app"
+    python3 "$pui_helper" verify --manifest "$pui_sidecar/pui-install.json" \
+      --binary "$pui_sidecar/bin/pui" --companion "$pui_sidecar/pui-companion.wasm" \
+      || fail "PUI generation changed during the final app seal"
+  fi
 }
 
 # ── Updater artifact: <productName>.app.tar.gz + ed25519/minisign .sig. ────────

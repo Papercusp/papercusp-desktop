@@ -88,6 +88,61 @@ function run(f, name = 'make_dmg') {
   ].join('\n')], { encoding: 'utf8', timeout: 10_000, env: f.env });
 }
 
+for (const mode of ['normal', 'companion-change', 'shallow-change', 'pre-sign-change', 'generation-change']) {
+  test(`app signing seals the final PUI generation and rejects ${mode} corruption`, t => {
+    const f = fixture(t);
+    const sidecar = path.join(f.app, 'Contents/Resources/sidecar');
+    fs.mkdirSync(path.join(sidecar, 'bin'), { recursive: true });
+    const binary = path.join(sidecar, 'bin/pui');
+    const companion = path.join(sidecar, 'pui-companion.wasm');
+    const manifest = path.join(sidecar, 'pui-install.json');
+    fs.writeFileSync(binary, 'unsigned PUI');
+    fs.writeFileSync(companion, 'fixed companion');
+    const helper = process.env.PUI_MANIFEST_HELPER || path.resolve(__dirname, '../../apps/tui/scripts/write-install-manifest.py');
+    const product = path.join(f.root, 'tooling');
+    const selectedHelper = path.join(product, 'apps/tui/scripts/write-install-manifest.py');
+    fs.mkdirSync(path.dirname(selectedHelper), { recursive: true });
+    fs.copyFileSync(helper, selectedHelper);
+    const here = path.join(product, 'papercusp-desktop/bin');
+    fs.mkdirSync(path.join(here, 'lib'), { recursive: true });
+    fs.copyFileSync(path.resolve(__dirname, '../bin/lib/source-roots.sh'), path.join(here, 'lib/source-roots.sh'));
+    const write = spawnSync('python3', [helper, 'write', '--manifest', manifest,
+      '--binary', binary, '--companion', companion, '--relative-paths', '--source-sha', 'fixture-source',
+      '--source-dirty', '0', '--built-at-epoch', '1', '--version', 'fixture-version', '--target', 'darwin-x64'], { encoding: 'utf8' });
+    assert.equal(write.status, 0, write.stdout + write.stderr);
+    const original = JSON.parse(fs.readFileSync(manifest));
+    if (mode === 'pre-sign-change') fs.appendFileSync(binary, 'unexpected');
+    fs.writeFileSync(path.join(f.root, 'bin/rcodesign'), `#!/usr/bin/env node
+const fs=require('node:fs'), path=require('node:path'), crypto=require('node:crypto');
+const args=process.argv.slice(2), app=args.at(-1), shallow=args.includes('--shallow');
+const sidecar=path.join(app,'Contents/Resources/sidecar'), manifest=path.join(sidecar,'pui-install.json');
+fs.appendFileSync(process.env.SIGNING_CALLS, shallow ? 'shallow\\n' : 'deep\\n');
+if (!shallow || process.env.PUI_SIGNING_MODE==='shallow-change') fs.appendFileSync(path.join(sidecar,'bin/pui'),'signature');
+if (process.env.PUI_SIGNING_MODE==='companion-change') fs.appendFileSync(path.join(sidecar,'pui-companion.wasm'),'corruption');
+if (process.env.PUI_SIGNING_MODE==='generation-change') { const j=JSON.parse(fs.readFileSync(manifest)); j.binarySha256='wrong'; fs.writeFileSync(manifest,JSON.stringify(j)); }
+fs.mkdirSync(path.join(app,'Contents/_CodeSignature'),{recursive:true});
+fs.writeFileSync(path.join(app,'Contents/_CodeSignature/CodeResources'),crypto.createHash('sha256').update(fs.readFileSync(manifest)).digest('hex'));
+`, { mode: 0o755 });
+    Object.assign(f.env, { HERE: here, REPO_ROOT: path.join(f.root, 'pinned-product-with-older-writer'),
+      ENTITLEMENTS: path.join(f.root, 'fixture-entitlements'), PUI_SIGNING_MODE: mode,
+      SIGNING_CALLS: path.join(f.root, 'calls') });
+    const result = run(f, 'sign_app');
+    if (mode !== 'normal') {
+      assert.notEqual(result.status, 0, result.stdout + result.stderr);
+      assert.match(result.stderr, /PUI generation|companion changed|binary generation changed|cannot bind/);
+      return;
+    }
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const generation = JSON.parse(fs.readFileSync(manifest));
+    const { createHash } = require('node:crypto');
+    const digest = p => createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+    assert.equal(generation.binarySha256, digest(binary));
+    assert.deepEqual({ ...generation, binarySha256: original.binarySha256 }, original);
+    assert.equal(fs.readFileSync(path.join(f.app, 'Contents/_CodeSignature/CodeResources'), 'utf8'), digest(manifest));
+    assert.equal(fs.readFileSync(f.env.SIGNING_CALLS, 'utf8'), 'deep\nshallow\n');
+  });
+}
+
 for (const inheritedPath of [true, false]) {
   test(`DMG signer receives only key content with inherited path ${inheritedPath}`, t => {
     const f = fixture(t, { inheritedPath, password: 'fixture-password' });
