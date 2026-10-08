@@ -270,7 +270,9 @@ run_sidecar_cached_package --check || exit 1
 # worktree passes; the shared tree does not — the intended split), and why it deliberately
 # does NOT also require HEAD to equal the pin. Same placement contract as the gate above:
 # before any toolchain or dependency work.
-if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" \
+   || ( "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" \
+        && -n "${PAPERCUSP_PINNED_DEPS_SNAPSHOT_ROOT:-}" ) ]]; then
   # EI-21904084277182116 / D-186: a release cut does not consume the dependency
   # generation, so producing one is pure cost — and until now the ONLY thing
   # switching it off was each orchestrator remembering to export this variable.
@@ -282,15 +284,15 @@ if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
   # copying 86 trees (11.3 GB read / 15.9 GB written), and a peer watching host
   # PSI opened an urgent escalation about the IO.
   #
-  # Setting it HERE makes skipping a property of BEING a release cut rather than
-  # of the caller having read D-186. `:-1` keeps the escape hatch honest: an
+  # EI-25371210326439139: an explicitly audited pinned dogfood cut has the same
+  # prepared-input contract as vm-release. Apply the existing source/dependency
+  # guards before installs, instead of publishing another unused generation.
+  # Ordinary dogfood builds retain their historical behavior.
+  # `:-1` keeps the escape hatch honest: an
   # orchestrator that genuinely wants a generation exports 0 deliberately.
   #
-  # Scope note: D-186's text says "a PINNED release cut", while its measured
-  # rationale — zero consumers anywhere in the release path — is broader. This
-  # enforces at the vm-release profile, slightly wider than D-186's literal
-  # words; that widening is recorded as its own Decision rather than folded in
-  # silently. Read it there before narrowing this back.
+  # Both paths reuse the same clean-source and decoupling checks below; a skip
+  # cannot admit dependencies backed by an unapproved live tree.
   export PAPERCUSP_SKIP_DEP_GENERATION="${PAPERCUSP_SKIP_DEP_GENERATION:-1}"
 
   if ! papercusp_assert_release_source_clean "${PROVENANCE_SOURCE_GIT_DIRTY:-true}" "$REPO_ROOT"; then

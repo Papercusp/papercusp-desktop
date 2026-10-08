@@ -35,6 +35,62 @@ function extractFunction(name) {
 
 const LDCONFIG_RESOLVER = extractFunction('resolve_ldconfig');
 
+function runPinnedReleaseInstallGuard(t, {
+  profile = 'dogfood', audited = '1', pinned = true, skip = '', dirty = 'false', external = false,
+} = {}) {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-pinned-release-install-'));
+  t.after(() => fs.rmSync(fixture, { recursive: true, force: true }));
+  const product = path.join(fixture, 'product');
+  fs.mkdirSync(product);
+  if (external) {
+    const live = path.join(fixture, 'live-node-modules');
+    fs.mkdirSync(live);
+    fs.symlinkSync(live, path.join(product, 'node_modules'));
+  } else fs.mkdirSync(path.join(product, 'node_modules'));
+  const blockStart = builder.indexOf('# EI-21832562420831737: having DEMANDED');
+  const blockEnd = builder.indexOf('unset _vm_release_build_sha _vm_release_desktop_version', blockStart);
+  assert.ok(blockStart >= 0 && blockEnd > blockStart, 'release dependency guard block is missing');
+  const result = childProcess.spawnSync('bash', ['-c', [
+    'set -euo pipefail',
+    'source "$PC_SOURCE_ROOT_HELPER"', 'source "$PC_PINNED_DEPS_HELPER"',
+    builder.slice(blockStart, blockEnd),
+    // This observes the install child's inherited contract, before any build.
+    'node -e \'console.log(JSON.stringify({skip:process.env.PAPERCUSP_SKIP_DEP_GENERATION||"unset"}))\'',
+  ].join('\n')], {
+    encoding: 'utf8', timeout: 10_000,
+    env: { ...process.env, REPO_ROOT: product, DISTRIBUTION_PROFILE: profile,
+      PAPERCUSP_RELEASE_AUDIT: audited, PAPERCUSP_PINNED_DEPS_SNAPSHOT_ROOT: pinned ? product : '',
+      PAPERCUSP_SKIP_DEP_GENERATION: skip, PROVENANCE_SOURCE_GIT_DIRTY: dirty,
+      PC_SOURCE_ROOT_HELPER: path.join(desktopRoot, 'bin/lib/source-roots.sh'),
+      PC_PINNED_DEPS_HELPER: path.join(desktopRoot, 'bin/lib/pinned-deps.sh'),
+    },
+  });
+  return result;
+}
+
+test('audited pinned dogfood installs inherit generation skip; ordinary dogfood and explicit zero are preserved', t => {
+  for (const [options, expected] of [
+    [{}, '1'], [{ profile: 'vm-release', pinned: false }, '1'],
+    [{ audited: '0' }, 'unset'], [{ pinned: false }, 'unset'], [{ skip: '0' }, '0'],
+  ]) {
+    const result = runPinnedReleaseInstallGuard(t, options);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(JSON.parse(result.stdout.trim()).skip, expected);
+  }
+  const guard = builder.indexOf('export PAPERCUSP_SKIP_DEP_GENERATION=');
+  const install = builder.indexOf('(cd "$REPO_ROOT" && node scripts/npm-install-safe.mjs install');
+  assert.ok(guard >= 0 && install > guard, 'the contract must be inherited by the first install');
+});
+
+test('audited pinned dogfood refuses dirty source and external dependencies before the install child', t => {
+  for (const options of [{ dirty: 'true' }, { external: true }, { external: true, skip: '0' }]) {
+    const result = runPinnedReleaseInstallGuard(t, options);
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    assert.equal(result.stdout.trim(), '');
+    assert.match(result.stderr, /dirty source|SYMLINK to dependencies outside/);
+  }
+});
+
 test('clean-source native transformer validation follows dependency hydration and precedes SPA assembly', () => {
   const install = builder.indexOf('(cd "$REPO_ROOT" && node scripts/npm-install-safe.mjs install');
   const validation = builder.indexOf('papercusp_verify_transformers_native_target "$REPO_ROOT" "$TARGET_OS" "$TARGET_ARCH" || exit 1');
