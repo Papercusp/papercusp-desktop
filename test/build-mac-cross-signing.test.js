@@ -8,13 +8,93 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const source = fs.readFileSync(process.env.BUILD_MAC_CROSS_SCRIPT
-  || path.join(__dirname, '../bin/build-mac-cross.sh'), 'utf8');
+const sourcePath = process.env.BUILD_MAC_CROSS_SCRIPT
+  || path.join(__dirname, '../bin/build-mac-cross.sh');
+const source = fs.readFileSync(sourcePath, 'utf8');
 function functionBody(name) {
   const start = source.indexOf(`${name}() {`);
-  const end = source.indexOf('\n}\n', start);
+  const terminator = name === 'gen_info_plist' ? '\nPY\n}\n' : '\n}\n';
+  const end = source.indexOf(terminator, start);
   assert.ok(start >= 0 && end > start, `${name} shell function is missing`);
-  return source.slice(start, end + 3);
+  return source.slice(start, end + terminator.length);
+}
+
+const packagingNames = ['gen_info_plist', 'strip_mac_signing_xattrs',
+  'verify_mac_signing_xattrs', 'sign_app', 'make_updater', 'build_tutorial_app', 'make_dmg'];
+function exportPackaging(script = sourcePath) {
+  return spawnSync('bash', [script, '--export-packaging-functions'], {
+    encoding: 'utf8', timeout: 10_000,
+    // Export must precede source/toolchain/key discovery, not merely skip cargo.
+    env: { ...process.env, PAPERCUSP_DESKTOP_TARGET_ROOT: '/missing-export-product-root' },
+  });
+}
+
+test('packaging export parses all seven real functions and invokes the complete plist writer', t => {
+  const f = fixture(t);
+  const exported = exportPackaging();
+  assert.equal(exported.status, 0, exported.stdout + exported.stderr);
+  for (const name of packagingNames) assert.ok(exported.stdout.includes(functionBody(name)), name);
+  const parsed = spawnSync('bash', ['-n'], { input: exported.stdout, encoding: 'utf8' });
+  assert.equal(parsed.status, 0, parsed.stderr);
+  const tauri = path.join(f.root, 'src-tauri');
+  fs.mkdirSync(tauri);
+  fs.writeFileSync(path.join(tauri, 'tauri.conf.json'), JSON.stringify({
+    bundle: { macOS: { minimumSystemVersion: '14.0' } },
+  }));
+  const user = spawnSync('python3', ['-c',
+    'import plistlib,sys;plistlib.dump({},open(sys.argv[1],"wb"))', path.join(tauri, 'Info.plist')],
+  { encoding: 'utf8' });
+  assert.equal(user.status, 0, user.stderr);
+  const out = path.join(f.root, 'generated.plist');
+  const invoked = spawnSync('bash', ['-c', [
+    'set -euo pipefail', exported.stdout,
+    ...packagingNames.map(name => `declare -F ${name} >/dev/null`),
+    'gen_info_plist com.papercusp.server "Papercusp Server" "$PLIST_OUT"',
+  ].join('\n')], { encoding: 'utf8', timeout: 10_000,
+    env: { ...f.env, SRC_TAURI: tauri, DARWIN_SIDECAR: f.root,
+      PAPERCUSP_DARWIN_NATIVE_INPUTS: '', PLIST_OUT: out } });
+  assert.equal(invoked.status, 0, invoked.stdout + invoked.stderr);
+  const read = spawnSync('python3', ['-c',
+    'import plistlib,json,sys;print(json.dumps(plistlib.load(open(sys.argv[1],"rb"))))', out],
+  { encoding: 'utf8' });
+  assert.equal(read.status, 0, read.stderr);
+  const actual = JSON.parse(read.stdout);
+  assert.equal(actual.CFBundleIdentifier, 'com.papercusp.server');
+  assert.equal(actual.LSMinimumSystemVersion, '14.0');
+
+  // Exact D200 counterfactual: the first brace truncates the Python heredoc.
+  const old = packagingNames.map(name => {
+    const start = source.indexOf(`${name}() {`);
+    return source.slice(start, source.indexOf('\n}\n', start) + 3);
+  }).join('\n');
+  const refused = spawnSync('bash', ['-n'], { input: old, encoding: 'utf8' });
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /here-document|unexpected end/);
+});
+
+test('packaging export refuses a missing selected-function boundary before emitting any code', t => {
+  const f = fixture(t);
+  const changed = path.join(f.root, 'changed-producer.sh');
+  // Still valid Bash; the export boundary contract has changed and needs review.
+  fs.writeFileSync(changed, source.replace('\nPY\n}\n', '\nPY\n }\n'));
+  const whole = spawnSync('bash', ['-n', changed], { encoding: 'utf8' });
+  assert.equal(whole.status, 0, whole.stderr);
+  const refused = exportPackaging(changed);
+  assert.notEqual(refused.status, 0);
+  assert.equal(refused.stdout, '');
+  assert.match(refused.stderr, /substring not found/);
+});
+
+for (const name of packagingNames) {
+  test(`packaging export rejects invalid ${name} code before emitting any function`, t => {
+    const f = fixture(t);
+    const changed = path.join(f.root, 'invalid-producer.sh');
+    fs.writeFileSync(changed, source.replace(`${name}() {`, `${name}() {\n)`));
+    const refused = exportPackaging(changed);
+    assert.notEqual(refused.status, 0);
+    assert.equal(refused.stdout, '');
+    assert.match(refused.stderr, /syntax error/);
+  });
 }
 
 function fixture(t, { inheritedPath = true, password = '', mode = 'sign', stale = false } = {}) {
@@ -78,11 +158,13 @@ if (env.SIGNER_MODE === 'empty') fs.writeFileSync(args.at(-1) + '.sig', '');
 }
 
 function run(f, name = 'make_dmg') {
+  const exported = exportPackaging();
+  assert.equal(exported.status, 0, exported.stdout + exported.stderr);
   return spawnSync('bash', ['-c', [
     'set -euo pipefail',
     'fail() { echo "ERROR: $*" >&2; exit 1; }',
+    exported.stdout,
     'build_tutorial_app() { :; }',
-    functionBody(name),
     `${name} "$APP" 'Papercusp GUI'`,
     'if [[ "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" == "$KEY_FILE" ]]; then echo CALLER_PATH_PRESERVED; fi',
   ].join('\n')], { encoding: 'utf8', timeout: 10_000, env: f.env });

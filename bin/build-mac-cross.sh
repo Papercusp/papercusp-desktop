@@ -102,6 +102,37 @@ set -euo pipefail
 # read offset into changed bytes. Matching } + exit 0 at EOF.
 {
 
+# Packaging-only continuations consume these maintained functions without
+# entering build initialization. Validate the actual emitted script BEFORE a
+# caller copies or changes an artifact; parsing a later eval wrapper is not enough.
+if [[ "${1:-}" == "--export-packaging-functions" ]]; then
+  [[ $# -eq 1 ]] || { echo 'export-packaging-functions takes no arguments' >&2; exit 2; }
+  python3 - "${BASH_SOURCE[0]}" <<'PY'
+from pathlib import Path
+import subprocess, sys
+
+source = Path(sys.argv[1]).read_text()
+names = ['gen_info_plist', 'strip_mac_signing_xattrs', 'verify_mac_signing_xattrs',
+         'sign_app', 'make_updater', 'build_tutorial_app', 'make_dmg']
+functions = []
+for name in names:
+    start = source.index(name + '() {')
+    # Reuse the minimum-OS writer guard's boundary: a Python dictionary's
+    # closing brace inside gen_info_plist is not a shell function terminator.
+    terminator = '\nPY\n}\n' if name == 'gen_info_plist' else '\n}\n'
+    end = source.index(terminator, start) + len(terminator)
+    functions.append(source[start:end])
+script = '\n'.join(functions)
+parsed = subprocess.run(['bash', '-n'], input=script, text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+if parsed.returncode:
+    sys.stderr.write(parsed.stderr)
+    sys.exit(parsed.returncode)
+sys.stdout.write(script)
+PY
+  exit $?
+fi
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Keep helper/audit policy current while compiling and packaging the pinned source.
 ROOT="$(cd "${PAPERCUSP_DESKTOP_TARGET_ROOT:-$HERE/..}" && pwd)"
