@@ -557,7 +557,8 @@ function writeExecutable(file, source) {
   fs.chmodSync(file, 0o755);
 }
 
-function runFakeVulnerabilityAudit({ matches = [], dbValid = true, report = null } = {}) {
+function runFakeVulnerabilityAudit({ matches = [], dbValid = true, report = null,
+  sbom = { components: [{ name: 'demo-runtime', version: '1.0.0', purl: 'pkg:generic/demo-runtime@1.0.0' }] } } = {}) {
   const dir = tmp('vulnerability-gate');
   const sidecar = path.join(dir, 'sidecar');
   const evidence = path.join(dir, 'evidence');
@@ -575,7 +576,7 @@ if (args[0] === 'version') {
 }
 const target = args.find((arg) => arg.startsWith('cyclonedx-json='));
 if (!target) process.exit(41);
-fs.writeFileSync(target.slice('cyclonedx-json='.length), JSON.stringify({ bomFormat: 'CycloneDX', specVersion: '1.7', components: [] }));
+fs.writeFileSync(target.slice('cyclonedx-json='.length), process.env.FAKE_SYFT_SBOM);
 `);
   writeExecutable(path.join(tools, 'grype'), `#!/usr/bin/env node
 const args = process.argv.slice(2);
@@ -592,6 +593,7 @@ if (args[0] === 'db' && args[1] === 'status') {
   process.exit(0);
 }
 process.stdout.write(process.env.FAKE_GRYPE_REPORT);
+require('node:fs').writeFileSync(process.env.FAKE_GRYPE_SCAN_MARKER, 'scanned');
 `);
 
   const env = {
@@ -600,6 +602,8 @@ process.stdout.write(process.env.FAKE_GRYPE_REPORT);
     FAKE_GRYPE_DB_BUILT: new Date().toISOString(),
     FAKE_GRYPE_DB_VALID: String(dbValid),
     FAKE_GRYPE_REPORT: JSON.stringify(report ?? { matches }),
+    FAKE_SYFT_SBOM: JSON.stringify({ bomFormat: 'CycloneDX', specVersion: '1.7', ...sbom }),
+    FAKE_GRYPE_SCAN_MARKER: path.join(evidence, 'grype-scan-called'),
   };
   const result = spawnSync(
     'python3',
@@ -621,6 +625,7 @@ test('vm-release vulnerability audit emits digest-bound evidence and attests onl
     ));
     assert.equal(summary.result.status, 'green');
     assert.equal(summary.result.gatedMatches, 0);
+    assert.equal(summary.coverage.cataloguedPackages, 1);
     assert.match(summary.evidence.sbomSha256, /^[a-f0-9]{64}$/);
     assert.match(summary.evidence.grypeReportSha256, /^[a-f0-9]{64}$/);
     assert.deepEqual(attestation, summary, 'the shipped attestation must bind the external evidence exactly');
@@ -662,6 +667,29 @@ test('vm-release vulnerability audit fails closed when the Grype DB is invalid o
     try {
       assert.equal(run.result.status, 2, `${input.label}\n${run.result.stdout}${run.result.stderr}`);
       assert.match(`${run.result.stdout}${run.result.stderr}`, /AUDIT ERROR/);
+    } finally {
+      fs.rmSync(run.dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('vulnerability audit refuses empty or unidentified SBOM coverage before scanning or attesting', () => {
+  for (const sbom of [
+    { components: [] },
+    {},
+    { components: {} },
+    { components: [null, {}, { name: 'file-only' }] },
+    { components: [{ name: 'runtime', version: '1.0.0', purl: '' }] },
+  ]) {
+    const run = runFakeVulnerabilityAudit({ sbom });
+    try {
+      assert.equal(run.result.status, 2, `${JSON.stringify(sbom)}\n${run.result.stdout}${run.result.stderr}`);
+      assert.match(run.result.stderr, /SBOM coverage is unjudgeable/);
+      assert.doesNotMatch(run.result.stdout, /VULNERABILITY GATE GREEN/);
+      assert.equal(fs.existsSync(path.join(run.evidence, 'grype-scan-called')), false);
+      assert.equal(fs.existsSync(path.join(run.evidence, 'summary.json')), false);
+      assert.equal(fs.existsSync(path.join(run.sidecar,
+        'apps/operator/runtime/vm-release-vulnerability-attestation.json')), false);
     } finally {
       fs.rmSync(run.dir, { recursive: true, force: true });
     }
