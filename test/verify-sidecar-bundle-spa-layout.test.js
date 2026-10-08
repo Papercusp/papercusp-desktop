@@ -45,10 +45,13 @@ const CHECK_BOOT_IMPORT_CLOSURE = extractFunction('check_boot_import_closure');
 
 // EI-25314848971418539: execute the real source lookup and protocol derivation,
 // with distinct protocol versions beside the tooling and selected product.
-const protocolLookupStart = script.indexOf('_verify_here=');
+const rootLookupStart = script.indexOf('_verify_here=');
+const rootLookupEnd = script.indexOf('\n_pui_manifest_tool=', rootLookupStart);
+const protocolLookupStart = script.indexOf('_ri_repo=');
 const protocolLookupEnd = script.indexOf('if [[ ! -f "$_ri" ]]; then', protocolLookupStart);
-assert.ok(protocolLookupStart >= 0 && protocolLookupEnd > protocolLookupStart);
-const PROTOCOL_LOOKUP = script.slice(protocolLookupStart, protocolLookupEnd);
+assert.ok(rootLookupStart >= 0 && rootLookupEnd > rootLookupStart);
+assert.ok(protocolLookupStart > rootLookupEnd && protocolLookupEnd > protocolLookupStart);
+const PROTOCOL_LOOKUP = script.slice(rootLookupStart, rootLookupEnd) + '\n' + script.slice(protocolLookupStart, protocolLookupEnd);
 
 function runProtocolLookup(overrides = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-verifier-source-'));

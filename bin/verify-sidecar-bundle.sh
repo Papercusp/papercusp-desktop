@@ -201,7 +201,11 @@ done
 echo "[1/7] pui generation manifest + companion"
 _pui_manifest="$SIDECAR/pui-install.json"
 _pui_companion="$SIDECAR/pui-companion.wasm"
-_repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
+# Tooling may live outside the selected product checkout. Resolve that product
+# once for both the PUI companion verifier and the initializer protocol below.
+_verify_here="$(cd "$(dirname "$0")" && pwd)"
+source "$_verify_here/lib/source-roots.sh"
+_repo_root="$(papercusp_repo_root "${PAPERCUSP_DESKTOP_TARGET_ROOT:-$_verify_here/..}")"
 _pui_manifest_tool="$_repo_root/apps/tui/scripts/write-install-manifest.py"
 [[ -s "$_pui_companion" ]] || fail "pui-companion.wasm: MISSING or empty from sidecar root"
 [[ -s "$_pui_manifest" ]] || fail "pui-install.json: MISSING or empty from sidecar root"
@@ -457,15 +461,15 @@ if [[ "$CROSS" == "1" ]]; then
   # VMs remain for testing — owner directive 2026-07-20).
   _nat_target_present() {
     local m="$1" d nf
-    local dirs="$SIDECAR/node_modules/$m"
+    local dirs=("$SIDECAR/node_modules/$m")
     # Some natives ship their binary in a SIBLING per-platform package, not in
     # the JS package dir — include the target's platform package for those.
     case "$m" in
-      onnxruntime-node) dirs="$SIDECAR/node_modules/$m/bin/napi-v6/${TARGET_OS_N/windows/win32}/$TARGET_ARCH_N" ;;
-      sharp) dirs="$dirs $SIDECAR/node_modules/@img/sharp-${TARGET_OS_N}-${TARGET_ARCH_N} $SIDECAR/node_modules/@img/sharp-libvips-${TARGET_OS_N}-${TARGET_ARCH_N}" ;;
-      @lydell/node-pty) dirs="$dirs $SIDECAR/node_modules/@lydell/node-pty-${TARGET_OS_N}-${TARGET_ARCH_N}" ;;
+      onnxruntime-node) dirs=("$SIDECAR/node_modules/$m/bin/napi-v6/${TARGET_OS_N/windows/win32}/$TARGET_ARCH_N") ;;
+      sharp) dirs+=("$SIDECAR/node_modules/@img/sharp-${TARGET_OS_N}-${TARGET_ARCH_N}" "$SIDECAR/node_modules/@img/sharp-libvips-${TARGET_OS_N}-${TARGET_ARCH_N}") ;;
+      @lydell/node-pty) dirs+=("$SIDECAR/node_modules/@lydell/node-pty-${TARGET_OS_N}-${TARGET_ARCH_N}") ;;
     esac
-    for d in $dirs; do
+    for d in "${dirs[@]}"; do
       [[ -d "$d" ]] || continue
       while IFS= read -r nf; do _is_target_format "$nf" && return 0; done < <(find "$d" -name '*.node' 2>/dev/null)
     done
@@ -608,9 +612,7 @@ _ri="$BIN/papercusp-remote-initializer"
 # A pinned tooling checkout can be separate from the product it verifies.
 # Resolve the same selected product root as the producer, rather than reading
 # a different protocol (or no source at all) beside the verifier's own checkout.
-_verify_here="$(cd "$(dirname "$0")" && pwd)"
-source "$_verify_here/lib/source-roots.sh"
-_ri_repo="$(papercusp_repo_root "${PAPERCUSP_DESKTOP_TARGET_ROOT:-$_verify_here/..}")"
+_ri_repo="$_repo_root"
 _ri_src="$_ri_repo/libs/generic/deployment-driver/src/workspace-host-remote-initializer.ts"
 # Quote-AGNOSTIC on purpose: the TS formatter has flipped this constant between single and
 # double quotes (build #2 2026-09-01 failed here when the source moved to double quotes while

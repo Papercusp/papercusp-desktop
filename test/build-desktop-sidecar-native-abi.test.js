@@ -16,7 +16,7 @@ const builder = fs.readFileSync(
   'utf8',
 );
 const verifier = fs.readFileSync(
-  path.join(desktopRoot, 'bin/verify-sidecar-bundle.sh'),
+  process.env.VERIFY_SIDECAR_BUNDLE_PATH ?? path.join(desktopRoot, 'bin/verify-sidecar-bundle.sh'),
   'utf8',
 );
 
@@ -683,37 +683,99 @@ test('Darwin runtime esbuild refuses missing exact platform pin, wrong version, 
   }
 });
 
-test('required local-model backend missing from a cross-target bundle is fatal, not advisory', () => {
+test('cross-target native lookup preserves spaced app paths and rejects missing, foreign-format or wrong-architecture bindings', () => {
   const start = verifier.indexOf('REQUIRED_NATIVE_MODULES="');
   const end = verifier.indexOf('\nelse\n  NODE_BIN=""', start);
   assert(start > 0 && end > start);
   const nativeBlock = verifier.slice(start, end) + '\nfi';
   const required = verifier.match(/REQUIRED_NATIVE_MODULES="\n([\s\S]*?)\n"/)[1].trim().split('\n');
   assert(required.includes('onnxruntime-node'));
-  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-required-onnx-'));
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-required-onnx-'));
+  const fixture = path.join(fixtureRoot, 'Papercusp Server.app/Contents/Resources/sidecar');
+  const macho = Buffer.from('cffaedfe', 'hex');
   try {
     for (const module of required) {
       const dir = path.join(fixture, 'node_modules', module);
       fs.mkdirSync(dir, { recursive: true });
-      if (module !== 'onnxruntime-node') fs.writeFileSync(path.join(dir, 'fixture.node'), 'target-format fixture');
+      if (!['onnxruntime-node', 'sharp', '@lydell/node-pty'].includes(module)) {
+        fs.writeFileSync(path.join(dir, 'fixture.node'), macho);
+      }
+    }
+    for (const module of ['@img/sharp-darwin-x64', '@lydell/node-pty-darwin-x64']) {
+      const dir = path.join(fixture, 'node_modules', module);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'fixture.node'), macho);
     }
     // An arm64 binding exists, but the Intel runtime cannot resolve it.
     const arm = path.join(fixture, 'node_modules/onnxruntime-node/bin/napi-v6/darwin/arm64');
     fs.mkdirSync(arm, { recursive: true });
-    fs.writeFileSync(path.join(arm, 'onnxruntime_binding.node'), 'target-format fixture');
+    fs.writeFileSync(path.join(arm, 'onnxruntime_binding.node'), macho);
+    const formatStart = verifier.indexOf('_is_script()');
+    const formatEnd = verifier.indexOf('# ── [1]', formatStart);
+    assert(formatStart >= 0 && formatEnd > formatStart);
     const probe = () => spawnSync('bash', ['-c', [
       'set -uo pipefail', 'FAIL=0; CROSS=1; TARGET_OS_N=darwin; TARGET_ARCH_N=x64',
       'SIDECAR="$1"', 'fail() { echo "$*"; FAIL=1; }', 'ok() { :; }',
-      '_is_target_format() { test -s "$1"; }', nativeBlock, 'exit "$FAIL"',
+      verifier.slice(formatStart, formatEnd), nativeBlock, 'exit "$FAIL"',
     ].join('\n'), 'test', fixture], { encoding: 'utf8' });
     const missing = probe();
     assert.equal(missing.status, 1, missing.stdout + missing.stderr);
     assert.match(missing.stdout, /onnxruntime-node: no darwin-x64/);
     const intel = path.join(fixture, 'node_modules/onnxruntime-node/bin/napi-v6/darwin/x64');
     fs.mkdirSync(intel, { recursive: true });
-    fs.writeFileSync(path.join(intel, 'onnxruntime_binding.node'), 'target-format fixture');
+    fs.writeFileSync(path.join(intel, 'onnxruntime_binding.node'), Buffer.from('7f454c46', 'hex'));
+    const wrongFormat = probe();
+    assert.equal(wrongFormat.status, 1, wrongFormat.stdout + wrongFormat.stderr);
+    assert.match(wrongFormat.stdout, /onnxruntime-node: no darwin-x64/);
+    fs.writeFileSync(path.join(intel, 'onnxruntime_binding.node'), macho);
     const complete = probe();
     assert.equal(complete.status, 0, complete.stdout + complete.stderr);
+  } finally { fs.rmSync(fixtureRoot, { recursive: true, force: true }); }
+});
+
+test('PUI generation verifier uses the selected product root and refuses missing helpers or changed bytes', () => {
+  const start = verifier.indexOf('_pui_manifest=');
+  const end = verifier.indexOf('# ── [2]', start);
+  assert(start >= 0 && end > start);
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-pui-product-root-'));
+  try {
+    const tooling = path.join(fixture, 'tooling/papercusp-desktop/bin');
+    const product = path.join(fixture, 'selected product');
+    const sidecar = path.join(fixture, 'Papercusp Server.app/Contents/Resources/sidecar');
+    fs.mkdirSync(path.join(tooling, 'lib'), { recursive: true });
+    fs.copyFileSync(path.join(desktopRoot, 'bin/lib/source-roots.sh'), path.join(tooling, 'lib/source-roots.sh'));
+    const helper = path.join(product, 'apps/tui/scripts/write-install-manifest.py');
+    fs.mkdirSync(path.dirname(helper), { recursive: true });
+    fs.copyFileSync(path.resolve(desktopRoot, '../apps/tui/scripts/write-install-manifest.py'), helper);
+    fs.mkdirSync(path.join(product, 'papercusp-desktop'), { recursive: true });
+    fs.mkdirSync(path.join(sidecar, 'bin'), { recursive: true });
+    const binary = path.join(sidecar, 'bin/pui');
+    const companion = path.join(sidecar, 'pui-companion.wasm');
+    fs.writeFileSync(binary, 'binary fixture');
+    fs.writeFileSync(companion, 'companion fixture');
+    const write = spawnSync('python3', [helper, 'write', '--manifest', path.join(sidecar, 'pui-install.json'),
+      '--binary', binary, '--companion', companion, '--relative-paths', '--source-sha', 'fixture',
+      '--source-dirty', '0', '--built-at-epoch', '1'], { encoding: 'utf8' });
+    assert.equal(write.status, 0, write.stdout + write.stderr);
+    const probe = (repo, desktop = '') => spawnSync('bash', ['-c', [
+      'set -uo pipefail', 'FAIL=0; SIDECAR="$1"; BIN="$SIDECAR/bin"',
+      'fail() { echo "$*"; FAIL=1; }', 'ok() { echo "$*"; }',
+      verifier.slice(start, end), 'exit "$FAIL"',
+    ].join('\n'), path.join(tooling, 'verify-sidecar-bundle.sh'), sidecar], {
+      encoding: 'utf8', env: { ...process.env, REPO_ROOT: repo, PAPERCUSP_DESKTOP_TARGET_ROOT: desktop },
+    });
+    for (const [repo, desktop] of [[product, ''], ['', path.join(product, 'papercusp-desktop')]]) {
+      const result = probe(repo, desktop);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.match(result.stdout, /pui install manifest OK/);
+    }
+    const missing = probe(path.join(fixture, 'absent'), path.join(product, 'papercusp-desktop'));
+    assert.equal(missing.status, 1, missing.stdout + missing.stderr);
+    assert.match(missing.stdout, /shared pui manifest verifier is missing/);
+    fs.appendFileSync(companion, 'changed');
+    const changed = probe(product);
+    assert.equal(changed.status, 1, changed.stdout + changed.stderr);
+    assert.match(changed.stdout, /pui generation manifest does not verify/);
   } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
 });
 
