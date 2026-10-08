@@ -79,6 +79,50 @@ function nativeTargetFixture() {
   return { root, runtime, writeTarget, probe, sourceCache };
 }
 
+test('split tooling reads the selected product model contract and preserves explicit override and ordinary defaults', () => {
+  const f = nativeTargetFixture();
+  try {
+    const tooling = path.join(f.root, 'tooling');
+    const product = path.join(f.root, 'product');
+    const copiedLib = path.join(tooling, 'bin/lib/transformers-models.sh');
+    const toolingContract = path.join(tooling, 'src-tauri/distribution-contract.json');
+    const productContract = path.join(product, 'src-tauri/distribution-contract.json');
+    fs.mkdirSync(path.dirname(copiedLib), { recursive: true });
+    fs.mkdirSync(path.dirname(productContract), { recursive: true });
+    fs.copyFileSync(lib, copiedLib);
+    const writeContract = (file, version) => {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify({ server: { optionalPacks: [{
+        name: 'local-models', compatibility: { transformersPackage: version },
+      }] } }));
+    };
+    const probe = (targetRoot, override = '') => spawnSync('bash', [
+      '-c', 'source "$1"; papercusp_verify_transformers_dependencies "$2" 1',
+      'test', copiedLib, f.root,
+    ], { encoding: 'utf8', env: { ...process.env,
+      PAPERCUSP_DESKTOP_TARGET_ROOT: targetRoot,
+      PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT: override,
+    } });
+    writeContract(productContract, '4.2.0');
+    let result = probe(product);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    writeContract(toolingContract, '4.1.0');
+    result = probe(product);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    writeContract(productContract, '4.1.0');
+    result = probe(product);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /(?:must pin|expects) 4\.1\.0, got 4\.2\.0/);
+    result = probe(product, path.join(f.root, 'contract.json'));
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    writeContract(toolingContract, '4.2.0');
+    result = probe('');
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
 test('same-version upstream source cache stages the missing Intel closure without mutating dependencies', () => {
   const f = nativeTargetFixture();
   try {

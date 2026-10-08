@@ -33,7 +33,9 @@
 # pins this list to those so the copies cannot drift apart silently.
 PAPERCUSP_TRANSFORMERS_MODELS=(harrier-oss-v1-0.6b-ONNX embeddinggemma-300m-ONNX)
 PAPERCUSP_TRANSFORMERS_MODELS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT_DEFAULT="$PAPERCUSP_TRANSFORMERS_MODELS_LIB_DIR/../../src-tauri/distribution-contract.json"
+# Helpers may run from an independent maintained tooling archive. The model
+# contract belongs to the selected product, just like its dependency lock.
+PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT_DEFAULT="${PAPERCUSP_DESKTOP_TARGET_ROOT:-$PAPERCUSP_TRANSFORMERS_MODELS_LIB_DIR/../..}/src-tauri/distribution-contract.json"
 
 papercusp_verify_transformers_dependencies() {
   local repo_root="${1:-}" check_installed="${2:-0}"
