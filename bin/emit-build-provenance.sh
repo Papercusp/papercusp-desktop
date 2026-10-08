@@ -313,14 +313,16 @@ GIT_DIRTY="${PROVENANCE_SOURCE_GIT_DIRTY:-$GIT_DIRTY_AT_EMIT}"
 [[ "$GIT_DIRTY" == "true" || "$GIT_DIRTY" == "false" ]] \
   || { echo "PROVENANCE_SOURCE_GIT_DIRTY must be true|false, got '$GIT_DIRTY'" >&2; exit 2; }
 
+# Follow artifact aliases consistently with sha256sum: attest the bytes hashed,
+# including their size and completion time, rather than the symlink itself.
 # Portable file size: GNU stat (-c, the Linux dev box) then BSD stat (-f).
-_bytes() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; }
+_bytes() { stat -L -c %s "$1" 2>/dev/null || stat -L -f %z "$1"; }
 
 # The artifact's own filesystem time is the relevant clock for containment.
 # `builtAtUtc` below is the MANIFEST/run finish and can be later than an artifact
 # whose compilation finished earlier. Keep the source epoch too, so consumers do
 # not have to parse an ISO timestamp when making an exact comparison.
-_mtime_epoch() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
+_mtime_epoch() { stat -L -c %Y "$1" 2>/dev/null || stat -L -f %m "$1"; }
 _mtime_utc() {
   local epoch
   epoch="$(_mtime_epoch "$1")"

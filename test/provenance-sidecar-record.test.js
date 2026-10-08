@@ -125,6 +125,35 @@ function captureSource(gitRoot, manifestPath) {
   };
 }
 
+test('artifact symlink metadata describes the same target bytes that are hashed', () => {
+  const dir = tmp();
+  try {
+    const retained = path.join(dir, 'retained.deb');
+    const bytes = Buffer.alloc(4096, 65);
+    fs.writeFileSync(retained, bytes);
+    const finished = new Date('2026-01-02T03:04:05Z');
+    fs.utimesSync(retained, finished, finished);
+    const out = path.join(dir, 'out');
+    fs.mkdirSync(out);
+    const alias = path.join(out, 'artifact.deb');
+    fs.symlinkSync(retained, alias);
+    assert.notEqual(fs.lstatSync(alias).size, bytes.length);
+    const result = spawnSync('bash', [EMITTER, out, '0.0.0', 'testsha', 'false', alias], {
+      encoding: 'utf8',
+      env: { ...process.env, PROVENANCE_GIT_ROOT: path.join(BIN, '..') },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const row = JSON.parse(fs.readFileSync(path.join(out, 'build-provenance.json'), 'utf8')).artifacts[0];
+    assert.equal(row.bytes, bytes.length);
+    assert.equal(row.sha256, crypto.createHash('sha256').update(bytes).digest('hex'));
+    assert.equal(row.mtimeEpochSec, Math.floor(finished.getTime() / 1000));
+    assert.equal(row.completedAtUtc, finished.toISOString().replace('.000Z', 'Z'));
+    assert.deepEqual(fs.readFileSync(retained), bytes);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /** A sidecar dir carrying its OWN provenance, written by the same real emitter. */
 function sidecarWithProvenance() {
   const dir = tmp();
