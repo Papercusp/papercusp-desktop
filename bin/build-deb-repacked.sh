@@ -125,6 +125,9 @@ if [[ -n "$(git -C "$SUPERPROJECT" status --porcelain --untracked-files=no --ign
 fi
 
 if [[ "$TAURI_SUBCOMMAND" == build ]]; then
+  source "$SCRIPT_DIR/lib/rust-path-remap.sh"
+  papercusp_export_rust_path_remap
+  papercusp_export_rust_lld linux
   source "$SCRIPT_DIR/lib/cargo-target-root.sh"
   papercusp_prepare_cargo_generated_paths "$ROOT/src-tauri"
 fi
