@@ -420,6 +420,45 @@ fn resolve_dev_ipc_socket(
     }
 }
 
+/// Legacy fixed build targets may still publish in the user's global runtime
+/// directory while the working-tree operator publishes in a workspace. Only
+/// the normal workspace tree may cross to that sibling; explicit isolated
+/// homes/workspace roots must never discover a live global operator.
+fn legacy_dev_runtime_root(
+    papercusp_dir: &std::path::Path,
+    home: &std::path::Path,
+    workspaces_root: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    if workspaces_root != home.join(".papercusp-workspaces")
+        || papercusp_dir.file_name() != Some(std::ffi::OsStr::new(".papercusp"))
+        || papercusp_dir.parent()?.parent()? != workspaces_root
+    {
+        return None;
+    }
+    Some(home.join(".papercusp"))
+}
+
+fn resolve_dev_ipc_socket_across_roots(
+    primary: &std::path::Path,
+    legacy: Option<&std::path::Path>,
+    port: u16,
+    via_wsl: bool,
+) -> endpoint_ipc::SocketResolution {
+    let selected = resolve_dev_ipc_socket(primary, port, via_wsl);
+    if selected.owner_is_content_origin || via_wsl || !matches!(port, 3070 | 3170) {
+        return selected;
+    }
+    if let Some(legacy) = legacy.filter(|dir| *dir != primary) {
+        // Never accept another runtime's singleton: only its validated exact
+        // per-port advertisement proves that it owns the selected content.
+        let candidate = resolve_dev_ipc_socket(legacy, port, false);
+        if candidate.owner_is_content_origin {
+            return candidate;
+        }
+    }
+    selected
+}
+
 /// Prepend the bundled runtime dir (sidecar `bin/`, which ships `node` + vendored
 /// CLIs) to PATH. The packaged desktop app's process PATH has no `node` (a GUI /
 /// `.deb` launch inherits a minimal PATH), so a bare `Command::new("node")`
@@ -3224,7 +3263,8 @@ mod helper_tests {
         bundled_path_env, classify_advertisement, cmdline_looks_like_operator,
         endpoint_ipc_socket_path_supported_for_target, find_endpoint_ipc_socket,
         inspect_advertisement, is_tcp_endpoint, local_process_cmdline, read_dev_ipc_socket,
-        read_dev_ipc_socket_for_port, resolve_dev_ipc_socket, resolve_wsl_endpoint_ipc_socket,
+        read_dev_ipc_socket_for_port, resolve_dev_ipc_socket, resolve_dev_ipc_socket_across_roots,
+        legacy_dev_runtime_root, resolve_wsl_endpoint_ipc_socket,
         url_encode, AdvertisementState,
     };
 
@@ -3819,6 +3859,74 @@ mod helper_tests {
             "an absent advertisement must say so plainly: {}",
             r.detail
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dev_runtime_roots_allow_only_normal_workspace_siblings() {
+        let home = std::path::Path::new("/fixture/home");
+        let root = home.join(".papercusp-workspaces");
+        assert_eq!(legacy_dev_runtime_root(&root.join("ws/.papercusp"), home, &root),
+            Some(home.join(".papercusp")));
+        assert_eq!(legacy_dev_runtime_root(std::path::Path::new("/isolated/.papercusp"), home, &root), None);
+        let isolated_root = std::path::Path::new("/isolated/workspaces");
+        assert_eq!(legacy_dev_runtime_root(&isolated_root.join("ws/.papercusp"), home, isolated_root), None);
+        assert_eq!(legacy_dev_runtime_root(&root.join("ws/other"), home, &root), None);
+    }
+
+    #[test]
+    fn dev_runtime_roots_follow_exact_fixed_target_without_crossing_custom_isolation() {
+        let dir = temp_dir("dev-runtime-roots");
+        let primary = dir.join("workspace");
+        let legacy = dir.join("global");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+        let operator = FakeServeProcess::spawn();
+        let global_socket = legacy.join("global.sock");
+        std::fs::write(&global_socket, b"").unwrap();
+        let advert = format!(r#"{{"socketPath":"{}","pid":{}}}"#,
+            global_socket.display(), operator.pid());
+        for port in [3070, 3170, 3270, 4207] {
+            std::fs::write(legacy.join(format!("endpoint-ipc.{port}.json")), &advert).unwrap();
+        }
+        for port in [3070, 3170] {
+            let resolved = resolve_dev_ipc_socket_across_roots(&primary, Some(&legacy), port, false);
+            assert_eq!(resolved.path, Some(global_socket.clone()));
+            assert!(resolved.owner_is_content_origin);
+        }
+        for port in [3270, 4207] {
+            assert_eq!(resolve_dev_ipc_socket_across_roots(&primary, Some(&legacy), port, false).path, None);
+        }
+        assert_eq!(resolve_dev_ipc_socket_across_roots(&primary, None, 3170, false).path, None);
+        assert_eq!(resolve_dev_ipc_socket_across_roots(&primary, Some(&legacy), 3170, true).path, None);
+
+        let own_socket = primary.join("own.sock");
+        std::fs::write(&own_socket, b"").unwrap();
+        std::fs::write(primary.join("endpoint-ipc.3170.json"),
+            format!(r#"{{"socketPath":"{}","pid":{}}}"#, own_socket.display(), operator.pid())).unwrap();
+        let own = resolve_dev_ipc_socket_across_roots(&primary, Some(&legacy), 3170, false);
+        assert_eq!(own.path, Some(own_socket));
+        assert!(own.owner_is_content_origin);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dev_runtime_roots_reject_stale_and_singleton_only_global_advertisements() {
+        let dir = temp_dir("dev-runtime-stale-roots");
+        let primary = dir.join("workspace");
+        let legacy = dir.join("global");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+        let operator = FakeServeProcess::spawn();
+        let socket = legacy.join("global.sock");
+        std::fs::write(&socket, b"").unwrap();
+        std::fs::write(legacy.join("endpoint-ipc.json"),
+            format!(r#"{{"socketPath":"{}","pid":{}}}"#, socket.display(), operator.pid())).unwrap();
+        std::fs::write(legacy.join("endpoint-ipc.3170.json"),
+            format!(r#"{{"socketPath":"{}","pid":{}}}"#, socket.display(), DEFINITELY_DEAD_PID)).unwrap();
+        let resolved = resolve_dev_ipc_socket_across_roots(&primary, Some(&legacy), 3170, false);
+        assert_eq!(resolved.path, None);
+        assert!(!resolved.owner_is_content_origin);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -10203,6 +10311,12 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
                     // treated as "not ready yet" rather than dialed straight
                     // into a measured 100%-failure ENOENT storm.
                     let dir_src = papercusp_dir.clone();
+                    let home_path = std::path::Path::new(&home);
+                    let workspaces_root = std::env::var_os("PAPERCUSP_WORKSPACES_ROOT")
+                        .filter(|root| !root.is_empty())
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| home_path.join(".papercusp-workspaces"));
+                    let legacy_src = legacy_dev_runtime_root(&papercusp_dir, home_path, &workspaces_root);
                     let dev_via_wsl = should_route_via_wsl(app.handle());
                     // Honour the same kill switch the packaged path does. It
                     // was previously ignored here, so `PAPERCUSP_DESKTOP_IPC=0`
@@ -10222,7 +10336,7 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
                         let handle = endpoint_ipc::IpcClientHandle::new(move || {
                             let port =
                                 SELECTED_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
-                            resolve_dev_ipc_socket(&dir_src, port, dev_via_wsl)
+                            resolve_dev_ipc_socket_across_roots(&dir_src, legacy_src.as_deref(), port, dev_via_wsl)
                         });
                         app.manage(handle.clone());
                         // Supervise for the life of the process. The dev
