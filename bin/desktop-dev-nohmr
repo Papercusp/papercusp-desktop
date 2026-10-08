@@ -83,14 +83,14 @@ cd "$__here/.."
 . "$__here/lib/claim-target-dir.sh"
 . "$__here/lib/resolve-dev-operator-port.sh"
 
-# Pin content + /api to the session's own operator (EI-296 seam) — outranks a
-# previously persisted prod/staging bar selection, and is never persisted, so
-# it can't repoint anyone else's launch.
-# The beforeDevCommand sources the same resolver. Exporting the selected port
-# here makes the Tauri webview and its Hono child agree when bg-host reserves
-# the default :3270 and the operator is relocated (EI-21445362974769138).
+# Select the session's operator at STARTUP. Rust reads OPERATOR_DEV_PORT before
+# its IPC supervisor starts, and beforeDevCommand uses the same resolver, so
+# content + /api agree even when bg-host relocates :3270 (EI-21445362974769138).
+# Do not synthesize PAPERCUSP_DEV_API_TARGET: that is a caller's permanent
+# isolation pin, which prevents /api from following later environment switches.
+# Synthesizing it left the GUI on :3170 while its data bridge dialed dead :3270
+# (WI-10007449). An explicitly supplied pin remains authoritative.
 export OPERATOR_DEV_PORT="$(resolve_dev_operator_port "${OPERATOR_DEV_PORT:-3270}")"
-export PAPERCUSP_DEV_API_TARGET="${PAPERCUSP_DEV_API_TARGET:-$OPERATOR_DEV_PORT}"
 
 # tauri dev --config takes a JSON5 string and merges it over tauri.conf.json.
 # We only override devUrl; everything else stays the same. A boot migration

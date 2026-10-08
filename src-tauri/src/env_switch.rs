@@ -142,24 +142,37 @@ fn env_api_target() -> Option<u16> {
     parse_api_target(std::env::var("PAPERCUSP_DEV_API_TARGET").ok())
 }
 
+/// The launcher selects an initial operator; only an explicit isolation pin
+/// prevents subsequent environment navigation (WI-10007449).
+fn startup_target(explicit_target: Option<u16>, launch_target: Option<u16>) -> Option<u16> {
+    explicit_target.or(launch_target)
+}
+
+fn initial_api_target() -> Option<u16> {
+    startup_target(
+        env_api_target(),
+        parse_api_target(std::env::var("OPERATOR_DEV_PORT").ok()),
+    )
+}
+
 fn startup_api_port(explicit_target: Option<u16>, current: u16) -> u16 {
     explicit_target.map(api_port_for_target).unwrap_or(current)
 }
 
-/// Prime the process-wide `/api` target before the dev endpoint-IPC
-/// supervisor starts. `env_switch::init` applies the same override later when
-/// it navigates the window, but letting the supervisor start first gives it a
+/// Prime the process-wide `/api` target from the explicit pin or launch port
+/// before the dev endpoint-IPC supervisor starts. `env_switch::init` applies
+/// the same initial selection later, but starting the supervisor first gives it a
 /// real window to connect to the static :3070 default and hydrate live state
 /// into an otherwise isolated test WebView.
 pub(crate) fn prime_explicit_api_target() {
-    let Some(target_port) = env_api_target() else {
+    let Some(target_port) = initial_api_target() else {
         return;
     };
     let current = crate::SELECTED_API_PORT.load(Ordering::Relaxed);
     let api_port = startup_api_port(Some(target_port), current);
     crate::SELECTED_API_PORT.store(api_port, Ordering::Relaxed);
     println!(
-        "[env-switch] PAPERCUSP_DEV_API_TARGET :{target_port} — primed /api :{api_port} before IPC supervisor"
+        "[env-switch] startup target :{target_port} — primed /api :{api_port} before IPC supervisor"
     );
 }
 
@@ -279,15 +292,22 @@ fn retarget_api(app: &tauri::AppHandle, target_port: u16) {
 /// follow through to `/api` — with NO bar in the loop. A
 /// `PAPERCUSP_DEV_API_TARGET` pin (EI-296) is never overridden or persisted.
 pub fn retarget_for_url(app: &tauri::AppHandle, url: &url::Url) {
-    if env_api_target().is_some() {
-        return;
-    }
-    let Some(port) = url.port() else { return };
-    let Some((_, name, _, _)) = fixed_targets().iter().find(|(_, _, p, _)| *p == port) else {
+    let Some((name, port)) = navigation_target(url, env_api_target()) else {
         return;
     };
     retarget_api(app, port);
     write_persisted_target(name, port);
+}
+
+fn navigation_target(url: &url::Url, explicit_target: Option<u16>) -> Option<(&'static str, u16)> {
+    if explicit_target.is_some() {
+        return None;
+    }
+    let port = url.port()?;
+    fixed_targets()
+        .iter()
+        .find(|(_, _, p, _)| *p == port)
+        .map(|(_, name, _, _)| (*name, port))
 }
 
 // ---------------------------------------------------------------------------
@@ -404,20 +424,20 @@ pub fn register_backstop_shortcuts(app: &tauri::App) {
 /// restored, else the default the webview actually shows.
 pub fn apply_persisted_target(window: &tauri::WebviewWindow) {
     let app = window.app_handle();
-    // EI-296: an explicit env target outranks the persisted selection. `/api`
-    // is pinned even when the content navigation fails (the target may be a
-    // fault proxy deliberately down mid-test); nothing is persisted.
-    if let Some(port) = env_api_target() {
+    // An explicit isolation pin or the launcher's initial operator outranks
+    // the persisted selection at boot. Only the former prevents later switches.
+    // A fault-proxy pin still holds even when content navigation fails.
+    if let Some(port) = initial_api_target() {
         if !port_reachable(port) {
-            eprintln!("[env-switch] PAPERCUSP_DEV_API_TARGET :{port} is not reachable — pinning /api anyway, keeping default content");
+            eprintln!("[env-switch] startup target :{port} is not reachable — selecting /api anyway, keeping default content");
         } else {
             let url = format!("http://127.0.0.1:{port}/");
             match url::Url::parse(&url)
                 .map_err(|e| e.to_string())
                 .and_then(|u| window.navigate(u).map_err(|e| e.to_string()))
             {
-                Ok(()) => println!("[env-switch] PAPERCUSP_DEV_API_TARGET :{port} — content + /api pinned (not persisted)"),
-                Err(e) => eprintln!("[env-switch] PAPERCUSP_DEV_API_TARGET :{port} navigate failed: {e}"),
+                Ok(()) => println!("[env-switch] startup target :{port} — content + /api selected (not persisted)"),
+                Err(e) => eprintln!("[env-switch] startup target :{port} navigate failed: {e}"),
             }
         }
         retarget_api(app, port);
@@ -554,6 +574,31 @@ mod tests {
         assert_eq!(startup_api_port(Some(3055), 3170), 3070);
         // Without an explicit override, preserve the already-selected target.
         assert_eq!(startup_api_port(None, 3170), 3170);
+    }
+
+    #[test]
+    fn launcher_target_primes_ipc_without_pinning_later_environment_navigation() {
+        // The actual failure: the launcher made its initial :3270 selection
+        // a permanent pin, so the page switched to :3170 and data stayed on
+        // dead :3270. Initial selection and navigation must remain separate.
+        assert_eq!(startup_api_port(startup_target(None, Some(3270)), 3070), 3270);
+        let staging = url::Url::parse("http://127.0.0.1:3170/adv?ws=fixture").unwrap();
+        assert_eq!(navigation_target(&staging, None), Some(("staging", 3170)));
+        let prod = url::Url::parse("http://127.0.0.1:3070/adv").unwrap();
+        assert_eq!(navigation_target(&prod, None), Some(("prod", 3070)));
+        // Relocated launch operators must be primed before the first IPC dial.
+        assert_eq!(startup_api_port(startup_target(None, Some(3371)), 3070), 3371);
+        let local = url::Url::parse("http://127.0.0.1:3055/adv").unwrap();
+        let (_, target) = navigation_target(&local, None).unwrap();
+        assert_eq!(api_port_for_target(target), 3070);
+    }
+
+    #[test]
+    fn explicit_isolation_pin_outranks_launcher_and_environment_switches() {
+        assert_eq!(startup_target(Some(3370), Some(3270)), Some(3370));
+        let staging = url::Url::parse("http://127.0.0.1:3170/adv").unwrap();
+        assert_eq!(navigation_target(&staging, Some(3370)), None);
+        assert_eq!(startup_target(None, None), None);
     }
 
     #[test]

@@ -386,6 +386,38 @@ test('desktop launcher starts Tauri without the fixed dev-server wait while the 
   }
 });
 
+test('ordinary desktop launch selects its operator without permanently pinning environment switches (WI-10007449)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-desktop-launch-routing-'));
+  try {
+    const npmShim = path.join(tmp, 'npm');
+    fs.writeFileSync(npmShim, '#!/usr/bin/env node\n' +
+      'console.log(JSON.stringify({args:process.argv.slice(2),port:process.env.OPERATOR_DEV_PORT,pin:process.env.PAPERCUSP_DEV_API_TARGET||null}));\n');
+    fs.chmodSync(npmShim, 0o755);
+    for (const pin of ['', '45556']) {
+      const launched = spawnSync('bash', [path.join(root, 'bin/desktop-dev-nohmr')], {
+        env: {
+          ...process.env,
+          PATH: `${tmp}:${process.env.PATH}`,
+          CARGO_TARGET_DIR: path.join(tmp, 'target'),
+          OPERATOR_DEV_PORT: '45555',
+          PAPERCUSP_DEV_API_TARGET: pin,
+        },
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+      assert.ifError(launched.error);
+      assert.equal(launched.status, 0, launched.stderr);
+      const launch = JSON.parse(launched.stdout.trim());
+      assert.equal(launch.port, '45555');
+      assert.equal(JSON.parse(launch.args.at(-1)).build.devUrl, 'http://127.0.0.1:45555');
+      assert.equal(launch.pin, pin || null,
+        'only a caller-supplied isolation pin may prevent the native API from following the selected GUI environment');
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('frozen host entry: runs the validated plain-node bundle inside the frozen source root (EI-22616267024724225)', async () => {
   const port = await testPort();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-dev-operator-bundle-'));
