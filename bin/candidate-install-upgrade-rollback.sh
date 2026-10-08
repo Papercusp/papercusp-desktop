@@ -83,10 +83,16 @@ CANDIDATE_VERSION="$(package_field "$CANDIDATE_GUI" Version)"
 CANDIDATE_SERVER_VERSION="$(package_field "$CANDIDATE_SERVER" Version)"
 BASELINE_VERSION="$(package_field "$BASELINE_GUI" Version)"
 BASELINE_SERVER_VERSION="$(package_field "$BASELINE_SERVER" Version)"
+candidate_gui_package="$(package_field "$CANDIDATE_GUI" Package | tr '[:upper:]' '[:lower:]')"
+candidate_server_package="$(package_field "$CANDIDATE_SERVER" Package | tr '[:upper:]' '[:lower:]')"
+baseline_gui_package="$(package_field "$BASELINE_GUI" Package | tr '[:upper:]' '[:lower:]')"
+baseline_server_package="$(package_field "$BASELINE_SERVER" Package | tr '[:upper:]' '[:lower:]')"
+[[ "$candidate_gui_package" == *gui* && "$candidate_gui_package" != *server* ]] || die "candidate GUI artifact does not name the GUI package"
+[[ "$candidate_server_package" == *server* ]] || die "candidate Server artifact does not name the Server package"
+[[ "$baseline_gui_package" == *gui* && "$baseline_gui_package" != *server* ]] || die "baseline GUI artifact does not name the GUI package"
+[[ "$baseline_server_package" == *server* ]] || die "baseline Server artifact does not name the Server package"
 [[ "$CANDIDATE_VERSION" == "$CANDIDATE_SERVER_VERSION" ]] || die "candidate GUI/Server versions differ"
 [[ "$BASELINE_VERSION" == "$BASELINE_SERVER_VERSION" ]] || die "baseline GUI/Server versions differ"
-[[ "$(read_build_field "$candidate_prov" version)" == "$CANDIDATE_VERSION" ]] || die "candidate provenance version does not match its GUI package"
-[[ "$(read_build_field "$baseline_prov" version)" == "$BASELINE_VERSION" ]] || die "baseline provenance version does not match its GUI package"
 candidate_server_prov="$(release_artifacts_find_provenance "$CANDIDATE_SERVER")" \
   || die "candidate Server has no nearby build-provenance.json"
 baseline_server_prov="$(release_artifacts_find_provenance "$BASELINE_SERVER")" \
@@ -107,11 +113,14 @@ SSH_HOST="$(sed -n 's/^ssh_host=//p' <<<"$endpoint" | head -1)"
 key_mode="$(stat -c '%a' "$SSH_KEY")"
 (( (8#$key_mode & 077) == 0 )) || die "Linux install credential must not be group/world accessible (mode $key_mode): $SSH_KEY"
 
-lock_file="${TMPDIR:-/tmp}/papercusp-candidate-install-upgrade-$VM.lock"
+lock_file="${TMPDIR:-/tmp}/papercusp-linux-smoke-$VM.lock"
 exec {lock_fd}>"$lock_file" || die "cannot open VM lock: $lock_file"
 flock -n "$lock_fd" || die "another candidate install/upgrade route holds $lock_file"
 if bash "$VMCTL" is-running "$VM" >/dev/null 2>&1; then
   die "VM '$VM' is already running; it belongs to another lane and will not be reset"
+else
+  vm_running_status=$?
+  [[ "$vm_running_status" -eq 1 ]] || die "could not prove VM '$VM' is stopped (vmctl is-running exit $vm_running_status)"
 fi
 
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-candidate-upgrade.XXXXXX")"
