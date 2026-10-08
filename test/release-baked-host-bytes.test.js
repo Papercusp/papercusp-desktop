@@ -31,7 +31,7 @@ const p = require('node:path');
 const e = process.env;
 const release = p.join(e.FIXTURE_TARGET, 'release');
 fs.mkdirSync(p.join(release, 'bundle/deb'), { recursive: true });
-fs.writeFileSync(e.FIXTURE_RECORD, JSON.stringify({host: e.PAPERCUSP_RELEASE_HOST}));
+fs.writeFileSync(e.FIXTURE_RECORD, JSON.stringify({host: e.PAPERCUSP_RELEASE_HOST, rustflags: e.RUSTFLAGS}));
 fs.writeFileSync(p.join(release, 'papercusp-desktop'), e.FIXTURE_HOST_MISMATCH === '1' ? 'hostless-binary' : (e.PAPERCUSP_RELEASE_HOST || 'hostless-binary'));
 fs.writeFileSync(p.join(release, 'bundle/deb/fixture.deb'), 'fixture-deb');
 `, { mode: 0o755 });
@@ -42,6 +42,8 @@ fs.writeFileSync(p.join(release, 'bundle/deb/fixture.deb'), 'fixture-deb');
     FIXTURE_HOST_MISMATCH: mismatch ? '1' : '0' };
   for (const key of ['PAPERCUSP_RELEASE_HOST', 'PAPERCUSP_UPDATE_BASE_URL',
     'PAPERCUSP_ALLOW_HOSTLESS_RELEASE', 'PAPERCUSP_RELEASE_TAG', '__PAPERCUSP_RELEASE_HOST_LIB']) delete env[key];
+  delete env.CARGO_ENCODED_RUSTFLAGS;
+  env.RUSTFLAGS = '-C debuginfo=0';
   const run = () => spawnSync('bash', [path.join(root, 'bin/build-deb-repacked.sh')],
     { encoding: 'utf8', env, timeout: 10_000 });
   return { dir, target, record, env, run };
@@ -52,6 +54,10 @@ test('public Debian producer loads the configured updater host into its actual T
   const result = f.run();
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.equal(JSON.parse(fs.readFileSync(f.record, 'utf8')).host, base);
+  const flags = JSON.parse(fs.readFileSync(f.record, 'utf8')).rustflags;
+  assert.ok(flags.includes(`--remap-path-prefix=${os.homedir()}=/build-home`));
+  assert.ok(flags.includes('-C debuginfo=0'), 'unrelated caller flags are retained');
+  assert.ok(flags.includes('-C link-arg=-fuse-ld=lld'), 'native linker policy survives RUSTFLAGS override');
   assert.match(result.stdout, /release host is BAKED/);
   assert.ok(!result.stdout.includes('secret-prefix'), 'producer must not log the host path');
 });
@@ -88,6 +94,37 @@ test('public byte assertion refuses absent configuration instead of reporting su
     { encoding: 'utf8', env: f.env, timeout: 10_000 });
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stderr, /REFUSING TO CUT/);
+});
+
+test('maintained Rust remap removes the real build-home prefix from Cargo binary bytes', t => {
+  const cache = path.join(os.homedir(), '.cache');
+  fs.mkdirSync(cache, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(cache, 'papercusp-rust-remap-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.writeFileSync(path.join(dir, 'Cargo.toml'),
+    '[package]\nname="rust-remap-byte-fixture"\nversion="0.1.0"\nedition="2021"\n');
+  const included = path.join(dir, 'included.rs');
+  fs.writeFileSync(included, 'pub fn source_path() -> &\'static str { file!() }\n');
+  fs.writeFileSync(path.join(dir, 'src/main.rs'),
+    `#[path=${JSON.stringify(included)}] mod included;\nfn main(){print!("{}",included::source_path());}\n`);
+  const target = path.join(dir, 'target');
+  const env = { ...process.env, CARGO_TARGET_DIR: target };
+  delete env.RUSTFLAGS;
+  delete env.CARGO_ENCODED_RUSTFLAGS;
+  const buildArgs = ['build', '--release', '--offline', '--quiet', '--manifest-path', path.join(dir, 'Cargo.toml')];
+  const unguarded = spawnSync('cargo', buildArgs, { env, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(unguarded.status, 0, unguarded.stderr);
+  const binary = path.join(target, 'release/rust-remap-byte-fixture');
+  assert.ok(fs.readFileSync(binary).includes(Buffer.from(os.homedir())), 'unguarded binary reproduces the identity leak');
+  const guarded = spawnSync('bash', ['-c',
+    'source "$1"; papercusp_export_rust_path_remap; shift; cargo "$@"', '_',
+    path.join(root, 'bin/lib/rust-path-remap.sh'), ...buildArgs],
+  { env, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(guarded.status, 0, guarded.stderr);
+  const bytes = fs.readFileSync(binary);
+  assert.equal(bytes.includes(Buffer.from(os.homedir())), false);
+  assert.ok(bytes.includes(Buffer.from('/build-home')));
 });
 
 function runProof(files, proofBase = base) {
