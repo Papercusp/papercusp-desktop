@@ -599,6 +599,12 @@ EXEC
 # stage → mkfs.hfsplus → hfsplus addall → dmg UDIF-convert → sign → verify. ────
 make_dmg() { # $1=app $2=productName
   local app="$1" name="$2"
+  # Packaging-only callers must supply the plist writer's complete context.
+  # Refuse before utility preparation, app copying or full-image allocation.
+  [[ -n "${DARWIN_SIDECAR:-}" && -d "$DARWIN_SIDECAR" ]] \
+    || fail "DMG packaging requires DARWIN_SIDECAR for tutorial metadata"
+  [[ -n "${SRC_TAURI:-}" && -d "$SRC_TAURI" ]] \
+    || fail "DMG packaging requires SRC_TAURI for tutorial metadata"
   local dmg="$OUT_BUNDLE/dmg/${name}_${VERSION}_${DMG_ARCH}.dmg"
   local diagnostics="${PAPERCUSP_DMG_DIAGNOSTICS_DIR:-$OUT_BUNDLE/dmg/diagnostics}/${name}_${VERSION}_${DMG_ARCH}-$$-$RANDOM"
   mkdir -p "$diagnostics"

@@ -148,6 +148,7 @@ if (env.SIGNER_MODE === 'empty') fs.writeFileSync(args.at(-1) + '.sig', '');
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`,
     TMPDIR: root, ROOT: root, OUT_BUNDLE: out, APP: app,
     HERE: path.dirname(sourcePath), PAPERCUSP_HFSPLUS_TOOL_CACHE: path.join(root, 'tool-cache'),
+    DARWIN_SIDECAR: root, SRC_TAURI: root,
     VERSION: '0.0.26', DMG_ARCH: 'x64', MAC_CERT_P12: '',
     DMG_TOOL: path.join(bin, 'dmg'), HFSPLUS_TOOL: path.join(bin, 'hfsplus'),
     PAPERCUSP_HFSPLUS_PREFLIGHT_SCRIPT: preflight,
@@ -187,6 +188,20 @@ test('DMG packaging rejects an unsafe allocator before copying or allocating the
   assert.equal(fs.existsSync(path.join(f.root, 'image-started')), false);
   assert.equal(fs.existsSync(f.dmg), false);
 });
+
+for (const name of ['DARWIN_SIDECAR', 'SRC_TAURI']) {
+  test(`DMG packaging requires ${name} before any tool or image phase`, t => {
+    const f = fixture(t);
+    delete f.env[name];
+    fs.writeFileSync(f.env.PAPERCUSP_HFSPLUS_PREFLIGHT_SCRIPT,
+      'import os\nopen(os.environ["ROOT"]+"/preflight-started","w").write("started")\n');
+    const result = run(f);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, new RegExp(`requires ${name}`));
+    assert.equal(fs.existsSync(path.join(f.root, 'preflight-started')), false);
+    assert.equal(fs.existsSync(f.dmg), false);
+  });
+}
 
 for (const phase of ['mkfs', 'addall', 'chmod', 'convert']) {
   test(`DMG packaging retains ${phase} failure diagnostics and refuses signing`, t => {
