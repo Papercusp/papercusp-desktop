@@ -600,6 +600,20 @@ EXEC
 make_dmg() { # $1=app $2=productName
   local app="$1" name="$2"
   local dmg="$OUT_BUNDLE/dmg/${name}_${VERSION}_${DMG_ARCH}.dmg"
+  local diagnostics="${PAPERCUSP_DMG_DIAGNOSTICS_DIR:-$OUT_BUNDLE/dmg/diagnostics}/${name}_${VERSION}_${DMG_ARCH}-$$-$RANDOM"
+  mkdir -p "$diagnostics"
+  local preflight="${PAPERCUSP_HFSPLUS_PREFLIGHT_SCRIPT:-$HERE/lib/hfsplus-allocation-preflight.py}"
+  # Qualify the actual utility before copying the app or allocating a large image.
+  # A successful file round trip is insufficient: the old allocator corrupts
+  # the catalog with a wrapped zero-fill write while returning success.
+  local qualified_tool
+  if ! qualified_tool="$(bash "$HERE/lib/prepare-hfsplus-tool.sh" "$HFSPLUS_TOOL" "$preflight" "$diagnostics" \
+      2>"$diagnostics/tool-preparation.log")"; then
+    tail -n 80 "$diagnostics/allocation-preflight.log" >&2
+    tail -n 80 "$diagnostics/tool-preparation.log" >&2
+    fail "HFS allocation preflight failed for $name; diagnostics: $diagnostics"
+  fi
+  [[ -x "$qualified_tool" ]] || fail "HFS preparation returned no executable: $qualified_tool"
   local stage raw; stage="$(mktemp -d)"; raw="$(mktemp)"
   cp -a "$app" "$stage/"
   build_tutorial_app "$stage"
@@ -613,7 +627,10 @@ make_dmg() { # $1=app $2=productName
   local bytes mb; bytes=$(du -sb "$stage" | cut -f1); mb=$(( bytes/1024/1024 + bytes/1024/1024/4 + 300 ))
   echo "    dmg: $(basename "$dmg") (staging $((bytes/1024/1024))MB → ${mb}MB image)"
   dd if=/dev/zero of="$raw" bs=1M count="$mb" status=none
-  mkfs.hfsplus -v "$name" "$raw" >/dev/null 2>&1 || fail "mkfs.hfsplus failed for $name"
+  if ! mkfs.hfsplus -v "$name" "$raw" >"$diagnostics/mkfs.log" 2>&1; then
+    tail -n 80 "$diagnostics/mkfs.log" >&2
+    fail "mkfs.hfsplus failed for $name; diagnostics: $diagnostics; stage: $stage; raw: $raw"
+  fi
 
   # Populate the image. PRIMARY: loop-mount + `cp -a` (root, via passwordless
   # sudo). This is REQUIRED for a working install, not a nicety: the userspace
@@ -638,18 +655,27 @@ make_dmg() { # $1=app $2=productName
   fi
   if [[ "$populated" != "1" ]]; then
     echo "    (dmg: loop-mount unavailable — addall + exec-perm repair; no /Applications symlink)"
-    "$HFSPLUS_TOOL" "$raw" addall "$stage" >/dev/null 2>&1 || fail "hfsplus addall failed for $name"
+    if ! "$qualified_tool" "$raw" addall "$stage" >"$diagnostics/addall.log" 2>&1; then
+      tail -n 80 "$diagnostics/addall.log" >&2
+      fail "hfsplus addall failed for $name; diagnostics: $diagnostics; stage: $stage; raw: $raw"
+    fi
     # addall writes 0644 for everything — restore +x on the source's executables,
     # or the installed app can't run its own binaries.
     local relf
     while IFS= read -r -d '' f; do
       relf="${f#$stage/}"
-      "$HFSPLUS_TOOL" "$raw" chmod 0755 "/$relf" >/dev/null 2>&1 || true
+      if ! "$qualified_tool" "$raw" chmod 0755 "/$relf" >>"$diagnostics/chmod.log" 2>&1; then
+        tail -n 80 "$diagnostics/chmod.log" >&2
+        fail "hfsplus executable mode repair failed for $relf; diagnostics: $diagnostics"
+      fi
     done < <(find "$stage" -type f -perm -u+x -print0)
   fi
 
   rm -f "$dmg"
-  "$DMG_TOOL" "$raw" "$dmg" >/dev/null 2>&1 || fail "dmg UDIF conversion failed for $name"
+  if ! "$DMG_TOOL" "$raw" "$dmg" >"$diagnostics/convert.log" 2>&1; then
+    tail -n 80 "$diagnostics/convert.log" >&2
+    fail "dmg UDIF conversion failed for $name; diagnostics: $diagnostics; stage: $stage; raw: $raw"
+  fi
   rm -f "$raw"; rm -rf "$stage"
 
   # Structurally verify the app + its binary actually landed in the image BEFORE

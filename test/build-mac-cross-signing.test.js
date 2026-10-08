@@ -116,6 +116,8 @@ function fixture(t, { inheritedPath = true, password = '', mode = 'sign', stale 
   script('hfsplus', '#!/bin/sh\nexit 0\n');
   script('dmg', '#!/bin/sh\nprintf fixture-dmg > "$2"\n');
   script('7z', '#!/bin/sh\nprintf "%s\\n" "Papercusp GUI.app/Contents/MacOS/papercusp-desktop"\n');
+  const preflight = path.join(root, 'preflight.py');
+  fs.writeFileSync(preflight, 'import sys\nprint("fixture-qualified")\n');
   script('npx', `#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
@@ -145,8 +147,10 @@ if (env.SIGNER_MODE === 'empty') fs.writeFileSync(args.at(-1) + '.sig', '');
   if (stale) fs.writeFileSync(dmg + '.sig', 'stale-signature');
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`,
     TMPDIR: root, ROOT: root, OUT_BUNDLE: out, APP: app,
+    HERE: path.dirname(sourcePath), PAPERCUSP_HFSPLUS_TOOL_CACHE: path.join(root, 'tool-cache'),
     VERSION: '0.0.26', DMG_ARCH: 'x64', MAC_CERT_P12: '',
     DMG_TOOL: path.join(bin, 'dmg'), HFSPLUS_TOOL: path.join(bin, 'hfsplus'),
+    PAPERCUSP_HFSPLUS_PREFLIGHT_SCRIPT: preflight,
     PAPERCUSP_DMG_NO_MOUNT: '1', TAURI_CLI_VERSION: '2.11.0',
     KEY_FILE: key, KEY_PASSWORD: password,
     SIGNER_RECORD: record, SIGNER_MODE: mode, EXPECT_PASSWORD: password };
@@ -169,6 +173,84 @@ function run(f, name = 'make_dmg') {
     'if [[ "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" == "$KEY_FILE" ]]; then echo CALLER_PATH_PRESERVED; fi',
   ].join('\n')], { encoding: 'utf8', timeout: 10_000, env: f.env });
 }
+
+test('DMG packaging rejects an unsafe allocator before copying or allocating the app image', t => {
+  const f = fixture(t);
+  fs.writeFileSync(f.env.PAPERCUSP_HFSPLUS_PREFLIGHT_SCRIPT,
+    'import sys\nprint("catalog offset wrapped", file=sys.stderr)\nsys.exit(1)\n');
+  fs.writeFileSync(path.join(f.root, 'bin/curl'), '#!/bin/sh\nexit 8\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(f.root, 'bin/dd'), '#!/bin/sh\ntouch "$ROOT/image-started"\n', { mode: 0o755 });
+  const result = run(f);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /catalog offset wrapped/);
+  assert.match(result.stderr, /HFS allocation preflight failed/);
+  assert.equal(fs.existsSync(path.join(f.root, 'image-started')), false);
+  assert.equal(fs.existsSync(f.dmg), false);
+});
+
+for (const phase of ['mkfs', 'addall', 'chmod', 'convert']) {
+  test(`DMG packaging retains ${phase} failure diagnostics and refuses signing`, t => {
+    const f = fixture(t);
+    const bin = path.join(f.root, 'bin');
+    const message = `${phase}-direct-utility-cause`;
+    if (phase === 'mkfs') {
+      fs.writeFileSync(path.join(bin, 'mkfs.hfsplus'), `#!/bin/sh\necho ${message} >&2\nexit 8\n`, { mode: 0o755 });
+    } else if (phase === 'convert') {
+      fs.writeFileSync(path.join(bin, 'dmg'), `#!/bin/sh\necho ${message} >&2\nexit 8\n`, { mode: 0o755 });
+    } else {
+      fs.writeFileSync(path.join(bin, 'hfsplus'),
+        `#!/bin/sh\nif [ "$2" = "${phase}" ]; then echo ${message} >&2; exit 8; fi\nexit 0\n`, { mode: 0o755 });
+      if (phase === 'chmod') fs.chmodSync(path.join(f.app, 'Contents/MacOS/papercusp-desktop'), 0o755);
+    }
+    const result = run(f);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, new RegExp(message));
+    assert.equal(fs.existsSync(f.record), false);
+    const logs = path.join(f.out, 'dmg/diagnostics');
+    const attempt = fs.readdirSync(logs);
+    assert.equal(attempt.length, 1);
+    assert.match(fs.readFileSync(path.join(logs, attempt[0], `${phase}.log`), 'utf8'), new RegExp(message));
+  });
+}
+
+test('allocation preflight rejects catalog corruption even when the HFS utility reports success', t => {
+  const f = fixture(t);
+  const mkfs = path.join(f.root, 'fake-mkfs');
+  const tool = path.join(f.root, 'fake-hfsplus');
+  fs.writeFileSync(mkfs, `#!/usr/bin/env python3
+import struct,sys
+with open(sys.argv[-1],'r+b') as f:
+ h=bytearray(512);h[:2]=b'H+';struct.pack_into('>II',h,40,4096,1310720)
+ struct.pack_into('>I',h,128,2);struct.pack_into('>I',h,288,10)
+ f.seek(1024);f.write(h);f.seek(40960);f.write(b'C'*4096)
+`, { mode: 0o755 });
+  fs.writeFileSync(tool, `#!/usr/bin/env python3
+import os,sys
+if sys.argv[2]=='add':
+ if os.environ.get('CORRUPT')=='1':
+  with open(sys.argv[1],'r+b') as f:f.seek(40960);f.write(bytes(4096))
+ else:
+  # A valid catalog insertion changes header counters, not the descriptor.
+  with open(sys.argv[1],'r+b') as f:f.seek(40960+14);f.write(b'D'*16)
+else:
+ open(sys.argv[4],'wb').write(bytes(range(256))*16)
+`, { mode: 0o755 });
+  const helper = path.join(__dirname, '../bin/lib/hfsplus-allocation-preflight.py');
+  for (const corrupt of ['1', '0']) {
+    const result = spawnSync('python3', [helper, '--tool', tool, '--mkfs', mkfs, '--work-root', f.root],
+      { encoding: 'utf8', env: { ...process.env, CORRUPT: corrupt }, timeout: 10_000 });
+    if (corrupt === '1') {
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /corrupted its catalog/);
+    } else {
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      const proof = JSON.parse(result.stdout);
+      assert.ok(proof.physicalOffset > 2 ** 32);
+      assert.equal(proof.catalogDescriptorPreserved, true);
+      assert.notEqual(proof.catalogBeforeSha256, proof.catalogAfterSha256);
+    }
+  }
+});
 
 for (const mode of ['normal', 'companion-change', 'shallow-change', 'pre-sign-change', 'generation-change']) {
   test(`app signing seals the final PUI generation and rejects ${mode} corruption`, t => {
