@@ -12,7 +12,7 @@ const test = require('node:test');
 
 const desktopRoot = path.resolve(__dirname, '..');
 const builder = fs.readFileSync(
-  path.join(desktopRoot, 'bin/build-desktop-sidecar.sh'),
+  process.env.BUILD_DESKTOP_SIDECAR_PATH ?? path.join(desktopRoot, 'bin/build-desktop-sidecar.sh'),
   'utf8',
 );
 const verifier = fs.readFileSync(
@@ -529,6 +529,62 @@ try:
 finally:shutil.rmtree(root)
 `);
   assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+function runPgCompatFixture({ legacy = false, inspectionFailure = false } = {}) {
+  const start = builder.indexOf('_pg_otool=');
+  const end = builder.indexOf('# Bundle pgvector', start);
+  assert.ok(start >= 0 && end > start, 'actual PG compatibility block must exist');
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-pg-compat-'));
+  const native = path.join(fixture, 'embedded/node_modules/@embedded-postgres/darwin-x64/native');
+  try {
+    fs.mkdirSync(path.join(native, 'bin'), { recursive: true });
+    fs.mkdirSync(path.join(native, 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(native, 'bin/initdb'), 'fixture');
+    fs.writeFileSync(path.join(native, 'bin/postgres'), 'fixture');
+    if (legacy) fs.writeFileSync(path.join(native, 'lib/libzstd.1.5.7.dylib'), 'fixture');
+    const inspector = inspectionFailure
+      ? 'if [[ "$2" == */initdb ]]; then echo "fixture malformed Mach-O" >&2; return 7; fi; printf "valid:\\n"'
+      : legacy
+        ? 'printf "%s:\\n  @loader_path/../lib/libzstd.1.dylib (compatibility version 1.0.0)\\n  @loader_path/../lib/libcurl.4.dylib (compatibility version 4.0.0)\\n" "$2"'
+        : 'printf "%s:\\n  @loader_path/../../../../lib/libpq.5.dylib (compatibility version 5.0.0)\\n" "$2"';
+    const result = spawnSync('bash', ['-c', [
+      'set -euo pipefail',
+      'SIDECAR_DIR="$1"; EMBEDDED_PG_DST="$1/embedded"',
+      `llvm-otool-18() { ${inspector}; }`,
+      builder.slice(start, end),
+      'echo PG_COMPAT_COMPLETED',
+    ].join('\n'), 'fixture', fixture], { encoding: 'utf8' });
+    const link = path.join(native, 'lib/libzstd.1.dylib');
+    return { ...result, link: fs.existsSync(link) ? fs.readlinkSync(link) : null,
+      unmatchedCreated: fs.existsSync(path.join(native, 'lib/libcurl.4.dylib')) };
+  } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
+}
+
+test('Darwin PG compat accepts normalized inputs with zero legacy loader references', () => {
+  const result = runPgCompatFixture();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /0 restored/);
+  assert.match(result.stdout, /PG_COMPAT_COMPLETED/);
+  assert.equal(result.link, null);
+});
+
+test('Darwin PG compat restores legacy versioned links and skips unbundled counterparts', () => {
+  const result = runPgCompatFixture({ legacy: true });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.link, 'libzstd.1.5.7.dylib');
+  assert.equal(result.unmatchedCreated, false);
+  assert.match(result.stdout, /1 restored/);
+  assert.match(result.stdout, /PG_COMPAT_COMPLETED/);
+});
+
+test('Darwin PG compat fails closed with a diagnostic for any binary inspection error', () => {
+  // initdb is first; a later successful postgres inspection must not hide it.
+  const result = runPgCompatFixture({ inspectionFailure: true });
+  assert.notEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stderr, /cannot inspect Darwin PostgreSQL dylib references: .*\/initdb/);
+  assert.match(result.stderr, /fixture malformed Mach-O/);
+  assert.doesNotMatch(result.stdout, /PG_COMPAT_COMPLETED/);
 });
 
 test('moved qualified PG clients resolve the normalized embedded library directory', () => {

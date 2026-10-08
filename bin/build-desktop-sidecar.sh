@@ -882,6 +882,7 @@ __pc_finish_sidecar_build() {
   set +e
   if [[ "$status" == "0" && "${_sidecar_success:-0}" != "1" ]]; then status=1; fi
   if [[ "$status" != "0" || "${_sidecar_success:-0}" != "1" ]]; then
+    echo "ERROR: sidecar producer stopped near source line ${2:-unknown} (phase=${_sidecar_stage_phase:-assembling}, exit=$status)" >&2
     failed_stage="${SIDECAR_FAILED_STAGE_ROOT:-$(dirname "$SIDECAR_FINAL_DIR")}/$(basename "$SIDECAR_FINAL_DIR").failed-stage.$$"
     if [[ "${_sidecar_published:-0}" == "1" && -d "$SIDECAR_FINAL_DIR" ]]; then
       mv "$SIDECAR_FINAL_DIR" "$SIDECAR_TMP_DIR"
@@ -920,7 +921,10 @@ __pc_finish_sidecar_build() {
   [[ -z "${_sidecar_stage_identity:-}" ]] || rm -f "$_sidecar_stage_identity"
   exit "$status"
 }
-trap '__pc_finish_sidecar_build "$?"' EXIT
+# EXIT's LINENO describes the trap, so capture the command's line on ERR.
+# Store only the number, never BASH_COMMAND (which can contain credentials).
+trap '_sidecar_failure_line=$LINENO' ERR
+trap '__pc_finish_sidecar_build "$?" "${_sidecar_failure_line:-unknown}"' EXIT
 
 export SIDECAR_STAGE_REPO_ROOT="$REPO_ROOT" SIDECAR_STAGE_DESKTOP_ROOT="$ROOT"
 export SIDECAR_STAGE_HELPER_ROOT="$HERE" SIDECAR_STAGE_FINAL_DIR="$SIDECAR_FINAL_DIR"
@@ -3476,8 +3480,19 @@ if [[ -n "$_pg_otool" ]]; then
   for _pg_native in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/darwin-*/native; do
     [[ -d "$_pg_native/lib" ]] || continue
     _pg_made=0
-    _pg_refs="$( { for _f in "$_pg_native/bin/"* "$_pg_native/lib/"*.dylib; do [[ -f "$_f" ]] && "$_pg_otool" -L "$_f" 2>/dev/null; done; } \
-      | grep -oE '@loader_path/\.\./lib/[^ ]+\.dylib' | sed 's#.*/lib/##' | sort -u )"
+    _pg_refs="$( { for _f in "$_pg_native/bin/"* "$_pg_native/lib/"*.dylib; do
+      [[ -f "$_f" ]] || continue
+      if ! _pg_loads="$("$_pg_otool" -L "$_f" 2>&1)"; then
+        echo "ERROR: cannot inspect Darwin PostgreSQL dylib references: $_f" >&2
+        printf '%s\n' "$_pg_loads" >&2
+        exit 1
+      fi
+      printf '%s\n' "$_pg_loads"
+    done; } | awk 'match($0, /@loader_path\/\.\.\/lib\/[^ ]+\.dylib/) {
+      ref = substr($0, RSTART, RLENGTH); sub(/^.*\/lib\//, "", ref); print ref
+    }' | sort -u )"
+    # Qualified private inputs already use normalized loader paths. No legacy
+    # references is a valid empty result; inspection errors above still fail.
     for _ref in $_pg_refs; do
       [[ -e "$_pg_native/lib/$_ref" ]] && continue
       # Versioned counterpart: libzstd.1.dylib → libzstd.1.<ver>.dylib. compgen -G

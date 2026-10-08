@@ -10,6 +10,7 @@ const bin = path.resolve(__dirname, '../bin');
 const builder = fs.readFileSync(path.join(bin, 'build-desktop-sidecar.sh'), 'utf8');
 const finish = builder.match(/^__pc_finish_sidecar_build\(\) \{\n[\s\S]*?^\}$/m)[0];
 const trap = builder.match(/^trap '[^\n]*' EXIT$/m)[0];
+const failureTrap = builder.match(/^trap '[^\n]*' ERR$/m)[0];
 const resume = builder.slice(builder.indexOf('if [[ -n "${PAPERCUSP_SIDECAR_RESUME_FROM:-}" ]]'), builder.indexOf('# Assembly-only work.'));
 
 function gitFixture(root) {
@@ -243,6 +244,26 @@ function lifecycle(f, { success = false, published = false, status = 1 } = {}) {
   ].join('\n'), 'test', f.finalDir, tmp, old, bin, identityFile, lockdir], { encoding: 'utf8' });
   return { result, tmp, old, lockdir, identityFile };
 }
+
+test('silent shell failure reports its source line and phase through the actual EXIT trap', () => {
+  const f = fixture();
+  try {
+    const lines = [
+      'set -euo pipefail', finish,
+      'SIDECAR_FINAL_DIR="$1"; SIDECAR_TMP_DIR="$2"; HERE="$3"',
+      '_sidecar_stage_phase=assembling; _sidecar_success=0; _sidecar_published=0',
+      '__pc_release_sidecar_publish_lock() { :; }',
+      failureTrap, trap,
+      'false',
+    ];
+    const failureLine = lines.join('\n').split('\n').length;
+    const result = spawnSync('bash', ['-c', lines.join('\n'), 'fixture', f.finalDir, f.stage, bin],
+      { encoding: 'utf8' });
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, new RegExp(`source line ${failureLine} \\(phase=assembling, exit=1\\)`));
+    assert.match(result.stderr, /unaccepted sidecar stage retained/);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
 
 test('late published failure restores prior output, retains usable evidence and releases locks', () => {
   const f = fixture();
