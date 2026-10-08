@@ -125,6 +125,68 @@ test('an unavailable Cargo command fails loudly instead of guessing a directory'
   }
 });
 
+test('relocated Cargo permission metadata is rebuilt through Cargo before its consumer runs', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cargo-generated-paths-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const workspace = path.join(dir, 'workspace');
+  const producer = path.join(workspace, 'producer');
+  const consumer = path.join(workspace, 'consumer');
+  fs.mkdirSync(path.join(producer, 'src'), { recursive: true });
+  fs.mkdirSync(path.join(consumer, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(workspace, 'Cargo.toml'),
+    '[workspace]\nmembers=["producer", "consumer"]\nresolver="2"\n');
+  fs.writeFileSync(path.join(producer, 'Cargo.toml'),
+    '[package]\nname="permission-producer-fixture"\nversion="0.1.0"\nedition="2021"\n');
+  fs.writeFileSync(path.join(producer, 'build.rs'), `
+fn main() {
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let permission = out.join("permission-files.json");
+    std::fs::write(&permission, "generated permission").unwrap();
+    println!("cargo:PERMISSION_FILES_PATH={}", permission.display());
+    println!("cargo:rustc-env=FIXTURE_PERMISSION_PATH={}", permission.display());
+}
+`);
+  fs.writeFileSync(path.join(producer, 'src/lib.rs'),
+    'pub const PERMISSION_PATH: &str = env!("FIXTURE_PERMISSION_PATH");\n');
+  fs.writeFileSync(path.join(consumer, 'Cargo.toml'),
+    '[package]\nname="permission-consumer-fixture"\nversion="0.1.0"\nedition="2021"\n[dependencies]\npermission-producer-fixture={path="../producer"}\n');
+  fs.writeFileSync(path.join(consumer, 'src/main.rs'),
+    'fn main(){print!("{}",std::fs::read_to_string(permission_producer_fixture::PERMISSION_PATH).unwrap());}\n');
+  const oldTarget = path.join(dir, 'old-target');
+  const movedTarget = path.join(dir, 'moved-target');
+  const env = { ...process.env, CARGO_HOME: path.join(dir, 'cargo-home'), RUSTUP_HOME };
+  const cargo = target => spawnSync('cargo', ['build', '--offline', '--quiet',
+    '--manifest-path', path.join(workspace, 'Cargo.toml'), '--target-dir', target],
+  { encoding: 'utf8', env, timeout: 30_000 });
+  const initial = cargo(oldTarget);
+  assert.equal(initial.status, 0, initial.stderr);
+  fs.renameSync(oldTarget, movedTarget);
+  const movedBuild = cargo(movedTarget);
+  assert.equal(movedBuild.status, 0, movedBuild.stderr);
+  const binary = path.join(movedTarget, 'debug/permission-consumer-fixture');
+  const broken = spawnSync(binary, [], { encoding: 'utf8' });
+  assert.notEqual(broken.status, 0, 'a relocated cached constant must reproduce the old-path failure');
+  const sentinel = path.join(movedTarget, 'release/bundle/deb/preserved.deb');
+  fs.mkdirSync(path.dirname(sentinel), { recursive: true });
+  fs.writeFileSync(sentinel, 'preserved artifact');
+  const preflight = spawnSync('bash', ['-c',
+    'source "$1"; papercusp_prepare_cargo_generated_paths "$2"', '_', helper, workspace],
+  { encoding: 'utf8', env: { ...env, CARGO_TARGET_DIR: movedTarget }, timeout: 30_000 });
+  assert.equal(preflight.status, 0, preflight.stdout + preflight.stderr);
+  assert.match(preflight.stdout, /invalidated 1 current dependency package/);
+  assert.equal(fs.readFileSync(sentinel, 'utf8'), 'preserved artifact');
+  const rebuilt = cargo(movedTarget);
+  assert.equal(rebuilt.status, 0, rebuilt.stderr);
+  const fixed = spawnSync(binary, [], { encoding: 'utf8' });
+  assert.equal(fixed.status, 0, fixed.stderr);
+  assert.equal(fixed.stdout, 'generated permission');
+  const stable = spawnSync('bash', ['-c',
+    'source "$1"; papercusp_prepare_cargo_generated_paths "$2"', '_', helper, workspace],
+  { encoding: 'utf8', env: { ...env, CARGO_TARGET_DIR: movedTarget }, timeout: 30_000 });
+  assert.equal(stable.status, 0, stable.stderr);
+  assert.equal(stable.stdout, '', 'current-root metadata must not trigger repeated invalidation');
+});
+
 // ── CLASS GUARD: no executable line may re-hard-code the pre-relocation default ──
 // The pattern matches `${CARGO_TARGET_DIR:-$HOME/.cargo-target}` and the
 // `${HOME}` spelling. Comment lines are skipped because history may be

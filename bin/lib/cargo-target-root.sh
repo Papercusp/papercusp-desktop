@@ -71,3 +71,66 @@ papercusp_cargo_target_root() {
   fi
   papercusp_cargo_metadata_target_dir "${1:-}"
 }
+
+# Cargo caches build-script metadata as well as compiled code. Tauri permission
+# metadata contains absolute OUT_DIR paths; moving/copying a target directory
+# does not invalidate those paths. Rebuild affected current-graph producers
+# through Cargo before a consumer proc-macro reads their generated files.
+papercusp_prepare_cargo_generated_paths() {
+  local project="${1:?Cargo project directory required}" target
+  target="$(papercusp_cargo_target_root "$project")" || return $?
+  python3 - "$project" "$target" <<'PY'
+import json, os, re, subprocess, sys
+from pathlib import Path
+
+project = Path(sys.argv[1]).resolve()
+target = Path(sys.argv[2])
+target = (target if target.is_absolute() else project / target).resolve()
+if not target.is_dir():
+    sys.exit(0)
+try:
+    stale = set()
+    outputs = set(target.glob('*/build/*/output')) | set(target.glob('*/*/build/*/output'))
+    for output in sorted(outputs):
+        for line in output.read_text(errors='replace').splitlines():
+            payload = line.removeprefix('cargo::metadata=').removeprefix('cargo:metadata=')
+            if '=' not in payload:
+                continue
+            key, value = payload.split('=', 1)
+            if not key.endswith(('PERMISSION_FILES_PATH', 'GLOBAL_SCOPE_SCHEMA_PATH')):
+                continue
+            path = Path(value)
+            # Source-owned paths are valid inputs; only generated build output
+            # is bound to a Cargo target root.
+            if not path.is_absolute() or '/build/' not in value or '/out/' not in value:
+                continue
+            if path.resolve().is_relative_to(target):
+                continue
+            match = re.fullmatch(r'([A-Za-z0-9_-]+)-[0-9a-f]{16}', output.parent.name)
+            if not match:
+                raise RuntimeError('cannot attribute relocated generated metadata to a Cargo package')
+            stale.add(match.group(1))
+    if not stale:
+        sys.exit(0)
+    metadata = subprocess.run(
+        ['cargo', 'metadata', '--locked', '--offline', '--format-version', '1'],
+        cwd=project, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+    if metadata.returncode:
+        raise RuntimeError(metadata.stderr or 'Cargo dependency graph unavailable')
+    packages = [p for p in json.loads(metadata.stdout)['packages'] if p['name'] in stale]
+    if not packages:
+        sys.exit(0)  # stale output belongs to a different workspace's graph
+    command = ['cargo', 'clean', '--manifest-path', str(project / 'Cargo.toml'),
+               '--target-dir', str(target)]
+    for package in sorted(packages, key=lambda p: p['id']):
+        command.extend(['-p', package['id']])
+    cleaned = subprocess.run(command, cwd=project, stdin=subprocess.DEVNULL,
+                             capture_output=True, text=True, timeout=120)
+    if cleaned.returncode:
+        raise RuntimeError(cleaned.stderr or 'Cargo package invalidation failed')
+    print(f'cargo-generated-paths: invalidated {len(packages)} current dependency package(s) with relocated output metadata')
+except Exception as error:
+    sys.stderr.write(f'ERROR: Cargo generated-path preflight failed before compilation: {str(error)[:1200]}\n')
+    sys.exit(1)
+PY
+}

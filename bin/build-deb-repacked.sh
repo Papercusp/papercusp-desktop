@@ -124,6 +124,10 @@ if [[ -n "$(git -C "$SUPERPROJECT" status --porcelain --untracked-files=no --ign
   BUILD_TREE_DIRTY=true
 fi
 
+if [[ "$TAURI_SUBCOMMAND" == build ]]; then
+  source "$SCRIPT_DIR/lib/cargo-target-root.sh"
+  papercusp_prepare_cargo_generated_paths "$ROOT/src-tauri"
+fi
 tauri "$TAURI_SUBCOMMAND" "${BUNDLE_ARGS[@]}" "${TAURI_ARGS[@]}"
 
 CARGO_TARGET_ROOT="$(
