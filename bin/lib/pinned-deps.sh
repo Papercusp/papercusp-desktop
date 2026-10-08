@@ -262,10 +262,13 @@ papercusp_pinned_deps_snapshot() {
       echo "  verifying retained staging bytes before reuse: $_tmp"
       dependency_generation_copy_with_progress "$_src" "$_tmp" --rsync-checksum || _copy_rc=$?
     else
-      cp -al "$_src" "$_tmp" 2>/dev/null || _copy_rc=$?
+      # Preserve cp's path-specific diagnosis. A generic incomplete receipt
+      # cannot distinguish a disappearing cache entry, EXDEV or ENOSPC, and
+      # forces callers to repeat the whole expensive snapshot to investigate.
+      cp -al "$_src" "$_tmp" || _copy_rc=$?
     fi
     if [ "$_copy_rc" -ne 0 ]; then
-      echo "  FAILED to snapshot $_rel" >&2
+      echo "  FAILED to snapshot $_rel (exit=$_copy_rc)" >&2
       if [ "$_copy_mode" = copy ]; then
         echo "  retained resumable staging tree: $_tmp (not a completed snapshot)" >&2
       else
