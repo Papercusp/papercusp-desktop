@@ -116,7 +116,7 @@ papercusp_pinned_deps_trees() {
 # at the MOUNTPOINT, so under the pinned tree they land inside the pinned tree — the same
 # property the r15 overlay had, for the same reason. That is also why a snapshot must never be
 # used as a node_modules directly at a different depth: the links would resolve elsewhere.
-papercusp_pinned_deps_snapshot() {
+papercusp_pinned_deps_snapshot() (
   local _donor="${1:-}"
   local _snap="${2:-}"
   local _copy_mode="${3:-hardlink}"
@@ -143,6 +143,12 @@ papercusp_pinned_deps_snapshot() {
       return 1
     fi
     source "$_generation_helper" || return 1
+    # WI-10007557: the progress helper alone does not serialize or admit a copy.
+    # Keep the host-wide lease through checksum reuse, staging and publication;
+    # the subshell's EXIT trap also releases it on every refused/failed attempt.
+    dependency_generation_record_reserve_fs "$_donor"
+    dependency_generation_acquire_copy_lock "pinned snapshot $_snap" || return $?
+    trap dependency_generation_release_copy_lock EXIT
   fi
 
   # Hardlinks cannot cross filesystems, and the failure mode without this check is a
@@ -212,6 +218,27 @@ papercusp_pinned_deps_snapshot() {
             continue
           fi
         fi
+      fi
+      # These ordinary donors have no generation .tree-bytes receipt. Measure
+      # apparent bytes (including sparse files) before touching retained staging.
+      # Check-only forbids the generation reaper from disposing peer evidence.
+      local _size_output _need _admission_rc=0
+      if ! _size_output="$(LC_ALL=C du -s -B1 --apparent-size -- "$_src")"; then
+        echo "DEPENDENCY_GENERATION_HEADROOM_UNMEASURED cannot measure $_src" >&2
+        _fail=77
+        continue
+      fi
+      _need="${_size_output%%[[:space:]]*}"
+      case "$_need" in ''|*[!0-9]*)
+        echo "DEPENDENCY_GENERATION_HEADROOM_UNMEASURED invalid size for $_src" >&2
+        _fail=77
+        continue ;;
+      esac
+      DEPENDENCY_GENERATION_HEADROOM_CHECK_ONLY=1 \
+        dependency_generation_check_headroom "$_src" "$_dst" "$_need" || _admission_rc=$?
+      if [ "$_admission_rc" -ne 0 ]; then
+        _fail="$_admission_rc"
+        continue
       fi
       _tmp="$_dst.pinned-deps-tmp"
       # Adopt exactly one old PID-specific staging tree. It is untrusted input:
@@ -301,7 +328,7 @@ EOF
 
   if [ "$_fail" -ne 0 ]; then
     echo "ERROR: dependency snapshot incomplete; refusing to stamp it." >&2
-    return 1
+    return "$_fail"
   fi
 
   # The stamp is what a later reader (and the gate below) can point at to say WHICH donor and
@@ -316,7 +343,7 @@ EOF
 
   echo "snapshotted $_n dependency tree(s) from $_donor into $_snap"
   return 0
-}
+)
 
 # Usage: papercusp_pinned_deps_snapshot_locked <donor_root> <snapshot_root>
 # The supported entry point: takes the DONOR's repo-keyed install mutex, then snapshots.
