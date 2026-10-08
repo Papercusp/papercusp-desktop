@@ -18,6 +18,14 @@ command -v cargo >/dev/null 2>&1 || { echo "FATAL: cargo not resolvable (checked
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${PAPERCUSP_DESKTOP_TARGET_ROOT:-$SCRIPT_DIR/..}" && pwd)"
+# A direct Debian producer must export the updater host to Cargo itself.
+# Public packaging cannot rely on a launcher remembering the environment.
+source "$SCRIPT_DIR/lib/release-host.sh"
+if [[ "${PAPERCUSP_DISTRIBUTION_PROFILE:-}" == public || -n "${PAPERCUSP_RELEASE_TAG:-}" ]]; then
+  require_release_host
+else
+  load_release_host
+fi
 PROFILE="release"
 TAURI_SUBCOMMAND="build"
 BUNDLE_ARGS=(--bundles deb)
@@ -144,6 +152,9 @@ mapfile -d '' -t BUILT_DEBS < <(
 # binary, so a later plain `tauri build` can never inherit this sha. With no sha to
 # record, REMOVE any earlier file rather than leave a stale identity behind.
 PROFILE_DIR="${DEB_DIR%/bundle/deb}"
+if [[ -n "${PAPERCUSP_RELEASE_HOST:-}" || "${PAPERCUSP_DISTRIBUTION_PROFILE:-}" == public || -n "${PAPERCUSP_RELEASE_TAG:-}" ]]; then
+  bash "$SCRIPT_DIR/assert-release-host-baked.sh" "$PROFILE_DIR/papercusp-desktop"
+fi
 BUILD_IDENTITY="$PROFILE_DIR/build-provenance.json"
 if [[ "$PAPERCUSP_BUILD_SHA" =~ ^[0-9a-f]{7,64}$ ]]; then
   printf '{"buildSha":"%s","builtAtMs":%s,"dirty":%s,"source":"build-deb-repacked.sh"}\n' \

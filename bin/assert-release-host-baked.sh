@@ -51,6 +51,12 @@ fi
 
 HOST="${PAPERCUSP_RELEASE_HOST:-}"
 
+if [[ -z "$HOST" && ( "${PAPERCUSP_DISTRIBUTION_PROFILE:-}" == public || -n "${PAPERCUSP_RELEASE_TAG:-}" ) ]]; then
+  source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/release-host.sh"
+  require_release_host
+  HOST="${PAPERCUSP_RELEASE_HOST:-}"
+fi
+
 if [[ -z "$HOST" ]]; then
   # Not a failure: release-local.sh already warns loudly that a hostless build
   # ships without an update source. There is simply nothing to assert.

@@ -12,6 +12,84 @@ const helper = path.join(root, 'bin', 'lib', 'release-artifacts.sh');
 const upload = path.join(root, 'bin', 'upload-release.sh');
 const base = 'https://download-test.example.invalid/secret-prefix';
 
+function debHostFixture(t, { configured = true, mismatch = false, profile = 'public' } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-host-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const bin = path.join(dir, 'bin');
+  const product = path.join(dir, 'product');
+  const target = path.join(dir, 'cargo');
+  const record = path.join(dir, 'tauri-env.json');
+  const hostFile = path.join(dir, 'release-host.env');
+  fs.mkdirSync(bin);
+  fs.mkdirSync(path.join(product, 'src-tauri'), { recursive: true });
+  if (configured) fs.writeFileSync(hostFile, `PAPERCUSP_RELEASE_HOST=${base}\n`);
+  fs.writeFileSync(path.join(bin, 'cargo'),
+    '#!/bin/sh\nprintf \'{"target_directory":"%s"}\\n\' "$FIXTURE_TARGET"\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(bin, 'tauri'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const p = require('node:path');
+const e = process.env;
+const release = p.join(e.FIXTURE_TARGET, 'release');
+fs.mkdirSync(p.join(release, 'bundle/deb'), { recursive: true });
+fs.writeFileSync(e.FIXTURE_RECORD, JSON.stringify({host: e.PAPERCUSP_RELEASE_HOST}));
+fs.writeFileSync(p.join(release, 'papercusp-desktop'), e.FIXTURE_HOST_MISMATCH === '1' ? 'hostless-binary' : (e.PAPERCUSP_RELEASE_HOST || 'hostless-binary'));
+fs.writeFileSync(p.join(release, 'bundle/deb/fixture.deb'), 'fixture-deb');
+`, { mode: 0o755 });
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`,
+    PAPERCUSP_DESKTOP_TARGET_ROOT: product, PAPERCUSP_RELEASE_HOST_ENV: hostFile,
+    PAPERCUSP_DISTRIBUTION_PROFILE: profile, PAPERCUSP_DEFER_DEB_REPACK: '1',
+    PAPERCUSP_BUILD_SHA: '1234567', FIXTURE_TARGET: target, FIXTURE_RECORD: record,
+    FIXTURE_HOST_MISMATCH: mismatch ? '1' : '0' };
+  for (const key of ['PAPERCUSP_RELEASE_HOST', 'PAPERCUSP_UPDATE_BASE_URL',
+    'PAPERCUSP_ALLOW_HOSTLESS_RELEASE', 'PAPERCUSP_RELEASE_TAG', '__PAPERCUSP_RELEASE_HOST_LIB']) delete env[key];
+  const run = () => spawnSync('bash', [path.join(root, 'bin/build-deb-repacked.sh')],
+    { encoding: 'utf8', env, timeout: 10_000 });
+  return { dir, target, record, env, run };
+}
+
+test('public Debian producer loads the configured updater host into its actual Tauri child', t => {
+  const f = debHostFixture(t);
+  const result = f.run();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(f.record, 'utf8')).host, base);
+  assert.match(result.stdout, /release host is BAKED/);
+  assert.ok(!result.stdout.includes('secret-prefix'), 'producer must not log the host path');
+});
+
+test('public Debian producer refuses missing updater configuration before compiling', t => {
+  const f = debHostFixture(t, { configured: false });
+  const result = f.run();
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /REFUSING TO CUT/);
+  assert.equal(fs.existsSync(f.record), false);
+});
+
+test('public Debian producer rejects a child binary which omitted the exported host', t => {
+  const f = debHostFixture(t, { mismatch: true });
+  const result = f.run();
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /RELEASE HOST NOT BAKED/);
+  assert.equal(fs.existsSync(path.join(f.target, 'release/build-provenance.json')), false);
+});
+
+test('public byte assertion resolves configured host when its caller omitted the export', t => {
+  const f = debHostFixture(t);
+  const binary = writeRawFixture(f.dir, 'hostless.bin', 'hostless-binary');
+  const result = spawnSync('bash', [path.join(root, 'bin/assert-release-host-baked.sh'), binary],
+    { encoding: 'utf8', env: f.env, timeout: 10_000 });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /RELEASE HOST NOT BAKED/);
+});
+
+test('public byte assertion refuses absent configuration instead of reporting success', t => {
+  const f = debHostFixture(t, { configured: false });
+  const binary = writeRawFixture(f.dir, 'hostless.bin', 'hostless-binary');
+  const result = spawnSync('bash', [path.join(root, 'bin/assert-release-host-baked.sh'), binary],
+    { encoding: 'utf8', env: f.env, timeout: 10_000 });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /REFUSING TO CUT/);
+});
+
 function runProof(files, proofBase = base) {
   const result = spawnSync(
     'bash',
