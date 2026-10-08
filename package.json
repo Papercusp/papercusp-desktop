@@ -4,7 +4,8 @@
   "private": true,
   "description": "Tauri desktop shell for Papercusp. Spawns the Node sidecar and embeds the web UI.",
   "scripts": {
-    "test": "npm run test:config && npm run test:shell && npm run test:mac-minimum-os && npm run test:mac-signing && npm run test:linux-finalize-deb && npm run test:selftests",
+    "test": "npm run test:config && npm run test:shell && npm run test:candidate-install-upgrade && npm run test:mac-minimum-os && npm run test:mac-signing && npm run test:linux-finalize-deb && npm run test:selftests",
+    "test:candidate-install-upgrade": "node --test --test-global-setup=test/monorepo-host-preflight.mjs test/candidate-install-upgrade.test.js",
     "test:linux-finalize-deb": "node --test --test-global-setup=test/monorepo-host-preflight.mjs test/build-linux-finalize-deb.test.js",
     "test:mac-minimum-os": "node --test --test-global-setup=test/monorepo-host-preflight.mjs test/build-mac-cross-minimum-os.test.js",
     "test:mac-signing": "node --test --test-global-setup=test/monorepo-host-preflight.mjs test/build-mac-cross-signing.test.js",
