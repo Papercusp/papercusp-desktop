@@ -147,7 +147,9 @@ printf '%s\n' "$baseline_script" \
       bash "$VMCTL" ssh "$VM" 'bash -s'
 
 run_leg() {
-  local name="$1" gui="$2" server="$3" sha="$4" version="$5" output="$RUN_DIR/$name.json"
+  local name="$1"
+  local gui="$2" server="$3" sha="$4" version="$5"
+  local output="$RUN_DIR/$name.json"
   echo "candidate-install-upgrade-rollback: running $name verifier for $sha"
   "$VERIFIER" \
     --platform linux --artifact "$gui" --server-artifact "$server" \

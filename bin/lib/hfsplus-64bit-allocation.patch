@@ -1,0 +1,14 @@
+# planetbeing/libdmg-hfsplus 7ac55ec64c96f7800d9818ce64c79670e7f02b67
+# EI-25395743635811411: widen the allocator's zero-fill offset BEFORE multiplying.
+# The normal read/write paths already multiply by size_t blockSize; this one did not.
+--- a/hfs/rawfile.c
++++ b/hfs/rawfile.c
+@@ -88,7 +88,7 @@
+ 				}
+ 
+ 				/* zero out allocated block */
+-				ASSERT(WRITE(volume->image, curBlock * volume->volumeHeader->blockSize, volume->volumeHeader->blockSize, zeros), "WRITE");
++				ASSERT(WRITE(volume->image, (uint64_t)curBlock * volume->volumeHeader->blockSize, volume->volumeHeader->blockSize, zeros), "WRITE");
+ 
+ 				setBlockUsed(volume, curBlock, TRUE);
+ 				volume->volumeHeader->freeBlocks--;
