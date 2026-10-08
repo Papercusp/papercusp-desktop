@@ -26,6 +26,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { createHash } = require('node:crypto');
 
 const scriptPath = path.resolve(__dirname, '../bin/verify-sidecar-bundle.sh');
 const script = fs.readFileSync(scriptPath, 'utf8');
@@ -42,6 +43,71 @@ function extractFunction(name) {
 
 const CHECK_SPA_RUNTIME_LAYOUT = extractFunction('check_spa_runtime_layout');
 const CHECK_BOOT_IMPORT_CLOSURE = extractFunction('check_boot_import_closure');
+const WRITE_VERIFICATION_RECEIPT = extractFunction('write_verification_receipt');
+
+const hashFile = (file) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+
+test('real verifier emits an executable-bound failure receipt on an incomplete bundle', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-receipt-'));
+  try {
+    const receipt = path.join(dir, 'result.json');
+    const result = spawnSync('bash', [scriptPath, path.join(dir, 'absent'), '--receipt', receipt], { encoding: 'utf8' });
+    assert.equal(result.status, 2, result.stderr);
+    const body = JSON.parse(fs.readFileSync(receipt));
+    assert.equal(body.verifier.path, scriptPath);
+    assert.equal(body.verifier.sha256, hashFile(scriptPath));
+    assert.equal(body.exitCode, 2);
+    assert.equal(body.verdict, 'fail');
+    assert.equal(body.onTargetNativeLoadVerified, false);
+    assert.equal(body.bootImportClosureVerified, false);
+    assert.equal(body.candidateAccepted, false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('machine receipt independently binds the verifier and selected manifest writer and rejects changed bytes', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-receipt-inputs-'));
+  try {
+    const executable = path.join(dir, 'verifier.sh');
+    const helper = path.join(dir, 'manifest writer.py');
+    const receipt = path.join(dir, 'result.json');
+    fs.writeFileSync(executable, 'executable verifier fixture');
+    fs.writeFileSync(helper, 'manifest helper fixture');
+    const verifierSha = hashFile(executable);
+    const helperSha = hashFile(helper);
+    const run = (status, cross = '1') => {
+      const result = spawnSync('bash', ['-c', `set -uo pipefail\n${WRITE_VERIFICATION_RECEIPT}\n` +
+        'RECEIPT="$1"; _receipt_verifier="$2"; _receipt_verifier_sha="$3"\n' +
+        '_pui_manifest_tool="$4"; _pui_manifest_tool_sha="$5"; SIDECAR=fixture\n' +
+        'TARGET_OS_N=darwin; TARGET_ARCH_N=x64; CROSS="$7"\n' +
+        '_receipt_command=(bash "$2" fixture); write_verification_receipt "$6"',
+        'receipt', receipt, executable, verifierSha, helper, helperSha, String(status), cross], { encoding: 'utf8' });
+      return { result, body: JSON.parse(fs.readFileSync(receipt)) };
+    };
+    const passing = run(0);
+    assert.equal(passing.result.status, 0, passing.result.stderr);
+    assert.equal(passing.body.verifier.sha256, verifierSha);
+    assert.equal(passing.body.helpers[0].sha256, helperSha);
+    assert.notEqual(passing.body.verifier.sha256, passing.body.helpers[0].sha256);
+    assert.equal(passing.body.qualification, 'static-cross');
+    assert.equal(passing.body.onTargetNativeLoadVerified, false);
+    assert.equal(passing.body.bootImportClosureVerified, false);
+    const refused = run(1, '0');
+    assert.equal(refused.body.exitCode, 1);
+    assert.equal(refused.body.verdict, 'fail');
+    assert.equal(refused.body.onTargetNativeLoadVerified, false);
+    fs.appendFileSync(helper, ' changed');
+    const changedHelper = run(0);
+    assert.equal(changedHelper.result.status, 1);
+    assert.equal(changedHelper.body.sourceHashesStable, false);
+    assert.equal(changedHelper.body.verdict, 'fail');
+    fs.writeFileSync(helper, 'manifest helper fixture');
+    fs.appendFileSync(executable, ' changed');
+    const changedVerifier = run(0);
+    assert.equal(changedVerifier.result.status, 1);
+    assert.equal(changedVerifier.body.sourceHashesStable, false);
+    assert.equal(changedVerifier.body.verdict, 'fail');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
 
 // EI-25314848971418539: execute the real source lookup and protocol derivation,
 // with distinct protocol versions beside the tooling and selected product.

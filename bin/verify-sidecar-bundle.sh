@@ -50,16 +50,21 @@
 # (macOS system bash) — no mapfile/associative arrays.
 set -uo pipefail
 
-# Usage: verify-sidecar-bundle.sh [SIDECAR_DIR] [--target-os OS] [--target-arch ARCH]
+# Usage: verify-sidecar-bundle.sh [SIDECAR_DIR] [--target-os OS] [--target-arch ARCH] [--receipt FILE]
 # WI-5651: --target-os/--target-arch let a CROSS build (baked on linux for
 # darwin/windows) tell the verifier which platform the bundle is FOR — default is
 # the build host, so every existing native caller is unchanged.
 SIDECAR=""
 TARGET_OS_ARG=""; TARGET_ARCH_ARG=""
+RECEIPT=""
+_receipt_command=("bash" "$0" "$@")
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --target-os)   TARGET_OS_ARG="${2:-}"; shift 2 ;;
     --target-arch) TARGET_ARCH_ARG="${2:-}"; shift 2 ;;
+    --receipt)
+      [[ $# -ge 2 && -n "$2" ]] || { echo "verify-sidecar-bundle: --receipt requires a file" >&2; exit 2; }
+      RECEIPT="$2"; shift 2 ;;
     *) [[ -z "$SIDECAR" ]] && SIDECAR="$1"; shift ;;
   esac
 done
@@ -88,6 +93,56 @@ TARGET_OS_N="${TARGET_OS_ARG:-$_host_os_n}"
 TARGET_ARCH_N="${TARGET_ARCH_ARG:-$_host_arch_n}"
 CROSS=0
 [[ "$TARGET_OS_N" != "$_host_os_n" || "$TARGET_ARCH_N" != "$_host_arch_n" ]] && CROSS=1
+
+# EI-25432995330309200: the executable verifier and its manifest helper are
+# different inputs. Capture their own bytes, then refuse a success receipt if
+# either changes during verification. The optional receipt also records failures.
+write_verification_receipt() {
+  local status="$1"
+  python3 - "$RECEIPT" "$_receipt_verifier" "$_receipt_verifier_sha" \
+    "${_pui_manifest_tool:-}" "${_pui_manifest_tool_sha:-}" "$SIDECAR" \
+    "$TARGET_OS_N" "$TARGET_ARCH_N" "$CROSS" "$status" "${_receipt_command[@]}" <<'PY'
+import hashlib, json, os, pathlib, sys, tempfile
+out, verifier, verifier_sha, helper, helper_sha, sidecar, os_name, arch, cross, status = sys.argv[1:11]
+status = int(status)
+def digest(path):
+    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+stable = digest(verifier) == verifier_sha
+helpers = []
+if helper_sha:
+    stable = stable and digest(helper) == helper_sha
+    helpers.append({"role": "manifest-writer", "path": helper, "sha256": helper_sha})
+effective_status = status if status else (0 if stable else 1)
+receipt = {"schemaVersion": "sidecar-verification-receipt/v1", "command": sys.argv[11:],
+    "verifier": {"path": verifier, "sha256": verifier_sha}, "helpers": helpers,
+    "sidecar": sidecar, "target": {"os": os_name, "arch": arch},
+    "sourceHashesStable": stable, "exitCode": effective_status,
+    "verdict": "pass" if effective_status == 0 else "fail",
+    "qualification": "static-cross" if cross == "1" else "native-runtime",
+    "onTargetNativeLoadVerified": effective_status == 0 and cross == "0",
+    "bootImportClosureVerified": effective_status == 0 and cross == "0",
+    "candidateAccepted": False}
+destination = pathlib.Path(out)
+destination.parent.mkdir(parents=True, exist_ok=True)
+fd, temporary = tempfile.mkstemp(prefix=destination.name + ".", dir=destination.parent)
+try:
+    with os.fdopen(fd, "w") as stream:
+        json.dump(receipt, stream, indent=2)
+        stream.write("\n")
+    os.replace(temporary, destination)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+if not stable:
+    print("verify-sidecar-bundle: verifier/helper changed during verification", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+if [[ -n "$RECEIPT" ]]; then
+  _receipt_verifier="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "$0")" || exit 2
+  _receipt_verifier_sha="$(python3 -c 'import hashlib,pathlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "$_receipt_verifier")" || exit 2
+  trap '_receipt_exit=$?; trap - EXIT; write_verification_receipt "$_receipt_exit" || { [[ "$_receipt_exit" != 0 ]] || _receipt_exit=1; }; exit "$_receipt_exit"' EXIT
+fi
 
 [[ -d "$BIN" ]] || { echo "verify-sidecar-bundle: ERROR: no bin/ under $SIDECAR" >&2; exit 2; }
 echo "→ verify-sidecar-bundle: $SIDECAR ($OS$([[ "$CROSS" == 1 ]] && echo " → cross ${TARGET_OS_N}-${TARGET_ARCH_N}"))"
@@ -207,6 +262,10 @@ _verify_here="$(cd "$(dirname "$0")" && pwd)"
 source "$_verify_here/lib/source-roots.sh"
 _repo_root="$(papercusp_repo_root "${PAPERCUSP_DESKTOP_TARGET_ROOT:-$_verify_here/..}")"
 _pui_manifest_tool="$_repo_root/apps/tui/scripts/write-install-manifest.py"
+_pui_manifest_tool_sha=""
+if [[ -n "${RECEIPT:-}" && -f "$_pui_manifest_tool" ]]; then
+  _pui_manifest_tool_sha="$(python3 -c 'import hashlib,pathlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "$_pui_manifest_tool")" || exit 2
+fi
 [[ -s "$_pui_companion" ]] || fail "pui-companion.wasm: MISSING or empty from sidecar root"
 [[ -s "$_pui_manifest" ]] || fail "pui-install.json: MISSING or empty from sidecar root"
 if [[ ! -f "$_pui_manifest_tool" ]]; then
