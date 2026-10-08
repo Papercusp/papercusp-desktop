@@ -44,8 +44,11 @@ For scripts that drive the VM, three subcommands give machine-readable answers:
 ```
 
 An instance name other than `clean`/`fed-a`/`fed-b`/`updater` gets its own
-overlay on the shared ad-hoc slot (SSH 2233, SPICE 127.0.0.1:5941), so only one
-ad-hoc instance can run at a time.
+overlay and a free slot from the ad-hoc port pool when it boots (`VM_ADHOC_SLOTS`
+defaults to 40). The allocator reserves ports under a lock and checks active
+listeners and in-flight claims, so multiple ad-hoc VMs can run when slots are
+free. A stopped ad-hoc instance has no assigned ports; after boot, query
+`vmctl endpoint <name>` for its current endpoint.
 
 **Big inputs or a big disk** (e.g. restoring production DB dumps in a clean room):
 `boot-vm.sh` takes `BOOT_DATA_DISK=/path/data.qcow2` (a 2nd virtio disk, seen in the
