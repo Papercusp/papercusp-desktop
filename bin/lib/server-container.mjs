@@ -101,12 +101,17 @@ export async function runCommand(command, args, options = {}) {
         : reject(new Error(command + ' failed with ' + (signal || code))));
     });
   }
-  const result = await execFileAsync(command, args, {
+  let result;
+  try { result = await execFileAsync(command, args, {
     timeout: options.timeout ?? 30 * 60_000,
     maxBuffer: 8 * 1024 * 1024,
     env: options.env ?? process.env,
     signal: options.signal,
-  });
+  }); } catch (error) {
+    error.message = command + ' failed (' + (error.signal || error.code || error.name) + ')'
+      + (error.stderr?.trim() ? ': ' + error.stderr.trim().slice(0, 4096) : '');
+    throw error;
+  }
   return result.stdout;
 }
 
@@ -158,17 +163,20 @@ export async function runOwnedContainer(options, run = runCommand) {
   };
   let id, heartbeat, error, heartbeatPending = Promise.resolve();
   const receipt = { schemaVersion: 1, imageId: options.imageId, platform: options.platform,
-    leaseTimeoutMs: ttl, leaseRoot, status: 'creating' };
+    leaseTimeoutMs: ttl, leaseRoot, status: 'creating',
+    containerName: 'papercusp-native-' + randomUUID(), ownerToken: randomUUID() };
   const save = () => writeFile(receiptFile, JSON.stringify(receipt) + '\n', { mode: 0o600 });
   process.on('SIGTERM', abort); process.on('SIGINT', abort);
   options.signal?.addEventListener('abort', abort, { once: true });
   try {
     await update();
-    id = (await run(engine, ['create', '--init', '--name', 'papercusp-native-' + randomUUID(),
+    await save();
+    id = (await run(engine, ['create', '--init', '--name', receipt.containerName,
       '--platform', options.platform, '--mount', 'type=bind,source=' + leaseRoot + ',target=/run/papercusp-producer-owner,readonly',
-      ...(options.args ?? []), '--entrypoint', '/usr/local/bin/node', options.imageId,
+      ...(options.args ?? []), '--label', 'dev.papercusp.producer-owner=' + receipt.ownerToken,
+      '--entrypoint', '/usr/local/bin/node', options.imageId,
       '-e', ownedContainerSupervisor, '/run/papercusp-producer-owner/lease.json', String(ttl), ...options.command],
-    { timeout: 30_000 })).trim();
+    { timeout: options.timeoutMs ?? 2 * 60 * 60_000, signal: controller.signal })).trim();
     if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Engine returned no immutable producer container ID');
     receipt.containerId = id; receipt.status = 'created'; await save();
     heartbeat = setInterval(() => {
@@ -191,6 +199,20 @@ export async function runOwnedContainer(options, run = runCommand) {
     process.off('SIGTERM', abort); process.off('SIGINT', abort);
     options.signal?.removeEventListener('abort', abort);
     try {
+      // A killed create client can leave a daemon-created object without
+      // returning its ID. Recover it only under our saved name, image and token.
+      if (!id) {
+        let object;
+        try { object = JSON.parse(await run(engine, ['inspect', '--format', '{{json .}}', receipt.containerName], { timeout: 10_000 })); }
+        catch (inspectError) {
+          if (!/No such (?:object|container)/i.test(inspectError.message)) throw inspectError;
+        }
+        if (object) {
+          if (object.Image !== options.imageId || object.Config?.Labels?.['dev.papercusp.producer-owner'] !== receipt.ownerToken
+              || !/^[a-f0-9]{64}$/.test(object.Id ?? '')) throw new Error('Cannot confirm interrupted create ownership');
+          id = object.Id; receipt.containerId = id;
+        }
+      }
       if (id && /^[a-f0-9]{64}$/.test(id)) {
         await run(engine, ['rm', '--force', id], { timeout: 10_000 });
         receipt.removed = true;
