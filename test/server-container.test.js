@@ -249,6 +249,47 @@ test('successful build inspects the content-addressed image and publishes bound 
   assert.equal((await fs.readdir(f.options.out)).some(name => name.startsWith('.server-container-build-')), false);
 });
 
+test('the actual in-container probe queries the discovered database after DBOS readiness', async () => {
+  const { verifyServerContainerBoot } = await lib;
+  let removed = false;
+  const run = async (_command, args) => {
+    if (args[0] === 'run') return 'd'.repeat(64);
+    if (args[0] === 'inspect') return JSON.stringify({ Running: true });
+    if (args[0] === 'rm') { removed = true; return ''; }
+    assert.equal(args[0], 'exec');
+    // Execute the producer's generated probe, rather than supplying the result
+    // it is expected to return. Both connection routing and query shape are
+    // checked by the child; a wrong call yields no qualifying database proof.
+    const setup = `
+      const assert=require('node:assert/strict');
+      Object.defineProperty(process,'version',{value:'v24.18.1'});
+      Object.defineProperty(process,'arch',{value:'x64'});
+      globalThis.fetch=async url=>({status:200,json:async()=>url.endsWith('/ready')
+        ?{ready:true,dbos:true,dbosEnabled:true}
+        :{ok:true,service:'papercusp-operator',sha:'${'a'.repeat(40)}'}});
+      require('node:fs').readFileSync=name=>{
+        assert.equal(name,'/home/papercup/.papercusp/embedded-pg.json');
+        return JSON.stringify({url:'postgres://fixture/isolated'});
+      };
+      require('node:child_process').spawnSync=(command,args)=>{
+        assert.equal(command,'/usr/bin/psql');
+        assert.equal(args[0],'postgres://fixture/isolated');
+        assert.ok(args.at(-1).includes("extname='vector'"));
+        assert.ok(args.at(-1).includes("schemaname='harness_shared'"));
+        return {status:0,stdout:JSON.stringify({vectorReady:true,schemaReady:true,serverVersion:'18.6'})};
+      };
+    `;
+    const r = spawnSync(process.execPath, ['-e', setup + args.at(-1)], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout;
+  };
+  const observed = await verifyServerContainerBoot({ engine: 'docker', imageId, platform: 'linux/amd64',
+    sourceCommit: 'a'.repeat(40), nodeVersion: '24.18.1', bootTimeoutMs: 1000 }, run);
+  assert.equal(observed.database.vectorReady, true);
+  assert.equal(observed.database.schemaReady, true);
+  assert.equal(removed, true);
+});
+
 test('a liveness response cannot qualify an unready Server, missing DBOS, missing database or different source', async t => {
   const { verifyServerContainerBoot } = await lib;
   for (const mode of ['unreadyServer', 'noDbos', 'noVector', 'noSchema', 'wrongBootSource', 'exitedServer']) {
