@@ -29,6 +29,7 @@ function extractFunction(name) {
 const RESOLVE_PKG_SOURCE = extractFunction('resolve_pkg_source');
 const PKG_DEST_FOR_SOURCE = extractFunction('pkg_dest_for_source');
 const COPY_PKG_CLOSURE = extractFunction('copy_pkg_closure');
+const PRUNE_UNUSED_ODIFF_PAYLOAD = extractFunction('prune_unused_odiff_payload');
 const ASSERT_RUNTIME_DEPENDENCY_CLOSURE = extractFunction(
   'assert_runtime_dependency_closure',
 );
@@ -63,6 +64,7 @@ function makeFixture() {
     dependencies: {
       'posthog-node': '3.5.0',
       'onnxruntime-web': '1.0.0',
+      'odiff-bin': '2.6.1',
     },
   });
   writePackage(path.join(nodeModules, 'lost-pixel/node_modules/posthog-node'), {
@@ -74,6 +76,15 @@ function makeFixture() {
     name: 'rusha',
     version: '0.8.14',
   });
+  const odiff = path.join(nodeModules, 'odiff-bin');
+  writePackage(odiff, { name: 'odiff-bin', version: '2.6.1', main: 'odiff.js' });
+  // The published JS wrapper eagerly imports without opening its native files.
+  fs.copyFileSync(require.resolve('odiff-bin'), path.join(odiff, 'odiff.js'));
+  for (const rel of ['bin/odiff', '_export/native.tar.gz',
+    'platform-linux/bin/odiff', 'platform-darwin/bin/odiff']) {
+    fs.mkdirSync(path.dirname(path.join(odiff, rel)), { recursive: true });
+    fs.writeFileSync(path.join(odiff, rel), 'unused native engine payload');
+  }
   // Parent copies can smuggle a skipped nested package into the destination.
   // Its unresolved dependencies must not force an exception in the final-tree
   // guard; the existing browser-only rule promises to omit this package itself.
@@ -102,6 +113,7 @@ function shellPrelude() {
     'prune_onnx_gpu_providers() { :; }',
     RESOLVE_PKG_SOURCE,
     PKG_DEST_FOR_SOURCE,
+    PRUNE_UNUSED_ODIFF_PAYLOAD,
   ].join('\n');
 }
 
@@ -152,6 +164,12 @@ test('closure preserves nested package identity and follows its hoisted dependen
       '3.5.0',
     );
     assert.equal(readVersion(path.join(installed, 'rusha')), '0.8.14');
+    assert.equal(readVersion(path.join(installed, 'odiff-bin')), '2.6.1');
+    for (const rel of ['bin', '_export', 'platform-linux', 'platform-darwin']) {
+      assert.equal(fs.existsSync(path.join(installed, 'odiff-bin', rel)), false, rel);
+      assert.equal(fs.existsSync(path.join(fixture.repoRoot, 'node_modules/odiff-bin', rel)), true,
+        'the dependency donor must remain untouched');
+    }
     assert.equal(
       fs.existsSync(path.join(installed, 'lost-pixel/node_modules/onnxruntime-web')),
       false,
@@ -160,6 +178,71 @@ test('closure preserves nested package identity and follows its hoisted dependen
   } finally {
     fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
   }
+});
+
+test('pruned odiff preserves the real eager import and pixelmatch comparison without native dispatch', () => {
+  const fixture = makeFixture();
+  try {
+    const result = runBash([shellPrelude(), COPY_PKG_CLOSURE,
+      'copy_pkg_closure lost-pixel'].join('\n'), fixture);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const copiedWrapper = path.join(fixture.sidecarDir, 'node_modules/odiff-bin/odiff.js');
+    const sourceWrapper = path.join(fixture.repoRoot, 'node_modules/odiff-bin/odiff.js');
+    assert.deepEqual(fs.readFileSync(copiedWrapper), fs.readFileSync(sourceWrapper));
+    const probe = spawnSync(process.execPath, ['-e', `
+      const assert = require('node:assert/strict');
+      const fs = require('node:fs');
+      const path = require('node:path');
+      const Module = require('node:module');
+      require('node:child_process').execFile = () => { throw new Error('native dispatch forbidden'); };
+      const originalLoad = Module._load;
+      let imports = 0;
+      Module._load = function(request, parent, main) {
+        if (request === 'odiff-bin') { imports++; request = process.argv[1]; }
+        return originalLoad.call(this, request, parent, main);
+      };
+      const comparator = require(process.argv[2]);
+      assert.equal(imports, 1, 'the actual lost-pixel importer must load the pruned odiff wrapper');
+      const { PNG } = require('pngjs');
+      const baseline = new PNG({width: 1, height: 1});
+      const current = new PNG({width: 1, height: 1});
+      baseline.data.set([0, 0, 0, 255]); current.data.set([255, 255, 255, 255]);
+      const base = path.join(process.argv[3], 'base.png');
+      const next = path.join(process.argv[3], 'next.png');
+      const diff = path.join(process.argv[3], 'diff.png');
+      fs.writeFileSync(base, PNG.sync.write(baseline));
+      fs.writeFileSync(next, PNG.sync.write(current));
+      comparator.compareImagesViaPixelmatch(0, base, next, diff).then(result => {
+        assert.equal(result.pixelDifference, 1);
+        assert.equal(result.isWithinThreshold, false);
+        assert.ok(fs.existsSync(diff));
+        console.log('real pixelmatch passed with pruned eager-import odiff');
+      }).catch(error => { console.error(error); process.exitCode = 1; });
+    `, copiedWrapper, require.resolve('lost-pixel/dist/compare/compare.js'), fixture.fixtureRoot],
+    { encoding: 'utf8' });
+    assert.equal(probe.status, 0, probe.stdout + probe.stderr);
+    assert.match(probe.stdout, /real pixelmatch passed/);
+  } finally { fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true }); }
+});
+
+test('odiff prune follows distinct nested requester versions and refuses a different package', () => {
+  const fixture = makeFixture();
+  try {
+    const nested = path.join(fixture.repoRoot, 'node_modules/lost-pixel/node_modules/odiff-bin');
+    fs.cpSync(path.join(fixture.repoRoot, 'node_modules/odiff-bin'), nested, { recursive: true });
+    fs.writeFileSync(path.join(nested, 'package.json'), JSON.stringify({name: 'odiff-bin', version: '2.5.0'}));
+    const result = runBash([shellPrelude(), COPY_PKG_CLOSURE,
+      'copy_pkg_closure odiff-bin', 'copy_pkg_closure lost-pixel'].join('\n'), fixture);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const modules = path.join(fixture.sidecarDir, 'node_modules');
+    assert.equal(readVersion(path.join(modules, 'odiff-bin')), '2.6.1');
+    assert.equal(readVersion(path.join(modules, 'lost-pixel/node_modules/odiff-bin')), '2.5.0');
+    assert.equal(fs.existsSync(path.join(modules, 'lost-pixel/node_modules/odiff-bin/platform-linux')), false);
+    const wrong = runBash([shellPrelude(),
+      'prune_unused_odiff_payload "$REPO_ROOT/node_modules/rusha"'].join('\n'), fixture);
+    assert.equal(wrong.status, 1);
+    assert.match(wrong.stderr, /refusing odiff payload prune/);
+  } finally { fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true }); }
 });
 
 test('assembled-tree guard fails closed and names a nested package missing its dependency', () => {
