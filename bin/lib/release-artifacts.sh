@@ -27,6 +27,27 @@
 # The manifest lives next to latest.json in /tmp (same TAG-scoped, same ephemeral
 # lifecycle: if one is gone the other is, and you re-cut anyway).
 
+# Preserve a nominated producer destination across sourced preflights. Bind the
+# bank and output in readonly caller variables BEFORE sourcing, then check again
+# before creating anything. Generic globals such as REVIEW/BANK may be reassigned
+# by those libraries; deriving RUN from them afterwards silently changes custody.
+release_artifacts_assert_producer_output() {
+  local bank="${1:-}" leaf="${2:-}" actual="${3:-}" physical_bank
+  [[ "$bank" == /* && -d "$bank" && "$leaf" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+    echo 'release-artifacts: producer output needs an absolute existing bank and a safe leaf.' >&2
+    return 2
+  }
+  physical_bank="$(cd -- "$bank" && pwd -P)" || return 2
+  [[ "$bank" == "$physical_bank" && "$actual" == "$physical_bank/$leaf" ]] || {
+    echo 'release-artifacts: producer output binding changed across preflight — refusing production.' >&2
+    return 2
+  }
+  [[ ! -e "$actual" && ! -L "$actual" ]] || {
+    echo 'release-artifacts: producer output already exists — attach its original task, do not relaunch.' >&2
+    return 2
+  }
+}
+
 # release_artifacts_manifest_path <tag> — the manifest file path for a cut.
 release_artifacts_manifest_path() {
   printf '/tmp/papercusp-artifacts-%s.txt\n' "$1"
