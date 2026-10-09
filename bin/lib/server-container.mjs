@@ -237,6 +237,7 @@ export async function preflightServerContainer(options, run = runCommand) {
 }
 
 export async function buildServerContainer(options, run = runCommand) {
+  options.onProgress?.('preflight');
   const input = await preflightServerContainer(options, run);
   const engine = options.engine ?? 'docker';
   if (!['docker', 'podman'].includes(engine)) throw new Error('Engine must be docker or podman');
@@ -252,6 +253,7 @@ export async function buildServerContainer(options, run = runCommand) {
   const stage = await mkdtemp(join(out, '.server-container-build-'));
   try {
     const context = join(stage, 'context');
+    options.onProgress?.('freeze-inputs');
     await mkdir(context);
     await cp(input.rootfs, join(context, 'papercup-runtime.tar.gz'));
     await cp(join(dirname(input.rootfs), '.rootfs-build-stamp'), join(context, '.rootfs-build-stamp'));
@@ -273,6 +275,7 @@ export async function buildServerContainer(options, run = runCommand) {
     };
     const labelArgs = Object.entries(labels).flatMap(([key, value]) => ['--label', key + '=' + value]);
     const iidfile = join(stage, 'image-id');
+    options.onProgress?.('build-image');
     await run(engine, ['build', '--platform', input.platform, ...labelArgs, '--iidfile', iidfile,
       '--tag', input.tag, '--file', containerfile, context]);
     const imageId = (await readFile(iidfile, 'utf8')).trim();
@@ -282,10 +285,13 @@ export async function buildServerContainer(options, run = runCommand) {
         Object.entries(labels).some(([key, value]) => inspected.Config?.Labels?.[key] !== value)) {
       throw new Error('Built image does not match its platform and source labels');
     }
+    options.onProgress?.('verify-payload');
     const payloadVerification = await verifyServerContainerPayload({ ...input, engine, imageId }, run);
+    options.onProgress?.('verify-full-boot');
     const bootVerification = await verifyServerContainerBoot({ ...input, engine, imageId,
       bootTimeoutMs: options.bootTimeoutMs }, run);
     const sbomTmp = join(stage, 'sbom.cdx.json');
+    options.onProgress?.('generate-sbom');
     await run(options.syft ?? 'syft', [imageId, '--from', engine, '-o', 'cyclonedx-json=' + sbomTmp]);
     const sbom = JSON.parse(await readFile(sbomTmp, 'utf8'));
     if (sbom.bomFormat !== 'CycloneDX' || !Array.isArray(sbom.components) || sbom.components.length < 50) {
@@ -305,6 +311,7 @@ export async function buildServerContainer(options, run = runCommand) {
       sbomPath, signed: false, published: false,
     };
     const publication = join(stage, 'publication');
+    options.onProgress?.('publish-local-evidence');
     await mkdir(publication);
     await writeFile(join(publication, 'build.json'), JSON.stringify(receipt, null, 2) + '\n');
     await rename(sbomTmp, join(publication, 'sbom.cdx.json'));
@@ -320,8 +327,10 @@ export async function buildServerContainer(options, run = runCommand) {
           existing.sbomSha256 !== await hashFile(sbomPath)) {
         throw new Error('Existing image generation has inconsistent evidence');
       }
+      options.onProgress?.('complete');
       return { ...existing, receiptPath };
     }
+    options.onProgress?.('complete');
     return { ...receipt, receiptPath };
   } finally {
     await rm(stage, { recursive: true, force: true });
@@ -385,6 +394,15 @@ export async function publishServerContainers(options, run = runCommand) {
   }
   if (members[0].receipt.sourceCommit !== members[1].receipt.sourceCommit) {
     throw new Error('Platform generations are from different native Server builds');
+  }
+  // Legacy receipts can be qualified without rebuilding the artifact. A stored
+  // liveness/parity proof never substitutes for this fresh full-boot observation.
+  for (const member of members) {
+    member.bootVerification = await verifyServerContainerBoot({ engine,
+      imageId: member.receipt.imageId, platform: member.receipt.platform,
+      sourceCommit: member.receipt.sourceCommit,
+      nodeVersion: member.receipt.payloadVerification.nodeVersion.slice(1),
+      bootTimeoutMs: options.bootTimeoutMs }, run);
   }
   const out = resolve(options.out);
   if (members.some(member => within(out, member.receiptPath) || within(dirname(member.receiptPath), out))) {
@@ -461,6 +479,9 @@ export async function publishServerContainers(options, run = runCommand) {
       verifiedFromRegistry: true, memberSignaturesVerified: true,
       platforms: members.map(member => ({ platform: member.receipt.platform, reference: member.reference,
         imageId: member.receipt.imageId, labels: member.receipt.labels, sbomSha256: member.receipt.sbomSha256,
+        bootVerification: { imageId: member.bootVerification.imageId, platform: member.bootVerification.platform,
+          sourceCommit: member.bootVerification.sourceCommit, arch: member.bootVerification.arch,
+          node: member.bootVerification.node, dbos: true, schemaReady: true, vectorReady: true },
         nativeReceiptSha256: member.receiptHash })) };
     await writeFile(join(stage, 'release.json'), JSON.stringify(release, null, 2) + '\n');
     const generation = join(out, 'papercusp-server-release-' + digest.slice(7));
