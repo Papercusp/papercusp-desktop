@@ -79,7 +79,7 @@ test('stage identity binds the executable tooling verifier and refuses its chang
     const desktop = gitFixture(path.join(f.root, 'desktop'));
     const tooling = path.join(f.root, 'tooling');
     fs.mkdirSync(path.join(tooling, 'lib'), { recursive: true });
-    for (const file of ['build-desktop-sidecar.sh', 'audit-release-bundle.py', 'emit-build-provenance.sh', 'lib/transformers-models.sh']) {
+    for (const file of ['build-desktop-sidecar.sh', 'audit-release-bundle.py', 'emit-build-provenance.sh', 'lib/transformers-models.sh', 'lib/server-container.mjs']) {
       fs.copyFileSync(path.join(bin, file), path.join(tooling, file));
     }
     const selected = path.join(tooling, 'verify-sidecar-bundle.sh');
@@ -100,6 +100,10 @@ test('stage identity binds the executable tooling verifier and refuses its chang
       file: fs.realpathSync(selected), sha256: crypto.createHash('sha256').update(fs.readFileSync(selected)).digest('hex'),
     });
     assert.equal(first.tools.some(tool => tool.file === frozen), false);
+    const inventory = path.join(tooling, 'lib/server-container.mjs');
+    assert.deepEqual(first.tools.find(tool => tool.file === fs.realpathSync(inventory)), {
+      file: fs.realpathSync(inventory), sha256: crypto.createHash('sha256').update(fs.readFileSync(inventory)).digest('hex'),
+    });
     recordFailure(f.stage, first, 'assembled', 1);
     validateResume(f.stage, first);
     fs.appendFileSync(selected, '# changed qualification policy\n');
@@ -107,6 +111,10 @@ test('stage identity binds the executable tooling verifier and refuses its chang
     assert.equal(changed.sourceState, first.sourceState);
     assert.equal(changed.desktopState, first.desktopState);
     assert.throws(() => validateResume(f.stage, changed), /producer identity changed/);
+    fs.writeFileSync(selected, '#!/bin/sh\nexit 0\n');
+    fs.appendFileSync(inventory, '// changed ELF inventory policy\n');
+    const changedInventory = await captureIdentity(env);
+    assert.throws(() => validateResume(f.stage, changedInventory), /producer identity changed/);
     fs.rmSync(selected);
     await assert.rejects(captureIdentity(env), /ENOENT/, 'missing tooling must never fall back to frozen verifier');
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
