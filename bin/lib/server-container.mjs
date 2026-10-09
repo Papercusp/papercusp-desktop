@@ -2,7 +2,7 @@
  * Package the existing native sidecar and WSL runtime, without rebuilding either.
  * Local image receipts are build evidence; registry signatures/release are separate.
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, statfs, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
@@ -120,6 +120,66 @@ export async function verifyServerContainerPayload(options, run = runCommand) {
   return observed;
 }
 
+/** Boot the immutable artifact in an isolated empty home, with no host ports/network. */
+export async function verifyServerContainerBoot(options, run = runCommand) {
+  if (!['docker', 'podman'].includes(options.engine) || !PLATFORMS.has(options.platform) ||
+      !/^sha256:[a-f0-9]{64}$/.test(options.imageId ?? '') || !COMMIT.test(options.sourceCommit ?? '')) {
+    throw new Error('Server boot verification requires an immutable image, platform and source commit');
+  }
+  const name = 'papercusp-server-boot-' + randomUUID();
+  const deadline = Date.now() + (options.bootTimeoutMs ?? 15 * 60_000);
+  const sql = "SELECT json_build_object('vectorReady',EXISTS(SELECT 1 FROM pg_extension WHERE extname='vector')," +
+    "'schemaReady',EXISTS(SELECT 1 FROM pg_tables WHERE schemaname='harness_shared')," +
+    "'serverVersion',current_setting('server_version'))";
+  const probe = "const fs=require('node:fs'),{spawnSync}=require('node:child_process');" +
+    "(async()=>{try{" +
+    "const get=async path=>{const r=await fetch('http://127.0.0.1:3070'+path,{signal:AbortSignal.timeout(2000)});" +
+    "return {status:r.status,body:await r.json()};};" +
+    "const ready=await get('/api/health/ready'),health=await get('/api/health');" +
+    "let database=null;if(ready.status===200&&ready.body.ready===true){" +
+    "const pg=JSON.parse(fs.readFileSync('/home/papercup/.papercusp/embedded-pg.json','utf8'));" +
+    "const result=spawnSync('/usr/bin/psql',[pg.url,'-X','-A','-t','-c'," + JSON.stringify(sql) +
+    "],{encoding:'utf8',timeout:5000});if(result.status===0)database=JSON.parse(result.stdout);}" +
+    "process.stdout.write(JSON.stringify({arch:process.arch,node:process.version,ready,health,database}));" +
+    "}catch(error){process.stdout.write(JSON.stringify({pending:error.name}));}})();";
+  let observed;
+  try {
+    await run(options.engine, ['run', '--detach', '--name', name, '--platform', options.platform,
+      '--network', 'none', '--read-only', '--tmpfs', '/tmp:rw,exec',
+      '--tmpfs', '/home/papercup:rw,uid=1001,gid=1001,mode=0700',
+      '--env', 'PAPERCUSP_HONO_PORT=3070', '--env', 'PAPERCUSP_PG_PORT=5532',
+      '--env', 'PAPERCUSP_BACKGROUND_WORKERS=1', '--env', 'PAPERCUSP_DBOS_ENABLE=1', options.imageId]);
+    do {
+      const state = JSON.parse(await run(options.engine, ['inspect', '--format', '{{json .State}}', name]));
+      if (state.Running !== true) {
+        throw new Error('Packaged Server exited during boot (exit=' + state.ExitCode + ')');
+      }
+      try {
+        observed = JSON.parse(await run(options.engine, ['exec', name, '/usr/local/bin/node', '-e', probe],
+          { timeout: 12_000 }));
+      } catch (error) {
+        observed = { pending: error.name };
+      }
+      if (observed.ready?.status === 200 && observed.ready.body?.ready === true &&
+          observed.ready.body.dbosEnabled === true && observed.ready.body.dbos === true &&
+          observed.health?.status === 200 && observed.health.body?.ok === true &&
+          observed.health.body.service === 'papercusp-operator' &&
+          /^[a-f0-9]{7,64}$/.test(observed.health.body.sha ?? '') &&
+          options.sourceCommit.startsWith(observed.health.body.sha) &&
+          observed.arch === (options.platform === 'linux/amd64' ? 'x64' : 'arm64') &&
+          observed.node === 'v' + options.nodeVersion &&
+          observed.database?.vectorReady === true && observed.database.schemaReady === true) {
+        return { schemaVersion: 1, imageId: options.imageId, platform: options.platform,
+          sourceCommit: options.sourceCommit, verifiedAtUtc: new Date().toISOString(), ...observed };
+      }
+      if (Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, Math.min(1000, deadline - Date.now())));
+    } while (Date.now() < deadline);
+    throw new Error('Packaged Server did not establish full boot readiness: ' + JSON.stringify(observed));
+  } finally {
+    await run(options.engine, ['rm', '--force', name]);
+  }
+}
+
 /** Read-only: no engine calls, output directories, or changes to the input artifacts. */
 export async function preflightServerContainer(options, run = runCommand) {
   const { platform, tag } = options;
@@ -223,6 +283,8 @@ export async function buildServerContainer(options, run = runCommand) {
       throw new Error('Built image does not match its platform and source labels');
     }
     const payloadVerification = await verifyServerContainerPayload({ ...input, engine, imageId }, run);
+    const bootVerification = await verifyServerContainerBoot({ ...input, engine, imageId,
+      bootTimeoutMs: options.bootTimeoutMs }, run);
     const sbomTmp = join(stage, 'sbom.cdx.json');
     await run(options.syft ?? 'syft', [imageId, '--from', engine, '-o', 'cyclonedx-json=' + sbomTmp]);
     const sbom = JSON.parse(await readFile(sbomTmp, 'utf8'));
@@ -237,7 +299,7 @@ export async function buildServerContainer(options, run = runCommand) {
       schemaVersion: 1, kind: 'papercusp-server-local-image', platform: input.platform,
       tag: input.tag, imageId, sourceCommit: input.sourceCommit, labels,
       engine, rootfsBaseImage: input.rootfsBaseImage,
-      payloadVerification,
+      payloadVerification, bootVerification,
       rootfsRecipeSha256: input.recipeSha256, containerfileSha256: await hashFile(containerfile),
       sbomSha256: await hashFile(sbomTmp), sbomPackages: sbom.components.length,
       sbomPath, signed: false, published: false,

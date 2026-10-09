@@ -85,6 +85,13 @@ async function fakeRunner(options = {}) {
       if (command === (options.engine ?? 'docker') && args[0] === 'run') {
         assert.ok(args.includes(id), 'probe the content-addressed image, never a tag');
         assert.equal(args[args.indexOf('--network') + 1], 'none');
+        if (args.includes('--detach')) {
+          assert.ok(args.includes('--read-only'));
+          assert.ok(args.includes('PAPERCUSP_DBOS_ENABLE=1'));
+          assert.equal(args.includes('--publish'), false);
+          assert.equal(args.includes('--volume'), false);
+          return 'd'.repeat(64);
+        }
         assert.ok(args.includes('--read-only'));
         assert.equal(args[args.indexOf('--entrypoint') + 1], '/usr/local/bin/node');
         if (options.wrongPayload) await fs.writeFile(path.join(imageContext, 'sidecar/serve.mjs'), 'substituted packed bytes');
@@ -95,6 +102,18 @@ async function fakeRunner(options = {}) {
         assert.equal(result.status, 0, result.stderr);
         return result.stdout;
       }
+      if (command === (options.engine ?? 'docker') && args[0] === 'inspect') {
+        return JSON.stringify({ Running: !options.exitedServer, ExitCode: options.exitedServer ? 1 : 0 });
+      }
+      if (command === (options.engine ?? 'docker') && args[0] === 'exec') {
+        return JSON.stringify({ arch: options.arch === 'arm64' ? 'arm64' : 'x64', node: 'v24.18.1',
+          ready: { status: 200, body: { ready: !options.unreadyServer, dbos: !options.noDbos,
+            dbosEnabled: !options.noDbos } },
+          health: { status: 200, body: { ok: true, service: 'papercusp-operator',
+            sha: options.wrongBootSource ? 'c'.repeat(40) : 'a'.repeat(40) } },
+          database: { vectorReady: !options.noVector, schemaReady: !options.noSchema, serverVersion: '18.6' } });
+      }
+      if (command === (options.engine ?? 'docker') && args[0] === 'rm') return '';
       if (command === 'syft') {
         const output = args[args.indexOf('-o') + 1].slice('cyclonedx-json='.length);
         await fs.writeFile(output, JSON.stringify({
@@ -215,12 +234,28 @@ test('successful build inspects the content-addressed image and publishes bound 
   assert.equal(result.published, false);
   assert.equal(result.payloadVerification.serveSha256, f.sidecarStamp.serveSha256);
   assert.equal(result.payloadVerification.mcpProxySha256, f.sidecarStamp.mcpProxySha256);
+  assert.equal(result.bootVerification.imageId, imageId);
+  assert.equal(result.bootVerification.database.vectorReady, true);
+  assert.equal(result.bootVerification.ready.body.dbos, true);
   assert.deepEqual(JSON.parse(await fs.readFile(result.receiptPath, 'utf8')).imageId, imageId);
   assert.equal(runner.calls.filter(c => c.command === 'docker' && c.args[0] === 'build').length, 1);
   assert.ok(runner.calls.some(c => c.command === 'docker' && c.args.includes(imageId)));
   assert.ok(runner.calls.findIndex(c => c.command === 'docker' && c.args[0] === 'run') <
     runner.calls.findIndex(c => c.command === 'syft'));
   assert.equal((await fs.readdir(f.options.out)).some(name => name.startsWith('.server-container-build-')), false);
+});
+
+test('a liveness response cannot qualify an unready Server, missing DBOS, missing database or different source', async t => {
+  const { verifyServerContainerBoot } = await lib;
+  for (const mode of ['unreadyServer', 'noDbos', 'noVector', 'noSchema', 'wrongBootSource', 'exitedServer']) {
+    await t.test(mode, async () => {
+      const runner = await fakeRunner({ [mode]: true });
+      await assert.rejects(verifyServerContainerBoot({ engine: 'docker', platform: 'linux/amd64',
+        imageId, sourceCommit: 'a'.repeat(40), nodeVersion: '24.18.1', bootTimeoutMs: 1 }, runner.run),
+      /did not establish full boot readiness|exited during boot/);
+      assert.equal(runner.calls.at(-1).args[0], 'rm', 'the isolated Server is always removed');
+    });
+  }
 });
 
 test('correct image labels cannot hide substituted packaged Server bytes or the wrong runtime', async t => {
