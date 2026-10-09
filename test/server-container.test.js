@@ -19,6 +19,8 @@ async function fixture(t, platform = 'linux/amd64') {
   const sidecar = path.join(root, 'sidecar');
   await fs.mkdir(resources);
   await fs.mkdir(sidecar);
+  await fs.mkdir(path.join(sidecar, 'db-sql'));
+  await fs.writeFile(path.join(sidecar, 'db-sql/000-fixture.sql'), '-- fixture migrations\n');
   const rootfs = path.join(resources, 'papercup-runtime.tar.gz');
   const content = 'rootfs archive fixture';
   await fs.writeFile(rootfs, content);
@@ -73,7 +75,12 @@ async function fakeRunner(options = {}) {
         const context = args.at(-1);
         imageContext = context;
         assert.equal(await fs.readFile(path.join(context, 'sidecar/serve.mjs'), 'utf8'), options.serveBytes ?? 'native server bytes');
-        assert.match(await fs.readFile(path.join(context, 'Containerfile'), 'utf8'), /ADD papercup-runtime\.tar\.gz/);
+        const recipe = await fs.readFile(path.join(context, 'Containerfile'), 'utf8');
+        assert.match(recipe, /ADD papercup-runtime\.tar\.gz/);
+        assert.match(recipe, /PAPERCUSP_PG_SQL_DIR=\/opt\/papercusp\/sidecar\/db-sql/);
+        assert.match(recipe, /PAPERCUSP_SIDECAR_DIR=\/opt\/papercusp\/sidecar/);
+        assert.match(recipe, /PAPERCUSP_BUILD_SHA=\$\{PAPERCUSP_BUILD_SHA\}/);
+        assert.equal(args[args.indexOf('--build-arg') + 1], 'PAPERCUSP_BUILD_SHA=' + labels['org.opencontainers.image.revision']);
         if (options.failBuild) throw new Error('engine build failure');
         await fs.writeFile(args[args.indexOf('--iidfile') + 1], id);
         return '';
@@ -138,6 +145,16 @@ test('preflight binds the exact native payload and WSL archive without writing o
   await fs.writeFile(path.join(f.sidecar, 'worker.mjs'), 'changed worker payload');
   const second = await preflightServerContainer(f.options);
   assert.notEqual(first.sidecarSha256, second.sidecarSha256, 'non-entry payload bytes are also bound');
+});
+
+test('missing or empty packaged SQL refuses before the engine can boot a schema-less Server', async t => {
+  const { preflightServerContainer } = await lib;
+  const f = await fixture(t);
+  await fs.rm(path.join(f.sidecar, 'db-sql/000-fixture.sql'));
+  await assert.rejects(preflightServerContainer(f.options), /lacks packaged SQL migrations/);
+  await fs.rm(path.join(f.sidecar, 'db-sql'), { recursive: true });
+  await assert.rejects(preflightServerContainer(f.options), /ENOENT/);
+  await assert.rejects(fs.stat(f.options.out), { code: 'ENOENT' });
 });
 
 test('tampered archives, stale recipes, and missing platform receipts refuse preflight', async t => {
