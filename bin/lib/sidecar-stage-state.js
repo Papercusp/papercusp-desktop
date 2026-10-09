@@ -30,8 +30,25 @@ function writeJson(file, value) {
   } finally { fs.rmSync(tmp, { force: true }); }
 }
 
+// The ARM64 builder under emulation fails Git getdelim when Git is forked
+// directly by Node (including through a shell). Python's subprocess launch
+// passes the same command in that builder. Python is already a producer
+// prerequisite; use its stdlib without changing argv, output bytes or verdict.
+const gitSubprocess = [
+  'import os, signal, subprocess, sys',
+  'status = subprocess.call(["git", *sys.argv[1:]])',
+  'if status < 0:',
+  '    signal.signal(-status, signal.SIG_DFL)',
+  '    os.kill(os.getpid(), -status)',
+  'sys.exit(status)',
+].join('\n');
+
+function gitArgs(root, args) {
+  return ['-c', gitSubprocess, '-C', root, ...args];
+}
+
 function git(root, args) {
-  return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).trim();
+  return execFileSync('python3', gitArgs(root, args), { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).trim();
 }
 
 // Failure evidence is generated output, not product source. An old frozen
@@ -48,7 +65,7 @@ function failureEvidenceRoot(finalDir, env = process.env) {
 
 function streamGitOutput(root, args, digest) {
   return new Promise((resolve, reject) => {
-    const child = spawn('git', ['-C', root, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('python3', gitArgs(root, args), { stdio: ['ignore', 'pipe', 'pipe'] });
     const stderr = [];
     let stderrBytes = 0;
     child.stdout.on('data', chunk => digest.update(chunk));

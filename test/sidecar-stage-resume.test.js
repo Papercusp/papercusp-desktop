@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { spawnSync, execFileSync } = require('node:child_process');
 const { makeDesktopTestScratchDirSync } = require('./test-scratch.cjs');
 const { captureIdentity, failureEvidenceRoot, inventory, recordFailure, sourceState, validateResume, writeJson } = require('../bin/lib/sidecar-stage-state.js');
@@ -27,6 +28,18 @@ function gitFixture(root) {
   git(['update-ref', 'HEAD', head]);
   git(['read-tree', 'HEAD']);
   return { root, head, git };
+}
+
+function directSourceState(root) {
+  const digest = crypto.createHash('sha256');
+  for (const args of [
+    ['diff', '--no-ext-diff', '--binary', '--submodule=diff', 'HEAD'],
+    ['status', '--porcelain=v1', '--untracked-files=normal'],
+  ]) {
+    digest.update(JSON.stringify(args));
+    digest.update(execFileSync('git', ['-C', root, ...args], { maxBuffer: 96 * 1024 * 1024 }));
+  }
+  return digest.digest('hex');
 }
 
 test('actual source capture detects same-HEAD source edits and binds both repositories', async () => {
@@ -71,6 +84,61 @@ test('source-state capture streams Git diff output larger than the child-process
 
     const state = await sourceState(root);
     assert.match(state, /^[a-f0-9]{64}$/);
+    assert.equal(state, directSourceState(root), 'Python launcher must preserve every streamed Git byte');
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('source-state preserves direct Git fingerprints for dirty nested and untracked source at the same HEAD', async () => {
+  const f = fixture();
+  try {
+    const source = gitFixture(path.join(f.root, 'source with spaces'));
+    const nested = gitFixture(path.join(f.root, 'nested'));
+    source.git(['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', nested.root, 'nested']);
+    source.git(['commit', '-qm', 'nested source']);
+    const head = source.git(['rev-parse', 'HEAD']);
+    const clean = await sourceState(source.root);
+    assert.equal(clean, directSourceState(source.root));
+    fs.writeFileSync(path.join(source.root, 'nested/package-lock.json'), '{"nestedChanged":true}\n');
+    const dirty = await sourceState(source.root);
+    assert.notEqual(dirty, clean);
+    assert.equal(dirty, directSourceState(source.root));
+    fs.writeFileSync(path.join(source.root, 'untracked source.txt'), 'new source\n');
+    const untracked = await sourceState(source.root);
+    assert.notEqual(untracked, dirty);
+    assert.equal(untracked, directSourceState(source.root));
+    assert.equal(source.git(['rev-parse', 'HEAD']), head);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('source-state fails on a real Git error instead of accepting a partial fingerprint', async () => {
+  const f = fixture();
+  try {
+    const direct = spawnSync('git', ['-C', f.root, 'diff', '--no-ext-diff', '--binary', '--submodule=diff', 'HEAD']);
+    assert.notEqual(direct.status, 0);
+    await assert.rejects(sourceState(f.root), new RegExp('git diff .* failed with ' + direct.status));
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('source-state preserves Git exit and signal failures and bounds stderr through Python', () => {
+  const f = fixture();
+  try {
+    const shimRoot = path.join(f.root, 'shim');
+    fs.mkdirSync(shimRoot);
+    const shim = path.join(shimRoot, 'git');
+    const helper = path.join(bin, 'lib/sidecar-stage-state.js');
+    const probe = 'require(process.argv[1]).sourceState(process.argv[2]).then(() => { process.exitCode = 99; }, error => { process.stdout.write(error.message); });';
+    for (const [script, expected] of [
+      ['printf partial; i=0; while [ "$i" -lt 10000 ]; do printf x >&2; i=$((i + 1)); done; exit 23', /failed with 23: x+$/],
+      ['kill -TERM $$', /failed with SIGTERM$/],
+    ]) {
+      fs.writeFileSync(shim, '#!/bin/sh\n' + script + '\n', { mode: 0o700 });
+      const result = spawnSync(process.execPath, ['-e', probe, helper, f.root], {
+        encoding: 'utf8', env: { ...process.env, PATH: shimRoot + path.delimiter + process.env.PATH },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, expected);
+      assert(result.stdout.length < 8400, 'diagnostics must retain at most 8192 stderr bytes');
+    }
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
