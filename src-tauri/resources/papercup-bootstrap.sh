@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Runtime architecture comes from the guest package database, rather than the
+# builder's CPU (which may execute this distro through QEMU).
+case "$(dpkg --print-architecture)" in
+  amd64) NODE_ARCH=x64; OVERMIND_ARCH=amd64 ;;
+  arm64) NODE_ARCH=arm64; OVERMIND_ARCH=arm64 ;;
+  *) echo "ERROR: unsupported runtime architecture; expected amd64 or arm64" >&2; exit 2 ;;
+esac
+
 # ── network preflight (EI-20574262390154687) ─────────────────────────────────
 #
 # This script CANNOT complete without internet: it apt-installs base packages
@@ -172,7 +180,7 @@ apt-get install -y --no-install-recommends \
 
 # overmind is not in the Ubuntu archive — fetch the release binary.
 OVERMIND_VERSION="${OVERMIND_VERSION:-2.5.1}"
-curl -fsSL "https://github.com/DarthSim/overmind/releases/download/v${OVERMIND_VERSION}/overmind-v${OVERMIND_VERSION}-linux-amd64.gz" \
+curl -fsSL "https://github.com/DarthSim/overmind/releases/download/v${OVERMIND_VERSION}/overmind-v${OVERMIND_VERSION}-linux-${OVERMIND_ARCH}.gz" \
   | gunzip > /usr/local/bin/overmind
 chmod +x /usr/local/bin/overmind
 overmind --version
@@ -205,7 +213,7 @@ if ! [[ "$NODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "ERROR: NODE_VERSION must be an exact Node release (for example 24.18.1); got '$NODE_VERSION'" >&2
   exit 2
 fi
-NODE_TARBALL="node-v${NODE_VERSION}-linux-x64.tar.xz"
+NODE_TARBALL="node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"
 install_node_runtime() (
   set -euo pipefail
   local prefix="$1" stage previous_npm=0

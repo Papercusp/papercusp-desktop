@@ -14,6 +14,8 @@ const voiceE2e = fs.readFileSync(
   'utf8',
 );
 const section = text => text.slice(text.indexOf('NODE_TARBALL='), text.indexOf('\n# pnpm'));
+const architecture = shipped.slice(shipped.indexOf('# Runtime architecture'), shipped.indexOf('# ── network preflight'));
+const overmind = shipped.slice(shipped.indexOf('# overmind is not'), shipped.indexOf('# kopia —'));
 const quote = s => `'${s.replaceAll("'", "'\\''")}'`;
 const run = (command, args, options = {}) => spawnSync(command, args, {
   encoding: 'utf8', timeout: 15000, ...options,
@@ -44,16 +46,52 @@ function fixture(t, { invalidNpm = false } = {}) {
   const packed = run('tar', ['-cJf', archive, '-C', dir, path.basename(upstream)]);
   assert.equal(packed.status, 0, packed.stderr);
   const fakebin = path.join(dir, 'tools');
-  write(fakebin, 'curl', '#!/bin/sh\nif [ "${CURL_FAIL:-0}" = 1 ]; then exit 22; fi\ncat "$NODE_FIXTURE_ARCHIVE"\n', 0o755);
+  write(fakebin, 'dpkg', '#!/bin/sh\nprintf "%s\\n" "${TEST_RUNTIME_ARCH:-amd64}"\n', 0o755);
+  write(fakebin, 'curl', '#!/bin/sh\nif [ "${CURL_FAIL:-0}" = 1 ]; then exit 22; fi\nprintf "%s\\n" "$2" >> "$RUNTIME_DOWNLOAD_LOG"\ncat "$NODE_FIXTURE_ARCHIVE"\n', 0o755);
   const script = path.join(dir, 'install.sh');
   const body = section(shipped);
   assert.ok(body.includes('install_node_runtime /usr/local'), 'exercise the production invocation');
-  fs.writeFileSync(script, 'set -euo pipefail\nNODE_VERSION=24.18.1\n' + body.replace('install_node_runtime /usr/local', 'install_node_runtime "$TEST_NODE_PREFIX"'));
-  const env = { ...process.env, PATH: `${fakebin}:${process.env.PATH}`, NODE_FIXTURE_ARCHIVE: archive, TEST_NODE_PREFIX: prefix };
+  fs.writeFileSync(script, 'set -euo pipefail\nNODE_VERSION=24.18.1\n' + architecture + body.replace('install_node_runtime /usr/local', 'install_node_runtime "$TEST_NODE_PREFIX"'));
+  const env = { ...process.env, PATH: `${fakebin}:${process.env.PATH}`, NODE_FIXTURE_ARCHIVE: archive, TEST_NODE_PREFIX: prefix,
+    RUNTIME_DOWNLOAD_LOG: path.join(dir, 'downloads') };
   return { dir, prefix, archive, npm, env, install: extra => run('bash', [script], { env: { ...env, ...extra } }),
     probe: () => run(process.execPath, [path.join(prefix, npm, 'bin/npm-cli.js')]),
     stageDirs: () => fs.readdirSync(prefix).filter(n => n.startsWith('.papercusp-node.')) };
 }
+
+for (const [guestArch, nodeArch] of [['amd64', 'x64'], ['arm64', 'arm64']]) {
+  test(`guest ${guestArch} selects matching Node and Overmind downloads`, t => {
+    const f = fixture(t);
+    const env = { ...f.env, TEST_RUNTIME_ARCH: guestArch };
+    const installed = f.install({ TEST_RUNTIME_ARCH: guestArch });
+    assert.equal(installed.status, 0, installed.stderr);
+    assert.equal(f.probe().status, 0);
+    const binary = path.join(f.dir, 'overmind');
+    const compressed = run('gzip', ['-c'], { input: '#!/bin/sh\necho overmind fixture\n', encoding: null });
+    assert.equal(compressed.status, 0, compressed.stderr);
+    const archive = path.join(f.dir, 'overmind.gz');
+    fs.writeFileSync(archive, compressed.stdout);
+    // Exercise the production URL and invocation with a local executable;
+    // the caller's host architecture never participates in artifact selection.
+    const result = run('bash', ['-c', 'set -euo pipefail\n' + architecture +
+      overmind.replaceAll('/usr/local/bin/overmind', quote(binary)).replace('\novermind --version', '\n' + quote(binary) + ' --version')],
+    { env: { ...env, NODE_FIXTURE_ARCHIVE: archive }, encoding: null });
+    assert.equal(result.status, 0, String(result.stderr));
+    assert.deepEqual(fs.readFileSync(env.RUNTIME_DOWNLOAD_LOG, 'utf8').trim().split('\n'), [
+      `https://nodejs.org/dist/v24.18.1/node-v24.18.1-linux-${nodeArch}.tar.xz`,
+      `https://github.com/DarthSim/overmind/releases/download/v2.5.1/overmind-v2.5.1-linux-${guestArch}.gz`,
+    ]);
+  });
+}
+
+test('unsupported guest architecture refuses before downloading or replacing Node', t => {
+  const f = fixture(t);
+  const result = f.install({ TEST_RUNTIME_ARCH: 'riscv64' });
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /unsupported runtime architecture/);
+  assert.equal(fs.existsSync(f.env.RUNTIME_DOWNLOAD_LOG), false);
+  assert.equal(fs.readFileSync(path.join(f.prefix, 'bin/node'), 'utf8'), 'original runtime');
+});
 
 test('rootfs producer fingerprints the complete shipped bootstrap, including network preflight', t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rootfs recipe '));
