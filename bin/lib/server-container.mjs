@@ -10,9 +10,12 @@ import { promisify } from 'node:util';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const execFileAsync = promisify(execFile);
+let execFileAsyncMemo;
+const execFileAsync = (...args) =>
+  Reflect.apply((execFileAsyncMemo ??= promisify(execFile)), undefined, args);
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const defaultContainerfile = resolve(desktopRoot, '../infra/images/server/Containerfile');
+const supplyChainScript = resolve(desktopRoot, '../infra/images/bootc/release-supply-chain.sh');
 const SHA = /^[a-f0-9]{64}$/;
 const COMMIT = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
 const PLATFORMS = new Map([['linux/amd64', 62], ['linux/arm64', 183]]);
@@ -93,6 +96,26 @@ export async function runCommand(command, args, options = {}) {
   return result.stdout;
 }
 
+/** Observe the packaged bytes with the image's own runtime, without starting services. */
+export async function verifyServerContainerPayload(options, run = runCommand) {
+  if (!['docker', 'podman'].includes(options.engine) || !PLATFORMS.has(options.platform) ||
+      !/^sha256:[a-f0-9]{64}$/.test(options.imageId ?? '')) {
+    throw new Error('Payload verification requires an immutable image and supported platform');
+  }
+  const script = "const fs=require('node:fs'),crypto=require('node:crypto');" +
+    "const hash=name=>crypto.createHash('sha256').update(fs.readFileSync('/opt/papercusp/sidecar/'+name)).digest('hex');" +
+    "process.stdout.write(JSON.stringify({serveSha256:hash('serve.mjs'),mcpProxySha256:hash('mcp-proxy.mjs')," +
+    "nodeArch:process.arch,nodeVersion:process.version}));";
+  const observed = JSON.parse(await run(options.engine, ['run', '--rm', '--read-only', '--network', 'none',
+    '--platform', options.platform, '--entrypoint', '/usr/local/bin/node', options.imageId, '-e', script]));
+  const arch = options.platform === 'linux/amd64' ? 'x64' : 'arm64';
+  if (observed.serveSha256 !== options.serveSha256 || observed.mcpProxySha256 !== options.mcpProxySha256 ||
+      observed.nodeArch !== arch || observed.nodeVersion !== 'v' + options.nodeVersion) {
+    throw new Error('Packaged Server bytes or runtime differ from the native/rootfs build receipts');
+  }
+  return observed;
+}
+
 /** Read-only: no engine calls, output directories, or changes to the input artifacts. */
 export async function preflightServerContainer(options, run = runCommand) {
   const { platform, tag } = options;
@@ -129,12 +152,23 @@ export async function preflightServerContainer(options, run = runCommand) {
     }
   }
   const inventory = await sidecarInventory(sidecar, platform);
+  let provenance;
+  try { provenance = await jsonFile(join(sidecar, 'build-provenance.json')); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const audit = stamp.releaseIdentityAudit;
+  const nativeReleaseAuditPassed = audit?.schemaVersion === 1 && audit.passed === true &&
+    audit.scanner === 'audit-release-bundle.py --scan-dir';
+  const nativeSourceVerified = provenance?.gitDirty === false &&
+    /^[a-f0-9]{7,64}$/.test(provenance.gitHead ?? '') && sourceCommit.startsWith(provenance.gitHead);
   return {
     platform, tag, rootfs, sidecar, sourceCommit,
     rootfsSha256: rootfsStamp.rootfsSha256, recipeSha256: recipe,
-    serveSha256: stamp.serveSha256, sidecarSha256: inventory.sha256,
+    rootfsBaseImage: rootfsStamp.baseImage,
+    serveSha256: stamp.serveSha256, mcpProxySha256: stamp.mcpProxySha256,
+    nodeVersion: rootfsStamp.nodeVersion, sidecarSha256: inventory.sha256,
     inputBytes: inventory.bytes + (await lstat(rootfs)).size,
     payloadEntries: inventory.entries,
+    nativeReleaseAuditPassed, nativeSourceVerified,
   };
 }
 
@@ -170,6 +204,8 @@ export async function buildServerContainer(options, run = runCommand) {
       'com.papercusp.rootfs.sha256': input.rootfsSha256,
       'com.papercusp.sidecar.sha256': input.sidecarSha256,
       'com.papercusp.serve.sha256': input.serveSha256,
+      'com.papercusp.native.release-audit': input.nativeReleaseAuditPassed ? 'passed' : 'unverified',
+      'com.papercusp.native.source-verified': input.nativeSourceVerified ? 'true' : 'false',
     };
     const labelArgs = Object.entries(labels).flatMap(([key, value]) => ['--label', key + '=' + value]);
     const iidfile = join(stage, 'image-id');
@@ -182,6 +218,7 @@ export async function buildServerContainer(options, run = runCommand) {
         Object.entries(labels).some(([key, value]) => inspected.Config?.Labels?.[key] !== value)) {
       throw new Error('Built image does not match its platform and source labels');
     }
+    const payloadVerification = await verifyServerContainerPayload({ ...input, engine, imageId }, run);
     const sbomTmp = join(stage, 'sbom.cdx.json');
     await run(options.syft ?? 'syft', [imageId, '--from', engine, '-o', 'cyclonedx-json=' + sbomTmp]);
     const sbom = JSON.parse(await readFile(sbomTmp, 'utf8'));
@@ -195,6 +232,8 @@ export async function buildServerContainer(options, run = runCommand) {
     const receipt = {
       schemaVersion: 1, kind: 'papercusp-server-local-image', platform: input.platform,
       tag: input.tag, imageId, sourceCommit: input.sourceCommit, labels,
+      engine, rootfsBaseImage: input.rootfsBaseImage,
+      payloadVerification,
       rootfsRecipeSha256: input.recipeSha256, containerfileSha256: await hashFile(containerfile),
       sbomSha256: await hashFile(sbomTmp), sbomPackages: sbom.components.length,
       sbomPath, signed: false, published: false,
@@ -218,6 +257,163 @@ export async function buildServerContainer(options, run = runCommand) {
       return { ...existing, receiptPath };
     }
     return { ...receipt, receiptPath };
+  } finally {
+    await rm(stage, { recursive: true, force: true });
+  }
+}
+
+/** Publish verified platform generations through the existing BYOC OCI trust pipeline. */
+export async function publishServerContainers(options, run = runCommand) {
+  const engine = options.engine ?? 'docker';
+  if (!['docker', 'podman'].includes(engine)) throw new Error('Engine must be docker or podman');
+  const tag = options.tag;
+  if (typeof tag !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/.test(tag) ||
+      !tag.includes('/') || !tag.split('/').at(-1).includes(':')) {
+    throw new Error('Publication requires an explicit repository and release tag');
+  }
+  for (const key of ['key', 'out', 'amd64Receipt', 'arm64Receipt']) {
+    if (typeof options[key] !== 'string' || !options[key]) throw new Error('Missing publication input: ' + key);
+  }
+  const key = resolve(options.key);
+  const pubkey = resolve(options.pubkey ?? key.replace(/\.key$/, '.pub'));
+  if (pubkey === key) throw new Error('A separate verification public key is required');
+  await Promise.all([lstat(key), lstat(pubkey)]);
+  const members = [];
+  for (const arch of ['amd64', 'arm64']) {
+    const receiptPath = resolve(options[arch + 'Receipt']);
+    const receiptHash = await hashFile(receiptPath);
+    const receipt = await jsonFile(receiptPath);
+    if (receipt.kind !== 'papercusp-server-local-image' || receipt.schemaVersion !== 1 ||
+        receipt.platform !== 'linux/' + arch || receipt.engine !== engine ||
+        !/^sha256:[a-f0-9]{64}$/.test(receipt.imageId ?? '') ||
+        !COMMIT.test(receipt.sourceCommit ?? '') || !receipt.rootfsBaseImage ||
+        !SHA.test(receipt.sbomSha256 ?? '') ||
+        receipt.sbomSha256 !== await hashFile(join(dirname(receiptPath), 'sbom.cdx.json'))) {
+      throw new Error('Invalid or damaged ' + arch + ' build generation');
+    }
+    const labels = receipt.labels;
+    if (!labels || labels['org.opencontainers.image.revision'] !== receipt.sourceCommit ||
+        ['rootfs', 'sidecar', 'serve'].some(name => !SHA.test(labels['com.papercusp.' + name + '.sha256'] ?? ''))) {
+      throw new Error('Build generation lacks its native payload binding');
+    }
+    if (labels['com.papercusp.native.release-audit'] !== 'passed' ||
+        labels['com.papercusp.native.source-verified'] !== 'true') {
+      throw new Error('Publication requires an audited native release with verified clean source provenance');
+    }
+    const proof = receipt.payloadVerification;
+    if (!proof || !SHA.test(proof.mcpProxySha256 ?? '') ||
+        proof.serveSha256 !== labels['com.papercusp.serve.sha256'] ||
+        !/^v\d+\.\d+\.\d+$/.test(proof.nodeVersion ?? '')) {
+      throw new Error('Build generation lacks observed native/container payload parity');
+    }
+    const image = JSON.parse(await run(engine, ['image', 'inspect', '--format', '{{json .}}', receipt.imageId]));
+    if (image.Id !== receipt.imageId || image.Os + '/' + image.Architecture !== receipt.platform ||
+        Object.entries(labels).some(([name, value]) => image.Config?.Labels?.[name] !== value)) {
+      throw new Error('Local image no longer matches its build generation');
+    }
+    await verifyServerContainerPayload({ engine, imageId: receipt.imageId, platform: receipt.platform,
+      serveSha256: proof.serveSha256, mcpProxySha256: proof.mcpProxySha256,
+      nodeVersion: proof.nodeVersion.slice(1) }, run);
+    if (await hashFile(receiptPath) !== receiptHash) throw new Error('Local build receipt changed during preflight');
+    members.push({ arch, receipt, receiptPath, receiptHash });
+  }
+  if (members[0].receipt.sourceCommit !== members[1].receipt.sourceCommit) {
+    throw new Error('Platform generations are from different native Server builds');
+  }
+  const out = resolve(options.out);
+  if (members.some(member => within(out, member.receiptPath) || within(dirname(member.receiptPath), out))) {
+    throw new Error('Publication output must be separate from local build generations');
+  }
+  await mkdir(out, { recursive: true });
+  const stage = await mkdtemp(join(out, '.server-container-release-'));
+  const tls = options.insecureRegistry ? ['--tls-verify=false'] : [];
+  const registry = async (ref, raw = false) => {
+    const args = ['run', '--rm', '--network', 'host', '--entrypoint', 'skopeo',
+      process.env.SKOPEO_IMAGE ?? 'quay.io/centos-bootc/centos-bootc:stream9',
+      'inspect', ...tls, ...(raw ? ['--raw'] : ['--format', '{{.Digest}}']), 'docker://' + ref];
+    const data = await run(process.getuid?.() === 0 ? 'podman' : 'sudo',
+      process.getuid?.() === 0 ? args : ['-n', 'podman', ...args]);
+    if (raw) return JSON.parse(data);
+    const digest = data.trim();
+    if (!/^sha256:[a-f0-9]{64}$/.test(digest)) throw new Error('Registry returned an invalid manifest digest');
+    return digest;
+  };
+  const repository = tag.slice(0, tag.lastIndexOf(':'));
+  try {
+    for (const member of members) {
+      const memberTag = tag + '-' + member.arch + '-' + member.receipt.imageId.slice(7, 19);
+      await run(engine, ['tag', member.receipt.imageId, memberTag]);
+      await run(engine, ['push', ...(engine === 'podman' ? tls : []), memberTag]);
+      member.digest = await registry(memberTag);
+      member.reference = repository + '@' + member.digest;
+      const manifest = await registry(member.reference, true);
+      if (manifest.config?.digest !== member.receipt.imageId) {
+        throw new Error('Registry member does not contain the built native image');
+      }
+      const signingOut = join(stage, member.arch);
+      await run('bash', [supplyChainScript, '--image', member.reference,
+        '--key', key, '--pubkey', pubkey, '--out', signingOut,
+        '--source-commit', member.receipt.sourceCommit,
+        '--containerfile', 'infra/images/server/Containerfile',
+        '--build-type', 'https://papercusp.dev/server/container/v1',
+        '--builder-id', 'https://papercusp.dev/builders/server-container',
+        '--base-image', member.receipt.rootfsBaseImage,
+        ...(options.insecureRegistry ? ['--insecure-registry'] : [])]);
+      const signed = await jsonFile(join(signingOut, 'supply-chain-summary.json'));
+      const packageCount = Number(signed.sbomPackages);
+      if (signed.reference !== member.reference || signed.signed !== true ||
+          signed.provenanceAttested !== true || signed.sbomAttested !== true ||
+          signed.secretScan !== 'clean' || signed.verifiedFromRegistry !== true ||
+          !Number.isSafeInteger(packageCount) || packageCount < 50) {
+        throw new Error('Image signatures and SBOM were not verified from the registry');
+      }
+    }
+    const refs = members.map(member => member.reference);
+    if (engine === 'docker') {
+      await run(engine, ['manifest', 'create', ...(options.insecureRegistry ? ['--insecure'] : []), '--amend', tag, ...refs]);
+      await run(engine, ['manifest', 'push', ...(options.insecureRegistry ? ['--insecure'] : []), tag]);
+    } else {
+      const localIndex = 'papercusp-server-' + stage.split(sep).at(-1).replaceAll('.', '');
+      await run(engine, ['manifest', 'create', localIndex, ...refs]);
+      try {
+        await run(engine, ['manifest', 'push', '--all', ...tls, localIndex, 'docker://' + tag]);
+      } finally {
+        await run(engine, ['manifest', 'rm', localIndex]);
+      }
+    }
+    const digest = await registry(tag);
+    const reference = repository + '@' + digest;
+    const index = await registry(reference, true);
+    if (!Array.isArray(index.manifests) || index.manifests.length !== members.length ||
+        members.some(member => index.manifests.filter(descriptor =>
+          descriptor.platform?.os === 'linux' && descriptor.platform?.architecture === member.arch &&
+          descriptor.digest === member.digest).length !== 1)) {
+      throw new Error('Published manifest does not contain the exact signed amd64 and arm64 images');
+    }
+    const release = { schemaVersion: 1, kind: 'papercusp-server-published-index',
+      reference, digest, tag, sourceCommit: members[0].receipt.sourceCommit,
+      verifiedFromRegistry: true, memberSignaturesVerified: true,
+      platforms: members.map(member => ({ platform: member.receipt.platform, reference: member.reference,
+        imageId: member.receipt.imageId, labels: member.receipt.labels, sbomSha256: member.receipt.sbomSha256,
+        nativeReceiptSha256: member.receiptHash })) };
+    await writeFile(join(stage, 'release.json'), JSON.stringify(release, null, 2) + '\n');
+    const generation = join(out, 'papercusp-server-release-' + digest.slice(7));
+    try {
+      await rename(stage, generation);
+    } catch (error) {
+      if (!['EEXIST', 'ENOTEMPTY'].includes(error.code)) throw error;
+      const existing = await jsonFile(join(generation, 'release.json'));
+      if (JSON.stringify(existing) !== JSON.stringify(release)) {
+        throw new Error('Existing published generation has inconsistent evidence');
+      }
+      for (const member of members) {
+        const prior = await jsonFile(join(generation, member.arch, 'supply-chain-summary.json'));
+        if (prior.reference !== member.reference || prior.signed !== true || prior.verifiedFromRegistry !== true) {
+          throw new Error('Existing published generation has inconsistent signing evidence');
+        }
+      }
+    }
+    return { ...release, receiptPath: join(generation, 'release.json') };
   } finally {
     await rm(stage, { recursive: true, force: true });
   }

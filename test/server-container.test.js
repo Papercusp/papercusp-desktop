@@ -50,7 +50,9 @@ function nativeHeader(machine) {
 
 async function fakeRunner(options = {}) {
   const calls = [];
+  const id = options.imageId ?? imageId;
   let labels;
+  let imageContext;
   return {
     calls,
     run: async (command, args, config) => {
@@ -60,7 +62,7 @@ async function fakeRunner(options = {}) {
         assert.equal(result.status, 0, result.stderr);
         return result.stdout;
       }
-      if (command === 'docker' && args[0] === 'build') {
+      if (command === (options.engine ?? 'docker') && args[0] === 'build') {
         labels = {};
         args.forEach((arg, index) => {
           if (arg === '--label') {
@@ -69,15 +71,29 @@ async function fakeRunner(options = {}) {
           }
         });
         const context = args.at(-1);
-        assert.equal(await fs.readFile(path.join(context, 'sidecar/serve.mjs'), 'utf8'), 'native server bytes');
+        imageContext = context;
+        assert.equal(await fs.readFile(path.join(context, 'sidecar/serve.mjs'), 'utf8'), options.serveBytes ?? 'native server bytes');
         assert.match(await fs.readFile(path.join(context, 'Containerfile'), 'utf8'), /ADD papercup-runtime\.tar\.gz/);
         if (options.failBuild) throw new Error('engine build failure');
-        await fs.writeFile(args[args.indexOf('--iidfile') + 1], imageId);
+        await fs.writeFile(args[args.indexOf('--iidfile') + 1], id);
         return '';
       }
-      if (command === 'docker' && args[0] === 'image') {
-        return JSON.stringify({ Id: imageId, Os: 'linux', Architecture: options.wrongPlatform ? 'arm64' : 'amd64',
+      if (command === (options.engine ?? 'docker') && args[0] === 'image') {
+        return JSON.stringify({ Id: id, Os: 'linux', Architecture: options.wrongPlatform ? 'arm64' : (options.arch ?? 'amd64'),
           Config: { Labels: labels } });
+      }
+      if (command === (options.engine ?? 'docker') && args[0] === 'run') {
+        assert.ok(args.includes(id), 'probe the content-addressed image, never a tag');
+        assert.equal(args[args.indexOf('--network') + 1], 'none');
+        assert.ok(args.includes('--read-only'));
+        assert.equal(args[args.indexOf('--entrypoint') + 1], '/usr/local/bin/node');
+        if (options.wrongPayload) await fs.writeFile(path.join(imageContext, 'sidecar/serve.mjs'), 'substituted packed bytes');
+        const script = args.at(-1).replaceAll('/opt/papercusp/sidecar/', path.join(imageContext, 'sidecar') + '/');
+        const setup = "Object.defineProperty(process,'version',{value:'v24.18.1'});" +
+          "Object.defineProperty(process,'arch',{value:'" + (options.wrongRuntime ? 'ia32' : (options.arch === 'arm64' ? 'arm64' : 'x64')) + "'});";
+        const result = spawnSync(process.execPath, ['-e', setup + script], { encoding: 'utf8' });
+        assert.equal(result.status, 0, result.stderr);
+        return result.stdout;
       }
       if (command === 'syft') {
         const output = args[args.indexOf('-o') + 1].slice('cyclonedx-json='.length);
@@ -169,10 +185,27 @@ test('successful build inspects the content-addressed image and publishes bound 
   assert.equal(result.sbomPackages, 50);
   assert.equal(result.signed, false);
   assert.equal(result.published, false);
+  assert.equal(result.payloadVerification.serveSha256, f.sidecarStamp.serveSha256);
+  assert.equal(result.payloadVerification.mcpProxySha256, f.sidecarStamp.mcpProxySha256);
   assert.deepEqual(JSON.parse(await fs.readFile(result.receiptPath, 'utf8')).imageId, imageId);
   assert.equal(runner.calls.filter(c => c.command === 'docker' && c.args[0] === 'build').length, 1);
   assert.ok(runner.calls.some(c => c.command === 'docker' && c.args.includes(imageId)));
+  assert.ok(runner.calls.findIndex(c => c.command === 'docker' && c.args[0] === 'run') <
+    runner.calls.findIndex(c => c.command === 'syft'));
   assert.equal((await fs.readdir(f.options.out)).some(name => name.startsWith('.server-container-build-')), false);
+});
+
+test('correct image labels cannot hide substituted packaged Server bytes or the wrong runtime', async t => {
+  const { buildServerContainer } = await lib;
+  for (const mode of ['wrongPayload', 'wrongRuntime']) {
+    await t.test(mode, async sub => {
+      const f = await fixture(sub);
+      const runner = await fakeRunner({ [mode]: true });
+      await assert.rejects(buildServerContainer(f.options, runner.run), /Packaged Server bytes or runtime/);
+      assert.equal(runner.calls.some(call => call.command === 'syft'), false);
+      assert.deepEqual(await fs.readdir(f.options.out), []);
+    });
+  }
 });
 
 test('engine failure, wrong-platform images and uncovered SBOMs publish no success receipt', async t => {
@@ -205,4 +238,188 @@ test('build retries preserve an earlier atomic generation and reject damaged evi
   await assert.rejects(buildServerContainer(f.options, damagedRunner.run), /inconsistent evidence/);
   assert.equal(await fs.readFile(first.receiptPath, 'utf8'), prior);
   assert.equal((await fs.readdir(f.options.out)).filter(name => name.startsWith('.server-container-build-')).length, 0);
+});
+
+async function publicationFixture(t, overrides = {}) {
+  const { buildServerContainer } = await lib;
+  const amd64 = await fixture(t);
+  const arm64 = await fixture(t, 'linux/arm64');
+  for (const native of [amd64, arm64]) {
+    if (!overrides.unauditedNative) native.sidecarStamp.releaseIdentityAudit = {
+      schemaVersion: 1, passed: true, scanner: 'audit-release-bundle.py --scan-dir',
+    };
+    await fs.writeFile(path.join(native.sidecar, '.sidecar-build-stamp'), JSON.stringify(native.sidecarStamp));
+    await fs.writeFile(path.join(native.sidecar, 'build-provenance.json'), JSON.stringify({
+      gitHead: native.sidecarStamp.gitHead, gitDirty: Boolean(overrides.dirtyNativeSource),
+    }));
+  }
+  if (overrides.arm64ServeBytes) {
+    await fs.writeFile(path.join(arm64.sidecar, 'serve.mjs'), overrides.arm64ServeBytes);
+    arm64.sidecarStamp.serveSha256 = sha(overrides.arm64ServeBytes);
+    await fs.writeFile(path.join(arm64.sidecar, '.sidecar-build-stamp'), JSON.stringify(arm64.sidecarStamp));
+  }
+  const engine = overrides.engine ?? 'docker';
+  amd64.options.engine = arm64.options.engine = engine;
+  const amd64Runner = await fakeRunner({ engine });
+  const arm64Runner = await fakeRunner({ engine, arch: 'arm64', imageId: 'sha256:' + 'c'.repeat(64),
+    serveBytes: overrides.arm64ServeBytes });
+  const receipts = [await buildServerContainer(amd64.options, amd64Runner.run),
+    await buildServerContainer(arm64.options, arm64Runner.run)];
+  const key = path.join(amd64.root, 'release.key');
+  await fs.writeFile(key, 'fixture key');
+  await fs.writeFile(path.join(amd64.root, 'release.pub'), 'fixture verification key');
+  const options = { amd64Receipt: receipts[0].receiptPath, arm64Receipt: receipts[1].receiptPath,
+    key, engine, tag: 'registry.example.com:5000/papercusp/server:release', out: path.join(amd64.root, 'publication') };
+  const images = receipts.map(receipt => ({ Id: receipt.imageId, Os: 'linux', Architecture: receipt.platform.split('/')[1],
+    Config: { Labels: { ...receipt.labels } } }));
+  const digests = ['sha256:' + 'd'.repeat(64), 'sha256:' + 'e'.repeat(64)];
+  const indexDigest = 'sha256:' + 'f'.repeat(64);
+  const calls = [];
+  const run = async (command, args) => {
+    calls.push({ command, args });
+    if (command === engine && ['image', 'tag', 'push', 'manifest', 'run'].includes(args[0])) {
+      if (args[0] === 'image') {
+        return JSON.stringify(images.find(image => image.Id === args.at(-1)));
+      }
+      if (args[0] === 'run') {
+        const receipt = receipts.find(receipt => args.includes(receipt.imageId));
+        return JSON.stringify({ ...receipt.payloadVerification,
+          ...(overrides.changedImagePayload ? { mcpProxySha256: '9'.repeat(64) } : {}) });
+      }
+      return '';
+    }
+    if (command === 'sudo' || command === 'podman') {
+      const ref = args.at(-1).slice('docker://'.length);
+      const archIndex = ref.includes('-amd64-') || ref.endsWith(digests[0]) ? 0 :
+        ref.includes('-arm64-') || ref.endsWith(digests[1]) ? 1 : -1;
+      if (!args.includes('--raw')) return (archIndex < 0 ? indexDigest : digests[archIndex]) + '\n';
+      if (archIndex >= 0) return JSON.stringify({ config: { digest: overrides.wrongConfig ? indexDigest : receipts[archIndex].imageId } });
+      return JSON.stringify({ manifests: digests.map((digest, i) => ({
+        digest: overrides.wrongMember && i === 1 ? indexDigest : digest,
+        platform: { os: 'linux', architecture: i === 0 || overrides.missingArm64 ? 'amd64' : 'arm64' },
+      })) });
+    }
+    if (command === 'bash') {
+      assert.match(args[0], /infra\/images\/bootc\/release-supply-chain\.sh$/);
+      const signingOut = args[args.indexOf('--out') + 1];
+      const reference = args[args.indexOf('--image') + 1];
+      assert.match(reference, /@sha256:[a-f0-9]{64}$/);
+      assert.equal(args[args.indexOf('--source-commit') + 1], 'a'.repeat(40));
+      assert.equal(args[args.indexOf('--containerfile') + 1], 'infra/images/server/Containerfile');
+      assert.equal(args[args.indexOf('--base-image') + 1], 'ubuntu:24.04');
+      await fs.mkdir(signingOut, { recursive: true });
+      await fs.writeFile(path.join(signingOut, 'supply-chain-summary.json'), JSON.stringify({
+        reference, signed: true, provenanceAttested: true, sbomAttested: true, secretScan: 'clean',
+        verifiedFromRegistry: !overrides.unverifiedSignature, sbomPackages: overrides.invalidCoverage ? 'skipped' : '50',
+      }));
+      return '';
+    }
+    throw new Error('Unexpected publication command: ' + command);
+  };
+  return { options, receipts, images, calls, run };
+}
+
+test('publication verifies signed members and exact platforms from the registry before issuing a release receipt', async t => {
+  const { publishServerContainers } = await lib;
+  const f = await publicationFixture(t);
+  const result = await publishServerContainers(f.options, f.run);
+  assert.equal(result.memberSignaturesVerified, true);
+  assert.equal(result.verifiedFromRegistry, true);
+  assert.equal(result.platforms.length, 2);
+  assert.match(result.reference, /registry\.example\.com:5000\/papercusp\/server@sha256:/);
+  assert.deepEqual(result.platforms.map(p => p.imageId), f.receipts.map(r => r.imageId));
+  assert.equal(JSON.parse(await fs.readFile(result.receiptPath, 'utf8')).digest, result.digest);
+  const signedAt = f.calls.map((c, i) => c.command === 'bash' ? i : -1).filter(i => i >= 0);
+  const indexAt = f.calls.findIndex(c => c.command === 'docker' && c.args[0] === 'manifest');
+  assert.ok(signedAt.length === 2 && signedAt.every(i => i < indexAt));
+  assert.equal(f.calls.filter(c => c.command === 'docker' && c.args[0] === 'push').length, 2);
+  assert.equal((await fs.readdir(f.options.out)).some(name => name.startsWith('.server-container-release-')), false);
+  const retried = await publishServerContainers(f.options, f.run);
+  assert.equal(retried.receiptPath, result.receiptPath);
+  await fs.writeFile(result.receiptPath, '{}');
+  await assert.rejects(publishServerContainers(f.options, f.run), /inconsistent evidence/);
+});
+
+test('mixed builds and damaged local SBOMs refuse before any registry write', async t => {
+  const { publishServerContainers } = await lib;
+  for (const mutation of ['source', 'bundle', 'sbom']) {
+    await t.test(mutation, async sub => {
+      const f = await publicationFixture(sub);
+      if (mutation === 'sbom') await fs.appendFile(f.receipts[1].sbomPath, 'changed');
+      else {
+        if (mutation === 'source') {
+          f.receipts[1].sourceCommit = '9'.repeat(40);
+          f.receipts[1].labels['org.opencontainers.image.revision'] = f.receipts[1].sourceCommit;
+          f.images[1].Config.Labels['org.opencontainers.image.revision'] = f.receipts[1].sourceCommit;
+        } else f.receipts[1].labels['com.papercusp.serve.sha256'] = '9'.repeat(64);
+        await fs.writeFile(f.receipts[1].receiptPath, JSON.stringify(f.receipts[1]));
+      }
+      await assert.rejects(publishServerContainers(f.options, f.run),
+        mutation === 'bundle' ? /observed native\/container payload parity/ : /different native|damaged/);
+      assert.equal(f.calls.some(c => c.command === 'docker' && c.args[0] === 'push'), false);
+      await assert.rejects(fs.stat(f.options.out), { code: 'ENOENT' });
+    });
+  }
+});
+
+test('Podman publication assembles both immutable members and cleans its temporary index', async t => {
+  const { publishServerContainers } = await lib;
+  const f = await publicationFixture(t, { engine: 'podman' });
+  const result = await publishServerContainers(f.options, f.run);
+  assert.equal(result.platforms.length, 2);
+  assert.equal(f.calls.filter(c => c.command === 'podman' && c.args[0] === 'push').length, 2);
+  assert.ok(f.calls.some(c => c.command === 'podman' && c.args[0] === 'manifest' && c.args[1] === 'push' && c.args.includes('--all')));
+  assert.ok(f.calls.some(c => c.command === 'podman' && c.args[0] === 'manifest' && c.args[1] === 'rm'));
+});
+
+test('each architecture remains bound to its own native bundle from the common source release', async t => {
+  const { publishServerContainers } = await lib;
+  const f = await publicationFixture(t, { arm64ServeBytes: 'native arm64 Server bytes' });
+  const result = await publishServerContainers(f.options, f.run);
+  assert.equal(result.sourceCommit, f.receipts[0].sourceCommit);
+  assert.deepEqual(result.platforms.map(p => p.labels['com.papercusp.serve.sha256']),
+    f.receipts.map(r => r.labels['com.papercusp.serve.sha256']));
+  assert.notEqual(result.platforms[0].labels['com.papercusp.serve.sha256'], result.platforms[1].labels['com.papercusp.serve.sha256']);
+  for (const [i, platform] of result.platforms.entries()) {
+    assert.equal(platform.nativeReceiptSha256, sha(await fs.readFile(f.receipts[i].receiptPath)));
+  }
+});
+
+test('local development images remain buildable but cannot be published without audited clean native provenance', async t => {
+  const { publishServerContainers } = await lib;
+  for (const mode of ['unauditedNative', 'dirtyNativeSource']) {
+    await t.test(mode, async sub => {
+      const f = await publicationFixture(sub, { [mode]: true });
+      await assert.rejects(publishServerContainers(f.options, f.run), /audited native release/);
+      assert.equal(f.calls.length, 0);
+      await assert.rejects(fs.stat(f.options.out), { code: 'ENOENT' });
+    });
+  }
+});
+
+test('publication rechecks payload bytes and refuses old generations with no observed parity proof', async t => {
+  const { publishServerContainers } = await lib;
+  for (const mode of ['changedImagePayload', 'missingProof']) {
+    await t.test(mode, async sub => {
+      const f = await publicationFixture(sub, { [mode]: true });
+      if (mode === 'missingProof') {
+        delete f.receipts[0].payloadVerification;
+        await fs.writeFile(f.receipts[0].receiptPath, JSON.stringify(f.receipts[0]));
+      }
+      await assert.rejects(publishServerContainers(f.options, f.run), /observed native|Packaged Server/);
+      assert.equal(f.calls.some(c => c.command === 'docker' && c.args[0] === 'push'), false);
+      await assert.rejects(fs.stat(f.options.out), { code: 'ENOENT' });
+    });
+  }
+});
+
+test('substituted registry members, missing platforms and unverifiable signatures publish no release receipt', async t => {
+  const { publishServerContainers } = await lib;
+  for (const mode of ['wrongConfig', 'wrongMember', 'missingArm64', 'unverifiedSignature', 'invalidCoverage']) {
+    await t.test(mode, async sub => {
+      const f = await publicationFixture(sub, { [mode]: true });
+      await assert.rejects(publishServerContainers(f.options, f.run), /native image|exact signed|not verified/);
+      assert.deepEqual(await fs.readdir(f.options.out), []);
+    });
+  }
 });
