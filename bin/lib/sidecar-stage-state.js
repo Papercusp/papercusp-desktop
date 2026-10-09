@@ -182,7 +182,8 @@ function validateResume(stage, expected) {
   const prefix = expected.failedStageRoot
     ? path.join(expected.failedStageRoot, `${path.basename(expected.finalDir)}.failed-stage.`)
     : `${expected.finalDir}.failed-stage.`;
-  if (!absolute.startsWith(prefix) || !/^[0-9]+$/.test(absolute.slice(prefix.length))) {
+  // The producer adds one numeric suffix when a container reuses its PID.
+  if (!absolute.startsWith(prefix) || !/^[0-9]+(?:\.[0-9]+)?$/.test(absolute.slice(prefix.length))) {
     throw new Error('resume requires a retained failed-stage sibling of this output');
   }
   const receipt = JSON.parse(fs.readFileSync(`${absolute}.resume.json`, 'utf8'));

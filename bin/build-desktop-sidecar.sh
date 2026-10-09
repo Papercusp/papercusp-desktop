@@ -900,18 +900,27 @@ _sidecar_published=0
 _sidecar_success=0
 _sidecar_stage_identity="$SIDECAR_TMP_DIR.identity.json"
 __pc_finish_sidecar_build() {
-  local status="$1" failed_stage
+  local status="$1" failed_stage failed_stage_base failed_stage_suffix=0 retained_stage=0
   trap - EXIT
   set +e
   if [[ "$status" == "0" && "${_sidecar_success:-0}" != "1" ]]; then status=1; fi
   if [[ "$status" != "0" || "${_sidecar_success:-0}" != "1" ]]; then
     echo "ERROR: sidecar producer stopped near source line ${2:-unknown} (phase=${_sidecar_stage_phase:-assembling}, exit=$status)" >&2
-    failed_stage="${SIDECAR_FAILED_STAGE_ROOT:-$(dirname "$SIDECAR_FINAL_DIR")}/$(basename "$SIDECAR_FINAL_DIR").failed-stage.$$"
+    failed_stage_base="${SIDECAR_FAILED_STAGE_ROOT:-$(dirname "$SIDECAR_FINAL_DIR")}/$(basename "$SIDECAR_FINAL_DIR").failed-stage.$$"
+    failed_stage="$failed_stage_base"
+    # Containers reuse PID 1. The output build lock serializes this bank;
+    # preserve every earlier directory/receipt and select the next free name.
+    while [[ -e "$failed_stage" || -L "$failed_stage" \
+          || -e "$failed_stage.resume.json" || -L "$failed_stage.resume.json" ]]; do
+      failed_stage_suffix=$((failed_stage_suffix + 1))
+      failed_stage="$failed_stage_base.$failed_stage_suffix"
+    done
     if [[ "${_sidecar_published:-0}" == "1" && -d "$SIDECAR_FINAL_DIR" ]]; then
       mv "$SIDECAR_FINAL_DIR" "$SIDECAR_TMP_DIR"
     fi
     if [[ -d "$SIDECAR_TMP_DIR" ]]; then
       if [[ ! -e "$failed_stage" ]] && mv "$SIDECAR_TMP_DIR" "$failed_stage"; then
+        retained_stage=1
         echo "FATAL: unaccepted sidecar stage retained at $failed_stage (phase=${_sidecar_stage_phase:-assembling}, exit=$status)" >&2
       else
         echo "ERROR: could not relocate failed stage; preserved at $SIDECAR_TMP_DIR" >&2
@@ -931,7 +940,7 @@ __pc_finish_sidecar_build() {
     # Restore readers before the potentially large failed-byte inventory.
     # The build lock still owns this output's producer/evidence transaction.
     __pc_release_sidecar_publish_lock
-    if [[ -d "$failed_stage" && -f "${_sidecar_stage_identity:-}" ]]; then
+    if [[ "$retained_stage" == "1" && -d "$failed_stage" && -f "${_sidecar_stage_identity:-}" ]]; then
       node "$HERE/lib/sidecar-stage-state.js" retain "$failed_stage" \
         "$_sidecar_stage_identity" "${_sidecar_stage_phase:-assembling}" "$status" \
         || echo "ERROR: failed bytes retained but resume receipt unavailable" >&2

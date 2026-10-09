@@ -205,6 +205,48 @@ test('external failure retention leaves a frozen target with no new gitignore cl
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test('reused container PID preserves earlier bytes and receipt; failed relocation writes no receipt', () => {
+  for (const failMove of [false, true]) {
+    const f = fixture();
+    try {
+      const failedRoot = path.join(f.root, 'failure-bank');
+      fs.mkdirSync(failedRoot);
+      f.identity = { ...f.identity, failedStageRoot: failedRoot };
+      const tmp = `${f.finalDir}.tmp.current`;
+      fs.renameSync(f.stage, tmp);
+      const identityFile = path.join(f.root, 'current-identity.json');
+      writeJson(identityFile, f.identity);
+      const result = spawnSync('bash', ['-c', [
+        'set -euo pipefail', finish,
+        'SIDECAR_FINAL_DIR="$1"; SIDECAR_TMP_DIR="$2"; SIDECAR_FAILED_STAGE_ROOT="$3"; HERE="$4"',
+        '_sidecar_stage_identity="$5"; _sidecar_stage_phase=assembled',
+        'prior="$SIDECAR_FAILED_STAGE_ROOT/sidecar.failed-stage.$$"',
+        'mkdir "$prior"; printf previous > "$prior/serve.mjs"',
+        'printf previous-receipt > "$prior.resume.json"',
+        '__pc_release_sidecar_publish_lock() { :; }',
+        ...(failMove ? ['mv() { return 1; }'] : []),
+        trap, 'exit 1',
+      ].join('\n'), 'test', f.finalDir, tmp, failedRoot, bin, identityFile], { encoding: 'utf8' });
+      assert.equal(result.status, 1, result.stderr);
+      const names = fs.readdirSync(failedRoot);
+      const prior = names.find(name => /^sidecar\.failed-stage\.\d+$/.test(name));
+      assert.ok(prior, result.stderr);
+      assert.equal(fs.readFileSync(path.join(failedRoot, prior, 'serve.mjs'), 'utf8'), 'previous');
+      assert.equal(fs.readFileSync(path.join(failedRoot, `${prior}.resume.json`), 'utf8'), 'previous-receipt');
+      if (failMove) {
+        assert.match(result.stderr, /could not relocate failed stage/);
+        assert.equal(names.length, 2, 'failed relocation must not write a receipt for existing bytes');
+        assert.ok(fs.existsSync(tmp), 'unmoved current bytes remain available');
+      } else {
+        const retained = path.join(failedRoot, `${prior}.1`);
+        assert.match(result.stderr, /unaccepted sidecar stage retained/);
+        assert.equal(validateResume(retained, f.identity).accepted, false);
+        assert.equal(fs.existsSync(tmp), false);
+      }
+    } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+  }
+});
+
 test('stage identity refuses failure evidence placed inside immutable product source', async () => {
   const f = fixture();
   try {
