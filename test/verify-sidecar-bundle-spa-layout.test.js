@@ -197,7 +197,8 @@ test('native addon linkage refuses an external library search path', () => {
   assert.match(result.stdout, /fixture\.node needs libatomic\.so\.1/);
 });
 
-test('producer vendors an addon library that loads after relocation without the factory library path', { skip: process.platform !== 'linux' }, () => {
+for (const suffix of ['.node', '.bare', '']) {
+test(`producer vendors ${suffix || 'extensionless'} ELF library that loads after relocation without the factory library path`, { skip: process.platform !== 'linux' }, () => {
   const builder = fs.readFileSync(path.resolve(__dirname, '../bin/build-desktop-sidecar.sh'), 'utf8');
   const bundleLibraries = extractFunction('bundle_linux_addon_libraries', builder);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-addon-vendor-'));
@@ -210,7 +211,7 @@ test('producer vendors an addon library that loads after relocation without the 
     const librarySource = path.join(factory, 'atomic.c');
     const addonSource = path.join(factory, 'addon.c');
     const library = path.join(factory, 'libatomic.so.1');
-    const addon = path.join(addonDir, 'fixture.node');
+    const addon = path.join(addonDir, 'fixture' + suffix);
     fs.writeFileSync(librarySource, 'int atomic_fixture(void) { return 73; }\n');
     fs.writeFileSync(addonSource, 'extern int atomic_fixture(void); int addon_value(void) { return atomic_fixture(); }\n');
     for (const args of [
@@ -223,7 +224,7 @@ test('producer vendors an addon library that loads after relocation without the 
     const result = spawnSync('bash', ['-c', 'set -euo pipefail\n' + bundleLibraries +
       '\nbundle_linux_addon_libraries "$1"', 'vendor', side], {
       encoding: 'utf8', env: { ...process.env, TARGET_OS: 'linux',
-        TARGET_ARCH: process.arch, LD_LIBRARY_PATH: factory },
+        TARGET_ARCH: process.arch, HERE: path.resolve(__dirname, '../bin'), LD_LIBRARY_PATH: factory },
     });
     assert.equal(result.status, 0, result.stdout + result.stderr);
     const moved = path.join(dir, 'relocated');
@@ -240,6 +241,53 @@ test('producer vendors an addon library that loads after relocation without the 
     fs.rmSync(path.join(moved, 'bin/.pg-real/lib/libatomic.so.1'));
     assert.notEqual(probe().status, 0, 'negative control must require the packaged library');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+}
+
+test('producer relocates PGXS consumers to the bundled libpq and preserves their executable behavior', { skip: process.platform !== 'linux' }, () => {
+  const builder = fs.readFileSync(path.resolve(__dirname, '../bin/build-desktop-sidecar.sh'), 'utf8');
+  const bundleLibraries = extractFunction('bundle_linux_addon_libraries', builder);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-pgxs-relocation-'));
+  try {
+    const side = path.join(dir, 'sidecar with spaces');
+    const native = path.join(side, 'node_modules/@papercusp/embedded-postgres-server/node_modules/@embedded-postgres/linux-' + process.arch, 'native');
+    const libraryDir = path.join(native, 'lib');
+    const toolDir = path.join(libraryDir, 'postgresql/pgxs/src/test/regress');
+    fs.mkdirSync(toolDir, {recursive: true});
+    const librarySource = path.join(dir, 'pq.c');
+    const toolSource = path.join(dir, 'regress.c');
+    const library = path.join(libraryDir, 'libpq.so.5');
+    const tool = path.join(toolDir, 'pg_regress');
+    fs.writeFileSync(librarySource, 'int fixture_pg_value(void) { return 47; }\n');
+    fs.writeFileSync(toolSource, '#include <stdio.h>\nextern int fixture_pg_value(void); int main(void) { printf("%d\\n", fixture_pg_value()); return 0; }\n');
+    for (const args of [
+      ['-shared', '-fPIC', '-Wl,-soname,libpq.so.5', librarySource, '-o', library],
+      [toolSource, '-L' + libraryDir, '-l:libpq.so.5', '-Wl,-rpath,/usr/local/pg-build/lib', '-o', tool],
+    ]) {
+      const result = spawnSync('cc', args, {encoding: 'utf8'});
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+    }
+    const env = {...process.env}; delete env.LD_LIBRARY_PATH;
+    assert.notEqual(spawnSync(tool, [], {encoding: 'utf8', env}).status, 0,
+      'the original build-host RUNPATH must fail without its compiler prefix');
+    const result = spawnSync('bash', ['-c', 'set -euo pipefail\n' + bundleLibraries +
+      '\nbundle_linux_addon_libraries "$1"', 'vendor', side], {
+      encoding: 'utf8', env: {...env, TARGET_OS: 'linux', TARGET_ARCH: process.arch,
+        HERE: path.resolve(__dirname, '../bin')},
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const moved = path.join(dir, 'relocated'); fs.renameSync(side, moved);
+    const movedTool = path.join(moved, path.relative(side, tool));
+    const probe = () => spawnSync(movedTool, [], {encoding: 'utf8', env});
+    const loaded = probe();
+    assert.equal(loaded.status, 0, loaded.stdout + loaded.stderr);
+    assert.equal(loaded.stdout.trim(), '47');
+    const runpath = spawnSync('patchelf', ['--print-rpath', movedTool], {encoding: 'utf8'});
+    assert.match(runpath.stdout, /\$ORIGIN/);
+    assert.ok(!runpath.stdout.includes('/usr/local/pg-build'));
+    fs.rmSync(path.join(moved, path.relative(side, library)));
+    assert.notEqual(probe().status, 0, 'negative control must require the packaged libpq');
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 });
 
 test('native addon assembly refuses missing inspection and relocation tools', { skip: process.platform !== 'linux' }, () => {

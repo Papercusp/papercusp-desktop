@@ -5452,36 +5452,96 @@ fi # assembly-only work; retained stages always rerun qualification below
 # libatomic is a compiler runtime, not an Ubuntu-minimal dependency. Reuse the
 # private Linux library directory and encode a relocatable addon loader path.
 bundle_linux_addon_libraries() {
-  local root="$1" addon source machine relative existing tool dynamic
+  local root="$1" addon source machine relative existing tool dynamic need dir paths part inventory
   [[ "$TARGET_OS" == "linux" ]] || return 0
   for tool in objdump ldd file patchelf; do
     command -v "$tool" >/dev/null 2>&1 || {
       echo "ERROR: native addon library bundling requires $tool" >&2; return 1;
     }
   done
+  # Use the same complete target census as the verifier. Bare addons and PGXS
+  # tools are ELF consumers too; a filename filter left their already-bundled
+  # libraries unreachable after relocation (EI-25528824429649441).
+  inventory="$(mktemp "${TMPDIR:-/tmp}/sidecar-library-elf.XXXXXX")" || return 1
+  # Header inspection loads no payload code. Keep its Node process independent
+  # of a donor's library search path; ldd below still resolves with that path.
+  if ! LD_LIBRARY_PATH="" node --input-type=module - "$HERE/lib/server-container.mjs" "$root" "$TARGET_ARCH" > "$inventory" <<'NODE'
+import { pathToFileURL } from 'node:url';
+const [helper, root, arch] = process.argv.slice(2);
+const platform = ['x64', 'x86_64', 'amd64'].includes(arch) ? 'linux/amd64'
+  : ['arm64', 'aarch64'].includes(arch) ? 'linux/arm64' : `linux/${arch}`;
+const { sidecarInventory } = await import(pathToFileURL(helper));
+const { elfFiles } = await sidecarInventory(root, platform, { hashContents: false });
+for (const file of elfFiles) process.stdout.write(file + '\0');
+NODE
+  then
+    rm -f "$inventory"
+    return 1
+  fi
+  local library_dirs=("$root/bin/.pg-real/lib")
+  for dir in "$root"/node_modules/@papercusp/embedded-postgres-server/node_modules/@embedded-postgres/*/native/lib; do
+    [[ -d "$dir" ]] && library_dirs+=("$dir")
+  done
   while IFS= read -r -d '' addon; do
     dynamic="$(objdump -p "$addon" 2>/dev/null)" || {
       echo "ERROR: cannot inspect native addon ELF dependencies: $addon" >&2; return 1;
     }
-    printf '%s\n' "$dynamic" | awk '$1 == "NEEDED" { print $2 }' | grep -Fx libatomic.so.1 >/dev/null || continue
-    source="$(ldd "$addon" 2>/dev/null | awk '$1 == "libatomic.so.1" && $2 == "=>" && $3 ~ /^\// { print $3; exit }')"
-    [[ -f "$source" ]] || {
-      echo "ERROR: cannot resolve target libatomic.so.1 for $addon" >&2; return 1;
-    }
-    case "$TARGET_ARCH" in
-      arm64|aarch64) machine='ARM aarch64' ;;
-      x64|x86_64|amd64) machine='x86-64' ;;
-      *) echo "ERROR: unsupported native addon architecture: $TARGET_ARCH" >&2; return 1 ;;
-    esac
-    [[ "$(file -b -L "$source")" == *"$machine"* ]] || {
-      echo "ERROR: libatomic.so.1 architecture differs from $TARGET_ARCH" >&2; return 1;
-    }
-    mkdir -p "$root/bin/.pg-real/lib" || return 1
-    cp -L "$source" "$root/bin/.pg-real/lib/libatomic.so.1" || return 1
-    relative="$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], os.path.dirname(sys.argv[2])))' "$root/bin/.pg-real/lib" "$addon")" || return 1
+    if printf '%s\n' "$dynamic" | awk '$1 == "NEEDED" { print $2 }' | grep -Fx libatomic.so.1 >/dev/null \
+       && [[ ! -f "$root/bin/.pg-real/lib/libatomic.so.1" ]]; then
+      source="$(ldd "$addon" 2>/dev/null | awk '$1 == "libatomic.so.1" && $2 == "=>" && $3 ~ /^\// { print $3; exit }')"
+      [[ -f "$source" ]] || {
+        echo "ERROR: cannot resolve target libatomic.so.1 for $addon" >&2; return 1;
+      }
+      case "$TARGET_ARCH" in
+        arm64|aarch64) machine='ARM aarch64' ;;
+        x64|x86_64|amd64) machine='x86-64' ;;
+        *) echo "ERROR: unsupported native addon architecture: $TARGET_ARCH" >&2; return 1 ;;
+      esac
+      [[ "$(file -b -L "$source")" == *"$machine"* ]] || {
+        echo "ERROR: libatomic.so.1 architecture differs from $TARGET_ARCH" >&2; return 1;
+      }
+      mkdir -p "$root/bin/.pg-real/lib" || return 1
+      cp -L "$source" "$root/bin/.pg-real/lib/libatomic.so.1" || return 1
+    fi
+    paths=""
+    # Add only directories that contain an actual DT_NEEDED library. Preserve
+    # package-local libraries and relocate the existing shared bundle dirs;
+    # do not copy arbitrary compiler libraries or expand the baseline allowlist.
+    for need in $(printf '%s\n' "$dynamic" | awk '$1 == "NEEDED" { print $2 }'); do
+      for dir in "$(dirname "$addon")" "${library_dirs[@]}"; do
+        [[ -f "$dir/$need" ]] || continue
+        relative="$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], os.path.dirname(sys.argv[2])))' "$dir" "$addon")" || return 1
+        part="\$ORIGIN/$relative"
+        case ":$paths:" in *":$part:"*) ;; *) paths="${paths:+$paths:}$part" ;; esac
+        break
+      done
+    done
+    [[ -n "$paths" ]] || continue
     existing="$(patchelf --print-rpath "$addon")" || return 1
-    patchelf --set-rpath "\$ORIGIN/$relative${existing:+:$existing}" "$addon" || return 1
-  done < <(find "$root/node_modules" -type f -name '*.node' -print0)
+    # Keep contained relocatable search paths; build-host absolute paths must
+    # not survive as fallbacks. Existing paths that resolve inside this stage
+    # are rewritten relative to the consumer as well.
+    existing="$(python3 - "$root" "$addon" "$existing" <<'PY'
+import os, sys
+root, addon, runpath = sys.argv[1:]
+root = os.path.realpath(root)
+origin = os.path.dirname(os.path.realpath(addon))
+paths = []
+for part in runpath.split(':'):
+    if not part:
+        continue
+    resolved = part.replace('${ORIGIN}', origin).replace('$ORIGIN', origin)
+    if not os.path.isabs(resolved) or '$' in resolved:
+        continue
+    resolved = os.path.realpath(resolved)
+    if os.path.commonpath([root, resolved]) == root:
+        paths.append('$ORIGIN/' + os.path.relpath(resolved, origin))
+print(':'.join(dict.fromkeys(paths)))
+PY
+)" || return 1
+    patchelf --set-rpath "$paths${existing:+:$existing}" "$addon" || return 1
+  done < "$inventory"
+  rm -f "$inventory"
 }
 bundle_linux_addon_libraries "$SIDECAR_TMP_DIR" || exit 1
 
