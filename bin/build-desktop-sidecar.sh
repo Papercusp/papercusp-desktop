@@ -1154,6 +1154,26 @@ done
   "${_runtime_workspace_install_args[@]}")
 unset _runtime_workspace_install_args _runtime_workspace
 
+# >>> Playwright runtime preflight (EI-25537398622311917)
+# Scoped installs need not contain Chromium BiDi. Validate the package-preserving
+# build boundary and the actual installed loader before spending time on Vite.
+source "$WEB_DIR/bin/bundle-host-common.sh"
+case " ${NATIVE_PKGS[*]} " in
+  *" playwright-core "*) ;;
+  *) echo "ERROR: Playwright must use the external package-copy boundary (optional BiDi and package-relative assets)" >&2; exit 1 ;;
+esac
+node --input-type=module - "$REPO_ROOT" <<'PLAYWRIGHT_RUNTIME_PREFLIGHT'
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+const require = createRequire(join(process.argv[2], 'apps/operator/package.json'));
+const { chromium, devices } = require('playwright-core');
+if (chromium.name() !== 'chromium' || !chromium.executablePath() || !devices['Desktop Chrome']?.userAgent) {
+  throw new Error('Playwright runtime loader or package assets are incomplete');
+}
+console.log('PLAYWRIGHT_RUNTIME_PREFLIGHT_OK: package loader and browser descriptors available');
+PLAYWRIGHT_RUNTIME_PREFLIGHT
+# <<< Playwright runtime preflight
+
 # EI-25480137688733154: a successful npm install is insufficient when its
 # lock omits this host architecture. Hydrate and load the exact native toolchain
 # before workspace compilation and SPA/sidecar assembly, including frozen cuts.
