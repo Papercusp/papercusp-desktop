@@ -639,9 +639,12 @@ function qualifyResume(f, failGate = '') {
   for (const model of ['harrier-oss-v1-0.6b-ONNX', 'embeddinggemma-300m-ONNX']) {
     fs.mkdirSync(path.join(f.stage, 'node_modules/@huggingface/transformers/models/onnx-community', model), { recursive: true });
   }
-  fs.writeFileSync(path.join(f.stage, 'node_modules/qualification-order.node'), Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  const qualificationElf = Buffer.alloc(20);
+  qualificationElf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1]);
+  qualificationElf.writeUInt16LE(62, 18);
+  fs.writeFileSync(path.join(f.stage, 'node_modules/qualification-order.node'), qualificationElf);
   fs.writeFileSync(path.join(shim, 'objdump'), '#!/usr/bin/env bash\necho addon-libraries >> "$GATE_LOG"\necho "NEEDED libc.so.6"\n', { mode: 0o755 });
-  for (const file of ['sidecar-stage-state.js', 'portable-sha256.sh', 'stamp-git-head.sh']) fs.copyFileSync(path.join(bin, 'lib', file), path.join(here, 'lib', file));
+  for (const file of ['sidecar-stage-state.js', 'portable-sha256.sh', 'stamp-git-head.sh', 'server-container.mjs']) fs.copyFileSync(path.join(bin, 'lib', file), path.join(here, 'lib', file));
   fs.writeFileSync(path.join(here, 'audit-release-bundle.py'), '# fixture gate\n');
   fs.writeFileSync(path.join(shim, 'python3'), '#!/usr/bin/env bash\nprintf "%s\\n" "$2" >> "$GATE_LOG"\n[[ "$2" != "$FAIL_GATE" ]]\n', { mode: 0o755 });
   fs.writeFileSync(path.join(shim, 'grype'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
