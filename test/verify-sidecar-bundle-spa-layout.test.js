@@ -287,24 +287,31 @@ test('machine receipt independently binds the verifier and selected manifest wri
   try {
     const executable = path.join(dir, 'verifier.sh');
     const helper = path.join(dir, 'manifest writer.py');
+    const inventory = path.join(dir, 'inventory.mjs');
     const receipt = path.join(dir, 'result.json');
     fs.writeFileSync(executable, 'executable verifier fixture');
     fs.writeFileSync(helper, 'manifest helper fixture');
+    fs.writeFileSync(inventory, 'ELF inventory fixture');
     const verifierSha = hashFile(executable);
     const helperSha = hashFile(helper);
+    const inventorySha = hashFile(inventory);
     const run = (status, cross = '1') => {
       const result = spawnSync('bash', ['-c', `set -uo pipefail\n${WRITE_VERIFICATION_RECEIPT}\n` +
         'RECEIPT="$1"; _receipt_verifier="$2"; _receipt_verifier_sha="$3"\n' +
         '_pui_manifest_tool="$4"; _pui_manifest_tool_sha="$5"; SIDECAR=fixture\n' +
+        '_elf_inventory_tool="$8"; _elf_inventory_tool_sha="$9"\n' +
         'TARGET_OS_N=darwin; TARGET_ARCH_N=x64; CROSS="$7"\n' +
         '_receipt_command=(bash "$2" fixture); write_verification_receipt "$6"',
-        'receipt', receipt, executable, verifierSha, helper, helperSha, String(status), cross], { encoding: 'utf8' });
+        'receipt', receipt, executable, verifierSha, helper, helperSha, String(status), cross,
+        inventory, inventorySha], { encoding: 'utf8' });
       return { result, body: JSON.parse(fs.readFileSync(receipt)) };
     };
     const passing = run(0);
     assert.equal(passing.result.status, 0, passing.result.stderr);
     assert.equal(passing.body.verifier.sha256, verifierSha);
     assert.equal(passing.body.helpers[0].sha256, helperSha);
+    assert.equal(passing.body.helpers[1].role, 'elf-inventory');
+    assert.equal(passing.body.helpers[1].sha256, inventorySha);
     assert.notEqual(passing.body.verifier.sha256, passing.body.helpers[0].sha256);
     assert.equal(passing.body.qualification, 'static-cross');
     assert.equal(passing.body.onTargetNativeLoadVerified, false);
@@ -313,6 +320,12 @@ test('machine receipt independently binds the verifier and selected manifest wri
     assert.equal(refused.body.exitCode, 1);
     assert.equal(refused.body.verdict, 'fail');
     assert.equal(refused.body.onTargetNativeLoadVerified, false);
+    fs.appendFileSync(inventory, ' changed');
+    const changedInventory = run(0);
+    assert.equal(changedInventory.result.status, 1);
+    assert.equal(changedInventory.body.sourceHashesStable, false);
+    assert.equal(changedInventory.body.verdict, 'fail');
+    fs.writeFileSync(inventory, 'ELF inventory fixture');
     fs.appendFileSync(helper, ' changed');
     const changedHelper = run(0);
     assert.equal(changedHelper.result.status, 1);
