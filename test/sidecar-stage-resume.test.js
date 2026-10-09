@@ -130,6 +130,8 @@ test('source-state preserves Git exit and signal failures and bounds stderr thro
     for (const [script, expected] of [
       ['printf partial; i=0; while [ "$i" -lt 10000 ]; do printf x >&2; i=$((i + 1)); done; exit 23', /failed with 23: x+$/],
       ['kill -TERM $$', /failed with SIGTERM$/],
+      ['kill -KILL $$', /failed with SIGKILL$/],
+      ['kill -PIPE $$', /failed with SIGPIPE$/],
     ]) {
       fs.writeFileSync(shim, '#!/bin/sh\n' + script + '\n', { mode: 0o700 });
       const result = spawnSync(process.execPath, ['-e', probe, helper, f.root], {

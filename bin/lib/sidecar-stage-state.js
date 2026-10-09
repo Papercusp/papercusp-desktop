@@ -38,7 +38,8 @@ const gitSubprocess = [
   'import os, signal, subprocess, sys',
   'status = subprocess.call(["git", *sys.argv[1:]])',
   'if status < 0:',
-  '    signal.signal(-status, signal.SIG_DFL)',
+  '    if -status not in (signal.SIGKILL, signal.SIGSTOP):',
+  '        signal.signal(-status, signal.SIG_DFL)',
   '    os.kill(os.getpid(), -status)',
   'sys.exit(status)',
 ].join('\n');
