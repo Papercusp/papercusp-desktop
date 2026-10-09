@@ -1970,6 +1970,21 @@ assert_lock_exact_install() {
   console.log(`    ✓ ${label} runtime deps are lock-exact (${checked} installed packages match package-lock.json)`);
 NODE
 }
+# lost-pixel eagerly imports odiff-bin's JS wrapper, but our production provider
+# calls compareImagesViaPixelmatch directly. odiff 2.6.1's fat package carries
+# x64 Linux/Darwin executables even on ARM, including dormant platform-* trees.
+# Preserve the real JS package, version and requester topology; omit only this
+# unselected engine's installation/native payload. Never delete arbitrary foreign
+# ELF files: the complete target inventory must reject an unexpected runtime dep.
+prune_unused_odiff_payload() {
+  local pkg_dir="$1"
+  [[ "$(node -p 'require(process.argv[1]).name' "$pkg_dir/package.json")" == "odiff-bin" ]] || {
+    echo "ERROR: refusing odiff payload prune for a different package: $pkg_dir" >&2
+    return 1
+  }
+  rm -rf "$pkg_dir/bin" "$pkg_dir/_export" "$pkg_dir"/platform-* || return 1
+  echo "  ✂ odiff-bin: omitted unused native engine; retained eager-import JS wrapper"
+}
 prune_foreign_prebuilds() {
   local pkg_dir="$1"
   [[ -d "$pkg_dir/prebuilds" && -n "$_bare_node_platform" && -n "$_bare_node_arch" ]] || return 0
@@ -2570,6 +2585,9 @@ copy_pkg_closure() {
     prune_foreign_prebuilds "$dest"
     prune_foreign_onnx_bins "$dest"
     prune_onnx_gpu_providers "$dest"
+    if [[ "$cur" == "odiff-bin" ]]; then
+      prune_unused_odiff_payload "$dest" || return 1
+    fi
 
     local deps
     deps=$(node -e 'try { const p=require(process.argv[1]); const optional=new Set(Object.keys(p.optionalDependencies||{})); const required=Object.keys(p.dependencies||{}).filter((name)=>!optional.has(name)); const opt=[...optional].map((name)=>`?${name}`); process.stdout.write([...required,...opt].join(" ")); } catch {}' "$src/package.json" 2>/dev/null)

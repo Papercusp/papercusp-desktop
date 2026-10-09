@@ -57,6 +57,7 @@ set -uo pipefail
 SIDECAR=""
 TARGET_OS_ARG=""; TARGET_ARCH_ARG=""
 RECEIPT=""
+_elf_inventory_tool=""; _elf_inventory_tool_sha=""
 _receipt_command=("bash" "$0" "$@")
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -100,10 +101,11 @@ CROSS=0
 write_verification_receipt() {
   local status="$1"
   python3 - "$RECEIPT" "$_receipt_verifier" "$_receipt_verifier_sha" \
-    "${_pui_manifest_tool:-}" "${_pui_manifest_tool_sha:-}" "$SIDECAR" \
+    "${_pui_manifest_tool:-}" "${_pui_manifest_tool_sha:-}" \
+    "${_elf_inventory_tool:-}" "${_elf_inventory_tool_sha:-}" "$SIDECAR" \
     "$TARGET_OS_N" "$TARGET_ARCH_N" "$CROSS" "$status" "${_receipt_command[@]}" <<'PY'
 import hashlib, json, os, pathlib, sys, tempfile
-out, verifier, verifier_sha, helper, helper_sha, sidecar, os_name, arch, cross, status = sys.argv[1:11]
+out, verifier, verifier_sha, helper, helper_sha, inventory, inventory_sha, sidecar, os_name, arch, cross, status = sys.argv[1:13]
 status = int(status)
 def digest(path):
     return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
@@ -112,8 +114,11 @@ helpers = []
 if helper_sha:
     stable = stable and digest(helper) == helper_sha
     helpers.append({"role": "manifest-writer", "path": helper, "sha256": helper_sha})
+if inventory_sha:
+    stable = stable and digest(inventory) == inventory_sha
+    helpers.append({"role": "elf-inventory", "path": inventory, "sha256": inventory_sha})
 effective_status = status if status else (0 if stable else 1)
-receipt = {"schemaVersion": "sidecar-verification-receipt/v1", "command": sys.argv[11:],
+receipt = {"schemaVersion": "sidecar-verification-receipt/v1", "command": sys.argv[13:],
     "verifier": {"path": verifier, "sha256": verifier_sha}, "helpers": helpers,
     "sidecar": sidecar, "target": {"os": os_name, "arch": arch},
     "sourceHashesStable": stable, "exitCode": effective_status,
@@ -316,6 +321,27 @@ for f in "$BIN"/*; do
 done
 
 # ── [3] linkage closure (Linux) ─────────────────────────────────────────────
+collect_bundle_elfs() {
+  # Reuse the OCI builder's header/containment inventory without hashing model
+  # bytes again. Enumerate the whole payload, including extensionless binaries,
+  # arbitrary nested directories, non-executable ELFs and safe in-tree links.
+  _elf_inventory_tool="${_elf_inventory_tool:-$(cd "$(dirname "$0")/lib" && pwd)/server-container.mjs}"
+  _elf_inventory_tool_sha="$(python3 -c 'import hashlib,pathlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "$_elf_inventory_tool")" || return 1
+  node --input-type=module - "$_elf_inventory_tool" "$SIDECAR" "$TARGET_ARCH_N" <<'NODE'
+import { pathToFileURL } from 'node:url';
+const [helper, root, arch] = process.argv.slice(2);
+const platform = ['x64', 'x86_64', 'amd64'].includes(arch) ? 'linux/amd64'
+  : ['arm64', 'aarch64'].includes(arch) ? 'linux/arm64' : `linux/${arch}`;
+try {
+  const { sidecarInventory } = await import(pathToFileURL(helper));
+  const { elfFiles } = await sidecarInventory(root, platform, { hashContents: false });
+  for (const file of elfFiles) process.stdout.write(file + '\0');
+} catch (error) {
+  console.error(error.message);
+  process.exitCode = 1;
+}
+NODE
+}
 echo "[3/7] ELF linkage closure (bundle libs + base allowlist only)"
 if [[ "$OS" == "Linux" ]]; then
   if ! command -v objdump >/dev/null 2>&1; then
@@ -344,26 +370,18 @@ if [[ "$OS" == "Linux" ]]; then
     for d in "$SIDECAR"/node_modules/@papercusp/embedded-postgres-server/node_modules/@embedded-postgres/*/native/lib; do
       [[ -d "$d" ]] && LIBDIRS="$LIBDIRS $d"
     done
-    # Native addons also carry ELF dependencies. Loading them on the factory
-    # alone can hide a library installed by its compiler (for example libatomic).
-    # Preserve paths containing spaces while inspecting the packaged closure.
+    # A suffix-based scan missed odiff's extensionless x64 executable in an ARM
+    # release. Architecture and linkage use the same complete inventory now.
     SCAN=()
-    for f in "$BIN"/* "$BIN"/.pg-real/* "$BIN"/.pg-real/lib/*; do
-      [[ -f "$f" ]] && _is_elf "$f" && SCAN+=("$f")
-    done
-    for d in "$SIDECAR"/node_modules/@papercusp/embedded-postgres-server/node_modules/@embedded-postgres/*/native/bin \
-             "$SIDECAR"/node_modules/@papercusp/embedded-postgres-server/node_modules/@embedded-postgres/*/native/lib; do
-      [[ -d "$d" ]] || continue
-      for f in "$d"/*; do
-        [[ -f "$f" && ! -L "$f" ]] && _is_elf "$f" && SCAN+=("$f")
-      done
-    done
-    if [[ -d "$SIDECAR/node_modules" ]]; then
-      while IFS= read -r -d '' f; do
-        _is_elf "$f" && SCAN+=("$f")
-      done < <(find "$SIDECAR/node_modules" -type f \( -name '*.node' -o -name '*.so' -o -name '*.so.*' \) -print0)
-    fi
     scanned=0; bad=0
+    _elf_inventory="$(mktemp "${TMPDIR:-/tmp}/sidecar-elf.XXXXXX")" || exit 1
+    if collect_bundle_elfs > "$_elf_inventory"; then
+      while IFS= read -r -d '' f; do SCAN+=("$f"); done < "$_elf_inventory"
+    else
+      fail "complete ELF target inventory failed"
+      bad=1
+    fi
+    rm -f "$_elf_inventory"
     for f in "${SCAN[@]}"; do
       scanned=$((scanned + 1))
       if [[ "$f" == "$SIDECAR/node_modules/"* ]]; then
