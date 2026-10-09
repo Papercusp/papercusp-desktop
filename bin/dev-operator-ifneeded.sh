@@ -141,6 +141,34 @@ if [ -n "$DEV_SOURCE_ROOT" ]; then
   fi
   DEV_OPERATOR_DIR="$DEV_SOURCE_ROOT/apps/operator"
 fi
+# WI-10007640: the gitignored apps/operator/.env.local carries the dev
+# DATABASE_URL, and it is never part of a verifier source snapshot. Sourcing
+# ./.env.local from a snapshot's DEV_OPERATOR_DIR therefore found nothing,
+# DATABASE_URL stayed unset, and the operator fell through to
+# ~/.papercusp/embedded-pg.json. On this box that file names the INSTALLED
+# Papercusp Server's own embedded PG, whose migrations trail the live DB, so
+# boot-migrate withheld request startup and the verifier's devUrl never served.
+# The verifier names the canonical env file explicitly (absolute path, so
+# `.` never searches PATH); every other launch keeps sourcing ./.env.local.
+DEV_ENV_FILE="./.env.local"
+if [ -n "${PAPERCUSP_DEV_ENV_FILE:-}" ]; then
+  case "$PAPERCUSP_DEV_ENV_FILE" in
+    /*) ;;
+    *)
+      echo "[tauri] FATAL: PAPERCUSP_DEV_ENV_FILE must be an absolute path: $PAPERCUSP_DEV_ENV_FILE" >&2
+      exit 1
+      ;;
+  esac
+  if [ ! -f "$PAPERCUSP_DEV_ENV_FILE" ] || [ ! -r "$PAPERCUSP_DEV_ENV_FILE" ]; then
+    echo "[tauri] FATAL: PAPERCUSP_DEV_ENV_FILE is not a readable file: $PAPERCUSP_DEV_ENV_FILE" >&2
+    exit 1
+  fi
+  DEV_ENV_FILE="$PAPERCUSP_DEV_ENV_FILE"
+  echo "[tauri] dev env file: $DEV_ENV_FILE (PAPERCUSP_DEV_ENV_FILE)"
+elif [ -n "$DEV_SOURCE_ROOT" ] && [ ! -f "$DEV_OPERATOR_DIR/.env.local" ]; then
+  echo "[tauri] WARN: verifier source root has no apps/operator/.env.local and no PAPERCUSP_DEV_ENV_FILE — DATABASE_URL comes only from the caller env, else the ~/.papercusp/embedded-pg.json discovery fallback (WI-10007640)" >&2
+fi
+printf -v DEV_ENV_FILE_Q '%q' "$DEV_ENV_FILE"
 
 # EI-22616267024724225: a frozen verifier snapshot has a unique path on every
 # run, so tsx cannot reuse its warm loader path. tsx's module.register worker
@@ -196,7 +224,7 @@ printf -v DEV_OPERATOR_DIR_Q '%q' "$DEV_OPERATOR_DIR"
 # their 40-malloc-arena.conf drop-ins (host-memory-reduction-2026-09-27 D-027:
 # this host held 1.8 GB in 64 MiB arenas without it). boot-malloc-arena.ts
 # re-execs an uncapped host as a backstop; setting it here skips that exec.
-DEFAULT_DEV_CMD="cd $DEV_OPERATOR_DIR_Q && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env ${DEV_CALLER_OVERRIDES}MALLOC_ARENA_MAX=2 PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 PAPERCUSP_BACKGROUND_WORKERS=$DEV_BACKGROUND_WORKERS PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR=1 PAPERCUSP_SYSTEM_HEALTH_SPAWN_SIDECAR=1 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT $DEV_HOST_COMMAND"
+DEFAULT_DEV_CMD="cd $DEV_OPERATOR_DIR_Q && set -a && if [ -f $DEV_ENV_FILE_Q ]; then . $DEV_ENV_FILE_Q; fi && set +a && env ${DEV_CALLER_OVERRIDES}MALLOC_ARENA_MAX=2 PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 PAPERCUSP_BACKGROUND_WORKERS=$DEV_BACKGROUND_WORKERS PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR=1 PAPERCUSP_SYSTEM_HEALTH_SPAWN_SIDECAR=1 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT $DEV_HOST_COMMAND"
 # hono-host ASSUMES a reachable database (env URL, embedded-pg.json, or native
 # :5432 harness_admin), which every developer box has and a fresh clone does
 # not. With no configured database and no reachable native fallback, boot
@@ -208,7 +236,7 @@ DEV_OPERATOR_MODE=external-pg
 if [ -z "$DEV_HOST_ENTRY" ] && [ -z "${OPERATOR_DEV_CMD:-}" ]; then
   PROBE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
   probe_status=0
-  (cd "$DEV_OPERATOR_DIR" && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && node "$SCRIPT_DIR/dev-operator-pg-probe.mjs" --repo-root "${DEV_SOURCE_ROOT:-$PROBE_ROOT}") || probe_status=$?
+  (cd "$DEV_OPERATOR_DIR" && set -a && if [ -f "$DEV_ENV_FILE" ]; then . "$DEV_ENV_FILE"; fi && set +a && node "$SCRIPT_DIR/dev-operator-pg-probe.mjs" --repo-root "${DEV_SOURCE_ROOT:-$PROBE_ROOT}") || probe_status=$?
   case "$probe_status" in
     0) ;;
     1) DEV_OPERATOR_MODE=embedded-pg ;;
@@ -220,7 +248,7 @@ if [ "$DEV_OPERATOR_MODE" = embedded-pg ]; then
   echo "[tauri] no reachable developer database — booting bin/serve.ts with its own embedded Postgres"
   # Same .env.local + malloc cap, but serve.ts owns its lifecycle (embedded PG,
   # in-process background workers), so none of the hono-host dev pins apply.
-  DEFAULT_DEV_CMD="cd $DEV_OPERATOR_DIR_Q && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env ${DEV_CALLER_OVERRIDES}MALLOC_ARENA_MAX=2 PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_SERVE_UI=1 npx tsx bin/serve.ts --ui"
+  DEFAULT_DEV_CMD="cd $DEV_OPERATOR_DIR_Q && set -a && if [ -f $DEV_ENV_FILE_Q ]; then . $DEV_ENV_FILE_Q; fi && set +a && env ${DEV_CALLER_OVERRIDES}MALLOC_ARENA_MAX=2 PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_SERVE_UI=1 npx tsx bin/serve.ts --ui"
 fi
 # Test seam: lets the reaper mechanics be exercised with a harmless
 # long-running command instead of booting the real dev stack.
