@@ -100,17 +100,27 @@ test('current Debian repacker invokes Tauri from the frozen product directory', 
   try {
     const tooling = path.join(fixture, 'tooling');
     const product = path.join(fixture, 'product');
+    const cargoTarget = path.join(fixture, 'cargo-target');
     const fakeBin = path.join(fixture, 'fake-bin');
     const receipt = path.join(fixture, 'cwd.txt');
     fs.mkdirSync(path.join(tooling, 'bin'), { recursive: true });
+    fs.mkdirSync(path.join(tooling, 'bin/lib'), { recursive: true });
     fs.mkdirSync(product);
+    fs.mkdirSync(cargoTarget);
     fs.mkdirSync(fakeBin);
     const entry = path.join(tooling, 'bin/build-deb-repacked.sh');
     fs.copyFileSync(path.join(root, 'bin/build-deb-repacked.sh'), entry);
+    for (const helper of ['release-host.sh', 'rust-path-remap.sh', 'cargo-target-root.sh']) {
+      fs.copyFileSync(path.join(root, 'bin/lib', helper), path.join(tooling, 'bin/lib', helper));
+    }
     fs.writeFileSync(path.join(fakeBin, 'cargo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     fs.writeFileSync(path.join(fakeBin, 'tauri'), '#!/bin/sh\nprintf "%s" "$PWD" > "$PC_TEST_CWD"\nexit 77\n', { mode: 0o755 });
     const result = spawnSync('bash', [entry], { encoding: 'utf8', env: { ...process.env,
       PATH: `${fakeBin}:${process.env.PATH}`, PAPERCUSP_DESKTOP_TARGET_ROOT: product,
+      CARGO_TARGET_DIR: cargoTarget,
+      PAPERCUSP_RELEASE_HOST: 'https://updates.example.invalid',
+      PAPERCUSP_UPDATE_BASE_URL: 'https://downloads.example.invalid',
+      PAPERCUSP_RELEASE_HOST_ENV: path.join(fixture, 'unused-release-host.env'),
       TAURI_SIGNING_PRIVATE_KEY: 'fixture-only', PC_TEST_CWD: receipt,
     } });
     assert.equal(result.status, 77, result.stdout + result.stderr);
