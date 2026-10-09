@@ -61,6 +61,35 @@ test('owned producer reports a refused daemon cleanup instead of claiming remova
   assert.equal(receipt.removed, undefined); assert.match(receipt.cleanupError, /daemon unavailable/);
 });
 
+test('interrupted create recovers only the exact saved name, image and ownership token', async t => {
+  const { runOwnedContainer } = await lib;
+  for (const foreign of [false, true]) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'owned-create-'));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const calls = []; let name, token;
+    await assert.rejects(runOwnedContainer({ imageId, platform: 'linux/arm64', out: root, command: ['true'] },
+      async (engine, args) => {
+        calls.push(args);
+        if (args[0] === 'create') {
+          name = args[args.indexOf('--name') + 1]; token = args[args.indexOf('--label') + 1].split('=')[1];
+          const [directory] = await fs.readdir(root);
+          const receipt = JSON.parse(await fs.readFile(path.join(root, directory, 'ownership.json')));
+          assert.equal(receipt.containerName, name); assert.equal(receipt.ownerToken, token);
+          throw new Error('create response lost');
+        }
+        if (args[0] === 'inspect') {
+          assert.equal(args.at(-1), name);
+          return JSON.stringify({ Id: 'c'.repeat(64), Image: imageId,
+            Config: { Labels: { 'dev.papercusp.producer-owner': foreign ? 'foreign' : token } } });
+        }
+        if (args[0] === 'rm') return '';
+        throw new Error('unexpected');
+      }), foreign ? /cleanup failed/ : /create response lost/);
+    assert.equal(calls.some(args => args[0] === 'rm'), !foreign);
+    if (!foreign) assert.deepEqual(calls.at(-1), ['rm', '--force', 'c'.repeat(64)]);
+  }
+});
+
 test('in-container supervisor terminates the producer when launcher lease disappears', async t => {
   const { ownedContainerSupervisor } = await lib;
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'owned-producer-lease-'));

@@ -355,6 +355,31 @@ test('changed SPA receipt invalidates a previously captured stage even with iden
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test('actual producer SPA branch imports only validated input and bypasses Vite compilation', async () => {
+  const f = await spaFixture();
+  try {
+    const identityFile = path.join(f.root, 'spa-identity.json');
+    writeJson(identityFile, f.identity);
+    const block = builder.slice(builder.indexOf('if [[ -n "${PAPERCUSP_SPA_SNAPSHOT_FROM:-}" ]]'),
+      builder.indexOf('echo "→ building sidecar into'));
+    const run = destination => spawnSync('bash', ['-euo', 'pipefail', '-c',
+      'npm() { echo unexpected-vite >&2; return 99; };\n' + block], {
+      encoding: 'utf8', env: { ...process.env, HERE: bin, SIDECAR_DIR: destination,
+        PAPERCUSP_SPA_SNAPSHOT_FROM: f.snapshot, _sidecar_stage_identity: identityFile },
+    });
+    const good = path.join(f.root, 'producer-copy'); fs.mkdirSync(good);
+    const accepted = run(good);
+    assert.equal(accepted.status, 0, accepted.stderr);
+    assert.match(accepted.stdout, /reused source-bound/);
+    assert.deepEqual(inventory(path.join(good, 'spa')), inventory(f.snapshot));
+    fs.writeFileSync(path.join(f.snapshot, 'chunk.js'), 'tampered');
+    const bad = path.join(f.root, 'producer-refused'); fs.mkdirSync(bad);
+    const refused = run(bad);
+    assert.notEqual(refused.status, 0); assert.match(refused.stderr, /SPA bytes, paths, modes or links changed/);
+    assert.equal(fs.existsSync(path.join(bad, 'spa')), false);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test('completed failed assembly resumes only with exact source, profile, target and producer identity', () => {
   const f = fixture();
   try {
