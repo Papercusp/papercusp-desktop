@@ -5,7 +5,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, statfs, writeFile } from 'node:fs/promises';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -92,6 +92,15 @@ async function sidecarInventory(root, platform) {
 }
 
 export async function runCommand(command, args, options = {}) {
+  if (options.stream) {
+    return new Promise((resolve, reject) => {
+      const child = spawn(command, args, { stdio: ['ignore', 'inherit', 'inherit'],
+        env: options.env ?? process.env, signal: options.signal, timeout: options.timeout });
+      child.once('error', reject);
+      child.once('close', (code, signal) => code === 0 ? resolve('')
+        : reject(new Error(command + ' failed with ' + (signal || code))));
+    });
+  }
   const result = await execFileAsync(command, args, {
     timeout: options.timeout ?? 30 * 60_000,
     maxBuffer: 8 * 1024 * 1024,
@@ -170,7 +179,7 @@ export async function runOwnedContainer(options, run = runCommand) {
     if (options.signal?.aborted) controller.abort();
     receipt.status = 'running'; await save();
     const output = await run(engine, ['start', '--attach', id],
-      { timeout: options.timeoutMs ?? 2 * 60 * 60_000, signal: controller.signal });
+      { timeout: options.timeoutMs ?? 2 * 60 * 60_000, signal: controller.signal, stream: true });
     const state = JSON.parse(await run(engine, ['inspect', '--format', '{{json .State}}', id], { timeout: 5000 }));
     if (state.Running !== false || state.ExitCode !== 0) throw new Error('Owned producer exited with ' + state.ExitCode);
     receipt.exitCode = state.ExitCode; receipt.status = 'completed';
