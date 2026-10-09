@@ -538,6 +538,43 @@ test('release-audited sidecar fails closed on dirty or moving source before publ
   );
 });
 
+test('an independent verifier archive reads the selected product updater key', () => {
+  const dir = tmp();
+  try {
+    const bin = path.join(dir, 'archive', 'bin');
+    const product = path.join(dir, 'product');
+    const out = path.join(dir, 'out');
+    fs.mkdirSync(path.join(bin, 'lib'), { recursive: true });
+    fs.mkdirSync(path.join(product, 'src-tauri'), { recursive: true });
+    fs.mkdirSync(out);
+    for (const rel of ['verify-provenance.sh', 'verify-tauri-signature.mjs', 'lib/release-artifacts.sh']) {
+      fs.copyFileSync(path.join(BIN, rel), path.join(bin, rel));
+    }
+    fs.writeFileSync(path.join(product, 'src-tauri', 'tauri.conf.json'), JSON.stringify({
+      plugins: { updater: { pubkey: 'nonsecret-fixture-public-key' } },
+    }));
+    const artifact = Buffer.from('unchanged fixture bytes');
+    fs.writeFileSync(path.join(out, 'fixture.bin'), artifact);
+    fs.writeFileSync(path.join(out, 'build-provenance.json'), JSON.stringify({
+      version: '1.0.0', buildSha: '1'.repeat(40), gitDirty: false,
+      artifacts: [{ name: 'fixture.bin', bytes: artifact.length,
+        sha256: crypto.createHash('sha256').update(artifact).digest('hex'), sig: false }],
+    }));
+    const env = { ...process.env, PAPERCUSP_DESKTOP_TARGET_ROOT: product };
+    const result = spawnSync('bash', [path.join(bin, 'verify-provenance.sh'), out, '--json'], {
+      encoding: 'utf8', env,
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(JSON.parse(result.stdout).ok, true);
+    assert.deepEqual(fs.readFileSync(path.join(out, 'fixture.bin')), artifact);
+    const explicit = spawnSync('bash', [path.join(bin, 'verify-provenance.sh'), out,
+      '--pubkey', 'nonsecret-explicit-fixture-key', '--json'], {
+      encoding: 'utf8', env: { ...env, PAPERCUSP_DESKTOP_TARGET_ROOT: path.join(dir, 'missing-product') },
+    });
+    assert.equal(explicit.status, 0, explicit.stderr);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('verify-provenance gates build-start dirt, not later cutter mutations', () => {
   const dir = tmp();
   const artifact = path.join(dir, 'Papercusp_GUI_0.0.0_amd64.AppImage');

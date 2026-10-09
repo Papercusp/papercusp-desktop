@@ -80,7 +80,12 @@ if [[ -z "$LATEST_JSON" && -f "$DIR/latest.json" ]]; then LATEST_JSON="$DIR/late
 
 # Default the pubkey from the app's own updater config (single source of truth).
 if [[ -z "$PUBKEY" ]]; then
-  PUBKEY="$(python3 -c "import json;print(json.load(open('$ROOT/src-tauri/tauri.conf.json'))['plugins']['updater']['pubkey'])" 2>/dev/null || true)"
+  # An independent helper archive reads config from the selected product.
+  PUBKEY="$(python3 - "${PAPERCUSP_DESKTOP_TARGET_ROOT:-$ROOT}/src-tauri/tauri.conf.json" 2>/dev/null <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1]))['plugins']['updater']['pubkey'])
+PY
+  )" || PUBKEY=""
   [[ -n "$PUBKEY" ]] || { echo "could not read plugins.updater.pubkey from tauri.conf.json — pass --pubkey" >&2; exit 2; }
 fi
 
