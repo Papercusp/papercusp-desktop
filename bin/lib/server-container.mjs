@@ -37,11 +37,13 @@ function within(root, path) {
   return !isAbsolute(suffix) && suffix !== '..' && !suffix.startsWith('..' + sep);
 }
 
-async function requireElfPlatform(path, machine) {
+async function requireElfPlatform(path, machine, required = true) {
   const fd = await open(path, 'r');
   try {
     const header = Buffer.alloc(20);
     const { bytesRead } = await fd.read(header, 0, header.length, 0);
+    const isElf = bytesRead >= 4 && header.subarray(0, 4).equals(Buffer.from([127, 69, 76, 70]));
+    if (!required && !isElf) return;
     if (bytesRead !== 20 || !header.subarray(0, 4).equals(Buffer.from([127, 69, 76, 70])) ||
         header[4] !== 2 || header[5] !== 1 || header.readUInt16LE(18) !== machine) {
       throw new Error('Native payload architecture mismatch: ' + path);
@@ -66,8 +68,9 @@ async function sidecarInventory(root, platform) {
     if (st.isSymbolicLink()) {
       const target = await realpath(path);
       if (!within(physicalRoot, target)) throw new Error('Sidecar link escapes its payload: ' + name);
-      if (name.endsWith('.node') || name === join('bin', 'node')) {
-        await requireElfPlatform(target, PLATFORMS.get(platform));
+      if ((await lstat(target)).isFile()) {
+        await requireElfPlatform(target, PLATFORMS.get(platform),
+          name.endsWith('.node') || name === join('bin', 'node'));
       }
       hash.update(JSON.stringify([name, 'link', relative(physicalRoot, target)]) + '\n');
     } else if (st.isDirectory()) {
@@ -75,9 +78,10 @@ async function sidecarInventory(root, platform) {
       const children = (await readdir(path)).sort().reverse();
       pending.push(...children.map(child => join(name, child)));
     } else if (st.isFile()) {
-      if (name.endsWith('.node') || name === join('bin', 'node')) {
-        await requireElfPlatform(path, PLATFORMS.get(platform));
-      }
+      // pui, PostgreSQL and shared libraries matter as much as Node/addons.
+      // Inspect ELF headers regardless of name or executable mode.
+      await requireElfPlatform(path, PLATFORMS.get(platform),
+        name.endsWith('.node') || name === join('bin', 'node'));
       bytes += st.size;
       hash.update(JSON.stringify([name, 'file', st.mode & 0o777, await hashFile(path)]) + '\n');
     } else {
