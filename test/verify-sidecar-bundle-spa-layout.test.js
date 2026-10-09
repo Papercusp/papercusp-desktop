@@ -32,8 +32,8 @@ const scriptPath = path.resolve(__dirname, '../bin/verify-sidecar-bundle.sh');
 const script = fs.readFileSync(scriptPath, 'utf8');
 
 /** Pull a top-level shell function verbatim out of the real verify script. */
-function extractFunction(name) {
-  const lines = script.split('\n');
+function extractFunction(name, source = script) {
+  const lines = source.split('\n');
   const start = lines.findIndex((line) => line === `${name}() {`);
   assert.ok(start >= 0, `${name}() not found in verify-sidecar-bundle.sh`);
   const end = lines.findIndex((line, index) => index > start && line === '}');
@@ -148,6 +148,51 @@ test('native addon linkage refuses an external library search path', () => {
   const result = runAddonLinkageCheck({ bundled: true, runpath: '/usr/lib' });
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stdout, /fixture\.node needs libatomic\.so\.1/);
+});
+
+test('producer vendors an addon library that loads after relocation without the factory library path', { skip: process.platform !== 'linux' }, () => {
+  const builder = fs.readFileSync(path.resolve(__dirname, '../bin/build-desktop-sidecar.sh'), 'utf8');
+  const bundleLibraries = extractFunction('bundle_linux_addon_libraries', builder);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-addon-vendor-'));
+  try {
+    const factory = path.join(dir, 'factory');
+    const side = path.join(dir, 'sidecar with spaces');
+    const addonDir = path.join(side, 'node_modules/fixture/prebuilds/linux-x64');
+    fs.mkdirSync(factory, { recursive: true });
+    fs.mkdirSync(addonDir, { recursive: true });
+    const librarySource = path.join(factory, 'atomic.c');
+    const addonSource = path.join(factory, 'addon.c');
+    const library = path.join(factory, 'libatomic.so.1');
+    const addon = path.join(addonDir, 'fixture.node');
+    fs.writeFileSync(librarySource, 'int atomic_fixture(void) { return 73; }\n');
+    fs.writeFileSync(addonSource, 'extern int atomic_fixture(void); int addon_value(void) { return atomic_fixture(); }\n');
+    for (const args of [
+      ['-shared', '-fPIC', '-Wl,-soname,libatomic.so.1', librarySource, '-o', library],
+      ['-shared', '-fPIC', addonSource, '-L' + factory, '-l:libatomic.so.1', '-o', addon],
+    ]) {
+      const result = spawnSync('cc', args, { encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+    }
+    const result = spawnSync('bash', ['-c', 'set -euo pipefail\n' + bundleLibraries +
+      '\nbundle_linux_addon_libraries "$1"', 'vendor', side], {
+      encoding: 'utf8', env: { ...process.env, TARGET_OS: 'linux',
+        TARGET_ARCH: process.arch, LD_LIBRARY_PATH: factory },
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const moved = path.join(dir, 'relocated');
+    fs.renameSync(side, moved);
+    fs.rmSync(factory, { recursive: true });
+    const movedAddon = path.join(moved, path.relative(side, addon));
+    const env = { ...process.env };
+    delete env.LD_LIBRARY_PATH;
+    const probe = () => spawnSync('python3', ['-c',
+      'import ctypes,sys; print(ctypes.CDLL(sys.argv[1]).addon_value())', movedAddon], { encoding: 'utf8', env });
+    const loaded = probe();
+    assert.equal(loaded.status, 0, loaded.stdout + loaded.stderr);
+    assert.equal(loaded.stdout.trim(), '73');
+    fs.rmSync(path.join(moved, 'bin/.pg-real/lib/libatomic.so.1'));
+    assert.notEqual(probe().status, 0, 'negative control must require the packaged library');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 const hashFile = (file) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');

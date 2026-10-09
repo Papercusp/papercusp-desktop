@@ -348,7 +348,7 @@ if [[ "$OS" == "Linux" ]]; then
     # alone can hide a library installed by its compiler (for example libatomic).
     # Preserve paths containing spaces while inspecting the packaged closure.
     SCAN=()
-    for f in "$BIN"/* "$BIN"/.pg-real/*; do
+    for f in "$BIN"/* "$BIN"/.pg-real/* "$BIN"/.pg-real/lib/*; do
       [[ -f "$f" ]] && _is_elf "$f" && SCAN+=("$f")
     done
     for d in "$SIDECAR"/node_modules/@papercusp/embedded-postgres-server/node_modules/@embedded-postgres/*/native/bin \
