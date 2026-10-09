@@ -516,6 +516,20 @@ if [[ "$CROSS_BUILD" != "1" && "$TARGET_OS" == "linux" ]]; then
     _missing_host_tools+=("ALSA development headers, alsa.pc (chat-dock pui audio — apt install libasound2-dev / dnf install alsa-lib-devel)")
   fi
 fi
+# LINUX_PGVECTOR_PREFLIGHT_BEGIN
+# EI-25484263609306750: ordinary Linux bundles copy these system inputs. A
+# fresh native factory formerly discovered their absence after SPA/assembly.
+# vm-release builds its own pinned PostgreSQL closure later in the producer.
+if [[ "$TARGET_OS" == "linux" && "$DISTRIBUTION_PROFILE" != "vm-release" ]]; then
+  _pgvector_sql=(/usr/share/postgresql/18/extension/vector--*.sql)
+  if [[ ! -s /usr/lib/postgresql/18/lib/vector.so \
+     || ! -s /usr/share/postgresql/18/extension/vector.control \
+     || ! -s "${_pgvector_sql[0]}" ]]; then
+    _missing_host_tools+=("PostgreSQL 18 pgvector library, control and SQL files (apt install postgresql-18-pgvector from the PostgreSQL apt repository)")
+  fi
+  unset _pgvector_sql
+fi
+# LINUX_PGVECTOR_PREFLIGHT_END
 # Embedding models: the sidecar's fail-closed models guard (WI-5638 / D-178) needs the
 # two contract-pinned transformers models, which `npm ci` never downloads. A host tree
 # carries them only because live use filled the package's `.cache`; a fresh clone

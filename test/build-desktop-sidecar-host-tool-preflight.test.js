@@ -132,6 +132,44 @@ test('a darwin cross-build does not demand host ALSA headers', () => {
   assert.doesNotMatch(output, /ALSA development headers/);
 });
 
+test('Linux pgvector inputs fail early for each missing file and exempt independently prepared profiles', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-pgvector-'));
+  const lib = path.join(scratch, 'lib');
+  const extension = path.join(scratch, 'extension');
+  fs.mkdirSync(lib);
+  fs.mkdirSync(extension);
+  const block = fs.readFileSync(script, 'utf8').split('# LINUX_PGVECTOR_PREFLIGHT_BEGIN\n')[1]
+    .split('# LINUX_PGVECTOR_PREFLIGHT_END')[0]
+    .replaceAll('/usr/lib/postgresql/18/lib', lib)
+    .replaceAll('/usr/share/postgresql/18/extension', extension);
+  const files = [path.join(lib, 'vector.so'), path.join(extension, 'vector.control'),
+    path.join(extension, 'vector--0.8.2.sql')];
+  const reset = () => files.forEach(file => fs.writeFileSync(file, 'fixture'));
+  const run = (target = 'linux', profile = 'dogfood') => spawnSync('bash', ['-euo', 'pipefail', '-c',
+    '_missing_host_tools=();\n' + block +
+    '\nif (( ${#_missing_host_tools[@]} )); then printf "%s\\n" "${_missing_host_tools[@]}"; exit 1; fi'], {
+    encoding: 'utf8', env: { ...process.env, TARGET_OS: target, DISTRIBUTION_PROFILE: profile },
+  });
+  try {
+    for (const profile of ['dogfood', 'public']) {
+      reset();
+      assert.equal(run('linux', profile).status, 0);
+      for (const file of files) {
+        for (const state of ['missing', 'empty']) {
+          reset();
+          if (state === 'missing') fs.unlinkSync(file); else fs.writeFileSync(file, '');
+          const r = run('linux', profile);
+          assert.equal(r.status, 1, `${profile} ${file} ${state}: ${r.stderr}`);
+          assert.match(r.stdout, /PostgreSQL 18 pgvector library, control and SQL files/);
+          assert.equal(run('linux', 'vm-release').status, 0);
+          assert.equal(run('darwin', profile).status, 0);
+          assert.equal(run('windows', profile).status, 0);
+        }
+      }
+    }
+  } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
+});
+
 // A REPO_ROOT that is the real tree minus node_modules: every earlier check still sees
 // real sources, but the transformers cache a fresh clone lacks is absent.
 function treeWithoutNodeModules() {

@@ -48,6 +48,45 @@ test('native builder refuses moving or shell-looking toolchain versions', () => 
   }
 });
 
+test('factory pgvector validation admits target ELF and refuses missing, empty or host inputs', () => {
+  const scratch = makeDesktopTestScratchDirSync('native-pgvector-');
+  const lib = path.join(scratch, 'lib');
+  const extension = path.join(scratch, 'extension');
+  fs.mkdirSync(lib);
+  fs.mkdirSync(extension);
+  const script = recipe.split('# NATIVE_PGVECTOR_PREFLIGHT_BEGIN\n')[1]
+    .split('# NATIVE_PGVECTOR_PREFLIGHT_END')[0]
+    .replaceAll('/usr/lib/postgresql/18/lib', lib)
+    .replaceAll('/usr/share/postgresql/18/extension', extension);
+  const files = [path.join(lib, 'vector.so'), path.join(extension, 'vector.control'),
+    path.join(extension, 'vector--0.8.2.sql')];
+  const reset = () => files.forEach(file => fs.writeFileSync(file, 'fixture'));
+  const run = (arch, machine) => spawnSync('bash', ['-euo', 'pipefail', '-c',
+    'file() { printf "%s\\n" "$FIXTURE_ELF"; };\n' + script], {
+    encoding: 'utf8', env: { ...process.env, TARGETARCH: arch, FIXTURE_ELF: machine },
+  });
+  try {
+    for (const [arch, machine] of [['arm64', 'ELF 64-bit LSB shared object, ARM aarch64'],
+      ['amd64', 'ELF 64-bit LSB shared object, x86-64']]) {
+      reset();
+      assert.equal(run(arch, machine).status, 0);
+      for (const file of files) {
+        for (const state of ['missing', 'empty']) {
+          reset();
+          if (state === 'missing') fs.unlinkSync(file); else fs.writeFileSync(file, '');
+          const r = run(arch, machine);
+          assert.equal(r.status, 2, `${file} ${state}: ${r.stderr}`);
+          assert.match(r.stderr, /requires PostgreSQL 18 pgvector library, control and SQL/);
+        }
+      }
+      reset();
+      const r = run(arch, arch === 'arm64' ? 'ELF x86-64' : 'ELF ARM aarch64');
+      assert.equal(r.status, 2, r.stderr);
+      assert.match(r.stderr, /pgvector architecture differs/);
+    }
+  } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
+});
+
 test('factory Git adapter distinguishes stale ENOMEM at EOF from real stream errors', { skip: process.platform !== 'linux' }, () => {
   const scratch = makeDesktopTestScratchDirSync('native-git-eof-');
   try {
