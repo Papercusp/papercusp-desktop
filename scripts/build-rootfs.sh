@@ -14,6 +14,10 @@
 # Run this in CI (or manually) before a Windows release build. The
 # actual `wsl --import` happens on the user's machine via wsl_setup.rs;
 # this script is only about producing the tarball ahead of time.
+# When invoking through pc-heavy, declare UBUNTU_IMAGE, NODE_VERSION,
+# PNPM_VERSION, PAPERCUSP_RUNTIME_PLATFORM and PAPERCUSP_ROOTFS_OUT_DIR in
+# PC_HEAVY_KEY_ENV, or disable coalescing. Distinct output targets must never
+# inherit another target's successful command result.
 
 set -euo pipefail
 
@@ -73,6 +77,25 @@ recipe_fingerprint() {
 if [[ "${1:-}" == "--print-recipe-fingerprint" ]]; then
   recipe_fingerprint
   exit 0
+fi
+
+# pc-heavy keys environment inputs only when the caller declares them BEFORE
+# its wrapper starts. Catch a missing declaration in the leader, before any
+# Docker work or output mutation, so a follower cannot inherit a false success.
+if [[ -n "${PC_HEAVY_ADMISSION_ID:-}" ]]; then
+  case "${PC_HEAVY_COALESCE:-1}" in
+    0|off|OFF|false|FALSE|no|NO) ;;
+    *)
+      _rootfs_key_env=" $(printf '%s' "${PC_HEAVY_KEY_ENV:-}" | tr ',[:space:]' ' ') "
+      for _rootfs_input in UBUNTU_IMAGE NODE_VERSION PNPM_VERSION PAPERCUSP_RUNTIME_PLATFORM PAPERCUSP_ROOTFS_OUT_DIR; do
+        if [[ "$_rootfs_key_env" != *" $_rootfs_input "* ]]; then
+          echo "ERROR: coalesced rootfs build requires $_rootfs_input in PC_HEAVY_KEY_ENV before pc-heavy, or PC_HEAVY_COALESCE=0" >&2
+          exit 2
+        fi
+      done
+      unset _rootfs_key_env _rootfs_input
+      ;;
+  esac
 fi
 
 # Docker can pull a foreign-architecture image without being able to execute

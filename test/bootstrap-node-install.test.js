@@ -144,7 +144,7 @@ test('rootfs host execution preflight preserves a valid archive when emulation i
   fs.writeFileSync(path.join(tools, 'docker'), '#!/bin/bash\nset -eu\nprintf "%s\\n" "$1" >> "$DOCKER_PREFLIGHT_LOG"\nif [ "$1" = run ]; then exit 1; fi\n', { mode: 0o755 });
   const result = run('bash', [path.join(root, 'scripts/build-rootfs.sh')], { env: { ...process.env,
     PATH: tools + ':' + process.env.PATH, DOCKER_PREFLIGHT_LOG: calls,
-    PAPERCUSP_ROOTFS_OUT_DIR: output, PAPERCUSP_RUNTIME_PLATFORM: 'linux/arm64' } });
+    PC_HEAVY_COALESCE: '0', PAPERCUSP_ROOTFS_OUT_DIR: output, PAPERCUSP_RUNTIME_PLATFORM: 'linux/arm64' } });
   assert.equal(result.status, 2, result.stderr);
   assert.match(result.stderr, /cannot execute linux\/arm64.*QEMU/);
   assert.deepEqual(fs.readFileSync(calls, 'utf8').trim().split('\n'), ['pull', 'run']);
@@ -162,13 +162,43 @@ test('an executable platform reaches bootstrap/export and writes an archive-boun
   fs.writeFileSync(path.join(tools, 'docker'), '#!/bin/bash\nset -eu\nprintf "%s\\n" "$1" >> "$DOCKER_PREFLIGHT_LOG"\nif [ "$1" = export ]; then printf "runtime fixture"; fi\n', { mode: 0o755 });
   const result = run('bash', [path.join(root, 'scripts/build-rootfs.sh')], { env: { ...process.env,
     PATH: tools + ':' + process.env.PATH, DOCKER_PREFLIGHT_LOG: calls,
-    PAPERCUSP_ROOTFS_OUT_DIR: output, PAPERCUSP_RUNTIME_PLATFORM: 'linux/arm64' } });
+    PC_HEAVY_COALESCE: '0', PAPERCUSP_ROOTFS_OUT_DIR: output, PAPERCUSP_RUNTIME_PLATFORM: 'linux/arm64' } });
   assert.equal(result.status, 0, result.stderr);
   const commands = fs.readFileSync(calls, 'utf8').trim().split('\n');
   assert.deepEqual(commands, ['pull', 'run', 'create', 'start', 'export', 'rm']);
   const stamp = JSON.parse(fs.readFileSync(path.join(output, '.rootfs-build-stamp'), 'utf8'));
   assert.equal(stamp.platform, 'linux/arm64');
   assert.equal(stamp.rootfsSha256, createHash('sha256').update(fs.readFileSync(path.join(output, 'papercup-runtime.tar.gz'))).digest('hex'));
+});
+
+test('coalesced rootfs builds declare every environment input before Docker or output mutation', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rootfs coalesce inputs '));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const tools = path.join(dir, 'tools');
+  const output = path.join(dir, 'output');
+  const calls = path.join(dir, 'docker-calls');
+  fs.mkdirSync(tools);
+  fs.mkdirSync(output);
+  fs.writeFileSync(path.join(output, 'papercup-runtime.tar.gz'), 'previous verified archive');
+  fs.writeFileSync(path.join(tools, 'docker'), '#!/bin/sh\necho "$1" >> "$DOCKER_PREFLIGHT_LOG"\nif [ "$1" = run ]; then exit 1; fi\n', { mode: 0o755 });
+  const keys = ['UBUNTU_IMAGE', 'NODE_VERSION', 'PNPM_VERSION', 'PAPERCUSP_RUNTIME_PLATFORM', 'PAPERCUSP_ROOTFS_OUT_DIR'];
+  const env = { ...process.env, PATH: tools + ':' + process.env.PATH, DOCKER_PREFLIGHT_LOG: calls,
+    PC_HEAVY_ADMISSION_ID: 'fixture-rootfs-admission', PC_HEAVY_COALESCE: '1',
+    PAPERCUSP_RUNTIME_PLATFORM: 'linux/amd64', PAPERCUSP_ROOTFS_OUT_DIR: output };
+  const invoke = keyEnv => run('bash', [path.join(root, 'scripts/build-rootfs.sh')], {
+    env: { ...env, PC_HEAVY_KEY_ENV: keyEnv },
+  });
+  for (const missing of keys) {
+    const result = invoke(keys.filter(key => key !== missing).join(','));
+    assert.equal(result.status, 2, result.stderr);
+    assert.ok(result.stderr.includes(`requires ${missing} in PC_HEAVY_KEY_ENV`), result.stderr);
+    assert.equal(fs.existsSync(calls), false, 'reject before contacting Docker');
+    assert.equal(fs.readFileSync(path.join(output, 'papercup-runtime.tar.gz'), 'utf8'), 'previous verified archive');
+  }
+  const declared = invoke(keys.join(' '));
+  assert.equal(declared.status, 2, declared.stderr);
+  assert.match(declared.stderr, /Docker cannot execute linux\/amd64/);
+  assert.deepEqual(fs.readFileSync(calls, 'utf8').trim().split('\n'), ['pull', 'run']);
 });
 
 test('voice live E2E dependencies are provisioned and preflighted before host discovery', () => {
