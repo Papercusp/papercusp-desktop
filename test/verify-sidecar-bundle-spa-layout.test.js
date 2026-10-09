@@ -107,6 +107,49 @@ test('Linux linkage closure refuses an unsupported target architecture', () => {
   assert.match(result.stdout, /unsupported Linux target architecture/);
 });
 
+function runAddonLinkageCheck({ bundled = false, runpath = '' } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-addon-linkage-'));
+  try {
+    const bin = path.join(dir, 'bin');
+    const addonDir = path.join(dir, 'node_modules/package with spaces/prebuilds/linux-arm64');
+    fs.mkdirSync(bin, { recursive: true });
+    fs.mkdirSync(addonDir, { recursive: true });
+    const elf = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
+    fs.writeFileSync(path.join(bin, 'node'), elf);
+    fs.writeFileSync(path.join(addonDir, 'fixture.node'), elf);
+    if (bundled) fs.writeFileSync(path.join(addonDir, 'libatomic.so.1'), elf);
+    return spawnSync('bash', ['-c', 'set -uo pipefail\nFAIL=0\n' +
+      'fail() { printf "%s\\n" "$*"; FAIL=1; }; ok() { printf "%s\\n" "$*"; };\n' +
+      'objdump() { case "$2" in *.node) printf "NEEDED libatomic.so.1\\n"; ' +
+      'if [[ -n "$FIXTURE_RUNPATH" ]]; then printf "RUNPATH %s\\n" "$FIXTURE_RUNPATH"; fi ;; ' +
+      '*) printf "NEEDED libc.so.6\\n" ;; esac; };\n' +
+      IS_ELF + '\n' + CHECK_LINKAGE + '\nexit "$FAIL"'], {
+      encoding: 'utf8', env: { ...process.env, OS: 'Linux', BIN: bin, SIDECAR: dir,
+        TARGET_ARCH_N: 'arm64', FIXTURE_RUNPATH: runpath },
+    });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('Linux linkage closure catches a host-masked native addon dependency', () => {
+  const result = runAddonLinkageCheck();
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /fixture\.node needs libatomic\.so\.1/);
+});
+
+test('native addon libraries must be reachable through the packaged ELF runpath', () => {
+  const unreachable = runAddonLinkageCheck({ bundled: true });
+  assert.equal(unreachable.status, 1, unreachable.stdout + unreachable.stderr);
+  const reachable = runAddonLinkageCheck({ bundled: true, runpath: '$ORIGIN' });
+  assert.equal(reachable.status, 0, reachable.stdout + reachable.stderr);
+  assert.match(reachable.stdout, /all 3 bundled ELFs close/);
+});
+
+test('native addon linkage refuses an external library search path', () => {
+  const result = runAddonLinkageCheck({ bundled: true, runpath: '/usr/lib' });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /fixture\.node needs libatomic\.so\.1/);
+});
+
 const hashFile = (file) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
 test('real verifier emits an executable-bound failure receipt on an incomplete bundle', () => {

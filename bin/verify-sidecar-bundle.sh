@@ -344,25 +344,50 @@ if [[ "$OS" == "Linux" ]]; then
     for d in "$SIDECAR"/node_modules/@papercusp/embedded-postgres-server/node_modules/@embedded-postgres/*/native/lib; do
       [[ -d "$d" ]] && LIBDIRS="$LIBDIRS $d"
     done
-    # Files to scan: everything we vendor as executable machine code
-    SCAN=""
+    # Native addons also carry ELF dependencies. Loading them on the factory
+    # alone can hide a library installed by its compiler (for example libatomic).
+    # Preserve paths containing spaces while inspecting the packaged closure.
+    SCAN=()
     for f in "$BIN"/* "$BIN"/.pg-real/*; do
-      [[ -f "$f" ]] && _is_elf "$f" && SCAN="$SCAN $f"
+      [[ -f "$f" ]] && _is_elf "$f" && SCAN+=("$f")
     done
     for d in "$SIDECAR"/node_modules/@papercusp/embedded-postgres-server/node_modules/@embedded-postgres/*/native/bin \
              "$SIDECAR"/node_modules/@papercusp/embedded-postgres-server/node_modules/@embedded-postgres/*/native/lib; do
       [[ -d "$d" ]] || continue
       for f in "$d"/*; do
-        [[ -f "$f" && ! -L "$f" ]] && _is_elf "$f" && SCAN="$SCAN $f"
+        [[ -f "$f" && ! -L "$f" ]] && _is_elf "$f" && SCAN+=("$f")
       done
     done
+    if [[ -d "$SIDECAR/node_modules" ]]; then
+      while IFS= read -r -d '' f; do
+        _is_elf "$f" && SCAN+=("$f")
+      done < <(find "$SIDECAR/node_modules" -type f \( -name '*.node' -o -name '*.so' -o -name '*.so.*' \) -print0)
+    fi
     scanned=0; bad=0
-    for f in $SCAN; do
+    for f in "${SCAN[@]}"; do
       scanned=$((scanned + 1))
+      if [[ "$f" == "$SIDECAR/node_modules/"* ]]; then
+        # dlopen does not search the addon's directory implicitly. Require a
+        # contained RPATH/RUNPATH that the loader will actually use after moving.
+        _elf_libdirs=()
+        while IFS= read -r _elf_runpath; do
+          IFS=: read -r -a _elf_runparts <<< "$_elf_runpath"
+          for _elf_dir in "${_elf_runparts[@]}"; do
+            _elf_dir="${_elf_dir//\$\{ORIGIN\}/$(dirname "$f")}"
+            _elf_dir="${_elf_dir//\$ORIGIN/$(dirname "$f")}"
+            [[ "$_elf_dir" == /* && "$_elf_dir" != *'$'* ]] || continue
+            _elf_dir="$(realpath -m -- "$_elf_dir")"
+            [[ "$_elf_dir" == "$SIDECAR/"* ]] && _elf_libdirs+=("$_elf_dir")
+          done
+        done < <(objdump -p "$f" 2>/dev/null | awk '$1 == "RPATH" || $1 == "RUNPATH" { print $2 }')
+      else
+        _elf_libdirs=("$(dirname "$f")")
+        for d in $LIBDIRS; do _elf_libdirs+=("$d"); done
+      fi
       for need in $(objdump -p "$f" 2>/dev/null | awk '/NEEDED/{print $2}'); do
         case "$BASE_LIBS" in *" $need "*) continue ;; esac
         found=""
-        for d in "$(dirname "$f")" $LIBDIRS; do
+        for d in "${_elf_libdirs[@]}"; do
           [[ -e "$d/$need" ]] && found=1 && break
         done
         if [[ -z "$found" ]]; then
