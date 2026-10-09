@@ -655,6 +655,7 @@ function qualifyResume(f, failGate = '') {
     encoding: 'utf8', env: {
       ...process.env, PATH: `${shim}:${process.env.PATH}`, GATE_LOG: gateLog, FAIL_GATE: failGate,
       HERE: here, ROOT: target, REPO_ROOT: source.root, PAPERCUSP_ROOT: pg,
+      TARGET_OS: 'linux', TARGET_ARCH: process.arch,
       SIDECAR_FINAL_DIR: f.finalDir, SIDECAR_TMP_DIR: `${f.finalDir}.tmp.5678`, SIDECAR_DIR: `${f.finalDir}.tmp.5678`,
       _sidecar_stage_identity: identityFile, PAPERCUSP_SIDECAR_RESUME_FROM: f.stage,
       DISTRIBUTION_PROFILE: 'vm-release', TARGET_OS: 'linux', TARGET_ARCH: 'x64',

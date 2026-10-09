@@ -195,6 +195,27 @@ test('producer vendors an addon library that loads after relocation without the 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('native addon assembly refuses missing inspection and relocation tools', { skip: process.platform !== 'linux' }, () => {
+  const builder = fs.readFileSync(path.resolve(__dirname, '../bin/build-desktop-sidecar.sh'), 'utf8');
+  const bundleLibraries = extractFunction('bundle_linux_addon_libraries', builder);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-addon-tools-'));
+  try {
+    for (const missing of ['objdump', 'ldd', 'file', 'patchelf']) {
+      const shims = path.join(dir, missing);
+      fs.mkdirSync(shims);
+      for (const tool of ['objdump', 'ldd', 'file', 'patchelf']) {
+        if (tool !== missing) fs.writeFileSync(path.join(shims, tool), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      }
+      const result = spawnSync('/bin/bash', ['-c', 'set -euo pipefail\n' + bundleLibraries +
+        '\nbundle_linux_addon_libraries "$1"', 'vendor', dir], {
+        encoding: 'utf8', env: { ...process.env, PATH: shims, TARGET_OS: 'linux', TARGET_ARCH: process.arch },
+      });
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      assert.match(result.stderr, new RegExp('requires ' + missing));
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 const hashFile = (file) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
 test('real verifier emits an executable-bound failure receipt on an incomplete bundle', () => {
