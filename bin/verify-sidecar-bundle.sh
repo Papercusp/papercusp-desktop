@@ -835,7 +835,7 @@ try {
   const startedAt = Date.now();
   const result = spawnSync(executable, [join(side, 'serve.mjs'), '--verify-boot-imports'],
     { cwd: side, env, encoding: 'utf8', timeout: 60000, maxBuffer: 1024 * 1024 });
-  if (result.status !== 0 || !result.stdout?.includes('PAPERCUSP_BOOT_IMPORTS_OK')) {
+  if (result.error || result.status !== 0 || !result.stdout?.includes('PAPERCUSP_BOOT_IMPORTS_OK')) {
     const diagnostic = { executable, cwd: side, elapsedMs: Date.now() - startedAt,
       pid: result.pid, status: result.status, signal: result.signal,
       errorCode: result.error?.code, allocatorCap: env.MALLOC_ARENA_MAX,

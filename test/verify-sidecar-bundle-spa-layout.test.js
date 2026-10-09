@@ -265,7 +265,8 @@ test('packaged import timeout preserves partial output and launch diagnostics', 
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'boot-timeout-observation-'));
   try {
     const preload = path.join(fixture, 'spawn-observation.cjs');
-    fs.writeFileSync(preload, `
+    for (const status of [null, 0]) {
+      fs.writeFileSync(preload, `
       const cp = require('node:child_process');
       const original = cp.spawnSync;
       cp.spawnSync = (file, args, options) => {
@@ -273,7 +274,7 @@ test('packaged import timeout preserves partial output and launch diagnostics', 
           require('node:assert/strict').equal(options.timeout, 60000);
           const error = new Error('observed boot probe deadline');
           error.code = 'ETIMEDOUT';
-          return { pid: 123, status: null, signal: 'SIGTERM', error,
+          return { pid: 123, status: ${JSON.stringify(status)}, signal: ${JSON.stringify(status === null ? 'SIGTERM' : null)}, error,
             stdout: 'LAST_COMPLETED_BOOT_PHASE registry-start\\nPAPERCUSP_BOOT_IMPORTS_OK\\n',
             stderr: 'CHILD_DIAGNOSTIC registry-pending\\n' };
         }
@@ -281,14 +282,15 @@ test('packaged import timeout preserves partial output and launch diagnostics', 
       };
       require('node:module').syncBuiltinESMExports();
     `);
-    const result = runBootCheck('', { NODE_OPTIONS: '--require=' + preload });
-    assert.equal(result.status, 1, 'a partial receipt must not accept a timed-out child');
-    assert.match(result.stderr, /LAST_COMPLETED_BOOT_PHASE registry-start/);
-    assert.match(result.stderr, /CHILD_DIAGNOSTIC registry-pending/);
-    assert.match(result.stderr, /"errorCode":"ETIMEDOUT"/);
-    assert.match(result.stderr, /"pid":123/);
-    assert.match(result.stderr, /"elapsedMs":\d+/);
-    assert.match(result.stderr, /"cwd":"[^\n]+packaged-boot-closure-/);
+      const result = runBootCheck('', { NODE_OPTIONS: '--require=' + preload });
+      assert.equal(result.status, 1, 'a partial receipt must not accept a timed-out child');
+      assert.match(result.stderr, /LAST_COMPLETED_BOOT_PHASE registry-start/);
+      assert.match(result.stderr, /CHILD_DIAGNOSTIC registry-pending/);
+      assert.match(result.stderr, /"errorCode":"ETIMEDOUT"/);
+      assert.match(result.stderr, /"pid":123/);
+      assert.match(result.stderr, /"elapsedMs":\d+/);
+      assert.match(result.stderr, /"cwd":"[^\n]+packaged-boot-closure-/);
+    }
   } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
 });
 
