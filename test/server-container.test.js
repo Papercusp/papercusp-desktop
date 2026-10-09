@@ -161,6 +161,34 @@ test('arm64 payloads are validated and executable-mode changes affect the bindin
   assert.notEqual(first.sidecarSha256, second.sidecarSha256);
 });
 
+test('every ELF payload must match the platform, including pui, PostgreSQL and non-executable libraries', async t => {
+  const { preflightServerContainer } = await lib;
+  for (const name of ['bin/pui', 'node_modules/@embedded-postgres/linux-arm64/native/bin/postgres', 'lib/libpayload.so']) {
+    await t.test(name, async sub => {
+      const f = await fixture(sub, 'linux/arm64');
+      const native = path.join(f.sidecar, name);
+      await fs.mkdir(path.dirname(native), { recursive: true });
+      await fs.writeFile(native, nativeHeader(62), { mode: 0o644 });
+      await assert.rejects(preflightServerContainer(f.options), /Native payload architecture mismatch/);
+      await assert.rejects(fs.stat(f.options.out), { code: 'ENOENT' });
+      await fs.writeFile(native, nativeHeader(183));
+      await preflightServerContainer(f.options);
+    });
+  }
+});
+
+test('architecture validation follows in-payload ELF links and permits scripts', async t => {
+  const { preflightServerContainer } = await lib;
+  const f = await fixture(t, 'linux/arm64');
+  await fs.mkdir(path.join(f.sidecar, 'bin'));
+  await fs.writeFile(path.join(f.sidecar, 'payload'), nativeHeader(62));
+  await fs.symlink('../payload', path.join(f.sidecar, 'bin/pui'));
+  await assert.rejects(preflightServerContainer(f.options), /Native payload architecture mismatch/);
+  await fs.writeFile(path.join(f.sidecar, 'payload'), nativeHeader(183));
+  await fs.writeFile(path.join(f.sidecar, 'bin/launcher'), '#!/bin/sh\nexec node serve.mjs\n', { mode: 0o755 });
+  await preflightServerContainer(f.options);
+});
+
 test('entry bytes and source provenance must match their native build receipt', async t => {
   const { preflightServerContainer } = await lib;
   const f = await fixture(t);

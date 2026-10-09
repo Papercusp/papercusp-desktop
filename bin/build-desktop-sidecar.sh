@@ -176,6 +176,15 @@ TARGET_ARCH="${TARGET_ARCH:-$_host_arch}"
 # GNU Make reserves TARGET_ARCH; keep it shell-local so it cannot become a
 # spurious compiler input. Subprocess target flags are passed explicitly.
 export -n TARGET_ARCH
+# Linux's native pui/embedded-PG branches consume the process architecture.
+# Unlike the Darwin route, they have no complete cross-target sysroot/payload
+# replacement. Refuse a mislabeled Linux bundle before any input mutation.
+if [[ "$TARGET_OS" == "linux" \
+   && ( "$_host_os" != "linux" || "$TARGET_ARCH" != "$_host_arch" ) ]]; then
+  echo "ERROR: Linux sidecar target $TARGET_ARCH requires a matching native Linux build process (host=$_host_os-$_host_arch)." >&2
+  echo "       Run this producer in a target-platform builder; setting TARGET_ARCH alone cannot cross-build pui, PostgreSQL and native addons." >&2
+  exit 2
+fi
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
   # shellcheck source=lib/vm-release-trust-toolchain.sh
   source "$HERE/lib/vm-release-trust-toolchain.sh"

@@ -65,6 +65,16 @@ function runWithHidden(hidden, extraEnv = {}, shims = {}) {
   }
 }
 
+test('Linux cross-architecture builds refuse before source capture or assembly',
+  { skip: process.platform !== 'linux' }, () => {
+    const target = process.arch === 'arm64' ? 'x64' : 'arm64';
+    const r = runWithHidden([], { TARGET_OS: 'linux', TARGET_ARCH: target });
+    const output = `${r.stdout}${r.stderr}`;
+    assert.equal(r.status, 2, output);
+    assert.match(output, /requires a matching native Linux build process/);
+    assert.doesNotMatch(output, /using pinned Node runtime|esbuild-bundling|copying first-party|CROSS-baking/);
+  });
+
 test('a local build without kopia fails in the host-tool preflight, before toolchain work', () => {
   const r = runWithHidden(['kopia']);
   const output = `${r.stdout}${r.stderr}`;
