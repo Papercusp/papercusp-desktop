@@ -91,6 +91,27 @@ test('audited pinned dogfood refuses dirty source and external dependencies befo
   }
 });
 
+test('native Server builder defaults enter the real release guard before installing frozen dependencies', t => {
+  const recipe = fs.readFileSync(path.join(repoRoot, 'infra/images/server/NativeBuilder.Containerfile'), 'utf8');
+  const profile = recipe.match(/^ENV PAPERCUSP_DISTRIBUTION_PROFILE=([^\s]+) /m)?.[1];
+  assert.equal(profile, 'dogfood', 'both native architectures require the supported audited pinned route');
+  assert.match(recipe, /PAPERCUSP_RELEASE_AUDIT=1/);
+  assert.match(recipe, /PAPERCUSP_PINNED_DEPS_SNAPSHOT_ROOT=\/product/);
+  for (const [options, expected] of [
+    [{ profile, pinned: true }, '1'],
+    [{ profile, pinned: true, skip: '0' }, '0'],
+  ]) {
+    const result = runPinnedReleaseInstallGuard(t, options);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(JSON.parse(result.stdout.trim()).skip, expected);
+  }
+  for (const options of [{ profile, pinned: true, dirty: 'true' }, { profile, pinned: true, external: true }]) {
+    const result = runPinnedReleaseInstallGuard(t, options);
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    assert.equal(result.stdout.trim(), '', 'refuse before any install child');
+  }
+});
+
 test('clean-source native transformer validation follows dependency hydration and precedes SPA assembly', () => {
   const install = builder.indexOf('(cd "$REPO_ROOT" && node scripts/npm-install-safe.mjs install');
   const validation = builder.indexOf('papercusp_verify_transformers_native_target "$REPO_ROOT" "$TARGET_OS" "$TARGET_ARCH" || exit 1');
