@@ -517,6 +517,7 @@ test('the npm build wrapper repacks fresh release, debug, and all-bundles Debian
       'bundle_root="$FAKE_TARGET_DIR"',
       '[[ -n "$target" ]] && bundle_root="$bundle_root/$target"',
       'mkdir -p "$bundle_root/$profile/bundle/deb"',
+      'printf "%s\\n" "$PAPERCUSP_RELEASE_HOST" > "$bundle_root/$profile/papercusp-desktop"',
       'cp "$FAKE_DEB_SOURCE" "$bundle_root/$profile/bundle/deb/Papercusp_1.0.0_all.deb"',
       '',
     ].join('\n'), { mode: 0o755 });
@@ -527,6 +528,7 @@ test('the npm build wrapper repacks fresh release, debug, and all-bundles Debian
       FAKE_ARGS_LOG: argsLog,
       FAKE_DEB_SOURCE: sourceDeb,
       FAKE_TARGET_DIR: targetDir,
+      PAPERCUSP_RELEASE_HOST: 'https://release-fixture.invalid',
       TAURI_SIGNING_PRIVATE_KEY: '',
     };
     for (const { args, profile, expectedArgs } of [
@@ -667,6 +669,35 @@ for (const channel of ['content', 'content-and-path', 'content-as-path', 'path-o
       assert.doesNotMatch(result.stdout + result.stderr, /fixture-key-content/);
       assert.equal(fs.readFileSync(`${f.deb}.sig`, 'utf8'), 'replacement signature\n');
       assert.match(run('ar', ['t', f.deb]), /data\.tar\.xz/);
+    } finally { fs.rmSync(f.tmp, { recursive: true, force: true }); }
+  });
+}
+
+for (const producer of ['build-appimage.sh', 'mac-vm-build.sh']) {
+  test(`${producer} signer child drops inherited path and keeps the caller setting`, () => {
+    const f = signingFixture();
+    try {
+      const source = fs.readFileSync(path.join(root, 'bin', producer), 'utf8');
+      let block;
+      if (producer === 'build-appimage.sh') {
+        block = source.slice(source.indexOf('# 5. Sign for the Tauri updater'), source.indexOf('# build-linux-local.sh moves this output'));
+      } else {
+        const start = source.lastIndexOf('rm -f "$dmg.sig"');
+        const end = source.indexOf('  echo "    ✓ $(basename "$dmg")"', start);
+        assert.ok(start >= 0 && end > start);
+        block = source.slice(start, end);
+      }
+      assert.ok(block.includes('tauri signer sign'));
+      const script = ['set -euo pipefail', 'OUT="$1"', 'dmg="$1"', 'ROOT="$2"', 'TAURI_CLI_VERSION=2.11.0', block,
+        'test "$TAURI_SIGNING_PRIVATE_KEY_PATH" = "$3"'].join('\n');
+      const result = spawnSync('bash', ['-c', script, '_', f.deb, f.tmp, f.key], { encoding: 'utf8', env: {
+        ...f.env, TAURI_SIGNING_PRIVATE_KEY: 'fixture-key-content', TAURI_SIGNING_PRIVATE_KEY_PATH: f.key,
+      } });
+      assert.equal(result.status, 0, result.stderr);
+      const rows = fs.readFileSync(f.record, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.deepEqual(rows, [{ content: true, pathPresent: false, argvLeaksKey: false }]);
+      assert.equal(fs.readFileSync(`${f.deb}.sig`, 'utf8'), 'replacement signature\n');
+      assert.doesNotMatch(result.stdout + result.stderr, /fixture-key-content/);
     } finally { fs.rmSync(f.tmp, { recursive: true, force: true }); }
   });
 }

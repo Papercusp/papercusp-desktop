@@ -756,7 +756,9 @@ for role in $PAPERCUSP_BUILD_ROLES; do
   [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]] \
     || { echo "ERROR: no TAURI_SIGNING_PRIVATE_KEY — refusing to publish unsigned $(basename "$dmg")" >&2; exit 1; }
   rm -f "$dmg.sig"
-  ( cd "$ROOT" && TAURI_SIGNING_PRIVATE_KEY="$TAURI_SIGNING_PRIVATE_KEY" \
+  _key="$TAURI_SIGNING_PRIVATE_KEY"; [[ -f "$_key" ]] && _key="$(cat "$_key")"
+  ( cd "$ROOT" && unset TAURI_SIGNING_PRIVATE_KEY_PATH
+      TAURI_SIGNING_PRIVATE_KEY="$_key" \
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
       npx --yes -p "@tauri-apps/cli@$TAURI_CLI_VERSION" tauri signer sign "$dmg" >/dev/null ) \
     || { echo "ERROR: tauri signer failed for $dmg" >&2; exit 1; }

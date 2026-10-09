@@ -895,8 +895,9 @@ if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
   # `> pkg@version tauri` / `> tauri signer sign …` echo lines entirely (verified: with
   # --silent, npm prints only the wrapped command's own stdout).
   _key="$TAURI_SIGNING_PRIVATE_KEY"; [ -f "$_key" ] && _key="$(cat "$_key")"
-  if TAURI_SIGNING_PRIVATE_KEY="$_key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
-        npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri signer sign "$OUT"; then
+  if ( unset TAURI_SIGNING_PRIVATE_KEY_PATH
+       TAURI_SIGNING_PRIVATE_KEY="$_key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+         npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri signer sign "$OUT" ); then
     echo "   signed → $OUT.sig"
   else
     echo "   WARN: signing failed — AppImage is usable but the updater .sig is missing" >&2
