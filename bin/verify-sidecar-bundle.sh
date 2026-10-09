@@ -331,7 +331,14 @@ if [[ "$OS" == "Linux" ]]; then
     #   libresolv/libutil: glibc components
     #   libasound.so.2: pui links it; present wherever the GUI stack installs
     #     (pulled via webkit2gtk→gstreamer alsa on the .deb dependency chain)
-    BASE_LIBS=" ld-linux-x86-64.so.2 libc.so.6 libm.so.6 libpthread.so.0 libdl.so.2 librt.so.1 libutil.so.1 libresolv.so.2 libgcc_s.so.1 libstdc++.so.6 libz.so.1 libzstd.so.1 liblz4.so.1 libcrypto.so.3 libssl.so.3 libasound.so.2 "
+    # Ubuntu's glibc loader name follows the target ABI. Admit only that
+    # target's base loader; a foreign/unknown loader still needs bundle closure.
+    case "$TARGET_ARCH_N" in
+      x64|x86_64|amd64) BASE_LOADER="ld-linux-x86-64.so.2" ;;
+      arm64|aarch64)   BASE_LOADER="ld-linux-aarch64.so.1" ;;
+      *) BASE_LOADER=""; fail "unsupported Linux target architecture: $TARGET_ARCH_N" ;;
+    esac
+    BASE_LIBS=" $BASE_LOADER libc.so.6 libm.so.6 libpthread.so.0 libdl.so.2 librt.so.1 libutil.so.1 libresolv.so.2 libgcc_s.so.1 libstdc++.so.6 libz.so.1 libzstd.so.1 liblz4.so.1 libcrypto.so.3 libssl.so.3 libasound.so.2 "
     # Bundle lib dirs a NEEDED may resolve from (plus the scanned file's own dir)
     LIBDIRS="$BIN/.pg-real/lib"
     for d in "$SIDECAR"/node_modules/@papercusp/embedded-postgres-server/node_modules/@embedded-postgres/*/native/lib; do
