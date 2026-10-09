@@ -135,6 +135,130 @@ test('every sidecar esbuild package runner holds the host package-cache lease', 
 });
 
 const CACHE_PACKAGE_RUNNER = extractFunction('run_sidecar_cached_package');
+const VITE_NATIVE_PREPARE = extractFunction('prepare_vite_native_toolchain');
+const EXACT_PLATFORM_FETCH = extractFunction('fetch_cross_npm_pkg');
+
+function viteNativeFixture(t, { parentVersion = '1.0.3', packedVersion = '1.0.3', packStatus = 0, brokenBinding = false } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pc-vite-native's frozen cut-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const suffix = process.platform === 'linux'
+    ? `-${process.report.getReport().header.glibcVersionRuntime ? 'gnu' : 'musl'}`
+    : process.platform === 'win32' ? '-msvc' : '';
+  const binding = `@rolldown/binding-${process.platform}-${process.arch}${suffix}`;
+  const write = (file, content) => {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.writeFileSync(path.join(root, file), content);
+  };
+  const json = (file, content) => write(file, JSON.stringify(content));
+  json('apps/operator-vite/package.json', { name: 'fixture-app' });
+  json('package-lock.json', { packages: { 'node_modules/rolldown': { version: '1.0.3' } } });
+  json('node_modules/vite/package.json', { name: 'vite', type: 'module', main: 'index.mjs', dependencies: { rolldown: '1.0.3' } });
+  write('node_modules/vite/index.mjs', "import 'rolldown'; export const ready = true;\n");
+  json('node_modules/rolldown/package.json', { name: 'rolldown', version: parentVersion, main: 'index.cjs', optionalDependencies: { [binding]: parentVersion } });
+  write('node_modules/rolldown/index.cjs', `module.exports = require(${JSON.stringify(binding)});\n`);
+  write('scripts/npm-install-safe.mjs', LEGACY_CACHE_HELPER + '\nexport function repoLockName(root) { return root; }\n');
+  write('scripts/lib/fs-mutex.mjs', 'export async function withFsMutex(name, fn) { process.env.PC_INSTALL_WRITE_LEASE="held"; try { return await fn(); } finally { delete process.env.PC_INSTALL_WRITE_LEASE; } }\n');
+  write('fake-bin/npm', [
+    `#!${process.execPath}`,
+    'const fs=require("node:fs"),path=require("node:path"),cp=require("node:child_process");',
+    'const args=process.argv.slice(2);',
+    'fs.appendFileSync(process.env.PC_PACK_RECORD,JSON.stringify({args,cache:process.env.PC_CACHE_LEASE,writer:process.env.PC_INSTALL_WRITE_LEASE})+"\\n");',
+    `if (${packStatus}) process.exit(${packStatus});`,
+    'fs.mkdirSync("package");',
+    `fs.writeFileSync("package/package.json",JSON.stringify({name:${JSON.stringify(binding)},version:${JSON.stringify(packedVersion)},main:"index.cjs"}));`,
+    `fs.writeFileSync("package/index.cjs",${JSON.stringify(brokenBinding ? 'throw new Error("native payload cannot load");' : 'module.exports={native:true};')});`,
+    'const result=cp.spawnSync("tar",["-czf","binding.tgz","package"]); process.exit(result.status??1);',
+  ].join('\n'));
+  fs.chmodSync(path.join(root, 'fake-bin/npm'), 0o755);
+  const sourceFiles = ['apps/operator-vite/package.json', 'package-lock.json'];
+  const original = sourceFiles.map(file => fs.readFileSync(path.join(root, file), 'utf8'));
+  const run = () => childProcess.spawnSync('bash', ['-c', [
+    'set -euo pipefail', CACHE_PACKAGE_RUNNER, EXACT_PLATFORM_FETCH, VITE_NATIVE_PREPARE,
+    'prepare_vite_native_toolchain',
+  ].join('\n')], {
+    encoding: 'utf8', timeout: 15_000,
+    env: { ...process.env, REPO_ROOT: root, WEB_DIR: root, PATH: path.join(root, 'fake-bin') + path.delimiter + process.env.PATH,
+      PC_PACK_RECORD: path.join(root, 'pack.jsonl'), SIDECAR_DIR: path.join(root, 'sidecar') },
+  });
+  return { root, binding, run, destination: path.join(root, 'node_modules/rolldown/node_modules', binding),
+    records: () => fs.existsSync(path.join(root, 'pack.jsonl')) ? fs.readFileSync(path.join(root, 'pack.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line)) : [],
+    assertSourceUnchanged: () => assert.deepEqual(sourceFiles.map(file => fs.readFileSync(path.join(root, file), 'utf8')), original) };
+}
+
+test('Vite native prerequisite hydrates the exact parent pin missing from a platform-specific lock under both leases', t => {
+  const fixture = viteNativeFixture(t);
+  const result = fixture.run();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /VITE_NATIVE_TOOLCHAIN_OK/);
+  assert.deepEqual(fixture.records(), [{ args: ['pack', `${fixture.binding}@1.0.3`, '--silent'], cache: 'held', writer: 'held' }]);
+  fixture.assertSourceUnchanged();
+  const again = fixture.run();
+  assert.equal(again.status, 0, again.stdout + again.stderr);
+  assert.equal(fixture.records().length, 1, 'the verified exact package is reused');
+  assert.ok(builder.indexOf('prepare_vite_native_toolchain || exit 1') < builder.indexOf('build_runtime_workspace_outputs_after_install\n'));
+});
+
+test('Vite native prerequisite refuses an unpinned parent before fetching and preserves source files', t => {
+  const fixture = viteNativeFixture(t, { parentVersion: '1.0.4' });
+  const result = fixture.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /no exact locked parent pin/);
+  assert.deepEqual(fixture.records(), []);
+  fixture.assertSourceUnchanged();
+});
+
+test('failed or mismatched native tarballs never publish a partial platform package', t => {
+  for (const options of [{ packStatus: 29 }, { packedVersion: '1.0.4' }]) {
+    const fixture = viteNativeFixture(t, options);
+    const result = fixture.run();
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.equal(fs.existsSync(fixture.destination), false);
+    fixture.assertSourceUnchanged();
+  }
+});
+
+test('Vite native prerequisite requires the fetched payload and actual Vite import to load', t => {
+  const fixture = viteNativeFixture(t, { brokenBinding: true });
+  const result = fixture.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /native payload cannot load/);
+  assert.doesNotMatch(result.stdout, /VITE_NATIVE_TOOLCHAIN_OK/);
+  fixture.assertSourceUnchanged();
+});
+
+test('Vite native prerequisite rejects a broken Vite entrypoint even when its native binding loads', t => {
+  const fixture = viteNativeFixture(t);
+  fs.writeFileSync(path.join(fixture.root, 'node_modules/vite/index.mjs'), 'import "rolldown"; throw new Error("Vite transitive graph is broken");');
+  const result = fixture.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Vite transitive graph is broken/);
+  assert.doesNotMatch(result.stdout, /VITE_NATIVE_TOOLCHAIN_OK/);
+});
+
+test('Vite native prerequisite follows a locked workspace-local Rolldown requester', t => {
+  const fixture = viteNativeFixture(t);
+  const local = path.join(fixture.root, 'node_modules/vite/node_modules/rolldown');
+  fs.mkdirSync(path.dirname(local), { recursive: true });
+  fs.renameSync(path.join(fixture.root, 'node_modules/rolldown'), local);
+  fs.writeFileSync(path.join(fixture.root, 'package-lock.json'), JSON.stringify({ packages: {
+    'node_modules/vite/node_modules/rolldown': { version: '1.0.3' },
+  } }));
+  const result = fixture.run();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(fs.existsSync(path.join(local, 'node_modules', fixture.binding, 'package.json')), true);
+});
+
+test('Vite native prerequisite refuses a different already-installed binding version without replacing evidence', t => {
+  const fixture = viteNativeFixture(t);
+  fs.mkdirSync(fixture.destination, { recursive: true });
+  const manifest = JSON.stringify({ name: fixture.binding, version: '1.0.4' });
+  fs.writeFileSync(path.join(fixture.destination, 'package.json'), manifest);
+  const result = fixture.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /differs from exact pin/);
+  assert.deepEqual(fixture.records(), []);
+  assert.equal(fs.readFileSync(path.join(fixture.destination, 'package.json'), 'utf8'), manifest);
+});
 
 function runCachePackageFixture({ helper, command = [], childStatus = 0 } = {}) {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "pc-cache-runner's target-"));

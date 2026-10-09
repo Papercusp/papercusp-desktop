@@ -1034,6 +1034,89 @@ echo "→ installing operator + operator-vite deps (ONE combined workspace insta
 # between builds can prune prior outputs and wait behind a reader that joined
 # after expensive source/dependency staging. Reuse the same workspace registry
 # for the one union install and the protected runtime builds below.
+# Reused for runtime cross packages and build-host optional native packages.
+# npm can silently omit a platform package when the committed lock contains
+# only another architecture. Fetch the parent's exact pin without rewriting
+# source manifests or the lock, and publish only a complete matching package.
+fetch_cross_npm_pkg() {
+  local spec="$1" nm_dir="$2" pkg_name="${1%@*}" pinned="${1##*@}"
+  local dest="$nm_dir/$pkg_name" actual tmp tgz
+  if [[ -f "$dest/package.json" ]]; then
+    actual="$(node -e 'process.stdout.write(String(require(process.argv[1]).version||""))' "$dest/package.json")" || return 1
+    [[ "$actual" == "$pinned" ]] || { echo "ERROR: $pkg_name version $actual differs from exact pin $pinned" >&2; return 1; }
+    echo "    ✓ $pkg_name@$pinned already present"
+    return 0
+  fi
+  [[ ! -e "$dest" ]] || { echo "ERROR: incomplete package at $dest; refusing to overwrite it" >&2; return 1; }
+  mkdir -p "$(dirname "$dest")" || return 1
+  tmp="$(mktemp -d "$(dirname "$dest")/.pc-npm-package.XXXXXX")" || return 1
+  if ! (cd "$tmp" && npm pack "$spec" --silent >pack.log 2>&1); then
+    cat "$tmp/pack.log" >&2
+    echo "ERROR: npm pack '$spec' failed" >&2; rm -rf "$tmp"; return 1
+  fi
+  tgz="$(ls "$tmp"/*.tgz 2>/dev/null | sed -n 1p)"
+  [[ -f "$tgz" ]] || { echo "ERROR: npm pack '$spec' produced no tarball" >&2; rm -rf "$tmp"; return 1; }
+  mkdir "$tmp/unpack"
+  if ! tar -xzf "$tgz" -C "$tmp/unpack" --strip-components=1 || ! node -e '
+const p=require(process.argv[1]);
+if (p.name !== process.argv[2] || p.version !== process.argv[3]) process.exit(1);
+' "$tmp/unpack/package.json" "$pkg_name" "$pinned"; then
+    echo "ERROR: '$spec' tarball is incomplete or does not match its exact pin" >&2
+    rm -rf "$tmp"; return 1
+  fi
+  mkdir -p "$(dirname "$dest")"
+  mv "$tmp/unpack" "$dest" || { rm -rf "$tmp"; return 1; }
+  rm -rf "$tmp"
+  echo "    ✓ fetched $pkg_name@$pinned → $dest"
+}
+
+prepare_vite_native_toolchain() {
+  export -f fetch_cross_npm_pkg
+  local status=0
+  # Keep the installer's lock order: repo writer, then cache reader for npm pack.
+  # Vite import stays under the writer after releasing the short cache lease.
+  node --input-type=module -e '
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join, relative, sep } from "node:path";
+import { pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
+const root=process.argv[1];
+const {withFsMutex}=await import(pathToFileURL(join(root,"scripts/lib/fs-mutex.mjs")));
+const {repoLockName,withPackageCacheReadLease}=await import(pathToFileURL(join(root,"scripts/npm-install-safe.mjs")));
+await withFsMutex(repoLockName(root),async()=>{
+  const appRequire=createRequire(join(root,"apps/operator-vite/package.json"));
+  const viteManifest=appRequire.resolve("vite/package.json");
+  const vite=JSON.parse(readFileSync(viteManifest,"utf8"));
+  if (vite.dependencies?.rolldown) {
+    const viteRequire=createRequire(viteManifest);
+    const manifest=viteRequire.resolve("rolldown/package.json");
+    const pkg=JSON.parse(readFileSync(manifest,"utf8"));
+    const key=relative(root,dirname(manifest)).split(sep).join("/");
+    const lock=JSON.parse(readFileSync(join(root,"package-lock.json"),"utf8"));
+    const suffix=process.platform==="linux"
+      ? `-${process.report.getReport().header.glibcVersionRuntime ? "gnu" : "musl"}`
+      : process.platform==="win32" ? "-msvc" : "";
+    const binding=`@rolldown/binding-${process.platform}-${process.arch}${suffix}`;
+    if (key.startsWith("../") || !key.split("/").includes("node_modules") || lock.packages?.[key]?.version!==pkg.version ||
+        !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(pkg.version) ||
+        pkg.optionalDependencies?.[binding]!==pkg.version) {
+      throw new Error(`Vite native binding has no exact locked parent pin: ${binding} / ${key}`);
+    }
+    const result=await withPackageCacheReadLease(()=>spawnSync("bash",["-c",`fetch_cross_npm_pkg "$1" "$2"`,"vite-native-binding",
+      `${binding}@${pkg.version}`,join(dirname(manifest),"node_modules")],{stdio:"inherit",env:process.env}));
+    if (result.error) throw result.error;
+    if (result.status!==0) throw new Error(`Vite native binding fetch failed (${result.status})`);
+    createRequire(manifest)(binding);
+  }
+  await import(pathToFileURL(appRequire.resolve("vite")));
+  console.log("VITE_NATIVE_TOOLCHAIN_OK: exact binding and Vite import load on the build host");
+});
+' "$REPO_ROOT" || status=$?
+  export -n -f fetch_cross_npm_pkg
+  return "$status"
+}
+
 RUNTIME_BUILD_WORKSPACES=(
   "@papercusp/omp"
   "@papercusp/sse"
@@ -1047,6 +1130,11 @@ done
   --workspace=@papercusp/web --workspace=@papercusp/operator-vite \
   "${_runtime_workspace_install_args[@]}")
 unset _runtime_workspace_install_args _runtime_workspace
+
+# EI-25480137688733154: a successful npm install is insufficient when its
+# lock omits this host architecture. Hydrate and load the exact native toolchain
+# before workspace compilation and SPA/sidecar assembly, including frozen cuts.
+prepare_vite_native_toolchain || exit 1
 
 # POST-INSTALL RUNTIME BUILDS (EI-20505823617947029) -------------------------
 # setup-release-checkout.sh builds these gitignored runtime entry points from
@@ -1734,24 +1822,6 @@ _bare_node_arch="$TARGET_ARCH"
 # can pull the exact @scope/pkg@version the target needs and unpack it where the
 # closure/embedded-pg install would have placed it. ALWAYS pass an explicit
 # @version (the `%@*` name-strip below assumes one). Idempotent; fails loud.
-fetch_cross_npm_pkg() {
-  local spec="$1" nm_dir="$2"
-  local pkg_name="${spec%@*}"            # @img/sharp-darwin-x64@0.35.3 → @img/sharp-darwin-x64
-  local dest="$nm_dir/$pkg_name"
-  [[ -e "$dest/package.json" ]] && { echo "    ✓ $pkg_name already present — skip cross-fetch"; return 0; }
-  local tmp; tmp="$(mktemp -d)"
-  if ! ( cd "$tmp" && npm pack "$spec" --silent >/dev/null 2>&1 ); then
-    echo "ERROR: npm pack '$spec' failed (cross-fetch of a per-platform pkg)"; rm -rf "$tmp"; return 1
-  fi
-  local tgz; tgz="$(ls "$tmp"/*.tgz 2>/dev/null | sed -n 1p)"
-  [[ -f "$tgz" ]] || { echo "ERROR: npm pack '$spec' produced no tarball"; rm -rf "$tmp"; return 1; }
-  mkdir -p "$dest"
-  if ! tar -xzf "$tgz" -C "$dest" --strip-components=1; then
-    echo "ERROR: extracting '$spec' tarball failed"; rm -rf "$tmp"; return 1
-  fi
-  rm -rf "$tmp"
-  echo "    ✓ cross-fetched $pkg_name → ${dest#"$SIDECAR_DIR/"}"
-}
 # Read an exact pinned version from a package's optionalDependencies map (npm pins
 # @img/* and @lydell/* platform packages to an EXACT version there, so we fetch the
 # ABI-matched build instead of `latest`, which could drift ahead of the JS pkg).
