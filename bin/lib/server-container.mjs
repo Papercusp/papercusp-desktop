@@ -43,20 +43,23 @@ async function requireElfPlatform(path, machine, required = true) {
     const header = Buffer.alloc(20);
     const { bytesRead } = await fd.read(header, 0, header.length, 0);
     const isElf = bytesRead >= 4 && header.subarray(0, 4).equals(Buffer.from([127, 69, 76, 70]));
-    if (!required && !isElf) return;
+    if (!required && !isElf) return false;
     if (bytesRead !== 20 || !header.subarray(0, 4).equals(Buffer.from([127, 69, 76, 70])) ||
         header[4] !== 2 || header[5] !== 1 || header.readUInt16LE(18) !== machine) {
       throw new Error('Native payload architecture mismatch: ' + path);
     }
+    return true;
   } finally {
     await fd.close();
   }
 }
 
 /** Bind every payload entry, including executable modes and safe in-tree links. */
-async function sidecarInventory(root, platform) {
+export async function sidecarInventory(root, platform, { hashContents = true } = {}) {
+  if (!PLATFORMS.has(platform)) throw new Error('Unsupported native inventory platform: ' + platform);
   const physicalRoot = await realpath(root);
   const hash = createHash('sha256');
+  const elfFiles = [];
   const pending = [''];
   let entries = 0;
   let bytes = 0;
@@ -69,8 +72,8 @@ async function sidecarInventory(root, platform) {
       const target = await realpath(path);
       if (!within(physicalRoot, target)) throw new Error('Sidecar link escapes its payload: ' + name);
       if ((await lstat(target)).isFile()) {
-        await requireElfPlatform(target, PLATFORMS.get(platform),
-          name.endsWith('.node') || name === join('bin', 'node'));
+        if (await requireElfPlatform(target, PLATFORMS.get(platform),
+          name.endsWith('.node') || name === join('bin', 'node'))) elfFiles.push(path);
       }
       hash.update(JSON.stringify([name, 'link', relative(physicalRoot, target)]) + '\n');
     } else if (st.isDirectory()) {
@@ -80,15 +83,15 @@ async function sidecarInventory(root, platform) {
     } else if (st.isFile()) {
       // pui, PostgreSQL and shared libraries matter as much as Node/addons.
       // Inspect ELF headers regardless of name or executable mode.
-      await requireElfPlatform(path, PLATFORMS.get(platform),
-        name.endsWith('.node') || name === join('bin', 'node'));
+      if (await requireElfPlatform(path, PLATFORMS.get(platform),
+        name.endsWith('.node') || name === join('bin', 'node'))) elfFiles.push(path);
       bytes += st.size;
-      hash.update(JSON.stringify([name, 'file', st.mode & 0o777, await hashFile(path)]) + '\n');
+      if (hashContents) hash.update(JSON.stringify([name, 'file', st.mode & 0o777, await hashFile(path)]) + '\n');
     } else {
       throw new Error('Unsupported sidecar entry: ' + name);
     }
   }
-  return { sha256: hash.digest('hex'), bytes, entries };
+  return { sha256: hashContents ? hash.digest('hex') : null, bytes, entries, elfFiles };
 }
 
 export async function runCommand(command, args, options = {}) {
