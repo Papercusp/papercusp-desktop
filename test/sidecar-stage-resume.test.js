@@ -406,6 +406,39 @@ test('SPA import refuses tampered bytes, modes, paths and links before publishin
   }
 });
 
+test('SPA copy preserves receipt-bound directory and file modes across destination umasks', async () => {
+  const f = await spaFixture();
+  try {
+    const assets = path.join(f.snapshot, 'assets');
+    const nested = path.join(assets, 'nested');
+    fs.mkdirSync(nested, { recursive: true });
+    fs.chmodSync(assets, 0o755);
+    fs.chmodSync(nested, 0o750);
+    fs.writeFileSync(path.join(nested, 'chunk.js'), 'export default 2');
+    fs.chmodSync(path.join(nested, 'chunk.js'), 0o640);
+    fs.chmodSync(path.join(f.snapshot, 'chunk.js'), 0o700);
+    fs.symlinkSync('nested/chunk.js', path.join(assets, 'chunk-link.js'));
+    captureSpa(f.snapshot, f.identity);
+    const identityFile = path.join(f.root, 'identity.json');
+    writeJson(identityFile, f.identity);
+    for (const mask of [0o002, 0o022, 0o077]) {
+      const destination = path.join(f.root, `copy-${mask.toString(8)}`);
+      const result = spawnSync(process.execPath, ['-e', `
+        const fs = require('node:fs');
+        const { copySpa } = require(process.argv[1]);
+        process.umask(Number(process.argv[2]));
+        copySpa(process.argv[3], process.argv[4], JSON.parse(fs.readFileSync(process.argv[5], 'utf8')));
+      `, path.join(bin, 'lib/sidecar-stage-state.js'), String(mask), f.snapshot,
+      destination, identityFile], { encoding: 'utf8' });
+      assert.equal(result.status, 0, `umask ${mask.toString(8)}: ${result.stdout}${result.stderr}`);
+      assert.deepEqual(inventory(destination), inventory(f.snapshot));
+      assert.equal(fs.existsSync(`${destination}.spa.json`), false, 'private receipt is not shipped');
+      assert.equal(fs.existsSync(`${destination}.tmp.${result.pid}`), false, 'temporary copy is removed');
+    }
+    validateSpa(f.snapshot, f.identity);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test('SPA portability rejects native addons and disguised ELF, PE and Mach-O bytes', async () => {
   for (const [name, bytes] of [['addon.node', 'native'], ['hidden.js', Buffer.from([127, 69, 76, 70])],
     ['windows.js', 'MZbinary'], ['mac.js', Buffer.from([0xcf, 0xfa, 0xed, 0xfe])]]) {

@@ -255,6 +255,11 @@ function copySpa(snapshot, destination, identity) {
   if (fs.existsSync(temporary)) throw new Error('SPA copy temporary already exists');
   try {
     fs.cpSync(snapshot, temporary, { recursive: true, verbatimSymlinks: true });
+    // cpSync creates directories using the destination umask. Restore the
+    // validated modes without changing the process-wide umask or following links.
+    for (const entry of receipt.entries) {
+      if (entry.type !== 'symlink') fs.chmodSync(path.join(temporary, entry.path), entry.mode);
+    }
     if (JSON.stringify(portableSpaInventory(temporary)) !== JSON.stringify(receipt.entries))
       throw new Error('SPA bytes changed during copy');
     validateSpa(snapshot, identity);
