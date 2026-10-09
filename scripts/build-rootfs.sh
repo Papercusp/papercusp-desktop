@@ -75,6 +75,14 @@ if [[ "${1:-}" == "--print-recipe-fingerprint" ]]; then
   exit 0
 fi
 
+# Docker can pull a foreign-architecture image without being able to execute
+# it. Check that boundary before bootstrap work or replacing a valid archive.
+docker pull --platform "$RUNTIME_PLATFORM" "$UBUNTU_IMAGE"
+if ! docker run --rm --platform "$RUNTIME_PLATFORM" "$UBUNTU_IMAGE" /bin/true; then
+  echo "ERROR: Docker cannot execute $RUNTIME_PLATFORM; configure a native runner or QEMU binfmt support before building the runtime." >&2
+  exit 2
+fi
+
 # A failed export must leave no final-path artifact for a later build guard to
 # mistake for a complete rootfs. Publish the successful export with rename(2)
 # below so readers see either no file or the complete tarball. Keep this
@@ -95,8 +103,6 @@ cleanup() {
 trap cleanup EXIT
 
 # ── Run the bootstrap inside the container ───────────────────────────
-docker pull --platform "$RUNTIME_PLATFORM" "$UBUNTU_IMAGE"
-
 # Use `docker create` then `docker start -a` so we get the container ID
 # back and can `docker export` it. `docker run` would tear down on exit.
 docker create \

@@ -93,6 +93,46 @@ test('rootfs producer fingerprints the complete shipped bootstrap, including net
   assert.notEqual(fingerprint().status, 0, 'a missing source must not fingerprint an empty recipe');
 });
 
+test('rootfs host execution preflight preserves a valid archive when emulation is unavailable', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rootfs execution '));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const tools = path.join(dir, 'tools');
+  const output = path.join(dir, 'output');
+  const calls = path.join(dir, 'docker-calls');
+  fs.mkdirSync(tools);
+  fs.mkdirSync(output);
+  const artifact = path.join(output, 'papercup-runtime.tar.gz');
+  fs.writeFileSync(artifact, 'previous verified generation');
+  fs.writeFileSync(path.join(tools, 'docker'), '#!/bin/bash\nset -eu\nprintf "%s\\n" "$1" >> "$DOCKER_PREFLIGHT_LOG"\nif [ "$1" = run ]; then exit 1; fi\n', { mode: 0o755 });
+  const result = run('bash', [path.join(root, 'scripts/build-rootfs.sh')], { env: { ...process.env,
+    PATH: tools + ':' + process.env.PATH, DOCKER_PREFLIGHT_LOG: calls,
+    PAPERCUSP_ROOTFS_OUT_DIR: output, PAPERCUSP_RUNTIME_PLATFORM: 'linux/arm64' } });
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /cannot execute linux\/arm64.*QEMU/);
+  assert.deepEqual(fs.readFileSync(calls, 'utf8').trim().split('\n'), ['pull', 'run']);
+  assert.equal(fs.readFileSync(artifact, 'utf8'), 'previous verified generation');
+  assert.deepEqual(fs.readdirSync(output), ['papercup-runtime.tar.gz']);
+});
+
+test('an executable platform reaches bootstrap/export and writes an archive-bound architecture receipt', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rootfs export '));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const tools = path.join(dir, 'tools');
+  const output = path.join(dir, 'output');
+  const calls = path.join(dir, 'docker-calls');
+  fs.mkdirSync(tools);
+  fs.writeFileSync(path.join(tools, 'docker'), '#!/bin/bash\nset -eu\nprintf "%s\\n" "$1" >> "$DOCKER_PREFLIGHT_LOG"\nif [ "$1" = export ]; then printf "runtime fixture"; fi\n', { mode: 0o755 });
+  const result = run('bash', [path.join(root, 'scripts/build-rootfs.sh')], { env: { ...process.env,
+    PATH: tools + ':' + process.env.PATH, DOCKER_PREFLIGHT_LOG: calls,
+    PAPERCUSP_ROOTFS_OUT_DIR: output, PAPERCUSP_RUNTIME_PLATFORM: 'linux/arm64' } });
+  assert.equal(result.status, 0, result.stderr);
+  const commands = fs.readFileSync(calls, 'utf8').trim().split('\n');
+  assert.deepEqual(commands, ['pull', 'run', 'create', 'start', 'export', 'rm']);
+  const stamp = JSON.parse(fs.readFileSync(path.join(output, '.rootfs-build-stamp'), 'utf8'));
+  assert.equal(stamp.platform, 'linux/arm64');
+  assert.equal(stamp.rootfsSha256, createHash('sha256').update(fs.readFileSync(path.join(output, 'papercup-runtime.tar.gz'))).digest('hex'));
+});
+
 test('voice live E2E dependencies are provisioned and preflighted before host discovery', () => {
   const marker = 'apt-get install -y --no-install-recommends \\\n';
   const start = shipped.indexOf(marker);
