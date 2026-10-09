@@ -84,7 +84,7 @@ test('source-state capture streams Git diff output larger than the child-process
 
     const state = await sourceState(root);
     assert.match(state, /^[a-f0-9]{64}$/);
-    assert.equal(state, directSourceState(root), 'Python launcher must preserve every streamed Git byte');
+    assert.equal(state, directSourceState(root), 'source capture must preserve every streamed Git byte');
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
@@ -119,7 +119,7 @@ test('source-state fails on a real Git error instead of accepting a partial fing
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test('source-state preserves Git exit and signal failures and bounds stderr through Python', () => {
+test('source-state preserves Git exit and signal failures and bounds stderr', () => {
   const f = fixture();
   try {
     const shimRoot = path.join(f.root, 'shim');

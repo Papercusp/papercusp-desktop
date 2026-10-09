@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { makeDesktopTestScratchDirSync } = require('./test-scratch.cjs');
 
 const recipe = fs.readFileSync(path.resolve(__dirname, '../../infra/images/server/NativeBuilder.Containerfile'), 'utf8');
 const preflight = recipe.split('# NATIVE_PREFLIGHT_BEGIN\n')[1].split('# NATIVE_PREFLIGHT_END')[0];
@@ -45,4 +46,64 @@ test('native builder refuses moving or shell-looking toolchain versions', () => 
       assert.match(r.stderr, /require exact versions/);
     }
   }
+});
+
+test('factory Git adapter distinguishes stale ENOMEM at EOF from real stream errors', { skip: process.platform !== 'linux' }, () => {
+  const scratch = makeDesktopTestScratchDirSync('native-git-eof-');
+  try {
+    const compat = recipe.split("<<'GIT_EOF_SOURCE'\n")[1].split('\nGIT_EOF_SOURCE')[0];
+    const compile = (name, source, shared) => {
+      const file = path.join(scratch, name);
+      const r = spawnSync('gcc', [...(shared ? ['-shared', '-fPIC'] : []), '-Wall', '-Wextra', '-Werror', '-x', 'c', '-', '-o', file, '-ldl'], { input: source, encoding: 'utf8' });
+      assert.equal(r.status, 0, r.stderr || r.error?.message);
+      return file;
+    };
+    const adapter = compile('compat.so', compat, true);
+    const injected = compile('stale-errno.so', `
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <dlfcn.h>
+#include <errno.h>
+ssize_t getdelim(char **p, size_t *n, int d, FILE *f) {
+  ssize_t (*next)(char **,size_t *,int,FILE *)=dlsym(RTLD_NEXT,"getdelim");
+  ssize_t r=next(p,n,d,f);
+  if(r<0 && feof(f) && !ferror(f)) errno=ENOMEM;
+  return r;
+}`, true);
+    const executable = compile('probe', `
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+static ssize_t failed_read(void *cookie, char *buf, size_t n) {
+  (void)buf; (void)n; errno=*(int *)cookie; return -1;
+}
+int main(int argc, char **argv) {
+  (void)argc; char *line=NULL; size_t n=0; int failure=0;
+  FILE *f;
+  if(strcmp(argv[1],"eof")==0) {
+    f=fmemopen("okay\\n",5,"r");
+    if(getdelim(&line,&n,'\\n',f)!=5 || memcmp(line,"okay\\n",5)) return 2;
+  } else {
+    failure=strcmp(argv[1],"enomem")==0 ? ENOMEM : EIO;
+    cookie_io_functions_t io={.read=failed_read};
+    f=fopencookie(&failure,"r",io);
+  }
+  errno=0;
+  ssize_t r=getdelim(&line,&n,'\\n',f); int e=errno;
+  printf("%ld %d %d %d\\n",(long)r,e,!!feof(f),!!ferror(f));
+  free(line); fclose(f); return 0;
+}`, false);
+    const run = (mode, libraries) => {
+      const r = spawnSync(executable, [mode], { encoding: 'utf8', env: { ...process.env, LD_PRELOAD: libraries.join(':') } });
+      assert.equal(r.status, 0, r.stderr);
+      return r.stdout.trim().split(' ').map(Number);
+    };
+    assert.deepEqual(run('eof', [injected]), [-1, 12, 1, 0], 'positive control reproduces false ENOMEM');
+    assert.deepEqual(run('eof', [adapter, injected]), [-1, 0, 1, 0]);
+    for (const [mode, errno] of [['enomem', 12], ['eio', 5]]) {
+      assert.deepEqual(run(mode, [adapter, injected]), [-1, errno, 0, 1], 'actual failures must remain errors');
+    }
+  } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
 });
