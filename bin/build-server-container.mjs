@@ -1,7 +1,18 @@
 #!/usr/bin/env node
-import { buildServerContainer, preflightServerContainer, publishServerContainers } from './lib/server-container.mjs';
+import { readFile } from 'node:fs/promises';
+import { buildServerContainer, preflightServerContainer, publishServerContainers, runOwnedContainer } from './lib/server-container.mjs';
 
 const args = process.argv.slice(2);
+if (args[0] === 'native') {
+  if (args.length !== 3 || args[1] !== '--config') throw new Error('Native producer: native --config FILE');
+  try {
+    const result = await runOwnedContainer(JSON.parse(await readFile(args[2], 'utf8')));
+    process.stdout.write(result.output);
+    console.log(JSON.stringify({ ...result, output: undefined }));
+  } catch (error) {
+    console.error('Native producer refused: ' + error.message); process.exitCode = 1;
+  }
+} else {
 const publish = args[0] === 'publish';
 if (publish) args.shift();
 const options = { onProgress: phase => console.error('[server-container] ' + phase) };
@@ -36,4 +47,5 @@ try {
 } catch (error) {
   console.error('Server container build refused: ' + error.message);
   process.exitCode = 1;
+}
 }

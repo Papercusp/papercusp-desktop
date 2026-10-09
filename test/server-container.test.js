@@ -12,6 +12,71 @@ const lib = import(pathToFileURL(path.join(desktop, 'bin/lib/server-container.mj
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const imageId = 'sha256:' + 'b'.repeat(64);
 
+test('owned producer removes only its recorded immutable container after success, failure or abort', async t => {
+  const { runOwnedContainer } = await lib;
+  for (const outcome of ['success', 'failure', 'abort']) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'owned-producer-'));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const calls = [];
+    const controller = new AbortController();
+    const id = 'c'.repeat(64);
+    const run = async (engine, args, options) => {
+      calls.push(args);
+      if (args[0] === 'create') return id;
+      if (args[0] === 'start') {
+        if (outcome === 'failure') throw new Error('producer failed');
+        if (outcome === 'abort') {
+          controller.abort(); assert.equal(options.signal.aborted, true);
+          throw new Error('producer aborted');
+        }
+        return 'producer output';
+      }
+      if (args[0] === 'inspect') return JSON.stringify({ Running: false, ExitCode: 0 });
+      if (args[0] === 'rm') return '';
+      throw new Error('unexpected engine call');
+    };
+    const promise = runOwnedContainer({ imageId, platform: 'linux/arm64', out: root,
+      command: ['bash', '-c', 'exit 0'], signal: controller.signal }, run);
+    if (outcome === 'success') assert.equal((await promise).output, 'producer output');
+    else await assert.rejects(promise, /producer failed|producer aborted/);
+    assert.deepEqual(calls.at(-1), ['rm', '--force', id]);
+    const [directory] = await fs.readdir(root);
+    const receipt = JSON.parse(await fs.readFile(path.join(root, directory, 'ownership.json')));
+    assert.equal(receipt.containerId, id); assert.equal(receipt.removed, true);
+  }
+});
+
+test('owned producer reports a refused daemon cleanup instead of claiming removal', async t => {
+  const { runOwnedContainer } = await lib;
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'owned-producer-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await assert.rejects(runOwnedContainer({ imageId, platform: 'linux/arm64', out: root, command: ['true'] },
+    async (engine, args) => {
+      if (args[0] === 'create') return 'c'.repeat(64);
+      if (args[0] === 'start') throw new Error('producer failed');
+      if (args[0] === 'rm') throw new Error('daemon unavailable');
+    }), /cleanup failed/);
+  const [directory] = await fs.readdir(root);
+  const receipt = JSON.parse(await fs.readFile(path.join(root, directory, 'ownership.json')));
+  assert.equal(receipt.removed, undefined); assert.match(receipt.cleanupError, /daemon unavailable/);
+});
+
+test('in-container supervisor terminates the producer when launcher lease disappears', async t => {
+  const { ownedContainerSupervisor } = await lib;
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'owned-producer-lease-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const lease = path.join(root, 'lease.json');
+  const marker = path.join(root, 'child-stopped');
+  await fs.writeFile(lease, JSON.stringify({ at: Date.now() }));
+  const { spawn } = require('node:child_process');
+  const child = spawn(process.execPath, ['-e', ownedContainerSupervisor, lease, '1000',
+    process.execPath, '-e', 'process.on("SIGTERM",()=>{require("node:fs").writeFileSync(process.argv[1],"stopped");process.exit(0)});setInterval(()=>{},100)', marker]);
+  const exit = new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', resolve); });
+  t.after(() => child.kill('SIGKILL'));
+  assert.equal(await exit, 125);
+  assert.equal(await fs.readFile(marker, 'utf8'), 'stopped');
+});
+
 async function fixture(t, platform = 'linux/amd64') {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'server-container-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

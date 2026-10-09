@@ -96,8 +96,102 @@ export async function runCommand(command, args, options = {}) {
     timeout: options.timeout ?? 30 * 60_000,
     maxBuffer: 8 * 1024 * 1024,
     env: options.env ?? process.env,
+    signal: options.signal,
   });
   return result.stdout;
+}
+
+// Docker children belong to the daemon, outside the launcher's task cgroup.
+// The in-container supervisor makes a killed launcher observable as a stale
+// lease and terminates its own producer group, even when host finally cannot run.
+export const ownedContainerSupervisor = `
+const fs=require('node:fs'),{spawn}=require('node:child_process');
+const [lease,ttl,...command]=process.argv.slice(1);
+let child,stopping=false,killTimer;
+function stop(){
+  if(stopping)return; stopping=true;
+  if(child?.pid){try{process.kill(-child.pid,'SIGTERM')}catch{};
+    killTimer=setTimeout(()=>{try{process.kill(-child.pid,'SIGKILL')}catch{}},2000)}
+}
+function current(){try{return Date.now()-JSON.parse(fs.readFileSync(lease,'utf8')).at<Number(ttl)}catch{return false}}
+if(!current()){process.exit(125)}
+child=spawn(command[0],command.slice(1),{stdio:'inherit',detached:true});
+const timer=setInterval(()=>{if(!current())stop()},250);
+process.on('SIGTERM',stop);process.on('SIGINT',stop);
+child.on('error',error=>{console.error(error.message);clearInterval(timer);process.exitCode=127});
+child.on('exit',(code,signal)=>{clearInterval(timer);clearTimeout(killTimer);process.exitCode=stopping?125:(code??1)});
+`;
+
+/** Run the existing native producer with a recorded, bounded daemon lifetime. */
+export async function runOwnedContainer(options, run = runCommand) {
+  const engine = options.engine ?? 'docker';
+  if (!['docker', 'podman'].includes(engine) || !PLATFORMS.has(options.platform)
+      || !/^sha256:[a-f0-9]{64}$/.test(options.imageId ?? '')
+      || !Array.isArray(options.command) || !options.command.length
+      || options.command.some(arg => typeof arg !== 'string')
+      || !Array.isArray(options.args ?? [])
+      || (options.args ?? []).some(arg => typeof arg !== 'string'
+        || /^(?:--(?:name|cidfile|rm|init|entrypoint|detach|restart|platform))(?:=|$)/.test(arg))) {
+    throw new Error('Owned producer requires an immutable image, platform, command and unowned create arguments');
+  }
+  const out = resolve(options.out);
+  await mkdir(out, { recursive: true });
+  const leaseRoot = await mkdtemp(join(out, '.native-producer-owner-'));
+  const lease = join(leaseRoot, 'lease.json');
+  const receiptFile = join(leaseRoot, 'ownership.json');
+  const ttl = options.leaseTimeoutMs ?? 15_000;
+  if (!Number.isInteger(ttl) || ttl < 1000 || ttl > 60_000) throw new Error('Owned producer lease requires 1000..60000 ms');
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const update = async () => {
+    await writeFile(lease + '.tmp', JSON.stringify({ at: Date.now() }), { mode: 0o600 });
+    await rename(lease + '.tmp', lease);
+  };
+  let id, heartbeat, error, heartbeatPending = Promise.resolve();
+  const receipt = { schemaVersion: 1, imageId: options.imageId, platform: options.platform,
+    leaseTimeoutMs: ttl, leaseRoot, status: 'creating' };
+  const save = () => writeFile(receiptFile, JSON.stringify(receipt) + '\n', { mode: 0o600 });
+  process.on('SIGTERM', abort); process.on('SIGINT', abort);
+  options.signal?.addEventListener('abort', abort, { once: true });
+  try {
+    await update();
+    id = (await run(engine, ['create', '--init', '--name', 'papercusp-native-' + randomUUID(),
+      '--platform', options.platform, '--mount', 'type=bind,source=' + leaseRoot + ',target=/run/papercusp-producer-owner,readonly',
+      ...(options.args ?? []), '--entrypoint', '/usr/local/bin/node', options.imageId,
+      '-e', ownedContainerSupervisor, '/run/papercusp-producer-owner/lease.json', String(ttl), ...options.command],
+    { timeout: 30_000 })).trim();
+    if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Engine returned no immutable producer container ID');
+    receipt.containerId = id; receipt.status = 'created'; await save();
+    heartbeat = setInterval(() => {
+      heartbeatPending = heartbeatPending.then(update).catch(error => {
+        receipt.leaseError = error.message; controller.abort();
+      });
+    }, Math.min(1000, Math.floor(ttl / 3)));
+    if (options.signal?.aborted) controller.abort();
+    receipt.status = 'running'; await save();
+    const output = await run(engine, ['start', '--attach', id],
+      { timeout: options.timeoutMs ?? 2 * 60 * 60_000, signal: controller.signal });
+    const state = JSON.parse(await run(engine, ['inspect', '--format', '{{json .State}}', id], { timeout: 5000 }));
+    if (state.Running !== false || state.ExitCode !== 0) throw new Error('Owned producer exited with ' + state.ExitCode);
+    receipt.exitCode = state.ExitCode; receipt.status = 'completed';
+    return { ...receipt, receiptFile, output };
+  } catch (caught) {
+    error = caught; receipt.status = 'failed'; receipt.error = caught.message; throw caught;
+  } finally {
+    clearInterval(heartbeat); await heartbeatPending;
+    process.off('SIGTERM', abort); process.off('SIGINT', abort);
+    options.signal?.removeEventListener('abort', abort);
+    try {
+      if (id && /^[a-f0-9]{64}$/.test(id)) {
+        await run(engine, ['rm', '--force', id], { timeout: 10_000 });
+        receipt.removed = true;
+      }
+      await save();
+    } catch (cleanupError) {
+      receipt.cleanupError = cleanupError.message; await save();
+      throw new AggregateError([...(error ? [error] : []), cleanupError], 'Owned producer cleanup failed');
+    }
+  }
 }
 
 /** Observe the packaged bytes with the image's own runtime, without starting services. */
