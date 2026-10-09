@@ -26,6 +26,10 @@ function runGuard({ explicitHome = '', workspace = true, corrupt = false, comman
     writeFileSync(join(bin, 'tauri'), '#!/usr/bin/env node\n' +
       'console.log(JSON.stringify({home:process.env.PAPERCUSP_HOME||"",args:process.argv.slice(2)}));\n',
     { mode: 0o755 });
+    // Runtime identity is independent of the host's Cargo-volume capacity.
+    writeFileSync(join(bin, 'df'), '#!/usr/bin/env bash\n' +
+      'printf "Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 209715200 0 104857600 0%% /fixture\\n"\n',
+    { mode: 0o755 });
     const result = spawnSync('bash', [guard, command], {
       cwd: desktop,
       encoding: 'utf8',
@@ -40,6 +44,7 @@ function runGuard({ explicitHome = '', workspace = true, corrupt = false, comman
         PAPERCUSP_WORKSPACE_ID: corrupt || !workspace ? '' : 'fixture-workspace',
         PAPERCUSP_HOME: explicitHome,
         CARGO_TARGET_DIR: join(root, 'cargo-target'),
+        PAPERCUSP_DISK_RESERVATION_DIR: join(root, 'disk-reservations'),
         PAPERCUSP_SIDECAR_LOCK: join(root, 'sidecar.lock'),
         PATH: `${bin}:${process.env.PATH}`,
       },
