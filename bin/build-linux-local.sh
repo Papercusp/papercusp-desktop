@@ -20,6 +20,7 @@
 #
 # Usage:
 #   bin/build-linux-local.sh                 # version from tauri.conf.json
+#   bin/build-linux-local.sh -h|--help       # print usage without starting a build
 #   PAPERCUSP_SKIP_SEED_CUT=1 bin/build-linux-local.sh   # reuse committed seed
 #   PAPERCUSP_DISTRIBUTION_PROFILE=vm-release bin/build-linux-local.sh
 #                                                   # immutable Server-only VM package
@@ -51,6 +52,35 @@
 #                                 but D-112 does not treat them as release leaks.
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  minisign key passphrase (default empty)
 set -euo pipefail
+
+# Parse CLI arguments before creating the immutable snapshot or running any
+# build preflight. Help is safe to discover even on an unconfigured machine.
+for _arg in "$@"; do
+  case "$_arg" in
+    -h|--help)
+      sed -n '/^# Usage:/,/^# Env passthrough/s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"
+      exit 0 ;;
+  esac
+done
+
+case "${1:-}" in
+  "")
+    if [[ $# -ne 0 ]]; then
+      printf 'ERROR: positional arguments are not supported (try --help)\n' >&2
+      exit 2
+    fi
+    ;;
+  --finalize-deb)
+    if [[ $# -ne 3 ]]; then
+      printf 'ERROR: --finalize-deb requires <completed.deb> <input-receipt.json> (try --help)\n' >&2
+      exit 2
+    fi
+    ;;
+  *)
+    printf 'ERROR: unknown argument: %s (try --help)\n' "$1" >&2
+    exit 2
+    ;;
+esac
 
 # A local cut routinely runs for tens of minutes out of the shared tree. Bash
 # re-reads a script by byte offset instead of slurping it up front, so git-sync

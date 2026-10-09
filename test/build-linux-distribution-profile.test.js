@@ -37,6 +37,56 @@ test('Linux self-snapshot keeps current helpers while selecting a frozen product
   } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
 });
 
+test('Linux help and invalid arguments exit before snapshot or build side effects', { skip: process.platform !== 'linux' }, () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-linux-cli-help-'));
+  try {
+    const fakeBin = path.join(fixture, 'bin');
+    fs.mkdirSync(fakeBin);
+    const sedSource = process.env.PATH.split(path.delimiter)
+      .map((dir) => path.join(dir, 'sed'))
+      .find((candidate) => {
+        try {
+          fs.accessSync(candidate, fs.constants.X_OK);
+          return fs.statSync(candidate).isFile();
+        } catch {
+          return false;
+        }
+      });
+    assert.ok(sedSource, 'the help printer needs a read-only sed executable');
+    fs.symlinkSync(sedSource, path.join(fakeBin, 'sed'));
+
+    const env = {
+      ...process.env,
+      PATH: fakeBin,
+      PAPERCUSP_BUILD_LINUX_SELF_SNAPSHOT: '',
+      PAPERCUSP_BUILD_LINUX_ROOT: '',
+      PAPERCUSP_DESKTOP_TARGET_ROOT: '',
+    };
+    const run = (args) => spawnSync('/bin/bash', [path.join(root, 'bin/build-linux-local.sh'), ...args], {
+      encoding: 'utf8',
+      env,
+    });
+
+    for (const flag of ['-h', '--help']) {
+      const result = run([flag]);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.match(result.stdout, /Usage:/);
+      assert.match(result.stdout, /--finalize-deb/);
+      assert.match(result.stdout, /Env passthrough/);
+    }
+
+    const unknown = run(['--not-a-build-option']);
+    assert.equal(unknown.status, 2, unknown.stdout + unknown.stderr);
+    assert.match(unknown.stderr, /unknown argument: --not-a-build-option/);
+
+    const malformedFinalize = run(['--finalize-deb']);
+    assert.equal(malformedFinalize.status, 2, malformedFinalize.stdout + malformedFinalize.stderr);
+    assert.match(malformedFinalize.stderr, /--finalize-deb requires/);
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test('Linux reuse qualification runs the maintained tooling verifier and audit', () => {
   const reuse = linuxScript.slice(linuxScript.indexOf('case "${PAPERCUSP_REUSE_SIDECAR:-0}"'), linuxScript.indexOf('echo "==> [4/5]'));
   assert.match(reuse, /bash "\$HERE\/verify-provenance.sh"/);
