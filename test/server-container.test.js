@@ -226,6 +226,8 @@ test('successful build inspects the content-addressed image and publishes bound 
   const { buildServerContainer } = await lib;
   const f = await fixture(t);
   const runner = await fakeRunner();
+  const progress = [];
+  f.options.onProgress = phase => progress.push(phase);
   const result = await buildServerContainer(f.options, runner.run);
   assert.equal(result.imageId, imageId);
   assert.equal(result.labels['com.papercusp.serve.sha256'], f.sidecarStamp.serveSha256);
@@ -237,6 +239,8 @@ test('successful build inspects the content-addressed image and publishes bound 
   assert.equal(result.bootVerification.imageId, imageId);
   assert.equal(result.bootVerification.database.vectorReady, true);
   assert.equal(result.bootVerification.ready.body.dbos, true);
+  assert.deepEqual(progress, ['preflight', 'freeze-inputs', 'build-image', 'verify-payload',
+    'verify-full-boot', 'generate-sbom', 'publish-local-evidence', 'complete']);
   assert.deepEqual(JSON.parse(await fs.readFile(result.receiptPath, 'utf8')).imageId, imageId);
   assert.equal(runner.calls.filter(c => c.command === 'docker' && c.args[0] === 'build').length, 1);
   assert.ok(runner.calls.some(c => c.command === 'docker' && c.args.includes(imageId)));
@@ -338,17 +342,23 @@ async function publicationFixture(t, overrides = {}) {
   const digests = ['sha256:' + 'd'.repeat(64), 'sha256:' + 'e'.repeat(64)];
   const indexDigest = 'sha256:' + 'f'.repeat(64);
   const calls = [];
+  let activeBootReceipt;
   const run = async (command, args) => {
     calls.push({ command, args });
-    if (command === engine && ['image', 'tag', 'push', 'manifest', 'run'].includes(args[0])) {
+    if (command === engine && ['image', 'tag', 'push', 'manifest', 'run', 'inspect', 'exec', 'rm'].includes(args[0])) {
       if (args[0] === 'image') {
         return JSON.stringify(images.find(image => image.Id === args.at(-1)));
       }
       if (args[0] === 'run') {
         const receipt = receipts.find(receipt => args.includes(receipt.imageId));
+        if (args.includes('--detach')) { activeBootReceipt = receipt; return 'd'.repeat(64); }
         return JSON.stringify({ ...receipt.payloadVerification,
           ...(overrides.changedImagePayload ? { mcpProxySha256: '9'.repeat(64) } : {}) });
       }
+      if (args[0] === 'inspect') return JSON.stringify({ Running: true, ExitCode: 0 });
+      if (args[0] === 'exec') return JSON.stringify({ ...activeBootReceipt.bootVerification,
+        ...(overrides.unreadyPublishedServer ? { ready: { status: 503, body: { ready: false } } } : {}) });
+      if (args[0] === 'rm') { activeBootReceipt = null; return ''; }
       return '';
     }
     if (command === 'sudo' || command === 'podman') {
@@ -389,6 +399,7 @@ test('publication verifies signed members and exact platforms from the registry 
   assert.equal(result.memberSignaturesVerified, true);
   assert.equal(result.verifiedFromRegistry, true);
   assert.equal(result.platforms.length, 2);
+  assert.ok(result.platforms.every(p => p.bootVerification.dbos && p.bootVerification.vectorReady));
   assert.match(result.reference, /registry\.example\.com:5000\/papercusp\/server@sha256:/);
   assert.deepEqual(result.platforms.map(p => p.imageId), f.receipts.map(r => r.imageId));
   assert.equal(JSON.parse(await fs.readFile(result.receiptPath, 'utf8')).digest, result.digest);
@@ -401,6 +412,15 @@ test('publication verifies signed members and exact platforms from the registry 
   assert.equal(retried.receiptPath, result.receiptPath);
   await fs.writeFile(result.receiptPath, '{}');
   await assert.rejects(publishServerContainers(f.options, f.run), /inconsistent evidence/);
+});
+
+test('publication refuses liveness-only artifacts before any registry write and cleans the boot container', async t => {
+  const { publishServerContainers } = await lib;
+  const f = await publicationFixture(t, { unreadyPublishedServer: true });
+  await assert.rejects(publishServerContainers({ ...f.options, bootTimeoutMs: 1 }, f.run), /full boot readiness/);
+  assert.equal(f.calls.some(c => ['tag', 'push', 'manifest'].includes(c.args[0])), false);
+  assert.equal(f.calls.at(-1).args[0], 'rm');
+  await assert.rejects(fs.stat(f.options.out), { code: 'ENOENT' });
 });
 
 test('mixed builds and damaged local SBOMs refuse before any registry write', async t => {

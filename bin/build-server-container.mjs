@@ -4,7 +4,7 @@ import { buildServerContainer, preflightServerContainer, publishServerContainers
 const args = process.argv.slice(2);
 const publish = args[0] === 'publish';
 if (publish) args.shift();
-const options = {};
+const options = { onProgress: phase => console.error('[server-container] ' + phase) };
 let preflightOnly = false;
 const keys = new Map([['--platform', 'platform'], ['--tag', 'tag'], ['--rootfs', 'rootfs'],
   ['--sidecar', 'sidecar'], ['--out', 'out'], ['--engine', 'engine'], ['--syft', 'syft'],
