@@ -101,7 +101,9 @@ for (const model of models) {
     assert.equal(packs.length, 1);
     const pack = packs[0];
     assert.ok(pack.installRoot.startsWith('sidecar/') && !pack.installRoot.split('/').includes('..'));
-    assert.ok(pack.models.some(entry => entry.name === model.name || entry.id === model.name || entry.repo?.endsWith('/' + model.name)), 'model must belong to the product contract');
+    const selected = pack.models.filter(entry => entry.runtimeId === 'onnx-community/' + model.name);
+    assert.equal(selected.length, 1, 'model must belong to the product contract');
+    assert.equal(selected[0].nativeDimensions, model.dims, 'dimensions must match the product contract');
     const modelsRoot = path.resolve(root, pack.installRoot.slice('sidecar/'.length));
     assert.ok(modelsRoot.startsWith(root + path.sep), 'model path escapes the bundle');
     const snapshot = path.resolve(root, pack.manifestPath.slice('sidecar/'.length));
