@@ -12,6 +12,110 @@ const lib = import(pathToFileURL(path.join(desktop, 'bin/lib/server-container.mj
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const imageId = 'sha256:' + 'b'.repeat(64);
 
+async function archiveFixture(t, mutate = () => {}, dockerOnly = false) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'server-archive-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const tree = path.join(root, 'tree');
+  await fs.mkdir(path.join(tree, 'blobs/sha256'), { recursive: true });
+  const descriptor = async (value, mediaType) => {
+    const bytes = Buffer.isBuffer(value) ? value : Buffer.from(JSON.stringify(value));
+    const digest = 'sha256:' + sha(bytes);
+    await fs.writeFile(path.join(tree, 'blobs/sha256', digest.slice(7)), bytes);
+    return { digest, size: bytes.length, mediaType };
+  };
+  const layer = await descriptor(Buffer.from('uncompressed layer fixture'), 'application/vnd.oci.image.layer.v1.tar');
+  const configValue = { os: 'linux', architecture: 'arm64', config: { Labels: {
+    'org.opencontainers.image.revision': 'a'.repeat(40), 'com.papercusp.serve.sha256': 'b'.repeat(64),
+  } }, rootfs: { type: 'layers', diff_ids: [layer.digest] } };
+  const config = await descriptor(configValue, 'application/vnd.oci.image.config.v1+json');
+  const manifest = await descriptor({ schemaVersion: 2, config, layers: [layer] }, 'application/vnd.oci.image.manifest.v1+json');
+  const index = await descriptor({ schemaVersion: 2, manifests: [{ ...manifest,
+    platform: { os: 'linux', architecture: 'arm64' } }] }, 'application/vnd.oci.image.index.v1+json');
+  const receipt = { kind: 'papercusp-server-local-image', schemaVersion: 1,
+    imageId: dockerOnly ? config.digest : index.digest, platform: 'linux/arm64',
+    sourceCommit: 'a'.repeat(40), labels: configValue.config.Labels, tag: 'papercusp-server:test' };
+  const aliases = [{ Config: 'blobs/sha256/' + config.digest.slice(7),
+    Layers: ['blobs/sha256/' + layer.digest.slice(7)], RepoTags: ['docker.io/library/papercusp-server:test'] }];
+  if (!dockerOnly) {
+    await fs.writeFile(path.join(tree, 'oci-layout'), JSON.stringify({ imageLayoutVersion: '1.0.0' }));
+    await fs.writeFile(path.join(tree, 'index.json'), JSON.stringify({ schemaVersion: 2, manifests: [{ ...index,
+      annotations: { 'io.containerd.image.name': 'docker.io/library/papercusp-server:test',
+        'org.opencontainers.image.ref.name': 'test' } }] }));
+  }
+  await fs.writeFile(path.join(tree, 'manifest.json'), JSON.stringify(aliases));
+  const receiptPath = path.join(root, 'build.json');
+  const f = { root, tree, config, manifest, index, layer, receipt, aliases, receiptPath,
+    archive: path.join(root, 'saved-image.bytes') };
+  await mutate(f);
+  await fs.writeFile(receiptPath, JSON.stringify(receipt));
+  const result = spawnSync('tar', ['-cf', f.archive, '-C', tree, '.'], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  return f;
+}
+
+test('preserved OCI archive binds distinct index, manifest and extensionless config digests', async t => {
+  const { verifyServerContainerArchive } = await lib;
+  const f = await archiveFixture(t);
+  for (const descriptor of [f.index, f.manifest, f.config]) {
+    f.receipt.imageId = descriptor.digest;
+    await fs.writeFile(f.receiptPath, JSON.stringify(f.receipt));
+    const result = await verifyServerContainerArchive(f);
+    assert.equal(result.configDigest, f.config.digest);
+    assert.equal(result.manifestDigest, f.manifest.digest);
+    assert.equal(result.verifiedBlobCount, 4);
+  }
+});
+
+test('preserved Docker archive verifies config identity and uncompressed layer digests', async t => {
+  const { verifyServerContainerArchive } = await lib;
+  const f = await archiveFixture(t, () => {}, true);
+  assert.equal((await verifyServerContainerArchive(f)).configDigest, f.config.digest);
+});
+
+test('OCI-only archives retain reference binding and refuse a substituted preservation hash', async t => {
+  const { verifyServerContainerArchive } = await lib;
+  const f = await archiveFixture(t, f => fs.rm(path.join(f.tree, 'manifest.json')));
+  const result = await verifyServerContainerArchive(f);
+  assert.equal(result.imageId, f.index.digest);
+  await assert.rejects(verifyServerContainerArchive({ ...f, archiveSha256: '0'.repeat(64) }), /preservation/);
+});
+
+test('archive verification refuses platform, source, reference, missing and corrupt blob bindings', async t => {
+  const { verifyServerContainerArchive } = await lib;
+  for (const mutation of ['platform', 'source', 'reference', 'oci-reference', 'descriptor-platform', 'config-alias', 'layer-alias', 'missing', 'config-bytes', 'layer-bytes', 'size', 'identity']) {
+    await t.test(mutation, async t => {
+      const f = await archiveFixture(t, async f => {
+        if (mutation === 'platform') f.receipt.platform = 'linux/amd64';
+        if (mutation === 'source') {
+          f.receipt.sourceCommit = 'c'.repeat(40);
+          f.receipt.labels = { ...f.receipt.labels, 'org.opencontainers.image.revision': f.receipt.sourceCommit };
+        }
+        if (mutation === 'identity') f.receipt.imageId = 'sha256:' + '9'.repeat(64);
+        if (mutation === 'reference') f.aliases[0].RepoTags = ['wrong:tag'];
+        if (mutation === 'config-alias') f.aliases[0].Config = 'wrong-config';
+        if (mutation === 'layer-alias') f.aliases[0].Layers = [];
+        if (['reference', 'config-alias', 'layer-alias'].includes(mutation))
+          await fs.writeFile(path.join(f.tree, 'manifest.json'), JSON.stringify(f.aliases));
+        const blob = d => path.join(f.tree, 'blobs/sha256', d.digest.slice(7));
+        if (mutation === 'missing') await fs.rm(blob(f.config));
+        if (mutation === 'config-bytes') await fs.appendFile(blob(f.config), 'x');
+        if (mutation === 'layer-bytes') await fs.writeFile(blob(f.layer), Buffer.alloc(f.layer.size));
+        if (mutation === 'size') {
+          const rootIndex = { schemaVersion: 2, manifests: [{ ...f.index, size: f.index.size + 1 }] };
+          await fs.writeFile(path.join(f.tree, 'index.json'), JSON.stringify(rootIndex));
+        }
+        if (mutation === 'oci-reference' || mutation === 'descriptor-platform') {
+          const rootIndex = JSON.parse(await fs.readFile(path.join(f.tree, 'index.json'), 'utf8'));
+          if (mutation === 'oci-reference') rootIndex.manifests[0].annotations['io.containerd.image.name'] = 'wrong:tag';
+          else rootIndex.manifests[0].platform = { os: 'linux', architecture: 'amd64' };
+          await fs.writeFile(path.join(f.tree, 'index.json'), JSON.stringify(rootIndex));
+        }
+      });
+      await assert.rejects(verifyServerContainerArchive(f), /platform|source|label|reference|alias|member|digest|size|identity/);
+    });
+  }
+});
+
 test('owned producer removes only its recorded immutable container after success, failure or abort', async t => {
   const { runOwnedContainer } = await lib;
   for (const outcome of ['success', 'failure', 'abort']) {

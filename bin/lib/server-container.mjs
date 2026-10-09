@@ -95,6 +95,29 @@ export async function sidecarInventory(root, platform, { hashContents = true } =
 }
 
 export async function runCommand(command, args, options = {}) {
+  if (options.hashOutput) {
+    return new Promise((resolve, reject) => {
+      const hash = createHash('sha256');
+      let bytes = 0, stderr = '', failure;
+      const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'],
+        env: options.env ?? process.env, signal: options.signal,
+        timeout: options.timeout ?? 30 * 60_000 });
+      child.stdout.on('data', chunk => {
+        bytes += chunk.length;
+        if (bytes > options.maxBytes) {
+          failure ??= new Error('Archive member exceeds its declared size');
+          child.kill();
+        } else hash.update(chunk);
+      });
+      child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-4096); });
+      child.once('error', reject);
+      child.once('close', (code, signal) => {
+        if (failure) reject(failure);
+        else if (code !== 0) reject(new Error(command + ' failed: ' + (signal || code) + ': ' + stderr));
+        else resolve(JSON.stringify({ sha256: hash.digest('hex'), bytes }));
+      });
+    });
+  }
   if (options.stream) {
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, { stdio: ['ignore', 'inherit', 'inherit'],
@@ -116,6 +139,138 @@ export async function runCommand(command, args, options = {}) {
     throw error;
   }
   return result.stdout;
+}
+
+/** Verify preserved OCI/Docker archives against the existing local-image receipt. */
+export async function verifyServerContainerArchive(options, run = runCommand) {
+  const archive = await realpath(options.archive);
+  const receiptPath = resolve(options.receiptPath);
+  const receiptSha256 = await hashFile(receiptPath);
+  const receipt = await jsonFile(receiptPath);
+  if (receipt.kind !== 'papercusp-server-local-image' || receipt.schemaVersion !== 1 ||
+      !PLATFORMS.has(receipt.platform) || !/^sha256:[a-f0-9]{64}$/.test(receipt.imageId ?? '') ||
+      !COMMIT.test(receipt.sourceCommit ?? '') || typeof receipt.tag !== 'string' || !receipt.tag ||
+      receipt.labels?.['org.opencontainers.image.revision'] !== receipt.sourceCommit) {
+    throw new Error('Invalid archive source/platform receipt');
+  }
+  const archiveSha256 = await hashFile(archive);
+  if (options.archiveSha256 && options.archiveSha256 !== archiveSha256)
+    throw new Error('Archive digest differs from its preservation receipt');
+  const names = (await run('tar', ['-tf', archive])).trim().split('\n');
+  if (names.length > 4096) throw new Error('Archive exceeds its member bound');
+  const members = new Map();
+  for (const name of names) {
+    const key = name.replace(/^\.\//, '').replace(/\/$/, '');
+    if (!key || key === '.') continue;
+    if (!/^[a-zA-Z0-9._/-]+$/.test(key) || key.startsWith('/') || key.split('/').includes('..') || members.has(key))
+      throw new Error('Unsafe or duplicate archive member: ' + name);
+    members.set(key, name);
+  }
+  const member = key => {
+    if (!members.has(key)) throw new Error('Missing archive member: ' + key);
+    return members.get(key);
+  };
+  const readJson = async key => {
+    const text = await run('tar', ['-xOf', archive, '--', member(key)]);
+    if (Buffer.byteLength(text) > 128 * 1024) throw new Error('Oversized archive JSON member');
+    return { value: JSON.parse(text), text };
+  };
+  const verified = new Map();
+  let totalBytes = 0;
+  const verifyBlob = async descriptor => {
+    if (!descriptor || !/^sha256:[a-f0-9]{64}$/.test(descriptor.digest ?? '') ||
+        !Number.isSafeInteger(descriptor.size) || descriptor.size < 0 || descriptor.size > 32 * 1024 ** 3)
+      throw new Error('Invalid archive blob descriptor');
+    const key = 'blobs/sha256/' + descriptor.digest.slice(7);
+    let observed = verified.get(key);
+    if (!observed) {
+      if (verified.size >= 256 || (totalBytes += descriptor.size) > 32 * 1024 ** 3)
+        throw new Error('Archive exceeds its descriptor/byte bound');
+      observed = JSON.parse(await run('tar', ['-xOf', archive, '--', member(key)],
+        { hashOutput: true, maxBytes: descriptor.size }));
+      verified.set(key, observed);
+    }
+    if (observed.bytes !== descriptor.size || observed.sha256 !== descriptor.digest.slice(7))
+      throw new Error('Archive blob digest/size mismatch: ' + key);
+    return key;
+  };
+  const labelsMatch = config => Object.entries(receipt.labels).every(([key, value]) => config.config?.Labels?.[key] === value);
+  const normalizeTag = tag => tag.replace(/^docker\.io\/(?:library\/)?/, '');
+  const candidates = [];
+  if (members.has('index.json')) {
+    if ((await readJson('oci-layout')).value.imageLayoutVersion !== '1.0.0') throw new Error('Invalid OCI layout version');
+    const root = await readJson('index.json');
+    const walk = async (descriptor, ancestors = [], platforms = [], references = [], depth = 0) => {
+      if (depth > 6) throw new Error('Archive index exceeds its depth bound');
+      const key = await verifyBlob(descriptor);
+      const chain = [...ancestors, descriptor.digest];
+      const hints = descriptor.platform ? [...platforms, descriptor.platform] : platforms;
+      const refs = descriptor.annotations ? [...references, descriptor.annotations] : references;
+      if (/image\.index|manifest\.list/.test(descriptor.mediaType ?? '')) {
+        const index = (await readJson(key)).value;
+        if (index.schemaVersion !== 2 || !Array.isArray(index.manifests) || !index.manifests.length || index.manifests.length > 32)
+          throw new Error('Invalid archive index descriptors');
+        for (const child of index.manifests) await walk(child, chain, hints, refs, depth + 1);
+      } else if (/image\.manifest|manifest\.v2/.test(descriptor.mediaType ?? '')) {
+        const manifest = (await readJson(key)).value;
+        if (manifest.schemaVersion !== 2 || !Array.isArray(manifest.layers) || manifest.layers.length > 128)
+          throw new Error('Invalid archive image manifest');
+        const configPath = await verifyBlob(manifest.config);
+        const config = (await readJson(configPath)).value;
+        const layerPaths = [];
+        for (const layer of manifest.layers) layerPaths.push(await verifyBlob(layer));
+        if (hints.some(p => p.os !== config.os || p.architecture !== config.architecture))
+          throw new Error('Archive descriptor/config platform mismatch');
+        if (config.os + '/' + config.architecture === receipt.platform &&
+            [...chain, manifest.config.digest].includes(receipt.imageId)) {
+          if (!labelsMatch(config)) throw new Error('Archive source/payload labels changed');
+          for (const ref of refs) {
+            const full = ref['io.containerd.image.name'];
+            const name = ref['org.opencontainers.image.ref.name'];
+            if ((full && normalizeTag(full) !== normalizeTag(receipt.tag)) ||
+                (name && normalizeTag(name) !== normalizeTag(receipt.tag) && name !== receipt.tag.split(':').at(-1)))
+              throw new Error('OCI archive image reference changed');
+          }
+          candidates.push({ manifestDigest: descriptor.digest, configDigest: manifest.config.digest, configPath, layerPaths });
+        }
+      } else throw new Error('Unsupported archive descriptor media type');
+    };
+    if (root.value.schemaVersion !== 2 || !Array.isArray(root.value.manifests) || !root.value.manifests.length || root.value.manifests.length > 32)
+      throw new Error('Invalid OCI archive root index');
+    for (const descriptor of root.value.manifests) await walk(descriptor, ['sha256:' + createHash('sha256').update(root.text).digest('hex')]);
+  } else if (members.has('manifest.json')) {
+    const manifest = (await readJson('manifest.json')).value;
+    if (!Array.isArray(manifest) || !manifest.length || manifest.length > 32) throw new Error('Invalid Docker archive manifest');
+    for (const entry of manifest) {
+      const raw = await readJson(entry.Config);
+      const configDigest = 'sha256:' + createHash('sha256').update(raw.text).digest('hex');
+      if (configDigest !== receipt.imageId || raw.value.os + '/' + raw.value.architecture !== receipt.platform) continue;
+      if (!labelsMatch(raw.value)) throw new Error('Archive source/payload labels changed');
+      if (!Array.isArray(entry.Layers) || entry.Layers.length > 128 || entry.Layers.length !== raw.value.rootfs?.diff_ids?.length)
+        throw new Error('Docker archive layer/config mismatch');
+      for (const [i, key] of entry.Layers.entries()) {
+        const observed = JSON.parse(await run('tar', ['-xOf', archive, '--', member(key)],
+          { hashOutput: true, maxBytes: 32 * 1024 ** 3 - totalBytes }));
+        totalBytes += observed.bytes;
+        if ('sha256:' + observed.sha256 !== raw.value.rootfs.diff_ids[i]) throw new Error('Docker archive layer digest mismatch');
+      }
+      candidates.push({ manifestDigest: null, configDigest, configPath: entry.Config, layerPaths: entry.Layers });
+    }
+  } else throw new Error('Archive has no OCI/Docker manifest');
+  if (candidates.length !== 1) throw new Error('Archive does not bind exactly one receipt identity/platform');
+  const selected = candidates[0];
+  if (members.has('manifest.json')) {
+    const aliases = (await readJson('manifest.json')).value;
+    if (!Array.isArray(aliases) || !aliases.some(entry => entry.Config === selected.configPath &&
+        JSON.stringify(entry.Layers) === JSON.stringify(selected.layerPaths) &&
+        Array.isArray(entry.RepoTags) && entry.RepoTags.some(tag => normalizeTag(tag) === normalizeTag(receipt.tag))))
+      throw new Error('Docker archive reference/config/layer alias mismatch');
+  }
+  if (await hashFile(archive) !== archiveSha256 || await hashFile(receiptPath) !== receiptSha256)
+    throw new Error('Archive or source receipt changed during verification');
+  return { archive, archiveSha256, receiptPath, receiptSha256, imageId: receipt.imageId,
+    platform: receipt.platform, sourceCommit: receipt.sourceCommit,
+    manifestDigest: selected.manifestDigest, configDigest: selected.configDigest, verifiedBlobCount: verified.size };
 }
 
 // Docker children belong to the daemon, outside the launcher's task cgroup.
