@@ -631,6 +631,8 @@ function qualifyResume(f, failGate = '') {
   for (const model of ['harrier-oss-v1-0.6b-ONNX', 'embeddinggemma-300m-ONNX']) {
     fs.mkdirSync(path.join(f.stage, 'node_modules/@huggingface/transformers/models/onnx-community', model), { recursive: true });
   }
+  fs.writeFileSync(path.join(f.stage, 'node_modules/qualification-order.node'), Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  fs.writeFileSync(path.join(shim, 'objdump'), '#!/usr/bin/env bash\necho addon-libraries >> "$GATE_LOG"\necho "NEEDED libc.so.6"\n', { mode: 0o755 });
   for (const file of ['sidecar-stage-state.js', 'portable-sha256.sh', 'stamp-git-head.sh']) fs.copyFileSync(path.join(bin, 'lib', file), path.join(here, 'lib', file));
   fs.writeFileSync(path.join(here, 'audit-release-bundle.py'), '# fixture gate\n');
   fs.writeFileSync(path.join(shim, 'python3'), '#!/usr/bin/env bash\nprintf "%s\\n" "$2" >> "$GATE_LOG"\n[[ "$2" != "$FAIL_GATE" ]]\n', { mode: 0o755 });
@@ -671,7 +673,9 @@ test('resumed assembly executes every current qualification gate before acceptin
   try {
     const run = qualifyResume(f);
     assert.equal(run.result.status, 0, `${run.result.stdout}\n${run.result.stderr}`);
-    for (const gate of ['--prune-vm-release', '--audit-vm-release', '--audit-vulnerabilities', 'provenance', '--scan-dir']) assert(run.gates.includes(gate), `missing gate ${gate}`);
+    for (const gate of ['addon-libraries', '--prune-vm-release', '--audit-vm-release', '--audit-vulnerabilities', 'provenance', '--scan-dir']) assert(run.gates.includes(gate), `missing gate ${gate}`);
+    assert(run.gates.indexOf('addon-libraries') < run.gates.indexOf('--prune-vm-release'));
+    assert(run.gates.indexOf('addon-libraries') < run.gates.indexOf('--audit-vulnerabilities'));
     assert.equal(run.gates.filter(gate => gate.startsWith('verify:')).length, 2);
     assert(run.gates.indexOf('provenance') < run.gates.indexOf('--scan-dir'));
     assert.equal(fs.existsSync(path.join(f.finalDir, 'serve.mjs')), true);

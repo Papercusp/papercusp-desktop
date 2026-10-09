@@ -5429,6 +5429,44 @@ _sidecar_stage_phase="assembled"
 fi # assembly-only work; retained stages always rerun qualification below
 
 # ── D-043/P-052 immutable runtime-only profile ──────────────────────────────
+# Keep this definition in the common qualification tail: a validated resume
+# skips assembly and must still run the current native library policy.
+# libatomic is a compiler runtime, not an Ubuntu-minimal dependency. Reuse the
+# private Linux library directory and encode a relocatable addon loader path.
+bundle_linux_addon_libraries() {
+  local root="$1" addon source machine relative existing tool dynamic
+  [[ "$TARGET_OS" == "linux" ]] || return 0
+  for tool in objdump ldd file patchelf; do
+    command -v "$tool" >/dev/null 2>&1 || {
+      echo "ERROR: native addon library bundling requires $tool" >&2; return 1;
+    }
+  done
+  while IFS= read -r -d '' addon; do
+    dynamic="$(objdump -p "$addon" 2>/dev/null)" || {
+      echo "ERROR: cannot inspect native addon ELF dependencies: $addon" >&2; return 1;
+    }
+    printf '%s\n' "$dynamic" | awk '$1 == "NEEDED" { print $2 }' | grep -Fx libatomic.so.1 >/dev/null || continue
+    source="$(ldd "$addon" 2>/dev/null | awk '$1 == "libatomic.so.1" && $2 == "=>" && $3 ~ /^\// { print $3; exit }')"
+    [[ -f "$source" ]] || {
+      echo "ERROR: cannot resolve target libatomic.so.1 for $addon" >&2; return 1;
+    }
+    case "$TARGET_ARCH" in
+      arm64|aarch64) machine='ARM aarch64' ;;
+      x64|x86_64|amd64) machine='x86-64' ;;
+      *) echo "ERROR: unsupported native addon architecture: $TARGET_ARCH" >&2; return 1 ;;
+    esac
+    [[ "$(file -b -L "$source")" == *"$machine"* ]] || {
+      echo "ERROR: libatomic.so.1 architecture differs from $TARGET_ARCH" >&2; return 1;
+    }
+    mkdir -p "$root/bin/.pg-real/lib" || return 1
+    cp -L "$source" "$root/bin/.pg-real/lib/libatomic.so.1" || return 1
+    relative="$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], os.path.dirname(sys.argv[2])))' "$root/bin/.pg-real/lib" "$addon")" || return 1
+    existing="$(patchelf --print-rpath "$addon")" || return 1
+    patchelf --set-rpath "\$ORIGIN/$relative${existing:+:$existing}" "$addon" || return 1
+  done < <(find "$root/node_modules" -type f -name '*.node' -print0)
+}
+bundle_linux_addon_libraries "$SIDECAR_TMP_DIR" || exit 1
+
 # Run after every sidecar copy/overlay step and before the runtime verifier and
 # atomic publish. The Python gate owns both the prune predicate and the audit
 # predicate, so a new residue class cannot be deleted by one list while escaping
@@ -5581,43 +5619,6 @@ source "$HERE/lib/portable-sha256.sh"
 # having been made incapable of failing.
 # shellcheck source=lib/stamp-git-head.sh
 source "$HERE/lib/stamp-git-head.sh"
-# Keep this definition in the common qualification tail: a validated resume
-# skips assembly and must still run the current native library policy.
-# libatomic is a compiler runtime, not an Ubuntu-minimal dependency. Reuse the
-# private Linux library directory and encode a relocatable addon loader path.
-bundle_linux_addon_libraries() {
-  local root="$1" addon source machine relative existing tool dynamic
-  [[ "$TARGET_OS" == "linux" ]] || return 0
-  for tool in objdump ldd file patchelf; do
-    command -v "$tool" >/dev/null 2>&1 || {
-      echo "ERROR: native addon library bundling requires $tool" >&2; return 1;
-    }
-  done
-  while IFS= read -r -d '' addon; do
-    dynamic="$(objdump -p "$addon" 2>/dev/null)" || {
-      echo "ERROR: cannot inspect native addon ELF dependencies: $addon" >&2; return 1;
-    }
-    printf '%s\n' "$dynamic" | awk '$1 == "NEEDED" { print $2 }' | grep -Fx libatomic.so.1 >/dev/null || continue
-    source="$(ldd "$addon" 2>/dev/null | awk '$1 == "libatomic.so.1" && $2 == "=>" && $3 ~ /^\// { print $3; exit }')"
-    [[ -f "$source" ]] || {
-      echo "ERROR: cannot resolve target libatomic.so.1 for $addon" >&2; return 1;
-    }
-    case "$TARGET_ARCH" in
-      arm64|aarch64) machine='ARM aarch64' ;;
-      x64|x86_64|amd64) machine='x86-64' ;;
-      *) echo "ERROR: unsupported native addon architecture: $TARGET_ARCH" >&2; return 1 ;;
-    esac
-    [[ "$(file -b -L "$source")" == *"$machine"* ]] || {
-      echo "ERROR: libatomic.so.1 architecture differs from $TARGET_ARCH" >&2; return 1;
-    }
-    mkdir -p "$root/bin/.pg-real/lib" || return 1
-    cp -L "$source" "$root/bin/.pg-real/lib/libatomic.so.1" || return 1
-    relative="$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], os.path.dirname(sys.argv[2])))' "$root/bin/.pg-real/lib" "$addon")" || return 1
-    existing="$(patchelf --print-rpath "$addon")" || return 1
-    patchelf --set-rpath "\$ORIGIN/$relative${existing:+:$existing}" "$addon" || return 1
-  done < <(find "$root/node_modules" -type f -name '*.node' -print0)
-}
-bundle_linux_addon_libraries "$SIDECAR_TMP_DIR" || exit 1
 _stamp_serve_sha="$(papercusp_portable_sha256 "$SIDECAR_TMP_DIR/serve.mjs")"
 _stamp_proxy_sha="$(papercusp_portable_sha256 "$SIDECAR_TMP_DIR/mcp-proxy.mjs")"
 _stamp_git_head="$(papercusp_stamp_git_head "$REPO_ROOT")"
