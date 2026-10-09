@@ -58,7 +58,9 @@ function fixture(t, { role = 'papercusp-server', version = '0.0.26', forbidden =
   fs.writeFileSync(path.join(tauri, 'tauri.conf.json'), JSON.stringify({ plugins: { updater: { pubkey } } }));
   const sourceSha = 'a'.repeat(40);
   const provenance = path.join(sidecar, 'build-provenance.json');
-  fs.writeFileSync(provenance, JSON.stringify({ gitHead: sourceSha, gitDirty: false, version: '0.0.26' }));
+  fs.writeFileSync(provenance, JSON.stringify({
+    buildSha: 'e7752b9e', gitHead: sourceSha, gitDirty: false, version: '0.0.26',
+  }));
   const receipt = path.join(root, 'input.json');
   const data = {
     kind: 'linux-completed-package-finalization-input/v1', profile: 'vm-release',
@@ -78,7 +80,7 @@ function fixture(t, { role = 'papercusp-server', version = '0.0.26', forbidden =
     '  dpkg-deb --build "$PAYLOAD" "$1" >/dev/null', 'fi',
   ].join('\n'));
   fs.writeFileSync(path.join(here, 'emit-build-provenance.sh'),
-    'printf "provenance %s\\n" "$*" >> "$CALL_LOG"\n');
+    'printf "provenance %s source=%s dirty=%s\\n" "$*" "$PROVENANCE_SOURCE_GIT_HEAD" "$PROVENANCE_SOURCE_GIT_DIRTY" >> "$CALL_LOG"\n');
   return { root, tree, tauri, here, deb, receipt, data, provenance,
     log: path.join(root, 'calls') };
 }
@@ -106,9 +108,25 @@ test('exact signed Server input runs only finalization with real initial/final s
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.equal(sha(f.deb), before);
   assert.deepEqual(calls(f).map(line => line.split(' ')[0]), ['audit', 'repack', 'audit', 'provenance']);
-  assert.match(calls(f).at(-1), /0\.0\.26 a{40} true/);
+  assert.match(calls(f).at(-1), /0\.0\.26 e7752b9e true/);
+  assert.match(calls(f).at(-1), /source=a{40} dirty=false$/);
   assert.ok(result.stdout.indexOf('phase=input-signature') < result.stdout.indexOf('phase=repack-and-sign'));
   assert.ok(result.stdout.indexOf('phase=final-signature') < result.stdout.indexOf('phase=provenance'));
+});
+
+test('missing or malformed baked identity refuses before repacking even with a valid source SHA', t => {
+  for (const buildSha of [undefined, '', 'bad\nidentity', 'bad identity', 42]) {
+    const f = fixture(t);
+    const p = JSON.parse(fs.readFileSync(f.provenance));
+    if (buildSha === undefined) delete p.buildSha;
+    else p.buildSha = buildSha;
+    fs.writeFileSync(f.provenance, JSON.stringify(p));
+    update(f, r => { r.sidecarBuildProvenanceSha256 = sha(f.provenance); });
+    const result = run(f);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /sidecar baked build identity is missing or invalid/);
+    assert.deepEqual(calls(f), []);
+  }
 });
 
 test('changed artifact, signature, provenance and receipt identity refuse before repack', t => {

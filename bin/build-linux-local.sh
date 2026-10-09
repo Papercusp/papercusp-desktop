@@ -267,11 +267,11 @@ assert_vm_release_deb_runtime_only() {
 # package guards; resuming finalization must never rebuild or relabel inputs.
 finalize_existing_vm_release_deb() {
   local deb="${1:?completed deb required}" receipt="${2:?input receipt required}"
-  local sidecar="$ROOT/src-tauri/sidecar" source_sha public_key
+  local sidecar="$ROOT/src-tauri/sidecar" source_sha baked_sha validated_identity public_key
   [[ "$DISTRIBUTION_PROFILE" == vm-release ]] || {
     echo 'ERROR: --finalize-deb requires vm-release' >&2; return 2;
   }
-  source_sha="$(python3 - "$deb" "$receipt" "$VERSION" "$sidecar/build-provenance.json" <<'PY'
+  validated_identity="$(python3 - "$deb" "$receipt" "$VERSION" "$sidecar/build-provenance.json" <<'PY'
 import hashlib,json,re,sys
 from pathlib import Path
 deb,receipt,version,provenance=map(Path,sys.argv[1:])
@@ -294,9 +294,16 @@ p=json.loads(provenance.read_text())
 if (p.get('gitHead')!=r['sourceSha'] or p.get('gitDirty') is not False
         or p.get('version')!=version):
     raise ValueError('sidecar source/version does not match finalization receipt')
-print(r['sourceSha'])
+# gitHead identifies the accepted source; buildSha is the exact compiled
+# /api/health identity. They can come from different repositories and must
+# never be substituted for each other, even when one is a longer SHA.
+if (not isinstance(p.get('buildSha'),str)
+        or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,199}',p['buildSha'])):
+    raise ValueError('sidecar baked build identity is missing or invalid')
+print(r['sourceSha'],p['buildSha'],sep='\t')
 PY
   )" || return 2
+  IFS=$'\t' read -r source_sha baked_sha <<<"$validated_identity"
   [[ "$(dpkg-deb -f "$deb" Package)" == papercusp-server \
      && "$(dpkg-deb -f "$deb" Version)" == "$VERSION" ]] || {
     echo 'ERROR: finalization requires the exact Server package/version' >&2; return 2;
@@ -323,7 +330,7 @@ PY
   echo 'finalize-existing: phase=provenance'
   PROVENANCE_SIDECAR_DIR="$sidecar" \
   PROVENANCE_SOURCE_GIT_HEAD="$source_sha" PROVENANCE_SOURCE_GIT_DIRTY=false \
-    bash "$HERE/emit-build-provenance.sh" "$(dirname "$deb")" "$VERSION" "$source_sha" true "$deb" "$deb.sig" || return 1
+    bash "$HERE/emit-build-provenance.sh" "$(dirname "$deb")" "$VERSION" "$baked_sha" true "$deb" "$deb.sig" || return 1
   echo "finalize-existing: complete $deb; installer acceptance remains separate"
 }
 
