@@ -385,7 +385,7 @@ test('sidecar dependency install includes both source workspaces with exact name
     '(cd "$REPO_ROOT" && node scripts/npm-install-safe.mjs install',
   );
   const installEnd = builder.indexOf(
-    ')\n\n# POST-INSTALL RUNTIME BUILDS',
+    ')\n',
     installStart,
   );
   assert(installStart >= 0, 'missing scoped sidecar dependency install');
@@ -414,19 +414,21 @@ test('sidecar runtime workspace builds require native TypeScript 7 plus the Type
   assert.match(builder, /API compatibility/);
 });
 
-test('runtime workspace build retries transient post-install extraction gaps under the safe install mutex', () => {
-  const start = builder.indexOf('build_runtime_workspace_outputs_after_install() {');
-  const end = builder.indexOf('\nbuild_runtime_workspace_outputs_after_install\n', start);
-  assert(start >= 0 && end > start, 'could not isolate runtime workspace build helper');
-  const helper = builder.slice(start, end);
-
-  assert.match(helper, /runtime_build_attempts=3/);
-  assert.match(helper, /for runtime_build_attempt in \$\(seq 1 "\$runtime_build_attempts"\)/);
-  assert.match(helper, /npm --workspace "\$workspace" run build/);
-  assert.match(helper, /node scripts\/npm-install-safe\.mjs install[\s\S]*--include=dev --workspace="\$workspace"/);
-  assert.match(helper, /retrying in 2s/);
-  assert.match(helper, /failed after \$runtime_build_attempts reify\+build attempts/);
-  assert.doesNotMatch(helper, /&& npm install /, 'runtime reification must never bypass npm-install-safe');
+test('prepared runtime builds are protected by the existing reader lease and never upgrade it to an installer', () => {
+  const reader = extractFunction('build_runtime_workspace_outputs_after_install');
+  // The prepared helper embeds JavaScript containing column-zero braces.
+  // Its next shell declaration is an unambiguous boundary; the simple brace
+  // extractor above is appropriate only for helpers without that payload.
+  const start = builder.indexOf('build_runtime_workspace_outputs_prepared() {');
+  const end = builder.indexOf('build_runtime_workspace_outputs_after_install() {', start);
+  assert(start >= 0 && end > start, 'missing prepared runtime build helper');
+  const prepared = builder.slice(start, end);
+  assert.match(reader, /run_sidecar_cached_package node/);
+  assert.match(reader, /--repo-root "\$REPO_ROOT" --exec-under-lock -- bash/);
+  assert.match(prepared, /npm --workspace "\$workspace" run build/);
+  assert.match(prepared, /prepared runtime workspace build failed/);
+  assert.doesNotMatch(prepared, /npm-install-safe\.mjs install|npm install|runtime_build_attempts|sleep /,
+    'dependency writes and retries belong before the protected build phase');
 });
 
 test('Debian removal tears down only verified Papercusp process ownership', () => {
