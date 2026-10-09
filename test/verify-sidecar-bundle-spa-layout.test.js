@@ -261,6 +261,45 @@ test('Linux import probe launches with the host allocator contract and preserves
     assert.equal(result.status, 0, result.stderr);
   }
 });
+test('packaged import timeout preserves partial output and launch diagnostics', () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'boot-timeout-observation-'));
+  try {
+    const preload = path.join(fixture, 'spawn-observation.cjs');
+    fs.writeFileSync(preload, `
+      const cp = require('node:child_process');
+      const original = cp.spawnSync;
+      cp.spawnSync = (file, args, options) => {
+        if (args?.some(arg => String(arg).endsWith('/serve.mjs'))) {
+          require('node:assert/strict').equal(options.timeout, 60000);
+          const error = new Error('observed boot probe deadline');
+          error.code = 'ETIMEDOUT';
+          return { pid: 123, status: null, signal: 'SIGTERM', error,
+            stdout: 'LAST_COMPLETED_BOOT_PHASE registry-start\\nPAPERCUSP_BOOT_IMPORTS_OK\\n',
+            stderr: 'CHILD_DIAGNOSTIC registry-pending\\n' };
+        }
+        return original(file, args, options);
+      };
+      require('node:module').syncBuiltinESMExports();
+    `);
+    const result = runBootCheck('', { NODE_OPTIONS: '--require=' + preload });
+    assert.equal(result.status, 1, 'a partial receipt must not accept a timed-out child');
+    assert.match(result.stderr, /LAST_COMPLETED_BOOT_PHASE registry-start/);
+    assert.match(result.stderr, /CHILD_DIAGNOSTIC registry-pending/);
+    assert.match(result.stderr, /"errorCode":"ETIMEDOUT"/);
+    assert.match(result.stderr, /"pid":123/);
+    assert.match(result.stderr, /"elapsedMs":\d+/);
+    assert.match(result.stderr, /"cwd":"[^\n]+packaged-boot-closure-/);
+  } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
+});
+
+test('packaged import failure retains both child output streams', () => {
+  const result = runBootCheck(`console.log('PARTIAL_IMPORT_PROGRESS');
+    console.error('CHILD_IMPORT_FAILURE'); process.exit(2);`);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /PARTIAL_IMPORT_PROGRESS/);
+  assert.match(result.stderr, /CHILD_IMPORT_FAILURE/);
+});
+
 test('packaged import closure refuses pruned eager persona reads and missing probe receipts', () => {
   for (const body of ["throw Error('oracle.persona.md not found');", "console.log('not a boot receipt');"]) {
     const result = runBootCheck(body);
