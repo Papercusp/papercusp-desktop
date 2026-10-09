@@ -447,6 +447,56 @@ print(json.dumps({
 PY
 }
 
+# Verify an installed Server resource root without guessing the models directory or
+# rewriting its snapshot. The existing distribution contract owns both installed paths.
+papercusp_verify_installed_transformers_model_pack() {
+  local installed_root="${1:-}" selection result
+  local contract="${PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT:-$PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT_DEFAULT}"
+  [ -n "$installed_root" ] || { echo "FATAL: installed model verification needs a Server resource root" >&2; return 2; }
+  selection="$(python3 - "$contract" "$installed_root" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+def fail(message):
+    sys.exit("FATAL: installed model contract mismatch: " + message)
+
+try:
+    contract = json.loads(Path(sys.argv[1]).read_text())
+    packs = [p for p in contract.get("server", {}).get("optionalPacks", []) if p.get("name") == "local-models"]
+    if len(packs) != 1 or packs[0].get("required") is not True:
+        fail("exactly one required local-models pack must be declared")
+    pack = packs[0]
+    def relative(key):
+        value = pack.get(key)
+        if not isinstance(value, str) or not value or "\\" in value or any(p in ("", ".", "..") for p in value.split("/")) or Path(value).is_absolute():
+            fail("unsafe " + key)
+        return Path(value)
+    install, manifest = relative("installRoot"), relative("manifestPath")
+    if install.name != "onnx-community" or manifest.parent != install.parent:
+        fail("model install root and manifest must share the declared models directory")
+    root = Path(sys.argv[2]).resolve(strict=True)
+    models = (root / install.parent).resolve(strict=True)
+    snapshot = (root / manifest).resolve(strict=True)
+    if not models.is_relative_to(root) or not snapshot.is_relative_to(models) or not models.is_dir() or not snapshot.is_file():
+        fail("declared model pack escapes or is absent from the installed root")
+    print(models)
+    print(snapshot)
+except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+    fail(str(exc))
+PY
+)" || return 1
+  local models_root="${selection%%$'\n'*}" snapshot="${selection#*$'\n'}"
+  result="$(papercusp_verify_transformers_model_pack "$models_root" 0 1)" || return 1
+  python3 - "$snapshot" "$result" <<'PY'
+import hashlib, json, pathlib, sys
+result = json.loads(sys.argv[2])
+if hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest() != result["manifestSha256"]:
+    sys.exit("FATAL: installed model snapshot differs from the selected distribution contract")
+print(sys.argv[2])
+PY
+}
+
 # Download fragments left beside finished weights by an interrupted download. They are not
 # model bytes and must never cross the staging boundary (EI-21121880496840788 / P-008) —
 # and they are not hypothetical: the host cache carries several right now, so a copy step
@@ -692,10 +742,11 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     present) shift; papercusp_transformers_models_present "$@" ;;
     names) printf '%s\n' "${PAPERCUSP_TRANSFORMERS_MODELS[@]}" ;;
     verify) shift; papercusp_verify_transformers_model_pack "$@" ;;
+    verify-installed) shift; papercusp_verify_installed_transformers_model_pack "$@" ;;
     dependencies) shift; papercusp_verify_transformers_dependencies "$@" ;;
     fetch) shift; papercusp_fetch_transformers_models "$@" ;;
     *)
-      echo "usage: $0 {stage|present|names|verify|fetch} <models_root> | dependencies <repo_root> [check_installed]" >&2
+      echo "usage: $0 {stage|present|names|verify|fetch} <models_root> | verify-installed <server_resource_root> | dependencies <repo_root> [check_installed]" >&2
       exit 2
       ;;
   esac

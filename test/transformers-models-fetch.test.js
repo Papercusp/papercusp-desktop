@@ -244,6 +244,55 @@ async function withServer(fn) {
   }
 }
 
+test('installed verification derives the nested pack from its contract and never rewrites the snapshot', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tf-installed-'));
+  try {
+    const pack = contract().server.optionalPacks[0];
+    Object.assign(pack, { required: true, installRoot: 'sidecar/node_modules/@huggingface/transformers/models/onnx-community',
+      manifestPath: 'sidecar/node_modules/@huggingface/transformers/models/papercusp-model-assets.json',
+      cachePolicy: { remoteFetch: 'forbidden-on-vm-release' }, compatibility: { transformersPackage: '4.2.0' } });
+    const selectedContract = path.join(root, 'contract.json');
+    const saveContract = () => fs.writeFileSync(selectedContract, JSON.stringify({ server: { optionalPacks: [pack] } }));
+    saveContract();
+    const models = path.join(root, path.dirname(pack.installRoot));
+    for (const [file, bytes] of Object.entries(FILES)) {
+      fs.mkdirSync(path.dirname(path.join(models, file)), { recursive: true });
+      fs.writeFileSync(path.join(models, file), bytes);
+    }
+    fs.writeFileSync(path.join(models, '../package.json'), JSON.stringify({ name: '@huggingface/transformers', version: '4.2.0' }));
+    const env = { ...process.env, PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT: selectedContract };
+    const seed = spawnSync('bash', [lib, 'verify', models, '1', '1'], { encoding: 'utf8', env });
+    assert.equal(seed.status, 0, seed.stderr);
+    const snapshot = path.join(root, pack.manifestPath);
+    const original = fs.readFileSync(snapshot);
+    const probe = () => spawnSync('bash', [lib, 'verify-installed', root], { encoding: 'utf8', env });
+    const wrongRoot = spawnSync('bash', [lib, 'verify', path.join(root, 'sidecar/models'), '0', '1'], { encoding: 'utf8', env });
+    assert.notEqual(wrongRoot.status, 0, 'the former guessed path must fail');
+    assert.match(wrongRoot.stderr, /missing declared file/);
+    let result = probe();
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).manifestSha256, sha(original));
+    assert.deepEqual(fs.readFileSync(snapshot), original);
+    fs.writeFileSync(snapshot, '{}');
+    result = probe();
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /snapshot differs/);
+    assert.equal(fs.readFileSync(snapshot, 'utf8'), '{}', 'verification must preserve a corrupt snapshot as evidence');
+    fs.writeFileSync(snapshot, original);
+    fs.appendFileSync(path.join(models, 'onnx-community/m1/config.json'), 'corrupt');
+    result = probe();
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /(?:size|sha256) mismatch/);
+    pack.installRoot = '../outside/onnx-community';
+    saveContract();
+    result = probe();
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /unsafe installRoot/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function runFetch(endpoint, contractObj, dest) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tf-fetch-contract-'));
   const cpath = path.join(dir, 'contract.json');
