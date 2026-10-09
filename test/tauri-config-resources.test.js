@@ -442,6 +442,27 @@ test('Tauri seed bundle is server-only, not duplicated into the GUI bundle', () 
   ]);
 });
 
+test('fresh GUI builds do not run the server-only seed placeholder warning path', () => {
+  const base = readConfig('tauri.conf.json');
+  const server = readConfig('tauri.server.conf.json');
+  const buildRs = readText('src-tauri', 'build.rs');
+  const main = buildRs.slice(buildRs.indexOf('fn main()'));
+  const hasSeedResource = (config) =>
+    config.bundle.resources.some((resource) => resource === 'seed' || resource.startsWith('seed/'));
+
+  assert.equal(hasSeedResource(base), false, 'the GUI base must not need a seed placeholder');
+  assert.equal(hasSeedResource(server), true, 'the Server overlay still needs the clean-checkout placeholder');
+  assert.match(buildRs, /fn config_declares_seed_resource\(manifest_dir: &Path\) -> bool/);
+  assert.match(buildRs, /std::env::var\("TAURI_CONFIG"\)/);
+  assert.match(buildRs, /pointer\("\/bundle\/resources"\)/);
+  assert.match(
+    main,
+    /if config_declares_seed_resource\(&manifest_dir\)\s*\{\s*ensure_seed_placeholder\(&manifest_dir\);\s*\}/,
+    'build.rs must create and warn about the seed placeholder only for a config that bundles seed',
+  );
+  assert.match(main, /cargo:rerun-if-env-changed=TAURI_CONFIG/);
+});
+
 // WI-6075 / P-007: the live-federation gate needs the full seeded runtime, so
 // its archived deb is a Server artifact. A one-off full-runtime GUI overlay was
 // the exact exception that let the shared GUI contract widen again.

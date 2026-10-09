@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+serde_json = "1"
 
 [dependencies]
 # `tray-icon` powers the "Papercusp Server" menubar/tray app (Server role, no

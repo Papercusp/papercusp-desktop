@@ -82,6 +82,42 @@ fn ensure_sidecar_placeholder(manifest_dir: &Path) {
     );
 }
 
+fn resource_path_is_seed(path: &str) -> bool {
+    let path = path.strip_prefix("./").unwrap_or(path);
+    path == "seed" || path.starts_with("seed/")
+}
+
+/// Resolve the resource list using the same overlay input as generate_context!.
+/// Tauri's `TAURI_CONFIG` contains the active overlay (or merged config); when
+/// it omits bundle.resources, the base config remains authoritative.
+fn config_declares_seed_resource(manifest_dir: &Path) -> bool {
+    let overlay_config = std::env::var("TAURI_CONFIG")
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    let base_config = std::fs::read_to_string(manifest_dir.join("tauri.conf.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    let resources = overlay_config
+        .as_ref()
+        .and_then(|config| config.pointer("/bundle/resources"))
+        .or_else(|| {
+            base_config
+                .as_ref()
+                .and_then(|config| config.pointer("/bundle/resources"))
+        });
+
+    match resources {
+        Some(serde_json::Value::Array(entries)) => entries
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(resource_path_is_seed),
+        Some(serde_json::Value::Object(entries)) => {
+            entries.keys().any(|path| resource_path_is_seed(path))
+        }
+        _ => false,
+    }
+}
+
 /// EI-9412: `src-tauri/seed/` is a gitignored, out-of-band-provisioned directory
 /// (papercusp-desktop/.gitignore: "Provision the seed out-of-band; git must not
 /// carry it.", plan hive-seed-bundle-2026-07-04 / WI-3346). On a fresh or
@@ -108,6 +144,8 @@ fn ensure_sidecar_placeholder(manifest_dir: &Path) {
 /// REAL bundle must still run `bin/ensure-release-seed.sh` first — every
 /// release script (release-local.sh, mac-vm-build.sh, build-windows-on-vm.sh)
 /// already does, and a fresh cut replaces this placeholder tree wholesale.
+/// Only run this repair when the active bundle config declares seed resources;
+/// the GUI base has none and must not emit a release-seed warning.
 fn ensure_seed_placeholder(manifest_dir: &Path) {
     let seed = manifest_dir.join("seed");
     if seed.join("manifest.json").exists() {
@@ -230,10 +268,14 @@ fn main() {
     let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
         .map(std::path::PathBuf::from)
         .expect("Cargo must provide CARGO_MANIFEST_DIR to build.rs");
+    println!("cargo:rerun-if-env-changed=TAURI_CONFIG");
+    println!("cargo:rerun-if-changed=tauri.conf.json");
     println!("cargo:rerun-if-changed=sidecar/spa/internal/docs");
     reject_unpruned_spa_docs(&manifest_dir);
     ensure_sidecar_placeholder(&manifest_dir);
-    ensure_seed_placeholder(&manifest_dir);
+    if config_declares_seed_resource(&manifest_dir) {
+        ensure_seed_placeholder(&manifest_dir);
+    }
     ensure_doc_vector_seed_placeholder(&manifest_dir);
     println!("cargo:rerun-if-changed=sidecar/serve.mjs");
     // Build provenance: rebuild main.rs when the build sets a new git sha so
