@@ -45,6 +45,68 @@ const CHECK_SPA_RUNTIME_LAYOUT = extractFunction('check_spa_runtime_layout');
 const CHECK_BOOT_IMPORT_CLOSURE = extractFunction('check_boot_import_closure');
 const WRITE_VERIFICATION_RECEIPT = extractFunction('write_verification_receipt');
 
+// Execute the real Linux linkage branch. Only objdump's external observation is
+// a fixture: target policy, bundle resolution and the FAIL verdict stay real.
+const linkageStart = script.indexOf('# ── [3] linkage closure');
+const linkageEnd = script.indexOf('# ── [4]', linkageStart);
+assert.ok(linkageStart >= 0 && linkageEnd > linkageStart);
+const CHECK_LINKAGE = script.slice(linkageStart, linkageEnd);
+const IS_ELF = script.split('\n').find(line => line.startsWith('_is_elf()'));
+assert.ok(IS_ELF);
+
+function runLinkageCheck(arch, needed, bundled = []) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-linkage-'));
+  try {
+    const bin = path.join(dir, 'bin');
+    fs.mkdirSync(path.join(bin, '.pg-real/lib'), { recursive: true });
+    fs.writeFileSync(path.join(bin, 'node'), Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+    for (const name of bundled) fs.writeFileSync(path.join(bin, '.pg-real/lib', name), 'bundled dependency');
+    return spawnSync('bash', ['-c', 'set -uo pipefail\nFAIL=0\n' +
+      'fail() { printf "%s\\n" "$*"; FAIL=1; }; ok() { printf "%s\\n" "$*"; };\n' +
+      'objdump() { printf "%s\\n" "$FIXTURE_NEEDED"; };\n' +
+      IS_ELF + '\n' + CHECK_LINKAGE + '\nexit "$FAIL"'], {
+      encoding: 'utf8', env: { ...process.env, OS: 'Linux', BIN: bin, SIDECAR: dir,
+        TARGET_ARCH_N: arch, FIXTURE_NEEDED: needed.map(name => 'NEEDED ' + name).join('\n') },
+    });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('Linux linkage closure admits the matching ARM64 and AMD64 base loaders', () => {
+  for (const [arch, loader] of [['arm64', 'ld-linux-aarch64.so.1'], ['x64', 'ld-linux-x86-64.so.2']]) {
+    const result = runLinkageCheck(arch, [loader, 'libc.so.6']);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /all 1 bundled ELFs close over bundle libs \+ base allowlist/);
+  }
+});
+
+test('Linux linkage closure refuses foreign and unknown loaders', () => {
+  for (const [arch, foreign] of [['arm64', 'ld-linux-x86-64.so.2'], ['x64', 'ld-linux-aarch64.so.1']]) {
+    for (const loader of [foreign, 'ld-linux-riscv64-lp64d.so.1']) {
+      const result = runLinkageCheck(arch, [loader]);
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      assert.ok(result.stdout.includes('node needs ' + loader));
+      assert.match(result.stdout, /host-masked dependency/);
+    }
+  }
+});
+
+test('Linux linkage closure still requires non-base dependencies inside the bundle', () => {
+  for (const arch of ['arm64', 'x64']) {
+    const missing = runLinkageCheck(arch, ['libprivate.so.1']);
+    assert.equal(missing.status, 1, missing.stdout + missing.stderr);
+    assert.match(missing.stdout, /node needs libprivate\.so\.1/);
+    const present = runLinkageCheck(arch, ['libprivate.so.1'], ['libprivate.so.1']);
+    assert.equal(present.status, 0, present.stdout + present.stderr);
+    assert.match(present.stdout, /all 1 bundled ELFs close/);
+  }
+});
+
+test('Linux linkage closure refuses an unsupported target architecture', () => {
+  const result = runLinkageCheck('riscv64', ['libc.so.6']);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /unsupported Linux target architecture/);
+});
+
 const hashFile = (file) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
 test('real verifier emits an executable-bound failure receipt on an incomplete bundle', () => {
