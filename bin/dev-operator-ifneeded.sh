@@ -104,7 +104,7 @@ PTY_PORT="${OPERATOR_DEV_PTY_PORT:-$((PORT + 4))}"
 # No caller value means no override, so ordinary dev launches retain the
 # existing `.env.local` contract.
 DEV_CALLER_OVERRIDES=""
-for DEV_CALLER_KEY in PAPERCUSP_BIND_HOST PAPERCUSP_CUPBOARD_URL; do
+for DEV_CALLER_KEY in PAPERCUSP_BIND_HOST PAPERCUSP_CUPBOARD_URL KOPIA_BACKUP_LOCK_PATH KOPIA_BACKUP_STATE_DIR; do
   if [ -n "${!DEV_CALLER_KEY:-}" ]; then
     printf -v DEV_CALLER_VALUE_Q '%q' "${!DEV_CALLER_KEY}"
     DEV_CALLER_OVERRIDES+="$DEV_CALLER_KEY=$DEV_CALLER_VALUE_Q "
