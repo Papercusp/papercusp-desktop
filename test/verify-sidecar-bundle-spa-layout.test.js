@@ -44,6 +44,14 @@ function extractFunction(name, source = script) {
 const CHECK_SPA_RUNTIME_LAYOUT = extractFunction('check_spa_runtime_layout');
 const CHECK_BOOT_IMPORT_CLOSURE = extractFunction('check_boot_import_closure');
 const WRITE_VERIFICATION_RECEIPT = extractFunction('write_verification_receipt');
+const INVENTORY_HELPER = path.resolve(__dirname, '../bin/lib/server-container.mjs');
+
+function elfHeader(arch) {
+  const header = Buffer.alloc(20);
+  header.set([0x7f, 0x45, 0x4c, 0x46, 2, 1]);
+  header.writeUInt16LE(arch === 'arm64' ? 183 : 62, 18);
+  return header;
+}
 
 // Execute the real Linux linkage branch. Only objdump's external observation is
 // a fixture: target policy, bundle resolution and the FAIL verdict stay real.
@@ -54,19 +62,26 @@ const CHECK_LINKAGE = script.slice(linkageStart, linkageEnd);
 const IS_ELF = script.split('\n').find(line => line.startsWith('_is_elf()'));
 assert.ok(IS_ELF);
 
-function runLinkageCheck(arch, needed, bundled = []) {
+function runLinkageCheck(arch, needed, bundled = [], extra = []) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-linkage-'));
   try {
     const bin = path.join(dir, 'bin');
     fs.mkdirSync(path.join(bin, '.pg-real/lib'), { recursive: true });
-    fs.writeFileSync(path.join(bin, 'node'), Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+    fs.writeFileSync(path.join(bin, 'node'), elfHeader(arch));
+    for (const { rel, bytes = elfHeader(arch), link } of extra) {
+      const file = path.join(dir, rel);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      if (link) fs.symlinkSync(link, file);
+      else fs.writeFileSync(file, bytes, { mode: 0o644 });
+    }
     for (const name of bundled) fs.writeFileSync(path.join(bin, '.pg-real/lib', name), 'bundled dependency');
     return spawnSync('bash', ['-c', 'set -uo pipefail\nFAIL=0\n' +
       'fail() { printf "%s\\n" "$*"; FAIL=1; }; ok() { printf "%s\\n" "$*"; };\n' +
       'objdump() { printf "%s\\n" "$FIXTURE_NEEDED"; };\n' +
       IS_ELF + '\n' + CHECK_LINKAGE + '\nexit "$FAIL"'], {
       encoding: 'utf8', env: { ...process.env, OS: 'Linux', BIN: bin, SIDECAR: dir,
-        TARGET_ARCH_N: arch, FIXTURE_NEEDED: needed.map(name => 'NEEDED ' + name).join('\n') },
+        TARGET_ARCH_N: arch, _elf_inventory_tool: INVENTORY_HELPER,
+        FIXTURE_NEEDED: needed.map(name => 'NEEDED ' + name).join('\n') },
     });
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
@@ -107,6 +122,38 @@ test('Linux linkage closure refuses an unsupported target architecture', () => {
   assert.match(result.stdout, /unsupported Linux target architecture/);
 });
 
+test('complete Linux ELF inventory rejects foreign extensionless payloads at arbitrary depths', () => {
+  for (const arch of ['arm64', 'x64']) {
+    for (const rel of ['node_modules/odiff-bin/platform-linux/bin/odiff',
+      'nested runtime/deep/vendor/private-tool']) {
+      const passing = runLinkageCheck(arch, ['libc.so.6'], [], [{rel}]);
+      assert.equal(passing.status, 0, passing.stdout + passing.stderr);
+      assert.match(passing.stdout, /all 2 bundled ELFs close/);
+      const foreign = runLinkageCheck(arch, [], [],
+        [{rel, bytes: elfHeader(arch === 'arm64' ? 'x64' : 'arm64')}]);
+      assert.equal(foreign.status, 1, foreign.stdout + foreign.stderr);
+      assert.ok(foreign.stderr.includes(rel));
+      assert.match(foreign.stderr, /Native payload architecture mismatch/);
+    }
+  }
+});
+
+test('complete Linux ELF inventory rejects malformed headers and escaping links', () => {
+  const wrongClass = elfHeader('arm64'); wrongClass[4] = 1;
+  const wrongEndian = elfHeader('arm64'); wrongEndian[5] = 2;
+  for (const bytes of [Buffer.from([127, 69, 76, 70]), wrongClass, wrongEndian]) {
+    const result = runLinkageCheck('arm64', [], [], [{rel: 'deep/file.bin', bytes}]);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /architecture mismatch/);
+  }
+  const link = runLinkageCheck('arm64', [], [], [{rel: 'node_modules/vendor/link', link: '/bin/sh'}]);
+  assert.equal(link.status, 1, link.stdout + link.stderr);
+  assert.match(link.stderr, /link escapes its payload/);
+  const contained = runLinkageCheck('arm64', [], [], [{rel: 'deep/node-link', link: '../bin/node'}]);
+  assert.equal(contained.status, 0, contained.stdout + contained.stderr);
+  assert.match(contained.stdout, /all 2 bundled ELFs close/);
+});
+
 function runAddonLinkageCheck({ bundled = false, runpath = '' } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-addon-linkage-'));
   try {
@@ -114,7 +161,7 @@ function runAddonLinkageCheck({ bundled = false, runpath = '' } = {}) {
     const addonDir = path.join(dir, 'node_modules/package with spaces/prebuilds/linux-arm64');
     fs.mkdirSync(bin, { recursive: true });
     fs.mkdirSync(addonDir, { recursive: true });
-    const elf = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
+    const elf = elfHeader('arm64');
     fs.writeFileSync(path.join(bin, 'node'), elf);
     fs.writeFileSync(path.join(addonDir, 'fixture.node'), elf);
     if (bundled) fs.writeFileSync(path.join(addonDir, 'libatomic.so.1'), elf);
@@ -125,7 +172,7 @@ function runAddonLinkageCheck({ bundled = false, runpath = '' } = {}) {
       '*) printf "NEEDED libc.so.6\\n" ;; esac; };\n' +
       IS_ELF + '\n' + CHECK_LINKAGE + '\nexit "$FAIL"'], {
       encoding: 'utf8', env: { ...process.env, OS: 'Linux', BIN: bin, SIDECAR: dir,
-        TARGET_ARCH_N: 'arm64', FIXTURE_RUNPATH: runpath },
+        TARGET_ARCH_N: 'arm64', _elf_inventory_tool: INVENTORY_HELPER, FIXTURE_RUNPATH: runpath },
     });
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
