@@ -196,7 +196,7 @@ function spaBinding(identity) {
   binding.packageLockSha256 = identity.tools?.find(tool => path.basename(tool.file) === 'package-lock.json')?.sha256;
   if (identity.sourceDirty !== 'false' || identity.sourceState !== cleanSourceState()
       || identity.desktopState !== cleanSourceState()) throw new Error('SPA reuse requires clean product and desktop source');
-  if (keys.some(key => typeof binding[key] !== 'string' || !binding[key])
+  if (keys.some(key => typeof binding[key] !== 'string' || (key !== 'submodules' && !binding[key]))
       || !/^[a-f0-9]{64}$/.test(binding.packageLockSha256 || '')
       || !/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(binding.buildNodeVersion)) {
     throw new Error('SPA snapshot lacks complete source/build binding');
