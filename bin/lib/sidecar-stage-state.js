@@ -118,7 +118,7 @@ async function captureIdentity(env = process.env) {
   ].map(file => ({ file: fs.realpathSync(file), sha256: sha256(file) }));
   const sourceStateDigest = await sourceState(repoRoot);
   const desktopStateDigest = await sourceState(desktopRoot);
-  return {
+  const identity = {
     repoRoot, desktopRoot, sourceHead, desktopHead,
     sourceState: sourceStateDigest, desktopState: desktopStateDigest,
     submodules: git(repoRoot, ['submodule', 'status', '--recursive']),
@@ -130,7 +130,19 @@ async function captureIdentity(env = process.env) {
     sourceDirty: env.PROVENANCE_SOURCE_GIT_DIRTY,
     releaseAudit: env.PAPERCUSP_RELEASE_AUDIT || '0',
     scrub: env.PAPERCUSP_STAGE_SCRUB || '1', tools,
+    buildNodeVersion: process.version,
+    spaRecipeSha256: digestJson(['apps/operator-vite/package.json',
+      'apps/operator-vite/vite.config.ts', 'apps/operator-vite/bin/vite-build-singleflight']
+      .map(file => ({ file, sha256: fs.existsSync(path.join(repoRoot, file))
+        ? sha256(path.join(repoRoot, file)) : null }))),
   };
+  if (env.PAPERCUSP_SPA_SNAPSHOT_FROM) {
+    const root = fs.realpathSync(env.PAPERCUSP_SPA_SNAPSHOT_FROM);
+    const receipt = validateSpa(root, identity);
+    identity.spaSnapshot = { root, receiptSha256: sha256(`${root}.spa.json`),
+      contentSha256: receipt.contentSha256 };
+  }
+  return identity;
 }
 
 function inventory(stage) {
@@ -162,6 +174,101 @@ function inventory(stage) {
   }
   walk('');
   return rows;
+}
+
+function digestJson(value) {
+  return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function cleanSourceState() {
+  const digest = crypto.createHash('sha256');
+  for (const args of [['diff', '--no-ext-diff', '--binary', '--submodule=diff', 'HEAD'],
+    ['status', '--porcelain=v1', '--untracked-files=normal']]) digest.update(JSON.stringify(args));
+  return digest.digest('hex');
+}
+
+// SPA bytes are portable, but their source and build recipe are not interchangeable.
+// Deliberately omit architecture, checkout paths and native producer tools here.
+function spaBinding(identity) {
+  const keys = ['sourceHead', 'desktopHead', 'sourceState', 'desktopState', 'submodules',
+    'profile', 'version', 'buildSha', 'buildNodeVersion', 'spaRecipeSha256'];
+  const binding = Object.fromEntries(keys.map(key => [key, identity[key]]));
+  binding.packageLockSha256 = identity.tools?.find(tool => path.basename(tool.file) === 'package-lock.json')?.sha256;
+  if (identity.sourceDirty !== 'false' || identity.sourceState !== cleanSourceState()
+      || identity.desktopState !== cleanSourceState()) throw new Error('SPA reuse requires clean product and desktop source');
+  if (keys.some(key => typeof binding[key] !== 'string' || !binding[key])
+      || !/^[a-f0-9]{64}$/.test(binding.packageLockSha256 || '')
+      || !/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(binding.buildNodeVersion)) {
+    throw new Error('SPA snapshot lacks complete source/build binding');
+  }
+  return binding;
+}
+
+function portableSpaInventory(snapshot) {
+  const entries = inventory(snapshot);
+  const index = entries.find(entry => entry.path === 'index.html');
+  if (!index || index.type !== 'file' || index.size === 0) throw new Error('SPA snapshot requires nonempty index.html');
+  for (const entry of entries) {
+    if (/\.(?:node|so(?:\.[0-9.]+)?|dll|dylib|exe)$/i.test(entry.path))
+      throw new Error(`SPA snapshot contains native bytes: ${entry.path}`);
+    if (entry.type !== 'file') continue;
+    const header = Buffer.alloc(4);
+    const fd = fs.openSync(path.join(snapshot, entry.path), 'r');
+    try { fs.readSync(fd, header, 0, 4, 0); } finally { fs.closeSync(fd); }
+    if (header.equals(Buffer.from([127, 69, 76, 70])) || header.subarray(0, 2).toString() === 'MZ'
+        || [0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe, 0xcafebabe, 0xbebafeca].includes(header.readUInt32BE()))
+      throw new Error(`SPA snapshot contains native bytes: ${entry.path}`);
+  }
+  return entries;
+}
+
+function captureSpa(snapshot, identity) {
+  const binding = spaBinding(identity);
+  const entries = portableSpaInventory(snapshot);
+  const receipt = { schemaVersion: 1, kind: 'portable-spa', binding, entries,
+    contentSha256: digestJson(entries) };
+  writeJson(`${snapshot}.spa.json`, receipt);
+  return receipt;
+}
+
+function validateSpa(snapshot, identity) {
+  const binding = spaBinding(identity);
+  const receiptFile = `${snapshot}.spa.json`;
+  if (fs.lstatSync(receiptFile).isSymbolicLink()) throw new Error('SPA receipt must not be a symlink');
+  const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+  if (receipt.schemaVersion !== 1 || receipt.kind !== 'portable-spa'
+      || JSON.stringify(receipt.binding) !== JSON.stringify(binding)) throw new Error('SPA source/build binding changed');
+  const entries = portableSpaInventory(snapshot);
+  if (JSON.stringify(entries) !== JSON.stringify(receipt.entries)
+      || digestJson(entries) !== receipt.contentSha256) throw new Error('SPA bytes, paths, modes or links changed');
+  if (identity.spaSnapshot && (identity.spaSnapshot.root !== fs.realpathSync(snapshot)
+      || identity.spaSnapshot.receiptSha256 !== sha256(receiptFile)
+      || identity.spaSnapshot.contentSha256 !== receipt.contentSha256)) throw new Error('SPA input receipt changed after stage capture');
+  return receipt;
+}
+
+function copySpa(snapshot, destination, identity) {
+  const receipt = validateSpa(snapshot, identity);
+  if (fs.existsSync(destination)) throw new Error('SPA copy destination already exists');
+  const temporary = `${destination}.tmp.${process.pid}`;
+  if (fs.existsSync(temporary)) throw new Error('SPA copy temporary already exists');
+  try {
+    fs.cpSync(snapshot, temporary, { recursive: true, verbatimSymlinks: true });
+    if (JSON.stringify(portableSpaInventory(temporary)) !== JSON.stringify(receipt.entries))
+      throw new Error('SPA bytes changed during copy');
+    validateSpa(snapshot, identity);
+    fs.renameSync(temporary, destination);
+  } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
+  return receipt;
+}
+
+async function captureSpaFromSource(snapshot, identity) {
+  for (const [root, head, state] of [[identity.repoRoot, identity.sourceHead, identity.sourceState],
+    [identity.desktopRoot, identity.desktopHead, identity.desktopState]]) {
+    if (git(root, ['rev-parse', 'HEAD']) !== head || await sourceState(root) !== state)
+      throw new Error('SPA source changed since identity capture');
+  }
+  return captureSpa(snapshot, identity);
 }
 
 function recordFailure(stage, identity, phase, exitCode) {
@@ -205,7 +312,8 @@ function validateResume(stage, expected) {
   return receipt;
 }
 
-module.exports = { captureIdentity, failureEvidenceRoot, inventory, recordFailure, sourceState, validateResume, writeJson };
+module.exports = { captureIdentity, captureSpa, captureSpaFromSource, copySpa, failureEvidenceRoot,
+  inventory, portableSpaInventory, recordFailure, sourceState, spaBinding, validateResume, validateSpa, writeJson };
 
 if (require.main === module) {
   try {
@@ -218,7 +326,21 @@ if (require.main === module) {
         process.exitCode = 1;
       });
     }
-    else if (command === 'retain') {
+    else if (command === 'capture-spa') {
+      captureSpaFromSource(file, JSON.parse(fs.readFileSync(args[0], 'utf8'))).catch(error => {
+        console.error('FATAL: sidecar stage: ' + error.message); process.exitCode = 1;
+      });
+    } else if (command === 'copy-spa') {
+      copySpa(file, args[0], JSON.parse(fs.readFileSync(args[1], 'utf8')));
+    } else if (command === 'export-spa') {
+      const identity = JSON.parse(fs.readFileSync(args[1], 'utf8'));
+      captureSpaFromSource(file, identity).then(() => {
+        copySpa(file, args[0], identity);
+        captureSpa(args[0], identity);
+      }).finally(() => fs.rmSync(`${file}.spa.json`, { force: true })).catch(error => {
+        console.error('FATAL: sidecar stage: ' + error.message); process.exitCode = 1;
+      });
+    } else if (command === 'retain') {
       recordFailure(file, JSON.parse(fs.readFileSync(args[0], 'utf8')), args[1], Number(args[2]));
     } else if (command === 'validate') {
       validateResume(file, JSON.parse(fs.readFileSync(args[0], 'utf8')));

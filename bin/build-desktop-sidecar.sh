@@ -1452,7 +1452,7 @@ fi
 # held; later packaging steps consume that stable snapshot instead of rereading
 # the shared live dist/ after another build can start.
 rm -rf "$SIDECAR_DIR"
-mkdir -p "$SIDECAR_DIR/spa" "$SIDECAR_DIR/node_modules/@lydell" "$SIDECAR_DIR/bin"
+mkdir -p "$SIDECAR_DIR/node_modules/@lydell" "$SIDECAR_DIR/bin"
 # Initialize the shared provenance note once, with the fresh assembly root.
 # Private Darwin PostgreSQL writes before the client-tool wiring below; a later
 # reset would also erase that payload receipt from the shipping note.
@@ -1470,9 +1470,19 @@ echo "→ building operator-vite SPA (vite build → locked sidecar snapshot)"
 # Note the tradeoff this makes visible rather than introduces: the build runs in
 # $REPO_ROOT (the shared tree), so it empties that tree's dist/ and any desktop
 # window open against it will need a reload. Packaging is deliberate and rare.
+if [[ -n "${PAPERCUSP_SPA_SNAPSHOT_FROM:-}" ]]; then
+  node "$HERE/lib/sidecar-stage-state.js" copy-spa "$PAPERCUSP_SPA_SNAPSHOT_FROM" \
+    "$SIDECAR_DIR/spa" "$_sidecar_stage_identity"
+  echo "→ reused source-bound portable SPA snapshot"
+else
 (cd "$REPO_ROOT" && PAPERCUSP_RETAIN_DIST_CHUNKS=0 \
   VITE_BUILD_SNAPSHOT_DIR="$SIDECAR_DIR/spa" \
   npm --workspace @papercusp/operator-vite run build)
+if [[ -n "${PAPERCUSP_SPA_SNAPSHOT_OUT:-}" ]]; then
+  node "$HERE/lib/sidecar-stage-state.js" export-spa "$SIDECAR_DIR/spa" \
+    "$PAPERCUSP_SPA_SNAPSHOT_OUT" "$_sidecar_stage_identity"
+fi
+fi
 if [[ ! -f "$SIDECAR_DIR/spa/index.html" ]]; then
   echo "ERROR: expected locked Vite snapshot at $SIDECAR_DIR/spa/index.html after the build"
   exit 1

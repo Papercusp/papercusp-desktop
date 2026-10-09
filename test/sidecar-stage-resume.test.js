@@ -6,7 +6,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync, execFileSync } = require('node:child_process');
 const { makeDesktopTestScratchDirSync } = require('./test-scratch.cjs');
-const { captureIdentity, failureEvidenceRoot, inventory, recordFailure, sourceState, validateResume, writeJson } = require('../bin/lib/sidecar-stage-state.js');
+const { captureIdentity, captureSpa, copySpa, failureEvidenceRoot, inventory, recordFailure,
+  sourceState, validateResume, validateSpa, writeJson } = require('../bin/lib/sidecar-stage-state.js');
 const bin = path.resolve(__dirname, '../bin');
 const builder = fs.readFileSync(path.join(bin, 'build-desktop-sidecar.sh'), 'utf8');
 const finish = builder.match(/^__pc_finish_sidecar_build\(\) \{\n[\s\S]*?^\}$/m)[0];
@@ -270,6 +271,89 @@ function fixture() {
   const identity = { finalDir, sourceHead: 'a'.repeat(40), desktopHead: 'b'.repeat(40), profile: 'vm-release', targetOs: 'linux', targetArch: 'x64', tools: [{ sha256: 'c'.repeat(64) }] };
   return { root, finalDir, stage, identity };
 }
+
+async function spaFixture() {
+  const f = fixture();
+  const source = gitFixture(path.join(f.root, 'source'));
+  const snapshot = path.join(f.root, 'snapshot');
+  fs.mkdirSync(snapshot);
+  fs.writeFileSync(path.join(snapshot, 'index.html'), '<html>portable</html>');
+  fs.writeFileSync(path.join(snapshot, 'chunk.js'), 'export default 1');
+  fs.symlinkSync('chunk.js', path.join(snapshot, 'chunk-link.js'));
+  f.snapshot = snapshot;
+  f.identity = { ...f.identity, sourceHead: source.head, desktopHead: source.head,
+    sourceState: await sourceState(source.root), desktopState: await sourceState(source.root),
+    submodules: 'none', sourceDirty: 'false', version: '0.0.26', buildSha: source.head,
+    buildNodeVersion: process.version, spaRecipeSha256: 'd'.repeat(64),
+    tools: [{ file: path.join(source.root, 'package-lock.json'), sha256: 'c'.repeat(64) }] };
+  captureSpa(snapshot, f.identity);
+  return f;
+}
+
+test('SPA reuse binds source and recipe while allowing portable bytes across target architectures', async () => {
+  const f = await spaFixture();
+  try {
+    validateSpa(f.snapshot, { ...f.identity, targetArch: 'arm64', repoRoot: '/relocated' });
+    for (const [key, value] of Object.entries({ sourceHead: 'e'.repeat(40), desktopHead: 'e'.repeat(40),
+      profile: 'dogfood', version: 'different', buildSha: 'different', buildNodeVersion: 'v1.2.3',
+      spaRecipeSha256: 'e'.repeat(64), submodules: 'different',
+      tools: [{ file: '/package-lock.json', sha256: 'e'.repeat(64) }] })) {
+      assert.throws(() => validateSpa(f.snapshot, { ...f.identity, [key]: value }), /binding changed/, key);
+    }
+    for (const key of ['sourceState', 'desktopState', 'sourceDirty']) {
+      assert.throws(() => validateSpa(f.snapshot, { ...f.identity, [key]: 'changed' }), /requires clean/);
+    }
+    const destination = path.join(f.root, 'copy');
+    copySpa(f.snapshot, destination, f.identity);
+    assert.deepEqual(inventory(destination), inventory(f.snapshot));
+    assert.equal(fs.existsSync(`${destination}.spa.json`), false, 'private receipt is not shipped');
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('SPA import refuses tampered bytes, modes, paths and links before publishing a copy', async () => {
+  for (const mutate of [
+    f => fs.writeFileSync(path.join(f.snapshot, 'chunk.js'), 'tampered'),
+    f => fs.chmodSync(path.join(f.snapshot, 'chunk.js'), 0o700),
+    f => fs.writeFileSync(path.join(f.snapshot, 'extra'), 'unmeasured'),
+    f => fs.rmSync(path.join(f.snapshot, 'index.html')),
+    f => { fs.unlinkSync(path.join(f.snapshot, 'chunk-link.js')); fs.symlinkSync('index.html', path.join(f.snapshot, 'chunk-link.js')); },
+    f => { fs.unlinkSync(path.join(f.snapshot, 'chunk-link.js')); fs.symlinkSync('../source/package-lock.json', path.join(f.snapshot, 'chunk-link.js')); },
+  ]) {
+    const f = await spaFixture();
+    try {
+      mutate(f);
+      const destination = path.join(f.root, 'copy');
+      assert.throws(() => copySpa(f.snapshot, destination, f.identity), /changed|index.html|escapes/);
+      assert.equal(fs.existsSync(destination), false);
+    } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+  }
+});
+
+test('SPA portability rejects native addons and disguised ELF, PE and Mach-O bytes', async () => {
+  for (const [name, bytes] of [['addon.node', 'native'], ['hidden.js', Buffer.from([127, 69, 76, 70])],
+    ['windows.js', 'MZbinary'], ['mac.js', Buffer.from([0xcf, 0xfa, 0xed, 0xfe])]]) {
+    const f = await spaFixture();
+    try {
+      fs.writeFileSync(path.join(f.snapshot, name), bytes);
+      assert.throws(() => captureSpa(f.snapshot, f.identity), /contains native bytes/);
+    } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+  }
+});
+
+test('changed SPA receipt invalidates a previously captured stage even with identical content', async () => {
+  const f = await spaFixture();
+  try {
+    const receiptFile = `${f.snapshot}.spa.json`;
+    const receipt = validateSpa(f.snapshot, f.identity);
+    const identity = { ...f.identity, spaSnapshot: { root: fs.realpathSync(f.snapshot),
+      receiptSha256: crypto.createHash('sha256').update(fs.readFileSync(receiptFile)).digest('hex'),
+      contentSha256: receipt.contentSha256 } };
+    recordFailure(f.stage, identity, 'assembled', 1);
+    fs.appendFileSync(receiptFile, '\n');
+    assert.throws(() => validateSpa(f.snapshot, identity), /receipt changed/);
+    assert.throws(() => validateResume(f.stage, { ...identity, spaSnapshot: { ...identity.spaSnapshot, receiptSha256: 'e'.repeat(64) } }), /identity changed/);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
 
 test('completed failed assembly resumes only with exact source, profile, target and producer identity', () => {
   const f = fixture();
