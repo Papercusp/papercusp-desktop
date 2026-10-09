@@ -100,9 +100,30 @@ command -v "${DECOMPRESS[0]}" >/dev/null 2>&1 || {
 }
 
 # Never invalidate a Tauri updater signature without being able to replace it.
-if [[ -f "$DEB_PATH.sig" && -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+if [[ -f "$DEB_PATH.sig" && -z "${TAURI_SIGNING_PRIVATE_KEY:-${TAURI_SIGNING_PRIVATE_KEY_PATH:-}}" ]]; then
   echo "FATAL: $DEB_PATH.sig exists but TAURI_SIGNING_PRIVATE_KEY is unset; refusing to create a stale signature" >&2
   exit 5
+fi
+
+# Validate the actual signer contract before expensive compression. Resolve once,
+# then expose only key content in the child; retain the caller's path setting.
+_signing_key="${TAURI_SIGNING_PRIVATE_KEY:-${TAURI_SIGNING_PRIVATE_KEY_PATH:-}}"
+if [[ -n "$_signing_key" && -f "$_signing_key" ]]; then
+  _signing_key="$(cat "$_signing_key")"
+fi
+sign_repack_file() (
+  unset TAURI_SIGNING_PRIVATE_KEY_PATH
+  TAURI_SIGNING_PRIVATE_KEY="$_signing_key" \
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+    npx --yes -p "@tauri-apps/cli@${PAPERCUSP_TAURI_CLI_VERSION:-2.11.0}" \
+      tauri signer sign "$1" >/dev/null
+)
+if [[ -n "$_signing_key" ]]; then
+  : > "$WORK/signing-probe"
+  if ! sign_repack_file "$WORK/signing-probe" || [[ ! -s "$WORK/signing-probe.sig" ]]; then
+    echo "FATAL: updater signer preflight failed; refusing to compress or replace $DEB_PATH" >&2
+    exit 6
+  fi
 fi
 
 ar p "$DEB_PATH" debian-binary > "$WORK/debian-binary"
@@ -136,7 +157,7 @@ dpkg-deb --info "$REPLACEMENT" >/dev/null
 dpkg-deb --contents "$REPLACEMENT" >/dev/null
 
 SIGNATURE_STATUS="UNSIGNED"
-if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+if [[ -n "$_signing_key" ]]; then
   # WI-3823 (again, here): `tauri signer sign` accepts ONLY the key CONTENT (base64)
   # in TAURI_SIGNING_PRIVATE_KEY, while `tauri build` accepts contents OR a path — so
   # the conventional callers legitimately export a PATH (build-linux-local.sh:98 and
@@ -150,11 +171,7 @@ if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
   # secret over via the CLI's own env fallback, never on argv: `npm run`/npx echo the
   # resolved command line, which would print the private key into the build log and
   # expose it in `ps` for the life of the process.
-  _key="$TAURI_SIGNING_PRIVATE_KEY"; [[ -f "$_key" ]] && _key="$(cat "$_key")"
-  TAURI_SIGNING_PRIVATE_KEY="$_key" \
-  TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
-    npx --yes -p "@tauri-apps/cli@${PAPERCUSP_TAURI_CLI_VERSION:-2.11.0}" \
-      tauri signer sign "$REPLACEMENT" >/dev/null
+  sign_repack_file "$REPLACEMENT"
   [[ -s "$REPLACEMENT.sig" ]] || { echo "FATAL: Tauri signer produced no signature for the replacement package" >&2; exit 6; }
   SIGNATURE_STATUS="signed"
 fi

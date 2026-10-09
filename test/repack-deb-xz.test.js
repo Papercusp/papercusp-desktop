@@ -606,6 +606,84 @@ test('refuses to invalidate an existing updater signature without a signing key'
   }
 });
 
+function signingFixture() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-repack-signing-env-'));
+  const pkg = path.join(tmp, 'pkg');
+  fs.mkdirSync(path.join(pkg, 'DEBIAN'), { recursive: true });
+  fs.mkdirSync(path.join(pkg, 'opt', 'fixture'), { recursive: true });
+  fs.writeFileSync(path.join(pkg, 'DEBIAN', 'control'), [
+    'Package: papercusp-signing-env-test', 'Version: 1.0.0', 'Architecture: all',
+    'Maintainer: Papercusp <test@example.invalid>', 'Description: signer environment fixture', '',
+  ].join('\n'));
+  fs.writeFileSync(path.join(pkg, 'opt', 'fixture', 'payload'), 'original signed payload\n');
+  const deb = path.join(tmp, 'fixture.deb');
+  run('dpkg-deb', ['-Zgzip', '-b', pkg, deb]);
+  fs.writeFileSync(`${deb}.sig`, 'original signature\n');
+  const original = fs.readFileSync(deb);
+  const key = path.join(tmp, 'key');
+  fs.writeFileSync(key, 'fixture-key-content\n');
+  const bin = path.join(tmp, 'bin');
+  fs.mkdirSync(bin);
+  const record = path.join(tmp, 'signer.jsonl');
+  const xzRan = path.join(tmp, 'xz-ran');
+  const realXz = run('bash', ['-c', 'command -v xz']).trim();
+  fs.writeFileSync(path.join(bin, 'xz'), `#!/usr/bin/env bash\nprintf xz > "$FIXTURE_XZ_RAN"\nexec "${realXz}" "$@"\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(bin, 'npx'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const env = process.env;
+fs.appendFileSync(env.FIXTURE_SIGNER_RECORD, JSON.stringify({
+  content: env.TAURI_SIGNING_PRIVATE_KEY === 'fixture-key-content',
+  pathPresent: Object.hasOwn(env, 'TAURI_SIGNING_PRIVATE_KEY_PATH'),
+  argvLeaksKey: args.some(x => x.includes('fixture-key-content')),
+}) + '\\n');
+if (env.TAURI_SIGNING_PRIVATE_KEY && env.TAURI_SIGNING_PRIVATE_KEY_PATH) {
+  console.error('private-key conflicts with private-key-path'); process.exit(2);
+}
+if (env.FIXTURE_SIGNER_FAIL === '1') process.exit(23);
+fs.writeFileSync(args.at(-1) + '.sig', 'replacement signature\\n');
+`, { mode: 0o755 });
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`,
+    FIXTURE_SIGNER_RECORD: record, FIXTURE_XZ_RAN: xzRan,
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD: '' };
+  delete env.TAURI_SIGNING_PRIVATE_KEY;
+  delete env.TAURI_SIGNING_PRIVATE_KEY_PATH;
+  return { tmp, deb, original, key, record, xzRan, env };
+}
+
+for (const channel of ['content', 'content-and-path', 'content-as-path', 'path-only']) {
+  test(`signer child normalizes ${channel} without leaking or changing caller settings`, () => {
+    const f = signingFixture();
+    try {
+      if (channel !== 'path-only') f.env.TAURI_SIGNING_PRIVATE_KEY = channel === 'content-as-path' ? f.key : 'fixture-key-content';
+      if (channel === 'path-only' || channel === 'content-and-path') f.env.TAURI_SIGNING_PRIVATE_KEY_PATH = f.key;
+      const result = spawnSync('bash', ['-c', 'bash "$1" "$2" || exit $?; test "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" = "$3"', '_', helper, f.deb, f.env.TAURI_SIGNING_PRIVATE_KEY_PATH || ''], {
+        encoding: 'utf8', env: f.env,
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const rows = fs.readFileSync(f.record, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.ok(rows.length >= 2, 'the same signer contract must be exercised before compression and for final bytes');
+      for (const row of rows) assert.deepEqual(row, { content: true, pathPresent: false, argvLeaksKey: false });
+      assert.doesNotMatch(result.stdout + result.stderr, /fixture-key-content/);
+      assert.equal(fs.readFileSync(`${f.deb}.sig`, 'utf8'), 'replacement signature\n');
+      assert.match(run('ar', ['t', f.deb]), /data\.tar\.xz/);
+    } finally { fs.rmSync(f.tmp, { recursive: true, force: true }); }
+  });
+}
+
+test('signer failure is detected before compression and preserves original package and signature', () => {
+  const f = signingFixture();
+  try {
+    const result = spawnSync('bash', [helper, f.deb], { encoding: 'utf8', env: {
+      ...f.env, TAURI_SIGNING_PRIVATE_KEY: 'fixture-key-content', TAURI_SIGNING_PRIVATE_KEY_PATH: f.key, FIXTURE_SIGNER_FAIL: '1',
+    } });
+    assert.notEqual(result.status, 0);
+    assert.equal(fs.existsSync(f.xzRan), false, 'a broken signer must fail before expensive xz work');
+    assert.deepEqual(fs.readFileSync(f.deb), f.original);
+    assert.equal(fs.readFileSync(`${f.deb}.sig`, 'utf8'), 'original signature\n');
+  } finally { fs.rmSync(f.tmp, { recursive: true, force: true }); }
+});
+
 test('announces an unsigned output when repacking without a signing key', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-xz-unsigned-'));
   try {
