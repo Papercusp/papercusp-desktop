@@ -205,6 +205,10 @@ export async function preflightServerContainer(options, run = runCommand) {
   })).trim();
   if (!SHA.test(recipe) || recipe !== rootfsStamp.recipeSha256) throw new Error('Rootfs recipe is stale');
   const stamp = await jsonFile(join(sidecar, '.sidecar-build-stamp'));
+  const sqlDir = join(sidecar, 'db-sql');
+  if (!(await lstat(sqlDir)).isDirectory() || !(await readdir(sqlDir)).some(name => name.endsWith('.sql'))) {
+    throw new Error('Native Server payload lacks packaged SQL migrations');
+  }
   const sourceCommit = options.sourceCommit ?? stamp.gitHead;
   if (!COMMIT.test(sourceCommit ?? '') || !/^[a-f0-9]{7,64}$/.test(stamp.gitHead ?? '') ||
       !sourceCommit.startsWith(stamp.gitHead)) {
@@ -276,7 +280,8 @@ export async function buildServerContainer(options, run = runCommand) {
     const labelArgs = Object.entries(labels).flatMap(([key, value]) => ['--label', key + '=' + value]);
     const iidfile = join(stage, 'image-id');
     options.onProgress?.('build-image');
-    await run(engine, ['build', '--platform', input.platform, ...labelArgs, '--iidfile', iidfile,
+    await run(engine, ['build', '--platform', input.platform,
+      '--build-arg', 'PAPERCUSP_BUILD_SHA=' + input.sourceCommit, ...labelArgs, '--iidfile', iidfile,
       '--tag', input.tag, '--file', containerfile, context]);
     const imageId = (await readFile(iidfile, 'utf8')).trim();
     if (!/^sha256:[a-f0-9]{64}$/.test(imageId)) throw new Error('Engine did not return a content-addressed image');
