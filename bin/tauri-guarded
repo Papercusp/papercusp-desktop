@@ -295,6 +295,22 @@ if [[ "$__subcommand" == "dev" ]]; then
   # helper honours it and returns without taking a second lock. Double-sourcing
   # is idempotent by design, so belt-and-braces callers cost nothing.
   . "$__here/lib/claim-target-dir.sh"
+
+  # WI-10007854: the verifier's source/profile reservations can live on other
+  # filesystems. Rust still writes to the selected Cargo slot, so reserve there
+  # before either the frontend command or the compiler starts. Reuse the shared
+  # target resolver and reservation ledger; explicit targets need this too.
+  . "$__here/lib/cargo-target-root.sh"
+  . "$__here/lib/disk-preflight.sh"
+  __pc_cargo_target="$(papercusp_cargo_target_root "$__here/../src-tauri")"
+  # Private cold slots have reached 65 GiB; the measured warm recompilation
+  # exhausted an 8 GiB mount. Keep those two capacity estimates separate.
+  __pc_cargo_need_gb=65
+  if [[ -d "$__pc_cargo_target/debug/deps" ]]; then
+    __pc_cargo_need_gb=12
+  fi
+  papercusp_require_free_gb "$__pc_cargo_target" "$__pc_cargo_need_gb" \
+    "native dev Cargo build" >&2 || exit $?
 fi
 
 # `dev` is the documented rig path; `build`/`bundle` also have Cargo/build.rs

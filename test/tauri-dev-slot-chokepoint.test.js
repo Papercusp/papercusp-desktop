@@ -27,7 +27,7 @@ const { join, relative } = require('node:path');
 
 const DESKTOP_DIR = join(__dirname, '..');
 const REPO_ROOT = join(DESKTOP_DIR, '..');
-const GUARD = join(DESKTOP_DIR, 'bin', 'tauri-guarded');
+const GUARD = process.env.PROBE_GUARD_SCRIPT || join(DESKTOP_DIR, 'bin', 'tauri-guarded');
 // Overridable so falsifiability can be proven against a COPY of the script, outside the
 // tree (scripts/mutation-probe.sh). git-sync commits the whole working tree every few
 // minutes, so mutating the real file in place risks committing the mutant — that has
@@ -37,13 +37,18 @@ const CLAIM = process.env.PROBE_CLAIM_SCRIPT || join(DESKTOP_DIR, 'bin', 'lib', 
 // These tests exercise wrapper/lock behavior, not Cargo configuration parsing
 // (covered with real Cargo in claim-target-dir.test.js). A metadata-only probe
 // keeps their sandboxed HOME independent of the host's installed Rust toolchain.
-function prepareCargoProbe(fixtureRoot) {
+function prepareCargoProbe(fixtureRoot, freeGb = 100, dfLog) {
   const probeBin = join(fixtureRoot, 'cargo-probe-bin');
   mkdirSync(probeBin, { recursive: true });
   writeFileSync(join(probeBin, 'cargo'),
     '#!/usr/bin/env node\n' +
     'if (process.argv.slice(2).join(" ") !== "metadata --no-deps --format-version 1") process.exit(3);\n' +
     'process.stdout.write(JSON.stringify({target_directory: require("node:path").join(process.env.HOME, ".cargo-target")}));\n',
+    { mode: 0o755 });
+  writeFileSync(join(probeBin, 'df'),
+    '#!/usr/bin/env node\n' +
+    (dfLog ? `require('node:fs').appendFileSync(${JSON.stringify(dfLog)}, JSON.stringify(process.argv.slice(2)) + '\\n');\n` : '') +
+    `process.stdout.write('Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 209715200 0 ${freeGb * 1024 * 1024} 0% /fixture\\n');\n`,
     { mode: 0o755 });
   return probeBin;
 }
@@ -67,6 +72,7 @@ function runGuard(args) {
         ...process.env,
         HOME: home,
         CARGO_TARGET_DIR: '',
+        PAPERCUSP_DISK_RESERVATION_DIR: join(home, 'disk-reservations'),
         PATH: `${shimDir}:${prepareCargoProbe(home)}:${process.env.PATH}`,
         // Routing/claim probes must never wait on a real concurrent release
         // writer. The dedicated contention tests below exercise that behavior.
@@ -85,7 +91,7 @@ function runGuard(args) {
  * proves the release message describes the signal path, rather than merely
  * proving that the wrapper reaches a stub CLI.
  */
-function runGuardResult(args, tauriScript) {
+function runGuardResult(args, tauriScript, { freeGb = 100, targetDir = '', dfLog } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'ei20270512-result-home-'));
   const shimDir = mkdtempSync(join(tmpdir(), 'ei20270512-result-bin-'));
   try {
@@ -96,8 +102,9 @@ function runGuardResult(args, tauriScript) {
       env: {
         ...process.env,
         HOME: home,
-        CARGO_TARGET_DIR: '',
-        PATH: `${shimDir}:${prepareCargoProbe(home)}:${process.env.PATH}`,
+        CARGO_TARGET_DIR: targetDir,
+        PAPERCUSP_DISK_RESERVATION_DIR: join(home, 'disk-reservations'),
+        PATH: `${shimDir}:${prepareCargoProbe(home, freeGb, dfLog)}:${process.env.PATH}`,
         PAPERCUSP_SIDECAR_LOCK: join(home, 'sidecar.lock'),
       },
       encoding: 'utf8',
@@ -152,6 +159,33 @@ test('the chokepoint claims a target-dir slot for `dev`', () => {
     'the `tauri` npm script must claim a slot before exec-ing the CLI for `dev` — ' +
       'without it a concurrent build corrupts the shared app-manifest (WI-7101)',
   );
+});
+
+test('dev refuses a full explicit Cargo mount before invoking Tauri', () => {
+  const sandbox = mkdtempSync(join(tmpdir(), 'wi10007854-cargo-admission-'));
+  const targetDir = join(sandbox, 'cargo-mount');
+  const dfLog = join(sandbox, 'df.jsonl');
+  try {
+    mkdirSync(join(targetDir, 'debug', 'deps'), { recursive: true });
+    const result = runGuardResult(['dev'], '#!/usr/bin/env bash\nprintf "CLI_STARTED\\n"\n', {
+      freeGb: 0, targetDir, dfLog,
+    });
+    assert.strictEqual(result.status, 28, result.stderr);
+    assert.doesNotMatch(result.stdout, /CLI_STARTED/);
+    assert.match(result.stderr, /insufficient disk for native dev Cargo build/);
+    assert.match(result.stderr, /need ~12GB/);
+    const measured = readFileSync(dfLog, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.ok(measured.some((args) => args.at(-1) === targetDir),
+      'admission must measure the Cargo mount even when scratch uses another mount');
+
+    const admitted = runGuardResult(['dev'], '#!/usr/bin/env bash\nprintf "CLI_STARTED\\n"\n', {
+      freeGb: 100, targetDir,
+    });
+    assert.strictEqual(admitted.status, 0, admitted.stderr);
+    assert.match(admitted.stdout, /CLI_STARTED/);
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
 });
 
 test('ordinary Tauri success and failure do not claim a SIGUSR1 yield', () => {
