@@ -831,10 +831,20 @@ try {
   for (const key of Object.keys(env)) {
     if (/DATABASE_URL|PG_DATA_DIR|PG_SQL_DIR|ENV_SIDECAR|OVERRIDE.*STORE/.test(key)) delete env[key];
   }
-  const result = spawnSync(join(side, 'bin/node'), [join(side, 'serve.mjs'), '--verify-boot-imports'],
+  const executable = join(side, 'bin/node');
+  const startedAt = Date.now();
+  const result = spawnSync(executable, [join(side, 'serve.mjs'), '--verify-boot-imports'],
     { cwd: side, env, encoding: 'utf8', timeout: 60000, maxBuffer: 1024 * 1024 });
   if (result.status !== 0 || !result.stdout?.includes('PAPERCUSP_BOOT_IMPORTS_OK')) {
-    process.stderr.write(`boot import closure FAILED: ${result.error?.message ?? result.status}\n${result.stderr ?? ''}`);
+    const diagnostic = { executable, cwd: side, elapsedMs: Date.now() - startedAt,
+      pid: result.pid, status: result.status, signal: result.signal,
+      errorCode: result.error?.code, allocatorCap: env.MALLOC_ARENA_MAX,
+      home, xdgStateHome: env.XDG_STATE_HOME,
+      receiptObserved: result.stdout?.includes('PAPERCUSP_BOOT_IMPORTS_OK') === true };
+    process.stderr.write(`boot import closure FAILED: ${result.error?.message ?? result.status}\n` +
+      JSON.stringify(diagnostic) + '\n[child stdout tail]\n' +
+      String(result.stdout ?? '').slice(-4096) + '\n[child stderr tail]\n' +
+      String(result.stderr ?? '').slice(-4096) + '\n');
     process.exitCode = 1;
   }
 } finally { rmSync(home, { recursive: true, force: true }); }
