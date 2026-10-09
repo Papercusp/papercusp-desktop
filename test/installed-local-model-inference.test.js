@@ -30,6 +30,72 @@ function cosine(a, b) {
   return dot / Math.sqrt(aa * bb);
 }
 
+// Dogfood candidates carry the same pinned weights without the vm-release
+// snapshot document. Reuse the producer's non-mutating file/compatibility check
+// rather than manufacturing release metadata inside an already-built payload.
+function verifyModelAssets(binding, root, pack) {
+  const profile = binding.distributionProfile ?? 'vm-release';
+  assert.ok(['vm-release', 'dogfood'].includes(profile), 'unsupported qualification profile');
+  assert.equal(fingerprint(binding.productContract.path), binding.productContract.sha256, 'product contract binding');
+  const modelsRoot = path.resolve(root, pack.installRoot.slice('sidecar/'.length));
+  assert.ok(pack.installRoot.startsWith('sidecar/') && modelsRoot.startsWith(root + path.sep), 'model path escapes the bundle');
+  if (profile === 'vm-release') {
+    const snapshot = path.resolve(root, pack.manifestPath.slice('sidecar/'.length));
+    assert.ok(pack.manifestPath.startsWith('sidecar/') && snapshot.startsWith(root + path.sep), 'model snapshot escapes the bundle');
+    assert.equal(fingerprint(snapshot), binding.modelSnapshotSha256, 'model snapshot binding');
+    return binding.modelSnapshotSha256;
+  }
+  const verifier = path.resolve(__dirname, '../bin/lib/transformers-models.sh');
+  assert.equal(fingerprint(verifier), binding.modelVerifierSha256, 'maintained model verifier binding');
+  assert.equal(path.basename(modelsRoot), 'onnx-community', 'unsupported model namespace');
+  const result = spawnSync('bash', ['-c',
+    'source "$1"; papercusp_verify_transformers_model_pack "$2" 0 1',
+    'bound-model-assets', verifier, path.dirname(modelsRoot)], {
+    encoding: 'utf8', timeout: 120000, maxBuffer: 1024 * 1024,
+    env: { ...process.env, PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT: binding.productContract.path },
+  });
+  assert.equal(result.error, undefined, String(result.error));
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const measured = JSON.parse(result.stdout.trim());
+  assert.equal(measured.ok, true);
+  assert.equal(measured.status, 'ready');
+  assert.match(measured.manifestSha256, /^[a-f0-9]{64}$/);
+  return measured.manifestSha256;
+}
+
+test('dogfood qualification checks pinned model bytes without adding vm-release metadata', t => {
+  const root = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'bound-model-assets-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const installRoot = 'sidecar/node_modules/@huggingface/transformers/models/onnx-community';
+  const modelsRoot = path.join(root, installRoot.slice('sidecar/'.length));
+  const model = path.join(modelsRoot, 'fixture-model');
+  fs.mkdirSync(model, { recursive: true });
+  fs.writeFileSync(path.resolve(modelsRoot, '../../package.json'), JSON.stringify({ name: '@huggingface/transformers', version: '4.2.0' }));
+  const weights = path.join(model, 'model.onnx');
+  fs.writeFileSync(weights, 'pinned model bytes');
+  const pack = { name: 'local-models', required: true, installRoot,
+    manifestPath: 'sidecar/node_modules/@huggingface/transformers/models/papercusp-model-assets.json',
+    cachePolicy: { remoteFetch: 'forbidden-on-vm-release' }, compatibility: { transformersPackage: '4.2.0' },
+    models: [{ runtimeId: 'onnx-community/fixture-model', revision: 'a'.repeat(40),
+      files: [{ path: 'model.onnx', bytes: fs.statSync(weights).size, sha256: fingerprint(weights) }] }],
+  };
+  const contract = path.join(root, 'contract.json');
+  fs.writeFileSync(contract, JSON.stringify({ server: { optionalPacks: [pack] } }));
+  const candidate = { distributionProfile: 'dogfood', productContract: { path: contract, sha256: fingerprint(contract) },
+    modelVerifierSha256: fingerprint(path.resolve(__dirname, '../bin/lib/transformers-models.sh')) };
+  const snapshot = path.join(root, pack.manifestPath.slice('sidecar/'.length));
+  assert.match(verifyModelAssets(candidate, root, pack), /^[a-f0-9]{64}$/);
+  assert.equal(fs.existsSync(snapshot), false, 'qualification must not mutate the payload');
+  assert.throws(() => verifyModelAssets({ ...candidate, distributionProfile: 'other' }, root, pack), /unsupported qualification profile/);
+  assert.throws(() => verifyModelAssets({ ...candidate, modelVerifierSha256: '0'.repeat(64) }, root, pack), /maintained model verifier binding/);
+  assert.throws(() => verifyModelAssets({ ...candidate, productContract: { ...candidate.productContract, sha256: '0'.repeat(64) } }, root, pack), /product contract binding/);
+  assert.throws(() => verifyModelAssets({ ...candidate, distributionProfile: undefined }, root, pack), /ENOENT/);
+  fs.writeFileSync(snapshot, '{}');
+  assert.throws(() => verifyModelAssets({ ...candidate, distributionProfile: 'vm-release', modelSnapshotSha256: '0'.repeat(64) }, root, pack), /model snapshot binding/);
+  fs.writeFileSync(weights, 'broken model bytes');
+  assert.throws(() => verifyModelAssets(candidate, root, pack), /(?:size|sha256) mismatch/);
+});
+
 test('qualification rejects invalid native model outputs', () => {
   assert.throws(() => validateVector([1], 768), /native dimensions/);
   assert.throws(() => validateVector([NaN, 1], 2), /non-finite/);
@@ -106,13 +172,13 @@ for (const model of models) {
     assert.equal(selected[0].nativeDimensions, model.dims, 'dimensions must match the product contract');
     const modelsRoot = path.resolve(root, pack.installRoot.slice('sidecar/'.length));
     assert.ok(modelsRoot.startsWith(root + path.sep), 'model path escapes the bundle');
-    const snapshot = path.resolve(root, pack.manifestPath.slice('sidecar/'.length));
-    const inputs = [[node, binding.nodeSha256], [worker, binding.workerSha256], [snapshot, binding.modelSnapshotSha256]];
+    const modelAssetsSha256 = verifyModelAssets(binding, root, pack);
+    const inputs = [[node, binding.nodeSha256], [worker, binding.workerSha256]];
     for (const [file, expected] of inputs) assert.equal(fingerprint(file), expected, `input binding: ${file}`);
     const result = spawnSync(node, ['-e', child, JSON.stringify({ sidecarRoot: root, modelsRoot, model })], {
       cwd: root, encoding: 'utf8', timeout: 180000, maxBuffer: 2 * 1024 * 1024,
       env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '',
-        PAPERCUSP_DISTRIBUTION_PROFILE: 'vm-release', PAPERCUSP_TRANSFORMERS_LOCAL_ONLY: '1',
+        PAPERCUSP_DISTRIBUTION_PROFILE: binding.distributionProfile ?? 'vm-release', PAPERCUSP_TRANSFORMERS_LOCAL_ONLY: '1',
         HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1' },
     });
     assert.equal(result.error, undefined, String(result.error));
@@ -126,8 +192,10 @@ for (const model of models) {
     const unrelated = cosine(measured.vectors[0], measured.vectors[2]);
     assert.ok(relevant > unrelated, `relevance order failed: ${relevant} <= ${unrelated}`);
     for (const [file, expected] of inputs) assert.equal(fingerprint(file), expected, `changed inference input: ${file}`);
+    assert.equal(verifyModelAssets(binding, root, pack), modelAssetsSha256, 'changed model asset binding');
     console.log(JSON.stringify({ evidencePlane: binding.evidencePlane, model: model.name,
       dimensions: model.dims, relevantCosine: relevant, unrelatedCosine: unrelated, remoteFetch: 'disabled',
-      workerSha256: binding.workerSha256, modelSnapshotSha256: binding.modelSnapshotSha256 }));
+      distributionProfile: binding.distributionProfile ?? 'vm-release',
+      workerSha256: binding.workerSha256, modelAssetsSha256 }));
   });
 }
