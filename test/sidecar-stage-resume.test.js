@@ -43,6 +43,75 @@ function directSourceState(root) {
   return digest.digest('hex');
 }
 
+test('both producer qualification phases execute current tooling against the selected product', () => {
+  const f = fixture();
+  try {
+    const tooling = path.join(f.root, 'current tooling');
+    const product = path.join(f.root, 'frozen product');
+    const desktop = path.join(product, 'desktop');
+    fs.mkdirSync(tooling);
+    fs.mkdirSync(path.join(desktop, 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(tooling, 'verify-sidecar-bundle.sh'),
+      '#!/bin/sh\nprintf "%s\\n" "$REPO_ROOT" "$PAPERCUSP_DESKTOP_TARGET_ROOT" "$@"\n', { mode: 0o700 });
+    fs.writeFileSync(path.join(desktop, 'bin/verify-sidecar-bundle.sh'),
+      '#!/bin/sh\necho frozen-verifier >&2\nexit 23\n', { mode: 0o700 });
+    const calls = builder.split('\n')
+      .filter(line => line.includes('verify-sidecar-bundle.sh" "$SIDECAR_DIR"'))
+      .map(line => line.replace(/^if ! /, '').replace(/; then$/, ''));
+    assert.equal(calls.length, 2, 'stage and final-path verification must both be exercised');
+    const result = spawnSync('bash', ['-c', [
+      'set -euo pipefail',
+      'HERE="$1"; ROOT="$2"; REPO_ROOT="$3"; SIDECAR_DIR="$4"; TARGET_OS=linux; TARGET_ARCH=arm64',
+      ...calls,
+    ].join('\n'), 'fixture', tooling, desktop, product, f.stage], {
+      encoding: 'utf8', env: { ...process.env, REPO_ROOT: '/foreign-source', PAPERCUSP_DESKTOP_TARGET_ROOT: '/foreign-desktop' },
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const expected = [product, desktop, f.stage, '--target-os', 'linux', '--target-arch', 'arm64'];
+    assert.deepEqual(result.stdout.trim().split('\n'), [...expected, ...expected]);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('stage identity binds the executable tooling verifier and refuses its changed bytes on resume', async () => {
+  const f = fixture();
+  try {
+    const source = gitFixture(path.join(f.root, 'source'));
+    const desktop = gitFixture(path.join(f.root, 'desktop'));
+    const tooling = path.join(f.root, 'tooling');
+    fs.mkdirSync(path.join(tooling, 'lib'), { recursive: true });
+    for (const file of ['build-desktop-sidecar.sh', 'audit-release-bundle.py', 'emit-build-provenance.sh', 'lib/transformers-models.sh']) {
+      fs.copyFileSync(path.join(bin, file), path.join(tooling, file));
+    }
+    const selected = path.join(tooling, 'verify-sidecar-bundle.sh');
+    fs.writeFileSync(selected, '#!/bin/sh\nexit 0\n');
+    fs.mkdirSync(path.join(desktop.root, 'bin'));
+    const frozen = path.join(desktop.root, 'bin/verify-sidecar-bundle.sh');
+    fs.writeFileSync(frozen, '#!/bin/sh\nexit 23\n');
+    const env = {
+      SIDECAR_STAGE_REPO_ROOT: source.root, SIDECAR_STAGE_DESKTOP_ROOT: desktop.root,
+      SIDECAR_STAGE_HELPER_ROOT: tooling, SIDECAR_STAGE_FINAL_DIR: f.finalDir,
+      SIDECAR_STAGE_FAILED_ROOT: f.root,
+      SIDECAR_STAGE_TARGET_OS: 'linux', SIDECAR_STAGE_TARGET_ARCH: 'arm64',
+      PROVENANCE_SOURCE_GIT_HEAD: source.head, PROVENANCE_SOURCE_GIT_DIRTY: 'false',
+      PAPERCUSP_DISTRIBUTION_PROFILE: 'vm-release', PAPERCUSP_RELEASE_AUDIT: '1',
+    };
+    const first = await captureIdentity(env);
+    assert.deepEqual(first.tools.find(tool => path.basename(tool.file) === 'verify-sidecar-bundle.sh'), {
+      file: fs.realpathSync(selected), sha256: crypto.createHash('sha256').update(fs.readFileSync(selected)).digest('hex'),
+    });
+    assert.equal(first.tools.some(tool => tool.file === frozen), false);
+    recordFailure(f.stage, first, 'assembled', 1);
+    validateResume(f.stage, first);
+    fs.appendFileSync(selected, '# changed qualification policy\n');
+    const changed = await captureIdentity(env);
+    assert.equal(changed.sourceState, first.sourceState);
+    assert.equal(changed.desktopState, first.desktopState);
+    assert.throws(() => validateResume(f.stage, changed), /producer identity changed/);
+    fs.rmSync(selected);
+    await assert.rejects(captureIdentity(env), /ENOENT/, 'missing tooling must never fall back to frozen verifier');
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test('actual source capture detects same-HEAD source edits and binds both repositories', async () => {
   const f = fixture();
   try {
@@ -540,7 +609,7 @@ test('real resume branch consumes validated failed bytes and bypasses assembly o
     assert.equal(fs.existsSync(f.stage), false);
     assert.equal(fs.readFileSync(path.join(tmp, 'serve.mjs'), 'utf8'), 'assembled source');
     const assemblyEnd = builder.indexOf('fi # assembly-only work;');
-    for (const gate of ['--prune-vm-release', '--audit-vm-release', '"$ROOT/bin/verify-sidecar-bundle.sh"', '--audit-vulnerabilities', '--scan-dir "$SIDECAR_DIR"']) {
+    for (const gate of ['--prune-vm-release', '--audit-vm-release', '"$HERE/verify-sidecar-bundle.sh"', '--audit-vulnerabilities', '--scan-dir "$SIDECAR_DIR"']) {
       assert(builder.indexOf(gate, assemblyEnd) > assemblyEnd, `${gate} must rerun after resume rejoins`);
     }
     assert(builder.indexOf('_sidecar_success=1', assemblyEnd) > builder.indexOf('--scan-dir "$SIDECAR_DIR"', assemblyEnd));
@@ -566,7 +635,7 @@ function qualifyResume(f, failGate = '') {
   fs.writeFileSync(path.join(here, 'audit-release-bundle.py'), '# fixture gate\n');
   fs.writeFileSync(path.join(shim, 'python3'), '#!/usr/bin/env bash\nprintf "%s\\n" "$2" >> "$GATE_LOG"\n[[ "$2" != "$FAIL_GATE" ]]\n', { mode: 0o755 });
   fs.writeFileSync(path.join(shim, 'grype'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
-  fs.writeFileSync(path.join(target, 'bin/verify-sidecar-bundle.sh'), '#!/usr/bin/env bash\nprintf "verify:%s\\n" "$1" >> "$GATE_LOG"\n[[ "$FAIL_GATE" != "verify" ]]\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(here, 'verify-sidecar-bundle.sh'), '#!/usr/bin/env bash\nprintf "verify:%s\\n" "$1" >> "$GATE_LOG"\n[[ "$FAIL_GATE" != "verify" ]]\n', { mode: 0o755 });
   fs.writeFileSync(path.join(here, 'emit-build-provenance.sh'), '#!/usr/bin/env bash\necho provenance >> "$GATE_LOG"\nprintf "{}\\n" > "$1/build-provenance.json"\n', { mode: 0o755 });
   f.identity.sourceHead = source.head;
   recordFailure(f.stage, f.identity, 'assembled', 1);

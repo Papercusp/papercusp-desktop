@@ -113,7 +113,7 @@ async function captureIdentity(env = process.env) {
     path.join(here, 'audit-release-bundle.py'),
     path.join(here, 'emit-build-provenance.sh'),
     path.join(here, 'lib/transformers-models.sh'),
-    path.join(desktopRoot, 'bin/verify-sidecar-bundle.sh'),
+    path.join(here, 'verify-sidecar-bundle.sh'),
     path.join(repoRoot, 'package-lock.json'),
   ].map(file => ({ file: fs.realpathSync(file), sha256: sha256(file) }));
   const sourceStateDigest = await sourceState(repoRoot);

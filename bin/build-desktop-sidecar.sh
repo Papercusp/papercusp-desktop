@@ -5449,7 +5449,10 @@ fi
 # The point: build-host probes are masked (the host has the dev deps), which
 # is exactly how the pg_wrapper psql (WI-3311) and unbundled kopia (WI-3312)
 # shipped broken. See the verifier's header before touching its allowlists.
-"$ROOT/bin/verify-sidecar-bundle.sh" "$SIDECAR_DIR" --target-os "$TARGET_OS" --target-arch "$TARGET_ARCH"
+# Qualification policy follows the current producer; manifest/protocol inputs
+# still follow the frozen product selected above. CaptureIdentity binds HERE's
+# executable verifier, so a changed policy invalidates a retained stage.
+REPO_ROOT="$REPO_ROOT" PAPERCUSP_DESKTOP_TARGET_ROOT="$ROOT" "$HERE/verify-sidecar-bundle.sh" "$SIDECAR_DIR" --target-os "$TARGET_OS" --target-arch "$TARGET_ARCH"
 
 # EI-21492557010868835: dependency/runtime verification is necessary but not a
 # security verdict.  Generate a real CycloneDX SBOM of the finished temporary
@@ -5722,7 +5725,7 @@ SIDECAR_DIR="$SIDECAR_FINAL_DIR"
 # still held. Keep OLD_DIR until this verdict; on red, preserve the bad tree and
 # atomically restore the prior published sidecar rather than stranding readers.
 echo "→ re-verifying atomically published sidecar at its final path"
-if ! "$ROOT/bin/verify-sidecar-bundle.sh" "$SIDECAR_DIR" --target-os "$TARGET_OS" --target-arch "$TARGET_ARCH"; then
+if ! REPO_ROOT="$REPO_ROOT" PAPERCUSP_DESKTOP_TARGET_ROOT="$ROOT" "$HERE/verify-sidecar-bundle.sh" "$SIDECAR_DIR" --target-os "$TARGET_OS" --target-arch "$TARGET_ARCH"; then
   echo "FATAL: final-path sidecar verification failed; preserving failed bytes and restoring prior sidecar" >&2
   exit 1
 fi
