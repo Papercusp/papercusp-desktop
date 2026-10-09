@@ -229,14 +229,14 @@ test('a missing selected source refuses instead of falling back to tooling proto
   assert.equal(result.out.trim(), '__UNDERIVABLE_INITIALIZER_PROTOCOL_VERSION__');
 });
 
-function runBootCheck(body) {
+function runBootCheck(body, envOverrides = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'packaged-boot-closure-'));
   try {
     fs.mkdirSync(path.join(dir, 'bin'));
     fs.symlinkSync(process.execPath, path.join(dir, 'bin/node'));
     fs.writeFileSync(path.join(dir, 'serve.mjs'), body);
     return spawnSync('bash', ['-c', `set -uo pipefail\n${CHECK_BOOT_IMPORT_CLOSURE}\ncheck_boot_import_closure "$1"`, 'check', dir], {
-      encoding: 'utf8', env: { ...process.env, ORIGINAL_HOME: process.env.HOME, HARNESS_ADMIN_DATABASE_URL: 'must-not-inherit', PAPERCUSP_INTEGRATION_ROOT: '/missing-build-tree' },
+      encoding: 'utf8', env: { ...process.env, ORIGINAL_HOME: process.env.HOME, HARNESS_ADMIN_DATABASE_URL: 'must-not-inherit', PAPERCUSP_INTEGRATION_ROOT: '/missing-build-tree', ...envOverrides },
     });
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
@@ -247,6 +247,19 @@ test('packaged import closure qualifies isolated final-image imports, not build-
     if (process.env.HOME === process.env.ORIGINAL_HOME) throw Error('not isolated');
     console.log('PAPERCUSP_BOOT_IMPORTS_OK');`);
   assert.equal(result.status, 0, result.stderr);
+});
+test('Linux import probe launches with the host allocator contract and preserves explicit settings', { skip: process.platform !== 'linux' }, () => {
+  for (const [cap, tunable, expected] of [
+    [undefined, undefined, '2'],
+    ['8', undefined, '8'],
+    [undefined, 'glibc.malloc.arena_max=4', undefined],
+  ]) {
+    const result = runBootCheck(`
+      if (process.env.MALLOC_ARENA_MAX !== ${JSON.stringify(expected) ?? 'undefined'}) throw Error('unexpected allocator cap: ' + process.env.MALLOC_ARENA_MAX);
+      if (process.env.GLIBC_TUNABLES !== ${JSON.stringify(tunable) ?? 'undefined'}) throw Error('changed explicit tunable');
+      console.log('PAPERCUSP_BOOT_IMPORTS_OK');`, { MALLOC_ARENA_MAX: cap, GLIBC_TUNABLES: tunable });
+    assert.equal(result.status, 0, result.stderr);
+  }
 });
 test('packaged import closure refuses pruned eager persona reads and missing probe receipts', () => {
   for (const body of ["throw Error('oracle.persona.md not found');", "console.log('not a boot receipt');"]) {

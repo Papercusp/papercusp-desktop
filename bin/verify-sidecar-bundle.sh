@@ -823,6 +823,11 @@ try {
     PAPERCUSP_PROMPTS_DIR: join(side, 'prompts'), PAPERCUSP_HARNESS_DIR: join(side, 'harness'),
     PAPERCUSP_WORKSPACES_DIR: join(home, 'workspaces'), PAPERCUSP_DISABLE_BACKGROUND_TASKS: '1',
     PAPERCUSP_DBOS_ROUTINES: '0', PAPERCUSP_INTEGRATION_ROOT: '' };
+  // Match the host launch contract before module loading. Its fallback reexec
+  // otherwise repeats the entire import graph inside this probe's deadline.
+  // Preserve explicit allocator choices, as malloc-arena-reexec.ts does.
+  if (process.platform === 'linux' && !env.MALLOC_ARENA_MAX
+      && !env.GLIBC_TUNABLES?.includes('glibc.malloc.arena_max')) env.MALLOC_ARENA_MAX = '2';
   for (const key of Object.keys(env)) {
     if (/DATABASE_URL|PG_DATA_DIR|PG_SQL_DIR|ENV_SIDECAR|OVERRIDE.*STORE/.test(key)) delete env[key];
   }
