@@ -66,9 +66,9 @@ test('rootfs producer fingerprints the complete shipped bootstrap, including net
   fs.writeFileSync(build, producer);
   fs.writeFileSync(resource, shipped);
   fs.writeFileSync(artifact, 'existing rootfs must survive a read');
-  const env = { ...process.env, UBUNTU_IMAGE: 'ubuntu:24.04', NODE_VERSION: '24.18.1', PNPM_VERSION: '9.15.0' };
+  const env = { ...process.env, UBUNTU_IMAGE: 'ubuntu:24.04', NODE_VERSION: '24.18.1', PNPM_VERSION: '9.15.0', PAPERCUSP_RUNTIME_PLATFORM: 'linux/amd64' };
   const fingerprint = () => run('bash', [build, '--print-recipe-fingerprint'], { env });
-  const expected = text => createHash('sha256').update(`ubuntu:24.04\n24.18.1\n9.15.0\n${text.replace(/\n+$/, '')}\n`).digest('hex');
+  const expected = text => createHash('sha256').update(`ubuntu:24.04\n24.18.1\n9.15.0\n${text.replace(/\n+$/, '')}\nlinux/amd64\n`).digest('hex');
   assert.match(shipped, /preflight_unreachable/);
   const first = fingerprint();
   assert.equal(first.status, 0, first.stderr);
@@ -80,6 +80,15 @@ test('rootfs producer fingerprints the complete shipped bootstrap, including net
   assert.equal(second.stdout.trim(), expected(changed));
   assert.notEqual(first.stdout, second.stdout);
   assert.equal(fs.readFileSync(artifact, 'utf8'), 'existing rootfs must survive a read');
+  const arm = run('bash', [build, '--print-recipe-fingerprint'], {
+    env: { ...env, PAPERCUSP_RUNTIME_PLATFORM: 'linux/arm64' },
+  });
+  assert.equal(arm.status, 0, arm.stderr);
+  assert.notEqual(arm.stdout, second.stdout, 'the CPU architecture is part of the rootfs recipe');
+  const invalid = run('bash', [build, '--print-recipe-fingerprint'], {
+    env: { ...env, PAPERCUSP_RUNTIME_PLATFORM: 'windows/amd64' },
+  });
+  assert.notEqual(invalid.status, 0, 'an unsupported runtime platform must fail before building');
   fs.unlinkSync(resource);
   assert.notEqual(fingerprint().status, 0, 'a missing source must not fingerprint an empty recipe');
 });

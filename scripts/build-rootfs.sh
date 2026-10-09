@@ -30,7 +30,20 @@ if ! [[ "$NODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 PNPM_VERSION="${PNPM_VERSION:-9.15.0}"
 OUT_DIR="$(cd "$(dirname "$0")/.." && pwd)/src-tauri/resources"
-OUT_TARBALL="${OUT_DIR}/papercup-runtime.tar.gz"
+OUTPUT_DIR="${PAPERCUSP_ROOTFS_OUT_DIR:-$OUT_DIR}"
+OUT_TARBALL="${OUTPUT_DIR}/papercup-runtime.tar.gz"
+RUNTIME_PLATFORM="${PAPERCUSP_RUNTIME_PLATFORM:-}"
+if [[ -z "$RUNTIME_PLATFORM" ]]; then
+  case "$(uname -m)" in
+    x86_64) RUNTIME_PLATFORM=linux/amd64 ;;
+    aarch64|arm64) RUNTIME_PLATFORM=linux/arm64 ;;
+    *) echo "ERROR: set PAPERCUSP_RUNTIME_PLATFORM to linux/amd64 or linux/arm64" >&2; exit 2 ;;
+  esac
+fi
+case "$RUNTIME_PLATFORM" in
+  linux/amd64|linux/arm64) ;;
+  *) echo "ERROR: unsupported runtime platform: $RUNTIME_PLATFORM" >&2; exit 2 ;;
+esac
 CONTAINER="papercup-runtime-build-$$"
 
 # The shipped bootstrap is the single recipe source. Keeping an embedded copy
@@ -52,8 +65,8 @@ BOOTSTRAP_SH="$(cat "$BOOTSTRAP_FILE")"
 # apart. (Drift between two hand-maintained copies of the same knowledge is
 # precisely what let .papercusp/ into the release bundle — WI-4419.)
 recipe_fingerprint() {
-  printf '%s\n%s\n%s\n%s\n' \
-    "$UBUNTU_IMAGE" "$NODE_VERSION" "$PNPM_VERSION" "$BOOTSTRAP_SH" \
+  printf '%s\n%s\n%s\n%s\n%s\n' \
+    "$UBUNTU_IMAGE" "$NODE_VERSION" "$PNPM_VERSION" "$BOOTSTRAP_SH" "$RUNTIME_PLATFORM" \
   | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1
 }
 
@@ -68,7 +81,7 @@ fi
 # destructive cleanup AFTER the read-only fingerprint fast path: callers use
 # --print-recipe-fingerprint to validate an existing tarball and that probe
 # must never remove the artifact it is checking (EI-21677432340139970).
-mkdir -p "$OUT_DIR"
+mkdir -p "$OUTPUT_DIR"
 rm -f "$OUT_TARBALL"
 OUT_TMP="$(mktemp "${OUT_TARBALL}.tmp.XXXXXX")"
 
@@ -82,11 +95,12 @@ cleanup() {
 trap cleanup EXIT
 
 # ── Run the bootstrap inside the container ───────────────────────────
-docker pull "$UBUNTU_IMAGE"
+docker pull --platform "$RUNTIME_PLATFORM" "$UBUNTU_IMAGE"
 
 # Use `docker create` then `docker start -a` so we get the container ID
 # back and can `docker export` it. `docker run` would tear down on exit.
 docker create \
+  --platform "$RUNTIME_PLATFORM" \
   --name "$CONTAINER" \
   -e NODE_VERSION="$NODE_VERSION" \
   -e PNPM_VERSION="$PNPM_VERSION" \
@@ -127,10 +141,14 @@ _rootfs_sha="$(papercusp_portable_sha256 "$OUT_TARBALL")"
   printf '{\n'
   printf '  "recipeSha256": "%s",\n' "${_recipe_sha:-}"
   printf '  "rootfsSha256": "%s",\n' "${_rootfs_sha:-}"
+  printf '  "platform": "%s",\n'    "$RUNTIME_PLATFORM"
+  printf '  "nodeVersion": "%s",\n' "$NODE_VERSION"
+  printf '  "pnpmVersion": "%s",\n' "$PNPM_VERSION"
+  printf '  "baseImage": "%s",\n'   "$UBUNTU_IMAGE"
   printf '  "builtAtUtc": "%s",\n'   "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '  "epochSec": %s\n'        "$(date +%s)"
   printf '}\n'
-} > "${OUT_DIR}/.rootfs-build-stamp"
+} > "${OUTPUT_DIR}/.rootfs-build-stamp"
 echo "→ wrote rootfs freshness stamp (recipe ${_recipe_sha:0:12}…, WI-4448)"
 
 # ── Ship the recipe + the bootstrap AS RESOURCES (WI-4478) ────────────
@@ -154,7 +172,7 @@ echo "→ wrote rootfs freshness stamp (recipe ${_recipe_sha:0:12}…, WI-4448)"
 # them up, and the .rootfs-build-stamp above is a BUILD-time artifact only.
 # The bootstrap resource is the canonical input read above, not a generated
 # copy to overwrite. The container received these exact bytes.
-printf '%s\n' "${_recipe_sha:-}" > "${OUT_DIR}/papercup-rootfs-recipe"
+printf '%s\n' "${_recipe_sha:-}" > "${OUTPUT_DIR}/papercup-rootfs-recipe"
 echo "→ shipped papercup-bootstrap.sh + papercup-rootfs-recipe as resources (WI-4478)"
 
 echo "done. ship it as a Tauri resource."
