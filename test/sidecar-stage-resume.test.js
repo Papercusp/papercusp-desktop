@@ -642,6 +642,7 @@ function qualifyResume(f, failGate = '') {
   const qualificationElf = Buffer.alloc(20);
   qualificationElf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1]);
   qualificationElf.writeUInt16LE(62, 18);
+  fs.writeFileSync(path.join(f.stage, 'bin/node'), qualificationElf);
   fs.writeFileSync(path.join(f.stage, 'node_modules/qualification-order.node'), qualificationElf);
   fs.writeFileSync(path.join(shim, 'objdump'), '#!/usr/bin/env bash\necho addon-libraries >> "$GATE_LOG"\necho "NEEDED libc.so.6"\n', { mode: 0o755 });
   for (const file of ['sidecar-stage-state.js', 'portable-sha256.sh', 'stamp-git-head.sh', 'server-container.mjs']) fs.copyFileSync(path.join(bin, 'lib', file), path.join(here, 'lib', file));
