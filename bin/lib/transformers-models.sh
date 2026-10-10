@@ -453,7 +453,7 @@ papercusp_verify_installed_transformers_model_pack() {
   local installed_root="${1:-}" selection result
   local contract="${PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT:-$PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT_DEFAULT}"
   [ -n "$installed_root" ] || { echo "FATAL: installed model verification needs a Server resource root" >&2; return 2; }
-  selection="$(python3 - "$contract" "$installed_root" <<'PY'
+  if ! selection="$(python3 - "$contract" "$installed_root" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -485,7 +485,9 @@ try:
 except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
     fail(str(exc))
 PY
-)" || return 1
+)"; then
+    return 1
+  fi
   local models_root="${selection%%$'\n'*}" snapshot="${selection#*$'\n'}"
   result="$(papercusp_verify_transformers_model_pack "$models_root" 0 1)" || return 1
   python3 - "$snapshot" "$result" <<'PY'

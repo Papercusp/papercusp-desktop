@@ -236,7 +236,7 @@ DEV_OPERATOR_MODE=external-pg
 if [ -z "$DEV_HOST_ENTRY" ] && [ -z "${OPERATOR_DEV_CMD:-}" ]; then
   PROBE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
   probe_status=0
-  (cd "$DEV_OPERATOR_DIR" && set -a && if [ -f "$DEV_ENV_FILE" ]; then . "$DEV_ENV_FILE"; fi && set +a && node "$SCRIPT_DIR/dev-operator-pg-probe.mjs" --repo-root "${DEV_SOURCE_ROOT:-$PROBE_ROOT}") || probe_status=$?
+  (cd "$DEV_OPERATOR_DIR" && set -a && if [ -n "${DEV_ENV_FILE:-}" ] && [ -f "$DEV_ENV_FILE" ]; then . "$DEV_ENV_FILE"; fi && set +a && node "$SCRIPT_DIR/dev-operator-pg-probe.mjs" --repo-root "${DEV_SOURCE_ROOT:-$PROBE_ROOT}") || probe_status=$?
   case "$probe_status" in
     0) ;;
     1) DEV_OPERATOR_MODE=embedded-pg ;;

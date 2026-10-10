@@ -5511,7 +5511,7 @@ NODE
     }
     if printf '%s\n' "$dynamic" | awk '$1 == "NEEDED" { print $2 }' | grep -Fx libatomic.so.1 >/dev/null \
        && [[ ! -f "$root/bin/.pg-real/lib/libatomic.so.1" ]]; then
-      source="$(ldd "$addon" 2>/dev/null | awk '$1 == "libatomic.so.1" && $2 == "=>" && $3 ~ /^\// { print $3; exit }')"
+      source="$(ldd "$addon" 2>/dev/null | awk '!found && $1 == "libatomic.so.1" && $2 == "=>" && $3 ~ /^\// { print $3; found = 1 }')"
       [[ -f "$source" ]] || {
         echo "ERROR: cannot resolve target libatomic.so.1 for $addon" >&2; return 1;
       }

@@ -449,8 +449,15 @@ test('cleans bridge credentials from the runtime temp directory used for discove
     source,
     /rm -f -- "\$\{TMPDIR:-\/tmp\}\/tauri-dev-bridge-\$BRIDGE_PID\.token"/,
   );
+  // A hard-coded /tmp cleanup is only allowed as the EXTRA legacy-location
+  // sweep, guarded so it runs when TMPDIR is scoped elsewhere. An unguarded
+  // /tmp-only cleanup diverges from Node os.tmpdir() when TMPDIR is scoped.
+  const withoutGuardedFallback = source.replace(
+    /if \[ "\$\{TMPDIR:-\/tmp\}" != "\/tmp" \]; then\s*\n\s*rm -f -- "\/tmp\/tauri-dev-bridge-\$BRIDGE_PID\.token"\s*\n\s*fi/g,
+    '',
+  );
   assert.doesNotMatch(
-    source,
+    withoutGuardedFallback,
     /rm -f -- "\/tmp\/tauri-dev-bridge-\$BRIDGE_PID\.token"/,
     'a hard-coded /tmp cleanup diverges from Node os.tmpdir() when TMPDIR is scoped',
   );

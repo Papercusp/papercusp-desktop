@@ -235,6 +235,7 @@ DEB_SOURCE_SNAPSHOT_WORKTREE=1
 # out-of-tree includes and fails when one is missing from this list.
 DEB_SUPERPROJECT_BUILD_INPUTS=(
   libs/generic/desktop-ipc/src/csp-policy.json
+  packages/operator-core/lib/gnome-terminal-policy.json
 )
 # shellcheck source=lib/superproject-blob.sh
 source "$LIVE_DESKTOP_DIR/bin/lib/superproject-blob.sh"
