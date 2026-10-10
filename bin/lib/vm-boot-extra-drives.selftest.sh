@@ -88,7 +88,10 @@ if has "if=none,id=pcroot,format=qcow2,file=$TMP/root.qcow2,cache=writeback,disc
 else
   bad "with a data disk, the root disk is not pinned as the boot device"
 fi
-if mentions "drive=pcdata" && grep -F "drive=pcdata" "$ARGV" | grep -qF bootindex; then
+# Capture the producer to completion before matching: under pipefail, a piped
+# `grep -q` can SIGPIPE the producer and turn a real bootindex into a false miss.
+PCDATA_ARGV="$(grep -F "drive=pcdata" "$ARGV" 2>/dev/null || true)"
+if mentions "drive=pcdata" && grep -qF bootindex <<<"$PCDATA_ARGV"; then
   bad "the data disk carries a bootindex (SeaBIOS would prefer it)"
 else
   ok "the data disk carries no bootindex"
