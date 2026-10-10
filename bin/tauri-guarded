@@ -303,12 +303,7 @@ if [[ "$__subcommand" == "dev" ]]; then
   . "$__here/lib/cargo-target-root.sh"
   . "$__here/lib/disk-preflight.sh"
   __pc_cargo_target="$(papercusp_cargo_target_root "$__here/../src-tauri")"
-  # Private cold slots have reached 65 GiB; the measured warm recompilation
-  # exhausted an 8 GiB mount. Keep those two capacity estimates separate.
-  __pc_cargo_need_gb=65
-  if [[ -d "$__pc_cargo_target/debug/deps" ]]; then
-    __pc_cargo_need_gb=12
-  fi
+  __pc_cargo_need_gb="$(papercusp_native_dev_cargo_need_gb "$__pc_cargo_target")"
   papercusp_require_free_gb "$__pc_cargo_target" "$__pc_cargo_need_gb" \
     "native dev Cargo build" >&2 || exit $?
 fi
