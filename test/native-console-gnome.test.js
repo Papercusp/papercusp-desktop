@@ -7,6 +7,7 @@ const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'src-tauri/src/native_console.rs'), 'utf8');
+const mainSource = fs.readFileSync(path.join(root, 'src-tauri/src/main.rs'), 'utf8');
 function functionSource(name) {
   const start = source.indexOf(`fn ${name}(`);
   const indent = source.slice(source.lastIndexOf('\n', start) + 1, start);
@@ -38,9 +39,14 @@ test('production native GNOME preparation and both entrypoints preserve preferen
       const fixtureEnd = source.indexOf('    fn envelope(', fixtureStart);
       assert.ok(fixtureStart >= 0 && fixtureEnd > fixtureStart, 'production native GNOME regression tests missing');
       const driver = path.join(temp, 'native.rs');
+      // Preserve the production declaration's platform attributes. An unconditional
+      // fixture import or cargo test alone masks a Windows/test-only module gate.
+      const moduleDeclaration = mainSource.match(/((?:#\[[^\n]+\]\r?\n)*)mod wsl_sidecar_staging;/)?.[0];
+      assert.ok(moduleDeclaration, 'production bounded-output module declaration missing');
       fs.writeFileSync(driver, [
         'use std::collections::HashMap; use std::path::PathBuf;',
-        `#[path=${JSON.stringify(path.join(root, 'src-tauri/src/wsl_sidecar_staging.rs'))}] mod wsl_sidecar_staging;`,
+        `#[path=${JSON.stringify(path.join(root, 'src-tauri/src/wsl_sidecar_staging.rs'))}]`,
+        moduleDeclaration,
         structSource('ConsoleEnvelope'), structSource('ExternalConsoleSpec'),
         source.slice(contextStart, contextEnd + 3),
         `const GNOME_TERMINAL_POLICY: &str = include_str!(${JSON.stringify(policyPath)});`,
@@ -55,10 +61,18 @@ test('production native GNOME preparation and both entrypoints preserve preferen
         '[workspace]', '[lib]', `path=${JSON.stringify(driver)}`, '[dependencies]',
         'serde_json="1"', 'uuid={version="1",features=["v4"]}', 'libc="0.2"',
       ].join('\n'));
-      const run = spawnSync(process.env.CARGO || 'cargo', ['test', '--offline', '--manifest-path', manifest, '--', 'tests::'],
-        { encoding: 'utf8', timeout: 110000, env: { ...process.env, CARGO_TARGET_DIR: path.join(temp, 'target') } });
-      const diagnostics = run.stderr.split('\n').filter((line) => /error|--> |^\s*\d+\s*\||^\s*\|/.test(line)).join('\n');
-      assert.equal(run.status, 0, String(run.error || diagnostics || run.stderr.slice(-3000) || run.stdout));
+      const runCargo = (args) => {
+        const result = spawnSync(process.env.CARGO || 'cargo', [...args, '--offline', '--manifest-path', manifest],
+          { encoding: 'utf8', timeout: 55000, env: { ...process.env, CARGO_TARGET_DIR: path.join(temp, 'target') } });
+        const diagnostics = (result.stderr || '').split('\n')
+          .filter((line) => /error|--> |^\s*\d+\s*\||^\s*\|/.test(line)).join('\n');
+        assert.equal(result.status, 0, String(result.error || diagnostics || result.stderr?.slice(-3000) || result.stdout));
+        return result;
+      };
+      // Compile the production helper bodies and declaration without cfg(test)
+      // before running their behavioral regressions.
+      runCargo(['check', '--lib']);
+      const run = runCargo(['test']);
       for (const name of ['gnome_preparation_preserves_explicit_profiles_and_other_emulators',
         'gnome_preparation_verifies_default_and_finite_history_receipts',
         'both_native_gnome_entrypoints_prepare_before_spawn_and_refuse_dependency_failures']) {

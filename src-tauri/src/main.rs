@@ -30,7 +30,8 @@ mod custom_protocol;
 mod dev_bridge;
 #[cfg(any(target_os = "windows", test))]
 mod sidecar_runtime_identity;
-#[cfg(any(target_os = "windows", test))]
+// Its bounded process-output helper also serves Linux GNOME preparation.
+// Keep this portable std-only module available in non-test desktop builds.
 mod wsl_sidecar_staging;
 // Global-hotkey docs-search palette (WI-2648, feature #5): an opt-in global
 // shortcut opens a small always-on-top window loading Pagefind's own default UI

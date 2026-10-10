@@ -104,6 +104,36 @@ test('native admission precedes costly preparation and pins its maintained helpe
   }
 });
 
+test('native console compile preflight refuses failures before setup and skips non-native preparation', () => {
+  const preflight = source.match(/^preflight_native_console_platform\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(preflight, 'native console platform preflight missing');
+  for (const [prepareOnly, platform, checkStatus, expected] of [
+    ['0', 'Linux', 1, 1], ['0', 'Linux', 0, 0], ['1', 'Linux', 1, 0], ['0', 'Darwin', 1, 0],
+  ]) {
+    const result = spawnSync('bash', ['-c',
+      `uname() { printf '%s\\n' '${platform}'; }\n` +
+      `node() { printf 'CHECK_ARGS %s\\n' "$*"; return ${checkStatus}; }\n` + preflight + '\n' +
+      'preflight_native_console_platform || exit $?\nprintf "PREPARATION_STARTED\\n"\n'], {
+      encoding: 'utf8', env: { ...process.env, DESKTOP_DIR: '/fixture/desktop', PREPARE_ONLY: prepareOnly },
+    });
+    assert.equal(result.status, expected, result.stderr);
+    assert.equal(result.stdout.includes('PREPARATION_STARTED'), expected === 0);
+    const runsCheck = prepareOnly === '0' && platform === 'Linux';
+    assert.equal(result.stdout.includes('CHECK_ARGS'), runsCheck);
+    if (runsCheck) assert.match(result.stdout, /--test --test-global-setup=\/fixture\/desktop\/test\/monorepo-host-preflight.mjs \/fixture\/desktop\/test\/native-console-gnome.test.js/);
+  }
+  const admission = source.indexOf('vh_run_step native-console-platform-check preflight_native_console_platform');
+  assert.ok(admission > source.indexOf('vh_run_step native-cargo-capacity preflight_native_cargo'));
+  assert.ok(admission < source.indexOf('vh_run_step operator-source-snapshot '));
+  const inputs = source.match(/local inputs="([^\n]+)"/)?.[1].split(',');
+  for (const input of ['papercusp-desktop/src-tauri/src/main.rs',
+    'papercusp-desktop/src-tauri/src/native_console.rs', 'papercusp-desktop/src-tauri/src/wsl_sidecar_staging.rs',
+    'papercusp-desktop/test/native-console-gnome.test.js', 'papercusp-desktop/test/monorepo-host-preflight.mjs',
+    'scripts/lib/node-test-host-preflight.mjs', 'packages/operator-core/lib/gnome-terminal-policy.json']) {
+    assert.ok(inputs?.includes(input), input);
+  }
+});
+
 function voiceExpression(name, document, location = {}, KeyboardEvent = class {
   constructor(type, options) { this.type = type; Object.assign(this, options); }
 }) {
