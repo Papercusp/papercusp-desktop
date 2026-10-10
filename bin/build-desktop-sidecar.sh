@@ -284,8 +284,7 @@ run_sidecar_cached_package --check || exit 1
 # does NOT also require HEAD to equal the pin. Same placement contract as the gate above:
 # before any toolchain or dependency work.
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" \
-   || ( "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" \
-        && -n "${PAPERCUSP_PINNED_DEPS_SNAPSHOT_ROOT:-}" ) ]]; then
+   || "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" ]]; then
   # EI-21904084277182116 / D-186: a release cut does not consume the dependency
   # generation, so producing one is pure cost — and until now the ONLY thing
   # switching it off was each orchestrator remembering to export this variable.
@@ -297,17 +296,16 @@ if [[ "$DISTRIBUTION_PROFILE" == "vm-release" \
   # copying 86 trees (11.3 GB read / 15.9 GB written), and a peer watching host
   # PSI opened an urgent escalation about the IO.
   #
-  # EI-25371210326439139: an explicitly audited pinned dogfood cut has the same
-  # prepared-input contract as vm-release. Apply the existing source/dependency
-  # guards before installs, instead of publishing another unused generation.
-  # Ordinary dogfood builds retain their historical behavior.
+  # EI-25629702993220183: every audited cut has the same prepared-input
+  # contract, including retained source with no declared snapshot root. An
+  # omitted root must enforce dependencies inside REPO_ROOT; it cannot disable
+  # the guard and admit lint-only links into the live checkout.
+  # Ordinary unaudited dogfood builds retain their historical behavior.
   # `:-1` keeps the escape hatch honest: an
   # orchestrator that genuinely wants a generation exports 0 deliberately.
   #
   # Both paths reuse the same clean-source and decoupling checks below; a skip
   # cannot admit dependencies backed by an unapproved live tree.
-  export PAPERCUSP_SKIP_DEP_GENERATION="${PAPERCUSP_SKIP_DEP_GENERATION:-1}"
-
   if ! papercusp_assert_release_source_clean "${PROVENANCE_SOURCE_GIT_DIRTY:-true}" "$REPO_ROOT"; then
     echo "       Refusing to build a release-audited sidecar from a dirty source tree." >&2
     exit 2
@@ -330,6 +328,7 @@ if [[ "$DISTRIBUTION_PROFILE" == "vm-release" \
     echo "       Refusing to build a release-audited sidecar from dependencies another tree owns." >&2
     exit 2
   fi
+  export PAPERCUSP_SKIP_DEP_GENERATION="${PAPERCUSP_SKIP_DEP_GENERATION:-1}"
 fi
 unset _vm_release_build_sha _vm_release_desktop_version
 

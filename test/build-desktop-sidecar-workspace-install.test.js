@@ -71,7 +71,7 @@ function runPinnedReleaseInstallGuard(t, {
 test('audited pinned dogfood installs inherit generation skip; ordinary dogfood and explicit zero are preserved', t => {
   for (const [options, expected] of [
     [{}, '1'], [{ profile: 'vm-release', pinned: false }, '1'],
-    [{ audited: '0' }, 'unset'], [{ pinned: false }, 'unset'], [{ skip: '0' }, '0'],
+    [{ audited: '0' }, 'unset'], [{ pinned: false }, '1'], [{ skip: '0' }, '0'],
   ]) {
     const result = runPinnedReleaseInstallGuard(t, options);
     assert.equal(result.status, 0, result.stdout + result.stderr);
@@ -89,6 +89,25 @@ test('audited pinned dogfood refuses dirty source and external dependencies befo
     assert.equal(result.stdout.trim(), '');
     assert.match(result.stderr, /dirty source|SYMLINK to dependencies outside/);
   }
+});
+
+test('audited builds without a declared snapshot reject live dependency links before installation', t => {
+  for (const profile of ['dogfood', 'public', 'vm-release']) {
+    for (const options of [
+      { external: true }, { external: true, skip: '0' }, { dirty: 'true' },
+    ]) {
+      const result = runPinnedReleaseInstallGuard(t, { profile, pinned: false, ...options });
+      assert.equal(result.status, 2, result.stdout + result.stderr);
+      assert.equal(result.stdout.trim(), '', 'no install child may run on rejected inputs');
+      assert.match(result.stderr, /dirty source|SYMLINK to dependencies outside/);
+    }
+    const clean = runPinnedReleaseInstallGuard(t, { profile, pinned: false });
+    assert.equal(clean.status, 0, clean.stdout + clean.stderr);
+    assert.equal(JSON.parse(clean.stdout.trim()).skip, '1');
+  }
+  const ordinary = runPinnedReleaseInstallGuard(t, { audited: '0', pinned: false, external: true });
+  assert.equal(ordinary.status, 0, ordinary.stdout + ordinary.stderr);
+  assert.equal(JSON.parse(ordinary.stdout.trim()).skip, 'unset');
 });
 
 test('native Server builder defaults enter the real release guard before installing frozen dependencies', t => {
