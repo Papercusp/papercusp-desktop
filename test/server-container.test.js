@@ -860,7 +860,8 @@ test('publication preflight verifies imported members without any registry or si
   assert.equal(result.signed, false);
   assert.equal(result.published, false);
   assert.equal(result.platforms.length, 2);
-  assert.ok(result.platforms.every(p => p.bootVerification.dbos && p.bootVerification.vectorReady));
+  assert.ok(result.platforms.every(p => p.bootVerification.ready.body.dbos &&
+    p.bootVerification.database.vectorReady && p.bootVerification.database.schemaReady));
   assert.equal(f.calls.some(c => c.command === 'bash' || c.command === 'sudo' ||
     (c.command === 'podman' && ['tag', 'push', 'manifest'].includes(c.args[0]))), false);
 });
