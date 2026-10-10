@@ -558,6 +558,7 @@ function writeExecutable(file, source) {
 }
 
 function runFakeVulnerabilityAudit({ matches = [], dbValid = true, report = null,
+  preflight = false, dbBuilt = new Date().toISOString(), dbStatusText = null,
   sbom = { components: [{ name: 'demo-runtime', version: '1.0.0', purl: 'pkg:generic/demo-runtime@1.0.0' }] } } = {}) {
   const dir = tmp('vulnerability-gate');
   const sidecar = path.join(dir, 'sidecar');
@@ -584,7 +585,12 @@ if (args[0] === 'version') {
   process.stdout.write(JSON.stringify({ application: 'grype', version: '0.117.0-test' }));
   process.exit(0);
 }
+if (args[0] === 'db' && args[1] === 'update') process.exit(0);
 if (args[0] === 'db' && args[1] === 'status') {
+  if (process.env.FAKE_GRYPE_DB_STATUS_TEXT) {
+    process.stdout.write(process.env.FAKE_GRYPE_DB_STATUS_TEXT);
+    process.exit(0);
+  }
   process.stdout.write(JSON.stringify({
     schemaVersion: 'test-v1',
     built: process.env.FAKE_GRYPE_DB_BUILT,
@@ -599,7 +605,8 @@ require('node:fs').writeFileSync(process.env.FAKE_GRYPE_SCAN_MARKER, 'scanned');
   const env = {
     ...VM_RELEASE_ENV,
     PATH: `${tools}${path.delimiter}${process.env.PATH}`,
-    FAKE_GRYPE_DB_BUILT: new Date().toISOString(),
+    FAKE_GRYPE_DB_BUILT: dbBuilt,
+    FAKE_GRYPE_DB_STATUS_TEXT: dbStatusText ?? '',
     FAKE_GRYPE_DB_VALID: String(dbValid),
     FAKE_GRYPE_REPORT: JSON.stringify(report ?? { matches }),
     FAKE_SYFT_SBOM: JSON.stringify({ bomFormat: 'CycloneDX', specVersion: '1.7', ...sbom }),
@@ -607,11 +614,83 @@ require('node:fs').writeFileSync(process.env.FAKE_GRYPE_SCAN_MARKER, 'scanned');
   };
   const result = spawnSync(
     'python3',
-    [AUDIT, '--audit-vulnerabilities', sidecar, evidence],
+    preflight ? [AUDIT, '--preflight-vulnerabilities'] : [AUDIT, '--audit-vulnerabilities', sidecar, evidence],
     { encoding: 'utf8', env },
   );
-  return { dir, sidecar, evidence, result };
+  return { dir, sidecar, evidence, result, env };
 }
+
+test('vulnerability scanner preflight validates tools without emitting artifact evidence', () => {
+  const run = runFakeVulnerabilityAudit({ preflight: true });
+  try {
+    assert.equal(run.result.status, 0, `${run.result.stdout}${run.result.stderr}`);
+    assert.match(run.result.stdout, /VULNERABILITY TOOLS READY/);
+    assert.equal(fs.existsSync(run.evidence), false);
+    assert.equal(fs.existsSync(path.join(run.sidecar,
+      'apps/operator/runtime/vm-release-vulnerability-attestation.json')), false);
+  } finally { fs.rmSync(run.dir, { recursive: true, force: true }); }
+});
+
+test('vulnerability scanner preflight rejects invalid, stale, future and malformed databases', () => {
+  for (const input of [
+    { dbValid: false, reason: /valid != true/ },
+    { dbBuilt: new Date(Date.now() - 73 * 3600_000).toISOString(), reason: /maximum is 72h/ },
+    { dbBuilt: new Date(Date.now() + 2 * 3600_000).toISOString(), reason: /in the future/ },
+    { dbStatusText: 'not-json', reason: /invalid JSON/ },
+  ]) {
+    const run = runFakeVulnerabilityAudit({ ...input, preflight: true });
+    try {
+      assert.equal(run.result.status, 2, `${run.result.stdout}${run.result.stderr}`);
+      assert.match(run.result.stderr, input.reason);
+      assert.equal(fs.existsSync(run.evidence), false);
+    } finally { fs.rmSync(run.dir, { recursive: true, force: true }); }
+  }
+});
+
+test('vm-release scanner preflight refuses an invalid database before source or build work', () => {
+  const run = runFakeVulnerabilityAudit({ dbValid: false, preflight: true });
+  try {
+    const result = spawnSync('bash', [path.join(root, 'bin/build-desktop-sidecar.sh')], {
+      encoding: 'utf8',
+      env: { ...run.env, PAPERCUSP_DISTRIBUTION_PROFILE: 'vm-release',
+        REPO_ROOT: path.join(run.dir, 'missing-repo') },
+      timeout: 15_000,
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 2, `${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, /grype DB reports valid != true/);
+    assert.doesNotMatch(`${result.stdout}${result.stderr}`, /\.nvmrc|source capture|building SPA/);
+  } finally { fs.rmSync(run.dir, { recursive: true, force: true }); }
+});
+
+test('scanner preflight gives DB integrity its own finite budget and still rejects a timeout', () => {
+  for (const fail of [false, true]) {
+    const probe = [
+      'import json, runpy, sys, types',
+      'ns = runpy.run_path(sys.argv[1])',
+      'calls = []',
+      'def run(command, **kwargs):',
+      '    calls.append({"argv": command[1:], "timeout": kwargs["timeout"], "autoUpdate": kwargs["env"]["GRYPE_DB_AUTO_UPDATE"]})',
+      '    is_db = command[1:3] == ["db", "status"]',
+      '    if is_db and (kwargs["timeout"] < 90 or sys.argv[2] == "fail"):',
+      '        raise ns["subprocess"].TimeoutExpired(command, kwargs["timeout"])',
+      '    value = {"version": "test"}',
+      '    if is_db: value = {"valid": True, "built": ns["datetime"].now(ns["timezone"].utc).isoformat()}',
+      '    return types.SimpleNamespace(returncode=0, stdout=json.dumps(value), stderr="")',
+      'ns["subprocess"].run = run',
+      'ns["shutil"].which = lambda name: "/test/" + name',
+      'code = ns["preflight_vulnerabilities"]([])',
+      'print(json.dumps({"code": code, "calls": calls}))',
+    ].join('\n');
+    const result = spawnSync('python3', ['-c', probe, AUDIT, fail ? 'fail' : 'pass'], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const measured = JSON.parse(result.stdout.trim().split('\n').at(-1));
+    assert.equal(measured.code, fail ? 2 : 0);
+    assert.deepEqual(measured.calls.map((call) => call.timeout), [60, 60, 300]);
+    assert.ok(measured.calls.every((call) => call.autoUpdate === 'false'));
+    if (fail) assert.match(result.stderr, /grype db status could not run.*300 seconds/);
+  }
+});
 
 test('vm-release vulnerability audit emits digest-bound evidence and attests only a zero-High/Critical result', () => {
   const run = runFakeVulnerabilityAudit();
@@ -740,8 +819,9 @@ function runBuilderOwnerPreflight({ audit, owner, advance = false }) {
 
 function runBuilderVmReleaseIdentityPreflight({ sha, version, advance = false, targetOs = 'linux', targetArch = 'x64' }) {
   const dir = tmp('vm-release-identity-preflight');
+  const readiness = advance ? runFakeVulnerabilityAudit({ preflight: true }) : null;
   const env = {
-    ...process.env,
+    ...(readiness?.env ?? process.env),
     PAPERCUSP_DISTRIBUTION_PROFILE: 'vm-release',
     PAPERCUSP_RELEASE_AUDIT: '0',
     TARGET_OS: targetOs,
@@ -777,6 +857,7 @@ function runBuilderVmReleaseIdentityPreflight({ sha, version, advance = false, t
     });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+    if (readiness) fs.rmSync(readiness.dir, { recursive: true, force: true });
   }
 }
 
@@ -816,9 +897,15 @@ test('vm-release rejects unsupported targets before source, dependency or stagin
       sha: 'deadbeefcafefeed', version: '9.8.7-vm-test', targetOs, targetArch,
     });
     const output = `${r.stdout}${r.stderr}`;
-    assert.equal(r.status, 1, output);
-    assert.match(output, /pinned trust toolchain currently supports only linux-x64/);
-    assert.ok(output.includes(`requested: ${targetOs}-${targetArch}`), output);
+    const nativeMismatch = targetOs === 'linux' && (process.platform !== 'linux' || targetArch !== process.arch);
+    assert.equal(r.status, nativeMismatch ? 2 : 1, output);
+    if (nativeMismatch) {
+      assert.match(output, /requires a matching native Linux build process/);
+      assert.ok(output.includes(`Linux sidecar target ${targetArch}`), output);
+    } else {
+      assert.match(output, /pinned trust toolchain currently supports only linux-x64/);
+      assert.ok(output.includes(`requested: ${targetOs}-${targetArch}`), output);
+    }
     assert.doesNotMatch(output, /transformers|could not read|papercusp not found|staging|vite/i,
       'target rejection must precede dependency/source reads and expensive build phases');
   }

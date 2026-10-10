@@ -58,6 +58,7 @@ Usage:  audit-release-bundle.py <path/to/source.tar.zst>
         audit-release-bundle.py --distribution-census <gui|server> <platform> <artifact>...
         audit-release-bundle.py --prune-vm-release <assembled-sidecar>
         audit-release-bundle.py --audit-vm-release <assembled-sidecar>
+        audit-release-bundle.py --preflight-vulnerabilities [--refresh-db]
         audit-release-bundle.py --audit-vulnerabilities <assembled-sidecar> <evidence-dir>
 """
 import base64
@@ -1710,6 +1711,11 @@ VM_RELEASE_VULNERABILITY_ATTESTATION_PATH = os.path.join(
 )
 VM_RELEASE_GATED_SEVERITIES = {"high", "critical"}
 VM_RELEASE_GRYPE_DB_MAX_AGE_HOURS = 72
+# DB status performs integrity validation over the multi-GB database, unlike
+# tool version metadata. Keep a separate finite budget; never skip validation.
+# This accommodates that operation, not a diagnosis of the historical timeout
+# (EI-25323345241522712 remains the runtime investigation).
+VM_RELEASE_GRYPE_DB_TIMEOUT_SECONDS = 300
 
 # EI-21925061645614369 — how many installed npm package directories we need to SEE on disk before
 # we are willing to insist the SBOM catalogued some. This is only a walk cutoff, not a threshold:
@@ -1768,6 +1774,70 @@ def _vulnerability_location(match):
     return "<unknown-path>"
 
 
+def _vulnerability_tool_metadata():
+    """Shared fail-closed readiness contract for preflight and final scan."""
+    syft = shutil.which("syft")
+    grype = shutil.which("grype")
+    if not syft or not grype:
+        raise RuntimeError("vm-release vulnerability verdict requires both syft "
+                           "and grype on PATH")
+    metadata_env = os.environ.copy()
+    metadata_env["SYFT_CHECK_FOR_APP_UPDATE"] = "false"
+    metadata_env["GRYPE_CHECK_FOR_APP_UPDATE"] = "false"
+    metadata_env["GRYPE_DB_AUTO_UPDATE"] = "false"
+    syft_version = _parse_tool_json(
+        [syft, "version", "-o", "json"], "syft version", metadata_env
+    )
+    grype_version = _parse_tool_json(
+        [grype, "version", "-o", "json"], "grype version", metadata_env
+    )
+    db_status = _parse_tool_json(
+        [grype, "db", "status", "-o", "json"], "grype db status", metadata_env,
+        timeout=VM_RELEASE_GRYPE_DB_TIMEOUT_SECONDS,
+    )
+    if db_status.get("valid") is not True:
+        raise RuntimeError("grype DB reports valid != true")
+    db_built = _parse_utc_timestamp(db_status.get("built"), "grype DB built")
+    db_age = datetime.now(timezone.utc) - db_built
+    if db_age.total_seconds() < -3600:
+        raise RuntimeError(f"grype DB build time is in the future: {db_built.isoformat()}")
+    if db_age.total_seconds() > VM_RELEASE_GRYPE_DB_MAX_AGE_HOURS * 3600:
+        raise RuntimeError(
+            f"grype DB is {db_age.total_seconds() / 3600:.1f}h old; "
+            f"maximum is {VM_RELEASE_GRYPE_DB_MAX_AGE_HOURS}h"
+        )
+    return syft, grype, metadata_env, syft_version, grype_version, db_status, db_built
+
+
+def preflight_vulnerabilities(args):
+    """Check scanners before building; this never attests an artifact."""
+    if args not in ([], ["--refresh-db"]):
+        print("AUDIT ERROR: --preflight-vulnerabilities accepts only --refresh-db",
+              file=sys.stderr)
+        return 2
+    if args:
+        grype = shutil.which("grype")
+        if grype:
+            env = os.environ.copy()
+            env["GRYPE_CHECK_FOR_APP_UPDATE"] = "false"
+            try:
+                result = subprocess.run([grype, "db", "update"], env=env,
+                                        timeout=VM_RELEASE_GRYPE_DB_TIMEOUT_SECONDS)
+                if result.returncode != 0:
+                    print("WARNING: grype db update failed; validated freshness decides",
+                          file=sys.stderr)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                print(f"WARNING: grype db update could not run: {exc}; "
+                      "validated freshness decides", file=sys.stderr)
+    try:
+        _vulnerability_tool_metadata()
+    except RuntimeError as exc:
+        print(f"AUDIT ERROR: {exc}", file=sys.stderr)
+        return 2
+    print("VULNERABILITY TOOLS READY — artifact SBOM and verdict still required")
+    return 0
+
+
 def audit_vulnerabilities(args):
     """Generate a real SBOM + Grype verdict for one finished vm-release tree."""
     if len(args) != 2 or not os.path.isdir(args[0]):
@@ -1796,38 +1866,9 @@ def audit_vulnerabilities(args):
               "PAPERCUSP_DESKTOP_VERSION", file=sys.stderr)
         return 2
 
-    syft = shutil.which("syft")
-    grype = shutil.which("grype")
-    if not syft or not grype:
-        print("AUDIT ERROR: vm-release vulnerability verdict requires both syft "
-              "and grype on PATH", file=sys.stderr)
-        return 2
-
-    metadata_env = os.environ.copy()
-    metadata_env["SYFT_CHECK_FOR_APP_UPDATE"] = "false"
-    metadata_env["GRYPE_CHECK_FOR_APP_UPDATE"] = "false"
-    metadata_env["GRYPE_DB_AUTO_UPDATE"] = "false"
     try:
-        syft_version = _parse_tool_json(
-            [syft, "version", "-o", "json"], "syft version", metadata_env
-        )
-        grype_version = _parse_tool_json(
-            [grype, "version", "-o", "json"], "grype version", metadata_env
-        )
-        db_status = _parse_tool_json(
-            [grype, "db", "status", "-o", "json"], "grype db status", metadata_env
-        )
-        if db_status.get("valid") is not True:
-            raise RuntimeError("grype DB reports valid != true")
-        db_built = _parse_utc_timestamp(db_status.get("built"), "grype DB built")
-        db_age = datetime.now(timezone.utc) - db_built
-        if db_age.total_seconds() < -3600:
-            raise RuntimeError(f"grype DB build time is in the future: {db_built.isoformat()}")
-        if db_age.total_seconds() > VM_RELEASE_GRYPE_DB_MAX_AGE_HOURS * 3600:
-            raise RuntimeError(
-                f"grype DB is {db_age.total_seconds() / 3600:.1f}h old; "
-                f"maximum is {VM_RELEASE_GRYPE_DB_MAX_AGE_HOURS}h"
-            )
+        (syft, grype, metadata_env, syft_version, grype_version,
+         db_status, db_built) = _vulnerability_tool_metadata()
     except RuntimeError as exc:
         print(f"AUDIT ERROR: {exc}", file=sys.stderr)
         return 2
@@ -4087,6 +4128,8 @@ def main():
         return prune_vm_release(sys.argv[2:])
     if sys.argv[1] == "--audit-vm-release":
         return audit_vm_release(sys.argv[2:])
+    if sys.argv[1] == "--preflight-vulnerabilities":
+        return preflight_vulnerabilities(sys.argv[2:])
     if sys.argv[1] == "--audit-vulnerabilities":
         return audit_vulnerabilities(sys.argv[2:])
     if sys.argv[1] == "--scrub-binaries":
