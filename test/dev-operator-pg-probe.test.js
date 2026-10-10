@@ -129,7 +129,11 @@ test('verifier readiness runs before source/dependency snapshots, and skips only
   const src = fs.readFileSync(VERIFIER, 'utf8');
   const call = src.indexOf('shared_schema_readiness_preflight || exit $?');
   assert.ok(call >= 0);
-  assert.ok(call < src.indexOf('OPERATOR_SNAPSHOT_PARENT="$(select_verifier_snapshot_root)"'));
+  // The selection may be wrapped in the vh_run_step phase recorder.
+  const snapshotAt =
+    /OPERATOR_SNAPSHOT_PARENT="\$\((?:vh_run_step \S+ )?select_verifier_snapshot_root\)"/.exec(src)?.index ?? -1;
+  assert.ok(snapshotAt >= 0, 'the verifier must still select its snapshot root');
+  assert.ok(call < snapshotAt);
   assert.ok(call < src.indexOf('WORK="$(mktemp -d'));
   assert.match(src, /shared_schema_readiness_preflight\(\) \{[\s\S]*?VERIFY_TAURI_ISOLATED_DB:-0[\s\S]*?return 0/);
   assert.match(src, /dev-operator-pg-probe\.mjs" --repo-root "\$REPO_DIR" --require-applied-schema/);
@@ -178,14 +182,23 @@ test('real probe CLI reports ready/pending/unavailable exits with the selected s
 test('real verifier preflight binds sourced .env.local, propagates refusal, and leaves isolated DB alone', (t) => {
   const f = cliFixture(t);
   const src = fs.readFileSync(VERIFIER, 'utf8');
-  const fn = src.slice(src.indexOf('shared_schema_readiness_preflight() {'), src.indexOf('shared_schema_readiness_preflight || exit $?'));
+  const fn = src.slice(src.indexOf('shared_schema_readiness_preflight() {'), src.indexOf('vh_run_step shared-schema-readiness'));
+  const work = path.join(f.root, 'private-run');
+  fs.mkdirSync(work);
   fs.writeFileSync(path.join(f.root, 'apps', 'operator', '.env.local'), 'HARNESS_ADMIN_DATABASE_URL=postgresql://fixture:sourced@selected/db\n');
   const env = {
-    ...process.env, REPO_DIR: f.root, DESKTOP_DIR: path.join(REPO_ROOT, 'papercusp-desktop'),
+    ...process.env, REPO_DIR: f.root, DESKTOP_DIR: path.join(REPO_ROOT, 'papercusp-desktop'), WORK: work,
     HARNESS_ADMIN_DATABASE_URL: 'postgresql://fixture:ambient@wrong/db', PAPERCUSP_PG_SQL_DIR: f.sqlDir,
     TEST_PROBE_RECEIPT: f.receipt, TEST_PROBE_APPLIED: '[]', TEST_PROBE_FAILURE: '', VERIFY_TAURI_ISOLATED_DB: '0',
   };
-  const run = (overrides = {}) => spawnSync('bash', ['-c', `${fn}\nshared_schema_readiness_preflight`], { encoding: 'utf8', timeout: 10000, env: { ...env, ...overrides } });
+  const run = (overrides = {}) => spawnSync('bash', ['-c', `${fn}
+shared_schema_readiness_preflight
+probe_status=$?
+if [ "$probe_status" = 0 ] && [ "$VERIFY_TAURI_ISOLATED_DB" = 0 ]; then
+  test "$HARNESS_ADMIN_DATABASE_URL" = 'postgresql://fixture:sourced@selected/db' || exit 96
+  test ! -e "$WORK/shared-database-url" || exit 97
+fi
+exit "$probe_status"`], { encoding: 'utf8', timeout: 10000, env: { ...env, ...overrides } });
   const pending = run();
   assert.equal(pending.status, 75, pending.stderr);
   assert.match(pending.stderr, /VERIFY_TAURI_SHARED_SCHEMA_NOT_READY/);
