@@ -160,7 +160,20 @@ mapfile -d '' -t BUILT_DEBS < <(
 # record, REMOVE any earlier file rather than leave a stale identity behind.
 PROFILE_DIR="${DEB_DIR%/bundle/deb}"
 if [[ -n "${PAPERCUSP_RELEASE_HOST:-}" || "${PAPERCUSP_DISTRIBUTION_PROFILE:-}" == public || -n "${PAPERCUSP_RELEASE_TAG:-}" ]]; then
-  bash "$SCRIPT_DIR/assert-release-host-baked.sh" "$PROFILE_DIR/papercusp-desktop"
+  # Tauri overlays can rename the main binary (the Server is papercusp-server).
+  # Audit the binary in each fresh bundle's actual payload, after Tauri's patch,
+  # rather than a fixed GUI name in Cargo's output directory.
+  for deb in "${BUILT_DEBS[@]}"; do
+    package_bin_dir="${deb%.deb}/data/usr/bin"
+    mapfile -d '' -t package_binaries < <(
+      find "$package_bin_dir" -maxdepth 1 -type f -perm /111 -print0 2>/dev/null
+    )
+    if [[ ${#package_binaries[@]} -ne 1 ]]; then
+      echo "FATAL: fresh Debian payload must contain exactly one main executable under $package_bin_dir" >&2
+      exit 7
+    fi
+    bash "$SCRIPT_DIR/assert-release-host-baked.sh" "${package_binaries[0]}"
+  done
 fi
 BUILD_IDENTITY="$PROFILE_DIR/build-provenance.json"
 if [[ "$PAPERCUSP_BUILD_SHA" =~ ^[0-9a-f]{7,64}$ ]]; then

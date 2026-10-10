@@ -89,12 +89,25 @@ papercusp_reservation_dir() {
   printf '%s' "${PAPERCUSP_DISK_RESERVATION_DIR:-${TMPDIR:-/tmp}/papercusp-disk-reservations}"
 }
 
-# Reservations are per-FILESYSTEM: a claim against /tmp must not shrink the budget
-# for /. Key on the mount point df reports, so two paths on one volume share a
-# ledger and paths on different volumes never interfere.
+# Reservations are per physical filesystem, including bind-mount aliases.
+papercusp_device_id() {
+  local path="$1" parent dev
+  while [ -n "$path" ] && [ ! -d "$path" ]; do
+    parent="$(dirname "$path")"
+    [ "$parent" = "$path" ] && break
+    path="$parent"
+  done
+  [ -d "$path" ] || return 0
+  dev="$(stat -L -c '%d' "$path" 2>/dev/null)" || dev="$(stat -L -f '%d' "$path" 2>/dev/null)" || return 0
+  case "$dev" in ''|*[!0-9]*) return 0 ;; esac
+  printf '%s' "$dev"
+}
+
 papercusp_mount_key() {
-  local path="$1" mp=""
+  local path="$1" mp="" dev
   [ -n "$path" ] || return 0
+  dev="$(papercusp_device_id "$path")"
+  if [ -n "$dev" ]; then printf 'dev-%s' "$dev"; return 0; fi
   while [ -n "$path" ] && [ ! -d "$path" ]; do
     local parent; parent="$(dirname "$path")"
     [ "$parent" = "$path" ] && break
@@ -104,6 +117,23 @@ papercusp_mount_key() {
   mp="$(df -Pk "$path" 2>/dev/null | awk 'NR==2 {print $6}')" || true
   [ -n "$mp" ] || return 0
   printf '%s' "$mp" | tr -c 'A-Za-z0-9' '_'
+}
+
+# Old mount-key claims remain readable until their owners exit or TTLs pass.
+# New check-and-reserve callers serialize on the same device-key mutex.
+papercusp_reservation_keys() {
+  local path="$1" primary dev fs blocks used avail capacity mount legacy root
+  primary="$(papercusp_mount_key "$path")"
+  [ -n "$primary" ] && printf '%s\n' "$primary"
+  dev="$(papercusp_device_id "$path")"
+  [ -n "$dev" ] || return 0
+  root="$(papercusp_reservation_dir)"
+  while read -r fs blocks used avail capacity mount; do
+    [ -n "$mount" ] || continue
+    legacy="$(printf '%s' "$mount" | tr -c 'A-Za-z0-9' '_')"
+    [ -d "$root/$legacy" ] || continue
+    [ "$(papercusp_device_id "$mount")" = "$dev" ] && printf '%s\n' "$legacy"
+  done < <(df -Pk -a 2>/dev/null)
 }
 
 # Process start time (jiffies since boot) — the identity that survives pid reuse.
@@ -144,9 +174,13 @@ papercusp_ledger_unlock() { rm -rf "$1/.lock" 2>/dev/null || true; }
 
 # Sum live reservations, reaping dead ones. MUST be called holding the lock.
 papercusp_reserved_gb() {
-  local ldir="$1" total=0 f pid gb start expires now cur live
+  local ldir="$1" total=0 f pid gb start expires now cur live key keys root
+  root="$(dirname "$ldir")"
+  keys="$(basename "$ldir")"
+  [ -z "${2:-}" ] || keys="$(papercusp_reservation_keys "$2" | awk '!seen[$0]++')"
   now="$(date +%s)"
-  for f in "$ldir"/*.res; do
+  for key in $keys; do
+  for f in "$root/$key"/*.res; do
     [ -e "$f" ] || continue
     pid="$(sed -n 's/^pid=//p' "$f" 2>/dev/null)"
     gb="$(sed -n 's/^gb=//p' "$f" 2>/dev/null)"
@@ -162,6 +196,7 @@ papercusp_reserved_gb() {
     fi
     if [ "$live" = 0 ]; then rm -f "$f" 2>/dev/null || true; continue; fi
     total=$((total + gb))
+  done
   done
   printf '%s' "$total"
 }
@@ -201,7 +236,7 @@ papercusp_require_free_gb() {
     mkdir -p "$ldir" 2>/dev/null || ldir=""
   fi
   if [ -n "$ldir" ] && papercusp_ledger_lock "$ldir"; then
-    reserved="$(papercusp_reserved_gb "$ldir")"
+    reserved="$(papercusp_reserved_gb "$ldir" "$dir")"
     [ -n "$reserved" ] || reserved=0
     effective=$((free_gb - reserved))
     [ "$effective" -lt 0 ] && effective=0

@@ -517,7 +517,10 @@ test('the npm build wrapper repacks fresh release, debug, and all-bundles Debian
       'bundle_root="$FAKE_TARGET_DIR"',
       '[[ -n "$target" ]] && bundle_root="$bundle_root/$target"',
       'mkdir -p "$bundle_root/$profile/bundle/deb"',
-      'printf "%s\\n" "$PAPERCUSP_RELEASE_HOST" > "$bundle_root/$profile/papercusp-desktop"',
+      'payload="$bundle_root/$profile/bundle/deb/Papercusp_1.0.0_all/data/usr/bin"',
+      'mkdir -p "$payload"',
+      'printf "%s\\n" "$PAPERCUSP_RELEASE_HOST" > "$payload/papercusp-desktop"',
+      'chmod +x "$payload/papercusp-desktop"',
       'cp "$FAKE_DEB_SOURCE" "$bundle_root/$profile/bundle/deb/Papercusp_1.0.0_all.deb"',
       '',
     ].join('\n'), { mode: 0o755 });

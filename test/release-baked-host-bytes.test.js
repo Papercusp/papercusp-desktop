@@ -12,7 +12,7 @@ const helper = path.join(root, 'bin', 'lib', 'release-artifacts.sh');
 const upload = path.join(root, 'bin', 'upload-release.sh');
 const base = 'https://download-test.example.invalid/secret-prefix';
 
-function debHostFixture(t, { configured = true, mismatch = false, profile = 'public' } = {}) {
+function debHostFixture(t, { configured = true, mismatch = false, profile = 'public', binary = 'papercusp-desktop', ambiguous = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-host-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -32,14 +32,18 @@ const e = process.env;
 const release = p.join(e.FIXTURE_TARGET, 'release');
 fs.mkdirSync(p.join(release, 'bundle/deb'), { recursive: true });
 fs.writeFileSync(e.FIXTURE_RECORD, JSON.stringify({host: e.PAPERCUSP_RELEASE_HOST, rustflags: e.RUSTFLAGS}));
-fs.writeFileSync(p.join(release, 'papercusp-desktop'), e.FIXTURE_HOST_MISMATCH === '1' ? 'hostless-binary' : (e.PAPERCUSP_RELEASE_HOST || 'hostless-binary'));
+const payload = p.join(release, 'bundle/deb/fixture/data/usr/bin');
+fs.mkdirSync(payload, { recursive: true });
+fs.writeFileSync(p.join(payload, e.FIXTURE_BINARY), e.FIXTURE_HOST_MISMATCH === '1' ? 'hostless-binary' : (e.PAPERCUSP_RELEASE_HOST || 'hostless-binary'), { mode: 0o755 });
+if (e.FIXTURE_AMBIGUOUS === '1') fs.writeFileSync(p.join(payload, 'unrelated'), e.PAPERCUSP_RELEASE_HOST, { mode: 0o755 });
 fs.writeFileSync(p.join(release, 'bundle/deb/fixture.deb'), 'fixture-deb');
 `, { mode: 0o755 });
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`,
     PAPERCUSP_DESKTOP_TARGET_ROOT: product, PAPERCUSP_RELEASE_HOST_ENV: hostFile,
     PAPERCUSP_DISTRIBUTION_PROFILE: profile, PAPERCUSP_DEFER_DEB_REPACK: '1',
     PAPERCUSP_BUILD_SHA: '1234567', FIXTURE_TARGET: target, FIXTURE_RECORD: record,
-    FIXTURE_HOST_MISMATCH: mismatch ? '1' : '0' };
+    FIXTURE_HOST_MISMATCH: mismatch ? '1' : '0', FIXTURE_BINARY: binary,
+    FIXTURE_AMBIGUOUS: ambiguous ? '1' : '0' };
   for (const key of ['PAPERCUSP_RELEASE_HOST', 'PAPERCUSP_UPDATE_BASE_URL',
     'PAPERCUSP_ALLOW_HOSTLESS_RELEASE', 'PAPERCUSP_RELEASE_TAG', '__PAPERCUSP_RELEASE_HOST_LIB']) delete env[key];
   delete env.CARGO_ENCODED_RUSTFLAGS;
@@ -76,6 +80,22 @@ test('public Debian producer rejects a child binary which omitted the exported h
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stderr, /RELEASE HOST NOT BAKED/);
   assert.equal(fs.existsSync(path.join(f.target, 'release/build-provenance.json')), false);
+});
+
+test('public Debian producer audits the renamed Server payload without a GUI binary', t => {
+  const f = debHostFixture(t, { binary: 'papercusp-server' });
+  const result = f.run();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /release host is BAKED into papercusp-server/);
+  const wrong = debHostFixture(t, { binary: 'papercusp-server', mismatch: true });
+  assert.equal(wrong.run().status, 1, 'the Server must retain the baked-host check');
+});
+
+test('public Debian producer refuses an ambiguous main executable payload', t => {
+  const f = debHostFixture(t, { ambiguous: true });
+  const result = f.run();
+  assert.equal(result.status, 7, result.stdout + result.stderr);
+  assert.match(result.stderr, /exactly one main executable/);
 });
 
 test('public byte assertion resolves configured host when its caller omitted the export', t => {
