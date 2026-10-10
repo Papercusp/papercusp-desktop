@@ -9,6 +9,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 
 let execFileAsyncMemo;
 const execFileAsync = (...args) =>
@@ -303,6 +304,74 @@ child.on('error',error=>{console.error(error.message);clearInterval(timer);proce
 child.on('exit',(code,signal)=>{clearInterval(timer);clearTimeout(killTimer);process.exitCode=stopping?125:(code??1)});
 `;
 
+function cleanupBudget(value = 30_000) {
+  if (!Number.isInteger(value) || value < 50 || value > 60_000)
+    throw new Error('Owned producer cleanup requires 50..60000 ms');
+  return value;
+}
+
+async function saveOwnedReceipt(file, receipt) {
+  await writeFile(file + '.tmp', JSON.stringify(receipt) + '\n', { mode: 0o600 });
+  await chmod(file + '.tmp', 0o600);
+  await rename(file + '.tmp', file);
+}
+
+async function settleOwnedContainer(receipt, save, run, budget, createdId) {
+  receipt.cleanupPending = true;
+  await save();
+  let id = createdId;
+  const deadline = performance.now() + budget;
+  while (!id) {
+    let object;
+    try {
+      object = JSON.parse(await run(receipt.engine ?? 'docker',
+        ['inspect', '--format', '{{json .}}', receipt.containerId ?? receipt.containerName],
+        { timeout: Math.max(1, Math.min(10_000, Math.ceil(deadline - performance.now()))) }));
+    } catch (inspectError) {
+      if (!/No such (?:object|container)/i.test(inspectError.message)) throw inspectError;
+      // A previously observed immutable ID cannot be recreated. An unknown
+      // create, however, can still arrive after this name lookup returns absent.
+      if (receipt.containerId) break;
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) throw new Error('Interrupted create cleanup remains pending; absence does not confirm cancellation');
+      await delay(Math.min(250, remaining));
+      continue;
+    }
+    if (!object || !matchesImageId(object.Image, receipt.imageId)
+        || object.Config?.Labels?.['dev.papercusp.producer-owner'] !== receipt.ownerToken
+        || !/^[a-f0-9]{64}$/.test(object.Id ?? '')
+        || (receipt.containerId && object.Id !== receipt.containerId))
+      throw new Error('Cannot confirm interrupted create ownership');
+    id = object.Id;
+    receipt.containerId = id;
+    await save();
+  }
+  if (id) await run(receipt.engine ?? 'docker', ['rm', '--force', id], { timeout: 10_000 });
+  receipt.removed = true;
+  receipt.cleanupPending = false;
+  delete receipt.cleanupError;
+  await save();
+}
+
+/** Resume ONE saved producer cleanup; never create or start another workload. */
+export async function reconcileOwnedContainer(options, run = runCommand) {
+  const receiptFile = resolve(options.receiptFile);
+  const receipt = await jsonFile(receiptFile);
+  if (receipt.schemaVersion !== 1 || !['docker', 'podman'].includes(receipt.engine ?? 'docker')
+      || !PLATFORMS.has(receipt.platform) || !/^sha256:[a-f0-9]{64}$/.test(receipt.imageId ?? '')
+      || !/^papercusp-native-[a-f0-9-]{36}$/.test(receipt.containerName ?? '')
+      || !/^[a-f0-9-]{36}$/.test(receipt.ownerToken ?? '')
+      || (receipt.containerId && !/^[a-f0-9]{64}$/.test(receipt.containerId)))
+    throw new Error('Invalid saved producer ownership receipt');
+  const budget = cleanupBudget(options.cleanupTimeoutMs);
+  const save = () => saveOwnedReceipt(receiptFile, receipt);
+  if (!receipt.removed) {
+    try { await settleOwnedContainer(receipt, save, run, budget); }
+    catch (error) { receipt.cleanupError = error.message; await save(); throw error; }
+  }
+  return { ...receipt, receiptFile };
+}
+
 /** Run the existing native producer with a recorded, bounded daemon lifetime. */
 export async function runOwnedContainer(options, run = runCommand) {
   const engine = options.engine ?? 'docker';
@@ -327,6 +396,7 @@ export async function runOwnedContainer(options, run = runCommand) {
   const receiptFile = join(leaseRoot, 'ownership.json');
   const ttl = options.leaseTimeoutMs ?? 15_000;
   if (!Number.isInteger(ttl) || ttl < 1000 || ttl > 60_000) throw new Error('Owned producer lease requires 1000..60000 ms');
+  const cleanupTimeoutMs = cleanupBudget(options.cleanupTimeoutMs);
   const controller = new AbortController();
   const abort = () => controller.abort();
   const update = async () => {
@@ -335,16 +405,20 @@ export async function runOwnedContainer(options, run = runCommand) {
     await chmod(lease + '.tmp', 0o644);
     await rename(lease + '.tmp', lease);
   };
-  let id, heartbeat, error, heartbeatPending = Promise.resolve();
-  const receipt = { schemaVersion: 1, imageId: options.imageId, platform: options.platform,
+  let id, heartbeat, error, createAttempted = false, heartbeatPending = Promise.resolve();
+  const receipt = { schemaVersion: 1, engine, imageId: options.imageId, platform: options.platform,
     leaseTimeoutMs: ttl, leaseRoot, clockRoot, status: 'creating',
     containerName: 'papercusp-native-' + randomUUID(), ownerToken: randomUUID() };
-  const save = () => writeFile(receiptFile, JSON.stringify(receipt) + '\n', { mode: 0o600 });
+  const save = () => saveOwnedReceipt(receiptFile, receipt);
   process.on('SIGTERM', abort); process.on('SIGINT', abort);
   options.signal?.addEventListener('abort', abort, { once: true });
   try {
     await update();
+    // Persist uncertainty before asking the daemon: even launcher death must
+    // leave a receipt that a successor can reconcile after a late create.
+    receipt.cleanupPending = true;
     await save();
+    createAttempted = true;
     id = (await run(engine, ['create', '--init', '--name', receipt.containerName,
       '--platform', options.platform, '--mount', 'type=bind,source=' + clockRoot + ',target=/run/papercusp-producer-owner,readonly',
       ...(options.args ?? []), '--label', 'dev.papercusp.producer-owner=' + receipt.ownerToken,
@@ -374,25 +448,8 @@ export async function runOwnedContainer(options, run = runCommand) {
     process.off('SIGTERM', abort); process.off('SIGINT', abort);
     options.signal?.removeEventListener('abort', abort);
     try {
-      // A killed create client can leave a daemon-created object without
-      // returning its ID. Recover it only under our saved name, image and token.
-      if (!id) {
-        let object;
-        try { object = JSON.parse(await run(engine, ['inspect', '--format', '{{json .}}', receipt.containerName], { timeout: 10_000 })); }
-        catch (inspectError) {
-          if (!/No such (?:object|container)/i.test(inspectError.message)) throw inspectError;
-        }
-        if (object) {
-          if (object.Image !== options.imageId || object.Config?.Labels?.['dev.papercusp.producer-owner'] !== receipt.ownerToken
-              || !/^[a-f0-9]{64}$/.test(object.Id ?? '')) throw new Error('Cannot confirm interrupted create ownership');
-          id = object.Id; receipt.containerId = id;
-        }
-      }
-      if (id && /^[a-f0-9]{64}$/.test(id)) {
-        await run(engine, ['rm', '--force', id], { timeout: 10_000 });
-        receipt.removed = true;
-      }
-      await save();
+      if (createAttempted) await settleOwnedContainer(receipt, save, run, cleanupTimeoutMs, id);
+      else await save();
     } catch (cleanupError) {
       receipt.cleanupError = cleanupError.message; await save();
       throw new AggregateError([...(error ? [error] : []), cleanupError], 'Owned producer cleanup failed');
