@@ -19,11 +19,11 @@ const options = { onProgress: phase => console.error('[server-container] ' + pha
 let preflightOnly = false;
 const keys = new Map([['--platform', 'platform'], ['--tag', 'tag'], ['--rootfs', 'rootfs'],
   ['--sidecar', 'sidecar'], ['--out', 'out'], ['--engine', 'engine'], ['--syft', 'syft'],
-  ['--source-commit', 'sourceCommit'], ['--amd64-receipt', 'amd64Receipt'], ['--arm64-receipt', 'arm64Receipt'],
+  ['--source-commit', 'sourceCommit'], ['--image-id', 'imageId'], ['--amd64-receipt', 'amd64Receipt'], ['--arm64-receipt', 'arm64Receipt'],
   ['--key', 'key'], ['--pubkey', 'pubkey']]);
 try {
   if (args.includes('--help')) {
-    console.log('Usage: node bin/build-server-container.mjs --platform linux/amd64|linux/arm64 --tag REF --rootfs FILE --sidecar DIR [--preflight-only | --out DIR] [--engine docker|podman] [--syft PATH] [--source-commit FULL_SHA]');
+    console.log('Usage: node bin/build-server-container.mjs --platform linux/amd64|linux/arm64 --tag REF --rootfs FILE --sidecar DIR [--preflight-only | --out DIR] [--engine docker|podman] [--syft PATH] [--source-commit FULL_SHA] [--image-id sha256:FULL_HASH (qualify without rebuilding)]');
     console.log('Publish: node bin/build-server-container.mjs publish --amd64-receipt FILE --arm64-receipt FILE --tag REGISTRY/REPO:VERSION --key FILE --out DIR [--pubkey FILE] [--engine docker|podman] [--insecure-registry]');
     process.exit(0);
   }
@@ -37,6 +37,7 @@ try {
     options[key] = args.shift();
   }
   if (publish && preflightOnly) throw new Error('Publication cannot be combined with --preflight-only');
+  if (options.imageId && (publish || preflightOnly)) throw new Error('--image-id requires local image qualification');
   for (const key of (publish ? ['amd64Receipt', 'arm64Receipt', 'tag', 'key', 'out'] :
     ['platform', 'tag', 'rootfs', 'sidecar', ...(preflightOnly ? [] : ['out'])])) {
     if (!options[key]) throw new Error('Missing --' + key);
