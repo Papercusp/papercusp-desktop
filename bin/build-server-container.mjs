@@ -20,11 +20,14 @@ let preflightOnly = false;
 const keys = new Map([['--platform', 'platform'], ['--tag', 'tag'], ['--rootfs', 'rootfs'],
   ['--sidecar', 'sidecar'], ['--out', 'out'], ['--engine', 'engine'], ['--syft', 'syft'],
   ['--source-commit', 'sourceCommit'], ['--image-id', 'imageId'], ['--amd64-receipt', 'amd64Receipt'], ['--arm64-receipt', 'arm64Receipt'],
-  ['--key', 'key'], ['--pubkey', 'pubkey']]);
+  ['--key', 'key'], ['--pubkey', 'pubkey'],
+  ['--amd64-archive', 'amd64Archive'], ['--arm64-archive', 'arm64Archive']]);
 try {
   if (args.includes('--help')) {
     console.log('Usage: node bin/build-server-container.mjs --platform linux/amd64|linux/arm64 --tag REF --rootfs FILE --sidecar DIR [--preflight-only | --out DIR] [--engine docker|podman] [--syft PATH] [--source-commit FULL_SHA] [--image-id sha256:FULL_HASH (qualify without rebuilding)]');
-    console.log('Publish: node bin/build-server-container.mjs publish --amd64-receipt FILE --arm64-receipt FILE --tag REGISTRY/REPO:VERSION --key FILE --out DIR [--pubkey FILE] [--engine docker|podman] [--insecure-registry]');
+    console.log('Publish: node bin/build-server-container.mjs publish --amd64-receipt FILE --arm64-receipt FILE --tag REGISTRY/REPO:VERSION --key FILE --out DIR [--pubkey FILE] [--engine docker|podman] [--amd64-archive FILE] [--arm64-archive FILE] [--insecure-registry]');
+    console.log('Archives bind imported engine config IDs to the original immutable native receipts; required when importing from another engine.');
+    console.log('publish --preflight-only verifies imports, native payload parity and full boot of both members without a registry, signing key or publication.');
     process.exit(0);
   }
   while (args.length) {
@@ -36,13 +39,13 @@ try {
     if (options[key]) throw new Error('Repeated option: ' + arg);
     options[key] = args.shift();
   }
-  if (publish && preflightOnly) throw new Error('Publication cannot be combined with --preflight-only');
   if (options.imageId && (publish || preflightOnly)) throw new Error('--image-id requires local image qualification');
-  for (const key of (publish ? ['amd64Receipt', 'arm64Receipt', 'tag', 'key', 'out'] :
+  if (!publish && (options.amd64Archive || options.arm64Archive)) throw new Error('Archive imports require publication mode');
+  for (const key of (publish ? ['amd64Receipt', 'arm64Receipt', ...(preflightOnly ? [] : ['tag', 'key', 'out'])] :
     ['platform', 'tag', 'rootfs', 'sidecar', ...(preflightOnly ? [] : ['out'])])) {
     if (!options[key]) throw new Error('Missing --' + key);
   }
-  const result = await (publish ? publishServerContainers(options) :
+  const result = await (publish ? publishServerContainers({ ...options, preflightOnly }) :
     preflightOnly ? preflightServerContainer(options) : buildServerContainer(options));
   console.log(JSON.stringify(result, null, 2));
 } catch (error) {
