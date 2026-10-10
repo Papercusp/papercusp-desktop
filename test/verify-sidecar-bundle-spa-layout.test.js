@@ -465,6 +465,22 @@ test('packaged import closure qualifies isolated final-image imports, not build-
     console.log('PAPERCUSP_BOOT_IMPORTS_OK');`);
   assert.equal(result.status, 0, result.stderr);
 });
+test('packaged import closure accepts a receipt after stderr exceeds the pipe buffer', () => {
+  const result = runBootCheck(`import { writeSync } from 'node:fs';
+    writeSync(2, Buffer.alloc(2 * 1024 * 1024, 'x'));
+    console.log('PAPERCUSP_BOOT_IMPORTS_OK');`);
+  assert.equal(result.status, 0, result.stderr);
+});
+test('packaged import failure keeps a bounded tail after oversized stderr', () => {
+  const result = runBootCheck(`import { writeSync } from 'node:fs';
+    writeSync(2, Buffer.alloc(2 * 1024 * 1024, 'x'));
+    console.error('FINAL_CHILD_TRACE'); process.exit(2);`);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /"status":2/);
+  assert.match(result.stderr, /FINAL_CHILD_TRACE/);
+  assert.doesNotMatch(result.stderr, /ENOBUFS/);
+  assert.ok(Buffer.byteLength(result.stderr) < 8192, 'failure output must remain bounded');
+});
 test('Linux import probe launches with the host allocator contract and preserves explicit settings', { skip: process.platform !== 'linux' }, () => {
   for (const [cap, tunable, expected] of [
     [undefined, undefined, '2'],
@@ -489,6 +505,7 @@ test('packaged import timeout preserves partial output and launch diagnostics', 
       cp.spawnSync = (file, args, options) => {
         if (args?.some(arg => String(arg).endsWith('/serve.mjs'))) {
           require('node:assert/strict').equal(options.timeout, 60000);
+          require('node:assert/strict').equal(options.maxBuffer, 1024 * 1024);
           const error = new Error('observed boot probe deadline');
           error.code = 'ETIMEDOUT';
           return { pid: 123, status: ${JSON.stringify(status)}, signal: ${JSON.stringify(status === null ? 'SIGTERM' : null)}, error,

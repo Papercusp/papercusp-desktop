@@ -694,6 +694,11 @@ packs = [p for p in contract.get("server", {}).get("optionalPacks", []) if p.get
 if len(packs) != 1:
     sys.exit(f"FATAL: {contract_path} must declare exactly one 'local-models' pack (found {len(packs)})")
 
+# A relocated cache may retain its symlink after its storage directory is gone.
+# Recreate the selected referent, preserving that path choice and the symlink.
+dest = os.path.realpath(dest)
+os.makedirs(dest, exist_ok=True)
+
 def sha256(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:

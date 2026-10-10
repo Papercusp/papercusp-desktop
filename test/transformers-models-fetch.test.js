@@ -343,6 +343,29 @@ test('fetch is idempotent: verified files are kept, not re-downloaded', async ()
   }
 });
 
+test('fetch restores a missing relocated cache without replacing its symlink', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tf-fetch-relocated-'));
+  const dest = path.join(root, 'cache');
+  const referent = path.join(root, 'relocated/models');
+  fs.symlinkSync(referent, dest, 'dir');
+  try {
+    await withServer(async (endpoint, hits) => {
+      const result = await runFetch(endpoint, contract(), dest);
+      assert.equal(result.status, 0, result.out);
+      assert.equal(fs.lstatSync(dest).isSymbolicLink(), true);
+      assert.equal(fs.readlinkSync(dest), referent);
+      for (const [file, bytes] of Object.entries(FILES)) {
+        assert.ok(fs.readFileSync(path.join(referent, file)).equals(bytes), file);
+      }
+      const requests = hits.length;
+      assert.equal((await runFetch(endpoint, contract(), dest)).status, 0);
+      assert.equal(hits.length, requests, 'restored cache reuses verified files');
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('fetch refuses bytes that do not match the contract sha256 and leaves no final file', async () => {
   const dest = fs.mkdtempSync(path.join(os.tmpdir(), 'tf-fetch-dest-'));
   try {

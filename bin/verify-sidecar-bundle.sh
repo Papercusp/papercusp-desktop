@@ -856,7 +856,7 @@ check_boot_import_closure() {
   local side="$1"
   "$side/bin/node" --input-type=module - "$side" <<'NODE'
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { closeSync, fstatSync, mkdtempSync, openSync, readSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const side = process.argv[2];
@@ -876,8 +876,20 @@ try {
   }
   const executable = join(side, 'bin/node');
   const startedAt = Date.now();
-  const result = spawnSync(executable, [join(side, 'serve.mjs'), '--verify-boot-imports'],
-    { cwd: side, env, encoding: 'utf8', timeout: 60000, maxBuffer: 1024 * 1024 });
+  // Verbose loader diagnostics must not kill the child by filling spawnSync's
+  // captured pipe (EI-25629008665505233). Reuse the isolated home for stderr;
+  // keep the stdout receipt bound and deadline, and read only a diagnostic tail.
+  const stderrFd = openSync(join(home, 'boot-imports.stderr.log'), 'wx+', 0o600);
+  let result, stderrTail;
+  try {
+    result = spawnSync(executable, [join(side, 'serve.mjs'), '--verify-boot-imports'],
+      { cwd: side, env, encoding: 'utf8', timeout: 60000, maxBuffer: 1024 * 1024,
+        stdio: ['ignore', 'pipe', stderrFd] });
+    const size = fstatSync(stderrFd).size;
+    const tail = Buffer.alloc(Math.min(4096, size));
+    const bytes = readSync(stderrFd, tail, 0, tail.length, size - tail.length);
+    stderrTail = tail.subarray(0, bytes).toString('utf8');
+  } finally { closeSync(stderrFd); }
   if (result.error || result.status !== 0 || !result.stdout?.includes('PAPERCUSP_BOOT_IMPORTS_OK')) {
     const diagnostic = { executable, cwd: side, elapsedMs: Date.now() - startedAt,
       pid: result.pid, status: result.status, signal: result.signal,
@@ -887,7 +899,7 @@ try {
     process.stderr.write(`boot import closure FAILED: ${result.error?.message ?? result.status}\n` +
       JSON.stringify(diagnostic) + '\n[child stdout tail]\n' +
       String(result.stdout ?? '').slice(-4096) + '\n[child stderr tail]\n' +
-      String(result.stderr ?? '').slice(-4096) + '\n');
+      String(result.stderr ?? stderrTail).slice(-4096) + '\n');
     process.exitCode = 1;
   }
 } finally { rmSync(home, { recursive: true, force: true }); }
