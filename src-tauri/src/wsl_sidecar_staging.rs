@@ -3,7 +3,7 @@
 //! extractor cannot attest that the producer supplied its entire source tree.
 
 use std::io::{self, Read, Write};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -236,6 +236,44 @@ impl Drop for OwnedChild {
 
 pub fn run_bounded(command: &mut Command, timeout: Duration) -> io::Result<ExitStatus> {
     let mut child = OwnedChild(command.spawn()?);
+    wait_bounded(&mut child, timeout)
+}
+
+/// Capture a small capability receipt while draining both pipes concurrently.
+/// Reuse the owned-child deadline so a settings service cannot stall a launch.
+pub fn run_bounded_output(command: &mut Command, timeout: Duration) -> io::Result<Output> {
+    let mut child = OwnedChild(command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?);
+    let stdout = child.0.stdout.take().expect("piped stdout");
+    let stderr = child.0.stderr.take().expect("piped stderr");
+    let deadline = Instant::now() + timeout;
+    let (tx, rx) = mpsc::channel();
+    for (is_stdout, pipe) in [
+        (true, Box::new(stdout) as Box<dyn Read + Send>),
+        (false, Box::new(stderr) as Box<dyn Read + Send>),
+    ] {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = pipe.take(16_385).read_to_end(&mut bytes).and_then(|_| {
+                if bytes.len() > 16_384 {
+                    Err(io::Error::new(io::ErrorKind::InvalidData, "capability receipt exceeds 16 KiB"))
+                } else { Ok(bytes) }
+            });
+            let _ = tx.send((is_stdout, result));
+        });
+    }
+    drop(tx);
+    let status = wait_bounded(&mut child, timeout)?;
+    let mut output = Output { status, stdout: Vec::new(), stderr: Vec::new() };
+    for _ in 0..2 {
+        let (is_stdout, bytes) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|e| io::Error::new(io::ErrorKind::TimedOut, format!("capability output did not close: {e}")))?;
+        if is_stdout { output.stdout = bytes?; } else { output.stderr = bytes?; }
+    }
+    Ok(output)
+}
+
+fn wait_bounded(child: &mut OwnedChild, timeout: Duration) -> io::Result<ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.0.try_wait()? {
