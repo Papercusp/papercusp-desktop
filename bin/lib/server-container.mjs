@@ -679,26 +679,30 @@ export async function buildServerContainer(options, run = runCommand) {
 /** Publish verified platform generations through the existing BYOC OCI trust pipeline. */
 export async function publishServerContainers(options, run = runCommand) {
   const engine = options.engine ?? 'docker';
+  const preflightOnly = options.preflightOnly === true;
   if (!['docker', 'podman'].includes(engine)) throw new Error('Engine must be docker or podman');
   const tag = options.tag;
-  if (typeof tag !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/.test(tag) ||
-      !tag.includes('/') || !tag.split('/').at(-1).includes(':')) {
+  if (!preflightOnly && (typeof tag !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/.test(tag) ||
+      !tag.includes('/') || !tag.split('/').at(-1).includes(':'))) {
     throw new Error('Publication requires an explicit repository and release tag');
   }
-  for (const key of ['key', 'out', 'amd64Receipt', 'arm64Receipt']) {
+  for (const key of ['amd64Receipt', 'arm64Receipt', ...(preflightOnly ? [] : ['key', 'out'])]) {
     if (typeof options[key] !== 'string' || !options[key]) throw new Error('Missing publication input: ' + key);
   }
-  const key = resolve(options.key);
-  const pubkey = resolve(options.pubkey ?? key.replace(/\.key$/, '.pub'));
-  if (pubkey === key) throw new Error('A separate verification public key is required');
-  await Promise.all([lstat(key), lstat(pubkey)]);
+  const key = preflightOnly ? null : resolve(options.key);
+  const pubkey = preflightOnly ? null : resolve(options.pubkey ?? key.replace(/\.key$/, '.pub'));
+  if (!preflightOnly) {
+    if (pubkey === key) throw new Error('A separate verification public key is required');
+    await Promise.all([lstat(key), lstat(pubkey)]);
+  }
   const members = [];
   for (const arch of ['amd64', 'arm64']) {
     const receiptPath = resolve(options[arch + 'Receipt']);
     const receiptHash = await hashFile(receiptPath);
     const receipt = await jsonFile(receiptPath);
     if (receipt.kind !== 'papercusp-server-local-image' || receipt.schemaVersion !== 1 ||
-        receipt.platform !== 'linux/' + arch || receipt.engine !== engine ||
+        receipt.platform !== 'linux/' + arch || !['docker', 'podman'].includes(receipt.engine) ||
+        (receipt.engine !== engine && !options[arch + 'Archive']) ||
         !/^sha256:[a-f0-9]{64}$/.test(receipt.imageId ?? '') ||
         !COMMIT.test(receipt.sourceCommit ?? '') || !receipt.rootfsBaseImage ||
         !SHA.test(receipt.sbomSha256 ?? '') ||
@@ -720,16 +724,31 @@ export async function publishServerContainers(options, run = runCommand) {
         !/^v\d+\.\d+\.\d+$/.test(proof.nodeVersion ?? '')) {
       throw new Error('Build generation lacks observed native/container payload parity');
     }
-    const image = JSON.parse(await run(engine, ['image', 'inspect', '--format', '{{json .}}', receipt.imageId]));
-    if (!matchesImageId(image.Id, receipt.imageId) || image.Os + '/' + image.Architecture !== receipt.platform ||
+    // An exported Docker image may name an OCI index while Podman addresses its
+    // config. Resolve that relation from the verified archive, never by rewriting
+    // the original native build receipt or trusting a caller-supplied config ID.
+    let imageId = receipt.imageId;
+    let importVerification = null;
+    if (options[arch + 'Archive']) {
+      importVerification = await verifyServerContainerArchive({
+        archive: options[arch + 'Archive'], receiptPath,
+      }, run);
+      if (importVerification.receiptSha256 !== receiptHash) throw new Error('Local build receipt changed during import');
+      imageId = importVerification.configDigest;
+      await run(engine, ['load', '--input', importVerification.archive]);
+      if (await hashFile(importVerification.archive) !== importVerification.archiveSha256)
+        throw new Error('Archive changed during import');
+    }
+    const image = JSON.parse(await run(engine, ['image', 'inspect', '--format', '{{json .}}', imageId]));
+    if (!matchesImageId(image.Id, imageId) || image.Os + '/' + image.Architecture !== receipt.platform ||
         Object.entries(labels).some(([name, value]) => image.Config?.Labels?.[name] !== value)) {
       throw new Error('Local image no longer matches its build generation');
     }
-    await verifyServerContainerPayload({ engine, imageId: receipt.imageId, platform: receipt.platform,
+    await verifyServerContainerPayload({ engine, imageId, platform: receipt.platform,
       serveSha256: proof.serveSha256, mcpProxySha256: proof.mcpProxySha256,
       nodeVersion: proof.nodeVersion.slice(1) }, run);
     if (await hashFile(receiptPath) !== receiptHash) throw new Error('Local build receipt changed during preflight');
-    members.push({ arch, receipt, receiptPath, receiptHash });
+    members.push({ arch, receipt, receiptPath, receiptHash, imageId, importVerification });
   }
   if (members[0].receipt.sourceCommit !== members[1].receipt.sourceCommit) {
     throw new Error('Platform generations are from different native Server builds');
@@ -738,11 +757,20 @@ export async function publishServerContainers(options, run = runCommand) {
   // liveness/parity proof never substitutes for this fresh full-boot observation.
   for (const member of members) {
     member.bootVerification = await verifyServerContainerBoot({ engine,
-      imageId: member.receipt.imageId, platform: member.receipt.platform,
+      imageId: member.imageId, platform: member.receipt.platform,
       sourceCommit: member.receipt.sourceCommit,
       nodeVersion: member.receipt.payloadVerification.nodeVersion.slice(1),
       bootTimeoutMs: options.bootTimeoutMs }, run);
+    if (await hashFile(member.receiptPath) !== member.receiptHash ||
+        await hashFile(join(dirname(member.receiptPath), 'sbom.cdx.json')) !== member.receipt.sbomSha256)
+      throw new Error('Local build receipt or SBOM changed during boot preflight');
   }
+  if (preflightOnly) return { schemaVersion: 1, kind: 'papercusp-server-publication-preflight',
+    engine, sourceCommit: members[0].receipt.sourceCommit, signed: false, published: false,
+    platforms: members.map(member => ({ platform: member.receipt.platform, imageId: member.imageId,
+      nativeImageId: member.receipt.imageId, nativeReceiptSha256: member.receiptHash,
+      sbomSha256: member.receipt.sbomSha256, importVerification: member.importVerification,
+      bootVerification: member.bootVerification })) };
   const out = resolve(options.out);
   if (members.some(member => within(out, member.receiptPath) || within(dirname(member.receiptPath), out))) {
     throw new Error('Publication output must be separate from local build generations');
@@ -764,13 +792,13 @@ export async function publishServerContainers(options, run = runCommand) {
   const repository = tag.slice(0, tag.lastIndexOf(':'));
   try {
     for (const member of members) {
-      const memberTag = tag + '-' + member.arch + '-' + member.receipt.imageId.slice(7, 19);
-      await run(engine, ['tag', member.receipt.imageId, memberTag]);
+      const memberTag = tag + '-' + member.arch + '-' + member.imageId.slice(7, 19);
+      await run(engine, ['tag', member.imageId, memberTag]);
       await run(engine, ['push', ...(engine === 'podman' ? tls : []), memberTag]);
       member.digest = await registry(memberTag);
       member.reference = repository + '@' + member.digest;
       const manifest = await registry(member.reference, true);
-      if (manifest.config?.digest !== member.receipt.imageId) {
+      if (manifest.config?.digest !== member.imageId) {
         throw new Error('Registry member does not contain the built native image');
       }
       const signingOut = join(stage, member.arch);
@@ -817,7 +845,9 @@ export async function publishServerContainers(options, run = runCommand) {
       reference, digest, tag, sourceCommit: members[0].receipt.sourceCommit,
       verifiedFromRegistry: true, memberSignaturesVerified: true,
       platforms: members.map(member => ({ platform: member.receipt.platform, reference: member.reference,
-        imageId: member.receipt.imageId, labels: member.receipt.labels, sbomSha256: member.receipt.sbomSha256,
+        imageId: member.imageId, labels: member.receipt.labels, sbomSha256: member.receipt.sbomSha256,
+        ...(member.importVerification ? { nativeImageId: member.receipt.imageId,
+          importVerification: member.importVerification } : {}),
         bootVerification: { imageId: member.bootVerification.imageId, platform: member.bootVerification.platform,
           sourceCommit: member.bootVerification.sourceCommit, arch: member.bootVerification.arch,
           node: member.bootVerification.node, dbos: true, schemaReady: true, vectorReady: true },

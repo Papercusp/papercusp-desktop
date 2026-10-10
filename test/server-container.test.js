@@ -12,7 +12,7 @@ const lib = import(pathToFileURL(path.join(desktop, 'bin/lib/server-container.mj
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const imageId = 'sha256:' + 'b'.repeat(64);
 
-async function archiveFixture(t, mutate = () => {}, dockerOnly = false) {
+async function archiveFixture(t, mutate = () => {}, dockerOnly = false, sourceReceipt = null) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'server-archive-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const tree = path.join(root, 'tree');
@@ -24,14 +24,14 @@ async function archiveFixture(t, mutate = () => {}, dockerOnly = false) {
     return { digest, size: bytes.length, mediaType };
   };
   const layer = await descriptor(Buffer.from('uncompressed layer fixture'), 'application/vnd.oci.image.layer.v1.tar');
-  const configValue = { os: 'linux', architecture: 'arm64', config: { Labels: {
+  const configValue = { os: 'linux', architecture: 'arm64', config: { Labels: sourceReceipt?.labels ?? {
     'org.opencontainers.image.revision': 'a'.repeat(40), 'com.papercusp.serve.sha256': 'b'.repeat(64),
   } }, rootfs: { type: 'layers', diff_ids: [layer.digest] } };
   const config = await descriptor(configValue, 'application/vnd.oci.image.config.v1+json');
   const manifest = await descriptor({ schemaVersion: 2, config, layers: [layer] }, 'application/vnd.oci.image.manifest.v1+json');
   const index = await descriptor({ schemaVersion: 2, manifests: [{ ...manifest,
     platform: { os: 'linux', architecture: 'arm64' } }] }, 'application/vnd.oci.image.index.v1+json');
-  const receipt = { kind: 'papercusp-server-local-image', schemaVersion: 1,
+  const receipt = { ...sourceReceipt, kind: 'papercusp-server-local-image', schemaVersion: 1,
     imageId: dockerOnly ? config.digest : index.digest, platform: 'linux/arm64',
     sourceCommit: 'a'.repeat(40), labels: configValue.config.Labels, tag: 'papercusp-server:test' };
   const aliases = [{ Config: 'blobs/sha256/' + config.digest.slice(7),
@@ -754,9 +754,11 @@ async function publicationFixture(t, overrides = {}) {
   const indexDigest = 'sha256:' + 'f'.repeat(64);
   const calls = [];
   let activeBootReceipt;
-  const run = async (command, args) => {
+  const run = async (command, args, runOptions) => {
     calls.push({ command, args });
-    if (command === engine && ['image', 'tag', 'push', 'manifest', 'run', 'inspect', 'exec', 'rm'].includes(args[0])) {
+    if (command === 'tar') return (await lib).runCommand(command, args, runOptions);
+    if (command === engine && ['image', 'load', 'tag', 'push', 'manifest', 'run', 'inspect', 'exec', 'rm'].includes(args[0])) {
+      if (args[0] === 'load') return '';
       if (args[0] === 'image') {
         const image = images.find(image => image.Id === args.at(-1));
         return JSON.stringify({ ...image, Id: 'inspectId' in overrides ? overrides.inspectId :
@@ -766,7 +768,7 @@ async function publicationFixture(t, overrides = {}) {
             { 'org.opencontainers.image.revision': '9'.repeat(40) } : {}) } } });
       }
       if (args[0] === 'run') {
-        const receipt = receipts.find(receipt => args.includes(receipt.imageId));
+        const receipt = receipts[images.findIndex(image => args.includes(image.Id))];
         if (args.includes('--detach')) { activeBootReceipt = receipt; return 'd'.repeat(64); }
         if (args.at(-1).includes('papercusp-boot-home-check')) return JSON.stringify(receipt.bootVerification.homeVerification);
         return JSON.stringify({ ...receipt.payloadVerification,
@@ -783,7 +785,7 @@ async function publicationFixture(t, overrides = {}) {
       const archIndex = ref.includes('-amd64-') || ref.endsWith(digests[0]) ? 0 :
         ref.includes('-arm64-') || ref.endsWith(digests[1]) ? 1 : -1;
       if (!args.includes('--raw')) return (archIndex < 0 ? indexDigest : digests[archIndex]) + '\n';
-      if (archIndex >= 0) return JSON.stringify({ config: { digest: overrides.wrongConfig ? indexDigest : receipts[archIndex].imageId } });
+      if (archIndex >= 0) return JSON.stringify({ config: { digest: overrides.wrongConfig ? indexDigest : images[archIndex].Id } });
       return JSON.stringify({ manifests: digests.map((digest, i) => ({
         digest: overrides.wrongMember && i === 1 ? indexDigest : digest,
         platform: { os: 'linux', architecture: i === 0 || overrides.missingArm64 ? 'amd64' : 'arm64' },
@@ -808,6 +810,60 @@ async function publicationFixture(t, overrides = {}) {
   };
   return { options, receipts, images, calls, run };
 }
+
+async function importedPublicationFixture(t, overrides = {}) {
+  const f = await publicationFixture(t, { engine: 'podman', ...overrides });
+  const original = f.receipts[1];
+  const a = await archiveFixture(t, a => { a.receipt.engine = 'docker'; }, false, original);
+  await fs.copyFile(original.sbomPath, path.join(a.root, 'sbom.cdx.json'));
+  f.options.arm64Receipt = a.receiptPath;
+  f.options.arm64Archive = a.archive;
+  f.receipts[1] = { ...a.receipt, bootVerification: { ...original.bootVerification, imageId: a.config.digest } };
+  f.images[1].Id = a.config.digest;
+  return { ...f, archiveFixture: a };
+}
+
+test('publication imports a verified Docker index into Podman without relabeling its native receipt', async t => {
+  const f = await importedPublicationFixture(t);
+  const original = await fs.readFile(f.options.arm64Receipt);
+  const result = await (await lib).publishServerContainers(f.options, f.run);
+  assert.equal(result.platforms[1].imageId, f.archiveFixture.config.digest);
+  assert.equal(result.platforms[1].nativeImageId, f.archiveFixture.index.digest);
+  assert.equal(result.platforms[1].importVerification.configDigest, f.archiveFixture.config.digest);
+  assert.equal(result.platforms[1].nativeReceiptSha256, sha(original));
+  assert.deepEqual(await fs.readFile(f.options.arm64Receipt), original);
+  assert.ok(f.calls.some(c => c.command === 'podman' && c.args[0] === 'load'));
+  assert.ok(f.calls.some(c => c.command === 'podman' && c.args[0] === 'tag' && c.args[1] === f.archiveFixture.config.digest));
+});
+
+test('archive-backed publication refuses missing proof, changed archive and substituted loaded config before pushes', async t => {
+  for (const mode of ['missing', 'changed', 'config']) await t.test(mode, async t => {
+    const f = await importedPublicationFixture(t);
+    if (mode === 'missing') delete f.options.arm64Archive;
+    const run = async (command, args, options) => {
+      if (mode === 'changed' && command === 'podman' && args[0] === 'load') await fs.appendFile(f.options.arm64Archive, 'changed');
+      if (mode === 'config' && command === 'podman' && args[0] === 'image' && args.at(-1) === f.archiveFixture.config.digest)
+        return JSON.stringify({ ...f.images[1], Id: '9'.repeat(64) });
+      return f.run(command, args, options);
+    };
+    const error = { missing: /build generation/, changed: /changed during import/, config: /no longer matches/ }[mode];
+    await assert.rejects((await lib).publishServerContainers(f.options, run), error);
+    assert.equal(f.calls.some(c => c.command === 'podman' && c.args[0] === 'push'), false);
+  });
+});
+
+test('publication preflight verifies imported members without any registry or signing identity', async t => {
+  const f = await importedPublicationFixture(t);
+  for (const field of ['key', 'pubkey', 'tag', 'out']) delete f.options[field];
+  const result = await (await lib).publishServerContainers({ ...f.options, preflightOnly: true }, f.run);
+  assert.equal(result.kind, 'papercusp-server-publication-preflight');
+  assert.equal(result.signed, false);
+  assert.equal(result.published, false);
+  assert.equal(result.platforms.length, 2);
+  assert.ok(result.platforms.every(p => p.bootVerification.dbos && p.bootVerification.vectorReady));
+  assert.equal(f.calls.some(c => c.command === 'bash' || c.command === 'sudo' ||
+    (c.command === 'podman' && ['tag', 'push', 'manifest'].includes(c.args[0]))), false);
+});
 
 test('publication verifies signed members and exact platforms from the registry before issuing a release receipt', async t => {
   const { publishServerContainers } = await lib;
