@@ -319,7 +319,7 @@ async function saveOwnedReceipt(file, receipt) {
 async function settleOwnedContainer(receipt, save, run, budget, createdId) {
   receipt.cleanupPending = true;
   await save();
-  let id = createdId;
+  let id = /^[a-f0-9]{64}$/.test(createdId ?? '') ? createdId : undefined;
   const deadline = performance.now() + budget;
   while (!id) {
     let object;
@@ -405,7 +405,7 @@ export async function runOwnedContainer(options, run = runCommand) {
     await chmod(lease + '.tmp', 0o644);
     await rename(lease + '.tmp', lease);
   };
-  let id, heartbeat, error, createAttempted = false, heartbeatPending = Promise.resolve();
+  let id, heartbeat, error, output, createAttempted = false, heartbeatPending = Promise.resolve();
   const receipt = { schemaVersion: 1, engine, imageId: options.imageId, platform: options.platform,
     leaseTimeoutMs: ttl, leaseRoot, clockRoot, status: 'creating',
     containerName: 'papercusp-native-' + randomUUID(), ownerToken: randomUUID() };
@@ -435,12 +435,11 @@ export async function runOwnedContainer(options, run = runCommand) {
     }, Math.min(1000, Math.floor(ttl / 3)));
     if (options.signal?.aborted) controller.abort();
     receipt.status = 'running'; await save();
-    const output = await run(engine, ['start', '--attach', id],
+    output = await run(engine, ['start', '--attach', id],
       { timeout: options.timeoutMs ?? 2 * 60 * 60_000, signal: controller.signal, stream: true });
     const state = JSON.parse(await run(engine, ['inspect', '--format', '{{json .State}}', id], { timeout: 5000 }));
     if (state.Running !== false || state.ExitCode !== 0) throw new Error('Owned producer exited with ' + state.ExitCode);
     receipt.exitCode = state.ExitCode; receipt.status = 'completed';
-    return { ...receipt, receiptFile, output };
   } catch (caught) {
     error = caught; receipt.status = 'failed'; receipt.error = caught.message; throw caught;
   } finally {
@@ -455,6 +454,7 @@ export async function runOwnedContainer(options, run = runCommand) {
       throw new AggregateError([...(error ? [error] : []), cleanupError], 'Owned producer cleanup failed');
     }
   }
+  return { ...receipt, receiptFile, output };
 }
 
 /** Observe the packaged bytes with the image's own runtime, without starting services. */

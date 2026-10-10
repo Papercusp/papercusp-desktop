@@ -172,7 +172,11 @@ test('owned producer removes only its recorded immutable container after success
     };
     const promise = runOwnedContainer({ imageId, platform: 'linux/arm64', out: root,
       command: ['bash', '-c', 'exit 0'], signal: controller.signal }, run);
-    if (outcome === 'success') assert.equal((await promise).output, 'producer output');
+    if (outcome === 'success') {
+      const result = await promise;
+      assert.equal(result.output, 'producer output');
+      assert.equal(result.removed, true); assert.equal(result.cleanupPending, false);
+    }
     else await assert.rejects(promise, /producer failed|producer aborted/);
     assert.deepEqual(calls.at(-1), ['rm', '--force', id]);
     const [directory] = await fs.readdir(root);
@@ -329,6 +333,29 @@ test('interrupted create waits for a late owned object before removing its immut
   const [directory] = await fs.readdir(root);
   const receipt = JSON.parse(await fs.readFile(path.join(root, directory, 'ownership.json')));
   assert.equal(receipt.removed, true); assert.equal(receipt.cleanupPending, false);
+});
+
+test('an invalid create response cannot become a mutable cleanup target', async t => {
+  const { runOwnedContainer } = await lib;
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'owned-create-invalid-id-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  let name, token;
+  const removed = [];
+  await assert.rejects(runOwnedContainer({ imageId, platform: 'linux/arm64', out: root, command: ['true'] },
+    async (engine, args) => {
+      if (args[0] === 'create') {
+        name = args[args.indexOf('--name') + 1]; token = args[args.indexOf('--label') + 1].split('=')[1];
+        return 'foreign-mutable-name';
+      }
+      if (args[0] === 'inspect') {
+        assert.equal(args.at(-1), name);
+        return JSON.stringify({ Id: 'c'.repeat(64), Image: imageId,
+          Config: { Labels: { 'dev.papercusp.producer-owner': token } } });
+      }
+      if (args[0] === 'rm') { removed.push(args); return ''; }
+      throw new Error('unexpected');
+    }), /no immutable producer container ID/);
+  assert.deepEqual(removed, [['rm', '--force', 'c'.repeat(64)]]);
 });
 
 test('an absent interrupted create remains pending and resumes without another create', async t => {
