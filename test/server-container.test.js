@@ -302,6 +302,75 @@ test('interrupted create recovers only the exact saved name, image and ownership
   }
 });
 
+test('interrupted create waits for a late owned object before removing its immutable ID', async t => {
+  const { runOwnedContainer } = await lib;
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'owned-create-late-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  let name, token, inspections = 0, creates = 0;
+  const removed = [];
+  await assert.rejects(runOwnedContainer({ imageId, platform: 'linux/arm64', out: root,
+    command: ['true'], cleanupTimeoutMs: 1000 }, async (engine, args) => {
+    if (args[0] === 'create') {
+      creates++;
+      name = args[args.indexOf('--name') + 1]; token = args[args.indexOf('--label') + 1].split('=')[1];
+      throw new Error('create client timed out');
+    }
+    if (args[0] === 'inspect') {
+      assert.equal(args.at(-1), name);
+      if (++inspections === 1) throw new Error('No such object: ' + name);
+      return JSON.stringify({ Id: 'c'.repeat(64), Image: imageId,
+        Config: { Labels: { 'dev.papercusp.producer-owner': token } } });
+    }
+    if (args[0] === 'rm') { removed.push(args); return ''; }
+    throw new Error('unexpected');
+  }), /create client timed out/);
+  assert.equal(creates, 1); assert.equal(inspections, 2);
+  assert.deepEqual(removed, [['rm', '--force', 'c'.repeat(64)]]);
+  const [directory] = await fs.readdir(root);
+  const receipt = JSON.parse(await fs.readFile(path.join(root, directory, 'ownership.json')));
+  assert.equal(receipt.removed, true); assert.equal(receipt.cleanupPending, false);
+});
+
+test('an absent interrupted create remains pending and resumes without another create', async t => {
+  const { runOwnedContainer, reconcileOwnedContainer } = await lib;
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'owned-create-pending-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  let name, token, creates = 0;
+  await assert.rejects(runOwnedContainer({ imageId, platform: 'linux/arm64', out: root,
+    command: ['true'], cleanupTimeoutMs: 50 }, async (engine, args) => {
+    if (args[0] === 'create') {
+      creates++;
+      name = args[args.indexOf('--name') + 1]; token = args[args.indexOf('--label') + 1].split('=')[1];
+      throw new Error('create client timed out');
+    }
+    if (args[0] === 'inspect') throw new Error('No such object: ' + name);
+    throw new Error('must not remove an absent object');
+  }), /cleanup failed/);
+  const [directory] = await fs.readdir(root);
+  const receiptFile = path.join(root, directory, 'ownership.json');
+  const pending = JSON.parse(await fs.readFile(receiptFile));
+  assert.equal(pending.removed, undefined); assert.equal(pending.cleanupPending, true);
+  assert.match(pending.cleanupError, /pending/);
+  for (const foreign of [true, false]) {
+    let removals = 0;
+    const reconcile = reconcileOwnedContainer({ receiptFile, cleanupTimeoutMs: 50 }, async (engine, args) => {
+      if (args[0] === 'inspect') {
+        assert.equal(args.at(-1), name);
+        return JSON.stringify({ Id: 'c'.repeat(64), Image: imageId,
+          Config: { Labels: { 'dev.papercusp.producer-owner': foreign ? 'foreign' : token } } });
+      }
+      if (args[0] === 'rm') { assert.equal(args.at(-1), 'c'.repeat(64)); removals++; return ''; }
+      throw new Error('resumed cleanup must not create or start a workload');
+    });
+    if (foreign) await assert.rejects(reconcile, /ownership/);
+    else assert.equal((await reconcile).removed, true);
+    assert.equal(removals, foreign ? 0 : 1);
+  }
+  assert.equal(creates, 1);
+  const settled = JSON.parse(await fs.readFile(receiptFile));
+  assert.equal(settled.cleanupPending, false); assert.equal(settled.cleanupError, undefined);
+});
+
 test('in-container supervisor terminates the producer when launcher lease disappears', async t => {
   const { ownedContainerSupervisor } = await lib;
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'owned-producer-lease-'));
