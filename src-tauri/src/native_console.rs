@@ -938,7 +938,7 @@ fn spawn_external_with(
         }
     }
     strip_terminal_context_env(&mut cmd);
-    for a in args {
+    for a in prepare_linux_terminal_args(bin, args, &spec.env)? {
         cmd.arg(a);
     }
     cmd.arg("bash").arg("-lc").arg(oneliner);
@@ -1185,7 +1185,7 @@ fn spawn_linux_with(
         }
     }
     strip_terminal_context_env(&mut cmd);
-    for a in args {
+    for a in prepare_linux_terminal_args(bin, args, &envelope.env)? {
         cmd.arg(a);
     }
     cmd.arg("bash").arg("-lc").arg(oneliner);
@@ -1196,6 +1196,78 @@ fn spawn_linux_with(
         .stderr(std::process::Stdio::null());
     let child = cmd.spawn().map_err(|e| format!("spawn {bin}: {e}"))?;
     Ok(Some(child.id()))
+}
+
+/// The same bundled preparation policy used by the operator's Node launchers.
+/// Compile it into the shell so installed native launches need no repo paths.
+#[cfg(target_os = "linux")]
+const GNOME_TERMINAL_POLICY: &str = include_str!("../../../../packages/operator-core/lib/gnome-terminal-policy.json");
+
+#[cfg(target_os = "linux")]
+fn prepare_linux_terminal_args(
+    bin: &str,
+    args: &[&str],
+    env: &HashMap<String, String>,
+) -> Result<Vec<String>, String> {
+    let mut prepared: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+    if std::path::Path::new(bin).file_name().and_then(|v| v.to_str()) != Some("gnome-terminal") {
+        return Ok(prepared);
+    }
+    if !args.iter().any(|arg| *arg == "--disable-factory" || *arg == "--app-id" || arg.starts_with("--app-id=")) {
+        let path = env.get("PATH").cloned().or_else(|| std::env::var("PATH").ok()).unwrap_or_default();
+        let executable = if bin.contains('/') { Some(PathBuf::from(bin)) } else {
+            std::env::split_paths(&path).map(|dir| dir.join(bin)).find(|p| p.is_file())
+        };
+        if let Some(text) = executable.and_then(|p| std::fs::read_to_string(p).ok()) {
+            if text.starts_with("#!") && text.contains("python")
+                && text.contains("parser.add_argument('--disable-factory'") {
+                prepared.insert(0, "--disable-factory".into());
+            }
+        }
+    }
+    if args.iter().any(|arg| *arg == "--profile" || arg.starts_with("--profile=")) {
+        return Ok(prepared);
+    }
+    let policy: serde_json::Value = serde_json::from_str(GNOME_TERMINAL_POLICY)
+        .map_err(|e| format!("invalid bundled GNOME terminal policy: {e}"))?;
+    let uuid = policy["profileUuid"].as_str().ok_or("bundled GNOME profile UUID missing")?;
+    let limit = policy["scrollbackLines"].as_u64().ok_or("bundled GNOME history limit missing")?;
+    let script = policy["preparation"].as_array().ok_or("bundled GNOME preparation missing")?
+        .iter().map(|line| line.as_str().ok_or("invalid bundled GNOME preparation line"))
+        .collect::<Result<Vec<_>, _>>()?.join("\n");
+    let mut command = std::process::Command::new("python3");
+    command.args(["-c", &script, uuid, &limit.to_string()]).stdin(std::process::Stdio::null());
+    for (key, value) in env {
+        if is_valid_env_name(key) { command.env(key, value); }
+    }
+    strip_terminal_context_env(&mut command);
+    let output = crate::wsl_sidecar_staging::run_bounded_output(&mut command, std::time::Duration::from_secs(8))
+        .map_err(|e| gnome_preparation_error(&e.to_string()))?;
+    if !output.status.success() {
+        return Err(gnome_preparation_error(&String::from_utf8_lossy(&output.stderr)));
+    }
+    let receipt: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| "GNOME profile preparation returned no valid receipt".to_string())?;
+    if receipt["profileUuid"].is_null() && receipt["customized"] == true {
+        return Ok(prepared);
+    }
+    let preserved = receipt["sourceProfileUuid"].is_string()
+        && receipt["sourceProfileUuid"] == receipt["defaultProfileUuid"];
+    if preserved && receipt["profileUuid"].is_null() && receipt["sourceUnlimited"] == false
+        && receipt["scrollbackLines"].as_u64().is_some_and(|lines| lines <= limit) {
+        return Ok(prepared);
+    }
+    if !preserved || receipt["profileUuid"] != uuid
+        || !receipt["scrollbackLines"].as_u64().is_some_and(|lines| lines > 0) {
+        return Err("GNOME profile preparation could not verify preserved default and bounded new profile".into());
+    }
+    prepared.insert(0, format!("--profile={uuid}"));
+    Ok(prepared)
+}
+
+#[cfg(target_os = "linux")]
+fn gnome_preparation_error(detail: &str) -> String {
+    format!("GNOME terminal safeguards require Python 3, PyGObject and GNOME Terminal settings. Install python3-gi and gnome-terminal (or your distribution equivalents), ensure python3 is on PATH, and retry. {}", detail.trim())
 }
 
 /// Cheap PATH lookup. We can't pull in the `which` crate without
