@@ -57,7 +57,8 @@ test('production native GNOME preparation and both entrypoints preserve preferen
       ].join('\n'));
       const run = spawnSync(process.env.CARGO || 'cargo', ['test', '--offline', '--manifest-path', manifest, '--', 'tests::'],
         { encoding: 'utf8', timeout: 110000, env: { ...process.env, CARGO_TARGET_DIR: path.join(temp, 'target') } });
-      assert.equal(run.status, 0, String(run.error || run.stderr || run.stdout));
+      const diagnostics = run.stderr.split('\n').filter((line) => /error|--> |^\s*\d+\s*\||^\s*\|/.test(line)).join('\n');
+      assert.equal(run.status, 0, String(run.error || diagnostics || run.stderr.slice(-3000) || run.stdout));
       for (const name of ['gnome_preparation_preserves_explicit_profiles_and_other_emulators',
         'gnome_preparation_verifies_default_and_finite_history_receipts',
         'both_native_gnome_entrypoints_prepare_before_spawn_and_refuse_dependency_failures']) {
