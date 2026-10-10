@@ -409,12 +409,44 @@ export async function verifyServerContainerPayload(options, run = runCommand) {
   return observed;
 }
 
+function bootFilesystemArgs(engine) {
+  // Podman 4.9 rejects Docker's uid/gid tmpfs options. Its chown option
+  // gives the empty mount to the image user without running the Server as root.
+  return ['--network', 'none', '--read-only', '--tmpfs', '/tmp:rw,exec',
+    ...(engine === 'podman'
+      ? ['--mount', 'type=tmpfs,destination=/home/papercup,tmpfs-mode=0700,notmpcopyup,U=true']
+      : ['--tmpfs', '/home/papercup:rw,uid=1001,gid=1001,mode=0700'])];
+}
+
+/** Exercise the real engine grammar and non-root home before starting services. */
+export async function verifyServerContainerHome(options, run = runCommand) {
+  if (!['docker', 'podman'].includes(options.engine) || !PLATFORMS.has(options.platform) ||
+      !/^sha256:[a-f0-9]{64}$/.test(options.imageId ?? '')) {
+    throw new Error('Home verification requires an immutable image and supported platform');
+  }
+  const script = "const fs=require('node:fs'),a=require('node:assert/strict');" +
+    "const home=process.env.HOME,s=fs.statSync(home),uid=process.getuid(),gid=process.getgid();" +
+    "a.equal(home,'/home/papercup');a.equal(uid,1001);a.equal(gid,1001);" +
+    "a.equal(s.uid,uid);a.equal(s.gid,gid);a.equal(s.mode&511,448);" +
+    "a.equal(fs.readdirSync(home).length,0);const file=home+'/papercusp-boot-home-check';" +
+    "fs.writeFileSync(file,'ok',{flag:'wx',mode:384});fs.unlinkSync(file);" +
+    "process.stdout.write(JSON.stringify({uid,gid,homeUid:s.uid,homeGid:s.gid,mode:s.mode&511,empty:true,writable:true}));";
+  const observed = JSON.parse(await run(options.engine, ['run', '--rm', '--platform', options.platform,
+    ...bootFilesystemArgs(options.engine), '--entrypoint', '/usr/local/bin/node', options.imageId, '-e', script]));
+  if (observed.uid !== 1001 || observed.gid !== 1001 || observed.homeUid !== 1001 ||
+      observed.homeGid !== 1001 || observed.mode !== 0o700 || observed.empty !== true || observed.writable !== true) {
+    throw new Error('Packaged Server lacks an empty private writable non-root home');
+  }
+  return observed;
+}
+
 /** Boot the immutable artifact in an isolated empty home, with no host ports/network. */
 export async function verifyServerContainerBoot(options, run = runCommand) {
   if (!['docker', 'podman'].includes(options.engine) || !PLATFORMS.has(options.platform) ||
       !/^sha256:[a-f0-9]{64}$/.test(options.imageId ?? '') || !COMMIT.test(options.sourceCommit ?? '')) {
     throw new Error('Server boot verification requires an immutable image, platform and source commit');
   }
+  const homeVerification = await verifyServerContainerHome(options, run);
   const name = 'papercusp-server-boot-' + randomUUID();
   const deadline = Date.now() + (options.bootTimeoutMs ?? 15 * 60_000);
   const sql = "SELECT json_build_object('vectorReady',EXISTS(SELECT 1 FROM pg_extension WHERE extname='vector')," +
@@ -434,8 +466,7 @@ export async function verifyServerContainerBoot(options, run = runCommand) {
   let observed;
   try {
     await run(options.engine, ['run', '--detach', '--name', name, '--platform', options.platform,
-      '--network', 'none', '--read-only', '--tmpfs', '/tmp:rw,exec',
-      '--tmpfs', '/home/papercup:rw,uid=1001,gid=1001,mode=0700',
+      ...bootFilesystemArgs(options.engine),
       '--env', 'PAPERCUSP_HONO_PORT=3070', '--env', 'PAPERCUSP_PG_PORT=5532',
       '--env', 'PAPERCUSP_BACKGROUND_WORKERS=1', '--env', 'PAPERCUSP_DBOS_ENABLE=1', options.imageId]);
     do {
@@ -459,7 +490,7 @@ export async function verifyServerContainerBoot(options, run = runCommand) {
           observed.node === 'v' + options.nodeVersion &&
           observed.database?.vectorReady === true && observed.database.schemaReady === true) {
         return { schemaVersion: 1, imageId: options.imageId, platform: options.platform,
-          sourceCommit: options.sourceCommit, verifiedAtUtc: new Date().toISOString(), ...observed };
+          sourceCommit: options.sourceCommit, verifiedAtUtc: new Date().toISOString(), homeVerification, ...observed };
       }
       if (Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, Math.min(1000, deadline - Date.now())));
     } while (Date.now() < deadline);
@@ -534,17 +565,31 @@ export async function buildServerContainer(options, run = runCommand) {
   const input = await preflightServerContainer(options, run);
   const engine = options.engine ?? 'docker';
   if (!['docker', 'podman'].includes(engine)) throw new Error('Engine must be docker or podman');
+  if (options.imageId !== undefined && !/^sha256:[a-f0-9]{64}$/.test(options.imageId)) {
+    throw new Error('Retained image qualification requires a full immutable image ID');
+  }
   const out = resolve(options.out);
   if (within(input.sidecar, out) || within(out, input.sidecar) || within(out, input.rootfs)) {
     throw new Error('Output directory must be separate from the source artifacts');
   }
   await mkdir(out, { recursive: true });
   const fs = await statfs(out);
-  if (BigInt(fs.bsize) * BigInt(fs.bavail) < BigInt(input.inputBytes) + 256n * 1024n * 1024n) {
+  if (BigInt(fs.bsize) * BigInt(fs.bavail) < (options.imageId ? 0n : BigInt(input.inputBytes)) + 256n * 1024n * 1024n) {
     throw new Error('Insufficient output space for a frozen build context');
   }
   const stage = await mkdtemp(join(out, '.server-container-build-'));
   try {
+    let imageId = options.imageId;
+    let containerfileSha256 = null;
+    const labels = {
+      'org.opencontainers.image.revision': input.sourceCommit,
+      'com.papercusp.rootfs.sha256': input.rootfsSha256,
+      'com.papercusp.sidecar.sha256': input.sidecarSha256,
+      'com.papercusp.serve.sha256': input.serveSha256,
+      'com.papercusp.native.release-audit': input.nativeReleaseAuditPassed ? 'passed' : 'unverified',
+      'com.papercusp.native.source-verified': input.nativeSourceVerified ? 'true' : 'false',
+    };
+    if (!imageId) {
     const context = join(stage, 'context');
     options.onProgress?.('freeze-inputs');
     await mkdir(context);
@@ -558,21 +603,17 @@ export async function buildServerContainer(options, run = runCommand) {
     }
     const containerfile = join(context, 'Containerfile');
     await cp(options.containerfile ?? defaultContainerfile, containerfile);
-    const labels = {
-      'org.opencontainers.image.revision': input.sourceCommit,
-      'com.papercusp.rootfs.sha256': input.rootfsSha256,
-      'com.papercusp.sidecar.sha256': input.sidecarSha256,
-      'com.papercusp.serve.sha256': input.serveSha256,
-      'com.papercusp.native.release-audit': input.nativeReleaseAuditPassed ? 'passed' : 'unverified',
-      'com.papercusp.native.source-verified': input.nativeSourceVerified ? 'true' : 'false',
-    };
+    containerfileSha256 = await hashFile(containerfile);
     const labelArgs = Object.entries(labels).flatMap(([key, value]) => ['--label', key + '=' + value]);
     const iidfile = join(stage, 'image-id');
     options.onProgress?.('build-image');
     await run(engine, ['build', '--platform', input.platform,
       '--build-arg', 'PAPERCUSP_BUILD_SHA=' + input.sourceCommit, ...labelArgs, '--iidfile', iidfile,
       '--tag', input.tag, '--file', containerfile, context]);
-    const imageId = (await readFile(iidfile, 'utf8')).trim();
+    imageId = (await readFile(iidfile, 'utf8')).trim();
+    } else {
+      options.onProgress?.('qualify-retained-image');
+    }
     if (!/^sha256:[a-f0-9]{64}$/.test(imageId)) throw new Error('Engine did not return a content-addressed image');
     const inspected = JSON.parse(await run(engine, ['image', 'inspect', '--format', '{{json .}}', imageId]));
     if (!matchesImageId(inspected.Id, imageId) || inspected.Os + '/' + inspected.Architecture !== input.platform ||
@@ -600,7 +641,8 @@ export async function buildServerContainer(options, run = runCommand) {
       tag: input.tag, imageId, sourceCommit: input.sourceCommit, labels,
       engine, rootfsBaseImage: input.rootfsBaseImage,
       payloadVerification, bootVerification,
-      rootfsRecipeSha256: input.recipeSha256, containerfileSha256: await hashFile(containerfile),
+      rootfsRecipeSha256: input.recipeSha256, containerfileSha256,
+      buildMode: options.imageId ? 'qualify-retained-image' : 'build',
       sbomSha256: await hashFile(sbomTmp), sbomPackages: sbom.components.length,
       sbomPath, signed: false, published: false,
     };

@@ -251,8 +251,8 @@ function nativeHeader(machine) {
 async function fakeRunner(options = {}) {
   const calls = [];
   const id = options.imageId ?? imageId;
-  let labels;
-  let imageContext;
+  let labels = options.labels;
+  let imageContext = options.imageContext;
   return {
     calls,
     run: async (command, args, config) => {
@@ -293,6 +293,23 @@ async function fakeRunner(options = {}) {
       if (command === (options.engine ?? 'docker') && args[0] === 'run') {
         assert.ok(args.includes(id), 'probe the content-addressed image, never a tag');
         assert.equal(args[args.indexOf('--network') + 1], 'none');
+        if (options.engine === 'podman') {
+          for (let i = 0; i < args.length; i++) {
+            if (args[i] === '--tmpfs') assert.doesNotMatch(args[i + 1], /(?:uid|gid)=/,
+              'Podman 4.9 refuses uid/gid in --tmpfs');
+          }
+        }
+        if (args.at(-1).includes('papercusp-boot-home-check')) {
+          assert.ok(args.includes('--rm'));
+          assert.ok(args.includes('--read-only'));
+          assert.equal(args[args.indexOf('--entrypoint') + 1], '/usr/local/bin/node');
+          if (options.engine === 'podman') assert.ok(args.includes(
+            'type=tmpfs,destination=/home/papercup,tmpfs-mode=0700,notmpcopyup,U=true'));
+          else assert.ok(args.includes('/home/papercup:rw,uid=1001,gid=1001,mode=0700'));
+          return JSON.stringify({ uid: 1001, gid: 1001, homeUid: 1001, homeGid: 1001,
+            mode: 0o700, empty: true, writable: !options.unwritableHome,
+            ...options.homeObservation });
+        }
         if (args.includes('--detach')) {
           assert.ok(args.includes('--read-only'));
           assert.ok(args.includes('PAPERCUSP_DBOS_ENABLE=1'));
@@ -495,11 +512,87 @@ test('Podman inspect normalization rejects different, incomplete or malformed ha
   }
 });
 
+test('retained image qualification binds every input without freezing or rebuilding', async t => {
+  const { preflightServerContainer, buildServerContainer } = await lib;
+  const f = await fixture(t);
+  const input = await preflightServerContainer(f.options);
+  const labels = {
+    'org.opencontainers.image.revision': input.sourceCommit,
+    'com.papercusp.rootfs.sha256': input.rootfsSha256,
+    'com.papercusp.sidecar.sha256': input.sidecarSha256,
+    'com.papercusp.serve.sha256': input.serveSha256,
+    'com.papercusp.native.release-audit': 'unverified',
+    'com.papercusp.native.source-verified': 'false',
+  };
+  const progress = [];
+  const runner = await fakeRunner({ engine: 'podman', labels, imageContext: f.root });
+  const result = await buildServerContainer({ ...f.options, engine: 'podman', imageId,
+    onProgress: phase => progress.push(phase) }, runner.run);
+  assert.equal(result.buildMode, 'qualify-retained-image');
+  assert.equal(result.containerfileSha256, null, 'qualification cannot attest a previous build recipe');
+  assert.equal(result.bootVerification.homeVerification.writable, true);
+  assert.equal(runner.calls.some(c => c.args[0] === 'build'), false);
+  assert.equal(progress.includes('freeze-inputs'), false);
+  assert.equal(result.signed, false);
+  assert.equal(result.published, false);
+  for (const key of Object.keys(labels)) {
+    const mismatch = await fakeRunner({ engine: 'podman', labels: { ...labels, [key]: 'different' }, imageContext: f.root });
+    await assert.rejects(buildServerContainer({ ...f.options, engine: 'podman', imageId }, mismatch.run),
+      /does not match/);
+    assert.equal(mismatch.calls.some(c => ['run', 'build'].includes(c.args[0])), false);
+  }
+  for (const invalid of ['localhost/image:mutable', 'c'.repeat(64), 'sha256:' + 'c'.repeat(12)]) {
+    await assert.rejects(buildServerContainer({ ...f.options, imageId: invalid }, runner.run), /immutable image ID/);
+  }
+});
+
+test('private home precheck refuses wrong identity, ownership, mode, contents or write access before services', async t => {
+  const { verifyServerContainerBoot } = await lib;
+  for (const homeObservation of [{ uid: 0 }, { gid: 0 }, { homeUid: 0 }, { homeGid: 0 },
+    { mode: 0o777 }, { empty: false }, { writable: false }]) {
+    await t.test(JSON.stringify(homeObservation), async () => {
+      const runner = await fakeRunner({ engine: 'podman', homeObservation });
+      await assert.rejects(verifyServerContainerBoot({ engine: 'podman', platform: 'linux/amd64',
+        imageId, sourceCommit: 'a'.repeat(40), nodeVersion: '24.18.1' }, runner.run), /private writable non-root home/);
+      assert.equal(runner.calls.some(c => c.args.includes('--detach')), false);
+      assert.equal(runner.calls.some(c => c.command === 'syft'), false);
+    });
+  }
+});
+
+test('generated home precheck actually writes and removes its file and rejects a populated home', async t => {
+  const { verifyServerContainerHome } = await lib;
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'boot-home-'));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const run = async (_engine, args) => {
+    const setup = `
+      const fs=require('node:fs'),home=${JSON.stringify(home)};
+      process.env.HOME='/home/papercup';process.getuid=()=>1001;process.getgid=()=>1001;
+      const translate=p=>p.replace('/home/papercup',home);
+      for(const name of ['statSync','readdirSync','writeFileSync','unlinkSync']) {
+        const original=fs[name];fs[name]=(p,...args)=>{
+          const r=original(translate(p),...args);
+          if(name==='statSync'){r.uid=1001;r.gid=1001;}return r;
+        };
+      }
+    `;
+    const r = spawnSync(process.execPath, ['-e', setup + args.at(-1)], { encoding: 'utf8' });
+    if (r.status !== 0) throw new Error(r.stderr);
+    return r.stdout;
+  };
+  const options = { engine: 'podman', platform: 'linux/amd64', imageId };
+  assert.equal((await verifyServerContainerHome(options, run)).writable, true);
+  assert.deepEqual(await fs.readdir(home), [], 'the actual generated script leaves no check file');
+  await fs.writeFile(path.join(home, 'unexpected'), 'state from another instance');
+  await assert.rejects(verifyServerContainerHome(options, run), /AssertionError/);
+});
+
 test('the actual in-container probe queries the discovered database after DBOS readiness', async () => {
   const { verifyServerContainerBoot } = await lib;
   let removed = false;
   const run = async (_command, args) => {
-    if (args[0] === 'run') return 'd'.repeat(64);
+    if (args[0] === 'run') return args.includes('--detach') ? 'd'.repeat(64) :
+      JSON.stringify({ uid: 1001, gid: 1001, homeUid: 1001, homeGid: 1001, mode: 0o700, empty: true, writable: true });
     if (args[0] === 'inspect') return JSON.stringify({ Running: true });
     if (args[0] === 'rm') { removed = true; return ''; }
     assert.equal(args[0], 'exec');
