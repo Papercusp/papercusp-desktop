@@ -37,6 +37,12 @@ function within(root, path) {
   return !isAbsolute(suffix) && suffix !== '..' && !suffix.startsWith('..' + sep);
 }
 
+function matchesImageId(observed, expected) {
+  // Podman reports the full config hash without Docker's sha256: prefix.
+  return observed === expected ||
+    (typeof observed === 'string' && SHA.test(observed) && 'sha256:' + observed === expected);
+}
+
 async function requireElfPlatform(path, machine, required = true) {
   const fd = await open(path, 'r');
   try {
@@ -569,7 +575,7 @@ export async function buildServerContainer(options, run = runCommand) {
     const imageId = (await readFile(iidfile, 'utf8')).trim();
     if (!/^sha256:[a-f0-9]{64}$/.test(imageId)) throw new Error('Engine did not return a content-addressed image');
     const inspected = JSON.parse(await run(engine, ['image', 'inspect', '--format', '{{json .}}', imageId]));
-    if (inspected.Id !== imageId || inspected.Os + '/' + inspected.Architecture !== input.platform ||
+    if (!matchesImageId(inspected.Id, imageId) || inspected.Os + '/' + inspected.Architecture !== input.platform ||
         Object.entries(labels).some(([key, value]) => inspected.Config?.Labels?.[key] !== value)) {
       throw new Error('Built image does not match its platform and source labels');
     }
@@ -670,7 +676,7 @@ export async function publishServerContainers(options, run = runCommand) {
       throw new Error('Build generation lacks observed native/container payload parity');
     }
     const image = JSON.parse(await run(engine, ['image', 'inspect', '--format', '{{json .}}', receipt.imageId]));
-    if (image.Id !== receipt.imageId || image.Os + '/' + image.Architecture !== receipt.platform ||
+    if (!matchesImageId(image.Id, receipt.imageId) || image.Os + '/' + image.Architecture !== receipt.platform ||
         Object.entries(labels).some(([name, value]) => image.Config?.Labels?.[name] !== value)) {
       throw new Error('Local image no longer matches its build generation');
     }

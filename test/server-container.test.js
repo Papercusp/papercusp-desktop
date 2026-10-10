@@ -284,8 +284,11 @@ async function fakeRunner(options = {}) {
         return '';
       }
       if (command === (options.engine ?? 'docker') && args[0] === 'image') {
-        return JSON.stringify({ Id: id, Os: 'linux', Architecture: options.wrongPlatform ? 'arm64' : (options.arch ?? 'amd64'),
-          Config: { Labels: labels } });
+        return JSON.stringify({ Id: 'inspectId' in options ? options.inspectId :
+          (options.engine === 'podman' ? id.slice(7) : id),
+          Os: 'linux', Architecture: options.wrongPlatform ? 'arm64' : (options.arch ?? 'amd64'),
+          Config: { Labels: { ...labels, ...(options.wrongLabel ?
+            { 'org.opencontainers.image.revision': '9'.repeat(40) } : {}) } } });
       }
       if (command === (options.engine ?? 'docker') && args[0] === 'run') {
         assert.ok(args.includes(id), 'probe the content-addressed image, never a tag');
@@ -464,6 +467,34 @@ test('successful build inspects the content-addressed image and publishes bound 
   assert.equal((await fs.readdir(f.options.out)).some(name => name.startsWith('.server-container-build-')), false);
 });
 
+test('Podman build accepts a full bare inspect hash and preserves canonical receipt identity', async t => {
+  const { buildServerContainer } = await lib;
+  const f = await fixture(t);
+  const runner = await fakeRunner({ engine: 'podman' });
+  const result = await buildServerContainer({ ...f.options, engine: 'podman' }, runner.run);
+  assert.equal(result.imageId, imageId);
+  assert.equal(result.bootVerification.imageId, imageId);
+  assert.equal(JSON.parse(await fs.readFile(result.receiptPath, 'utf8')).imageId, imageId);
+  assert.ok(runner.calls.some(c => c.command === 'podman' && c.args[0] === 'run' && c.args.includes(imageId)));
+});
+
+test('Podman inspect normalization rejects different, incomplete or malformed hashes and provenance', async t => {
+  const { buildServerContainer } = await lib;
+  for (const mismatch of [{ inspectId: 'c'.repeat(64) }, { inspectId: 'sha256:' + 'c'.repeat(64) },
+    { inspectId: 'b'.repeat(12) }, { inspectId: 'z'.repeat(64) }, { inspectId: null },
+    { wrongPlatform: true }, { wrongLabel: true }]) {
+    await t.test(JSON.stringify(mismatch), async t => {
+      const f = await fixture(t);
+      const runner = await fakeRunner({ engine: 'podman', ...mismatch });
+      await assert.rejects(buildServerContainer({ ...f.options, engine: 'podman' }, runner.run),
+        /Built image does not match/);
+      assert.equal(runner.calls.some(c => c.command === 'podman' && c.args[0] === 'run'), false);
+      await assert.rejects(fs.stat(path.join(f.options.out, 'papercusp-server-amd64-' + imageId.slice(7, 19))),
+        { code: 'ENOENT' });
+    });
+  }
+});
+
 test('the actual in-container probe queries the discovered database after DBOS readiness', async () => {
   const { verifyServerContainerBoot } = await lib;
   let removed = false;
@@ -603,7 +634,12 @@ async function publicationFixture(t, overrides = {}) {
     calls.push({ command, args });
     if (command === engine && ['image', 'tag', 'push', 'manifest', 'run', 'inspect', 'exec', 'rm'].includes(args[0])) {
       if (args[0] === 'image') {
-        return JSON.stringify(images.find(image => image.Id === args.at(-1)));
+        const image = images.find(image => image.Id === args.at(-1));
+        return JSON.stringify({ ...image, Id: 'inspectId' in overrides ? overrides.inspectId :
+          (engine === 'podman' ? image.Id.slice(7) : image.Id),
+          Architecture: overrides.wrongPlatform ? '386' : image.Architecture,
+          Config: { Labels: { ...image.Config.Labels, ...(overrides.wrongLabel ?
+            { 'org.opencontainers.image.revision': '9'.repeat(40) } : {}) } } });
       }
       if (args[0] === 'run') {
         const receipt = receipts.find(receipt => args.includes(receipt.imageId));
@@ -709,6 +745,18 @@ test('Podman publication assembles both immutable members and cleans its tempora
   assert.equal(f.calls.filter(c => c.command === 'podman' && c.args[0] === 'push').length, 2);
   assert.ok(f.calls.some(c => c.command === 'podman' && c.args[0] === 'manifest' && c.args[1] === 'push' && c.args.includes('--all')));
   assert.ok(f.calls.some(c => c.command === 'podman' && c.args[0] === 'manifest' && c.args[1] === 'rm'));
+});
+
+test('Podman publication rejects inspect identity or provenance drift before pushing', async t => {
+  const { publishServerContainers } = await lib;
+  for (const mismatch of [{ inspectId: 'e'.repeat(64) }, { inspectId: 'b'.repeat(12) },
+    { inspectId: null }, { wrongPlatform: true }, { wrongLabel: true }]) {
+    await t.test(JSON.stringify(mismatch), async t => {
+      const f = await publicationFixture(t, { engine: 'podman', ...mismatch });
+      await assert.rejects(publishServerContainers(f.options, f.run), /Local image no longer matches/);
+      assert.equal(f.calls.some(c => c.command === 'podman' && c.args[0] === 'push'), false);
+    });
+  }
 });
 
 test('each architecture remains bound to its own native bundle from the common source release', async t => {
