@@ -202,6 +202,9 @@ export async function verifyServerContainerArchive(options, run = runCommand) {
   };
   const labelsMatch = config => Object.entries(receipt.labels).every(([key, value]) => config.config?.Labels?.[key] === value);
   const normalizeTag = tag => tag.replace(/^docker\.io\/(?:library\/)?/, '');
+  // Saving by immutable ID gives Podman's OCI archive that ID as its reference.
+  const referenceMatches = ref => normalizeTag(ref) === normalizeTag(receipt.tag) ||
+    matchesImageId(ref, receipt.imageId);
   const candidates = [];
   if (members.has('index.json')) {
     if ((await readJson('oci-layout')).value.imageLayoutVersion !== '1.0.0') throw new Error('Invalid OCI layout version');
@@ -233,8 +236,8 @@ export async function verifyServerContainerArchive(options, run = runCommand) {
           for (const ref of refs) {
             const full = ref['io.containerd.image.name'];
             const name = ref['org.opencontainers.image.ref.name'];
-            if ((full && normalizeTag(full) !== normalizeTag(receipt.tag)) ||
-                (name && normalizeTag(name) !== normalizeTag(receipt.tag) && name !== receipt.tag.split(':').at(-1)))
+            if ((full && !referenceMatches(full)) ||
+                (name && !referenceMatches(name) && name !== receipt.tag.split(':').at(-1)))
               throw new Error('OCI archive image reference changed');
           }
           candidates.push({ manifestDigest: descriptor.digest, configDigest: manifest.config.digest, configPath, layerPaths });

@@ -80,6 +80,37 @@ test('OCI-only archives retain reference binding and refuse a substituted preser
   await assert.rejects(verifyServerContainerArchive({ ...f, archiveSha256: '0'.repeat(64) }), /preservation/);
 });
 
+test('OCI immutable-ID references require the exact receipt image digest', async t => {
+  const { verifyServerContainerArchive } = await lib;
+  for (const annotation of ['org.opencontainers.image.ref.name', 'io.containerd.image.name']) {
+    for (const form of ['prefixed', 'bare', 'wrong-prefixed', 'wrong-bare', 'short', 'nonhex']) {
+      await t.test(annotation + '/' + form, async t => {
+        const f = await archiveFixture(t, async f => {
+          f.receipt.imageId = f.config.digest;
+          const reference = {
+            prefixed: f.config.digest,
+            bare: f.config.digest.slice(7),
+            'wrong-prefixed': 'sha256:' + '9'.repeat(64),
+            'wrong-bare': '9'.repeat(64),
+            short: f.config.digest.slice(7, 19),
+            nonhex: 'g'.repeat(64),
+          }[form];
+          const indexPath = path.join(f.tree, 'index.json');
+          const index = JSON.parse(await fs.readFile(indexPath, 'utf8'));
+          // podman save <immutable-id> emits this single annotation, without a tag.
+          index.manifests[0].annotations = { [annotation]: reference };
+          await fs.writeFile(indexPath, JSON.stringify(index));
+        });
+        if (form === 'prefixed' || form === 'bare') {
+          assert.equal((await verifyServerContainerArchive(f)).configDigest, f.config.digest);
+        } else {
+          await assert.rejects(verifyServerContainerArchive(f), /reference changed/);
+        }
+      });
+    }
+  }
+});
+
 test('archive verification refuses platform, source, reference, missing and corrupt blob bindings', async t => {
   const { verifyServerContainerArchive } = await lib;
   for (const mutation of ['platform', 'source', 'reference', 'oci-reference', 'descriptor-platform', 'config-alias', 'layer-alias', 'missing', 'config-bytes', 'layer-bytes', 'size', 'identity']) {
