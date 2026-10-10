@@ -1201,7 +1201,7 @@ fn spawn_linux_with(
 /// The same bundled preparation policy used by the operator's Node launchers.
 /// Compile it into the shell so installed native launches need no repo paths.
 #[cfg(target_os = "linux")]
-const GNOME_TERMINAL_POLICY: &str = include_str!("../../../../packages/operator-core/lib/gnome-terminal-policy.json");
+const GNOME_TERMINAL_POLICY: &str = include_str!("../../../packages/operator-core/lib/gnome-terminal-policy.json");
 
 #[cfg(target_os = "linux")]
 fn prepare_linux_terminal_args(
@@ -1235,17 +1235,29 @@ fn prepare_linux_terminal_args(
     let script = policy["preparation"].as_array().ok_or("bundled GNOME preparation missing")?
         .iter().map(|line| line.as_str().ok_or("invalid bundled GNOME preparation line"))
         .collect::<Result<Vec<_>, _>>()?.join("\n");
-    let mut command = std::process::Command::new("python3");
-    command.args(["-c", &script, uuid, &limit.to_string()]).stdin(std::process::Stdio::null());
-    for (key, value) in env {
-        if is_valid_env_name(key) { command.env(key, value); }
+    let mut verified_output = None;
+    let mut failure = String::new();
+    for python in policy["pythonCandidates"].as_array().ok_or("bundled GNOME Python candidates missing")? {
+        let python = python.as_str().ok_or("invalid bundled GNOME Python candidate")?;
+        let mut command = std::process::Command::new(python);
+        command.args(["-c", &script, uuid, &limit.to_string()]).stdin(std::process::Stdio::null());
+        for (key, value) in env {
+            if is_valid_env_name(key) { command.env(key, value); }
+        }
+        strip_terminal_context_env(&mut command);
+        match crate::wsl_sidecar_staging::run_bounded_output(&mut command, std::time::Duration::from_secs(8)) {
+            Ok(output) if output.status.success() => { verified_output = Some(output); break; }
+            Ok(output) => {
+                failure = String::from_utf8_lossy(&output.stderr).into_owned();
+                if !failure.contains("No module named 'gi'") && !failure.contains("No module named gi") { break; }
+            }
+            Err(error) => {
+                failure = error.to_string();
+                if error.kind() != std::io::ErrorKind::NotFound { break; }
+            }
+        }
     }
-    strip_terminal_context_env(&mut command);
-    let output = crate::wsl_sidecar_staging::run_bounded_output(&mut command, std::time::Duration::from_secs(8))
-        .map_err(|e| gnome_preparation_error(&e.to_string()))?;
-    if !output.status.success() {
-        return Err(gnome_preparation_error(&String::from_utf8_lossy(&output.stderr)));
-    }
+    let output = verified_output.ok_or_else(|| gnome_preparation_error(&failure))?;
     let receipt: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|_| "GNOME profile preparation returned no valid receipt".to_string())?;
     if receipt["profileUuid"].is_null() && receipt["customized"] == true {
@@ -1598,6 +1610,91 @@ fn windows_terminal_executable() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    struct TerminalFixture(PathBuf);
+    #[cfg(target_os = "linux")]
+    impl TerminalFixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("papercusp-terminal-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&root).unwrap();
+            Self(root)
+        }
+        fn executable(&self, name: &str, body: &str) {
+            use std::os::unix::fs::PermissionsExt;
+            let path = self.0.join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fn env(&self) -> HashMap<String, String> {
+            HashMap::from([("PATH".into(), self.0.to_string_lossy().into_owned())])
+        }
+    }
+    #[cfg(target_os = "linux")]
+    impl Drop for TerminalFixture {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gnome_preparation_preserves_explicit_profiles_and_other_emulators() {
+        let fixture = TerminalFixture::new();
+        for (bin, args) in [("kitty", vec!["--"]), ("gnome-terminal", vec!["--profile=personal", "--"]),
+            ("gnome-terminal", vec!["--profile", "personal", "--"])] {
+            assert_eq!(prepare_linux_terminal_args(bin, &args, &fixture.env()).unwrap(), args);
+        }
+        fixture.executable("python3", "#!/bin/sh\nprintf '%s' 'GNOME settings schemas unavailable' >&2\nexit 1\n");
+        let error = prepare_linux_terminal_args("gnome-terminal", &["--"], &fixture.env()).unwrap_err();
+        assert!(error.contains("Install python3-gi and gnome-terminal"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gnome_preparation_verifies_default_and_finite_history_receipts() {
+        let fixture = TerminalFixture::new();
+        let policy: serde_json::Value = serde_json::from_str(GNOME_TERMINAL_POLICY).unwrap();
+        let uuid = policy["profileUuid"].as_str().unwrap();
+        let receipt = serde_json::json!({"profileUuid": uuid, "scrollbackLines": 10000,
+            "sourceProfileUuid": "original", "defaultProfileUuid": "original"});
+        fixture.executable("python3", &format!("#!/bin/sh\nprintf '%s' '{}'\n", receipt));
+        let args = prepare_linux_terminal_args("gnome-terminal", &["--app-id=personal", "--window", "--"], &fixture.env()).unwrap();
+        assert_eq!(args, vec![format!("--profile={uuid}"), "--app-id=personal".into(), "--window".into(), "--".into()]);
+        for invalid in [serde_json::json!({"profileUuid": null}),
+            serde_json::json!({"profileUuid": uuid, "scrollbackLines": 10000, "sourceProfileUuid": "original", "defaultProfileUuid": "changed"})] {
+            fixture.executable("python3", &format!("#!/bin/sh\nprintf '%s' '{}'\n", invalid));
+            assert!(prepare_linux_terminal_args("gnome-terminal", &["--"], &fixture.env()).is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn both_native_gnome_entrypoints_prepare_before_spawn_and_refuse_dependency_failures() {
+        let fixture = TerminalFixture::new();
+        let policy: serde_json::Value = serde_json::from_str(GNOME_TERMINAL_POLICY).unwrap();
+        let uuid = policy["profileUuid"].as_str().unwrap();
+        let receipt = serde_json::json!({"profileUuid": uuid, "scrollbackLines": 10000,
+            "sourceProfileUuid": "original", "defaultProfileUuid": "original"});
+        fixture.executable("python3", &format!("#!/bin/sh\nprintf '%s' '{}'\n", receipt));
+        fixture.executable("gnome-terminal", "#!/bin/sh\n# python parser.add_argument('--disable-factory'\nprintf '%s\\n' \"$@\" > \"$ARG_RECEIPT\"\n");
+        let bin = fixture.0.join("gnome-terminal").to_string_lossy().into_owned();
+        let mut e = envelope(fixture.0.to_str().unwrap());
+        e.env = fixture.env();
+        let receipt_path = fixture.0.join("args");
+        e.env.insert("ARG_RECEIPT".into(), receipt_path.to_string_lossy().into_owned());
+        let spec = ExternalConsoleSpec { cwd: e.cwd.clone(), env: e.env.clone(), command: "true".into(), args: vec![], title: "test".into() };
+        for external in [false, true] {
+            let pid = if external { spawn_external_with(&bin, &["--window", "--"], &spec, "true") }
+                else { spawn_linux_with(&bin, &["--window", "--"], &e, "true") }.unwrap().unwrap();
+            unsafe { libc::waitpid(pid as i32, std::ptr::null_mut(), 0); }
+            let actual = std::fs::read_to_string(&receipt_path).unwrap();
+            assert!(actual.starts_with(&format!("--profile={uuid}\n--disable-factory\n--window\n--\nbash\n-lc\n")), "{actual}");
+            std::fs::remove_file(&receipt_path).unwrap();
+        }
+        fixture.executable("python3", "#!/bin/sh\nprintf '%s' 'GNOME settings schemas unavailable' >&2\nexit 1\n");
+        assert!(spawn_linux_with(&bin, &["--"], &e, "true").unwrap_err().contains("PyGObject"));
+        assert!(spawn_external_with(&bin, &["--"], &spec, "true").unwrap_err().contains("PyGObject"));
+        assert!(!receipt_path.exists(), "dependency failure must prevent an unprotected spawn");
+    }
 
     fn envelope(cwd: &str) -> ConsoleEnvelope {
         let mut env = HashMap::new();
