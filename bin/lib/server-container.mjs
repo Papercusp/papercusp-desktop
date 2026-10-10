@@ -4,7 +4,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, statfs, writeFile } from 'node:fs/promises';
+import { chmod, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, statfs, writeFile } from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -318,7 +318,12 @@ export async function runOwnedContainer(options, run = runCommand) {
   const out = resolve(options.out);
   await mkdir(out, { recursive: true });
   const leaseRoot = await mkdtemp(join(out, '.native-producer-owner-'));
-  const lease = join(leaseRoot, 'lease.json');
+  // Bind only the clock into the guest. Ownership credentials stay in the
+  // private parent, while any non-owner guest UID can read the timestamp.
+  const clockRoot = join(leaseRoot, 'clock');
+  await mkdir(clockRoot);
+  await chmod(clockRoot, 0o755);
+  const lease = join(clockRoot, 'lease.json');
   const receiptFile = join(leaseRoot, 'ownership.json');
   const ttl = options.leaseTimeoutMs ?? 15_000;
   if (!Number.isInteger(ttl) || ttl < 1000 || ttl > 60_000) throw new Error('Owned producer lease requires 1000..60000 ms');
@@ -326,11 +331,13 @@ export async function runOwnedContainer(options, run = runCommand) {
   const abort = () => controller.abort();
   const update = async () => {
     await writeFile(lease + '.tmp', JSON.stringify({ at: Date.now() }), { mode: 0o600 });
+    // Explicitly override a restrictive host umask for this clock-only file.
+    await chmod(lease + '.tmp', 0o644);
     await rename(lease + '.tmp', lease);
   };
   let id, heartbeat, error, heartbeatPending = Promise.resolve();
   const receipt = { schemaVersion: 1, imageId: options.imageId, platform: options.platform,
-    leaseTimeoutMs: ttl, leaseRoot, status: 'creating',
+    leaseTimeoutMs: ttl, leaseRoot, clockRoot, status: 'creating',
     containerName: 'papercusp-native-' + randomUUID(), ownerToken: randomUUID() };
   const save = () => writeFile(receiptFile, JSON.stringify(receipt) + '\n', { mode: 0o600 });
   process.on('SIGTERM', abort); process.on('SIGINT', abort);
@@ -339,13 +346,14 @@ export async function runOwnedContainer(options, run = runCommand) {
     await update();
     await save();
     id = (await run(engine, ['create', '--init', '--name', receipt.containerName,
-      '--platform', options.platform, '--mount', 'type=bind,source=' + leaseRoot + ',target=/run/papercusp-producer-owner,readonly',
+      '--platform', options.platform, '--mount', 'type=bind,source=' + clockRoot + ',target=/run/papercusp-producer-owner,readonly',
       ...(options.args ?? []), '--label', 'dev.papercusp.producer-owner=' + receipt.ownerToken,
       '--entrypoint', '/usr/local/bin/node', options.imageId,
       '-e', ownedContainerSupervisor, '/run/papercusp-producer-owner/lease.json', String(ttl), ...options.command],
     { timeout: options.timeoutMs ?? 2 * 60 * 60_000, signal: controller.signal })).trim();
     if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Engine returned no immutable producer container ID');
     receipt.containerId = id; receipt.status = 'created'; await save();
+    await update();
     heartbeat = setInterval(() => {
       heartbeatPending = heartbeatPending.then(update).catch(error => {
         receipt.leaseError = error.message; controller.abort();

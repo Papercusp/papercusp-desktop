@@ -181,6 +181,83 @@ test('owned producer removes only its recorded immutable container after success
   }
 });
 
+test('owned producer exposes a cross-UID clock without exposing its ownership receipt', async t => {
+  const { runOwnedContainer, ownedContainerSupervisor } = await lib;
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'owned-producer-clock-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  let clockRoot;
+  const oldUmask = process.umask(0o077);
+  t.after(() => process.umask(oldUmask));
+  const privileged = process.getuid?.() === 0;
+  const sudo = !privileged && process.platform === 'linux' &&
+    spawnSync('sudo', ['-n', process.execPath, '-e', 'process.exit(0)']).status === 0;
+  await runOwnedContainer({ imageId, platform: 'linux/arm64', out: root, command: ['true'] },
+    async (engine, args) => {
+      if (args[0] === 'create') {
+        const mount = args[args.indexOf('--mount') + 1];
+        assert.match(mount, /,target=\/run\/papercusp-producer-owner,readonly$/);
+        clockRoot = mount.split(',')[1].slice('source='.length);
+        assert.equal((await fs.stat(clockRoot)).mode & 0o777, 0o755);
+        assert.deepEqual(await fs.readdir(clockRoot), ['lease.json']);
+        assert.equal((await fs.stat(path.join(clockRoot, 'lease.json'))).mode & 0o777, 0o644);
+        assert.deepEqual(Object.keys(JSON.parse(await fs.readFile(path.join(clockRoot, 'lease.json')))), ['at']);
+        const ownerRoot = path.dirname(clockRoot);
+        assert.equal((await fs.stat(ownerRoot)).mode & 0o777, 0o700);
+        assert.equal((await fs.stat(path.join(ownerRoot, 'ownership.json'))).mode & 0o777, 0o600);
+        return 'c'.repeat(64);
+      }
+      if (args[0] === 'start') {
+        if (privileged || sudo) {
+          // Enter the mounted directory before dropping privileges: a bind mount
+          // bypasses the private host parents in exactly the same way.
+          const probe = `const fs=require('node:fs');
+            const [root,supervisor]=process.argv.slice(1);
+            process.chdir(root);process.setgroups([]);process.setgid(1001);process.setuid(1001);
+            let privateReadable=false;try{fs.readFileSync('../ownership.json');privateReadable=true}catch{}
+            console.log(JSON.stringify({uid:process.getuid(),privateReadable,clock:JSON.parse(fs.readFileSync('lease.json','utf8'))}));
+            process.argv=[process.execPath,'lease.json','1000','/usr/bin/printf','workload-ran'];eval(supervisor);`;
+          for (const fresh of [true, false]) {
+            await fs.writeFile(path.join(clockRoot, 'lease.json'), JSON.stringify({ at: fresh ? Date.now() : 0 }));
+            const argv = ['-e', probe, clockRoot, ownedContainerSupervisor];
+            const result = spawnSync(privileged ? process.execPath : 'sudo', privileged ? argv : ['-n', process.execPath, ...argv],
+              { encoding: 'utf8', timeout: 5000 });
+            assert.equal(result.status, fresh ? 0 : 125, result.stderr);
+            const observation = JSON.parse(result.stdout.split('\n')[0]);
+            assert.equal(observation.uid, 1001); assert.equal(observation.privateReadable, false);
+            assert.equal(result.stdout.includes('workload-ran'), fresh);
+          }
+        } else t.diagnostic('Cross-UID OS probe unavailable; clock and private-receipt permission invariants checked.');
+        return '';
+      }
+      if (args[0] === 'inspect') return JSON.stringify({ Running: false, ExitCode: 0 });
+      if (args[0] === 'rm') return '';
+      throw new Error('unexpected engine call');
+    });
+});
+
+test('owned producer refreshes its clock after create before starting the workload', async t => {
+  const { runOwnedContainer } = await lib;
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'owned-producer-slow-create-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  let now = Date.now(), clockRoot;
+  t.mock.method(Date, 'now', () => now);
+  await runOwnedContainer({ imageId, platform: 'linux/arm64', out: root, command: ['true'] },
+    async (engine, args) => {
+      if (args[0] === 'create') {
+        clockRoot = args[args.indexOf('--mount') + 1].split(',')[1].slice('source='.length);
+        now += 20_000;
+        return 'c'.repeat(64);
+      }
+      if (args[0] === 'start') {
+        assert.equal(JSON.parse(await fs.readFile(path.join(clockRoot, 'lease.json'))).at, now);
+        return '';
+      }
+      if (args[0] === 'inspect') return JSON.stringify({ Running: false, ExitCode: 0 });
+      if (args[0] === 'rm') return '';
+      throw new Error('unexpected engine call');
+    });
+});
+
 test('owned producer reports a refused daemon cleanup instead of claiming removal', async t => {
   const { runOwnedContainer } = await lib;
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'owned-producer-'));
