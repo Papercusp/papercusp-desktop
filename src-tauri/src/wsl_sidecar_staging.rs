@@ -956,3 +956,27 @@ mod tests {
         assert!(!f.0.join("must-not-run").exists());
     }
 }
+    #[cfg(unix)]
+    #[test]
+    fn bounded_output_drains_both_pipes_and_refuses_oversized_receipts() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf 'receipt'; printf 'diagnostic' >&2"]);
+        let output = run_bounded_output(&mut command, Duration::from_secs(2)).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"receipt");
+        assert_eq!(output.stderr, b"diagnostic");
+        let mut oversized = Command::new("sh");
+        oversized.args(["-c", "head -c 20000 /dev/zero"]);
+        assert_eq!(run_bounded_output(&mut oversized, Duration::from_secs(2)).unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_output_stops_an_owned_hung_capability_probe() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec sleep 10"]);
+        let start = Instant::now();
+        assert_eq!(run_bounded_output(&mut command, Duration::from_millis(50)).unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
