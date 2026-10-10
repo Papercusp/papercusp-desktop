@@ -565,7 +565,7 @@ test('generated home precheck actually writes and removes its file and rejects a
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'boot-home-'));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const run = async (_engine, args) => {
-    const setup = `
+    const setup = `(()=>{
       const fs=require('node:fs'),home=${JSON.stringify(home)};
       process.env.HOME='/home/papercup';process.getuid=()=>1001;process.getgid=()=>1001;
       const translate=p=>p.replace('/home/papercup',home);
@@ -575,7 +575,7 @@ test('generated home precheck actually writes and removes its file and rejects a
           if(name==='statSync'){r.uid=1001;r.gid=1001;}return r;
         };
       }
-    `;
+    })();`;
     const r = spawnSync(process.execPath, ['-e', setup + args.at(-1)], { encoding: 'utf8' });
     if (r.status !== 0) throw new Error(r.stderr);
     return r.stdout;
@@ -737,6 +737,7 @@ async function publicationFixture(t, overrides = {}) {
       if (args[0] === 'run') {
         const receipt = receipts.find(receipt => args.includes(receipt.imageId));
         if (args.includes('--detach')) { activeBootReceipt = receipt; return 'd'.repeat(64); }
+        if (args.at(-1).includes('papercusp-boot-home-check')) return JSON.stringify(receipt.bootVerification.homeVerification);
         return JSON.stringify({ ...receipt.payloadVerification,
           ...(overrides.changedImagePayload ? { mcpProxySha256: '9'.repeat(64) } : {}) });
       }
