@@ -293,7 +293,9 @@ test('the Linux local release entrypoint keeps the identity preflight before sid
   const preflightAt = linuxScript.indexOf(
     'python3 "$HERE/audit-release-bundle.py" --owner-preflight',
   );
-  const sidecarAt = linuxScript.indexOf('bash "$ROOT/bin/build-desktop-sidecar.sh"');
+  // D-181 (7319ab37): helpers run from the immutable producer root ($HERE),
+  // separate from the frozen product/output root ($ROOT).
+  const sidecarAt = linuxScript.indexOf('bash "$HERE/build-desktop-sidecar.sh"');
 
   assert.ok(preflightAt >= 0, 'build-linux-local.sh must retain --owner-preflight compatibility');
   assert.ok(sidecarAt >= 0, 'build-linux-local.sh must retain sidecar assembly');
@@ -309,7 +311,7 @@ test('the Linux local release entrypoint restores Cargo from CARGO_HOME before b
     'python3 "$HERE/audit-release-bundle.py" --owner-preflight',
   );
   const cargoGuardAt = linuxScript.indexOf('_cargo_home="${CARGO_HOME:-$HOME/.cargo}"');
-  const sidecarAt = linuxScript.indexOf('bash "$ROOT/bin/build-desktop-sidecar.sh"');
+  const sidecarAt = linuxScript.indexOf('bash "$HERE/build-desktop-sidecar.sh"');
   const metadataAt = linuxScript.indexOf('papercusp_cargo_target_root "$ROOT/src-tauri"');
 
   assert.ok(cargoGuardAt > preflightAt, 'Cargo resolution must preserve identity-preflight ordering');
@@ -525,7 +527,7 @@ test('the Linux local release entrypoint claims one Cargo target slot before eit
 test('the Linux local release entrypoint pins one immutable sidecar snapshot through packaging', () => {
   const helperAt = linuxScript.indexOf('hold_sidecar_read_lock()');
   const freshCallAt =
-    /bash "\$ROOT\/bin\/stage-source-tree\.sh"\r?\n\s+hold_sidecar_read_lock/.exec(linuxScript)?.index ?? -1;
+    /bash "\$HERE\/stage-source-tree\.sh"\r?\n\s+hold_sidecar_read_lock/.exec(linuxScript)?.index ?? -1;
   const reuseAt = linuxScript.indexOf('PAPERCUSP_REUSE_SIDECAR=1 — validating');
   const reuseCallAt = linuxScript.indexOf('hold_sidecar_read_lock', reuseAt);
   const verifyAt = linuxScript.indexOf('verify-sidecar-bundle.sh', reuseAt);
