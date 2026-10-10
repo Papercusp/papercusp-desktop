@@ -21,6 +21,24 @@ const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
 const helper = path.join(root, 'bin', 'lib', 'cargo-target-root.sh');
+
+test('native dev capacity policy distinguishes a cold slot from a warm cache', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'native-cargo-budget-'));
+  const need = () => spawnSync('bash', ['-c',
+    '. "$1"; papercusp_native_dev_cargo_need_gb "$2"', 'budget', helper, dir],
+  { encoding: 'utf8' });
+  try {
+    const cold = need();
+    assert.equal(cold.status, 0, cold.stderr);
+    assert.equal(cold.stdout, '65');
+    fs.mkdirSync(path.join(dir, 'debug', 'deps'), { recursive: true });
+    const warm = need();
+    assert.equal(warm.status, 0, warm.stderr);
+    assert.equal(warm.stdout, '12');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 const RUSTUP_HOME = process.env.RUSTUP_HOME || path.join(os.homedir(), '.rustup');
 
 function fixture(configToml) {

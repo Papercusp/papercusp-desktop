@@ -72,6 +72,17 @@ papercusp_cargo_target_root() {
   papercusp_cargo_metadata_target_dir "${1:-}"
 }
 
+# Keep verifier admission and the final native-dev reservation on one policy.
+# Private cold slots have reached 65 GiB; warm recompilation needs 12 GiB.
+papercusp_native_dev_cargo_need_gb() {
+  local target="${1:?Cargo target directory required}"
+  if [[ -d "$target/debug/deps" ]]; then
+    printf '12'
+  else
+    printf '65'
+  fi
+}
+
 # Cargo caches build-script metadata as well as compiled code. Tauri permission
 # metadata contains absolute OUT_DIR paths; moving/copying a target directory
 # does not invalidate those paths. Rebuild affected current-graph producers
