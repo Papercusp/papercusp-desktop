@@ -166,7 +166,10 @@ test('owned producer removes only its recorded immutable container after success
         }
         return 'producer output';
       }
-      if (args[0] === 'inspect') return JSON.stringify({ Running: false, ExitCode: 0 });
+      if (args[0] === 'inspect') {
+        assert.deepEqual(args.slice(1, 3), ['--type', 'container']);
+        return JSON.stringify({ Running: false, ExitCode: 0 });
+      }
       if (args[0] === 'rm') return '';
       throw new Error('unexpected engine call');
     };
@@ -398,6 +401,41 @@ test('an absent interrupted create remains pending and resumes without another c
   assert.equal(settled.cleanupPending, false); assert.equal(settled.cleanupError, undefined);
 });
 
+test('reconciliation settles an absent immutable container without generic inspect fallback', async t => {
+  const { reconcileOwnedContainer } = await lib;
+  for (const engine of ['docker', 'podman']) {
+    await t.test(engine, async t => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'owned-container-absent-'));
+      t.after(() => fs.rm(root, { recursive: true, force: true }));
+      const containerId = 'c'.repeat(64);
+      const receiptFile = path.join(root, 'ownership.json');
+      await fs.writeFile(receiptFile, JSON.stringify({ schemaVersion: 1, engine,
+        imageId, platform: 'linux/arm64', containerId,
+        containerName: 'papercusp-native-' + 'a'.repeat(36), ownerToken: 'b'.repeat(36),
+        cleanupPending: true, cleanupError: 'previous inspection timed out' }));
+      const calls = [];
+      const settled = await reconcileOwnedContainer({ receiptFile }, async (_engine, args) => {
+        calls.push(args);
+        assert.equal(_engine, engine);
+        assert.equal(args.at(-1), containerId);
+        if (args[0] !== 'inspect') throw new Error('must only inspect the absent immutable container');
+        // Generic inspection may fall through to another object namespace.
+        if (args[1] !== '--type' || args[2] !== 'container')
+          throw new Error('ETIMEDOUT inspecting another object namespace');
+        throw new Error('No such container: ' + containerId);
+      });
+      assert.equal(calls.length, 1);
+      assert.equal(settled.removed, true);
+      assert.equal(settled.cleanupPending, false);
+      assert.equal(settled.cleanupError, undefined);
+      const saved = JSON.parse(await fs.readFile(receiptFile));
+      assert.equal(saved.removed, true);
+      assert.equal(saved.cleanupPending, false);
+      assert.equal(saved.cleanupError, undefined);
+    });
+  }
+});
+
 test('in-container supervisor terminates the producer when launcher lease disappears', async t => {
   const { ownedContainerSupervisor } = await lib;
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'owned-producer-lease-'));
@@ -532,6 +570,7 @@ async function fakeRunner(options = {}) {
         return result.stdout;
       }
       if (command === (options.engine ?? 'docker') && args[0] === 'inspect') {
+        assert.deepEqual(args.slice(1, 3), ['--type', 'container']);
         return JSON.stringify({ Running: !options.exitedServer, ExitCode: options.exitedServer ? 1 : 0 });
       }
       if (command === (options.engine ?? 'docker') && args[0] === 'exec') {

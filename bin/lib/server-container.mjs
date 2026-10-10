@@ -325,7 +325,7 @@ async function settleOwnedContainer(receipt, save, run, budget, createdId) {
     let object;
     try {
       object = JSON.parse(await run(receipt.engine ?? 'docker',
-        ['inspect', '--format', '{{json .}}', receipt.containerId ?? receipt.containerName],
+        ['inspect', '--type', 'container', '--format', '{{json .}}', receipt.containerId ?? receipt.containerName],
         { timeout: Math.max(1, Math.min(10_000, Math.ceil(deadline - performance.now()))) }));
     } catch (inspectError) {
       if (!/No such (?:object|container)/i.test(inspectError.message)) throw inspectError;
@@ -437,7 +437,7 @@ export async function runOwnedContainer(options, run = runCommand) {
     receipt.status = 'running'; await save();
     output = await run(engine, ['start', '--attach', id],
       { timeout: options.timeoutMs ?? 2 * 60 * 60_000, signal: controller.signal, stream: true });
-    const state = JSON.parse(await run(engine, ['inspect', '--format', '{{json .State}}', id], { timeout: 5000 }));
+    const state = JSON.parse(await run(engine, ['inspect', '--type', 'container', '--format', '{{json .State}}', id], { timeout: 5000 }));
     if (state.Running !== false || state.ExitCode !== 0) throw new Error('Owned producer exited with ' + state.ExitCode);
     receipt.exitCode = state.ExitCode; receipt.status = 'completed';
   } catch (caught) {
@@ -538,7 +538,7 @@ export async function verifyServerContainerBoot(options, run = runCommand) {
       '--env', 'PAPERCUSP_HONO_PORT=3070', '--env', 'PAPERCUSP_PG_PORT=5532',
       '--env', 'PAPERCUSP_BACKGROUND_WORKERS=1', '--env', 'PAPERCUSP_DBOS_ENABLE=1', options.imageId]);
     do {
-      const state = JSON.parse(await run(options.engine, ['inspect', '--format', '{{json .State}}', name]));
+      const state = JSON.parse(await run(options.engine, ['inspect', '--type', 'container', '--format', '{{json .State}}', name]));
       if (state.Running !== true) {
         throw new Error('Packaged Server exited during boot (exit=' + state.ExitCode + ')');
       }
