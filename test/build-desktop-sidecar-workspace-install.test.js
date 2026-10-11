@@ -1349,6 +1349,11 @@ test('sidecar build closes direct linked-workspace peer contracts and hoists doc
     }
   }
   assert.deepEqual(missingPeerDeclarations, []);
+  assert.equal(
+    lock.packages['apps/operator'].dependencies['@papercusp/kv-persist'],
+    operatorPackage.dependencies['@papercusp/kv-persist'],
+    'the indexeddb peer must also survive the pinned scoped install',
+  );
 
   for (const peer of ['dockview', 'dockview-react']) {
     assert.equal(
@@ -1399,9 +1404,13 @@ test('sidecar source union declares every bare runtime import in operator-core',
   // admission-jobs.tsx-worker.mjs is the same pattern for the release-admission worker: it
   // registers tsx on an unbundled host's worker thread, while bundled hosts load the esbuilt
   // admission-jobs.worker.mjs (admission-offthread.ts, WI-10005223 / WI-10005359).
+  // The Codex-home worker follows the same bundled-worker selection. The BM25
+  // helper is imported only by integration suites, never the host source graph.
   const sourceTreeOnly = new Set([
     'packages/operator-core/lib/sync/hyperbee/snapshot-fold.worker.dev.mjs',
     'packages/operator-core/lib/release/admission-jobs.tsx-worker.mjs',
+    'packages/operator-core/lib/role-codex-home.worker.dev.mjs',
+    'packages/operator-core/lib/search/lexical/test-pg/bm25-test-db.ts',
   ]);
   for (const relative of sourceTreeOnly) {
     assert.ok(
@@ -1409,12 +1418,28 @@ test('sidecar source union declares every bare runtime import in operator-core',
       `stale sourceTreeOnly entry (file is gone): ${relative}`,
     );
   }
+  const codexWorkerSelector = fs.readFileSync(
+    path.join(repoRoot, 'packages/operator-core/lib/role-codex-home-offload.ts'), 'utf8',
+  );
+  assert.match(codexWorkerSelector, /existsSync\(bundled\) \? bundled : resolve\(dir, 'role-codex-home\.worker\.dev\.mjs'\)/);
+  const hostBundler = fs.readFileSync(
+    path.join(repoRoot, 'apps/operator/bin/bundle-host-common.sh'), 'utf8',
+  );
+  assert.ok(hostBundler.includes('"$repo_root/packages/operator-core/lib/role-codex-home.worker.ts"'));
   const missing = new Map();
   const packageName = (specifier) =>
     specifier.startsWith('@')
       ? specifier.split('/').slice(0, 2).join('/')
       : specifier.split('/')[0];
   const inspectSpecifier = (specifier, file) => {
+    if (specifier.startsWith('.')) {
+      const resolved = path.relative(repoRoot, path.resolve(path.dirname(file), specifier));
+      assert.notEqual(
+        resolved.replace(/\.ts$/, ''),
+        'packages/operator-core/lib/search/lexical/test-pg/bm25-test-db',
+        `runtime source must not import the test-only BM25 helper: ${path.relative(repoRoot, file)}`,
+      );
+    }
     if (
       specifier.startsWith('.') ||
       specifier.startsWith('/') ||
