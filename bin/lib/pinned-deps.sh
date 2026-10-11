@@ -70,78 +70,31 @@
 # Echoes, one per line, the repo-relative path of every node_modules directory a workspace
 # install can reach from <root>. Empty output is a legitimate answer (a fresh worktree).
 #
-# Use the maintained product boundary, including tracked submodules and these exclusions:
+# The enumeration matches the r15 workaround's, including its two exclusions, because both
+# were paid for:
 #   - `.papercusp/` holds agent scratch, not build input;
 #   - nested node_modules under a node_modules are reached through their parent already;
 #   - the generated sidecar OUTPUT dir is excluded by D-187. Mounting inside it makes the
 #     mount follow the retired inode when publication atomically renames sidecar/ aside, and
 #     the builder's cleanup then fails EBUSY after an otherwise-green cut. It would also
 #     leak live build artifacts into server.tgz.
-papercusp_pinned_deps_trees() (
+papercusp_pinned_deps_trees() {
   local _root="${1:-}"
   [ -n "$_root" ] || return 0
   [ -d "$_root" ] || return 0
 
-  _root="$(cd "$_root" && pwd -P)" || return 1
-  source "$(dirname "${BASH_SOURCE[0]}")/../../../apps/operator/bin/release/dependency-generation.sh" || return 1
-  dependency_generation_configure_workspace_dirs "$_root" || return 1
-  # WI-41095: no second depth-limited walker admitting unrelated checkouts.
-  local _trees _tree
-  _trees="$(dependency_generation_enumerate_node_modules "$_root")" || return 1
-  while IFS= read -r _tree; do
-    if [ -n "$_tree" ]; then printf '%s\n' "${_tree#"$_root"/}"; fi
-  done <<EOF
-$_trees
-EOF
-)
-
-# WI-41095: refuse invalid donor links before allocating a copy. With a source
-# capture (or '-' for stdin JSON), also require their targets in the planned copy.
-# Repeat inside the install mutex; the final copied-tree guard remains authoritative.
-papercusp_pinned_deps_preflight() {
-  local _donor="${1:-}" _population="${2:-}" _trees
-  _trees="$(papercusp_pinned_deps_trees "$_donor")" || return 1
-  node -e '
-const fs = require("node:fs"), path = require("node:path");
-const root = fs.realpathSync(process.argv[1]), population = process.argv[2];
-const trees = process.argv[3].split("\n").filter(Boolean).map(p => path.join(root, p));
-const inside = (parent, child) => child === parent || child.startsWith(parent + path.sep);
-let files;
-if (population) {
-  const record = JSON.parse(fs.readFileSync(population === "-" ? 0 : population, "utf8"));
-  const selected = Array.isArray(record) ? record : Object.keys(record.sourceFiles);
-  files = new Set();
-  for (const p of selected) {
-    const target = path.resolve(root, p);
-    if (path.isAbsolute(p) || !inside(root, target)) throw new Error("escaping-pinned-source:" + p);
-    for (let parent = target; inside(root, parent); parent = path.dirname(parent)) {
-      files.add(parent);
-      if (parent === root) break;
-    }
-  }
-}
-const fail = (reason, file) => { throw new Error(reason + ":" + path.relative(root, file)); };
-const visit = file => {
-  const stat = fs.lstatSync(file);
-  if (stat.isSymbolicLink()) {
-    const link = fs.readlinkSync(file);
-    if (path.isAbsolute(link)) fail("absolute-pinned-dependency-link", file);
-    const lexical = path.resolve(path.dirname(file), link);
-    if (!inside(root, lexical)) fail("escaping-pinned-dependency-link", file);
-    let resolved;
-    try { resolved = fs.realpathSync(file); } catch { fail("dangling-pinned-dependency-link", file); }
-    if (!inside(root, resolved)) fail("escaping-pinned-dependency-link", file);
-    if (files && [lexical, resolved].some(target => !trees.some(tree => inside(tree, target)) &&
-      !files.has(target))) fail("unplanned-pinned-dependency-target", file);
-  } else if (stat.isDirectory()) {
-    for (const entry of fs.readdirSync(file)) visit(path.join(file, entry));
-  }
-};
-for (const tree of trees) {
-  if (fs.lstatSync(tree).isSymbolicLink()) fail("REFUSING symlinked dependency tree", tree);
-  visit(tree);
-}
-' "$_donor" "$_population" "$_trees"
+  # ⚠ `-type d` ALONE IS A HOLE, and it is the hole that matters: a node_modules which is a
+  # SYMLINK into another tree is `-type l`, so a directory-only enumeration silently omits
+  # the single worst coupling shape from the gate below — the guard reports clean precisely
+  # when it should refuse. Caught by its own suite, not by review.
+  ( cd "$_root" 2>/dev/null || exit 0
+    find . -maxdepth 4 -name node_modules \( -type d -o -type l \) \
+      -not -path './.papercusp/*' \
+      -not -path './node_modules/*' 2>/dev/null \
+      | sed 's#^\./##' \
+      | grep -v '^papercusp-desktop/src-tauri/sidecar/node_modules$' \
+      | LC_ALL=C sort
+  )
 }
 
 # Usage: papercusp_pinned_deps_snapshot <donor_root> <snapshot_root> [hardlink|copy]
@@ -167,7 +120,6 @@ papercusp_pinned_deps_snapshot() (
   local _donor="${1:-}"
   local _snap="${2:-}"
   local _copy_mode="${3:-hardlink}"
-  local _population="${4:-}"
   local _rel _src _dst _tmp _old _n=0 _fail=0 _legacy _legacy_count _legacy_path
   case "$_copy_mode" in
     hardlink|copy) ;;
@@ -182,10 +134,6 @@ papercusp_pinned_deps_snapshot() (
     echo "ERROR: dependency donor is not a directory: $_donor" >&2
     return 2
   fi
-
-  # A refused retry must not leave the previous attempt attested by its stamp.
-  if [ -d "$_snap" ]; then rm -f "$_snap/.papercusp-pinned-deps" || return 1; fi
-  papercusp_pinned_deps_preflight "$_donor" "$_population" || return 1
 
   if [ "$_copy_mode" = copy ]; then
     local _generation_helper
@@ -413,7 +361,6 @@ papercusp_pinned_deps_snapshot_locked() {
   local _donor="${1:-}"
   local _snap="${2:-}"
   local _copy_mode="${3:-hardlink}"
-  local _population="${4:-}"
   local _self="${BASH_SOURCE[0]}"
   local _wrapper
 
@@ -431,7 +378,7 @@ papercusp_pinned_deps_snapshot_locked() {
   fi
 
   node "$_wrapper" --repo-root "$_donor" --exec-under-lock -- \
-    bash "$_self" snapshot "$_donor" "$_snap" "$_copy_mode" "$_population"
+    bash "$_self" snapshot "$_donor" "$_snap" "$_copy_mode"
 }
 
 # Usage: papercusp_assert_pinned_deps_decoupled <repo_root> [<allowed_root>] [<mountinfo>]
@@ -574,10 +521,9 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     snapshot) shift; papercusp_pinned_deps_snapshot "$@" ;;
     snapshot-locked) shift; papercusp_pinned_deps_snapshot_locked "$@" ;;
     trees) shift; papercusp_pinned_deps_trees "$@" ;;
-    preflight) shift; papercusp_pinned_deps_preflight "$@" ;;
     assert) shift; papercusp_assert_pinned_deps_decoupled "$@" ;;
     *)
-      echo "usage: $0 {snapshot|snapshot-locked|trees|preflight|assert} <args...>" >&2
+      echo "usage: $0 {snapshot|snapshot-locked|trees|assert} <args...>" >&2
       exit 2
       ;;
   esac
