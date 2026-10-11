@@ -8,7 +8,10 @@
 //      darwin/Windows with a warning instead of shipping a broken tree;
 //   3. embedded-postgres-server preloads pg_textsearch exactly when the binary tree holds
 //      the library — a missing library in shared_preload_libraries would stop the
-//      postmaster from starting at all.
+//      postmaster from starting at all;
+//   4. the ABI gate refuses a library that imports a symbol the embedded server does not
+//      export (D-014: pg_textsearch built for PG 18.4 needs palloc_mul, absent from 18.3),
+//      because a preloaded library the server cannot load stops it just as hard.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -77,7 +80,10 @@ test('Linux preflight fails early for each missing or empty pg_textsearch input'
   } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
 });
 
-function runBundle(scratch, host, target, profile = 'dogfood') {
+// The bundle block calls pg_textsearch_abi_gaps (its own marked block, exercised against
+// real ELF files in the last test). The fixtures here are text files, so the copy tests
+// stub it: '' reports a loadable library, a symbol list reports what the server lacks.
+function runBundle(scratch, host, target, profile = 'dogfood', gaps = '') {
   const dst = path.join(scratch, 'pgdst');
   fs.rmSync(dst, { recursive: true, force: true });
   // Debian layout (upstream npm binaries) and the relocatable prefix (pinned source build).
@@ -87,7 +93,9 @@ function runBundle(scratch, host, target, profile = 'dogfood') {
   fs.mkdirSync(path.join(relocatable, 'lib'), { recursive: true });
   fs.mkdirSync(path.join(relocatable, 'share/extension'), { recursive: true });
   fs.writeFileSync(path.join(relocatable, 'lib/pgcrypto.so'), 'x');
-  const body = host.rewrite(block('PG_TEXTSEARCH_BUNDLE_BEGIN', 'PG_TEXTSEARCH_BUNDLE_END'));
+  assert.ok(!gaps.includes("'"), 'stub gaps must not contain a single quote');
+  const body = `pg_textsearch_abi_gaps() { printf '%s' '${gaps}'; }\n` +
+    host.rewrite(block('PG_TEXTSEARCH_BUNDLE_BEGIN', 'PG_TEXTSEARCH_BUNDLE_END'));
   const r = spawnSync('bash', ['-euo', 'pipefail', '-c', body], {
     encoding: 'utf8',
     env: { ...process.env, TARGET_OS: target, DISTRIBUTION_PROFILE: profile, EMBEDDED_PG_DST: dst },
@@ -142,6 +150,78 @@ test('bundle block fails a Linux build without pg_textsearch or its licence, and
       assert.match(out.r.stdout, new RegExp(`pg_textsearch not bundled for ${target}`));
       assert.ok(!fs.existsSync(path.join(out.debian, 'lib/postgresql/pg_textsearch.so')), `${target} copies nothing`);
     }
+  } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
+});
+
+test('bundle block refuses a library the embedded server cannot load (D-014)', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-pgts-bundle-'));
+  try {
+    const host = fakeHostInstall(scratch);
+    host.reset();
+    let { r, debian } = runBundle(scratch, host, 'linux', 'dogfood', 'palloc_mul');
+    assert.equal(r.status, 1, 'a Linux bundle must not ship a library its server cannot load');
+    assert.match(r.stdout, /cannot load in the embedded server .*\(missing: palloc_mul\)/);
+    assert.match(r.stdout, /Bump embedded-postgres to at least that minor \(D-014\)/);
+    assert.ok(!fs.existsSync(path.join(debian, 'lib/postgresql/pg_textsearch.so')), 'nothing copied');
+
+    ({ r, debian } = runBundle(scratch, host, 'linux', 'vm-release', '<unmeasured>'));
+    assert.equal(r.status, 0, 'vm-release skips the tree with a warning');
+    assert.match(r.stdout, /its server cannot load it \(missing: <unmeasured>\)/);
+    assert.match(r.stdout, /pg_textsearch copied into 0 embedded-postgres tree\(s\)/);
+    assert.ok(!fs.existsSync(path.join(debian, 'lib/postgresql/pg_textsearch.so')), 'vm-release copies nothing');
+  } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
+});
+
+const hasCc = spawnSync('cc', ['--version'], { encoding: 'utf8' }).status === 0
+  && spawnSync('nm', ['--version'], { encoding: 'utf8' }).status === 0;
+
+test('ABI gate measures the extension\'s imports against the server and the libraries it links', {
+  skip: (process.platform !== 'linux' || !hasCc) && 'needs Linux with cc and nm',
+}, () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-pgts-abi-'));
+  try {
+    const cc = (args) => {
+      const r = spawnSync('cc', ['-fno-builtin', ...args], { encoding: 'utf8', cwd: scratch });
+      assert.equal(r.status, 0, r.stderr);
+    };
+    // An extension importing palloc and palloc_mul (from the server) and log (from libm,
+    // which the extension does not link; the real pg_textsearch.so has the same shape).
+    fs.writeFileSync(path.join(scratch, 'ext.c'), [
+      'extern void *palloc(unsigned long);',
+      'extern void *palloc_mul(unsigned long, unsigned long);',
+      'extern double log(double);',
+      'void *ext(unsigned long n) { return log((double) n) > 0 ? palloc_mul(n, 2) : palloc(n); }',
+    ].join('\n'));
+    cc(['-shared', '-fPIC', '-o', 'ext.so', 'ext.c']);
+    // Two "servers" exporting palloc and linking libm; only the newer exports palloc_mul.
+    fs.writeFileSync(path.join(scratch, 'server.c'), [
+      '#include <stdlib.h>',
+      'extern double log(double);',
+      'void *palloc(unsigned long n) { return malloc(n); }',
+      '#ifdef NEWER',
+      'void *palloc_mul(unsigned long a, unsigned long b) { return malloc(a * b); }',
+      '#endif',
+      'int main(int argc, char **argv) { (void) argv; return (int) log((double) argc); }',
+    ].join('\n'));
+    for (const [name, defs] of [['newer', ['-DNEWER']], ['older', []]]) {
+      fs.mkdirSync(path.join(scratch, name, 'bin'), { recursive: true });
+      cc([...defs, '-rdynamic', '-o', path.join(name, 'bin/postgres'), 'server.c', '-lm']);
+    }
+    const gate = block('PG_TEXTSEARCH_ABI_GATE_BEGIN', 'PG_TEXTSEARCH_ABI_GATE_END');
+    const gaps = (lib, bin) => {
+      const r = spawnSync('bash', ['-euo', 'pipefail', '-c', `${gate}\npg_textsearch_abi_gaps "$1" "$2"`, 'gate', lib, bin], {
+        encoding: 'utf8', cwd: scratch,
+      });
+      assert.equal(r.status, 0, r.stderr);
+      return r.stdout.trim();
+    };
+    const ext = path.join(scratch, 'ext.so');
+    assert.equal(gaps(ext, path.join(scratch, 'newer/bin/postgres')), '', 'log resolves through the server\'s libm');
+    assert.equal(gaps(ext, path.join(scratch, 'older/bin/postgres')), 'palloc_mul');
+    // A measurement that read nothing must never pass as compatible.
+    fs.writeFileSync(path.join(scratch, 'text.so'), 'not an ELF file');
+    assert.equal(gaps(path.join(scratch, 'text.so'), path.join(scratch, 'newer/bin/postgres')), '<unmeasured>');
+    assert.equal(gaps(ext, path.join(scratch, 'absent/bin/postgres')), '<unmeasured>');
   } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
 });
 

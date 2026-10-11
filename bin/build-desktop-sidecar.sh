@@ -3962,6 +3962,39 @@ if [[ "$_pgv_os" != "windows" && "${pgvector_copied:-0}" -eq 0 ]]; then
 fi
 fi # qualified native inputs / ordinary pgvector preparation
 
+# PG_TEXTSEARCH_ABI_GATE_BEGIN
+# pg_textsearch_abi_gaps <extension.so> <postgres binary>
+# Prints each symbol the extension imports that the target server cannot provide, or
+# "<unmeasured>" when either side could not be read. Empty output means loadable.
+# Why (plan bm25-lexical-search-evoke-adoption-2026-10-10, D-014; measured 2026-10-11): a
+# pgdg extension package is compiled against the host's server minor and can import
+# symbols an older minor of the same major lacks. pg_textsearch 1.5.1 built for 18.4
+# imports palloc_mul, which embedded 18.3 does not export, and the 18.3 postmaster refused
+# to start with it preloaded. embedded-postgres-server preloads the library whenever the
+# file is present, so an incompatible copy stops the bundled database instead of
+# degrading to legacy ranking. "Provided" is the binary's dynamic exports plus those of
+# every library it links (libm supplies `log`, for instance). Versioned imports
+# (memcpy@GLIBC_…) are always resolved by system libraries and are not checked.
+pg_textsearch_abi_gaps() {
+  local lib="$1" bin="$2" need have dep
+  need="$(nm -D --undefined-only "$lib" 2>/dev/null | awk '$1 == "U" && $2 !~ /@/ { print $2 }' | LC_ALL=C sort -u || true)"
+  have="$( {
+    nm -D --defined-only "$bin" 2>/dev/null || true
+    while read -r dep; do
+      [[ -n "$dep" ]] && { nm -D --defined-only "$dep" 2>/dev/null || true; }
+    done < <(LD_LIBRARY_PATH="$(dirname "$(dirname "$bin")")/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd "$bin" 2>/dev/null | awk '$2 == "=>" && $3 ~ /^\// { print $3 }' || true)
+  } | awk 'NF >= 3 { sub(/@.*/, "", $3); print $3 }' | LC_ALL=C sort -u)"
+  # Positive control: every PostgreSQL server exports palloc and every extension calls it.
+  # If either list lacks it, the measurement read nothing (no nm, not ELF, wrong path) and
+  # must not pass as compatible.
+  if ! grep -qx palloc <<<"$need" || ! grep -qx palloc <<<"$have"; then
+    echo "<unmeasured>"
+    return 0
+  fi
+  LC_ALL=C comm -23 <(printf '%s\n' "$need") <(printf '%s\n' "$have")
+}
+# PG_TEXTSEARCH_ABI_GATE_END
+
 # PG_TEXTSEARCH_BUNDLE_BEGIN
 # Bundle pg_textsearch (BM25 lexical ranking — plan bm25-lexical-search-evoke-adoption-
 # 2026-10-10, D-002; PostgreSQL licence, which permits redistribution with its notice)
@@ -3998,6 +4031,19 @@ if [[ -n "$_pgts_lib_src" ]]; then
         _pgts_runtime_lib_dir="$plat_dir/lib/postgresql"
         _pgts_runtime_ext_dir="$plat_dir/share/postgresql/extension"
       fi
+      # Refuse a library this tree's server cannot load (D-014; see the ABI gate above).
+      _pgts_gaps="$(pg_textsearch_abi_gaps "$_pgts_lib_src" "$plat_dir/bin/postgres")"
+      if [[ -n "$_pgts_gaps" ]]; then
+        _pgts_gaps="${_pgts_gaps//$'\n'/ }"
+        if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+          echo "  ⚠ pg_textsearch not bundled into $plat_dir: its server cannot load it (missing: $_pgts_gaps); BM25 search falls back to legacy ranking"
+          continue
+        fi
+        echo "ERROR: $_pgts_lib_src cannot load in the embedded server at $plat_dir (missing: $_pgts_gaps)."
+        echo "    The host package was built for a newer PostgreSQL minor than the embedded binaries."
+        echo "    Bump embedded-postgres to at least that minor (D-014), or install a pg_textsearch built for it."
+        exit 1
+      fi
       mkdir -p "$_pgts_runtime_lib_dir" "$_pgts_runtime_ext_dir"
       cp -f "$_pgts_lib_src" "$_pgts_runtime_lib_dir/"
       cp -f "$_pgts_ext_src"/pg_textsearch--*.sql "$_pgts_runtime_ext_dir/"
@@ -4024,7 +4070,7 @@ if [[ -n "$_pgts_lib_src" ]]; then
     exit 1
   fi
 fi
-unset _pgts_lib_src _pgts_ext_src _pgts_runtime_lib_dir _pgts_runtime_ext_dir
+unset _pgts_lib_src _pgts_ext_src _pgts_runtime_lib_dir _pgts_runtime_ext_dir _pgts_gaps
 # PG_TEXTSEARCH_BUNDLE_END
 
 # Surface real pg_dump / psql to the sidecar's $PATH so the snapshot
