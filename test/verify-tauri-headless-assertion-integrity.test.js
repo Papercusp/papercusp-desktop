@@ -18,6 +18,9 @@ const path = require('node:path');
 
 const VERIFY_SCRIPT = path.resolve(__dirname, '../../scripts/verify-tauri-headless.sh');
 const source = fs.readFileSync(VERIFY_SCRIPT, 'utf8');
+const sourcePreview = fs.readFileSync(path.resolve(__dirname, '../../scripts/source-preview.mjs'), 'utf8');
+const nativeInputsBlock = sourcePreview.match(/export const TAURI_VERIFIER_INPUTS = Object.freeze\(\[([\s\S]*?)\]\);/)?.[1];
+const nativeInputs = [...(nativeInputsBlock || '').matchAll(/'([^']+)'/g)].map(match => match[1]);
 const DEV_OPERATOR_SCRIPT = path.resolve(__dirname, '../bin/dev-operator-ifneeded.sh');
 const devOperatorSource = fs.readFileSync(DEV_OPERATOR_SCRIPT, 'utf8');
 const dreamSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-dream-native.sh'), 'utf8');
@@ -97,10 +100,10 @@ test('native admission precedes costly preparation and pins its maintained helpe
   for (const step of ['shared-schema-readiness', 'operator-source-snapshot']) {
     assert.ok(admission < source.indexOf(`vh_run_step ${step} `), step);
   }
-  const inputs = source.match(/local inputs="([^\n]+)"/)?.[1].split(',');
+  assert.match(source, /local input_args=\(--tauri-inputs\)/);
   for (const helper of ['tauri-guarded', 'lib/claim-target-dir.sh',
     'lib/cargo-target-root.sh', 'lib/release-artifacts.sh', 'lib/disk-preflight.sh']) {
-    assert.ok(inputs?.includes(`papercusp-desktop/bin/${helper}`), helper);
+    assert.ok(nativeInputs.includes(`papercusp-desktop/bin/${helper}`), helper);
   }
 });
 
@@ -125,12 +128,11 @@ test('native console compile preflight refuses failures before setup and skips n
   const admission = source.indexOf('vh_run_step native-console-platform-check preflight_native_console_platform');
   assert.ok(admission > source.indexOf('vh_run_step native-cargo-capacity preflight_native_cargo'));
   assert.ok(admission < source.indexOf('vh_run_step operator-source-snapshot '));
-  const inputs = source.match(/local inputs="([^\n]+)"/)?.[1].split(',');
   for (const input of ['papercusp-desktop/src-tauri/src/main.rs',
     'papercusp-desktop/src-tauri/src/native_console.rs', 'papercusp-desktop/src-tauri/src/wsl_sidecar_staging.rs',
     'papercusp-desktop/test/native-console-gnome.test.js', 'papercusp-desktop/test/monorepo-host-preflight.mjs',
     'scripts/lib/node-test-host-preflight.mjs', 'packages/operator-core/lib/gnome-terminal-policy.json']) {
-    assert.ok(inputs?.includes(input), input);
+    assert.ok(nativeInputs.includes(input), input);
   }
 });
 
