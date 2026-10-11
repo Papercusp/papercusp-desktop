@@ -894,11 +894,13 @@ const root = ${JSON.stringify(side)};
 // fallback. Import qualification owns no runtime services: stop Node socket
 // connections and subprocess escapes before the graph runs. Keep the failed
 // verdict even when an import catches its IO error and prints a boot receipt.
-let forbiddenIO = false;
+let forbiddenIO = null;
 const refuseIO = operation => {
-  forbiddenIO = true;
   const error = new Error('BOOT_IMPORT_IO_FORBIDDEN: ' + operation);
   error.code = 'BOOT_IMPORT_IO_FORBIDDEN';
+  // Imported modules may catch this error and still emit a success receipt.
+  // Retain the first callsite without recording syscall arguments or secrets.
+  if (!forbiddenIO) forbiddenIO = { operation, stack: error.stack };
   throw error;
 };
 Object.defineProperty(net.Socket.prototype, 'connect', {
@@ -910,6 +912,7 @@ for (const operation of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', '
 syncBuiltinESMExports();
 process.on('exit', () => {
   if (forbiddenIO) {
+    process.stderr.write('BOOT_IMPORT_IO_DETAIL: ' + JSON.stringify(forbiddenIO) + '\\n');
     process.stderr.write('BOOT_IMPORT_IO_FORBIDDEN: socket or child_process attempted during import qualification\\n');
     process.exitCode = 1;
   }

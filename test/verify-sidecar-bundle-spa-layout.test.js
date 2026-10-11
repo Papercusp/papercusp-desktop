@@ -553,6 +553,8 @@ test('packaged imports cannot connect to an ambient PostgreSQL endpoint, even wh
       assert.equal(contacts, 0, 'the live loopback listener must receive no connection');
       assert.equal(result.status, 1, 'a caught connection error must still refuse the boot receipt');
       assert.match(result.stderr, /BOOT_IMPORT_IO_FORBIDDEN.*socket/);
+      assert.match(result.stderr, /BOOT_IMPORT_IO_DETAIL: .*"operation":"socket.connect"/);
+      assert.match(result.stderr, /serve\.mjs/);
       assert.match(result.stderr, /"receiptObserved":true/);
     }
   } finally { await new Promise(resolve => listener.close(resolve)); }
@@ -590,6 +592,8 @@ test('packaged imports cannot launch a subprocess that escapes the isolated prob
     const result = runBootCheck(body + `\nconsole.log('PAPERCUSP_BOOT_IMPORTS_OK');`);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /BOOT_IMPORT_IO_FORBIDDEN.*child_process/);
+    assert.match(result.stderr, /BOOT_IMPORT_IO_DETAIL: .*"operation":"child_process\.(?:spawnSync|execFileSync)"/);
+    assert.match(result.stderr, /serve\.mjs/);
     assert.match(result.stderr, /"receiptObserved":true/);
   }
 });
