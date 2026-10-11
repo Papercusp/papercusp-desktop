@@ -233,6 +233,9 @@ if (require.main === module) {
     if (args[0] === '--site') {
       if (args.length !== 2) throw new Error('Public release site check requires exactly one site directory.');
       assertPublicDesktopReleaseSite(args[1]);
+    } else if (args[0] === '--spa') {
+      if (args.length !== 2) throw new Error('Public SPA check requires exactly one built index document.');
+      assertPublicDesktopInterface({ desktopInterface: desktopInterfaceIdentity(fs.readFileSync(args[1], 'utf8')) });
     } else {
       assertPublicDesktopArtifacts(args);
     }

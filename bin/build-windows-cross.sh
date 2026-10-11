@@ -87,6 +87,7 @@ set -euo pipefail
 # release entrypoint. Helpers/audits belong to the producer we are executing;
 # source and artifact paths must still belong to that frozen target.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+node "$HERE/lib/spa-freshness.js" || exit $?
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC_TAURI="$ROOT/src-tauri"
 SOURCE_ROOT="$ROOT"
@@ -531,6 +532,7 @@ fi
 # exits; artifacts must not disappear with the temporary worktree.
 ROOT="$BUILD_ROOT"
 SRC_TAURI="$ROOT/src-tauri"
+node "$HERE/lib/spa-freshness.js" --spa "$SRC_TAURI/sidecar/spa/index.html" || exit $?
 echo "==> isolated Windows build source: commit=${BUILD_COMMIT_SHORT} root=$BUILD_ROOT"
 
 # ── Stage dir the .iss reads via {#BuildRoot}. papercusp.iss wants the exe at
