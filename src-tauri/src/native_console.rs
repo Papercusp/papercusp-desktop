@@ -1621,10 +1621,16 @@ mod tests {
             Self(root)
         }
         fn executable(&self, name: &str, body: &str) {
-            use std::os::unix::fs::PermissionsExt;
             let path = self.0.join(name);
-            std::fs::write(&path, body).unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let pending = self.0.join(format!(".{name}.{}.pending", uuid::Uuid::new_v4()));
+            // Rust tests spawn concurrently. Keep writable executable handles
+            // out of this forking process, and replace an old generation's
+            // inode so an inherited writer cannot make the new one ETXTBSY.
+            let status = std::process::Command::new("/bin/sh")
+                .args(["-c", "umask 077; printf '%s' \"$3\" > \"$1\" && /bin/chmod 700 \"$1\" && /bin/mv -f \"$1\" \"$2\"", "publish-terminal-fixture"])
+                .arg(&pending).arg(&path).arg(body)
+                .status().unwrap();
+            assert!(status.success(), "terminal fixture publication failed");
         }
         fn env(&self) -> HashMap<String, String> {
             HashMap::from([("PATH".into(), self.0.to_string_lossy().into_owned())])
@@ -1633,6 +1639,22 @@ mod tests {
     #[cfg(target_os = "linux")]
     impl Drop for TerminalFixture {
         fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminal_fixture_replacement_does_not_execute_an_inode_with_old_writers() {
+        let fixture = TerminalFixture::new();
+        fixture.executable("python3", "#!/bin/sh\nprintf old\n");
+        let path = fixture.0.join("python3");
+        // Model a writer descriptor retained by an unrelated child. Publishing
+        // the next receipt must not leave its executable on that same inode.
+        let old_writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        fixture.executable("python3", "#!/bin/sh\nprintf new\n");
+        let output = std::process::Command::new(&path).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"new");
+        drop(old_writer);
     }
 
     #[cfg(target_os = "linux")]
