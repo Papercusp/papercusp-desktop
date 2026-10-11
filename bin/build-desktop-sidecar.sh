@@ -1634,7 +1634,14 @@ for np in "${NATIVE_PKGS[@]}"; do HOST_EXTERNALS+=( "--external:$np" ); done
 # syntax alone cut serve.mjs ~49MB→~35MB with zero behaviour change
 # (install-size-audit 2026-07-07, owner-directed). Full --minify would save a
 # further ~6MB but is left out for that name-dependency risk.
-MINIFY_ARGS=(--minify-whitespace --minify-syntax)
+# >>> desktop release compaction
+if declare -p HOST_RELEASE_COMPACTION_ARGS >/dev/null 2>&1; then
+  MINIFY_ARGS=("${HOST_RELEASE_COMPACTION_ARGS[@]}")
+else
+  # Exact-source cuts may select an older target helper; retain its proven policy.
+  MINIFY_ARGS=(--minify-whitespace --minify-syntax)
+fi
+# <<< desktop release compaction
 (cd "$WEB_DIR" && run_sidecar_cached_package npx --yes esbuild@0.25.0 bin/serve.ts \
   --bundle --platform=node --format=esm --target=node22 \
   "${MINIFY_ARGS[@]}" \
