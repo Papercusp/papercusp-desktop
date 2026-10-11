@@ -499,7 +499,10 @@ const SERVE_LOG_SOURCE = /\/\.papercusp\/logs\/serve\.log$/;
 test('an absent seeded pot fails offline-restore only after polling the whole window, naming the diagnostics', opts, () => {
   const fx = fixture();
   serveLog(fx, `boot\n${SEED_LINE}\n${ADMIT_LINE}\n`);
-  const r = run(fx, { args: ['--restore-timeout', '1'], env: { FAKE_POT_SLUG: 'something-else' } });
+  // A 3s window, not 1s: under gate load one fake pot:list read took over a second, so a
+  // 1s window fit a single read and this assertion measured host load, not the poll loop
+  // (green-checkpoint run 762a13a6, 'polled more than once, got 1'; WI-10006055).
+  const r = run(fx, { args: ['--restore-timeout', '3'], env: { FAKE_POT_SLUG: 'something-else' } });
   assert.equal(r.status, 1);
   const leg = r.legs['offline-restore'];
   assert.equal(leg.status, 'fail');
