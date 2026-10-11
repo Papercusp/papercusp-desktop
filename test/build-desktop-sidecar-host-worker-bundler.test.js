@@ -31,7 +31,7 @@ function fixture() {
   fs.writeFileSync(
     path.join(dir, 'orch-common.sh'),
     `${GUARD}\nHOST_COMMON_EXTERNALS=(--external:orchestrator-only)\n` +
-      'HOST_WORKER_OUTPUTS=(a.script.mjs "b worker.mjs" role-codex-home.worker.mjs)\n' +
+      'HOST_WORKER_OUTPUTS=(a.script.mjs "b worker.mjs")\n' +
       'bundle_host_workers() { echo "bundled $1 -> $2 (${#HOST_WORKER_OUTPUTS[@]})"; }\n',
   );
   return dir;
@@ -49,13 +49,13 @@ test('an old target helper gets the orchestrator bundle_host_workers and keeps i
     source "${lib}"
     papercusp_ensure_host_worker_bundler "${dir}/orch-common.sh" || exit 9
     echo "externals=\${HOST_COMMON_EXTERNALS[*]}"
-    echo "outputs=\${#HOST_WORKER_OUTPUTS[@]}:\${HOST_WORKER_OUTPUTS[2]}"
+    echo "outputs=\${#HOST_WORKER_OUTPUTS[@]}:\${HOST_WORKER_OUTPUTS[1]}"
     bundle_host_workers /src /out
   `);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /externals=--external:target-only$/m);
-  assert.match(r.stdout, /outputs=3:role-codex-home\.worker\.mjs$/m);
-  assert.match(r.stdout, /bundled \/src -> \/out \(3\)$/m);
+  assert.match(r.stdout, /outputs=2:b worker\.mjs$/m);
+  assert.match(r.stdout, /bundled \/src -> \/out \(2\)$/m);
 });
 
 test('a target helper that already defines bundle_host_workers is used as-is (orchestrator copy never read)', () => {

@@ -210,34 +210,6 @@ papercusp_release_disk_reservation() {
   return 0
 }
 
-# Evidence windows require a real receipt, rather than the build fail-open result.
-# Call in the long-lived owning shell, never in a command substitution.
-papercusp_require_disk_reservation() {
-  local dir="$1" need="$2" label="${3:-evidence}" ttl="${PAPERCUSP_DISK_RESERVATION_TTL_SEC:-21600}"
-  local file start expires now key
-  case "$need" in ''|*[!0-9]*) return 28 ;; esac
-  case "$ttl" in ''|*[!0-9]*) return 28 ;; esac
-  [ "$need" -gt 0 ] && [ "$ttl" -gt 0 ] || return 28
-  PAPERCUSP_DISK_RESERVATION_FILE=""
-  papercusp_require_free_gb "$dir" "$need" "$label" || return $?
-  file="${PAPERCUSP_DISK_RESERVATION_FILE:-}"
-  start="$(papercusp_proc_starttime "$$")"
-  now="$(date +%s)"
-  key="$(papercusp_mount_key "$dir")"
-  expires="$(sed -n 's/^expires=//p' "$file" 2>/dev/null)"
-  case "$expires" in ''|*[!0-9]*) expires=0 ;; esac
-  if [ -z "$key" ] || [ -z "$start" ] || [ ! -f "$file" ] ||
-     [ "$(dirname "$file")" != "$(papercusp_reservation_dir)/$key" ] ||
-     [ "$(sed -n 's/^pid=//p' "$file" 2>/dev/null)" != "$$" ] ||
-     [ "$(sed -n 's/^start=//p' "$file" 2>/dev/null)" != "$start" ] ||
-     [ "$(sed -n 's/^gb=//p' "$file" 2>/dev/null)" != "$need" ] ||
-     [ "$expires" -lt "$((now + ttl - 5))" ]; then
-    papercusp_release_disk_reservation
-    echo "ERROR: $label requires a verified live disk reservation receipt" >&2
-    return 28
-  fi
-}
-
 # Refuse the build unless $1 has at least $2 GB free *that no other live build has
 # already claimed*, and record this build's claim so concurrent callers see it. $3
 # is a human label for the message ("sidecar staging", "cold compile"). Exits 28
