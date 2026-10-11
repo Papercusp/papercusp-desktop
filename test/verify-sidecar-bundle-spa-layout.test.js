@@ -519,6 +519,44 @@ test('packaged import closure qualifies isolated final-image imports, not build-
     console.log('PAPERCUSP_BOOT_IMPORTS_OK');`);
   assert.equal(result.status, 0, result.stderr);
 });
+test('packaged imports cannot connect to an ambient PostgreSQL endpoint, even when the error is caught', async () => {
+  const net = require('node:net');
+  let contacts = 0;
+  const listener = net.createServer(socket => { contacts++; socket.destroy(); });
+  await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
+  try {
+    for (const [imports, operation] of [
+      [`import net from 'node:net';`, `net.createConnection({ host: '127.0.0.1', port: Number(process.env.PAPERCUSP_PG_PORT) })`],
+      [`import { Socket } from 'node:net';`, `new Socket().connect(Number(process.env.PAPERCUSP_PG_PORT), '127.0.0.1')`],
+      [`import { createRequire } from 'node:module';`, `createRequire(import.meta.url)('net').connect(Number(process.env.PAPERCUSP_PG_PORT), '127.0.0.1')`],
+      [`import { connect } from 'node:tls';`, `connect({ host: '127.0.0.1', port: Number(process.env.PAPERCUSP_PG_PORT), rejectUnauthorized: false })`],
+    ]) {
+      const result = runBootCheck(`${imports}\ntry {
+        const socket = ${operation};
+        socket.on('error', () => {});
+        socket.once('connect', () => socket.destroy());
+      } catch {}\nconsole.log('PAPERCUSP_BOOT_IMPORTS_OK');`, {
+        PAPERCUSP_PG_PORT: String(listener.address().port),
+      });
+      await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(contacts, 0, 'the live loopback listener must receive no connection');
+      assert.equal(result.status, 1, 'a caught connection error must still refuse the boot receipt');
+      assert.match(result.stderr, /BOOT_IMPORT_IO_FORBIDDEN.*socket/);
+      assert.match(result.stderr, /"receiptObserved":true/);
+    }
+  } finally { await new Promise(resolve => listener.close(resolve)); }
+});
+test('packaged imports cannot launch a subprocess that escapes the isolated probe', () => {
+  for (const body of [
+    `import { spawnSync } from 'node:child_process'; try { spawnSync(process.execPath, ['-e', 'process.exit(0)']); } catch {}`,
+    `import { createRequire } from 'node:module'; try { createRequire(import.meta.url)('child_process').execFileSync(process.execPath, ['-e', 'process.exit(0)']); } catch {}`,
+  ]) {
+    const result = runBootCheck(body + `\nconsole.log('PAPERCUSP_BOOT_IMPORTS_OK');`);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /BOOT_IMPORT_IO_FORBIDDEN.*child_process/);
+    assert.match(result.stderr, /"receiptObserved":true/);
+  }
+});
 test('packaged import closure accepts a receipt after stderr exceeds the pipe buffer', () => {
   const result = runBootCheck(`import { writeSync } from 'node:fs';
     writeSync(2, Buffer.alloc(2 * 1024 * 1024, 'x'));
