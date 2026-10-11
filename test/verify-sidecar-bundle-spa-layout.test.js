@@ -36,7 +36,18 @@ function extractFunction(name, source = script) {
   const lines = source.split('\n');
   const start = lines.findIndex((line) => line === `${name}() {`);
   assert.ok(start >= 0, `${name}() not found in verify-sidecar-bundle.sh`);
-  const end = lines.findIndex((line, index) => index > start && line === '}');
+  let heredoc = null;
+  let end = -1;
+  for (let index = start + 1; index < lines.length; index++) {
+    const line = lines[index];
+    if (heredoc) {
+      if ((heredoc.stripTabs ? line.replace(/^\t+/, '') : line) === heredoc.delimiter) heredoc = null;
+      continue;
+    }
+    if (line === '}') { end = index; break; }
+    const marker = line.match(/<<(-?)\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/);
+    if (marker) heredoc = { delimiter: marker[3], stripTabs: marker[1] === '-' };
+  }
   assert.ok(end > start, `${name}() has no top-level closing brace`);
   return lines.slice(start, end + 1).join('\n');
 }
@@ -544,6 +555,31 @@ test('packaged imports cannot connect to an ambient PostgreSQL endpoint, even wh
       assert.match(result.stderr, /BOOT_IMPORT_IO_FORBIDDEN.*socket/);
       assert.match(result.stderr, /"receiptObserved":true/);
     }
+  } finally { await new Promise(resolve => listener.close(resolve)); }
+});
+test('packaged imports refuse the real PostgreSQL driver before it reaches an ambient listener', async () => {
+  let contacts = 0;
+  const listener = require('node:net').createServer(socket => { contacts++; socket.destroy(); });
+  await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
+  try {
+    const result = runBootCheck(`import postgres from 'postgres';
+      const sql = postgres('postgresql://probe:probe@127.0.0.1:' + process.env.PAPERCUSP_PG_PORT + '/probe', { connect_timeout: 1, max: 1 });
+      try { await sql\`select 1\`; } catch {} finally { await sql.end({ timeout: 0 }); }
+      console.log('PAPERCUSP_BOOT_IMPORTS_OK');`, {
+      PAPERCUSP_PG_PORT: String(listener.address().port),
+    }, dir => {
+      // The package's CJS entry is cjs/src/index.js. Copy its real source so
+      // the namespace guard still qualifies a wholly in-bundle dependency.
+      const packageRoot = path.resolve(path.dirname(require.resolve('postgres')), '../..');
+      assert.equal(JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8')).name, 'postgres');
+      fs.cpSync(packageRoot, path.join(dir, 'node_modules/postgres'), { recursive: true });
+    });
+    await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal(contacts, 0, 'the real driver must never contact the live loopback listener');
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /BOOT_IMPORT_IO_FORBIDDEN.*socket/);
+    assert.match(result.stderr, /node_modules\/postgres\/src\/connection\.js/);
+    assert.match(result.stderr, /"receiptObserved":false/);
   } finally { await new Promise(resolve => listener.close(resolve)); }
 });
 test('packaged imports cannot launch a subprocess that escapes the isolated probe', () => {
