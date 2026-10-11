@@ -44,8 +44,7 @@ RUNTIME_SIBLINGS=(
   local-embedder-worker.script.mjs cpu-task-worker.script.mjs
   local-reranker-worker.script.mjs event-loop-sentinel.worker.mjs
   snapshot-fold.worker.mjs mutation-probe-closure.worker.mjs
-  admission-jobs.worker.mjs precision-bench-worker.mjs
-  first-party-callers.worker.mjs role-codex-home.worker.mjs
+  admission-jobs.worker.mjs
   systemd-scope-env-runner.mjs git-ext-bridge.mjs
 )
 

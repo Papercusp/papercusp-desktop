@@ -533,20 +533,6 @@ if [[ "$TARGET_OS" == "linux" && "$DISTRIBUTION_PROFILE" != "vm-release" ]]; the
   unset _pgvector_sql
 fi
 # LINUX_PGVECTOR_PREFLIGHT_END
-# LINUX_PG_TEXTSEARCH_PREFLIGHT_BEGIN
-# BM25 lexical search (plan bm25-lexical-search-evoke-adoption-2026-10-10, D-002):
-# ordinary Linux bundles copy pg_textsearch from the host's PostgreSQL 18 install,
-# exactly like pgvector. The PostgreSQL apt repository packages it.
-if [[ "$TARGET_OS" == "linux" && "$DISTRIBUTION_PROFILE" != "vm-release" ]]; then
-  _pgts_sql=(/usr/share/postgresql/18/extension/pg_textsearch--*.sql)
-  if [[ ! -s /usr/lib/postgresql/18/lib/pg_textsearch.so \
-     || ! -s /usr/share/postgresql/18/extension/pg_textsearch.control \
-     || ! -s "${_pgts_sql[0]}" ]]; then
-    _missing_host_tools+=("PostgreSQL 18 pg_textsearch library, control and SQL files (apt install postgresql-18-pg-textsearch from the PostgreSQL apt repository)")
-  fi
-  unset _pgts_sql
-fi
-# LINUX_PG_TEXTSEARCH_PREFLIGHT_END
 # Embedding models: the sidecar's fail-closed models guard (WI-5638 / D-178) needs the
 # two contract-pinned transformers models, which `npm ci` never downloads. A host tree
 # carries them only because live use filled the package's `.cache`; a fresh clone
@@ -1634,14 +1620,7 @@ for np in "${NATIVE_PKGS[@]}"; do HOST_EXTERNALS+=( "--external:$np" ); done
 # syntax alone cut serve.mjs ~49MB→~35MB with zero behaviour change
 # (install-size-audit 2026-07-07, owner-directed). Full --minify would save a
 # further ~6MB but is left out for that name-dependency risk.
-# >>> desktop release compaction
-if declare -p HOST_RELEASE_COMPACTION_ARGS >/dev/null 2>&1; then
-  MINIFY_ARGS=("${HOST_RELEASE_COMPACTION_ARGS[@]}")
-else
-  # Exact-source cuts may select an older target helper; retain its proven policy.
-  MINIFY_ARGS=(--minify-whitespace --minify-syntax)
-fi
-# <<< desktop release compaction
+MINIFY_ARGS=(--minify-whitespace --minify-syntax)
 (cd "$WEB_DIR" && run_sidecar_cached_package npx --yes esbuild@0.25.0 bin/serve.ts \
   --bundle --platform=node --format=esm --target=node22 \
   "${MINIFY_ARGS[@]}" \
@@ -3968,117 +3947,6 @@ if [[ "$_pgv_os" != "windows" && "${pgvector_copied:-0}" -eq 0 ]]; then
   exit 1
 fi
 fi # qualified native inputs / ordinary pgvector preparation
-
-# PG_TEXTSEARCH_ABI_GATE_BEGIN
-# pg_textsearch_abi_gaps <extension.so> <postgres binary>
-# Prints each symbol the extension imports that the target server cannot provide, or
-# "<unmeasured>" when either side could not be read. Empty output means loadable.
-# Why (plan bm25-lexical-search-evoke-adoption-2026-10-10, D-014; measured 2026-10-11): a
-# pgdg extension package is compiled against the host's server minor and can import
-# symbols an older minor of the same major lacks. pg_textsearch 1.5.1 built for 18.4
-# imports palloc_mul, which embedded 18.3 does not export, and the 18.3 postmaster refused
-# to start with it preloaded. embedded-postgres-server preloads the library whenever the
-# file is present, so an incompatible copy stops the bundled database instead of
-# degrading to legacy ranking. "Provided" is the binary's dynamic exports plus those of
-# every library it links (libm supplies `log`, for instance). Versioned imports
-# (memcpy@GLIBC_…) are always resolved by system libraries and are not checked.
-pg_textsearch_abi_gaps() {
-  local lib="$1" bin="$2" need have dep
-  need="$(nm -D --undefined-only "$lib" 2>/dev/null | awk '$1 == "U" && $2 !~ /@/ { print $2 }' | LC_ALL=C sort -u || true)"
-  have="$( {
-    nm -D --defined-only "$bin" 2>/dev/null || true
-    while read -r dep; do
-      [[ -n "$dep" ]] && { nm -D --defined-only "$dep" 2>/dev/null || true; }
-    done < <(LD_LIBRARY_PATH="$(dirname "$(dirname "$bin")")/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd "$bin" 2>/dev/null | awk '$2 == "=>" && $3 ~ /^\// { print $3 }' || true)
-  } | awk 'NF >= 3 { sub(/@.*/, "", $3); print $3 }' | LC_ALL=C sort -u)"
-  # Positive control: every PostgreSQL server exports palloc and every extension calls it.
-  # If either list lacks it, the measurement read nothing (no nm, not ELF, wrong path) and
-  # must not pass as compatible.
-  if ! grep -qx palloc <<<"$need" || ! grep -qx palloc <<<"$have"; then
-    echo "<unmeasured>"
-    return 0
-  fi
-  LC_ALL=C comm -23 <(printf '%s\n' "$need") <(printf '%s\n' "$have")
-}
-# PG_TEXTSEARCH_ABI_GATE_END
-
-# PG_TEXTSEARCH_BUNDLE_BEGIN
-# Bundle pg_textsearch (BM25 lexical ranking — plan bm25-lexical-search-evoke-adoption-
-# 2026-10-10, D-002; PostgreSQL licence, which permits redistribution with its notice)
-# into the same runtime directories pgvector uses. embedded-postgres-server preloads it
-# (shared_preload_libraries) only when this library file is present, so a target that
-# does not bundle it still boots; its migration skips the BM25 indexes and search ranks
-# with the legacy tsvector path, reported by the BM25 health check.
-#   Linux:   apt install postgresql-18-pg-textsearch  (hard requirement; preflighted above)
-#   darwin:  no Homebrew formula or upstream binary exists yet — not bundled (WI-6554700010008388)
-#   Windows: no automated source — not bundled (WI-6554700010008388)
-echo "→ bundling pg_textsearch into embedded-postgres (per platform)"
-pg_textsearch_copied=0
-_pgts_lib_src=""
-_pgts_ext_src=""
-case "$TARGET_OS" in
-  linux)
-    _pgts_lib_src="/usr/lib/postgresql/18/lib/pg_textsearch.so"
-    _pgts_ext_src="/usr/share/postgresql/18/extension"
-    ;;
-  darwin|windows)
-    echo "  ⚠ pg_textsearch not bundled for $TARGET_OS (no packaged build); BM25 search falls back to legacy ranking there (WI-6554700010008388)"
-    ;;
-esac
-if [[ -n "$_pgts_lib_src" ]]; then
-  if [[ -f "$_pgts_lib_src" && -f "$_pgts_ext_src/pg_textsearch.control" ]]; then
-    for plat_dir in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/*/native; do
-      [[ -d "$plat_dir" ]] || continue
-      # Same layout selection as pgvector: relocatable prefix (lib + share/extension)
-      # for the pinned source build, Debian layout for the upstream npm binaries.
-      if [[ -f "$plat_dir/lib/pgcrypto.so" && -d "$plat_dir/share/extension" ]]; then
-        _pgts_runtime_lib_dir="$plat_dir/lib"
-        _pgts_runtime_ext_dir="$plat_dir/share/extension"
-      else
-        _pgts_runtime_lib_dir="$plat_dir/lib/postgresql"
-        _pgts_runtime_ext_dir="$plat_dir/share/postgresql/extension"
-      fi
-      # Refuse a library this tree's server cannot load (D-014; see the ABI gate above).
-      _pgts_gaps="$(pg_textsearch_abi_gaps "$_pgts_lib_src" "$plat_dir/bin/postgres")"
-      if [[ -n "$_pgts_gaps" ]]; then
-        _pgts_gaps="${_pgts_gaps//$'\n'/ }"
-        if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
-          echo "  ⚠ pg_textsearch not bundled into $plat_dir: its server cannot load it (missing: $_pgts_gaps); BM25 search falls back to legacy ranking"
-          continue
-        fi
-        echo "ERROR: $_pgts_lib_src cannot load in the embedded server at $plat_dir (missing: $_pgts_gaps)."
-        echo "    The host package was built for a newer PostgreSQL minor than the embedded binaries."
-        echo "    Bump embedded-postgres to at least that minor (D-014), or install a pg_textsearch built for it."
-        exit 1
-      fi
-      mkdir -p "$_pgts_runtime_lib_dir" "$_pgts_runtime_ext_dir"
-      cp -f "$_pgts_lib_src" "$_pgts_runtime_lib_dir/"
-      cp -f "$_pgts_ext_src"/pg_textsearch--*.sql "$_pgts_runtime_ext_dir/"
-      cp -f "$_pgts_ext_src/pg_textsearch.control" "$_pgts_runtime_ext_dir/"
-      # The PostgreSQL licence requires its copyright notice in every copy.
-      if [[ -f /usr/share/doc/postgresql-18-pg-textsearch/copyright ]]; then
-        cp -f /usr/share/doc/postgresql-18-pg-textsearch/copyright "$_pgts_runtime_ext_dir/pg_textsearch.LICENSE"
-      else
-        echo "ERROR: pg_textsearch licence notice missing (/usr/share/doc/postgresql-18-pg-textsearch/copyright)"
-        exit 1
-      fi
-      pg_textsearch_copied=$((pg_textsearch_copied + 1))
-    done
-    echo "  ✓ pg_textsearch copied into $pg_textsearch_copied embedded-postgres tree(s)"
-  elif [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
-    echo "  ⚠ pg_textsearch not found at $_pgts_lib_src for vm-release; BM25 search falls back to legacy ranking"
-  else
-    echo "ERROR: pg_textsearch not found at $_pgts_lib_src — Linux bundles ship BM25 search"
-    echo "    Install: sudo apt install postgresql-18-pg-textsearch"
-    exit 1
-  fi
-  if [[ "$TARGET_OS" == "linux" && "$DISTRIBUTION_PROFILE" != "vm-release" && "$pg_textsearch_copied" -eq 0 ]]; then
-    echo "ERROR: pg_textsearch was NOT bundled into any embedded-postgres tree on linux."
-    exit 1
-  fi
-fi
-unset _pgts_lib_src _pgts_ext_src _pgts_runtime_lib_dir _pgts_runtime_ext_dir _pgts_gaps
-# PG_TEXTSEARCH_BUNDLE_END
 
 # Surface real pg_dump / psql to the sidecar's $PATH so the snapshot
 # subsystem (packages/backup/src/hook.ts spawns `pg_dump` by bare name; the

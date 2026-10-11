@@ -332,12 +332,7 @@ there and redo it.
   **Scope this exclusivity to `LIVE_GATE_OPS` only.** `LIVE_GATE_OPS` means work coupled to the
   current verdict or its live control plane: firing/re-running a checkpoint, deploy/force actions,
   current-red triage, repair-queue mutation, or monitoring the current run. FIRST call
-  `state:read { cell: 'gate.greenCheckpoint.ownership' }`.
-  Compare `gate.ownership.takenBy` with your own verified owner identity.
-  **Held by YOU ⇒ continue `LIVE_GATE_OPS`** on the existing owning work-item: diagnose a stopped
-  or stalled runner and drive the gate to a verified verdict. Never stand down merely because your own claim is held-live.
-  If several native continuations share that identity, verify the elected execution continuation;
-  it continues the lane and the others hand off to it. **Held by ANOTHER live agent ⇒ you are DONE
+  `state:read { cell: 'gate.greenCheckpoint.ownership' }`. **Held by a live agent ⇒ you are DONE
   with `LIVE_GATE_OPS`, not with every gate-related task:** send useful live-gate evidence once
   (`coord:send`), then STOP THAT LANE — do not claim the live gate item, arm a fallback monitor,
   or read gate status again this session.

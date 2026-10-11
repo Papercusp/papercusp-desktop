@@ -147,17 +147,6 @@ const PER_CALL_EVENT_CAP: u64 = 10_000;
 /// no Done, no Error, no reconnect — exactly the "hangs on bprogress-busy,
 /// needs manual relaunch" symptom this fixes.
 const IPC_CALL_IDLE_TIMEOUT_MS: u64 = 20_000;
-/// Liveness event the server sends for every call still in flight
-/// (`IPC_KEEPALIVE_EVENT` in `@papercusp/ipc-endpoint-server`; PROTOCOL.md
-/// § Keepalive). Without it a route that works for longer than the budget
-/// above before answering (a Cupboard install clones a repo and starts a
-/// sandboxed daemon) was force-failed as wedged (WI-6554700010008458). The
-/// beat comes from the sidecar's own event loop, so a sidecar that is blocked
-/// or not servicing its socket still sends nothing and this watchdog still
-/// fires. It is activity only: never forwarded to the webview, never counted
-/// toward the per-call event cap. Pinned against the TS constant by
-/// `packages/operator-core/lib/endpoint-ipc/keepalive-lockstep.test.ts`.
-const IPC_KEEPALIVE_EVENT: &str = "ipc.keepalive";
 /// How often the per-call watchdog re-checks staleness. Small relative to
 /// either timeout so the observed hang is bounded to ~timeout + one interval.
 const IPC_WATCHDOG_CHECK_INTERVAL_MS: u64 = 2_000;
@@ -273,13 +262,6 @@ impl CallSink {
     /// true if the event was forwarded; false if it was dropped (cap or
     /// channel error).
     fn try_send_event(&self, event: EndpointEvent) -> bool {
-        if let EndpointEvent::Event { name, .. } = &event {
-            if name == IPC_KEEPALIVE_EVENT {
-                // Liveness only: refresh the idle clock and stop here.
-                self.last_activity_ms.store(now_ms(), Ordering::Relaxed);
-                return false;
-            }
-        }
         // WI-2817: ANY inbound frame is activity — resets the idle-timeout clock.
         // The response head may also promote this call to the stream budget.
         self.record_activity(&event);
@@ -1666,42 +1648,6 @@ mod tests {
             InvokeResponseBody::Raw(actual) => assert_eq!(actual, raw),
             InvokeResponseBody::Json(_) => panic!("binary event regressed to JSON/base64"),
         }
-    }
-
-    #[test]
-    fn call_sink_counts_keepalive_as_activity_without_forwarding_it() {
-        // WI-6554700010008458: a call whose route is slow to answer receives only
-        // keepalives. They must keep it inside the idle budget, and the webview must
-        // never see them.
-        let (sink, captured) = capturing_sink();
-        let stale = now_ms() - IPC_CALL_IDLE_TIMEOUT_MS - 1;
-        sink.last_activity_ms.store(stale, Ordering::Relaxed);
-        assert!(is_idle_timed_out(stale, now_ms(), IPC_CALL_IDLE_TIMEOUT_MS));
-
-        assert!(!sink.try_send_event(EndpointEvent::Event {
-            name: IPC_KEEPALIVE_EVENT.into(),
-            data: serde_json::Value::Null,
-        }));
-
-        assert!(!is_idle_timed_out(
-            sink.last_activity_ms.load(Ordering::Relaxed),
-            now_ms(),
-            IPC_CALL_IDLE_TIMEOUT_MS
-        ));
-        assert!(captured.lock().unwrap().is_empty());
-        assert_eq!(sink.events_sent.load(Ordering::Relaxed), 0);
-        // A keepalive never promotes a request to the longer stream budget.
-        assert_eq!(
-            sink.idle_timeout_ms.load(Ordering::Relaxed),
-            IPC_CALL_IDLE_TIMEOUT_MS
-        );
-
-        // Ordinary events still flow after a keepalive.
-        assert!(sink.try_send_event(EndpointEvent::Event {
-            name: "head".into(),
-            data: serde_json::json!({ "status": 200, "headers": {} }),
-        }));
-        assert_eq!(captured.lock().unwrap().len(), 1);
     }
 
     #[test]
