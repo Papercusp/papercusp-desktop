@@ -179,6 +179,10 @@ printf -v DEV_ENV_FILE_Q '%q' "$DEV_ENV_FILE"
 # supervision and reaping contract byte-for-byte.
 DEV_HOST_COMMAND="npx tsx bin/hono-host.ts"
 DEV_HOST_ENTRY="${PAPERCUSP_DEV_HOST_ENTRY:-}"
+if [ -n "$DEV_SOURCE_ROOT" ] && [ -z "$DEV_HOST_ENTRY" ]; then
+  echo "[tauri] FATAL: PAPERCUSP_DEV_SOURCE_ROOT requires PAPERCUSP_DEV_HOST_ENTRY; build the frozen source host with apps/operator/bin/bundle-host.sh instead of falling back to tsx" >&2
+  exit 1
+fi
 if [ -n "$DEV_HOST_ENTRY" ]; then
   case "$DEV_HOST_ENTRY" in
     /*) ;;
