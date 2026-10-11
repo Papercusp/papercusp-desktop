@@ -1,7 +1,7 @@
 // Tests for bin/mac-vm-watchdog.mjs and qmp-command.py's status-events mode
 // (WI-10002582 / EI-24019740313758959).
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import net from 'node:net';
@@ -16,6 +16,7 @@ import {
   loadConfig,
   parseCursorProbe,
   parseNeighStates,
+  readVmFiles,
   resolveDbUrl,
   resolveSuDbUrl,
   RESTART_MIN_INTERVAL_FLOOR_SEC,
@@ -275,6 +276,7 @@ function fakeDeps({ resets = 6, qmpCode = 0, quitCode = 0, pingCode = 0, startCo
   let leaseProbeIndex = 0;
   const deps = {
     calls,
+    readVmFiles: () => ({ status: 'ok', deletedCwd: false, deletedDrives: [] }),
     advance: (sec) => { nowMs += sec * 1000; },
     set resets(n) { resets = n; },
     exec: async (cmd, args, opts = {}) => {
@@ -464,6 +466,48 @@ test('runOnce --dry-run has no side effects', async () => {
   assert.ok(!deps.calls.some((call) => call.cmd === 'psql' && String(call.stdin || '').includes('INSERT INTO harness_shared.coord_event_log')));
   assert.ok(!typesOf(deps.calls).includes('qmp:quit'));
   assert.equal(existsSync(path.join(c.stateDir, 'state.json')), false);
+});
+
+test('deleted VM disks are detected through a real open descriptor', { skip: process.platform !== 'linux' }, async () => {
+  const dir = await tempDir();
+  const disk = path.join(dir, 'disk.qcow2');
+  await writeFile(disk, 'retained disk bytes');
+  const child = spawn(process.execPath, ['-e', `
+    const fs = require('node:fs');
+    fs.openSync(process.argv[1], 'r');
+    fs.unlinkSync(process.argv[1]);
+    process.stdout.write('ready');
+    process.stdin.resume();
+  `, disk, '-drive', `file=${disk},format=qcow2`], { stdio: ['pipe', 'pipe', 'pipe'] });
+  try {
+    await new Promise((resolve, reject) => {
+      child.stdout.once('data', resolve);
+      child.once('error', reject);
+      child.once('exit', () => reject(new Error('descriptor holder exited before inspection')));
+    });
+    assert.deepEqual(readVmFiles(child.pid), { status: 'unsafe', deletedCwd: false, deletedDrives: ['disk.qcow2'] });
+  } finally {
+    child.stdin.end();
+    await new Promise((resolve) => child.once('exit', resolve));
+  }
+});
+
+test('working QMP never makes deleted VM inputs safe to restart', () => {
+  const s = { ...signals(), files: { status: 'unsafe', deletedCwd: true, deletedDrives: ['disk.qcow2'] } };
+  const classification = classify(s, cfg());
+  assert.equal(classification.verdict, 'vm-inputs-deleted');
+  assert.equal(classification.kind, 'alert');
+  const decision = decide(classification, { condition: 'vm-inputs-deleted', streak: 100 }, cfg(), 1_000_000, null);
+  assert.equal(decision.actions.some((action) => action.type === 'cold-restart'), false);
+});
+
+test('coldRestart rechecks disk safety immediately before stopping QEMU', async () => {
+  const deps = fakeDeps();
+  deps.readVmFiles = () => ({ status: 'unsafe', deletedCwd: false, deletedDrives: ['disk.qcow2'] });
+  const out = await coldRestart(cfg(), deps, { service: { mainPid: 4242 }, files: { status: 'ok' } });
+  assert.equal(out.step, 'input-check');
+  assert.equal(out.blocked, true);
+  assert.equal(deps.calls.length, 0);
 });
 
 test('coldRestart stops at a refused QMP quit and never starts a second qemu', async () => {

@@ -117,6 +117,37 @@ export function loadConfig(env = process.env) {
 
 // ── pure parsers ──────────────────────────────────────────────────────────
 
+// A running QEMU can retain a deleted disk through an open descriptor. Quitting
+// it then destroys the last reference; inspect those inputs before any remedy.
+export function readVmFiles(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return { status: 'unknown', detail: 'no VM process identity' };
+  try {
+    const proc = `/proc/${pid}`;
+    const cwd = fs.readlinkSync(`${proc}/cwd`);
+    const deletedCwd = cwd.endsWith(' (deleted)');
+    const argv = fs.readFileSync(`${proc}/cmdline`, 'utf8').split('\0');
+    const drives = new Set();
+    for (let i = 0; i < argv.length - 1; i += 1) {
+      if (argv[i] !== '-drive') continue;
+      const file = argv[i + 1].split(',').find((part) => part.startsWith('file='))?.slice(5);
+      if (file) drives.add(path.resolve(cwd.replace(/ \(deleted\)$/, ''), file));
+    }
+    if (!drives.size) return { status: 'unknown', detail: 'VM drive inputs could not be identified' };
+    const deletedDrives = [];
+    for (const fd of fs.readdirSync(`${proc}/fd`)) {
+      try {
+        const target = fs.readlinkSync(`${proc}/fd/${fd}`).replace(/ \(deleted\)$/, '');
+        if (drives.has(target) && fs.statSync(`${proc}/fd/${fd}`).nlink === 0) {
+          deletedDrives.push(path.basename(target));
+        }
+      } catch { /* A descriptor may close during the read. */ }
+    }
+    return { status: deletedCwd || deletedDrives.length ? 'unsafe' : 'ok', deletedCwd, deletedDrives };
+  } catch (error) {
+    return { status: 'unknown', detail: error.code || error.message };
+  }
+}
+
 export function parseSystemdShow(text) {
   const out = {};
   for (const line of String(text || '').split('\n')) {
@@ -177,6 +208,15 @@ export function classify(s, cfg) {
       kind: 'alert',
       detail: `${cfg.unit} is ${s.service.activeState}; not starting a unit someone stopped (systemd Restart= owns crash restarts)`,
     };
+  }
+  if (s.files?.status === 'unsafe') {
+    return {
+      verdict: 'vm-inputs-deleted', kind: 'alert',
+      detail: `VM inputs were deleted while QEMU is alive (working directory: ${s.files.deletedCwd ? 'deleted' : 'present'}; disks: ${s.files.deletedDrives.join(', ') || 'none'}). Preserve its open disk descriptors before any restart.`,
+    };
+  }
+  if (s.files?.status === 'unknown') {
+    return { verdict: 'vm-inputs-unverified', kind: 'alert', detail: `VM input safety could not be measured: ${s.files.detail}; refusing an automatic restart` };
   }
   if (s.qmp.contended) {
     return { verdict: 'op-in-flight', kind: 'skip', detail: 'another client holds the single-client QMP slot' };
@@ -362,7 +402,8 @@ export async function collectSignals(cfg, deps) {
     ], { timeoutMs: 45_000 });
     cursor = r.code === 0 ? parseCursorProbe(r.stdout) : { ok: false, error: tail(r.stderr || `ssh exit ${r.code}`) };
   }
-  return { service, qmp, guest, cursor };
+  const files = deps.readVmFiles ? deps.readVmFiles(service.mainPid) : { status: 'unknown', detail: 'VM input reader unavailable' };
+  return { service, qmp, guest, cursor, files };
 }
 
 async function waitUntil(deps, seconds, predicate) {
@@ -385,6 +426,12 @@ function readPidfile(file) {
 
 /** QMP quit, wait for qemu to exit, then systemctl start. Never system_reset. */
 export async function coldRestart(cfg, deps, signals) {
+  const oldPid = signals.service.mainPid || readPidfile(cfg.qemuPidfile);
+  const files = deps.readVmFiles ? deps.readVmFiles(oldPid) : signals.files;
+  if (files?.status !== 'ok') {
+    return { ok: false, blocked: true, blockKind: 'vm-input-safety', step: 'input-check',
+      detail: 'VM input safety is not verified; preserve deleted open disks before QMP quit', files };
+  }
   const nowSec = Math.floor(deps.nowMs() / 1000);
   const manualHold = activeHold(readJson(cfg.holdFile), nowSec);
   if (manualHold) {
@@ -411,7 +458,6 @@ export async function coldRestart(cfg, deps, signals) {
   }
 
   const steps = [];
-  const oldPid = signals.service.mainPid || readPidfile(cfg.qemuPidfile);
   const quit = await deps.exec('python3', [cfg.qmpHelper, cfg.qmpSock, 'quit'], { timeoutMs: 15_000 });
   steps.push({ step: 'qmp-quit', code: quit.code });
   if (quit.code !== 0) return { ok: false, step: 'qmp-quit', detail: tail(quit.stderr), steps };
@@ -676,6 +722,7 @@ export function realDeps() {
       if (stdin !== undefined) child.stdin.end(stdin);
     }),
     nowMs: () => Date.now(),
+    readVmFiles,
     monotonicUs: () => Number(process.hrtime.bigint() / 1000n),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     pidAlive: (pid) => {
