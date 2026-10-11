@@ -134,6 +134,7 @@ PY
 fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+node "$HERE/lib/spa-freshness.js" || exit $?
 # Keep helper/audit policy current while compiling and packaging the pinned source.
 ROOT="$(cd "${PAPERCUSP_DESKTOP_TARGET_ROOT:-$HERE/..}" && pwd)"
 SRC_TAURI="$ROOT/src-tauri"
@@ -304,6 +305,7 @@ done
 # would ship an app that dies with 'exec format error' on macOS).
 [[ -d "$DARWIN_SIDECAR/apps" && -f "$DARWIN_SIDECAR/bin/node" ]] \
   || fail "darwin sidecar not found at $DARWIN_SIDECAR — build it: TARGET_OS=darwin TARGET_ARCH=x64 PAPERCUSP_SIDECAR_OUT=$DARWIN_SIDECAR bin/build-desktop-sidecar.sh"
+node "$HERE/lib/spa-freshness.js" --spa "$DARWIN_SIDECAR/spa/index.html" || exit $?
 file "$DARWIN_SIDECAR/bin/node" 2>/dev/null | grep -c 'Mach-O' >/dev/null \
   || fail "sidecar at $DARWIN_SIDECAR is NOT darwin (bin/node is not Mach-O) — rebuild the darwin sidecar"
 # ...and it must be a build that carries what this cut is shipping (EI-19446480107603858).

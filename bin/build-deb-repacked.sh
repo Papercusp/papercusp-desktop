@@ -18,6 +18,7 @@ command -v cargo >/dev/null 2>&1 || { echo "FATAL: cargo not resolvable (checked
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${PAPERCUSP_DESKTOP_TARGET_ROOT:-$SCRIPT_DIR/..}" && pwd)"
+node "$SCRIPT_DIR/lib/spa-freshness.js" --spa "$ROOT/src-tauri/sidecar/spa/index.html" || exit $?
 # A direct Debian producer must export the updater host to Cargo itself.
 # Public packaging cannot rely on a launcher remembering the environment.
 source "$SCRIPT_DIR/lib/release-host.sh"
