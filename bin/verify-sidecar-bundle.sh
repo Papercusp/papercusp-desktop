@@ -854,14 +854,52 @@ fi
 # A bounded node child replaces GNU timeout (not available on the Mac builder).
 check_boot_import_closure() {
   local side="$1"
-  "$side/bin/node" --input-type=module - "$side" <<'NODE'
+  "$side/bin/node" --input-type=module - "$side" "$REQUIRED_NATIVE_MODULES" <<'NODE'
 import { spawnSync } from 'node:child_process';
-import { closeSync, fstatSync, mkdtempSync, openSync, readSync, rmSync } from 'node:fs';
+import { closeSync, fstatSync, mkdtempSync, openSync, readSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-const side = process.argv[2];
+import { isAbsolute, join, relative, sep } from 'node:path';
+const side = realpathSync(process.argv[2]);
 const home = mkdtempSync(join(tmpdir(), 'papercusp-boot-imports-'));
 try {
+  // Reuse the native contract above before paying for the complete import graph.
+  // A missing package must not be supplied by this checkout's ancestors or by
+  // an external diagnostic overlay. Resolution alone does not execute addons.
+  const require = createRequire(join(side, 'serve.mjs'));
+  const inside = file => {
+    const suffix = relative(side, realpathSync(file));
+    return !isAbsolute(suffix) && suffix !== '..' && !suffix.startsWith('..' + sep);
+  };
+  const natives = process.argv[3].trim().split(/\s+/).filter(Boolean);
+  if (!natives.length) throw Error('boot import namespace FAILED: empty native contract');
+  if (natives.includes('@lydell/node-pty')) natives.push(`@lydell/node-pty-${process.platform}-${process.arch}`);
+  for (const name of natives) {
+    const entry = require.resolve(name);
+    if (!inside(entry)) throw Error(`boot import namespace FAILED: ${name} resolved OUTSIDE the bundle -> ${entry}`);
+  }
+  // The isolated native probes already guard CommonJS; the full graph also has
+  // ESM imports. Node's synchronous hook applies the same physical-root rule to
+  // both loaders, including transitive dependencies and escaping symlinks.
+  const guard = join(home, 'boot-imports.guard.cjs');
+  writeFileSync(guard, `
+const { registerHooks } = require('node:module');
+const { realpathSync } = require('node:fs');
+const { isAbsolute, relative, sep } = require('node:path');
+const { fileURLToPath } = require('node:url');
+const root = ${JSON.stringify(side)};
+registerHooks({ resolve(specifier, context, nextResolve) {
+  const result = nextResolve(specifier, context);
+  if (result.url.startsWith('file:')) {
+    const physical = realpathSync(fileURLToPath(result.url));
+    const suffix = relative(root, physical);
+    if (isAbsolute(suffix) || suffix === '..' || suffix.startsWith('..' + sep)) {
+      throw Error('ESCAPED_BUNDLE: ' + specifier + ' resolved OUTSIDE the bundle -> ' + physical);
+    }
+  }
+  return result;
+} });
+`, { flag: 'wx', mode: 0o600 });
   const env = { ...process.env, HOME: home, PAPERCUSP_HOME: home,
     PAPERCUSP_PROMPTS_DIR: join(side, 'prompts'), PAPERCUSP_HARNESS_DIR: join(side, 'harness'),
     PAPERCUSP_WORKSPACES_DIR: join(home, 'workspaces'), PAPERCUSP_DISABLE_BACKGROUND_TASKS: '1',
@@ -882,7 +920,7 @@ try {
   const stderrFd = openSync(join(home, 'boot-imports.stderr.log'), 'wx+', 0o600);
   let result, stderrTail;
   try {
-    result = spawnSync(executable, [join(side, 'serve.mjs'), '--verify-boot-imports'],
+    result = spawnSync(executable, ['--require', guard, join(side, 'serve.mjs'), '--verify-boot-imports'],
       { cwd: side, env, encoding: 'utf8', timeout: 60000, maxBuffer: 1024 * 1024,
         stdio: ['ignore', 'pipe', stderrFd] });
     const size = fstatSync(stderrFd).size;

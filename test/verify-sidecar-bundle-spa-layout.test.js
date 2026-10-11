@@ -446,17 +446,71 @@ test('a missing selected source refuses instead of falling back to tooling proto
   assert.equal(result.out.trim(), '__UNDERIVABLE_INITIALIZER_PROTOCOL_VERSION__');
 });
 
-function runBootCheck(body, envOverrides = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'packaged-boot-closure-'));
+function runBootCheck(body, envOverrides = {}, setup = () => {}) {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'packaged-boot-closure-'));
+  const dir = path.join(scratch, 'sidecar');
+  const nativeContract = script.match(/REQUIRED_NATIVE_MODULES="([^"]+)"/)[1];
   try {
+    fs.mkdirSync(dir);
     fs.mkdirSync(path.join(dir, 'bin'));
     fs.symlinkSync(process.execPath, path.join(dir, 'bin/node'));
     fs.writeFileSync(path.join(dir, 'serve.mjs'), body);
-    return spawnSync('bash', ['-c', `set -uo pipefail\n${CHECK_BOOT_IMPORT_CLOSURE}\ncheck_boot_import_closure "$1"`, 'check', dir], {
+    for (const name of [...nativeContract.trim().split(/\s+/), `@lydell/node-pty-${process.platform}-${process.arch}`]) {
+      const pkg = path.join(dir, 'node_modules', name);
+      fs.mkdirSync(pkg, { recursive: true });
+      fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name, main: 'index.cjs' }));
+      fs.writeFileSync(path.join(pkg, 'index.cjs'), 'module.exports = {};');
+    }
+    setup(dir);
+    return spawnSync('bash', ['-c', `set -uo pipefail\nREQUIRED_NATIVE_MODULES=$2\n${CHECK_BOOT_IMPORT_CLOSURE}\ncheck_boot_import_closure "$1"`, 'check', dir, nativeContract], {
       encoding: 'utf8', env: { ...process.env, ORIGINAL_HOME: process.env.HOME, HARNESS_ADMIN_DATABASE_URL: 'must-not-inherit', PAPERCUSP_INTEGRATION_ROOT: '/missing-build-tree', ...envOverrides },
     });
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
 }
+
+test('boot preflight refuses ancestor natives and missing target node-pty before executing the graph', () => {
+  for (const name of ['@lydell/node-pty', `@lydell/node-pty-${process.platform}-${process.arch}`]) {
+    const result = runBootCheck(`throw Error('GRAPH_MUST_NOT_RUN');`, {}, dir => {
+      const source = path.join(dir, 'node_modules', name);
+      const ancestor = path.join(dir, '..', 'node_modules', name);
+      fs.mkdirSync(path.dirname(ancestor), { recursive: true });
+      fs.renameSync(source, ancestor);
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /boot import namespace FAILED.*resolved OUTSIDE/);
+    assert.doesNotMatch(result.stderr, /GRAPH_MUST_NOT_RUN/);
+  }
+});
+
+test('full boot graph refuses ancestor CommonJS, ESM and escaping package links', () => {
+  for (const [body, linked] of [
+    [`import { createRequire } from 'node:module'; createRequire(import.meta.url)('ancestor-only');`, false],
+    [`await import('ancestor-only');`, false],
+    [`await import('ancestor-only');`, true],
+  ]) {
+    const result = runBootCheck(body + `console.log('PAPERCUSP_BOOT_IMPORTS_OK');`, {}, dir => {
+      const ancestor = path.join(dir, '..', 'node_modules', 'ancestor-only');
+      fs.mkdirSync(ancestor, { recursive: true });
+      fs.writeFileSync(path.join(ancestor, 'package.json'), JSON.stringify({ name: 'ancestor-only', main: 'index.cjs' }));
+      fs.writeFileSync(path.join(ancestor, 'index.cjs'), 'module.exports = {};');
+      if (linked) fs.symlinkSync(ancestor, path.join(dir, 'node_modules', 'ancestor-only'), 'dir');
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /ESCAPED_BUNDLE.*resolved OUTSIDE/);
+    assert.doesNotMatch(result.stderr, /receiptObserved":true/);
+  }
+});
+
+test('full boot graph permits in-bundle transitive CommonJS, ESM and builtin imports', () => {
+  const result = runBootCheck(`
+    import fs from 'node:fs';
+    import { createRequire } from 'node:module';
+    createRequire(import.meta.url)('@lydell/node-pty');
+    await import('@lydell/node-pty');
+    if (!fs.existsSync(import.meta.filename)) throw Error('missing entry');
+    console.log('PAPERCUSP_BOOT_IMPORTS_OK');`);
+  assert.equal(result.status, 0, result.stderr);
+});
 
 test('packaged import closure qualifies isolated final-image imports, not build-host assets', () => {
   const result = runBootCheck(`if (!process.argv.includes('--verify-boot-imports')) throw Error('wrong probe');
