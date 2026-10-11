@@ -883,11 +883,37 @@ try {
   // both loaders, including transitive dependencies and escaping symlinks.
   const guard = join(home, 'boot-imports.guard.cjs');
   writeFileSync(guard, `
-const { registerHooks } = require('node:module');
+const { registerHooks, syncBuiltinESMExports } = require('node:module');
+const net = require('node:net');
+const childProcess = require('node:child_process');
 const { realpathSync } = require('node:fs');
 const { isAbsolute, relative, sep } = require('node:path');
 const { fileURLToPath } = require('node:url');
 const root = ${JSON.stringify(side)};
+// HOME/URL sanitization does not disable the DB library's native localhost
+// fallback. Import qualification owns no runtime services: stop Node socket
+// connections and subprocess escapes before the graph runs. Keep the failed
+// verdict even when an import catches its IO error and prints a boot receipt.
+let forbiddenIO = false;
+const refuseIO = operation => {
+  forbiddenIO = true;
+  const error = new Error('BOOT_IMPORT_IO_FORBIDDEN: ' + operation);
+  error.code = 'BOOT_IMPORT_IO_FORBIDDEN';
+  throw error;
+};
+Object.defineProperty(net.Socket.prototype, 'connect', {
+  value() { return refuseIO('socket.connect'); }, writable: false, configurable: false,
+});
+for (const operation of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) {
+  childProcess[operation] = () => refuseIO('child_process.' + operation);
+}
+syncBuiltinESMExports();
+process.on('exit', () => {
+  if (forbiddenIO) {
+    process.stderr.write('BOOT_IMPORT_IO_FORBIDDEN: socket or child_process attempted during import qualification\\n');
+    process.exitCode = 1;
+  }
+});
 registerHooks({ resolve(specifier, context, nextResolve) {
   const result = nextResolve(specifier, context);
   if (result.url.startsWith('file:')) {

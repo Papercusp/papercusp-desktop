@@ -247,6 +247,11 @@ there and redo it.
   sequences multiple subsystems: `plans:new` + `plans:add-item`, then `plans:start`
   (promotes items into work-items). Don't over-apply — a single work-item, a one-shot
   fix, or pure investigation needs no plan.
+- **Shape, then specify; lead approval with the walkthrough.** For an owner-originated
+  plan, write `## Product shaping` (audience, problem, outcome, non-goals, source turns,
+  scenarios) BEFORE requirements, and requirements before tasks. Ask the owner to
+  approve with the `ownerWalkthrough` from `plans:audit { slug, phase:'shaping' }`
+  first — plain-language scenarios, assumptions, open choices — not the requirement list.
 - **Audit the complete source conversation before activating a draft plan.** Before
   `draft → ready` / `active` or `plans:start`, use `sessions:search` / `sessions:read`
   to re-read the full plan-related conversation — never rely on memory or a summary.
@@ -332,7 +337,12 @@ there and redo it.
   **Scope this exclusivity to `LIVE_GATE_OPS` only.** `LIVE_GATE_OPS` means work coupled to the
   current verdict or its live control plane: firing/re-running a checkpoint, deploy/force actions,
   current-red triage, repair-queue mutation, or monitoring the current run. FIRST call
-  `state:read { cell: 'gate.greenCheckpoint.ownership' }`. **Held by a live agent ⇒ you are DONE
+  `state:read { cell: 'gate.greenCheckpoint.ownership' }`.
+  Compare `gate.ownership.takenBy` with your own verified owner identity.
+  **Held by YOU ⇒ continue `LIVE_GATE_OPS`** on the existing owning work-item: diagnose a stopped
+  or stalled runner and drive the gate to a verified verdict. Never stand down merely because your own claim is held-live.
+  If several native continuations share that identity, verify the elected execution continuation;
+  it continues the lane and the others hand off to it. **Held by ANOTHER live agent ⇒ you are DONE
   with `LIVE_GATE_OPS`, not with every gate-related task:** send useful live-gate evidence once
   (`coord:send`), then STOP THAT LANE — do not claim the live gate item, arm a fallback monitor,
   or read gate status again this session.
@@ -432,6 +442,26 @@ there and redo it.
   justification is non-compliance.
 
 ## Anti-babysitting rule — monitoring is not work by default
+
+**Publish finished owner-facing prose.** When you finish an audit, review, analysis,
+postmortem, status digest or proposal for the human owner, save the complete Markdown
+through `reports:publish` before your final reply. Preserve Mermaid fences and keep
+the default `visibility:'owner'` unless a broader audience was requested. Complete
+delivery in this order: (1) `reports:publish`; (2) `reports:get { id: report_id }` using
+the returned id; (3) verify that readback contains the complete Markdown and intended
+visibility; (4) provide a descriptive Markdown link to the report page in the GUI.
+The returned `path` is a valid same-origin route; use it directly as the Markdown
+target in Papercusp/Tauri (the Reports reader selects a report with
+`/reports?sel=<report_id>`). Verify that the link opens the intended report. Use an
+absolute HTTP(S) URL only when a verified owner-facing GUI origin is available;
+never guess or ask the owner for an origin
+solely to format the link. Never give a bare report id as the actionable link. Keep
+`report_id` in the durable evidence record. Claim
+saved or delivered only after the readback succeeds. Use a stable `request_key` for
+retries of the same edition; changed
+content needs a new key. A correction uses `supersedes`; a separate dated edition
+starts its own lineage. Short answers and progress updates need no report. In-flight
+handoffs still go to `work_items:checkpoint`, and standing facts to shared memory.
 
 AUTO authorizes execution; it does not create a monitoring mission. **Fixing is work;
 watching someone else fix is not.**
