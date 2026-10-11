@@ -18,16 +18,13 @@
 // with the read-only migration ledger. It never applies a migration. Native
 // verification uses this before copying/building a private host; ordinary dev
 // launches keep the existing reachability-only fallback.
-// --source-ref selects the committed migration corpus, including its gitlinks,
-// without exporting/building that source or consulting newer working-tree SQL.
-// Usage: node dev-operator-pg-probe.mjs [--repo-root <dir>] [--require-applied-schema] [--source-ref <commit>]
+// Usage: node dev-operator-pg-probe.mjs [--repo-root <dir>] [--require-applied-schema]
 
 import { existsSync, readFileSync, realpathSync, readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const ENV_VARS = ['HARNESS_ADMIN_DATABASE_URL', 'DATABASE_URL', 'PAPERCUSP_PG_URL'];
@@ -57,38 +54,7 @@ export function resolveDevPgUrl(env = process.env, home = homedir()) {
   return { url: NATIVE_FALLBACK, source: 'native-fallback' };
 }
 
-function committedMigrationFiles(repoRoot, sqlDir, sourceRef, timeoutMs) {
-  const rel = relative(repoRoot, sqlDir);
-  if (!sourceRef || !rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
-    throw new Error('Committed migration corpus must be inside the selected source');
-  }
-  const gitEnv = { ...process.env };
-  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR']) delete gitEnv[key];
-  const git = (cwd, args) => execFileSync('git', ['-C', cwd, ...args], {
-    encoding: 'utf8', env: gitEnv, timeout: Math.min(timeoutMs, 3000), maxBuffer: 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const rootCommit = git(repoRoot, ['rev-parse', '--verify', '--end-of-options', `${sourceRef}^{commit}`]).trim();
-  let checkout = repoRoot, commit = rootCommit, parts = rel.split(sep);
-  // A gitlink's commit, rather than the nested checkout's HEAD, defines the
-  // selected corpus. Flattened release-source repositories work the same way.
-  for (let i = 0; i < parts.length; i++) {
-    const prefix = parts.slice(0, i + 1).join('/');
-    const entry = git(checkout, ['ls-tree', '-z', commit, '--', prefix]);
-    const link = /^160000 commit ([0-9a-f]{40,64})\t/.exec(entry);
-    if (link) {
-      checkout = join(checkout, prefix);
-      commit = link[1];
-      parts = parts.slice(i + 1);
-      i = -1;
-    }
-  }
-  const files = git(checkout, ['ls-tree', '-z', '--name-only', `${commit}:${parts.join('/')}`])
-    .split('\0').filter(Boolean);
-  return { files, sourceRef: rootCommit, schemaSourceRef: commit };
-}
-
-export async function probeDevPg({ repoRoot, env = process.env, home = homedir(), requireAppliedSchema = false, sourceRef, postgresFactory, timeoutMs = 5000 }) {
+export async function probeDevPg({ repoRoot, env = process.env, home = homedir(), requireAppliedSchema = false, postgresFactory, timeoutMs = 5000 }) {
   const { url, source } = resolveDevPgUrl(env, home);
   const identity = { source, targetFingerprint: createHash('sha256').update(url).digest('hex') };
   const require = createRequire(pathToFileURL(join(repoRoot, 'package.json')));
@@ -99,7 +65,6 @@ export async function probeDevPg({ repoRoot, env = process.env, home = homedir()
     const inspect = async () => {
       let files;
       let sqlDir;
-      let committedSource = {};
       if (requireAppliedSchema) {
         // Import the pure runner subpath, never its embedded-binary barrel.
         const { defaultSkipFile, compareMigrationFilenames } = await import(pathToFileURL(
@@ -109,10 +74,7 @@ export async function probeDevPg({ repoRoot, env = process.env, home = homedir()
         sqlDir = env.PAPERCUSP_PG_SQL_DIR
           ? resolve(env.PAPERCUSP_PG_SQL_DIR)
           : join(repoRoot, 'libs', 'papercusp', 'libs', 'db', 'sql');
-        const corpus = sourceRef === undefined ? { files: readdirSync(sqlDir) }
-          : committedMigrationFiles(repoRoot, sqlDir, sourceRef, timeoutMs);
-        files = corpus.files.filter((f) => f.endsWith('.sql') && !defaultSkipFile(f)).sort(compareMigrationFilenames);
-        if (sourceRef !== undefined) committedSource = { sourceRef: corpus.sourceRef, schemaSourceRef: corpus.schemaSourceRef };
+        files = readdirSync(sqlDir).filter((f) => f.endsWith('.sql') && !defaultSkipFile(f)).sort(compareMigrationFilenames);
         if (files.length === 0) return { ...identity, status: 'unavailable', reason: 'empty-migration-corpus', sqlDir };
       }
       const postgres = postgresFactory ?? require('postgres');
@@ -127,7 +89,7 @@ export async function probeDevPg({ repoRoot, env = process.env, home = homedir()
       const rows = await sql.unsafe('SELECT filename FROM harness_shared.schema_migrations');
       const applied = new Set(rows.map((row) => row.filename));
       const pending = files.filter((f) => !applied.has(f));
-      return { ...identity, ...committedSource, status: pending.length ? 'pending' : 'ready', sqlDir, totalKnown: files.length, pendingCount: pending.length, pendingFiles: pending.slice(0, 5) };
+      return { ...identity, status: pending.length ? 'pending' : 'ready', sqlDir, totalKnown: files.length, pendingCount: pending.length, pendingFiles: pending.slice(0, 5) };
     };
     return await Promise.race([
       inspect(),
@@ -151,9 +113,7 @@ async function main(argv) {
   const i = argv.indexOf('--repo-root');
   const repoRoot = resolve(i >= 0 ? argv[i + 1] : join(fileURLToPath(new URL('.', import.meta.url)), '..', '..'));
   const requireAppliedSchema = argv.includes('--require-applied-schema');
-  const sourceIndex = argv.indexOf('--source-ref');
-  const sourceRef = sourceIndex >= 0 ? (argv[sourceIndex + 1] ?? '') : undefined;
-  const result = await probeDevPg({ repoRoot, requireAppliedSchema, sourceRef });
+  const result = await probeDevPg({ repoRoot, requireAppliedSchema });
   if (requireAppliedSchema) {
     console.log(JSON.stringify(result));
     return result.status === 'ready' ? 0 : result.status === 'pending' ? 75 : 74;
