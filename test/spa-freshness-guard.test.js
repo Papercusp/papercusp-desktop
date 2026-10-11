@@ -18,6 +18,10 @@ const {
   inspectSpaFreshness,
   blocksBuild,
   describe: describeResult,
+  desktopInterfaceIdentity,
+  desktopInterfaceChoice,
+  assertPublicDesktopInterface,
+  assertPublicDesktopArtifacts,
 } = require('../bin/lib/spa-freshness.js');
 
 const html = (entry) =>
@@ -93,4 +97,52 @@ test('the CLI exits 4 on skew and 0 under the documented override', () => {
     encoding: 'utf8',
   });
   assert.equal(noDist.status, 0, noDist.stderr);
+});
+
+test('public interface selection defaults to legacy and refuses candidate or unknown requests', () => {
+  assert.equal(desktopInterfaceChoice({}), 'legacy');
+  assert.doesNotThrow(() => assertPublicDesktopInterface(undefined, {}));
+  assert.throws(() => assertPublicDesktopInterface(undefined, { PAPERCUSP_DESKTOP_INTERFACE: 'portal-candidate' }), /PUBLIC DESKTOP INTERFACE HOLD/);
+  assert.throws(() => desktopInterfaceChoice({ PAPERCUSP_DESKTOP_INTERFACE: 'typo' }), /Unknown desktop interface/);
+});
+
+test('SPA interface identity comes from exactly one built-document marker', () => {
+  const marked = (kind) => html('index-AAAAAAAA.js').replace('</head>', `<meta name="papercusp-desktop-interface" content="${kind}"></head>`);
+  const legacy = desktopInterfaceIdentity(marked('legacy'));
+  assert.equal(legacy.kind, 'legacy');
+  assert.match(legacy.spaIndexSha256, /^[a-f0-9]{64}$/);
+  assert.doesNotThrow(() => assertPublicDesktopInterface({ desktopInterface: legacy }, {}));
+  assert.throws(() => assertPublicDesktopInterface({ sidecar: { desktopInterface: desktopInterfaceIdentity(marked('portal-candidate')) } }, {}), /PUBLIC DESKTOP INTERFACE HOLD/);
+  assert.equal(desktopInterfaceIdentity(html('index-AAAAAAAA.js')).kind, 'unknown');
+  assert.equal(desktopInterfaceIdentity(`<!-- ${marked('legacy')} -->`).kind, 'unknown');
+  assert.equal(desktopInterfaceIdentity(marked('legacy').replace('</head>', '<meta content="portal-candidate" name="papercusp-desktop-interface"></head>')).kind, 'unknown');
+  assert.throws(() => assertPublicDesktopInterface({}, {}), /no measured legacy/);
+  assert.throws(() => assertPublicDesktopInterface({ desktopInterface: legacy, sidecar: { desktopInterface: { kind: 'portal-candidate' } } }, {}), /PUBLIC DESKTOP INTERFACE HOLD/);
+});
+
+test('public artifact guard binds interface provenance to bytes, including nested bundle paths', () => {
+  const fs = require('node:fs');
+  const crypto = require('node:crypto');
+  const { makeDesktopTestScratchDirSync } = require('./test-scratch.cjs');
+  const root = makeDesktopTestScratchDirSync('desktop-interface-');
+  try {
+    fs.mkdirSync(path.join(root, 'deb'));
+    const file = path.join(root, 'deb', 'legacy.deb');
+    const bytes = Buffer.from('measured installer bytes');
+    fs.writeFileSync(file, bytes);
+    const identity = desktopInterfaceIdentity(html('index-AAAAAAAA.js').replace('</head>', '<meta name="papercusp-desktop-interface" content="legacy"></head>'));
+    const record = { desktopInterface: identity, artifacts: [{ name: 'deb/legacy.deb', bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') }] };
+    const provenance = path.join(root, 'build-provenance.json');
+    fs.writeFileSync(provenance, JSON.stringify(record));
+    assert.doesNotThrow(() => assertPublicDesktopArtifacts([file], {}));
+    record.desktopInterface.kind = 'portal-candidate';
+    fs.writeFileSync(provenance, JSON.stringify(record));
+    assert.throws(() => assertPublicDesktopArtifacts([file], {}), /PUBLIC DESKTOP INTERFACE HOLD/);
+    record.desktopInterface.kind = 'legacy';
+    fs.writeFileSync(provenance, JSON.stringify(record));
+    fs.writeFileSync(file, 'other installer bytes');
+    assert.throws(() => assertPublicDesktopArtifacts([file], {}), /bytes differ/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

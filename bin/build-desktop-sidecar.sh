@@ -44,6 +44,9 @@ set -euo pipefail
 # differs (e.g. CI clones into a flat workspace dir).
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# The ordinary producer remains legacy until the separate public cutover.
+# Candidate packaging must use its explicit isolated entrypoint, not this rail.
+node "$HERE/lib/spa-freshness.js" || exit $?
 # An exact-source cut runs this CURRENT producer while writing into the FROZEN
 # desktop target. Helpers follow HERE; product inputs and outputs follow ROOT.
 # Refuse a missing override rather than accidentally building the live checkout.

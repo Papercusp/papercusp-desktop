@@ -54,6 +54,8 @@ TAG="desktop-v${VERSION}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
+# Refuse a candidate request before credentials, remote I/O or public writes.
+node "$HERE/lib/spa-freshness.js" || exit $?
 
 # ── Config: where it goes ────────────────────────────────────────────────────
 RELEASE_HOST_ENV="${HOME}/.papercusp/release-host.env"
@@ -318,6 +320,10 @@ if [[ ${#ARTIFACTS[@]} -eq 0 ]]; then
   echo "ERROR: no artifacts recorded for $TAG" >&2
   exit 1
 fi
+
+# The caller's selection is insufficient: inspect the exact artifact records.
+# This precedes installer/signature and permanent/channel manifest uploads.
+node "$HERE/lib/spa-freshness.js" "${ARTIFACTS[@]}" || exit $?
 
 # EI-20551860898590077: the artifact manifest is tag-scoped, but a failed cut
 # can leave a correctly named/signed artifact from an earlier attempt in that

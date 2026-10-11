@@ -50,6 +50,8 @@ DRY_RUN="${DRY_RUN:-0}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DESKTOP_ROOT="$(cd "$HERE/.." && pwd)"
 REPO_ROOT="$(cd "$DESKTOP_ROOT/.." && pwd)"
+# Candidate runs may never replace the established public download page.
+node "$HERE/lib/spa-freshness.js" || exit $?
 
 # Bind the generated site to the release being published. The explicit
 # argument/env override is useful for re-publishing a known cut; the desktop

@@ -11,7 +11,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { inspectSpaFreshness, blocksBuild, describe } = require('./lib/spa-freshness.js');
+const { inspectSpaFreshness, blocksBuild, describe, assertPublicDesktopInterface, desktopInterfaceIdentity } = require('./lib/spa-freshness.js');
 
 const desktopDir = path.resolve(__dirname, '..');
 const repoRoot = process.env.PAPERCUSP_REPO_DIR || path.resolve(desktopDir, '..');
@@ -31,6 +31,15 @@ const result = inspectSpaFreshness({
   sidecarHtml: readOrNull(SIDECAR_INDEX),
   distHtml: readOrNull(DIST_INDEX),
 });
+try {
+  assertPublicDesktopInterface();
+  if (process.env.PAPERCUSP_RELEASE_HOST || process.env.PAPERCUSP_RELEASE_TAG || process.env.PAPERCUSP_DISTRIBUTION_PROFILE === 'public') {
+    assertPublicDesktopInterface({ desktopInterface: desktopInterfaceIdentity(readOrNull(SIDECAR_INDEX)) });
+  }
+} catch (error) {
+  console.error(error.message);
+  process.exit(4);
+}
 const message = describe(result);
 
 if (blocksBuild(result.verdict) && process.env.PAPERCUSP_ALLOW_STALE_SPA === '1') {

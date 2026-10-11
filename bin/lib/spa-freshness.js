@@ -32,6 +32,10 @@
 
 'use strict';
 
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+
 /** The `<script src>` vite emits, e.g. `index-AZ22_Xh1.js`. */
 const ENTRY_RE = /index-[A-Za-z0-9_-]+\.js/g;
 
@@ -121,4 +125,100 @@ function describe(result) {
   }
 }
 
-module.exports = { entryBundle, inspectSpaFreshness, blocksBuild, describe };
+/** Measured identity of the built document, carried by build-provenance.json. */
+function desktopInterfaceIdentity(html) {
+  if (typeof html !== 'string') return { kind: 'unknown', spaIndexSha256: null, entryBundle: null };
+  const kinds = [];
+  for (const tag of html.replace(/<!--[\s\S]*?-->/g, '').match(/<meta\b[^>]*>/gi) ?? []) {
+    const attrs = Object.fromEntries([...tag.matchAll(/([\w-]+)\s*=\s*(["'])(.*?)\2/g)]
+      .map((match) => [match[1].toLowerCase(), match[3]]));
+    if (attrs.name === 'papercusp-desktop-interface') kinds.push(attrs.content);
+  }
+  const kind = kinds.length === 1 && ['legacy', 'portal-candidate'].includes(kinds[0])
+    ? kinds[0] : 'unknown';
+  return {
+    kind,
+    spaIndexSha256: crypto.createHash('sha256').update(html).digest('hex'),
+    entryBundle: entryBundle(html),
+  };
+}
+
+function desktopInterfaceChoice(env = process.env) {
+  const choice = env.PAPERCUSP_DESKTOP_INTERFACE ?? 'legacy';
+  if (!['legacy', 'portal-candidate'].includes(choice)) {
+    throw new Error(`Unknown desktop interface ${JSON.stringify(choice)}; choose legacy or portal-candidate.`);
+  }
+  return choice;
+}
+
+/** No public cutover override: that remains a separate owner decision. */
+function assertPublicDesktopInterface(provenance, env = process.env) {
+  if (desktopInterfaceChoice(env) !== 'legacy') {
+    throw new Error('PUBLIC DESKTOP INTERFACE HOLD: portal candidate cannot replace public installers, signatures, latest.json or index.html before the separate approved cutover.');
+  }
+  if (provenance === undefined) return;
+  const identities = [provenance?.desktopInterface, provenance?.sidecar?.desktopInterface].filter(Boolean);
+  if (!identities.length || identities.some((identity) => identity.kind !== 'legacy' || !/^[a-f0-9]{64}$/.test(identity.spaIndexSha256 ?? ''))) {
+    throw new Error('PUBLIC DESKTOP INTERFACE HOLD: artifact has no measured legacy SPA identity; candidate or unknown bytes cannot enter the public release pipeline.');
+  }
+}
+
+function fileIdentity(file) {
+  const hash = crypto.createHash('sha256');
+  const buffer = Buffer.alloc(64 * 1024);
+  const fd = fs.openSync(file, 'r');
+  let size = 0;
+  try {
+    let count;
+    while ((count = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+      hash.update(buffer.subarray(0, count));
+      size += count;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return { bytes: size, sha256: hash.digest('hex') };
+}
+
+/** Bind the interface record to the exact installer bytes being published. */
+function assertPublicDesktopArtifacts(artifacts, env = process.env) {
+  assertPublicDesktopInterface(undefined, env);
+  const identities = [];
+  for (const artifact of artifacts) {
+    let directory = path.dirname(path.resolve(artifact));
+    let found = false;
+    for (let depth = 0; depth < 5; depth++, directory = path.dirname(directory)) {
+      const file = path.join(directory, 'build-provenance.json');
+      if (!fs.existsSync(file)) continue;
+      const provenance = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const relative = path.relative(directory, path.resolve(artifact)).split(path.sep).join('/');
+      const record = provenance.artifacts?.find((entry) => entry.name === relative);
+      if (!record) continue;
+      assertPublicDesktopInterface(provenance, env);
+      const measured = fileIdentity(artifact);
+      if (record.bytes !== measured.bytes || record.sha256 !== measured.sha256) {
+        throw new Error('PUBLIC DESKTOP INTERFACE HOLD: installer bytes differ from their interface provenance.');
+      }
+      found = true;
+      identities.push(provenance.desktopInterface ?? provenance.sidecar.desktopInterface);
+      break;
+    }
+    if (!found) throw new Error('PUBLIC DESKTOP INTERFACE HOLD: installer has no matching build-provenance record.');
+  }
+  return identities;
+}
+
+module.exports = {
+  entryBundle, inspectSpaFreshness, blocksBuild, describe,
+  desktopInterfaceIdentity, desktopInterfaceChoice,
+  assertPublicDesktopInterface, assertPublicDesktopArtifacts,
+};
+
+if (require.main === module) {
+  try {
+    assertPublicDesktopArtifacts(process.argv.slice(2));
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 4;
+  }
+}

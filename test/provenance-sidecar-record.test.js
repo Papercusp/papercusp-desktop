@@ -125,6 +125,26 @@ function captureSource(gitRoot, manifestPath) {
   };
 }
 
+test('shared provenance measures the packaged SPA interface and its exact document bytes', () => {
+  const dir = tmp();
+  try {
+    const sidecarDir = path.join(dir, 'sidecar');
+    fs.mkdirSync(path.join(sidecarDir, 'spa'), { recursive: true });
+    const html = '<html><head><meta name="papercusp-desktop-interface" content="legacy"><script src="/assets/index-AAAAAAAA.js"></script></head></html>';
+    fs.writeFileSync(path.join(sidecarDir, 'spa/index.html'), html);
+    const doc = emit({ sidecarDir });
+    assert.equal(doc.desktopInterface.kind, 'legacy');
+    assert.equal(doc.desktopInterface.spaIndexSha256, crypto.createHash('sha256').update(html).digest('hex'));
+    assert.equal(doc.desktopInterface.entryBundle, 'index-AAAAAAAA.js');
+    fs.writeFileSync(path.join(sidecarDir, 'spa/index.html'), html.replace('content="legacy"', 'content="portal-candidate"'));
+    const candidate = emit({ sidecarDir });
+    assert.equal(candidate.desktopInterface.kind, 'portal-candidate');
+    assert.notEqual(candidate.desktopInterface.spaIndexSha256, doc.desktopInterface.spaIndexSha256);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('artifact symlink metadata describes the same target bytes that are hashed', () => {
   const dir = tmp();
   try {

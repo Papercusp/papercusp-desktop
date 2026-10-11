@@ -388,6 +388,17 @@ _release_host_fp() {
 # `null` = the leg named no sidecar. `{"status":"absent"}` = it named one that carries
 # no provenance file — which sidecar-freshness.js treats as UNDECIDABLE, never a pass,
 # so the two must stay distinguishable here too. A MISSING key = a pre-EI-20086238555902880 emitter.
+_desktop_interface_provenance() {
+  local d="$OUT_DIR"
+  [[ -f "$d/spa/index.html" ]] || d="${PROVENANCE_SIDECAR_DIR:-}"
+  if [[ -z "$d" || ! -f "$d/spa/index.html" ]]; then printf 'null'; return; fi
+  node - "$(dirname "$0")/lib/spa-freshness.js" "$d/spa/index.html" <<'NODE'
+const fs = require('node:fs');
+const { desktopInterfaceIdentity } = require(require('node:path').resolve(process.argv[2]));
+process.stdout.write(JSON.stringify(desktopInterfaceIdentity(fs.readFileSync(process.argv[3], 'utf8'))));
+NODE
+}
+
 _sidecar_provenance() {
   local d="${PROVENANCE_SIDECAR_DIR:-}"
   if [[ -z "$d" ]]; then printf 'null'; return; fi
@@ -402,8 +413,8 @@ _sidecar_provenance() {
   # serve.mjs's own sha256 is the CONTENT identity of the packed half — the one field
   # that answers "are these the bytes I think they are" without trusting a timestamp.
   _sha="$(grep '"name": "serve.mjs"' "$p" | sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-  printf '{ "gitHead": "%s", "builtAtUtc": "%s", "serveMjsSha256": "%s" }' \
-    "${_head:-unknown}" "${_built:-unknown}" "${_sha:-unknown}"
+  printf '{ "gitHead": "%s", "builtAtUtc": "%s", "serveMjsSha256": "%s", "desktopInterface": %s }' \
+    "${_head:-unknown}" "${_built:-unknown}" "${_sha:-unknown}" "$(_desktop_interface_provenance)"
 }
 
 # Artifact name: relative to OUT_DIR when under it, else basename (see header).
@@ -639,6 +650,7 @@ trap 'rm -f "$_prov_tmp"; [[ -z "$_dirty_source_tmp" ]] || rm -f "$_dirty_source
   # "nothing was packed" — the same present-vs-missing distinction releaseHostSha256
   # relies on, and the reason neither is emitted only when non-empty.
   printf '  "sidecar": %s,\n' "$(_sidecar_provenance)"
+  printf '  "desktopInterface": %s,\n' "$(_desktop_interface_provenance)"
   printf '  "builtAtUtc": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '  "artifacts": [\n'
   _first=1
