@@ -279,6 +279,42 @@ test('Vite native prerequisite refuses a different already-installed binding ver
   assert.equal(fs.readFileSync(path.join(fixture.destination, 'package.json'), 'utf8'), manifest);
 });
 
+test('Vite native prerequisite maps an external dependency alias through its exact logical lock pin', t => {
+  const fixture = viteNativeFixture(t);
+  const donor = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-vite-native-donor-'));
+  t.after(() => fs.rmSync(donor, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(donor, 'node_modules'));
+  for (const name of ['vite', 'rolldown']) {
+    const external = path.join(donor, 'node_modules', name);
+    const logical = path.join(fixture.root, 'node_modules', name);
+    fs.renameSync(logical, external);
+    fs.symlinkSync(external, logical, 'dir');
+  }
+  const result = fixture.run();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /VITE_NATIVE_TOOLCHAIN_OK/);
+  assert.deepEqual(fixture.records(), [{ args: ['pack', `${fixture.binding}@1.0.3`, '--silent'], cache: 'held', writer: 'held' }]);
+  fixture.assertSourceUnchanged();
+});
+
+test('an aliased Rolldown with the wrong locked version is refused before fetch', t => {
+  const fixture = viteNativeFixture(t, { parentVersion: '1.0.4' });
+  const donor = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-vite-native-wrong-donor-'));
+  t.after(() => fs.rmSync(donor, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(donor, 'node_modules'));
+  for (const name of ['vite', 'rolldown']) {
+    const external = path.join(donor, 'node_modules', name);
+    const logical = path.join(fixture.root, 'node_modules', name);
+    fs.renameSync(logical, external);
+    fs.symlinkSync(external, logical, 'dir');
+  }
+  const result = fixture.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /no exact locked parent pin/);
+  assert.deepEqual(fixture.records(), []);
+  fixture.assertSourceUnchanged();
+});
+
 function runCachePackageFixture({ helper, command = [], childStatus = 0 } = {}) {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "pc-cache-runner's target-"));
   try {

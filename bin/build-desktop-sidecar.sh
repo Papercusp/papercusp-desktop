@@ -1119,7 +1119,7 @@ prepare_vite_native_toolchain() {
   # Keep the installer's lock order: repo writer, then cache reader for npm pack.
   # Vite import stays under the writer after releasing the short cache lease.
   node --input-type=module -e '
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -1135,19 +1135,31 @@ await withFsMutex(repoLockName(root),async()=>{
     const viteRequire=createRequire(viteManifest);
     const manifest=viteRequire.resolve("rolldown/package.json");
     const pkg=JSON.parse(readFileSync(manifest,"utf8"));
-    const key=relative(root,dirname(manifest)).split(sep).join("/");
     const lock=JSON.parse(readFileSync(join(root,"package-lock.json"),"utf8"));
+    // A committed-source clone may expose a locked package through a shared
+    // dependency alias. Map the actual resolved manifest back through that
+    // logical lock keys of the clone; the donor filesystem path is not a lock key.
+    const key=Object.keys(lock.packages ?? {}).find(candidate=>{
+      if (!(candidate==="node_modules/rolldown" || candidate.endsWith("/node_modules/rolldown")) ||
+          candidate.split("/").some(part=>part===".." || part==="") || candidate.startsWith("/")) return false;
+      try { return realpathSync(join(root,candidate,"package.json"))===realpathSync(manifest); }
+      catch { return false; }
+    });
     const suffix=process.platform==="linux"
       ? `-${process.report.getReport().header.glibcVersionRuntime ? "gnu" : "musl"}`
       : process.platform==="win32" ? "-msvc" : "";
     const binding=`@rolldown/binding-${process.platform}-${process.arch}${suffix}`;
-    if (key.startsWith("../") || !key.split("/").includes("node_modules") || lock.packages?.[key]?.version!==pkg.version ||
+    if (!key || lock.packages?.[key]?.version!==pkg.version ||
         !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(pkg.version) ||
         pkg.optionalDependencies?.[binding]!==pkg.version) {
       throw new Error(`Vite native binding has no exact locked parent pin: ${binding} / ${key}`);
     }
-    const result=await withPackageCacheReadLease(()=>spawnSync("bash",["-c",`fetch_cross_npm_pkg "$1" "$2"`,"vite-native-binding",
+    const hydrate=()=>withPackageCacheReadLease(()=>spawnSync("bash",["-c",`fetch_cross_npm_pkg "$1" "$2"`,"vite-native-binding",
       `${binding}@${pkg.version}`,join(dirname(manifest),"node_modules")],{stdio:"inherit",env:process.env}));
+    // The resolved package can live in the donor checkout. Its writer lease,
+    // along with the clone lease, protects the native package publish.
+    const dependencyRoot=manifest.split(`${sep}node_modules${sep}`)[0];
+    const result=dependencyRoot!==root ? await withFsMutex(repoLockName(dependencyRoot),hydrate) : await hydrate();
     if (result.error) throw result.error;
     if (result.status!==0) throw new Error(`Vite native binding fetch failed (${result.status})`);
     createRequire(manifest)(binding);
