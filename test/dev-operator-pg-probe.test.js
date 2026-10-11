@@ -161,6 +161,85 @@ function cliFixture(t) {
   return { ...fixture, receipt: path.join(fixture.root, 'receipt.json') };
 }
 
+function committedSchemaFixture(t) {
+  const fixture = cliFixture(t);
+  const child = path.join(fixture.root, 'libs', 'papercusp');
+  fs.mkdirSync(child, { recursive: true });
+  const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 'Schema fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+    GIT_COMMITTER_NAME: 'Schema fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' };
+  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR']) delete gitEnv[key];
+  const git = (cwd, args, input) => {
+    const result = spawnSync('git', ['-C', cwd, ...args], { env: gitEnv, input, encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  for (const cwd of [fixture.root, child]) git(cwd, ['init', '-q']);
+  const blob = git(child, ['hash-object', '-w', '--stdin'], '-- committed fixture\n');
+  const oldSql = git(child, ['mktree'], `100644 blob ${blob}\t374-old.sql\n`);
+  const newSql = git(child, ['mktree'], `100644 blob ${blob}\t374-old.sql\n100644 blob ${blob}\t1447-future.sql\n`);
+  const childCommit = (sqlTree) => {
+    const db = git(child, ['mktree'], `040000 tree ${sqlTree}\tsql\n`);
+    const libs = git(child, ['mktree'], `040000 tree ${db}\tdb\n`);
+    const tree = git(child, ['mktree'], `040000 tree ${libs}\tlibs\n`);
+    return git(child, ['commit-tree', tree], 'schema fixture\n');
+  };
+  const oldChild = childCommit(oldSql), newChild = childCommit(newSql);
+  const rootCommit = (sha) => {
+    const libs = git(fixture.root, ['mktree'], `160000 commit ${sha}\tpapercusp\n`);
+    const tree = git(fixture.root, ['mktree'], `040000 tree ${libs}\tlibs\n`);
+    return git(fixture.root, ['commit-tree', tree], 'root fixture\n');
+  };
+  const oldRef = rootCommit(oldChild), newRef = rootCommit(newChild);
+  git(child, ['update-ref', 'HEAD', newChild]);
+  git(fixture.root, ['update-ref', 'HEAD', newRef]);
+  const sqlDir = path.join(child, 'libs', 'db', 'sql');
+  fs.mkdirSync(sqlDir, { recursive: true });
+  for (const name of ['374-old.sql', '1447-future.sql', '1999-dirty.sql']) fs.writeFileSync(path.join(sqlDir, name), '-- newer working state\n');
+  return { ...fixture, sqlDir, oldRef, newRef, oldChild, newChild };
+}
+
+test('pinned schema probe uses the selected gitlink, ignoring newer committed and dirty working migrations', (t) => {
+  const f = committedSchemaFixture(t);
+  const env = { ...process.env, HARNESS_ADMIN_DATABASE_URL: 'postgresql://fixture:secret@selected/db',
+    PAPERCUSP_PG_SQL_DIR: f.sqlDir, TEST_PROBE_RECEIPT: f.receipt, TEST_PROBE_APPLIED: '["374-old.sql"]', TEST_PROBE_FAILURE: '' };
+  const run = (sourceRef) => spawnSync(process.execPath, [PROBE, '--repo-root', f.root, '--require-applied-schema',
+    ...(sourceRef === undefined ? [] : ['--source-ref', sourceRef])], { env, encoding: 'utf8', timeout: 10000 });
+  const old = run(f.oldRef);
+  assert.equal(old.status, 0, old.stderr);
+  assert.deepEqual(JSON.parse(old.stdout), { source: 'env:HARNESS_ADMIN_DATABASE_URL',
+    targetFingerprint: require('node:crypto').createHash('sha256').update(env.HARNESS_ADMIN_DATABASE_URL).digest('hex'),
+    sourceRef: f.oldRef, schemaSourceRef: f.oldChild, status: 'ready', sqlDir: f.sqlDir,
+    totalKnown: 1, pendingCount: 0, pendingFiles: [] });
+  const newer = run(f.newRef);
+  assert.equal(newer.status, 75, newer.stderr);
+  assert.deepEqual(JSON.parse(newer.stdout).pendingFiles, ['1447-future.sql']);
+  const live = run();
+  assert.equal(live.status, 75, live.stderr);
+  assert.deepEqual(JSON.parse(live.stdout).pendingFiles, ['1447-future.sql', '1999-dirty.sql']);
+  fs.rmSync(f.receipt);
+  const missing = run('missing-commit');
+  assert.equal(missing.status, 74, missing.stderr);
+  assert.equal(JSON.parse(missing.stdout).status, 'unavailable');
+  assert.equal(fs.existsSync(f.receipt), false, 'an unreadable pin must not fall back to the working corpus or query the DB');
+});
+
+test('real native preflight passes the selected source pin to the read-only schema probe', (t) => {
+  const f = committedSchemaFixture(t);
+  const src = fs.readFileSync(VERIFIER, 'utf8');
+  const fn = src.slice(src.indexOf('shared_schema_readiness_preflight() {'), src.indexOf('vh_run_step shared-schema-readiness'));
+  const env = { ...process.env, REPO_DIR: f.root, DESKTOP_DIR: path.join(REPO_ROOT, 'papercusp-desktop'),
+    HARNESS_ADMIN_DATABASE_URL: 'postgresql://fixture:secret@selected/db', PAPERCUSP_PG_SQL_DIR: f.sqlDir,
+    TEST_PROBE_RECEIPT: f.receipt, TEST_PROBE_APPLIED: '["374-old.sql"]', TEST_PROBE_FAILURE: '', VERIFY_TAURI_ISOLATED_DB: '0' };
+  const run = (sourceRef) => spawnSync('bash', ['-c', `${fn}\nshared_schema_readiness_preflight`], {
+    env: { ...env, VERIFY_TAURI_SOURCE_REF: sourceRef }, encoding: 'utf8', timeout: 10000 });
+  assert.equal(run(f.oldRef).status, 0);
+  const pending = run(f.newRef);
+  assert.equal(pending.status, 75, pending.stderr);
+  assert.match(pending.stderr, /1447-future.sql/);
+  assert.equal(pending.stderr.includes('secret'), false);
+  assert.equal(JSON.parse(fs.readFileSync(f.receipt)).query, 'SELECT filename FROM harness_shared.schema_migrations');
+});
+
 test('real probe CLI reports ready/pending/unavailable exits with the selected schema ledger', (t) => {
   const f = cliFixture(t);
   for (const [applied, failure, expectedStatus, expectedExit] of [
@@ -205,7 +284,13 @@ exit "$probe_status"`], { encoding: 'utf8', timeout: 10000, env: { ...env, ...ov
   assert.equal(JSON.parse(fs.readFileSync(f.receipt)).url, 'postgresql://fixture:sourced@selected/db');
   const ready = run({ TEST_PROBE_APPLIED: '["374-old.sql","1003-new.sql"]' });
   assert.equal(ready.status, 0, ready.stderr);
-  assert.equal(JSON.parse(ready.stdout).status, 'ready');
+  // The preflight captures the resolved URL with $(...), so the probe's own
+  // report is routed to stderr (scripts/verify-tauri-headless.sh): anything it
+  // printed on stdout would be glued into HARNESS_ADMIN_DATABASE_URL.
+  assert.equal(ready.stdout, '', 'the probe report must never reach stdout, where it would corrupt the captured URL');
+  const readyReport = ready.stderr.split('\n').filter((line) => line.trim().startsWith('{')).pop();
+  assert.ok(readyReport, `the probe report must reach stderr; got: ${ready.stderr}`);
+  assert.equal(JSON.parse(readyReport).status, 'ready');
   fs.unlinkSync(f.receipt);
   const isolated = run({ VERIFY_TAURI_ISOLATED_DB: '1' });
   assert.equal(isolated.status, 0, isolated.stderr);
