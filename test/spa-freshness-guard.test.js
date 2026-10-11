@@ -22,6 +22,7 @@ const {
   desktopInterfaceChoice,
   assertPublicDesktopInterface,
   assertPublicDesktopArtifacts,
+  assertPublicDesktopReleaseSite,
 } = require('../bin/lib/spa-freshness.js');
 
 const html = (entry) =>
@@ -142,6 +143,26 @@ test('public artifact guard binds interface provenance to bytes, including neste
     fs.writeFileSync(provenance, JSON.stringify(record));
     fs.writeFileSync(file, 'other installer bytes');
     assert.throws(() => assertPublicDesktopArtifacts([file], {}), /bytes differ/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('retained public history refuses candidate metadata with a legacy caller', () => {
+  const fs = require('node:fs');
+  const { makeDesktopTestScratchDirSync } = require('./test-scratch.cjs');
+  const root = makeDesktopTestScratchDirSync('desktop-interface-site-');
+  try {
+    const desktopInterface = { kind: 'legacy', spaIndexSha256: 'a'.repeat(64), entryBundle: 'index-A.js' };
+    const history = { releases: [{ artifacts: [{ desktopInterface }] }] };
+    const file = path.join(root, 'history.json');
+    fs.writeFileSync(file, JSON.stringify(history));
+    assert.doesNotThrow(() => assertPublicDesktopReleaseSite(root, {}));
+    desktopInterface.kind = 'portal-candidate';
+    fs.writeFileSync(file, JSON.stringify(history));
+    assert.throws(() => assertPublicDesktopReleaseSite(root, {}), /PUBLIC DESKTOP INTERFACE HOLD/);
+    fs.writeFileSync(file, JSON.stringify({ releases: [{ artifacts: null }] }));
+    assert.throws(() => assertPublicDesktopReleaseSite(root, {}), /malformed release artifacts/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

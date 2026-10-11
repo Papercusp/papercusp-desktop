@@ -149,7 +149,7 @@ test('immutable Windows provenance tools include and execute the SPA identity de
   const dir = tmp();
   try {
     const source = fs.readFileSync(path.join(BIN, 'build-windows-cross.sh'), 'utf8');
-    const snapshot = source.match(/^snapshot_provenance_tools\(\) \{[\s\S]*?^\}/m);
+    const snapshot = source.match(/^snapshot_provenance_tools\(\) \{[\s\S]*?^NODE\n\}/m);
     assert.ok(snapshot, 'maintained Windows producer has no provenance snapshot function');
     const dest = path.join(dir, 'producer');
     const result = spawnSync('bash', ['-c', `set -euo pipefail\nfail() { echo "$*" >&2; exit 1; }\n${snapshot[0]}\nsnapshot_provenance_tools "$1" "$2"`, 'test', dest, BIN], { encoding: 'utf8' });

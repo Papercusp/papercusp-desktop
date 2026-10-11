@@ -208,15 +208,34 @@ function assertPublicDesktopArtifacts(artifacts, env = process.env) {
   return identities;
 }
 
+/** Re-publication must also inspect retained feed bytes, not just caller flags. */
+function assertPublicDesktopReleaseSite(directory, env = process.env) {
+  assertPublicDesktopInterface(undefined, env);
+  const history = JSON.parse(fs.readFileSync(path.join(directory, 'history.json'), 'utf8'));
+  if (!Array.isArray(history.releases)) throw new Error('PUBLIC DESKTOP INTERFACE HOLD: malformed release history.');
+  for (const release of history.releases) {
+    if (!Array.isArray(release.artifacts)) throw new Error('PUBLIC DESKTOP INTERFACE HOLD: malformed release artifacts.');
+    for (const artifact of release.artifacts) {
+      if (artifact.desktopInterface) assertPublicDesktopInterface({ desktopInterface: artifact.desktopInterface }, env);
+    }
+  }
+}
+
 module.exports = {
   entryBundle, inspectSpaFreshness, blocksBuild, describe,
   desktopInterfaceIdentity, desktopInterfaceChoice,
-  assertPublicDesktopInterface, assertPublicDesktopArtifacts,
+  assertPublicDesktopInterface, assertPublicDesktopArtifacts, assertPublicDesktopReleaseSite,
 };
 
 if (require.main === module) {
   try {
-    assertPublicDesktopArtifacts(process.argv.slice(2));
+    const args = process.argv.slice(2);
+    if (args[0] === '--site') {
+      if (args.length !== 2) throw new Error('Public release site check requires exactly one site directory.');
+      assertPublicDesktopReleaseSite(args[1]);
+    } else {
+      assertPublicDesktopArtifacts(args);
+    }
   } catch (error) {
     console.error(error.message);
     process.exitCode = 4;

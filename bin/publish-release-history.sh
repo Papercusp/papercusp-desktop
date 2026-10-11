@@ -85,6 +85,10 @@ fi
 BUNDLE="${PAPERCUSP_BUNDLE_DIR:-$DESKTOP_ROOT/src-tauri/target/release/bundle}"
 SITE_DIR="${PAPERCUSP_RELEASE_SITE_DIR:-${BUNDLE}/release-history}"
 
+if [[ -f "$SITE_DIR/history.json" ]]; then
+  node "$HERE/lib/spa-freshness.js" --site "$SITE_DIR" || exit $?
+fi
+
 if [[ ! -f "$SITE_DIR/index.html" ]]; then
   echo "ERROR: no generated site at $SITE_DIR" >&2
   echo "       Generate it first:" >&2
