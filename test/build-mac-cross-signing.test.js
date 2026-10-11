@@ -271,6 +271,18 @@ test('DMG packaging checks output space separately when scratch is on another fi
 case "$2" in *bundle/dmg*) available=0; mount=/output ;; *) available=8388608; mount=/scratch ;; esac
 printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 10000000 0 %s 0%% %s\\n' "$available" "$mount"
 `, { mode: 0o755 });
+  // papercusp_mount_key prefers the stat device id over df's mount column (f7eb5332), so a
+  // separate output filesystem must be faked at the device-id layer too; any other stat call
+  // goes to the real binary.
+  const realStat = spawnSync('sh', ['-c', 'command -v stat'], { encoding: 'utf8' }).stdout.trim();
+  assert.ok(realStat, 'stat must be on PATH');
+  fs.writeFileSync(path.join(f.root, 'bin/stat'), `#!/bin/sh
+if [ "$1" = -L ] && [ "$2" = -c ] && [ "$3" = %d ]; then
+  case "$4" in *bundle/dmg*) echo 2 ;; *) echo 1 ;; esac
+  exit 0
+fi
+exec ${JSON.stringify(realStat)} "$@"
+`, { mode: 0o755 });
   fs.writeFileSync(path.join(f.root, 'bin/dd'), '#!/bin/sh\ntouch "$ROOT/image-started"\n', { mode: 0o755 });
   const result = run(f);
   assert.notEqual(result.status, 0);

@@ -18,10 +18,123 @@ const path = require('node:path');
 
 const VERIFY_SCRIPT = path.resolve(__dirname, '../../scripts/verify-tauri-headless.sh');
 const source = fs.readFileSync(VERIFY_SCRIPT, 'utf8');
+const sourcePreview = fs.readFileSync(path.resolve(__dirname, '../../scripts/source-preview.mjs'), 'utf8');
+const nativeInputsBlock = sourcePreview.match(/export const TAURI_VERIFIER_INPUTS = Object.freeze\(\[([\s\S]*?)\]\);/)?.[1];
+const nativeInputs = [...(nativeInputsBlock || '').matchAll(/'([^']+)'/g)].map(match => match[1]);
 const DEV_OPERATOR_SCRIPT = path.resolve(__dirname, '../bin/dev-operator-ifneeded.sh');
 const devOperatorSource = fs.readFileSync(DEV_OPERATOR_SCRIPT, 'utf8');
 const dreamSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-dream-native.sh'), 'utf8');
 const voiceSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-voice-settings.sh'), 'utf8');
+
+function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false, claimSlot = false }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-native-capacity-'));
+  const target = path.join(dir, 'cargo');
+  const ledger = path.join(dir, 'reservations');
+  const dfCalls = path.join(dir, 'df-calls');
+  try {
+    fs.mkdirSync(warm ? path.join(target, 'debug', 'deps') : target, { recursive: true });
+    const bin = path.join(dir, 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'cargo'), '#!/usr/bin/env node\n' +
+      'process.stdout.write(JSON.stringify({target_directory: process.env.NATIVE_FIXTURE_TARGET}));\n',
+    { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, 'df'), '#!/usr/bin/env bash\n' +
+      'printf "measured\\n" >> "$NATIVE_FIXTURE_DF_CALLS"\n' +
+      `printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 209715200 0 ${freeGb * 1024 * 1024} 0%% /fixture\\n'\n`,
+    { mode: 0o755 });
+    const preflight = source.match(/^preflight_native_cargo\(\) \{[\s\S]*?^\}/m)?.[0];
+    assert.ok(preflight, 'the maintained native preflight must be executable');
+    const result = spawnSync('bash', ['-c', preflight + '\n' +
+      'preflight_native_cargo || exit $?\n' +
+      'printf "PREPARATION_STARTED target=%s\\n" "$CARGO_TARGET_DIR"\n' +
+      (claimSlot ? 'if flock -n "$HOME/.papercusp/desktop-dev-slots/slot0.lock" true; then echo SLOT_UNPROTECTED; else echo SLOT_HELD; fi\n' : '')], {
+      encoding: 'utf8', timeout: 15_000,
+      env: { ...process.env, HOME: dir, DESKTOP_DIR: path.resolve(__dirname, '..'),
+        CARGO_TARGET_DIR: claimSlot ? '' : target, PREPARE_ONLY: prepareOnly ? '1' : '0',
+        PATH: `${bin}:${process.env.PATH}`, PAPERCUSP_DISK_RESERVATION_DIR: ledger,
+        NATIVE_FIXTURE_DF_CALLS: dfCalls, NATIVE_FIXTURE_TARGET: target },
+    });
+    const claims = fs.existsSync(ledger) ? fs.readdirSync(ledger)
+      .flatMap(mount => fs.readdirSync(path.join(ledger, mount))) : [];
+    return { ...result, target, claims, measured: fs.existsSync(dfCalls) };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('native admission rejects cold and warm shortages before verifier preparation', () => {
+  for (const [warm, need] of [[false, 65], [true, 12]]) {
+    const refused = nativeCargoPreflightFixture({ freeGb: need - 1, warm });
+    assert.equal(refused.status, 28, refused.stderr);
+    assert.doesNotMatch(refused.stdout, /PREPARATION_STARTED/);
+    assert.match(refused.stderr, new RegExp(`need ~${need}GB`));
+    assert.ok(refused.stderr.includes(refused.target), 'measure the selected native target');
+    assert.deepEqual(refused.claims, [], 'a refusal leaves no reservation');
+
+    const admitted = nativeCargoPreflightFixture({ freeGb: need, warm });
+    assert.equal(admitted.status, 0, admitted.stderr);
+    assert.ok(admitted.stdout.includes(`target=${admitted.target}`));
+    assert.deepEqual(admitted.claims, [], 'early admission releases its temporary reservation');
+  }
+});
+
+test('prepare-only does not require native Cargo capacity', () => {
+  const result = nativeCargoPreflightFixture({ freeGb: 0, prepareOnly: true });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /PREPARATION_STARTED/);
+  assert.equal(result.measured, false);
+});
+
+test('early native admission keeps the selected slot locked for preparation and boot', () => {
+  const result = nativeCargoPreflightFixture({ freeGb: 100, claimSlot: true });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(result.stdout.includes(`target=${result.target}`));
+  assert.match(result.stdout, /SLOT_HELD/);
+  assert.doesNotMatch(result.stdout, /SLOT_UNPROTECTED/);
+  assert.deepEqual(result.claims, [], 'the early disk reservation is temporary; the slot lock is retained');
+});
+
+test('native admission precedes costly preparation and pins its maintained helpers', () => {
+  const admission = source.indexOf('vh_run_step native-cargo-capacity preflight_native_cargo');
+  assert.ok(admission > 0);
+  for (const step of ['shared-schema-readiness', 'operator-source-snapshot']) {
+    assert.ok(admission < source.indexOf(`vh_run_step ${step} `), step);
+  }
+  assert.match(source, /local input_args=\(--tauri-inputs\)/);
+  for (const helper of ['tauri-guarded', 'lib/claim-target-dir.sh',
+    'lib/cargo-target-root.sh', 'lib/release-artifacts.sh', 'lib/disk-preflight.sh']) {
+    assert.ok(nativeInputs.includes(`papercusp-desktop/bin/${helper}`), helper);
+  }
+});
+
+test('native console compile preflight refuses failures before setup and skips non-native preparation', () => {
+  const preflight = source.match(/^preflight_native_console_platform\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(preflight, 'native console platform preflight missing');
+  for (const [prepareOnly, platform, checkStatus, expected] of [
+    ['0', 'Linux', 1, 1], ['0', 'Linux', 0, 0], ['1', 'Linux', 1, 0], ['0', 'Darwin', 1, 0],
+  ]) {
+    const result = spawnSync('bash', ['-c',
+      `uname() { printf '%s\\n' '${platform}'; }\n` +
+      `node() { printf 'CHECK_ARGS %s\\n' "$*"; return ${checkStatus}; }\n` + preflight + '\n' +
+      'preflight_native_console_platform || exit $?\nprintf "PREPARATION_STARTED\\n"\n'], {
+      encoding: 'utf8', env: { ...process.env, DESKTOP_DIR: '/fixture/desktop', PREPARE_ONLY: prepareOnly },
+    });
+    assert.equal(result.status, expected, result.stderr);
+    assert.equal(result.stdout.includes('PREPARATION_STARTED'), expected === 0);
+    const runsCheck = prepareOnly === '0' && platform === 'Linux';
+    assert.equal(result.stdout.includes('CHECK_ARGS'), runsCheck);
+    if (runsCheck) assert.match(result.stdout, /--test --test-global-setup=\/fixture\/desktop\/test\/monorepo-host-preflight.mjs \/fixture\/desktop\/test\/native-console-gnome.test.js/);
+  }
+  const admission = source.indexOf('vh_run_step native-console-platform-check preflight_native_console_platform');
+  assert.ok(admission > source.indexOf('vh_run_step native-cargo-capacity preflight_native_cargo'));
+  assert.ok(admission < source.indexOf('vh_run_step operator-source-snapshot '));
+  for (const input of ['papercusp-desktop/src-tauri/src/main.rs',
+    'papercusp-desktop/src-tauri/src/native_console.rs', 'papercusp-desktop/src-tauri/src/wsl_sidecar_staging.rs',
+    'papercusp-desktop/test/native-console-gnome.test.js', 'papercusp-desktop/test/monorepo-host-preflight.mjs',
+    'scripts/lib/node-test-host-preflight.mjs', 'packages/operator-core/lib/gnome-terminal-policy.json']) {
+    assert.ok(nativeInputs.includes(input), input);
+  }
+});
 
 function voiceExpression(name, document, location = {}, KeyboardEvent = class {
   constructor(type, options) { this.type = type; Object.assign(this, options); }
@@ -338,8 +451,15 @@ test('cleans bridge credentials from the runtime temp directory used for discove
     source,
     /rm -f -- "\$\{TMPDIR:-\/tmp\}\/tauri-dev-bridge-\$BRIDGE_PID\.token"/,
   );
+  // A hard-coded /tmp cleanup is only allowed as the EXTRA legacy-location
+  // sweep, guarded so it runs when TMPDIR is scoped elsewhere. An unguarded
+  // /tmp-only cleanup diverges from Node os.tmpdir() when TMPDIR is scoped.
+  const withoutGuardedFallback = source.replace(
+    /if \[ "\$\{TMPDIR:-\/tmp\}" != "\/tmp" \]; then\s*\n\s*rm -f -- "\/tmp\/tauri-dev-bridge-\$BRIDGE_PID\.token"\s*\n\s*fi/g,
+    '',
+  );
   assert.doesNotMatch(
-    source,
+    withoutGuardedFallback,
     /rm -f -- "\/tmp\/tauri-dev-bridge-\$BRIDGE_PID\.token"/,
     'a hard-coded /tmp cleanup diverges from Node os.tmpdir() when TMPDIR is scoped',
   );
@@ -362,7 +482,15 @@ test('pins the operator source graph before Tauri launch and cleans it on both e
   assert.ok(snapshotCall > snapshot, 'the operator source snapshot helper must run with failure cleanup');
   assert.ok(launch > snapshotCall, 'the operator source must be frozen before Tauri launch');
   assert.ok(sourceEnv > launch, 'generated launch.sh must export the frozen operator source root');
-  assert.ok(source.indexOf('papercusp_pinned_deps_snapshot_locked', snapshot) > snapshot);
+  const pinnedDeps = source.match(/^snapshot_verifier_pinned_deps\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(pinnedDeps, 'the shared dependency snapshot helper must exist');
+  assert.ok(pinnedDeps.includes('papercusp_pinned_deps_snapshot_locked "$REPO_DIR" "$snapshot_root" "$mode"'),
+    'the helper must invoke the maintained locked dependency snapshot producer');
+  for (const name of ['snapshot_operator_source', 'snapshot_committed_operator_source']) {
+    const body = source.match(new RegExp(`^${name}\\(\\) \\{[\\s\\S]*?^\\}`, 'm'))?.[0];
+    assert.ok(body?.includes('snapshot_verifier_pinned_deps "$snapshot_root"'),
+      `${name} must delegate its dependency snapshot to the shared helper`);
+  }
   assert.ok(source.indexOf('cleanup_operator_source_snapshot', teardown) > teardown);
   assert.ok(stop > 0, 'boot-only stop.sh must clean the operator source root');
   for (const excluded of [
