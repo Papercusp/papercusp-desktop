@@ -145,6 +145,32 @@ test('shared provenance measures the packaged SPA interface and its exact docume
   }
 });
 
+test('immutable Windows provenance tools include and execute the SPA identity dependency', () => {
+  const dir = tmp();
+  try {
+    const source = fs.readFileSync(path.join(BIN, 'build-windows-cross.sh'), 'utf8');
+    const snapshot = source.match(/^snapshot_provenance_tools\(\) \{[\s\S]*?^\}/m);
+    assert.ok(snapshot, 'maintained Windows producer has no provenance snapshot function');
+    const dest = path.join(dir, 'producer');
+    const result = spawnSync('bash', ['-c', `set -euo pipefail\nfail() { echo "$*" >&2; exit 1; }\n${snapshot[0]}\nsnapshot_provenance_tools "$1" "$2"`, 'test', dest, BIN], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const receipt = JSON.parse(result.stdout).windowsProvenanceProducer;
+    const dependency = receipt.files.find((entry) => entry.path === 'lib/spa-freshness.js');
+    assert.ok(dependency, 'snapshot receipt omitted the executable interface dependency');
+    assert.equal(dependency.sha256, crypto.createHash('sha256').update(fs.readFileSync(path.join(dest, dependency.path))).digest('hex'));
+    const out = path.join(dir, 'out');
+    fs.mkdirSync(path.join(out, 'spa'), { recursive: true });
+    fs.writeFileSync(path.join(out, 'spa/index.html'), '<meta name="papercusp-desktop-interface" content="legacy"><script src="/assets/index-AAAAAAAA.js"></script>');
+    const artifact = path.join(out, 'artifact.deb');
+    fs.writeFileSync(artifact, 'isolated fixture bytes');
+    const emitted = spawnSync('bash', [path.join(dest, 'emit-build-provenance.sh'), out, '0.0.0', 'fixture', 'false', artifact], { encoding: 'utf8' });
+    assert.equal(emitted.status, 0, emitted.stderr);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(out, 'build-provenance.json'), 'utf8')).desktopInterface.kind, 'legacy');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('artifact symlink metadata describes the same target bytes that are hashed', () => {
   const dir = tmp();
   try {

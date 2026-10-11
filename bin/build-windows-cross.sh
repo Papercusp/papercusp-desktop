@@ -99,18 +99,19 @@ BUILD_WORKTREE=0
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
 # The outer script is self-read, but a late child script is not. Capture the
-# exact provenance emitter and its only local dependency before cargo/Inno can
+# exact provenance emitter and its local dependencies before cargo/Inno can
 # yield to a peer edit. Copy (never hardlink), validate, and attest those bytes.
 snapshot_provenance_tools() {
   local dest="$1" source="$2" rel supplied="${PROVENANCE_TOOLCHAIN:-}"
   [[ -n "$supplied" ]] || supplied='{}'
   [[ ! -e "$dest" ]] || fail "provenance producer snapshot already exists"
   mkdir -p "$dest/lib"
-  for rel in emit-build-provenance.sh lib/windows-source-repair.js; do
+  for rel in emit-build-provenance.sh lib/windows-source-repair.js lib/spa-freshness.js; do
     cp -- "$source/$rel" "$dest/$rel"
   done
   bash -n "$dest/emit-build-provenance.sh" || fail "invalid snapshotted provenance emitter"
   node --check "$dest/lib/windows-source-repair.js" || fail "invalid snapshotted repair helper"
+  node --check "$dest/lib/spa-freshness.js" || fail "invalid snapshotted interface helper"
   node - "$dest" "$supplied" <<'NODE'
 const fs = require('node:fs');
 const path = require('node:path');
@@ -120,7 +121,7 @@ const toolchain = JSON.parse(supplied);
 if (!toolchain || Array.isArray(toolchain) || typeof toolchain !== 'object') {
   throw new Error('provenance toolchain must be a JSON object');
 }
-const files = ['emit-build-provenance.sh', 'lib/windows-source-repair.js'].map(relative => ({
+const files = ['emit-build-provenance.sh', 'lib/windows-source-repair.js', 'lib/spa-freshness.js'].map(relative => ({
   path: relative,
   sha256: crypto.createHash('sha256').update(fs.readFileSync(path.join(root, relative))).digest('hex'),
 }));
