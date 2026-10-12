@@ -26,7 +26,7 @@ const devOperatorSource = fs.readFileSync(DEV_OPERATOR_SCRIPT, 'utf8');
 const dreamSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-dream-native.sh'), 'utf8');
 const voiceSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-voice-settings.sh'), 'utf8');
 
-function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false, claimSlot = false, handoff = false, peerReceipt = false }) {
+function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false, claimSlot = false, handoff = false, peerReceipt = false, afterFreeGb = 12 }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-native-capacity-'));
   const target = path.join(dir, 'cargo');
   const ledger = path.join(dir, 'reservations');
@@ -41,7 +41,7 @@ function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false
     fs.writeFileSync(path.join(bin, 'df'), '#!/usr/bin/env bash\n' +
       'printf "measured\\n" >> "$NATIVE_FIXTURE_DF_CALLS"\n' +
       `available=${freeGb * 1024 * 1024}\n` +
-      '[ "${NATIVE_FIXTURE_AFTER_PREPARE:-0}" != 1 ] || available=12582912\n' +
+      `[ "\${NATIVE_FIXTURE_AFTER_PREPARE:-0}" != 1 ] || available=${afterFreeGb * 1024 * 1024}\n` +
       'printf "Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 209715200 0 %s 0%% /fixture\\n" "$available"\n',
     { mode: 0o755 });
     fs.writeFileSync(path.join(bin, 'tauri'), '#!/usr/bin/env bash\nprintf "CLI_STARTED\\n"\n', { mode: 0o755 });
@@ -122,6 +122,16 @@ test('native boot cannot adopt an unrelated live peer reservation', () => {
   assert.doesNotMatch(result.stdout, /CLI_STARTED/);
   assert.doesNotMatch(result.stderr, /adopted/);
   assert.match(result.stderr, /insufficient disk for native dev Cargo build/);
+});
+
+test('native boot refuses physical disk exhaustion despite its retained Cargo reservation', () => {
+  const result = nativeCargoPreflightFixture({ freeGb: 100, warm: true, handoff: true, afterFreeGb: 11 });
+  assert.equal(result.status, 28, result.stderr);
+  assert.match(result.stdout, /RESERVATION_HELD/);
+  assert.doesNotMatch(result.stdout, /CLI_STARTED/);
+  assert.doesNotMatch(result.stderr, /adopted/);
+  assert.match(result.stderr, /insufficient disk for native dev Cargo build/);
+  assert.deepEqual(result.claims, [], 'the refused descendant and preparation owner release their receipt');
 });
 
 test('native admission precedes costly preparation and pins its maintained helpers', () => {
