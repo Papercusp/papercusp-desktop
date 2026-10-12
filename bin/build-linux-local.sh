@@ -21,6 +21,11 @@
 # Usage:
 #   bin/build-linux-local.sh                 # version from tauri.conf.json
 #   bin/build-linux-local.sh -h|--help       # print usage without starting a build
+#   bin/build-linux-local.sh --producer-bank <bank> <preflight.sh>
+#     # Resume the nominated Linux GUI recipe in a fresh bank; requires
+#     # PAPERCUSP_NOMINATED_PACKET_SHA256 for next-leg-preparation-packet.json.
+#   bin/build-linux-local.sh --producer-bank <bank> <preflight.sh> --binding-preflight-only
+#     # Check output custody without creating the destination or building.
 #   PAPERCUSP_SKIP_SEED_CUT=1 bin/build-linux-local.sh   # reuse committed seed
 #   PAPERCUSP_DISTRIBUTION_PROFILE=vm-release bin/build-linux-local.sh
 #                                                   # immutable Server-only VM package
@@ -76,6 +81,12 @@ case "${1:-}" in
       exit 2
     fi
     ;;
+  --producer-bank)
+    if [[ $# -ne 3 && ! ( $# -eq 4 && "$4" == --binding-preflight-only ) ]]; then
+      printf 'ERROR: --producer-bank requires <bank> <preflight.sh> [--binding-preflight-only]\n' >&2
+      exit 2
+    fi
+    ;;
   *)
     printf 'ERROR: unknown argument: %s (try --help)\n' "$1" >&2
     exit 2
@@ -104,6 +115,71 @@ trap 'rm -rf -- "${PAPERCUSP_BUILD_LINUX_SNAPSHOT_DIR:-}"' EXIT
 # helper root separate from the frozen product/output root, as the sidecar and
 # Mac producers already do; no new configuration or source overlay is needed.
 HERE="${PAPERCUSP_BUILD_LINUX_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/bin"
+
+# Maintain the original nominated LinuxGUI wrapper here, rather than keeping
+# its only caller in an ephemeral review bank. The ordinary local-cut path below
+# still owns sidecar/source preparation; this mode consumes a prepared source.
+if [[ "${1:-}" == --producer-bank ]]; then
+  readonly PAPERCUSP_PRODUCER_BANK="$2"
+  readonly PAPERCUSP_PRODUCER_OUTPUT="$PAPERCUSP_PRODUCER_BANK/linux-gui-production"
+  readonly RUN="$PAPERCUSP_PRODUCER_OUTPUT"
+  readonly PAPERCUSP_PRODUCER_PREFLIGHT="$3"
+  readonly PAPERCUSP_PRODUCER_BINDING_ONLY="${4:-}"
+  readonly PAPERCUSP_PRODUCER_TOOL="$(cd "$HERE/.." && pwd -P)"
+  source "$PAPERCUSP_PRODUCER_TOOL/bin/lib/release-artifacts.sh"
+  release_artifacts_assert_producer_output "$PAPERCUSP_PRODUCER_BANK" linux-gui-production "$RUN"
+  source "$PAPERCUSP_PRODUCER_PREFLIGHT"
+  release_artifacts_assert_producer_output "$PAPERCUSP_PRODUCER_BANK" linux-gui-production "$RUN"
+  if [[ "$PAPERCUSP_PRODUCER_BINDING_ONLY" == --binding-preflight-only ]]; then
+    printf 'PRODUCER_OUTPUT_BINDING_PASS %s\n' "$RUN"
+    exit 0
+  fi
+  [[ "${PAPERCUSP_NOMINATED_PACKET_SHA256:-}" =~ ^[a-f0-9]{64}$ ]] || {
+    echo 'exact independent packet nomination is required before production' >&2; exit 2;
+  }
+  # Bind this maintained consumer and its destination to the nominated packet,
+  # along with the original separate baked and full-source identities.
+  readonly PAPERCUSP_PRODUCER_BUILD_SHA="${PAPERCUSP_BUILD_SHA:?preflight must bind PAPERCUSP_BUILD_SHA}"
+  readonly PAPERCUSP_PRODUCER_SOURCE_HEAD="${PROVENANCE_SOURCE_GIT_HEAD:?preflight must bind PROVENANCE_SOURCE_GIT_HEAD}"
+  readonly PAPERCUSP_PRODUCER_SOURCE="${SRC:?preflight must bind SRC}"
+  node - "$PAPERCUSP_PRODUCER_BANK/next-leg-preparation-packet.json" \
+    "$PAPERCUSP_NOMINATED_PACKET_SHA256" "$RUN" "$PAPERCUSP_PRODUCER_TOOL/bin/build-linux-local.sh" \
+    "$PAPERCUSP_PRODUCER_BUILD_SHA" "$PAPERCUSP_PRODUCER_SOURCE_HEAD" <<'NODE'
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const [packetPath, nominated, output, scriptPath, baked, source] = process.argv.slice(2);
+const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+const bytes = fs.readFileSync(packetPath);
+const packet = JSON.parse(bytes);
+const leg = packet.legs?.find(row => row.name === 'LinuxGUI');
+if (digest(bytes) !== nominated || leg?.output !== output || leg?.script?.path !== scriptPath ||
+    leg?.script?.sha256 !== digest(fs.readFileSync(scriptPath)) ||
+    leg?.bakedIdentity !== baked || leg?.sourceIdentity !== source) {
+  console.error('release-artifacts: nominated packet does not bind this Linux GUI producer');
+  process.exit(2);
+}
+NODE
+  test -f "$PAPERCUSP_PRODUCER_SOURCE/papercusp-desktop/src-tauri/sidecar/spa/index.html"
+  readonly PAPERCUSP_PRODUCER_VERSION="$(node -p \
+    'require(process.argv[1]).version' "$PAPERCUSP_PRODUCER_SOURCE/papercusp-desktop/src-tauri/tauri.conf.json")"
+  npm exec --yes --package=@tauri-apps/cli@2.11.0 -- tauri --version | grep -Fx 'tauri-cli 2.11.0'
+  release_artifacts_assert_producer_output "$PAPERCUSP_PRODUCER_BANK" linux-gui-production "$RUN"
+  mkdir -- "$RUN"
+  export PAPERCUSP_DISTRIBUTION_PROFILE=public PAPERCUSP_BUILD_ROLES=gui
+  export PAPERCUSP_BUILD_SHA="$PAPERCUSP_PRODUCER_BUILD_SHA"
+  export PROVENANCE_SOURCE_GIT_HEAD="$PAPERCUSP_PRODUCER_SOURCE_HEAD" PROVENANCE_SOURCE_GIT_DIRTY=false
+  export PAPERCUSP_DESKTOP_TARGET_ROOT="$PAPERCUSP_PRODUCER_SOURCE/papercusp-desktop"
+  bash "$PAPERCUSP_PRODUCER_TOOL/bin/emit-build-provenance.sh" --capture-source \
+    "$PAPERCUSP_PRODUCER_SOURCE" "$RUN/source-state.json" >"$RUN/source-capture.log"
+  export PROVENANCE_SOURCE_DIRTY_MANIFEST="$RUN/source-state.json" CARGO_TARGET_DIR="$RUN/cargo"
+  export TAURI_SIGNING_PRIVATE_KEY="${TAURI_SIGNING_PRIVATE_KEY_PATH:?preflight must bind signing key path}"
+  npm exec --yes --package=@tauri-apps/cli@2.11.0 -- bash "$PAPERCUSP_PRODUCER_TOOL/bin/build-deb-repacked.sh"
+  bash "$PAPERCUSP_PRODUCER_TOOL/bin/assert-release-host-baked.sh" "$RUN/cargo/release/papercusp-desktop"
+  PROVENANCE_GIT_ROOT="$PAPERCUSP_PRODUCER_SOURCE" bash "$PAPERCUSP_PRODUCER_TOOL/bin/emit-build-provenance.sh" \
+    "$RUN/cargo/release/bundle/deb" "$PAPERCUSP_PRODUCER_VERSION" "$PAPERCUSP_PRODUCER_BUILD_SHA" false
+  echo 'LINUX_GUI_PRODUCTION_COMPLETE; final-byte qualification and physical GO remain required'
+  exit 0
+fi
 ROOT="$(cd "${PAPERCUSP_DESKTOP_TARGET_ROOT:-$HERE/..}" && pwd)"
 cd "$ROOT"
 
