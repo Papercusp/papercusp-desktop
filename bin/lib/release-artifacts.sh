@@ -31,7 +31,6 @@
 # bank and output in readonly caller variables BEFORE sourcing, then check again
 # before creating anything. Generic globals such as REVIEW/BANK may be reassigned
 # by those libraries; deriving RUN from them afterwards silently changes custody.
-# assert-integrity-ok: R6 orphan by design until WI-6554700010008341 — the caller is the out-of-tree producer wrapper (linux-gui-production bank binding); exercised by test/build-artifact-atomicity.test.js
 release_artifacts_assert_producer_output() {
   local bank="${1:-}" leaf="${2:-}" actual="${3:-}" physical_bank
   [[ "$bank" == /* && -d "$bank" && "$leaf" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {

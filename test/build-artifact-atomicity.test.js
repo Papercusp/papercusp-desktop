@@ -23,6 +23,7 @@ const bootstrapResource = fs.readFileSync(
 );
 const auditBundle = path.join(root, 'bin/audit-release-bundle.py');
 const artifactLibrary = path.join(root, 'bin/lib/release-artifacts.sh');
+const linuxProducer = path.join(root, 'bin/build-linux-local.sh');
 
 function outputFixture(t, preflight) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-producer-binding-'));
@@ -52,6 +53,89 @@ function composeOutput(f) {
     encoding: 'utf8', timeout: 10_000, env: { ...process.env, OLD_BANK: f.oldBank },
   });
 }
+
+function runLinuxProducer(f, bindingOnly = true, env = {}) {
+  return spawnSync('bash', [linuxProducer, '--producer-bank', f.bank, f.preflightPath,
+    ...(bindingOnly ? ['--binding-preflight-only'] : [])], {
+    encoding: 'utf8', timeout: 10_000,
+    env: { ...process.env, OLD_BANK: f.oldBank, PAPERCUSP_NOMINATED_PACKET_SHA256: '', ...env },
+  });
+}
+
+test('maintained Linux producer preserves custody across the actual sourced preflight', t => {
+  const f = outputFixture(t, 'REVIEW="$OLD_BANK"\nBANK="$REVIEW"\nset -- changed arguments\n');
+  const result = runLinuxProducer(f);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.stdout.trim(), `PRODUCER_OUTPUT_BINDING_PASS ${f.output}`);
+  assert.equal(fs.existsSync(f.output), false);
+  for (const variable of ['PAPERCUSP_PRODUCER_BANK', 'PAPERCUSP_PRODUCER_OUTPUT', 'RUN']) {
+    fs.writeFileSync(f.preflightPath, `${variable}="$OLD_BANK"\n`);
+    const drift = runLinuxProducer(f);
+    assert.notEqual(drift.status, 0);
+    assert.match(drift.stderr, /readonly variable/);
+    assert.equal(fs.existsSync(f.output), false);
+  }
+});
+
+test('maintained Linux producer rejects existing output before sourcing preflight', t => {
+  const f = outputFixture(t, 'echo PREFLIGHT_RAN\n');
+  fs.mkdirSync(f.output);
+  const result = runLinuxProducer(f);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /already exists/);
+  assert.doesNotMatch(result.stdout, /PREFLIGHT_RAN/);
+});
+
+test('maintained Linux producer requires exact nomination before creating output', t => {
+  const f = outputFixture(t, 'true\n');
+  const result = runLinuxProducer(f, false);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /exact independent packet nomination/);
+  assert.equal(fs.existsSync(f.output), false);
+});
+
+test('maintained Linux producer consumes the bound source and output in the nominated build chain', t => {
+  const crypto = require('node:crypto');
+  const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+  const f = outputFixture(t, '');
+  const source = path.join(f.oldBank, 'source');
+  const tauri = path.join(source, 'papercusp-desktop/src-tauri');
+  fs.mkdirSync(path.join(tauri, 'sidecar/spa'), { recursive: true });
+  fs.writeFileSync(path.join(tauri, 'sidecar/spa/index.html'), 'prepared SPA');
+  fs.writeFileSync(path.join(tauri, 'tauri.conf.json'), JSON.stringify({ version: '0.0.26' }));
+  fs.writeFileSync(f.preflightPath, [
+    'REVIEW="$OLD_BANK"; BANK="$REVIEW"; SRC="$OLD_BANK/source"',
+    'PAPERCUSP_BUILD_SHA=e7752b9e; PROVENANCE_SOURCE_GIT_HEAD=bb0f15e16648907717ad34dae04858b06787b051',
+    'TAURI_SIGNING_PRIVATE_KEY_PATH="$OLD_BANK/test-key"',
+    'npm() {',
+    '  if [[ "$*" == *"tauri --version" ]]; then printf "tauri-cli 2.11.0\\n"; return; fi',
+    '  [[ "$*" == *"build-deb-repacked.sh" ]] || return 96',
+    '  printf "%s|%s|%s|%s\\n" "$PAPERCUSP_DISTRIBUTION_PROFILE" "$PAPERCUSP_BUILD_ROLES" "$PAPERCUSP_DESKTOP_TARGET_ROOT" "$CARGO_TARGET_DIR" > "$RUN/build-call"',
+    '}',
+    'bash() { printf "%s\\n" "$*" >> "$RUN/provenance-calls"; }',
+  ].join('\n'));
+  const packetPath = path.join(f.bank, 'next-leg-preparation-packet.json');
+  const leg = { name: 'LinuxGUI', output: f.output,
+    script: { path: linuxProducer, sha256: digest(fs.readFileSync(linuxProducer)) },
+    bakedIdentity: 'e7752b9e', sourceIdentity: 'bb0f15e16648907717ad34dae04858b067b051' };
+  // The packet source identity deliberately differs until corrected below.
+  const writePacket = () => { const bytes = Buffer.from(JSON.stringify({ legs: [leg] }));
+    fs.writeFileSync(packetPath, bytes); return digest(bytes); };
+  const refused = runLinuxProducer(f, false, { PAPERCUSP_NOMINATED_PACKET_SHA256: writePacket() });
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /packet does not bind/);
+  assert.equal(fs.existsSync(f.output), false);
+  leg.sourceIdentity = 'bb0f15e16648907717ad34dae04858b06787b051';
+  const accepted = runLinuxProducer(f, false, { PAPERCUSP_NOMINATED_PACKET_SHA256: writePacket() });
+  assert.equal(accepted.status, 0, accepted.stdout + accepted.stderr);
+  assert.equal(fs.readFileSync(path.join(f.output, 'build-call'), 'utf8').trim(),
+    `public|gui|${source}/papercusp-desktop|${f.output}/cargo`);
+  const provenance = fs.readFileSync(path.join(f.output, 'provenance-calls'), 'utf8');
+  assert.ok(provenance.includes(`--capture-source ${source} ${f.output}/source-state.json`));
+  assert.ok(provenance.includes(`${f.output}/cargo/release/papercusp-desktop`));
+  assert.ok(provenance.includes(`${f.output}/cargo/release/bundle/deb 0.0.26 e7752b9e false`));
+  assert.equal(fs.existsSync(path.join(f.oldBank, 'linux-gui-production')), false);
+});
 
 test('sourced preflight REVIEW/BANK mutations cannot redirect a bound producer output', t => {
   const f = outputFixture(t, 'REVIEW="$OLD_BANK"\nBANK="$REVIEW"\n');
