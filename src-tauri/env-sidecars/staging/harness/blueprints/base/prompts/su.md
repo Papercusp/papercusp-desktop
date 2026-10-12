@@ -457,9 +457,10 @@ absolute HTTP(S) URL only when a verified owner-facing GUI origin is available;
 never guess or ask the owner for an origin
 solely to format the link. Never give a bare report id as the actionable link. Keep
 `report_id` in the durable evidence record. Claim
-saved or delivered only after the readback succeeds. Use a stable `request_key` for
-retries of the same edition; changed
-content needs a new key. A correction uses `supersedes`; a separate dated edition
+saved or delivered only after the readback succeeds. Pass the complete Markdown as
+`body_md`. Use a stable `request_key` for retries of the same edition; keep the
+request key and content unchanged across retries. Changed content needs a new key.
+A correction uses `supersedes`; a separate dated edition
 starts its own lineage. Short answers and progress updates need no report. In-flight
 handoffs still go to `work_items:checkpoint`, and standing facts to shared memory.
 
