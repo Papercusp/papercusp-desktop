@@ -12,6 +12,64 @@ const lib = import(pathToFileURL(path.join(desktop, 'bin/lib/server-container.mj
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const imageId = 'sha256:' + 'b'.repeat(64);
 
+const dependencyMetafile = rows => ({ outputs: { 'serve.mjs': { imports:
+  rows.map(row => typeof row === 'string'
+    ? { path: row, kind: 'import-statement', external: true } : row) } } });
+
+test('supplemental closure distinguishes a changed subpath from a new package root', async () => {
+  const { supplementalRuntimeDependencyDelta } = await lib;
+  const result = supplementalRuntimeDependencyDelta(
+    dependencyMetafile(['viem', '@aws-sdk/client-ec2', '@aws-sdk/client-ssm', 'fs']),
+    dependencyMetafile(['js-tiktoken', 'viem/utils', 'node:fs']),
+  );
+  assert.deepEqual(result, {
+    previousSpecifiers: ['@aws-sdk/client-ec2', '@aws-sdk/client-ssm', 'viem'],
+    specifiers: ['js-tiktoken', 'viem/utils'],
+    added: ['js-tiktoken', 'viem/utils'],
+    removed: ['@aws-sdk/client-ec2', '@aws-sdk/client-ssm', 'viem'],
+    roots: ['js-tiktoken'],
+  });
+});
+
+test('supplemental closure preserves scoped roots and deduplicates across all outputs', async () => {
+  const { supplementalRuntimeDependencyDelta } = await lib;
+  const current = dependencyMetafile(['@scope/new/subpath', '@scope/existing/new', 'new-package/a']);
+  current.outputs['worker.mjs'] = { imports: dependencyMetafile(
+    ['@scope/new/other', 'new-package/a', 'new-package/b'],
+  ).outputs['serve.mjs'].imports };
+  const result = supplementalRuntimeDependencyDelta(
+    dependencyMetafile(['@scope/existing/old']), current,
+  );
+  assert.deepEqual(result.roots, ['@scope/new', 'new-package']);
+  assert.equal(result.specifiers.filter(value => value === 'new-package/a').length, 1);
+});
+
+test('supplemental boot closure excludes optional dynamic and bundled imports', async () => {
+  const { supplementalRuntimeDependencyDelta } = await lib;
+  const current = dependencyMetafile([
+    'required',
+    { path: 'optional', kind: 'dynamic-import', external: true },
+    { path: './bundled.js', kind: 'import-statement', external: false },
+    'node:crypto',
+  ]);
+  assert.deepEqual(supplementalRuntimeDependencyDelta(dependencyMetafile([]), current).roots,
+    ['required']);
+});
+
+test('supplemental closure refuses incomplete metadata and non-package static externals', async () => {
+  const { supplementalRuntimeDependencyDelta } = await lib;
+  const valid = dependencyMetafile([]);
+  for (const invalid of [{}, { outputs: {} }, { outputs: [] }, { outputs: { 'serve.mjs': {} } }]) {
+    assert.throws(() => supplementalRuntimeDependencyDelta(valid, invalid), /outputs|imports/);
+    assert.throws(() => supplementalRuntimeDependencyDelta(invalid, valid), /outputs|imports/);
+  }
+  for (const specifier of ['./local', '/absolute', 'file:/outside', '#internal', '@scope',
+    'package/../outside', 'https://example.test/package']) {
+    assert.throws(() => supplementalRuntimeDependencyDelta(valid, dependencyMetafile([specifier])),
+      /Unsupported static runtime package specifier/);
+  }
+});
+
 async function archiveFixture(t, mutate = () => {}, dockerOnly = false, sourceReceipt = null) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'server-archive-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

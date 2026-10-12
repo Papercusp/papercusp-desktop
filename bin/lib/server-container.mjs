@@ -9,6 +9,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { builtinModules } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
 
 let execFileAsyncMemo;
@@ -20,6 +21,45 @@ const supplyChainScript = resolve(desktopRoot, '../infra/images/bootc/release-su
 const SHA = /^[a-f0-9]{64}$/;
 const COMMIT = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
 const PLATFORMS = new Map([['linux/amd64', 62], ['linux/arm64', 183]]);
+
+/** Measure static boot-import changes without shadowing an existing package. */
+export function supplementalRuntimeDependencyDelta(previousMetafile, currentMetafile) {
+  const builtins = new Set(builtinModules.flatMap(name => [name, 'node:' + name]));
+  const packageRoot = specifier => {
+    // Local paths, URLs and package-internal aliases cannot be staged as npm roots.
+    if (typeof specifier !== 'string' ||
+        !/^(?:@[a-zA-Z0-9_.-]+\/)?[a-zA-Z0-9_-][a-zA-Z0-9_.-]*(?:\/[a-zA-Z0-9_.-]+)*$/.test(specifier) ||
+        specifier.split('/').some(part => part === '.' || part === '..')) {
+      throw new Error('Unsupported static runtime package specifier: ' + specifier);
+    }
+    return specifier.startsWith('@') ? specifier.split('/').slice(0, 2).join('/')
+      : specifier.split('/')[0];
+  };
+  const staticImports = metafile => {
+    if (!metafile?.outputs || typeof metafile.outputs !== 'object' ||
+        Array.isArray(metafile.outputs) || Object.keys(metafile.outputs).length === 0) {
+      throw new Error('Complete bundle outputs are required for a runtime dependency delta');
+    }
+    const imports = new Set();
+    for (const output of Object.values(metafile.outputs)) {
+      if (!Array.isArray(output?.imports)) throw new Error('Bundle output imports are missing');
+      for (const row of output.imports) {
+        if (!row?.external || row.kind !== 'import-statement' || builtins.has(row.path)) continue;
+        packageRoot(row.path);
+        imports.add(row.path);
+      }
+    }
+    return [...imports].sort();
+  };
+  const previousSpecifiers = staticImports(previousMetafile);
+  const specifiers = staticImports(currentMetafile);
+  const previousRoots = new Set(previousSpecifiers.map(packageRoot));
+  const added = specifiers.filter(specifier => !previousSpecifiers.includes(specifier));
+  const removed = previousSpecifiers.filter(specifier => !specifiers.includes(specifier));
+  const roots = [...new Set(added.map(packageRoot))]
+    .filter(root => !previousRoots.has(root)).sort();
+  return { previousSpecifiers, specifiers, added, removed, roots };
+}
 
 export async function hashFile(path) {
   const hash = createHash('sha256');
