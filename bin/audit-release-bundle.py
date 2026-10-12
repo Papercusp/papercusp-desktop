@@ -4110,6 +4110,136 @@ def source_leakers(argv):
     return 0
 
 
+def portable_source_tar(argv):
+    """Project dependency shadows into portable bytes; retain the GNU selection."""
+    import copy
+    import posixpath
+    import tarfile
+    import tempfile
+
+    root, tar_bin, *excludes = argv
+    root = os.path.abspath(root)
+    emitted, links = set(), []
+
+    def relative_name(name):
+        name = posixpath.normpath(name)
+        if name.startswith('/') or name == '..' or name.startswith('../'):
+            raise ValueError('source archive path escapes its root')
+        return name
+
+    def local_link(name, target):
+        if os.path.isabs(target):
+            target = os.path.relpath(target, root)
+        else:
+            target = posixpath.join(posixpath.dirname(name), target)
+        try:
+            target = relative_name(target)
+        except ValueError:
+            return None
+        # A shadow file points into the donor, while a workspace/bin link points
+        # to an actual member of the extracted source tree. Keep only the latter.
+        if not os.path.lexists(os.path.join(root, target)):
+            return None
+        return target
+
+    def selected_expansion(name):
+        direct = os.path.join(root, name)
+        if os.path.isfile(direct):
+            # This member was already selected by the producer's GNU tar pass.
+            return [(name, direct, None)]
+        entries = {}
+
+        def visit(member, ancestors):
+            source = os.path.join(root, member)
+            target = os.readlink(source) if os.path.islink(source) else None
+            local = local_link(member, target) if target is not None else None
+            if local is not None:
+                entries[member] = (source, local)
+                return
+            if target is not None and 'node_modules' not in member.split('/'):
+                raise ValueError('external source link outside dependencies: ' + member)
+            identity = os.path.realpath(source)
+            if os.path.isdir(source):
+                if identity in ancestors:
+                    raise ValueError('cyclic dependency directory: ' + member)
+                entries[member] = (source, None)
+                for child in sorted(os.listdir(source)):
+                    visit(posixpath.join(member, child), ancestors | {identity})
+            elif os.path.isfile(source):
+                entries[member] = (source, None)
+            else:
+                raise ValueError('unreadable dependency link: ' + member)
+
+        visit(name, set())
+        # Ask the same GNU tar exclusion engine about a zero-byte shape. This
+        # preserves ancestor exclusions too, without copying dependency bytes
+        # into a second tree or reimplementing GNU glob semantics in Python.
+        with tempfile.TemporaryDirectory(prefix='papercusp-source-links-') as shape:
+            for member, (source, local) in entries.items():
+                dest = os.path.join(shape, member)
+                if local is None and os.path.isdir(source):
+                    os.makedirs(dest, exist_ok=True)
+                else:
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    open(dest, 'wb').close()
+            query = subprocess.Popen([tar_bin, *excludes, '-C', shape, '-cf', '-', './' + name],
+                                     stdout=subprocess.PIPE)
+            with tarfile.open(fileobj=query.stdout, mode='r|') as selected:
+                allowed = {relative_name(member.name) for member in selected}
+            query.stdout.close()
+            if query.wait() != 0:
+                raise ValueError('GNU source selection failed for dependency links')
+        return [(member, *entries[member]) for member in entries if member in allowed]
+
+    def add_link(output, member, target):
+        member = copy.copy(member)
+        name = relative_name(member.name)
+        member.type, member.size = tarfile.SYMTYPE, 0
+        member.linkname = posixpath.relpath(target, posixpath.dirname(name) or '.')
+        member.pax_headers = dict(member.pax_headers)
+        member.pax_headers.pop('linkpath', None)
+        member.pax_headers.pop('size', None)
+        output.addfile(member)
+        emitted.add(name)
+        links.append((name, target))
+
+    with tarfile.open(fileobj=sys.stdin.buffer, mode='r|') as source, \
+            tarfile.open(fileobj=sys.stdout.buffer, mode='w|', format=tarfile.PAX_FORMAT,
+                         dereference=True) as output:
+        for member in source:
+            name = relative_name(member.name)
+            if not member.issym():
+                output.addfile(member, source.extractfile(member) if member.isfile() else None)
+                emitted.add(name)
+                continue
+            local = local_link(name, member.linkname)
+            if local is not None:
+                add_link(output, member, local)
+                continue
+            if 'node_modules' not in name.split('/'):
+                raise ValueError('external source link outside dependencies: ' + name)
+            for expanded, physical, target in selected_expansion(name):
+                info = output.gettarinfo(physical, arcname='./' + expanded)
+                info.uid = info.gid = 0
+                info.uname = info.gname = ''
+                if target is not None:
+                    add_link(output, info, target)
+                elif os.path.isdir(physical):
+                    info.type, info.linkname, info.size = tarfile.DIRTYPE, '', 0
+                    output.addfile(info)
+                    emitted.add(expanded)
+                else:
+                    info.type, info.linkname = tarfile.REGTYPE, ''
+                    info.size = os.stat(physical).st_size
+                    with open(physical, 'rb') as content:
+                        output.addfile(info, content)
+                    emitted.add(expanded)
+        for name, target in links:
+            if target not in emitted:
+                raise ValueError('source link target was excluded: ' + name)
+    return 0
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__, file=sys.stderr)
@@ -4120,6 +4250,8 @@ def main():
         return owner_preflight()
     if sys.argv[1] == "--identity-literals":
         return print_identity_literals()
+    if sys.argv[1] == "--portable-source-tar":
+        return portable_source_tar(sys.argv[2:])
     if sys.argv[1] == "--source-leakers":
         return source_leakers(sys.argv[2:])
     if sys.argv[1] == "--prune-docs":
