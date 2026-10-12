@@ -73,6 +73,83 @@ function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false
   }
 }
 
+function maintainedShellFunction(name) {
+  const start = source.indexOf(name + '() {');
+  const end = source.indexOf('\n}', start);
+  assert.ok(start >= 0 && end > start, 'maintained shell function missing: ' + name);
+  return source.slice(start, end + 2);
+}
+
+function staleIpcAdvertCleanupFixture(nspidValue) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-tauri-ipc-pidns-'));
+  try {
+    const home = path.join(root, 'home');
+    const work = path.join(root, 'work');
+    const status = path.join(root, 'proc-status');
+    const papercuspHome = path.join(home, '.papercusp');
+    const advert = path.join(papercuspHome, 'endpoint-ipc.3270.json');
+    fs.mkdirSync(papercuspHome, { recursive: true });
+    fs.mkdirSync(work, { recursive: true });
+    fs.writeFileSync(advert, JSON.stringify({ socketPath: '/tmp/fixture.sock', pid: 999999, port: 3270 }));
+    const statusBody = nspidValue === null
+      ? 'Name:\tbash\n'
+      : 'Name:\tbash\nNSpid:\t' + nspidValue + '\n';
+    fs.writeFileSync(status, statusBody);
+
+    const shell = [
+      'log() { :; }',
+      'kill() { return 1; }',
+      maintainedShellFunction('verifier_pid_namespace_is_private'),
+      maintainedShellFunction('prepare_verifier_papercusp_home'),
+      maintainedShellFunction('prune_stale_ipc_advert_for_port'),
+      'prepare_verifier_papercusp_home "$VERIFY_TAURI_PID_STATUS"',
+      'prune_stale_ipc_advert_for_port 3270',
+      'printf "%s\\n" "$PAPERCUSP_HOME"',
+    ].join('\n');
+    const result = spawnSync('bash', ['-c', shell], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: home,
+        WORK: work,
+        PAPERCUSP_HOME: papercuspHome,
+        VERIFY_TAURI_PID_STATUS: status,
+      },
+    });
+    return {
+      status: result.status,
+      stderr: result.stderr,
+      papercuspHome: result.stdout.trim(),
+      workHome: path.join(work, 'papercusp-home'),
+      hostAdvertRemains: fs.existsSync(advert),
+      hostHome: papercuspHome,
+    };
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test('stale IPC cleanup cannot remove a host advertisement from a private PID namespace', () => {
+  assert.ok(source.indexOf('prepare_verifier_papercusp_home ||') <
+    source.indexOf('prune_stale_ipc_advert_for_port "$DEV_PORT"'),
+  'private Papercusp home must be configured before the early cleanup');
+
+  const privateNamespace = staleIpcAdvertCleanupFixture('2158939 1');
+  assert.equal(privateNamespace.status, 0, privateNamespace.stderr);
+  assert.equal(privateNamespace.papercuspHome, privateNamespace.workHome);
+  assert.equal(privateNamespace.hostAdvertRemains, true, 'namespace-relative PID absence must not delete host state');
+
+  const sameNamespace = staleIpcAdvertCleanupFixture('2158939');
+  assert.equal(sameNamespace.status, 0, sameNamespace.stderr);
+  assert.equal(sameNamespace.papercuspHome, sameNamespace.hostHome);
+  assert.equal(sameNamespace.hostAdvertRemains, false, 'confirmed same-namespace dead PIDs remain prunable');
+
+  const unknownNamespace = staleIpcAdvertCleanupFixture(null);
+  assert.equal(unknownNamespace.status, 0, unknownNamespace.stderr);
+  assert.equal(unknownNamespace.papercuspHome, unknownNamespace.workHome);
+  assert.equal(unknownNamespace.hostAdvertRemains, true, 'unknown namespace identity must fail closed');
+});
+
 test('native admission rejects cold and warm shortages before verifier preparation', () => {
   for (const [warm, need] of [[false, 65], [true, 12]]) {
     const refused = nativeCargoPreflightFixture({ freeGb: need - 1, warm });
