@@ -102,29 +102,68 @@ async function requireElfPlatform(path, machine, required = true) {
 }
 
 /** Bind every payload entry, including executable modes and safe in-tree links. */
-export async function sidecarInventory(root, platform, { hashContents = true } = {}) {
+export async function sidecarInventory(root, platform, {
+  hashContents = true, checkpointPath, onProgress,
+} = {}) {
   if (!PLATFORMS.has(platform)) throw new Error('Unsupported native inventory platform: ' + platform);
   const physicalRoot = await realpath(root);
+  // Checkpoints accelerate a fresh scan; they never replace current membership,
+  // link/architecture checks or the final validation of every observed identity.
+  const identity = st => [st.dev, st.ino, st.mode, st.size, st.mtimeNs, st.ctimeNs]
+    .map(value => String(value)).join(':');
+  let cachedFiles = Object.create(null);
+  const files = Object.create(null);
+  const observed = new Map();
+  let filesHashed = 0, filesReused = 0;
+  if (checkpointPath) {
+    if (!hashContents) throw new Error('Inventory checkpoints require content hashing');
+    checkpointPath = resolve(checkpointPath);
+    if (within(physicalRoot, checkpointPath) ||
+        within(physicalRoot, await realpath(dirname(checkpointPath)))) {
+      throw new Error('Inventory checkpoint must be outside its payload');
+    }
+    try {
+      const st = await lstat(checkpointPath);
+      if (!st.isFile() || st.size > 40 * 1024 * 1024) throw new Error('Invalid inventory checkpoint file');
+      const saved = JSON.parse(await readFile(checkpointPath, 'utf8'));
+      if (saved.schemaVersion !== 1 || saved.root !== physicalRoot || saved.platform !== platform ||
+          !saved.files || typeof saved.files !== 'object' || Array.isArray(saved.files) ||
+          Object.keys(saved.files).length > 100_000 ||
+          Object.values(saved.files).some(row => typeof row?.identity !== 'string' ||
+            !SHA.test(row?.digest ?? ''))) throw new Error('Invalid or mismatched inventory checkpoint');
+      cachedFiles = saved.files;
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
   const hash = createHash('sha256');
   const elfFiles = [];
   const pending = [''];
   let entries = 0;
   let bytes = 0;
+  const saveProgress = async complete => {
+    if (checkpointPath) {
+      await writeFile(checkpointPath + '.tmp', JSON.stringify({ schemaVersion: 1,
+        root: physicalRoot, platform, complete, files }), { mode: 0o600 });
+      await rename(checkpointPath + '.tmp', checkpointPath);
+    }
+    await onProgress?.({ entries, filesHashed, filesReused, complete });
+  };
   while (pending.length) {
     const name = pending.pop();
     const path = join(root, name);
-    const st = await lstat(path);
+    const st = await lstat(path, { bigint: !!checkpointPath });
+    if (checkpointPath) observed.set(path, identity(st));
     if (++entries > 100_000) throw new Error('Sidecar inventory exceeds its entry bound');
     if (st.isSymbolicLink()) {
       const target = await realpath(path);
       if (!within(physicalRoot, target)) throw new Error('Sidecar link escapes its payload: ' + name);
+      if (checkpointPath) observed.set(target, identity(await lstat(target, { bigint: true })));
       if ((await lstat(target)).isFile()) {
         if (await requireElfPlatform(target, PLATFORMS.get(platform),
           name.endsWith('.node') || name === join('bin', 'node'))) elfFiles.push(path);
       }
       hash.update(JSON.stringify([name, 'link', relative(physicalRoot, target)]) + '\n');
     } else if (st.isDirectory()) {
-      hash.update(JSON.stringify([name, 'directory', st.mode & 0o777]) + '\n');
+      hash.update(JSON.stringify([name, 'directory', Number(st.mode) & 0o777]) + '\n');
       const children = (await readdir(path)).sort().reverse();
       pending.push(...children.map(child => join(name, child)));
     } else if (st.isFile()) {
@@ -132,12 +171,29 @@ export async function sidecarInventory(root, platform, { hashContents = true } =
       // Inspect ELF headers regardless of name or executable mode.
       if (await requireElfPlatform(path, PLATFORMS.get(platform),
         name.endsWith('.node') || name === join('bin', 'node'))) elfFiles.push(path);
-      bytes += st.size;
-      if (hashContents) hash.update(JSON.stringify([name, 'file', st.mode & 0o777, await hashFile(path)]) + '\n');
+      bytes += Number(st.size);
+      if (hashContents) {
+        const before = checkpointPath ? observed.get(path) : null;
+        const cached = Object.hasOwn(cachedFiles, name) ? cachedFiles[name] : null;
+        const digest = before && cached?.identity === before ? cached.digest : await hashFile(path);
+        if (before && identity(await lstat(path, { bigint: true })) !== before) {
+          throw new Error('Sidecar changed during inventory: ' + name);
+        }
+        if (before && cached?.identity === before) filesReused++; else filesHashed++;
+        files[name] = { identity: before, digest };
+        hash.update(JSON.stringify([name, 'file', Number(st.mode) & 0o777, digest]) + '\n');
+      }
     } else {
       throw new Error('Unsupported sidecar entry: ' + name);
     }
+    if (checkpointPath && entries % 64 === 0) await saveProgress(false);
   }
+  for (const [path, expected] of observed) {
+    if (identity(await lstat(path, { bigint: true })) !== expected) {
+      throw new Error('Sidecar changed during inventory: ' + relative(root, path));
+    }
+  }
+  if (checkpointPath) await saveProgress(true);
   return { sha256: hashContents ? hash.digest('hex') : null, bytes, entries, elfFiles };
 }
 
