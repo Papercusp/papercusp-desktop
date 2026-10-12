@@ -521,7 +521,9 @@ test('late provenance emission uses immutable helper copies after source produce
   const f = fixture(t);
   const source = path.join(f.dir, 'producer-source');
   fs.mkdirSync(path.join(source, 'lib'), { recursive: true });
-  for (const relative of ['emit-build-provenance.sh', 'lib/windows-source-repair.js']) {
+  // Stage exactly the helpers snapshot_provenance_tools copies (b838aafe added
+  // lib/spa-freshness.js); a helper missing here fails the snapshot's cp, not the claim.
+  for (const relative of ['emit-build-provenance.sh', 'lib/windows-source-repair.js', 'lib/spa-freshness.js']) {
     fs.copyFileSync(path.join(root, 'bin', relative), path.join(source, relative));
   }
   const script = fs.readFileSync(path.join(root, 'bin/build-windows-cross.sh'), 'utf8');
@@ -546,6 +548,7 @@ test('late provenance emission uses immutable helper copies after source produce
   }
   fs.writeFileSync(path.join(source, 'emit-build-provenance.sh'), 'exit 97\n');
   fs.writeFileSync(path.join(source, 'lib/windows-source-repair.js'), 'throw Error("moving helper")\n');
+  fs.writeFileSync(path.join(source, 'lib/spa-freshness.js'), 'throw Error("moving helper")\n');
   Object.assign(f.value, { kind: 'windows-native-source-repair', roles: ['server'] });
   const applied = f.apply('server');
   const input = path.join(f.dir, 'repair.json'); fs.writeFileSync(input, JSON.stringify(applied));
