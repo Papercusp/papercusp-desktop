@@ -84,7 +84,13 @@ test('production native GNOME preparation and both entrypoints preserve preferen
       ].join('\n'));
       const runCargo = (args) => {
         const result = spawnSync(process.env.CARGO || 'cargo', [...args, '--offline', '--manifest-path', manifest],
-          { encoding: 'utf8', timeout: 55000, env: { ...process.env, CARGO_TARGET_DIR: path.join(temp, 'target') } });
+          {
+            encoding: 'utf8',
+            timeout: 55000,
+            // Each fixture starts several owned child processes with five-second
+            // operation bounds; parallel Rust tests can starve otherwise tiny archives.
+            env: { ...process.env, CARGO_TARGET_DIR: path.join(temp, 'target'), RUST_TEST_THREADS: '1' },
+          });
         assert.equal(result.status, 0, cargoFailureMessage(result));
         return result;
       };
