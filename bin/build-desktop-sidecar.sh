@@ -1125,7 +1125,7 @@ import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 const root=process.argv[1];
-const {withFsMutex}=await import(pathToFileURL(join(root,"scripts/lib/fs-mutex.mjs")));
+const {withFsMutex,withFsMutexRead}=await import(pathToFileURL(join(root,"scripts/lib/fs-mutex.mjs")));
 const {repoLockName,withPackageCacheReadLease}=await import(pathToFileURL(join(root,"scripts/npm-install-safe.mjs")));
 await withFsMutex(repoLockName(root),async()=>{
   const appRequire=createRequire(join(root,"apps/operator-vite/package.json"));
@@ -1156,13 +1156,41 @@ await withFsMutex(repoLockName(root),async()=>{
     }
     const hydrate=()=>withPackageCacheReadLease(()=>spawnSync("bash",["-c",`fetch_cross_npm_pkg "$1" "$2"`,"vite-native-binding",
       `${binding}@${pkg.version}`,join(dirname(manifest),"node_modules")],{stdio:"inherit",env:process.env}));
-    // The resolved package can live in the donor checkout. Its writer lease,
-    // along with the clone lease, protects the native package publish.
+    // Reuse an exact installed binding under a reader lease. Taking the donor
+    // writer just to load it needlessly drains unrelated long-running readers.
     const dependencyRoot=manifest.split(`${sep}node_modules${sep}`)[0];
-    const result=dependencyRoot!==root ? await withFsMutex(repoLockName(dependencyRoot),hydrate) : await hydrate();
-    if (result.error) throw result.error;
-    if (result.status!==0) throw new Error(`Vite native binding fetch failed (${result.status})`);
-    createRequire(manifest)(binding);
+    const loadExisting=async()=>{
+      if (JSON.parse(readFileSync(manifest,"utf8")).version!==pkg.version) {
+        throw new Error("Vite native parent changed while acquiring its dependency lease");
+      }
+      const requireBinding=createRequire(manifest);
+      let installedManifest;
+      try { installedManifest=requireBinding.resolve(`${binding}/package.json`); }
+      catch (error) { if (error.code==="MODULE_NOT_FOUND") return false; throw error; }
+      const installed=JSON.parse(readFileSync(installedManifest,"utf8"));
+      if (installed.name!==binding || installed.version!==pkg.version) {
+        throw new Error(`Vite native binding ${installed.name}@${installed.version} differs from exact pin ${binding}@${pkg.version}`);
+      }
+      requireBinding(binding);
+      await import(pathToFileURL(appRequire.resolve("vite")));
+      return true;
+    };
+    const available=dependencyRoot!==root
+      ? await withFsMutexRead(repoLockName(dependencyRoot),loadExisting)
+      : await loadExisting();
+    if (!available) {
+      const hydrateAndLoad=async()=>{
+        // Recheck after releasing the reader and acquiring the writer: another
+        // installer may have completed the exact package in that interval.
+        if (await loadExisting()) return;
+        const result=await hydrate();
+        if (result.error) throw result.error;
+        if (result.status!==0) throw new Error(`Vite native binding fetch failed (${result.status})`);
+        if (!await loadExisting()) throw new Error("Vite native binding remains missing after hydration");
+      };
+      if (dependencyRoot!==root) await withFsMutex(repoLockName(dependencyRoot),hydrateAndLoad);
+      else await hydrateAndLoad();
+    }
   }
   await import(pathToFileURL(appRequire.resolve("vite")));
   console.log("VITE_NATIVE_TOOLCHAIN_OK: exact binding and Vite import load on the build host");

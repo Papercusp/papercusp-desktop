@@ -176,7 +176,7 @@ function viteNativeFixture(t, { parentVersion = '1.0.3', packedVersion = '1.0.3'
   json('node_modules/rolldown/package.json', { name: 'rolldown', version: parentVersion, main: 'index.cjs', optionalDependencies: { [binding]: parentVersion } });
   write('node_modules/rolldown/index.cjs', `module.exports = require(${JSON.stringify(binding)});\n`);
   write('scripts/npm-install-safe.mjs', LEGACY_CACHE_HELPER + '\nexport function repoLockName(root) { return root; }\n');
-  write('scripts/lib/fs-mutex.mjs', 'export async function withFsMutex(name, fn) { process.env.PC_INSTALL_WRITE_LEASE="held"; try { return await fn(); } finally { delete process.env.PC_INSTALL_WRITE_LEASE; } }\n');
+  write('scripts/lib/fs-mutex.mjs', 'export async function withFsMutex(name, fn) { if (name===process.env.PC_BLOCKED_DONOR_ROOT) throw Error("donor writer blocked by active readers"); process.env.PC_INSTALL_WRITE_LEASE="held"; try { return await fn(); } finally { delete process.env.PC_INSTALL_WRITE_LEASE; } }\nexport async function withFsMutexRead(name, fn) { process.env.PC_INSTALL_READ_LEASE="held"; try { return await fn(); } finally { delete process.env.PC_INSTALL_READ_LEASE; } }\n');
   write('fake-bin/npm', [
     `#!${process.execPath}`,
     'const fs=require("node:fs"),path=require("node:path"),cp=require("node:child_process");',
@@ -191,13 +191,13 @@ function viteNativeFixture(t, { parentVersion = '1.0.3', packedVersion = '1.0.3'
   fs.chmodSync(path.join(root, 'fake-bin/npm'), 0o755);
   const sourceFiles = ['apps/operator-vite/package.json', 'package-lock.json'];
   const original = sourceFiles.map(file => fs.readFileSync(path.join(root, file), 'utf8'));
-  const run = () => childProcess.spawnSync('bash', ['-c', [
+  const run = (extraEnv = {}) => childProcess.spawnSync('bash', ['-c', [
     'set -euo pipefail', CACHE_PACKAGE_RUNNER, EXACT_PLATFORM_FETCH, VITE_NATIVE_PREPARE,
     'prepare_vite_native_toolchain',
   ].join('\n')], {
     encoding: 'utf8', timeout: 15_000,
     env: { ...process.env, REPO_ROOT: root, WEB_DIR: root, PATH: path.join(root, 'fake-bin') + path.delimiter + process.env.PATH,
-      PC_PACK_RECORD: path.join(root, 'pack.jsonl'), SIDECAR_DIR: path.join(root, 'sidecar') },
+      PC_PACK_RECORD: path.join(root, 'pack.jsonl'), SIDECAR_DIR: path.join(root, 'sidecar'), ...extraEnv },
   });
   return { root, binding, run, destination: path.join(root, 'node_modules/rolldown/node_modules', binding),
     records: () => fs.existsSync(path.join(root, 'pack.jsonl')) ? fs.readFileSync(path.join(root, 'pack.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line)) : [],
@@ -312,6 +312,51 @@ test('an aliased Rolldown with the wrong locked version is refused before fetch'
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /no exact locked parent pin/);
   assert.deepEqual(fixture.records(), []);
+  fixture.assertSourceUnchanged();
+});
+
+test('an exact donor binding loads under a reader lease while donor writes are blocked', t => {
+  const fixture = viteNativeFixture(t);
+  const donor = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-vite-native-read-donor-'));
+  t.after(() => fs.rmSync(donor, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(donor, 'node_modules'));
+  for (const name of ['vite', 'rolldown']) {
+    const external = path.join(donor, 'node_modules', name);
+    const logical = path.join(fixture.root, 'node_modules', name);
+    fs.renameSync(logical, external);
+    fs.symlinkSync(external, logical, 'dir');
+  }
+  const bindingDir = path.join(donor, 'node_modules', fixture.binding);
+  fs.mkdirSync(bindingDir, { recursive: true });
+  fs.writeFileSync(path.join(bindingDir, 'package.json'), JSON.stringify({
+    name: fixture.binding, version: '1.0.3', main: 'index.cjs',
+  }));
+  fs.writeFileSync(path.join(bindingDir, 'index.cjs'),
+    'if(process.env.PC_INSTALL_READ_LEASE!=="held") throw Error("native load lost reader lease"); module.exports={native:true};');
+  fs.writeFileSync(path.join(donor, 'node_modules/vite/index.mjs'),
+    'import "rolldown"; if(process.env.PC_INSTALL_READ_LEASE!=="held") throw Error("Vite load lost reader lease");');
+  const result = fixture.run({ PC_BLOCKED_DONOR_ROOT: donor });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /VITE_NATIVE_TOOLCHAIN_OK/);
+  assert.deepEqual(fixture.records(), [], 'an existing exact binding needs no package mutation');
+  fixture.assertSourceUnchanged();
+});
+
+test('a missing donor binding still requires the donor writer', t => {
+  const fixture = viteNativeFixture(t);
+  const donor = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-vite-native-write-donor-'));
+  t.after(() => fs.rmSync(donor, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(donor, 'node_modules'));
+  for (const name of ['vite', 'rolldown']) {
+    const external = path.join(donor, 'node_modules', name);
+    const logical = path.join(fixture.root, 'node_modules', name);
+    fs.renameSync(logical, external);
+    fs.symlinkSync(external, logical, 'dir');
+  }
+  const result = fixture.run({ PC_BLOCKED_DONOR_ROOT: donor });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /donor writer blocked by active readers/);
+  assert.deepEqual(fixture.records(), [], 'no hydration may escape the blocked writer');
   fixture.assertSourceUnchanged();
 });
 
