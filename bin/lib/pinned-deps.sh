@@ -121,6 +121,8 @@ if (population) {
   }
 }
 const fail = (reason, file) => { throw new Error(reason + ":" + path.relative(root, file)); };
+// Match dependency_generation_prune_ephemeral before traversing disposable outputs.
+const caches = new Set([".cache", ".astro", ".vite", ".vite-temp", ".verdict-data"]);
 const visit = file => {
   const stat = fs.lstatSync(file);
   if (stat.isSymbolicLink()) {
@@ -134,7 +136,10 @@ const visit = file => {
     if (files && [lexical, resolved].some(target => !trees.some(tree => inside(tree, target)) &&
       !files.has(target))) fail("unplanned-pinned-dependency-target", file);
   } else if (stat.isDirectory()) {
-    for (const entry of fs.readdirSync(file)) visit(path.join(file, entry));
+    for (const entry of fs.readdirSync(file, { withFileTypes: true })) {
+      if (entry.isDirectory() && caches.has(entry.name)) continue;
+      visit(path.join(file, entry.name));
+    }
   }
 };
 for (const tree of trees) {
@@ -186,6 +191,16 @@ papercusp_pinned_deps_snapshot() (
   # A refused retry must not leave the previous attempt attested by its stamp.
   if [ -d "$_snap" ]; then rm -f "$_snap/.papercusp-pinned-deps" || return 1; fi
   papercusp_pinned_deps_preflight "$_donor" "$_population" || return 1
+
+  # Live tool caches can disappear even under the install mutex. Filter before
+  # copying, using dependency-generation's policy; package failures remain fatal.
+  local -a _cache_filters
+  _cache_filters=(--exclude=.cache/ --exclude=.astro/ --exclude=.vite/ \
+    --exclude=.vite-temp/ --exclude=.verdict-data/)
+  if ! command -v rsync >/dev/null 2>&1; then
+    echo "ERROR: pinned dependency snapshots require rsync for cache-safe copying." >&2
+    return 1
+  fi
 
   if [ "$_copy_mode" = copy ]; then
     local _generation_helper
@@ -260,7 +275,8 @@ papercusp_pinned_deps_snapshot() (
         _linked="$(find "$_dst" -type f -links +1 -print -quit)" || { _fail=1; continue; }
         if [ -z "$_linked" ]; then
           echo "verifying completed snapshot $_rel (checksums, independent inodes)"
-          if ! _changes="$(rsync -aH --checksum --dry-run --delete --itemize-changes "$_src/" "$_dst/")"; then
+          if ! _changes="$(rsync -aH --checksum --dry-run --delete --itemize-changes \
+            "${_cache_filters[@]}" "$_src/" "$_dst/")"; then
             _fail=1
             continue
           fi
@@ -339,12 +355,16 @@ papercusp_pinned_deps_snapshot() (
     echo "snapshotting $_rel (mode=$_copy_mode)"
     if [ "$_copy_mode" = copy ]; then
       echo "  verifying retained staging bytes before reuse: $_tmp"
-      dependency_generation_copy_with_progress "$_src" "$_tmp" --rsync-checksum || _copy_rc=$?
+      dependency_generation_copy_with_progress "$_src" "$_tmp" --rsync-checksum \
+        "${_cache_filters[@]}" || _copy_rc=$?
     else
-      # Preserve cp's path-specific diagnosis. A generic incomplete receipt
+      # Preserve rsync's path-specific diagnosis. A generic incomplete receipt
       # cannot distinguish a disappearing cache entry, EXDEV or ENOSPC, and
       # forces callers to repeat the whole expensive snapshot to investigate.
-      cp -al "$_src" "$_tmp" || _copy_rc=$?
+      mkdir -p "$_tmp" || _copy_rc=$?
+      if [ "$_copy_rc" -eq 0 ]; then
+        rsync -aH --link-dest="$_src" "${_cache_filters[@]}" "$_src/" "$_tmp/" || _copy_rc=$?
+      fi
     fi
     if [ "$_copy_rc" -ne 0 ]; then
       echo "  FAILED to snapshot $_rel (exit=$_copy_rc)" >&2
