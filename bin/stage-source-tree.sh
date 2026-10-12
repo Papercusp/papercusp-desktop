@@ -430,12 +430,14 @@ OUT_TMP=""
 # is registered. Bind the audited archive to the existing retention authority
 # so later extraction/native acceptance cannot lose its exact source to GC.
 node --input-type=module - "$MONO" "$OUT" "$HERE/../../scripts/lint-as-committed.mjs" <<'SOURCE_ARCHIVE_RETENTION'
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { join, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 const [root, archive, helper] = process.argv.slice(2);
 const markerPath = join(root, '.git', 'lint-as-committed-owner.json');
-if (existsSync(markerPath)) {
+// An archive inside the checkout has the same lifetime; its external installer
+// is retained by the cutter. Only an independently stored archive needs a hold.
+if (existsSync(markerPath) && !realpathSync(archive).startsWith(realpathSync(root) + sep)) {
   const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
   const { retainCommittedWorkRoot } = await import(pathToFileURL(helper));
   retainCommittedWorkRoot(root, marker.sha, archive);

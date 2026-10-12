@@ -284,6 +284,11 @@ test('audited source archive retains its exact expired checkout until the artifa
   assert.ok(block, 'exercise the actual source-stager retention boundary');
   assert.ok(stageSource.indexOf("<<'SOURCE_ARCHIVE_RETENTION'") > stageSource.indexOf('mv -f "$OUT_TMP" "$OUT"'),
     'only the successfully audited final artifact can retain its source');
+  const internal = path.join(source, 'source.tar.zst');
+  fs.writeFileSync(internal, 'fixture internal artifact');
+  const internalResult = run(process.execPath, ['--input-type=module', '-', source, internal, helper], { input: block[1] });
+  assert.doesNotMatch(internalResult, /COMMITTED_SOURCE_ARCHIVE_RETENTION_OK/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(source, lifecycle.OWNER_MARKER))).retainedFor, undefined);
   const retained = run(process.execPath, ['--input-type=module', '-', source, archive, helper], { input: block[1] });
   assert.match(retained, /COMMITTED_SOURCE_ARCHIVE_RETENTION_OK/);
   assert.equal(lifecycle.verifyCommittedWorkRoot(source, sha, [], archive).sha, sha);
