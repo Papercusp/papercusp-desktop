@@ -175,6 +175,9 @@ test('portable source projection keeps dependency bytes and relocated workspace/
   };
   write(source, 'packages/workspace/package.json', '{"name":"workspace","main":"index.js"}');
   write(source, 'packages/workspace/index.js', 'module.exports = 23;');
+  const workspaceCli = write(source, 'packages/workspace/cli.js',
+    '#!/usr/bin/env node\nconsole.log(require("workspace"));\n');
+  fs.chmodSync(workspaceCli, 0o755);
   write(donor, 'node_modules/dep/package.json', '{"name":"dep","main":"index.js"}');
   write(donor, 'node_modules/dep/index.js', 'module.exports = 19;');
   const cli = write(donor, 'node_modules/dep/cli.js',
@@ -184,6 +187,8 @@ test('portable source projection keeps dependency bytes and relocated workspace/
   write(donor, 'node_modules/dep/assets/public/data.txt', 'preserved runtime bytes');
   fs.mkdirSync(path.join(donor, 'node_modules/.bin'));
   fs.symlinkSync('../dep/cli.js', path.join(donor, 'node_modules/.bin/demo'));
+  fs.symlinkSync('../workspace/cli.js', path.join(donor, 'node_modules/.bin/workspace-demo'));
+  fs.symlinkSync(path.join(source, 'packages/workspace'), path.join(donor, 'node_modules/workspace'));
   fs.mkdirSync(path.join(source, 'node_modules/dep'), { recursive: true });
   for (const child of ['package.json', 'index.js', 'cli.js', 'assets']) {
     fs.symlinkSync(path.join(donor, 'node_modules/dep', child), path.join(source, 'node_modules/dep', child));
@@ -199,6 +204,14 @@ test('portable source projection keeps dependency bytes and relocated workspace/
     '--portable-source-tar', source, 'tar', '--exclude=./node_modules/dep/assets/private'],
   { input: selected.stdout, maxBuffer: 16 * 1024 * 1024 });
   assert.equal(projected.status, 0, projected.stderr.toString());
+  const excludedSelection = spawnSync('tar', ['--exclude=./packages/workspace/cli.js',
+    '-C', source, '-cf', '-', './node_modules', './packages']);
+  assert.equal(excludedSelection.status, 0, excludedSelection.stderr.toString());
+  const excludedTarget = spawnSync('python3', [path.join(root, 'bin/audit-release-bundle.py'),
+    '--portable-source-tar', source, 'tar', '--exclude=./packages/workspace/cli.js'],
+  { input: excludedSelection.stdout, maxBuffer: 16 * 1024 * 1024 });
+  assert.notEqual(excludedTarget.status, 0);
+  assert.match(excludedTarget.stderr.toString(), /link target was excluded: node_modules\/\.bin\/workspace-demo/);
   fs.writeFileSync(archive, projected.stdout);
   fs.mkdirSync(extracted);
   run('tar', ['-xf', archive, '-C', extracted]);
@@ -212,6 +225,8 @@ test('portable source projection keeps dependency bytes and relocated workspace/
   fs.rmSync(donor, { recursive: true });
   assert.equal(run(process.execPath, [path.join(extracted, 'node_modules/.bin/demo')],
     { cwd: extracted }).trim(), '42');
+  assert.equal(run(process.execPath, [path.join(extracted, 'node_modules/.bin/workspace-demo')],
+    { cwd: extracted }).trim(), '23');
   assert.ok(stageSource.includes('| python3 "$HERE/audit-release-bundle.py" --portable-source-tar'),
     'the real stager must project the selected tar before compression and final audit');
 });
@@ -224,7 +239,7 @@ test('portable source projection refuses external source links and dependency cy
   fs.writeFileSync(path.join(donor, 'outside.txt'), 'outside source');
   fs.symlinkSync(path.join(donor, 'outside.txt'), path.join(source, 'outside'));
   const project = member => {
-    const selected = spawnSync('tar', ['-C', source, '-cf', '-', member]);
+    const selected = spawnSync('tar', ['-C', source, '-cf', '-', ...[].concat(member)]);
     assert.equal(selected.status, 0, selected.stderr.toString());
     return spawnSync('python3', [path.join(root, 'bin/audit-release-bundle.py'),
       '--portable-source-tar', source, 'tar'], { input: selected.stdout });
@@ -236,6 +251,11 @@ test('portable source projection refuses external source links and dependency cy
   const missing = project('./kept-link');
   assert.notEqual(missing.status, 0);
   assert.match(missing.stderr.toString(), /link target was excluded/);
+  fs.symlinkSync('loop-b', path.join(source, 'loop-a'));
+  fs.symlinkSync('loop-a', path.join(source, 'loop-b'));
+  const localCycle = project(['./loop-a', './loop-b']);
+  assert.notEqual(localCycle.status, 0);
+  assert.match(localCycle.stderr.toString(), /cyclic source link/);
   fs.mkdirSync(path.join(source, 'node_modules'));
   fs.symlinkSync(donor, path.join(source, 'node_modules/cyclic'));
   fs.symlinkSync(donor, path.join(donor, 'back'));

@@ -4234,7 +4234,25 @@ def portable_source_tar(argv):
                     with open(physical, 'rb') as content:
                         output.addfile(info, content)
                     emitted.add(expanded)
+        # A bin target can traverse a selected workspace-directory symlink.
+        # Validate the archive's link graph, rather than requiring that logical
+        # alias path to appear as a second copy of the physical workspace file.
+        link_targets = dict(links)
         for name, target in links:
+            seen = set()
+            for _ in range(40):
+                if target in seen:
+                    raise ValueError('cyclic source link: ' + name)
+                seen.add(target)
+                parts = target.split('/')
+                prefix = next(('/'.join(parts[:end]) for end in range(1, len(parts) + 1)
+                               if '/'.join(parts[:end]) in link_targets), None)
+                if prefix is None:
+                    break
+                suffix = target[len(prefix):].lstrip('/')
+                target = relative_name(posixpath.join(link_targets[prefix], suffix))
+            else:
+                raise ValueError('cyclic or excessive source link chain: ' + name)
             if target not in emitted:
                 raise ValueError('source link target was excluded: ' + name)
     return 0
