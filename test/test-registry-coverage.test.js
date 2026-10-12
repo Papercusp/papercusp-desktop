@@ -1,4 +1,4 @@
-// Every test/*.test.js must actually be RUN by `npm test`.
+// Every Node test file under test/ must actually be RUN by `npm test`.
 //
 // WHY THIS TEST EXISTS
 // `test:shell` enumerates its files BY HAND. That makes "add your new test to the
@@ -68,7 +68,7 @@ function tokensReachableFromNpmTest() {
   return testChainScriptNames().flatMap((name) => testPathTokens(pkg.scripts?.[name] ?? ''));
 }
 
-/** Every test/*.test.js file named by the scripts `npm test` reaches. */
+/** Every Node test file named by the scripts `npm test` reaches. */
 function filesReachableFromNpmTest() {
   return new Set(tokensReachableFromNpmTest());
 }
@@ -76,7 +76,7 @@ function filesReachableFromNpmTest() {
 function filesOnDisk() {
   return fs
     .readdirSync(path.join(root, 'test'))
-    .filter((f) => f.endsWith('.test.js'))
+    .filter((f) => f.endsWith('.test.js') || f.endsWith('.test.mjs') || f.endsWith('.test.cjs'))
     .map((f) => `test/${f}`)
     .sort();
 }
@@ -101,7 +101,7 @@ test('CONTROL: the orphan predicate detects a file no script names', () => {
   );
 });
 
-test('every test/*.test.js is run by `npm test`', () => {
+test('every Node test file under test/ is run by `npm test`', () => {
   const reachable = filesReachableFromNpmTest();
   const orphans = findOrphans(filesOnDisk(), reachable, EXCLUSIONS);
 
