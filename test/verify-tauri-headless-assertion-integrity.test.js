@@ -163,17 +163,38 @@ test('native console compile preflight refuses failures before setup and skips n
     assert.equal(result.stdout.includes('PREPARATION_STARTED'), expected === 0);
     const runsCheck = prepareOnly === '0' && platform === 'Linux';
     assert.equal(result.stdout.includes('CHECK_ARGS'), runsCheck);
-    if (runsCheck) assert.match(result.stdout, /--test --test-global-setup=\/fixture\/desktop\/test\/monorepo-host-preflight.mjs \/fixture\/desktop\/test\/native-console-gnome.test.js/);
+    if (runsCheck) assert.match(result.stdout, /--test --test-global-setup=\/fixture\/desktop\/test\/monorepo-host-preflight.mjs \/fixture\/desktop\/test\/native-console-gnome.test.mjs/);
   }
   const admission = source.indexOf('vh_run_step native-console-platform-check preflight_native_console_platform');
   assert.ok(admission > source.indexOf('vh_run_step native-cargo-capacity preflight_native_cargo'));
   assert.ok(admission < source.indexOf('vh_run_step operator-source-snapshot '));
   for (const input of ['papercusp-desktop/src-tauri/src/main.rs',
     'papercusp-desktop/src-tauri/src/native_console.rs', 'papercusp-desktop/src-tauri/src/wsl_sidecar_staging.rs',
-    'papercusp-desktop/test/native-console-gnome.test.js', 'papercusp-desktop/test/monorepo-host-preflight.mjs',
+    'papercusp-desktop/test/native-console-gnome.test.mjs', 'papercusp-desktop/test/monorepo-host-preflight.mjs',
     'scripts/lib/node-test-host-preflight.mjs', 'packages/operator-core/lib/gnome-terminal-policy.json']) {
     assert.ok(nativeInputs.includes(input), input);
   }
+});
+
+test('native console preflight accepts the inherited committed-source loader', () => {
+  const loader = path.resolve(__dirname, '../../scripts/lib/committed-source-loader.mjs');
+  const preflight = source.match(/^preflight_native_console_platform\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(preflight, 'native console platform preflight missing');
+  // Exercise the real runner and module load without repeating the Cargo fixture.
+  // The command-only fixture above cannot detect a loader refusing CommonJS.
+  const env = { ...process.env, DESKTOP_DIR: path.resolve(__dirname, '..'), PREPARE_ONLY: '0',
+    NODE_OPTIONS: [process.env.NODE_OPTIONS || '', `--import=${loader}`].filter(Boolean).join(' ') };
+  // Start a runner, rather than a second child of this suite's node:test IPC.
+  delete env.NODE_TEST_CONTEXT;
+  const result = spawnSync('bash', ['-c',
+    'uname() { printf "Linux\\n"; }\n' +
+    preflight.replace('node --test ', 'node --test --test-name-pattern="^Cargo failure diagnostics" ') +
+    '\npreflight_native_console_platform'], {
+    encoding: 'utf8', timeout: 60000, env,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Cargo failure diagnostics retain stdout and stderr tails/);
+  assert.doesNotMatch(result.stderr, /COMMITTED_SOURCE refused/);
 });
 
 function voiceExpression(name, document, location = {}, KeyboardEvent = class {
