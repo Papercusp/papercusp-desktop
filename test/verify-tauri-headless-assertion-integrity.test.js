@@ -192,7 +192,7 @@ test('native console preflight accepts the inherited committed-source loader', (
     '\npreflight_native_console_platform'], {
     encoding: 'utf8', timeout: 60000, env,
   });
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 0, result.stderr + result.stdout);
   assert.match(result.stdout, /Cargo failure diagnostics retain stdout and stderr tails/);
   assert.doesNotMatch(result.stderr, /COMMITTED_SOURCE refused/);
 });
