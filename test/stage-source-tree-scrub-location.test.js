@@ -263,3 +263,34 @@ test('portable source projection refuses external source links and dependency cy
   assert.notEqual(cyclic.status, 0);
   assert.match(cyclic.stderr.toString(), /cyclic dependency directory/);
 });
+
+test('audited source archive retains its exact expired checkout until the artifact is removed', async t => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-source-retention-'));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const helper = path.resolve(root, '../scripts/lint-as-committed.mjs');
+  const { pathToFileURL } = require('node:url');
+  const lifecycle = await import(pathToFileURL(helper));
+  const source = path.join(tmp, lifecycle.WORK_ROOT_PREFIX + 'release-retention');
+  fs.mkdirSync(source);
+  run('git', ['init', '--quiet', source]);
+  run('git', ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '--quiet', '--allow-empty', '-m', 'fixture'], { cwd: source });
+  const sha = run('git', ['rev-parse', 'HEAD'], { cwd: source }).trim();
+  fs.writeFileSync(path.join(source, lifecycle.OWNER_MARKER),
+    JSON.stringify({ pid: 101, keep: true, sha, createdAtMs: 0 }));
+  const archive = path.join(tmp, 'source.tar.zst');
+  fs.writeFileSync(archive, 'fixture audited artifact');
+  const block = stageSource.match(/<<'SOURCE_ARCHIVE_RETENTION'\n([\s\S]*?)\nSOURCE_ARCHIVE_RETENTION/);
+  assert.ok(block, 'exercise the actual source-stager retention boundary');
+  assert.ok(stageSource.indexOf("<<'SOURCE_ARCHIVE_RETENTION'") > stageSource.indexOf('mv -f "$OUT_TMP" "$OUT"'),
+    'only the successfully audited final artifact can retain its source');
+  const retained = run(process.execPath, ['--input-type=module', '-', source, archive, helper], { input: block[1] });
+  assert.match(retained, /COMMITTED_SOURCE_ARCHIVE_RETENTION_OK/);
+  assert.equal(lifecycle.verifyCommittedWorkRoot(source, sha, [], archive).sha, sha);
+  const options = { root: tmp, nowMs: lifecycle.MAX_AGE_MS + 3600_000, cwds: [], isAlive: () => false, maxIdleKept: 0 };
+  assert.ok(lifecycle.sweepStaleWorkRoots(options).kept.some(x => x.reason === 'dependent-artifact'));
+  assert.ok(fs.existsSync(source));
+  fs.rmSync(archive);
+  assert.ok(lifecycle.sweepStaleWorkRoots(options).removed.some(x => x.reason === 'max-age'));
+  assert.equal(fs.existsSync(source), false);
+});

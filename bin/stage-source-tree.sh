@@ -426,6 +426,22 @@ elif [[ $_audit_rc -ne 0 ]]; then
 fi
 mv -f "$OUT_TMP" "$OUT"
 OUT_TMP=""
+# A kept committed-source checkout is temporary unless its dependent artifact
+# is registered. Bind the audited archive to the existing retention authority
+# so later extraction/native acceptance cannot lose its exact source to GC.
+node --input-type=module - "$MONO" "$OUT" "$HERE/../../scripts/lint-as-committed.mjs" <<'SOURCE_ARCHIVE_RETENTION'
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const [root, archive, helper] = process.argv.slice(2);
+const markerPath = join(root, '.git', 'lint-as-committed-owner.json');
+if (existsSync(markerPath)) {
+  const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+  const { retainCommittedWorkRoot } = await import(pathToFileURL(helper));
+  retainCommittedWorkRoot(root, marker.sha, archive);
+  console.log('COMMITTED_SOURCE_ARCHIVE_RETENTION_OK');
+}
+SOURCE_ARCHIVE_RETENTION
 exit 0
 
 }  # ── end self-read guard (WI-3306) — opened after 'set -euo pipefail' above ──
