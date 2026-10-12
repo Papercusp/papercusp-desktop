@@ -356,11 +356,14 @@ fi
   -C "$MONO" -cf - "${INCLUDES[@]}" \
   "${_scrub_tail[@]}" \
   "${PACKAGE_LOCK_TAIL[@]}" \
+  | python3 "$HERE/audit-release-bundle.py" --portable-source-tar \
+      "$MONO" "$TAR_BIN" "${EXCLUDES[@]}" \
   | zstd -T0 "-${zstd_level}" --long=27 -q -f -o "$OUT_TMP"
 rcs=("${PIPESTATUS[@]}")
 set -e -o pipefail
 (( rcs[0] <= 1 )) || { echo "ERROR: tar failed (exit ${rcs[0]})" >&2; exit 1; }
-(( rcs[1] == 0 )) || { echo "ERROR: zstd failed (exit ${rcs[1]})" >&2; exit 1; }
+(( rcs[1] == 0 )) || { echo "ERROR: portable source links failed (exit ${rcs[1]})" >&2; exit 1; }
+(( rcs[2] == 0 )) || { echo "ERROR: zstd failed (exit ${rcs[2]})" >&2; exit 1; }
 
 sz="$(du -h "$OUT_TMP" | cut -f1)"
 echo "    ✓ source.tar.zst staged (${sz} compressed, zstd -${zstd_level} --long=27)"

@@ -161,3 +161,85 @@ test('Debian repacker rejects stale in-sidecar scrub members', () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('portable source projection keeps dependency bytes and relocated workspace/bin links', t => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-portable-source-'));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const donor = path.join(tmp, 'donor'), source = path.join(tmp, 'source');
+  const extracted = path.join(tmp, 'installed');
+  const write = (base, rel, text) => {
+    const file = path.join(base, rel);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+    return file;
+  };
+  write(source, 'packages/workspace/package.json', '{"name":"workspace","main":"index.js"}');
+  write(source, 'packages/workspace/index.js', 'module.exports = 23;');
+  write(donor, 'node_modules/dep/package.json', '{"name":"dep","main":"index.js"}');
+  write(donor, 'node_modules/dep/index.js', 'module.exports = 19;');
+  const cli = write(donor, 'node_modules/dep/cli.js',
+    '#!/usr/bin/env node\nconsole.log(require("dep") + require("workspace"));\n');
+  fs.chmodSync(cli, 0o755);
+  write(donor, 'node_modules/dep/assets/private/secret.txt', 'must stay excluded');
+  write(donor, 'node_modules/dep/assets/public/data.txt', 'preserved runtime bytes');
+  fs.mkdirSync(path.join(donor, 'node_modules/.bin'));
+  fs.symlinkSync('../dep/cli.js', path.join(donor, 'node_modules/.bin/demo'));
+  fs.mkdirSync(path.join(source, 'node_modules/dep'), { recursive: true });
+  for (const child of ['package.json', 'index.js', 'cli.js', 'assets']) {
+    fs.symlinkSync(path.join(donor, 'node_modules/dep', child), path.join(source, 'node_modules/dep', child));
+  }
+  fs.symlinkSync(path.join(donor, 'node_modules/.bin'), path.join(source, 'node_modules/.bin'));
+  fs.symlinkSync(path.join(source, 'packages/workspace'), path.join(source, 'node_modules/workspace'));
+  const original = fs.readlinkSync(path.join(source, 'node_modules/dep/index.js'));
+  const archive = path.join(tmp, 'source.tar');
+  // Feed the selected archive to the actual producer projection, not a mock.
+  const selected = spawnSync('tar', ['-C', source, '-cf', '-', './node_modules', './packages']);
+  assert.equal(selected.status, 0, selected.stderr.toString());
+  const projected = spawnSync('python3', [path.join(root, 'bin/audit-release-bundle.py'),
+    '--portable-source-tar', source, 'tar', '--exclude=./node_modules/dep/assets/private'],
+  { input: selected.stdout, maxBuffer: 16 * 1024 * 1024 });
+  assert.equal(projected.status, 0, projected.stderr.toString());
+  fs.writeFileSync(archive, projected.stdout);
+  fs.mkdirSync(extracted);
+  run('tar', ['-xf', archive, '-C', extracted]);
+  assert.equal(fs.readlinkSync(path.join(source, 'node_modules/dep/index.js')), original);
+  assert.equal(fs.readlinkSync(path.join(extracted, 'node_modules/.bin/demo')), '../dep/cli.js');
+  assert.equal(fs.readlinkSync(path.join(extracted, 'node_modules/workspace')), '../packages/workspace');
+  assert.equal(fs.statSync(path.join(extracted, 'node_modules/dep/cli.js')).mode & 0o777, 0o755);
+  assert.equal(fs.readFileSync(path.join(extracted, 'node_modules/dep/assets/public/data.txt'), 'utf8'),
+    'preserved runtime bytes');
+  assert.equal(fs.existsSync(path.join(extracted, 'node_modules/dep/assets/private')), false);
+  fs.rmSync(donor, { recursive: true });
+  assert.equal(run(process.execPath, [path.join(extracted, 'node_modules/.bin/demo')],
+    { cwd: extracted }).trim(), '42');
+  assert.ok(stageSource.includes('| python3 "$HERE/audit-release-bundle.py" --portable-source-tar'),
+    'the real stager must project the selected tar before compression and final audit');
+});
+
+test('portable source projection refuses external source links and dependency cycles', t => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-portable-refuse-'));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const source = path.join(tmp, 'source'), donor = path.join(tmp, 'donor');
+  fs.mkdirSync(source); fs.mkdirSync(donor);
+  fs.writeFileSync(path.join(donor, 'outside.txt'), 'outside source');
+  fs.symlinkSync(path.join(donor, 'outside.txt'), path.join(source, 'outside'));
+  const project = member => {
+    const selected = spawnSync('tar', ['-C', source, '-cf', '-', member]);
+    assert.equal(selected.status, 0, selected.stderr.toString());
+    return spawnSync('python3', [path.join(root, 'bin/audit-release-bundle.py'),
+      '--portable-source-tar', source, 'tar'], { input: selected.stdout });
+  };
+  const outside = project('./outside');
+  assert.notEqual(outside.status, 0);
+  assert.match(outside.stderr.toString(), /outside dependencies/);
+  fs.symlinkSync(path.join(source, 'outside'), path.join(source, 'kept-link'));
+  const missing = project('./kept-link');
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr.toString(), /link target was excluded/);
+  fs.mkdirSync(path.join(source, 'node_modules'));
+  fs.symlinkSync(donor, path.join(source, 'node_modules/cyclic'));
+  fs.symlinkSync(donor, path.join(donor, 'back'));
+  const cyclic = project('./node_modules');
+  assert.notEqual(cyclic.status, 0);
+  assert.match(cyclic.stderr.toString(), /cyclic dependency directory/);
+});
