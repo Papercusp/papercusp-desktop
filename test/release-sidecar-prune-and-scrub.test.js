@@ -1116,6 +1116,46 @@ test('scrub-text leaves a CLEAN doc byte-identical', () => {
   assert.equal(fs.statSync(doc).mtimeMs, before, 'a clean file must not be rewritten at all');
 });
 
+test('final shipping-text projection cleans real donor-linked bundles and preserves execution', () => {
+  const dir = tmp('scrubtext-donor-bundle');
+  try {
+    const lit = identityLiteral();
+    const donor = path.join(dir, 'donor', lit.replace(/^[/\\]+/, ''), 'node_modules');
+    const pkg = path.join(donor, 'shipping-fixture');
+    fs.mkdirSync(pkg, { recursive: true });
+    fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: 'shipping-fixture', main: 'index.cjs' }));
+    fs.writeFileSync(path.join(pkg, 'index.cjs'), 'module.exports = { answer: 42 };\n');
+    const source = path.join(dir, 'frozen-source');
+    fs.mkdirSync(source);
+    fs.symlinkSync(donor, path.join(source, 'node_modules'), 'dir');
+    fs.writeFileSync(path.join(source, 'entry.cjs'), "console.log(require('shipping-fixture').answer);\n");
+    const sidecar = path.join(dir, 'sidecar');
+    const worker = path.join(sidecar, 'late.worker.mjs');
+    const cli = path.join(sidecar, 'scripts', 'late-cli.cjs');
+    fs.mkdirSync(path.dirname(cli), { recursive: true });
+    const esbuild = require('esbuild');
+    for (const [outfile, format] of [[worker, 'esm'], [cli, 'cjs']]) {
+      const result = esbuild.buildSync({ absWorkingDir: source, entryPoints: ['entry.cjs'],
+        outfile, platform: 'node', format, bundle: true, metafile: true, logLevel: 'silent' });
+      fs.writeFileSync(`${outfile}.meta.json`, JSON.stringify(result.metafile));
+      assert.ok(fs.readFileSync(outfile, 'utf8').includes(lit), 'real compiler output must reproduce the donor identity leak');
+      assert.equal(execFileSync(process.execPath, [outfile], { encoding: 'utf8' }).trim(), '42');
+    }
+    assert.equal(audit('--scan-dir', sidecar).status, 1, 'the final detector must reject the unprojected real bundles');
+    assert.equal(audit('--scrub-text', sidecar).status, 0);
+    assert.equal(audit('--scan-dir', sidecar).status, 0, 'all compiled and metadata outputs must pass the same detector');
+    for (const outfile of [worker, cli]) {
+      assert.ok(!fs.readFileSync(outfile, 'utf8').includes(lit));
+      assert.ok(!fs.readFileSync(`${outfile}.meta.json`, 'utf8').includes(lit));
+      assert.doesNotThrow(() => JSON.parse(fs.readFileSync(`${outfile}.meta.json`, 'utf8')));
+      assert.equal(execFileSync(process.execPath, [outfile], { encoding: 'utf8' }).trim(), '42', 'projection must preserve runtime behavior');
+    }
+    assert.equal(fs.readFileSync(path.join(pkg, 'index.cjs'), 'utf8'), 'module.exports = { answer: 42 };\n', 'donor inputs stay untouched');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('build-desktop-sidecar runs --scrub-text BEFORE the identity scan that judges it', () => {
   // Ordering is the whole contract: scrubbing after the scan would gate on unscrubbed
   // bytes and red every cut, which is the bug this wiring exists to prevent.
@@ -1137,6 +1177,10 @@ test('build-desktop-sidecar runs --scrub-text BEFORE the identity scan that judg
   const envTextScrub = sh.indexOf('--scrub-text', overlayCopy);
   assert.ok(envTextScrub > overlayCopy,
     'preserved env-sidecar text must be scrubbed after the overlay restore');
+  const finalScrub = sh.lastIndexOf('--scrub-text "$SIDECAR_DIR"');
+  const finalScan = sh.lastIndexOf('--scan-dir "$SIDECAR_DIR"');
+  assert.ok(finalScrub > overlayCopy && finalScan > finalScrub,
+    'the entire shipping text tree must be projected after late assembly and before its final scan');
 });
 
 test('sidecar source-note producer scrubs build roots and preserves system provenance', () => {
@@ -1534,9 +1578,14 @@ test('build-mac-cross resolves Cargo-installed tools from CARGO_HOME under a min
   const dir = tmp('mac-cargo-home');
   const cargoHome = path.join(dir, 'cargo-home');
   const cargoBin = path.join(cargoHome, 'bin');
+  const runtimeBin = path.join(dir, 'runtime-bin');
   const zigDir = path.join(dir, 'zig');
   const missingSdk = path.join(dir, 'missing-sdk');
   fs.mkdirSync(cargoBin, { recursive: true });
+  fs.mkdirSync(runtimeBin);
+  // The public-interface preflight requires Node before reaching Cargo/SDK.
+  // Supply that runtime while keeping CARGO_HOME/bin absent from manager PATH.
+  fs.symlinkSync(process.execPath, path.join(runtimeBin, 'node'));
   fs.mkdirSync(zigDir, { recursive: true });
 
   const executable = (file, body) => {
@@ -1552,7 +1601,7 @@ test('build-mac-cross resolves Cargo-installed tools from CARGO_HOME under a min
       encoding: 'utf8',
       env: {
         ...process.env,
-        PATH: '/usr/bin:/bin',
+        PATH: `${runtimeBin}:/usr/bin:/bin`,
         HOME: dir,
         CARGO_HOME: cargoHome,
         PAPERCUSP_ZIG_DIR: zigDir,

@@ -6084,9 +6084,15 @@ fi
 #
 # Release-gated (PAPERCUSP_RELEASE_AUDIT=1) exactly as before: a dev sidecar on the
 # build box — whose own identity legitimately pervades its compiled binaries —
-# still builds. The prune/scrub steps stay where they are, upstream of the copies
-# they rewrite. Pinned by packages/operator-core/lib/release-identity-gate-ordering.test.ts.
+# still builds. Earlier projection prepares the docs/SPA; the final projection
+# also covers workers, bundled CLIs and metafiles produced afterwards. Donor
+# node_modules symlinks can put physical build-home paths in esbuild module keys
+# even when the entrypoint comes from a frozen source tree (EI-25733874198709240).
+# Reuse the shipping-text scrubber, which skips vendor node_modules and binaries
+# and breaks hardlinks before rewriting; retain the unconditional content scan.
+# Pinned by packages/operator-core/lib/release-identity-gate-ordering.test.ts.
 if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" && -f "$HERE/audit-release-bundle.py" ]]; then
+  python3 "$HERE/audit-release-bundle.py" --scrub-text "$SIDECAR_DIR"
   echo "→ identity-scanning assembled sidecar (release gate, honors NO path-exclude)"
   if ! python3 "$HERE/audit-release-bundle.py" --scan-dir "$SIDECAR_DIR"; then
     echo "ERROR: assembled sidecar carries a sensitive/build-box identity — refusing to ship (WI-4419)."
