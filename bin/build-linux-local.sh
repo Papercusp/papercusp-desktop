@@ -144,16 +144,16 @@ if [[ "${1:-}" == --producer-bank ]]; then
   readonly PAPERCUSP_PRODUCER_SOURCE="${SRC:?preflight must bind SRC}"
   node - "$PAPERCUSP_PRODUCER_BANK/next-leg-preparation-packet.json" \
     "$PAPERCUSP_NOMINATED_PACKET_SHA256" "$RUN" "$PAPERCUSP_PRODUCER_TOOL/bin/build-linux-local.sh" \
-    "$PAPERCUSP_PRODUCER_BUILD_SHA" "$PAPERCUSP_PRODUCER_SOURCE_HEAD" <<'NODE'
+    "$PAPERCUSP_PRODUCER_BUILD_SHA" "$PAPERCUSP_PRODUCER_SOURCE_HEAD" "${BASH_SOURCE[0]}" <<'NODE'
 const fs = require('node:fs');
 const crypto = require('node:crypto');
-const [packetPath, nominated, output, scriptPath, baked, source] = process.argv.slice(2);
+const [packetPath, nominated, output, scriptPath, baked, source, executingPath] = process.argv.slice(2);
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const bytes = fs.readFileSync(packetPath);
 const packet = JSON.parse(bytes);
 const leg = packet.legs?.find(row => row.name === 'LinuxGUI');
 if (digest(bytes) !== nominated || leg?.output !== output || leg?.script?.path !== scriptPath ||
-    leg?.script?.sha256 !== digest(fs.readFileSync(scriptPath)) ||
+    leg?.script?.sha256 !== digest(fs.readFileSync(executingPath)) ||
     leg?.bakedIdentity !== baked || leg?.sourceIdentity !== source) {
   console.error('release-artifacts: nominated packet does not bind this Linux GUI producer');
   process.exit(2);

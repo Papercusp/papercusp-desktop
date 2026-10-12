@@ -94,6 +94,34 @@ test('maintained Linux producer requires exact nomination before creating output
   assert.equal(fs.existsSync(f.output), false);
 });
 
+test('maintained Linux producer nominates executing snapshot bytes rather than a replaced canonical script', t => {
+  const f = outputFixture(t, '');
+  const toolRoot = path.join(f.oldBank, 'tooling');
+  const toolBin = path.join(toolRoot, 'bin');
+  fs.mkdirSync(path.join(toolBin, 'lib'), { recursive: true });
+  const canonical = path.join(toolBin, 'build-linux-local.sh');
+  fs.copyFileSync(linuxProducer, canonical);
+  fs.copyFileSync(artifactLibrary, path.join(toolBin, 'lib/release-artifacts.sh'));
+  fs.writeFileSync(f.preflightPath, [
+    'PAPERCUSP_BUILD_SHA=e7752b9e; PROVENANCE_SOURCE_GIT_HEAD=full-source; SRC="$OLD_BANK/source"',
+    'printf "# replaced canonical script\\n" > "$PAPERCUSP_PRODUCER_TOOL/bin/build-linux-local.sh"',
+    'node - "$PAPERCUSP_PRODUCER_BANK/next-leg-preparation-packet.json" "$RUN" "$PAPERCUSP_PRODUCER_TOOL/bin/build-linux-local.sh" <<\'NODE\'',
+    'const fs=require("node:fs"),crypto=require("node:crypto");',
+    'const [file,output,path]=process.argv.slice(2);',
+    'const sha256=crypto.createHash("sha256").update(fs.readFileSync(path)).digest("hex");',
+    'fs.writeFileSync(file,JSON.stringify({legs:[{name:"LinuxGUI",output,script:{path,sha256},bakedIdentity:"e7752b9e",sourceIdentity:"full-source"}]}));',
+    'NODE',
+    'PAPERCUSP_NOMINATED_PACKET_SHA256="$(sha256sum "$PAPERCUSP_PRODUCER_BANK/next-leg-preparation-packet.json")"',
+    'PAPERCUSP_NOMINATED_PACKET_SHA256="${PAPERCUSP_NOMINATED_PACKET_SHA256%% *}"',
+  ].join('\n'));
+  const result = spawnSync('bash', [canonical, '--producer-bank', f.bank, f.preflightPath], {
+    encoding: 'utf8', timeout: 10_000, env: { ...process.env, OLD_BANK: f.oldBank },
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /packet does not bind/);
+  assert.equal(fs.existsSync(f.output), false);
+});
+
 test('maintained Linux producer consumes the bound source and output in the nominated build chain', t => {
   const crypto = require('node:crypto');
   const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
