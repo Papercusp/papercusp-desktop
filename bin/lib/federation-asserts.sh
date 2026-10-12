@@ -1062,6 +1062,9 @@ fed_acquire_port_lock() {
 fed_release_port_locks() {
   local fd
   for fd in "${FED_PORT_LOCK_FDS[@]:-}"; do
+    # With `:-`, an empty array still yields one empty iteration under set -u.
+    # Skip it: evaluating `exec ${fd}>&-` with fd empty would close stdout.
+    [ -n "$fd" ] || continue
     eval "exec ${fd}>&-"
   done
   FED_PORT_LOCK_FDS=()
