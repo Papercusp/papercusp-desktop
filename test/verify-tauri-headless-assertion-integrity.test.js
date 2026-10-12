@@ -26,7 +26,7 @@ const devOperatorSource = fs.readFileSync(DEV_OPERATOR_SCRIPT, 'utf8');
 const dreamSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-dream-native.sh'), 'utf8');
 const voiceSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-voice-settings.sh'), 'utf8');
 
-function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false, claimSlot = false }) {
+function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false, claimSlot = false, handoff = false, peerReceipt = false }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-native-capacity-'));
   const target = path.join(dir, 'cargo');
   const ledger = path.join(dir, 'reservations');
@@ -40,13 +40,24 @@ function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false
     { mode: 0o755 });
     fs.writeFileSync(path.join(bin, 'df'), '#!/usr/bin/env bash\n' +
       'printf "measured\\n" >> "$NATIVE_FIXTURE_DF_CALLS"\n' +
-      `printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 209715200 0 ${freeGb * 1024 * 1024} 0%% /fixture\\n'\n`,
+      `available=${freeGb * 1024 * 1024}\n` +
+      '[ "${NATIVE_FIXTURE_AFTER_PREPARE:-0}" != 1 ] || available=12582912\n' +
+      'printf "Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 209715200 0 %s 0%% /fixture\\n" "$available"\n',
     { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, 'tauri'), '#!/usr/bin/env bash\nprintf "CLI_STARTED\\n"\n', { mode: 0o755 });
     const preflight = source.match(/^preflight_native_cargo\(\) \{[\s\S]*?^\}/m)?.[0];
     assert.ok(preflight, 'the maintained native preflight must be executable');
     const result = spawnSync('bash', ['-c', preflight + '\n' +
+      'trap \'papercusp_release_disk_reservation; [ -z "${peer:-}" ] || kill "$peer" 2>/dev/null\' EXIT\n' +
       'preflight_native_cargo || exit $?\n' +
       'printf "PREPARATION_STARTED target=%s\\n" "$CARGO_TARGET_DIR"\n' +
+      'if [ -n "${NATIVE_CARGO_DISK_RESERVATION_FILE:-}" ] && [ -f "$NATIVE_CARGO_DISK_RESERVATION_FILE" ]; then echo RESERVATION_HELD; fi\n' +
+      (peerReceipt ? 'sleep 30 & peer=$!\n' +
+        'sed "/^pid=/d; /^start=/d" "$NATIVE_CARGO_DISK_RESERVATION_FILE" > "$NATIVE_CARGO_DISK_RESERVATION_FILE.tmp"\n' +
+        'printf "pid=%s\\nstart=%s\\n" "$peer" "$(papercusp_proc_starttime "$peer")" >> "$NATIVE_CARGO_DISK_RESERVATION_FILE.tmp"\n' +
+        'mv "$NATIVE_CARGO_DISK_RESERVATION_FILE.tmp" "$NATIVE_CARGO_DISK_RESERVATION_FILE"\n' : '') +
+      (handoff ? 'export NATIVE_FIXTURE_AFTER_PREPARE=1 PAPERCUSP_DISK_RESERVATION_FILE="$NATIVE_CARGO_DISK_RESERVATION_FILE"\n' +
+        'PAPERCUSP_SIDECAR_LOCK="$HOME/sidecar.lock" bash "$DESKTOP_DIR/bin/tauri-guarded" dev || exit $?\n' : '') +
       (claimSlot ? 'if flock -n "$HOME/.papercusp/desktop-dev-slots/slot0.lock" true; then echo SLOT_UNPROTECTED; else echo SLOT_HELD; fi\n' : '')], {
       encoding: 'utf8', timeout: 15_000,
       env: { ...process.env, HOME: dir, DESKTOP_DIR: path.resolve(__dirname, '..'),
@@ -74,7 +85,8 @@ test('native admission rejects cold and warm shortages before verifier preparati
     const admitted = nativeCargoPreflightFixture({ freeGb: need, warm });
     assert.equal(admitted.status, 0, admitted.stderr);
     assert.ok(admitted.stdout.includes(`target=${admitted.target}`));
-    assert.deepEqual(admitted.claims, [], 'early admission releases its temporary reservation');
+    assert.match(admitted.stdout, /RESERVATION_HELD/, 'preparation retains the admitted Cargo budget');
+    assert.deepEqual(admitted.claims, [], 'the preparation owner releases its receipt on exit');
   }
 });
 
@@ -91,7 +103,25 @@ test('early native admission keeps the selected slot locked for preparation and 
   assert.ok(result.stdout.includes(`target=${result.target}`));
   assert.match(result.stdout, /SLOT_HELD/);
   assert.doesNotMatch(result.stdout, /SLOT_UNPROTECTED/);
-  assert.deepEqual(result.claims, [], 'the early disk reservation is temporary; the slot lock is retained');
+  assert.match(result.stdout, /RESERVATION_HELD/);
+  assert.deepEqual(result.claims, [], 'the owner releases its receipt on exit');
+});
+
+test('native boot adopts the retained Cargo budget after preparation without double reserving', () => {
+  const result = nativeCargoPreflightFixture({ freeGb: 100, warm: true, handoff: true });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /RESERVATION_HELD/);
+  assert.match(result.stderr, /adopted 12GB ancestor reservation/);
+  assert.match(result.stdout, /CLI_STARTED/);
+  assert.deepEqual(result.claims, [], 'handoff creates no second reservation');
+});
+
+test('native boot cannot adopt an unrelated live peer reservation', () => {
+  const result = nativeCargoPreflightFixture({ freeGb: 100, warm: true, handoff: true, peerReceipt: true });
+  assert.equal(result.status, 28, result.stderr);
+  assert.doesNotMatch(result.stdout, /CLI_STARTED/);
+  assert.doesNotMatch(result.stderr, /adopted/);
+  assert.match(result.stderr, /insufficient disk for native dev Cargo build/);
 });
 
 test('native admission precedes costly preparation and pins its maintained helpers', () => {

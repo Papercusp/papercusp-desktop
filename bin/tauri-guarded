@@ -305,7 +305,7 @@ if [[ "$__subcommand" == "dev" ]]; then
   __pc_cargo_target="$(papercusp_cargo_target_root "$__here/../src-tauri")"
   __pc_cargo_need_gb="$(papercusp_native_dev_cargo_need_gb "$__pc_cargo_target")"
   papercusp_require_free_gb "$__pc_cargo_target" "$__pc_cargo_need_gb" \
-    "native dev Cargo build" >&2 || exit $?
+    "native dev Cargo build" "${PAPERCUSP_DISK_RESERVATION_FILE:-}" >&2 || exit $?
 fi
 
 # `dev` is the documented rig path; `build`/`bundle` also have Cargo/build.rs

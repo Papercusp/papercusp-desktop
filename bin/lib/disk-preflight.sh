@@ -245,6 +245,7 @@ papercusp_require_disk_reservation() {
 # a compile error.
 papercusp_require_free_gb() {
   local dir="$1" need_gb="$2" label="${3:-build}"
+  local inherited="${4:-}" owner claimed start current expires cursor hops=0
   local free_gb
   free_gb="$(papercusp_free_gb "$dir")"
 
@@ -252,6 +253,37 @@ papercusp_require_free_gb() {
     # Unmeasurable -> proceed. Say so, so a later ENOSPC is not a total mystery.
     echo "    (disk preflight SKIPPED for $label — could not measure free space on '$dir')" >&2
     return 0
+  fi
+
+  # A preparation owner may hand its existing claim to a descendant build.
+  # Only reuse a live receipt for this device, budget and purpose. An unrelated
+  # peer's receipt never authorizes spending its reservation. Keep checking
+  # physical space: a receipt cannot make an exhausted filesystem usable.
+  if [ -n "$inherited" ] && [ -f "$inherited" ] &&
+     [ "$(dirname "$inherited")" = "$(papercusp_reservation_dir)/$(papercusp_mount_key "$dir")" ] &&
+     [ "$free_gb" -ge "$need_gb" ] &&
+     [ "$(sed -n 's/^label=//p' "$inherited")" = "$label" ]; then
+    owner="$(sed -n 's/^pid=//p' "$inherited")"
+    claimed="$(sed -n 's/^gb=//p' "$inherited")"
+    expires="$(sed -n 's/^expires=//p' "$inherited")"
+    start="$(sed -n 's/^start=//p' "$inherited")"
+    case "$owner:$claimed:$expires" in *[!0-9:]*|:*|*::*|*:) owner="" ;; esac
+    if [ -n "$owner" ] && [ "$claimed" -ge "$need_gb" ] &&
+       [ "$expires" -ge "$(date +%s)" ] && kill -0 "$owner" 2>/dev/null; then
+      current="$(papercusp_proc_starttime "$owner")"
+      if [ -z "$current" ] || [ "$current" = "$start" ]; then
+        cursor="$$"
+        while [ "$cursor" -gt 1 ] 2>/dev/null && [ "$hops" -lt 256 ]; do
+          if [ "$cursor" = "$owner" ]; then
+            PAPERCUSP_DISK_RESERVATION_FILE="$inherited"
+            echo "    (disk preflight adopted ${claimed}GB ancestor reservation for $label on '$dir')"
+            return 0
+          fi
+          cursor="$(ps -o ppid= -p "$cursor" 2>/dev/null | tr -d ' ')"
+          hops=$((hops + 1))
+        done
+      fi
+    fi
   fi
 
   # Check-and-reserve under one mutex, so two callers cannot both pass on the same
