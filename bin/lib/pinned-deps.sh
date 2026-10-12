@@ -187,6 +187,8 @@ papercusp_pinned_deps_snapshot() (
     echo "ERROR: dependency donor is not a directory: $_donor" >&2
     return 2
   fi
+  # rsync resolves a relative --link-dest from the destination, not the caller.
+  _donor="$(cd "$_donor" && pwd -P)" || return 1
 
   # A refused retry must not leave the previous attempt attested by its stamp.
   if [ -d "$_snap" ]; then rm -f "$_snap/.papercusp-pinned-deps" || return 1; fi
@@ -195,7 +197,7 @@ papercusp_pinned_deps_snapshot() (
   # Live tool caches can disappear even under the install mutex. Filter before
   # copying, using dependency-generation's policy; package failures remain fatal.
   local -a _cache_filters
-  _cache_filters=(--exclude=.cache/ --exclude=.astro/ --exclude=.vite/ \
+  _cache_filters=(--delete-excluded --exclude=.cache/ --exclude=.astro/ --exclude=.vite/ \
     --exclude=.vite-temp/ --exclude=.verdict-data/)
   if ! command -v rsync >/dev/null 2>&1; then
     echo "ERROR: pinned dependency snapshots require rsync for cache-safe copying." >&2
