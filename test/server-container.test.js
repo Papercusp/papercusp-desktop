@@ -70,6 +70,110 @@ test('supplemental closure refuses incomplete metadata and non-package static ex
   }
 });
 
+async function inventoryCheckpointFixture(t) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'inventory-checkpoint-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const payload = path.join(root, 'payload');
+  await fs.mkdir(payload);
+  await Promise.all(Array.from({ length: 130 }, (_, index) =>
+    fs.writeFile(path.join(payload, String(index).padStart(3, '0')), 'payload-' + index)));
+  return { root, payload, checkpointPath: path.join(root, 'progress.json') };
+}
+
+test('inventory resumes interrupted content hashing with the same complete payload digest', async t => {
+  const { sidecarInventory } = await lib;
+  const { payload, checkpointPath } = await inventoryCheckpointFixture(t);
+  await assert.rejects(sidecarInventory(payload, 'linux/arm64', { checkpointPath,
+    onProgress: () => { throw new Error('simulated wrapper interruption'); },
+  }), /simulated wrapper interruption/);
+  const partial = JSON.parse(await fs.readFile(checkpointPath, 'utf8'));
+  assert.equal(partial.complete, false);
+  assert.ok(Object.keys(partial.files).length > 0 && Object.keys(partial.files).length < 130);
+  const events = [];
+  const resumed = await sidecarInventory(payload, 'linux/arm64', {
+    checkpointPath, onProgress: event => events.push(event),
+  });
+  assert.deepEqual(resumed, await sidecarInventory(payload, 'linux/arm64'));
+  const complete = events.at(-1);
+  assert.equal(complete.complete, true);
+  assert.ok(complete.filesReused > 0 && complete.filesHashed > 0);
+  assert.equal((await fs.stat(checkpointPath)).mode & 0o777, 0o600);
+});
+
+test('inventory checkpoint rehashes changed bytes even when size and mtime are restored', async t => {
+  const { sidecarInventory } = await lib;
+  const { payload, checkpointPath } = await inventoryCheckpointFixture(t);
+  const before = await sidecarInventory(payload, 'linux/arm64', { checkpointPath });
+  const file = path.join(payload, '000');
+  const st = await fs.stat(file);
+  await fs.writeFile(file, 'changed-0');
+  await fs.utimes(file, st.atime, st.mtime);
+  await fs.chmod(path.join(payload, '001'), 0o755);
+  await fs.unlink(path.join(payload, '002'));
+  await fs.writeFile(path.join(payload, 'new'), 'new member');
+  let progress;
+  const after = await sidecarInventory(payload, 'linux/arm64', {
+    checkpointPath, onProgress: event => { progress = event; },
+  });
+  assert.notEqual(after.sha256, before.sha256);
+  assert.deepEqual(after, await sidecarInventory(payload, 'linux/arm64'));
+  assert.ok(progress.filesHashed >= 3 && progress.filesReused > 0);
+});
+
+test('inventory refuses an earlier member changing while later entries are scanned', async t => {
+  const { sidecarInventory } = await lib;
+  const { payload, checkpointPath } = await inventoryCheckpointFixture(t);
+  let changed = false;
+  await assert.rejects(sidecarInventory(payload, 'linux/arm64', { checkpointPath,
+    onProgress: async event => {
+      if (!changed && !event.complete) {
+        changed = true;
+        await fs.writeFile(path.join(payload, '000'), 'mutated during scan');
+      }
+    },
+  }), /changed during inventory/);
+  assert.deepEqual(await sidecarInventory(payload, 'linux/arm64', { checkpointPath }),
+    await sidecarInventory(payload, 'linux/arm64'));
+});
+
+test('inventory refuses malformed checkpoints, identity mismatches and in-payload storage', async t => {
+  const { sidecarInventory } = await lib;
+  const { root, payload, checkpointPath } = await inventoryCheckpointFixture(t);
+  await sidecarInventory(payload, 'linux/arm64', { checkpointPath });
+  const original = await fs.readFile(checkpointPath, 'utf8');
+  const other = path.join(root, 'other');
+  await fs.mkdir(other);
+  await assert.rejects(sidecarInventory(other, 'linux/arm64', { checkpointPath }), /mismatched/);
+  await assert.rejects(sidecarInventory(payload, 'linux/amd64', { checkpointPath }), /mismatched/);
+  await assert.rejects(sidecarInventory(payload, 'linux/arm64', {
+    checkpointPath: path.join(payload, 'progress.json'),
+  }), /outside its payload/);
+  await assert.rejects(sidecarInventory(payload, 'linux/arm64', {
+    checkpointPath, hashContents: false,
+  }), /require content hashing/);
+  const malformed = JSON.parse(original);
+  malformed.files['000'].digest = 'untrusted';
+  await fs.writeFile(checkpointPath, JSON.stringify(malformed));
+  await assert.rejects(sidecarInventory(payload, 'linux/arm64', { checkpointPath }), /Invalid/);
+});
+
+test('inventory checkpoint retains current link confinement and ELF platform checks', async t => {
+  const { sidecarInventory } = await lib;
+  const { root, payload, checkpointPath } = await inventoryCheckpointFixture(t);
+  await fs.symlink('000', path.join(payload, 'link'));
+  await sidecarInventory(payload, 'linux/arm64', { checkpointPath });
+  await fs.unlink(path.join(payload, 'link'));
+  await fs.writeFile(path.join(root, 'outside'), 'outside');
+  await fs.symlink('../outside', path.join(payload, 'link'));
+  await assert.rejects(sidecarInventory(payload, 'linux/arm64', { checkpointPath }), /escapes/);
+  await fs.unlink(path.join(payload, 'link'));
+  const elf = Buffer.alloc(20);
+  elf.set([127, 69, 76, 70, 2, 1]);
+  elf.writeUInt16LE(62, 18);
+  await fs.writeFile(path.join(payload, '000'), elf);
+  await assert.rejects(sidecarInventory(payload, 'linux/arm64', { checkpointPath }), /architecture mismatch/);
+});
+
 async function archiveFixture(t, mutate = () => {}, dockerOnly = false, sourceReceipt = null) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'server-archive-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
