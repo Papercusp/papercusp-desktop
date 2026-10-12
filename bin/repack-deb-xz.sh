@@ -37,7 +37,13 @@ XZ_MEMORY_LIMIT="${PAPERCUSP_XZ_MEMORY_LIMIT:-4GiB}"
 # it is already xz-packed) so a future regression fails at the Debian chokepoint
 # instead of shipping duplicate redacted source files.
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-deb-xz-guard.XXXXXX")"
-cleanup() { rm -rf "$WORK"; }
+REPLACEMENT=""
+REPLACEMENT_SIGNATURE=""
+REPLACEMENT_DIR=""
+cleanup() {
+  rm -rf -- "$WORK"
+  [[ -z "$REPLACEMENT_DIR" ]] || rm -rf -- "$REPLACEMENT_DIR"
+}
 trap cleanup EXIT
 
 set +e
@@ -148,7 +154,13 @@ if (( REPACK_PIPESTATUS[0] != 0 || REPACK_PIPESTATUS[1] != 0 || REPACK_PIPESTATU
   exit 9
 fi
 
-REPLACEMENT="$WORK/repacked.deb"
+PUBLISH_DIR="$(dirname -- "$DEB_PATH")"
+PUBLISH_NAME="$(basename -- "$DEB_PATH")"
+# Keep the complete archive on the destination filesystem. A cross-filesystem
+# mv becomes copy+unlink, which can expose a partial package and is not the
+# atomic replacement promised by this helper's contract.
+REPLACEMENT_DIR="$(mktemp -d "$PUBLISH_DIR/.$PUBLISH_NAME.repacked.XXXXXX")"
+REPLACEMENT="$REPLACEMENT_DIR/repacked.deb"
 (cd "$WORK" && ar rc "$REPLACEMENT" debian-binary "${MEMBERS[1]}" data.tar.xz)
 chmod --reference="$DEB_PATH" "$REPLACEMENT"
 
@@ -171,16 +183,19 @@ if [[ -n "$_signing_key" ]]; then
   # secret over via the CLI's own env fallback, never on argv: `npm run`/npx echo the
   # resolved command line, which would print the private key into the build log and
   # expose it in `ps` for the life of the process.
+  REPLACEMENT_SIGNATURE="$REPLACEMENT.sig"
   sign_repack_file "$REPLACEMENT"
-  [[ -s "$REPLACEMENT.sig" ]] || { echo "FATAL: Tauri signer produced no signature for the replacement package" >&2; exit 6; }
+  [[ -s "$REPLACEMENT_SIGNATURE" ]] || { echo "FATAL: Tauri signer produced no signature for the replacement package" >&2; exit 6; }
   SIGNATURE_STATUS="signed"
 fi
 
 # Publish only after every validation AND signing step succeeds. A signer
 # failure must leave the known-good deb and its matching signature untouched.
 mv -f "$REPLACEMENT" "$DEB_PATH"
+REPLACEMENT=""
 if [[ "$SIGNATURE_STATUS" == "signed" ]]; then
-  mv -f "$REPLACEMENT.sig" "$DEB_PATH.sig"
+  mv -f "$REPLACEMENT_SIGNATURE" "$DEB_PATH.sig"
+  REPLACEMENT_SIGNATURE=""
 fi
 
 echo "✓ repacked data member as xz -9: $DEB_PATH ($SIGNATURE_STATUS)"

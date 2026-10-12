@@ -17,6 +17,107 @@ function run(cmd, args, options = {}) {
   return res.stdout;
 }
 
+function findCrossDeviceRoots() {
+  const candidates = [...new Set([
+    process.env.TMPDIR,
+    os.tmpdir(),
+    path.dirname(root),
+    os.homedir(),
+    '/dev/shm',
+    '/mnt/backup',
+    '/mnt/data',
+    '/var/tmp',
+  ].filter(Boolean))];
+  const roots = candidates.flatMap((candidate) => {
+    try {
+      const stat = fs.statSync(candidate);
+      if (!stat.isDirectory()) return [];
+      fs.accessSync(candidate, fs.constants.W_OK);
+      return [{ path: candidate, device: stat.dev }];
+    } catch {
+      return [];
+    }
+  });
+  const publishRoot = roots.find((publish) => roots.some((scratch) => scratch.device !== publish.device));
+  if (!publishRoot) return null;
+  const scratchRoot = roots.find((scratch) => scratch.device !== publishRoot.device);
+  return scratchRoot ? { publishRoot: publishRoot.path, scratchRoot: scratchRoot.path } : null;
+}
+
+const crossDeviceRoots = findCrossDeviceRoots();
+
+test('keeps replacement publication on the package filesystem and preserves the original on publish failure', {
+  skip: !crossDeviceRoots,
+}, () => {
+  const roots = crossDeviceRoots;
+  const tmp = fs.mkdtempSync(path.join(roots.publishRoot, 'papercusp-deb-xz-atomic-'));
+  try {
+    const pkg = path.join(tmp, 'pkg');
+    fs.mkdirSync(path.join(pkg, 'DEBIAN'), { recursive: true });
+    fs.mkdirSync(path.join(pkg, 'opt', 'fixture'), { recursive: true });
+    fs.writeFileSync(path.join(pkg, 'DEBIAN', 'control'), [
+      'Package: papercusp-repack-atomic-test',
+      'Version: 1.0.0',
+      'Architecture: all',
+      'Maintainer: Papercusp <test@example.invalid>',
+      'Description: atomic repack publication fixture',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(pkg, 'opt', 'fixture', 'payload'), 'original bytes survive failed publication\n');
+    const deb = path.join(tmp, 'fixture.deb');
+    run('dpkg-deb', ['-Zgzip', '-b', pkg, deb]);
+    const original = fs.readFileSync(deb);
+
+    const fakeBin = path.join(tmp, 'bin');
+    fs.mkdirSync(fakeBin);
+    const publishEvidence = path.join(tmp, 'publish-evidence.txt');
+    const fakeMv = path.join(fakeBin, 'mv');
+    const mvWrapper = [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'source_path="$(printf "%s\\n" "$@" | tail -n 2 | head -n 1)"',
+      'destination="$(printf "%s\\n" "$@" | tail -n 1)"',
+      'if [[ "$destination" == "$PAPERCUSP_TEST_PUBLISH_TARGET" ]]; then',
+      '  source_device="$(stat -c %d -- "$source_path")"',
+      '  target_device="$(stat -c %d -- "$(dirname -- "$destination")")"',
+      '  echo "source_device=$source_device" > "$PAPERCUSP_TEST_PUBLISH_EVIDENCE"',
+      '  echo "target_device=$target_device" >> "$PAPERCUSP_TEST_PUBLISH_EVIDENCE"',
+      '  if [[ "$source_device" != "$target_device" ]]; then',
+      '    echo "FATAL: attempted cross-device package publication" >&2',
+      '    exit 92',
+      '  fi',
+      '  exit 42',
+      'fi',
+      'exec /usr/bin/mv "$@"',
+      '',
+    ].join('\n');
+    fs.writeFileSync(fakeMv, mvWrapper, { mode: 0o755 });
+
+    const res = spawnSync('bash', [helper, deb], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: fakeBin + ':' + process.env.PATH,
+        TMPDIR: roots.scratchRoot,
+        PAPERCUSP_TEST_PUBLISH_TARGET: deb,
+        PAPERCUSP_TEST_PUBLISH_EVIDENCE: publishEvidence,
+        TAURI_SIGNING_PRIVATE_KEY: '',
+      },
+    });
+    assert.equal(res.status, 42, 'expected injected same-device publication failure');
+    const evidence = Object.fromEntries(fs.readFileSync(publishEvidence, 'utf8')
+      .trim().split('\n').map((line) => line.split('=')));
+    assert.equal(evidence.source_device, evidence.target_device,
+      'the replacement must be staged on the package filesystem even when TMPDIR differs');
+    assert.deepEqual(fs.readFileSync(deb), original,
+      'a failed atomic rename must leave the original package byte-for-byte intact');
+    assert.deepEqual(fs.readdirSync(tmp).filter((name) => name.includes('.repacked.')), [],
+      'failed publication must clean its adjacent temporary replacement');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('bounds xz workers and compression memory independently of host core count', () => {
   const source = fs.readFileSync(helper, 'utf8');
   assert.doesNotMatch(source, /\bxz\s+-9\s+-T0\b/, 'the release repacker must never scale workers to every host core');
@@ -474,6 +575,11 @@ test('every direct Debian-producing npm script is discovered and routes through 
 test('the npm build wrapper repacks fresh release, debug, and all-bundles Debian output', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-build-wrapper-test-'));
   try {
+    const productRoot = path.join(tmp, 'product');
+    const spaIndex = path.join(productRoot, 'src-tauri', 'sidecar', 'spa', 'index.html');
+    fs.mkdirSync(path.dirname(spaIndex), { recursive: true });
+    fs.writeFileSync(spaIndex, '<!doctype html><html><head><meta name="papercusp-desktop-interface" content="legacy"></head><body></body></html>\n');
+
     const pkgDir = path.join(tmp, 'pkg');
     fs.mkdirSync(path.join(pkgDir, 'DEBIAN'), { recursive: true });
     fs.mkdirSync(path.join(pkgDir, 'opt', 'papercusp'), { recursive: true });
@@ -531,6 +637,9 @@ test('the npm build wrapper repacks fresh release, debug, and all-bundles Debian
       FAKE_ARGS_LOG: argsLog,
       FAKE_DEB_SOURCE: sourceDeb,
       FAKE_TARGET_DIR: targetDir,
+      CARGO_TARGET_DIR: targetDir,
+      PAPERCUSP_BUILD_SHA: 'a'.repeat(40),
+      PAPERCUSP_DESKTOP_TARGET_ROOT: productRoot,
       PAPERCUSP_RELEASE_HOST: 'https://release-fixture.invalid',
       TAURI_SIGNING_PRIVATE_KEY: '',
     };
