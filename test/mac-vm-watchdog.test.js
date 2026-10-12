@@ -528,3 +528,115 @@ test('coldRestart refuses to start while the old qemu is still alive', async () 
   assert.equal(out.step, 'wait-qemu-exit');
   assert.ok(!typesOf(deps.calls).includes('systemctl:start'));
 });
+
+// Exercise the maintained recovery helper with real archive decoding and cmp,
+// while replacing systemd/QEMU so this regression never touches a host VM.
+const restoreFixture = String.raw`
+import hashlib, importlib.util, json, os, subprocess, sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location('restore', sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+root, case = Path(sys.argv[2]), sys.argv[3]
+backup, runtime, tools = root/'backup', root/'runtime', root/'tools'
+backup.mkdir(); tools.mkdir()
+payload = b'preserved OS bytes\0' * 4096
+image = backup/'source.img'
+image.write_bytes(payload)
+archive = backup/'mac_hdd_ng.img.zst'
+subprocess.run(['zstd', '-q', '-o', str(archive), str(image)], check=True)
+archive_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+data = backup/'builddata-20260820-160g.qcow2'
+data.write_bytes(b'repaired guest data')
+for name in ['OVMF_CODE_4M.fd', 'OVMF_VARS-1920x1080.fd', 'OpenCore.qcow2']:
+    (backup/name).write_bytes(b'firmware')
+(tools/'boot-sonoma-durable.sh').write_text('#!/bin/sh\nexit 0\n')
+raw_part = backup/'raw.bin'
+raw_part.write_bytes(b'original metadata and guest data')
+raw_part.chmod(0o400)
+raw = {'ok': True, 'sourcePid': 4242, 'sourceStarttime': 'initial',
+       'totalBytes': raw_part.stat().st_size,
+       'parts': [{'path': str(raw_part), 'offset': 0, 'bytes': raw_part.stat().st_size}]}
+repair = {'ok': True, 'guestVisibleDataUnchanged': True, 'rawBackup': raw}
+preserved = {'ok': True, 'sourcePid': 4242, 'sourceStarttime': 'initial',
+             'osArchive': str(archive), 'buildData': str(data), 'completedAt': 123,
+             'buildDataRawBackup': str(backup/'builddata-raw-preserved.json'),
+             'buildDataRepairProof': str(backup/'builddata-repair-proof.json')}
+if case == 'invalid-marker': preserved['ok'] = False
+if case == 'raw-gap': raw['parts'][0]['offset'] = 1
+if case == 'visible-change': repair['guestVisibleDataUnchanged'] = False
+for name, body in [('source.json', {'pid': 4242, 'starttime': 'initial'}),
+                   ('preserved.json', preserved), ('builddata-raw-preserved.json', raw),
+                   ('builddata-repair-proof.json', repair)]:
+    (backup/name).write_text(json.dumps(body))
+
+alive, calls = [True], []
+real_run, real_stat = subprocess.run, os.stat
+def identity(pid): return 'initial' if alive[0] else None
+def stat(path, *args, **kwargs):
+    if str(path) == '/proc/4242/fd/17':
+        return SimpleNamespace(st_nlink=0, st_size=len(payload),
+                               st_dev=backup.stat().st_dev, st_blocks=1)
+    return real_stat(path, *args, **kwargs)
+def run(args, *pos, **kwargs):
+    if args[0] == 'systemctl':
+        calls.append(list(args))
+        if 'thaw' in args:
+            raise subprocess.CalledProcessError(1, args, stderr='Unit has a pending job')
+        assert 'stop' in args
+        alive[0] = False  # A frozen unit is thawed by its stop transaction.
+        return subprocess.CompletedProcess(args, 0)
+    if args[0] == 'qemu-img':
+        calls.append(list(args))
+        assert Path(args[-1]).is_file()
+        return subprocess.CompletedProcess(args, 0)
+    return real_run(args, *pos, **kwargs)
+args = ['restore', '--backup', str(backup), '--runtime', str(runtime),
+        '--tools', str(tools), '--source-bytes', str(len(payload)),
+        '--restore-after-verified-preservation']
+with patch.object(sys, 'argv', args), patch.object(m, 'identity', identity), \
+     patch.object(m.os, 'stat', stat), patch.object(m.shutil, 'disk_usage',
+         return_value=SimpleNamespace(free=30*2**30)), \
+     patch.object(m.subprocess, 'check_output', return_value='frozen\n'), \
+     patch.object(m.subprocess, 'run', run):
+    if case != 'pending-stop':
+        try: m.main()
+        except RuntimeError: pass
+        else: raise AssertionError('invalid preservation was admitted')
+        assert calls == [] and not runtime.exists(), 'invalid proof reached a destructive step'
+    else:
+        m.main()
+        ready = json.loads((runtime/'runtime-ready.json').read_text())
+        assert ready['ok'] and ready['osCompared'] and ready['sourceStarttime'] == 'initial'
+        assert (runtime/'mac_hdd_ng.img').read_bytes() == payload
+        assert not alive[0]
+        assert len([c for c in calls if c[0] == 'systemctl']) == 1
+        assert len([c for c in calls if c[0] == 'qemu-img']) == 3
+        assert (runtime/'boot-sonoma-durable.sh').is_file()
+assert hashlib.sha256(archive.read_bytes()).hexdigest() == archive_digest
+assert raw_part.read_bytes() == b'original metadata and guest data'
+assert raw_part.stat().st_mode & 0o222 == 0
+print(json.dumps({'ok': True, 'case': case}))
+`;
+
+for (const [scenario, name] of [
+  ['pending-stop', 'a frozen-unit stop with a pending job restores without a redundant thaw'],
+  ['invalid-marker', 'an invalid completion marker cannot stop the original or write a runtime'],
+  ['raw-gap', 'a gap in original raw preservation cannot stop the original or write a runtime'],
+  ['visible-change', 'a repair that changed guest-visible data cannot admit restoration'],
+]) {
+  test(`guarded Mac restoration: ${name}`, async () => {
+    const dir = await tempDir();
+    const helper = process.env.MAC_VM_RESTORE_UNDER_TEST || new URL('../bin/mac-vm-restore.py', import.meta.url).pathname;
+    const result = await new Promise((resolve) => {
+      execFile('python3', ['-c', restoreFixture, helper, dir, scenario], { timeout: 20_000 }, (error, stdout, stderr) => {
+        resolve({ code: error ? error.code : 0, stdout, stderr });
+      });
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout.trim().split('\n').at(-1)), { ok: true, case: scenario });
+  });
+}
