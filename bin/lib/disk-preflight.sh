@@ -166,6 +166,25 @@ papercusp_proc_starttime() {
   printf '%s' "$rest" | awk '{print $20}'
 }
 
+# Read one process's parent directly on Linux. Repeated ps invocations made
+# receipt ancestry checks exceed their guard deadline before rejecting a peer.
+# Missing process metadata is unknown ancestry, never permission to adopt.
+papercusp_proc_parent_pid() {
+  local pid="$1" line rest parent
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -d /proc/self ]; then
+    IFS= read -r line < "/proc/$pid/stat" 2>/dev/null || return 1
+    rest="${line##*) }"
+    [ "$rest" != "$line" ] || return 1
+    rest="${rest#* }"
+    parent="${rest%% *}"
+  else
+    parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" || return 1
+  fi
+  case "$parent" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$parent"
+}
+
 # Atomic mutex via mkdir (portable to bash 3.2 / darwin, where flock is absent).
 # Bounded: the critical section is a handful of small file reads, so failing to
 # acquire within ~5s means something is wrong — and we then fail OPEN, per this
@@ -258,7 +277,7 @@ papercusp_require_disk_reservation() {
   cursor="$$"
   while [ "$cursor" -gt 1 ] 2>/dev/null && [ "$hops" -lt 256 ]; do
     if [ "$cursor" = "$owner" ]; then ancestor=1; break; fi
-    cursor="$(ps -o ppid= -p "$cursor" 2>/dev/null | tr -d ' ')"
+    cursor="$(papercusp_proc_parent_pid "$cursor")" || break
     hops=$((hops + 1))
   done
   if [ -z "$key" ] || [ -z "$start" ] || [ ! -f "$file" ] ||
@@ -315,7 +334,7 @@ papercusp_require_free_gb() {
             echo "    (disk preflight adopted ${claimed}GB ancestor reservation for $label on '$dir')"
             return 0
           fi
-          cursor="$(ps -o ppid= -p "$cursor" 2>/dev/null | tr -d ' ')"
+          cursor="$(papercusp_proc_parent_pid "$cursor")" || break
           hops=$((hops + 1))
         done
       fi

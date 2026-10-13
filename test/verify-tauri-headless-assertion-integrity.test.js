@@ -243,6 +243,24 @@ test('background native boot adopts its preparation owner Cargo receipt', () => 
   assert.deepEqual(result.claims, [], 'the owning verifier releases the adopted receipt');
 });
 
+test('disk receipt ancestry reads kernel parents without ps and rejects missing metadata',
+  { skip: process.platform !== 'linux' }, () => {
+    const helper = path.resolve(__dirname, '../bin/lib/disk-preflight.sh');
+    const result = spawnSync('bash', ['-c',
+      'source "$1"\n' +
+      'ps() { echo UNEXPECTED_ANCESTRY_PS >&2; return 91; }\n' +
+      'parent="$(papercusp_proc_parent_pid "$$")" || exit $?\n' +
+      '[ "$parent" = "$PPID" ] || exit 92\n' +
+      'if papercusp_proc_parent_pid not-a-pid; then exit 93; fi\n' +
+      'if papercusp_proc_parent_pid 999999999; then exit 94; fi\n' +
+      'printf "KERNEL_PARENT_VERIFIED\\n"\n',
+      'kernel-parent-test', helper], { encoding: 'utf8', timeout: 5_000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.error, undefined);
+    assert.match(result.stdout, /KERNEL_PARENT_VERIFIED/);
+    assert.doesNotMatch(result.stderr, /UNEXPECTED_ANCESTRY_PS/);
+  });
+
 test('native boot cannot adopt an unrelated live peer reservation', () => {
   const result = nativeCargoPreflightFixture({ freeGb: 100, warm: true, handoff: true, peerReceipt: true });
   assert.equal(result.status, 28, result.stderr);
