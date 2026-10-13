@@ -5663,7 +5663,7 @@ fi # assembly-only work; retained stages always rerun qualification below
 # libatomic is a compiler runtime, not an Ubuntu-minimal dependency. Reuse the
 # private Linux library directory and encode a relocatable addon loader path.
 bundle_linux_addon_libraries() {
-  local root="$1" addon source machine relative existing tool dynamic need dir paths part inventory
+  local root="$1" addon source machine relative existing tool dynamic need dir paths part inventory restore_mode
   [[ "$TARGET_OS" == "linux" ]] || return 0
   for tool in objdump ldd file patchelf; do
     command -v "$tool" >/dev/null 2>&1 || {
@@ -5750,7 +5750,18 @@ for part in runpath.split(':'):
 print(':'.join(dict.fromkeys(paths)))
 PY
 )" || return 1
+    # patchelf rewrites the ELF in place. A copy-mode release checkout
+    # preserves npm's read-only (0444/0555) prebuilt addons, and the stage is
+    # only made writable at publish, so open the one file being patched and
+    # restore its mode afterwards (WI-6554700010009706). A dev tree's 0644
+    # addons never exercise this branch, which is why only release builds broke.
+    restore_mode=""
+    if [[ ! -w "$addon" ]]; then
+      restore_mode="$(stat -c '%a' "$addon")" || return 1
+      chmod u+w "$addon" || return 1
+    fi
     patchelf --set-rpath "$paths${existing:+:$existing}" "$addon" || return 1
+    [[ -z "$restore_mode" ]] || chmod "$restore_mode" "$addon" || return 1
   done < "$inventory"
   rm -f "$inventory"
 }
