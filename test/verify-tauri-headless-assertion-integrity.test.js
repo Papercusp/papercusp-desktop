@@ -26,7 +26,7 @@ const devOperatorSource = fs.readFileSync(DEV_OPERATOR_SCRIPT, 'utf8');
 const dreamSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-dream-native.sh'), 'utf8');
 const voiceSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-voice-settings.sh'), 'utf8');
 
-function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false, claimSlot = false, handoff = false, peerReceipt = false, afterFreeGb = 12, aggregate = false, sourceDevice = 101, bulkDevice = 101, bulkFreeGb = freeGb }) {
+function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false, claimSlot = false, handoff = false, backgroundHandoff = false, peerReceipt = false, afterFreeGb = 12, aggregate = false, sourceDevice = 101, bulkDevice = 101, bulkFreeGb = freeGb, preAdmissionGb = 0 }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-native-capacity-'));
   const target = path.join(dir, 'cargo');
   const ledger = path.join(dir, 'reservations');
@@ -57,10 +57,23 @@ function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false
       "  *) printf '101\\n' ;;\nesac\n", { mode: 0o755 });
     const preflight = source.match(/^preflight_native_cargo\(\) \{[\s\S]*?^\}/m)?.[0];
     assert.ok(preflight, 'the maintained native preflight must be executable');
+    const backgroundLaunch = source.match(/^  TAURI_SCOPE_UNIT=.*\n([\s\S]*?)\n\}/m)?.[1];
+    if (backgroundHandoff) {
+      assert.ok(backgroundLaunch, 'the maintained native background launch must be executable');
+      fs.writeFileSync(path.join(work, 'launch.sh'), '#!/usr/bin/env bash\n' +
+        'while [ ! -f "$WORK/launch-go" ]; do sleep 0.01; done\n' +
+        'status=0\n' +
+        'PAPERCUSP_SIDECAR_LOCK="$HOME/sidecar.lock" bash "$DESKTOP_DIR/bin/tauri-guarded" dev || status=$?\n' +
+        'printf "%s" "$status" > "$WORK/launch-status"\nexit "$status"\n', { mode: 0o755 });
+    }
     const result = spawnSync('bash', ['-c', preflight + '\n' +
       maintainedShellFunction('release_verifier_disk_reservations') + '\n' +
       maintainedShellFunction('reserve_verifier_disk') + '\n' +
+      maintainedShellFunction('start_verify_process') + '\n' +
       'trap \'papercusp_release_disk_reservation; [ -z "${peer:-}" ] || kill "$peer" 2>/dev/null\' EXIT\n' +
+      (preAdmissionGb ? '. "$DESKTOP_DIR/bin/lib/disk-preflight.sh"\n' +
+        `papercusp_require_disk_reservation "$NATIVE_FIXTURE_TARGET" ${preAdmissionGb} "native dev Cargo build" || exit $?\n` +
+        'export PAPERCUSP_DISK_RESERVATION_FILE\n' : '') +
       'preflight_native_cargo || exit $?\n' +
       'printf "PREPARATION_STARTED target=%s\\n" "$CARGO_TARGET_DIR"\n' +
       'if [ -n "${NATIVE_CARGO_DISK_RESERVATION_FILE:-}" ] && [ -f "$NATIVE_CARGO_DISK_RESERVATION_FILE" ]; then echo RESERVATION_HELD; fi\n' +
@@ -76,7 +89,13 @@ function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false
         'printf "pid=%s\\nstart=%s\\n" "$peer" "$(papercusp_proc_starttime "$peer")" >> "$NATIVE_CARGO_DISK_RESERVATION_FILE.tmp"\n' +
         'mv "$NATIVE_CARGO_DISK_RESERVATION_FILE.tmp" "$NATIVE_CARGO_DISK_RESERVATION_FILE"\n' : '') +
       (handoff ? 'export NATIVE_FIXTURE_AFTER_PREPARE=1 PAPERCUSP_DISK_RESERVATION_FILE="$NATIVE_CARGO_DISK_RESERVATION_FILE"\n' +
-        'PAPERCUSP_SIDECAR_LOCK="$HOME/sidecar.lock" bash "$DESKTOP_DIR/bin/tauri-guarded" dev || exit $?\n' : '') +
+        (backgroundHandoff ? 'VERIFY_SCOPE_MODE=inherit\nTAURI_SCOPE_UNIT=fixture\nLOG="$WORK/launch.log"\n' +
+          backgroundLaunch + '\n' +
+          'touch "$WORK/launch-go"\n' +
+          'while [ ! -f "$WORK/launch-status" ]; do sleep 0.01; done\n' +
+          'cat "$LOG"\nstatus=$(cat "$WORK/launch-status")\n' +
+          'wait "$TAURI_PID" 2>/dev/null || true\n[ "$status" = 0 ] || exit "$status"\n' :
+          'PAPERCUSP_SIDECAR_LOCK="$HOME/sidecar.lock" bash "$DESKTOP_DIR/bin/tauri-guarded" dev || exit $?\n') : '') +
       (claimSlot ? 'if flock -n "$HOME/.papercusp/desktop-dev-slots/slot0.lock" true; then echo SLOT_UNPROTECTED; else echo SLOT_HELD; fi\n' : '')], {
       encoding: 'utf8', timeout: 15_000,
       env: { ...process.env, HOME: dir, DESKTOP_DIR: path.resolve(__dirname, '..'),
@@ -215,6 +234,15 @@ test('native boot adopts the retained Cargo budget after preparation without dou
   assert.deepEqual(result.claims, [], 'handoff creates no second reservation');
 });
 
+test('background native boot adopts its preparation owner Cargo receipt', () => {
+  const result = nativeCargoPreflightFixture({ freeGb: 100, warm: true,
+    handoff: true, backgroundHandoff: true });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /adopted 12GB ancestor reservation/);
+  assert.match(result.stdout, /CLI_STARTED/);
+  assert.deepEqual(result.claims, [], 'the owning verifier releases the adopted receipt');
+});
+
 test('native boot cannot adopt an unrelated live peer reservation', () => {
   const result = nativeCargoPreflightFixture({ freeGb: 100, warm: true, handoff: true, peerReceipt: true });
   assert.equal(result.status, 28, result.stderr);
@@ -258,6 +286,16 @@ test('combined admission groups each physical device and retains the same Cargo 
     assert.match(result.stdout, /CLI_STARTED/);
     assert.deepEqual(result.claims, [], 'every device receipt is released on exit');
   }
+});
+
+test('a pre-admitted complete window survives native preflight and source preparation without a second claim', () => {
+  // Only the original full 23 GiB window fits: reserving another 12 GiB fails.
+  const result = nativeCargoPreflightFixture({ freeGb: 23, warm: true,
+    aggregate: true, preAdmissionGb: 23 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /SOURCE_EXPORT_STARTED/);
+  assert.deepEqual([...result.stdout.matchAll(/^BUDGET (\d+)$/gm)].map(m => Number(m[1])), [23]);
+  assert.deepEqual(result.claims, [], 'the owning shell releases its single window on exit');
 });
 
 test('a shortage on a later preparation device releases earlier admitted device receipts', () => {
