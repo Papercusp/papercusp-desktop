@@ -3147,6 +3147,8 @@ if [[ -d "$OMP_HOOK_SRC_DIR" ]]; then
       cp -a "$omp_hook_src" "$OMP_HOOK_DST_DIR/"
     done
   fi
+  # WI-6554700010010534: date the packaged copy for the installer's downgrade guard.
+  node "$WEB_DIR/scripts/write-hook-source-provenance.mjs" "$OMP_HOOK_SRC_DIR" "$OMP_HOOK_DST_DIR"
 fi
 
 # Same reason again, for the CONTEXT-INJECTION pair
@@ -3169,6 +3171,8 @@ if [[ -d "$INJECT_SRC_DIR" && -f "$OMP_HOOK_SRC_DIR/inject-hook.ts" ]]; then
   mkdir -p "$INJECT_DST_DIR/adapters" "$SIDECAR_DIR/apps/operator/scripts/hooks/omp"
   cp -a "$INJECT_SRC_DIR"/*.mjs "$INJECT_DST_DIR"/
   cp -a "$INJECT_SRC_DIR"/adapters/*.mjs "$INJECT_DST_DIR"/adapters/
+  # WI-6554700010010534: date the packaged copy for the installer's downgrade guard.
+  node "$WEB_DIR/scripts/write-hook-source-provenance.mjs" "$INJECT_SRC_DIR" "$INJECT_DST_DIR"
 fi
 
 # Same reason: the Claude/Codex CC hooks (statusline-fleet + lock/coord/activity/
@@ -3202,6 +3206,10 @@ if [[ -d "$CC_HOOK_SRC_DIR" ]]; then
   for mjs in "$CC_HOOK_SRC_DIR"/*.mjs; do
     [[ -e "$mjs" ]] && cp -a "$mjs" "$CC_HOOK_DST_DIR"/
   done
+  # WI-6554700010010534: the packaged app has no git, so record what git says about these
+  # hooks NOW. install-provenance.ts reads it so the installer's downgrade guard can refuse
+  # an older package; without it a 2026-10-07 build overwrote newer hooks on 2026-10-13.
+  node "$WEB_DIR/scripts/write-hook-source-provenance.mjs" "$CC_HOOK_SRC_DIR" "$CC_HOOK_DST_DIR"
 fi
 
 # WI-6554700010009448: the pinned RTK installer. papercusp-files.ts (provisionRtk)
