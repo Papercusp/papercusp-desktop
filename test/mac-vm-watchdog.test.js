@@ -715,6 +715,76 @@ for (const scenario of ['preserved', 'live', 'orphan', 'capacity', 'source-chang
   });
 }
 
+// SSH closure must not hide successful native exit or imply an exit that never
+// happened. Replace the clock, guest command and native observations only.
+const shutdownFixture = String.raw`
+import importlib.util, json, subprocess, sys
+from pathlib import Path
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location('launch', sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+root, case = Path(sys.argv[2]), sys.argv[3]
+(root/'qemu.pid').write_text('4242')
+clock, requested, calls = [0.0], [False], []
+def state(unit):
+    if case=='wrong-unit':
+        return {'MainPID':'9999','ActiveState':'active','NRestarts':'1'}
+    if not requested[0] or case in ('still-live','ack-live'):
+        return {'MainPID':'4242','ActiveState':'active','Result':'success','NRestarts':'1'}
+    if case=='transition' and clock[0]<1:
+        return {'MainPID':'4242','ActiveState':'deactivating','Result':'success','NRestarts':'1'}
+    if case=='late-restart' and clock[0]>=2:
+        return {'MainPID':'9999','ActiveState':'active','Result':'success','NRestarts':'2'}
+    return {'MainPID':'0','ActiveState':'inactive',
+            'Result':'exit-code' if case=='failed-stop' else 'success',
+            'NRestarts':'2' if case=='restarted' else '1'}
+def identity(pid):
+    if not requested[0] or case in ('still-live','ack-live'): return 'initial'
+    if case=='transition' and clock[0]<1: return 'initial'
+    return None
+def run(args, **kwargs):
+    calls.append(args)
+    assert args[0]=='ssh' and args[-1]=='sudo -n shutdown -h now'
+    assert kwargs['check'] is False and kwargs['capture_output'] is True
+    requested[0]=True
+    if case=='ssh-timeout': raise subprocess.TimeoutExpired(args, kwargs['timeout'])
+    return subprocess.CompletedProcess(args, 0 if case in ('acknowledged','ack-live') else 255)
+def sleep(seconds): clock[0]+=seconds
+with patch.object(m,'unit_state',side_effect=state), \
+     patch.object(m,'process_identity',side_effect=identity), \
+     patch.object(m.subprocess,'run',side_effect=run), \
+     patch.object(m.time,'monotonic',side_effect=lambda:clock[0]), \
+     patch.object(m.time,'sleep',side_effect=sleep):
+    if case in ('disconnected','acknowledged','ssh-timeout','transition'):
+        result=m.verified_shutdown('test.service',root,'guest',2222,root/'key',timeout=3,settle=3)
+        assert result['ok'] and result['processDeparted'] and result['unitInactive']
+        assert result['sshReturnCode']==({'acknowledged':0,'disconnected':255,'ssh-timeout':None,'transition':255}[case])
+        assert clock[0]>=3 and len(calls)==1
+    else:
+        try: m.verified_shutdown('test.service',root,'guest',2222,root/'key',timeout=3,settle=3)
+        except RuntimeError: pass
+        else: raise AssertionError('unverified shutdown admitted: '+case)
+        assert len(calls)==(0 if case=='wrong-unit' else 1)
+print(json.dumps({'ok':True,'case':case}))
+`;
+
+for (const scenario of ['disconnected', 'acknowledged', 'ssh-timeout', 'transition', 'still-live', 'ack-live',
+  'failed-stop', 'restarted', 'late-restart', 'wrong-unit']) {
+  test('verified Mac guest shutdown: ' + scenario, async () => {
+    const dir = await tempDir();
+    const helper = new URL('../bin/mac-vm-launch.py', import.meta.url).pathname;
+    const result = await new Promise((resolve) => {
+      execFile('python3', ['-c', shutdownFixture, helper, dir, scenario],
+        { timeout: 10_000 }, (error, stdout, stderr) => {
+          resolve({ code: error ? error.code : 0, stdout, stderr });
+        });
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout.trim()), { ok: true, case: scenario });
+  });
+}
+
 // Exercise the maintained recovery helper with real archive decoding and cmp,
 // while replacing systemd/QEMU so this regression never touches a host VM.
 const restoreFixture = String.raw`
