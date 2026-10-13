@@ -3185,6 +3185,19 @@ if [[ -d "$CC_HOOK_SRC_DIR" ]]; then
   done
 fi
 
+# WI-6554700010009448: the pinned RTK installer. papercusp-files.ts (provisionRtk)
+# runs it from <operatorAppRoot>/scripts/install-rtk.sh to put ~/.local/bin/rtk on a
+# desktop install, the same pinned + sha256-verified binary install-standalone-mcp.sh
+# provisions on the dev box. It is the ONE source of the version and hashes, so ship
+# the script itself rather than a copy of its pins. Without it every RTK seam fails
+# open on the packaged app and only alarm:rtk-liveness notices.
+RTK_INSTALLER_SRC="$WEB_DIR/scripts/install-rtk.sh"
+if [[ -f "$RTK_INSTALLER_SRC" ]]; then
+  echo "→ copying install-rtk.sh → sidecar/apps/operator/scripts/"
+  mkdir -p "$SIDECAR_DIR/apps/operator/scripts"
+  cp -a "$RTK_INSTALLER_SRC" "$SIDECAR_DIR/apps/operator/scripts/install-rtk.sh"
+fi
+
 # Same reason: lib/desktop-install/papercusp-files.ts resolves the
 # playbook source via <operatorAppRoot>/prompts/papercusp-su.tools.md.
 # In production the operator app root lives at sidecar/apps/operator/,
