@@ -132,6 +132,78 @@ test('status-events rejects an unbounded or missing window', async () => {
   }
 });
 
+
+test('powerdown-if-running succeeds after the main process and control files have gone', async () => {
+  const dir = await tempDir();
+  const r = await runQmp([path.join(dir, 'qmp.sock'), 'powerdown-if-running', path.join(dir, 'qemu.pid')], { MAINPID: '' });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).alreadyStopped, true);
+});
+
+test('powerdown-if-running refuses a missing socket while the main process is alive', async () => {
+  const dir = await tempDir();
+  const r = await runQmp([path.join(dir, 'qmp.sock'), 'powerdown-if-running', path.join(dir, 'qemu.pid')], { MAINPID: String(process.pid) });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /unable to connect/);
+});
+
+test('powerdown-if-running sends ACPI powerdown to a live VM', async () => {
+  const qmp = await fakeQmp();
+  try {
+    const r = await runQmp([qmp.sock, 'powerdown-if-running', path.join(path.dirname(qmp.sock), 'qemu.pid')], { MAINPID: String(process.pid) });
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(qmp.commands, ['qmp_capabilities', 'system_powerdown']);
+  } finally {
+    await qmp.close();
+  }
+});
+
+test('powerdown-if-running refuses unverified and malformed process identities', async () => {
+  const qmp = await fakeQmp();
+  try {
+    for (const mainPid of ['', 'bad-pid', '1', '0']) {
+      const r = await runQmp([qmp.sock, 'powerdown-if-running', path.join(path.dirname(qmp.sock), 'qemu.pid')], { MAINPID: mainPid });
+      assert.equal(r.code, 1, r.stderr);
+    }
+    assert.deepEqual(qmp.commands, []);
+  } finally {
+    await qmp.close();
+  }
+});
+
+test('powerdown-if-running uses the live QEMU pidfile when systemd MAINPID is absent', async () => {
+  const qmp = await fakeQmp();
+  try {
+    const pidfile = path.join(path.dirname(qmp.sock), 'qemu.pid');
+    await writeFile(pidfile, String(process.pid));
+    const r = await runQmp([qmp.sock, 'powerdown-if-running', pidfile], { MAINPID: '' });
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(qmp.commands, ['qmp_capabilities', 'system_powerdown']);
+  } finally {
+    await qmp.close();
+  }
+});
+
+test('powerdown-if-running never sends commands for a departed MAINPID even if a socket remains', async () => {
+  const child = spawn('true');
+  await new Promise((resolve, reject) => { child.once('exit', resolve); child.once('error', reject); });
+  const qmp = await fakeQmp();
+  try {
+    const r = await runQmp([qmp.sock, 'powerdown-if-running', path.join(path.dirname(qmp.sock), 'qemu.pid')], { MAINPID: String(child.pid) });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(JSON.parse(r.stdout).alreadyStopped, true);
+    assert.deepEqual(qmp.commands, []);
+  } finally {
+    await qmp.close();
+  }
+});
+
+test('legacy query-status still fails for a missing control socket', async () => {
+  const dir = await tempDir();
+  const r = await runQmp([path.join(dir, 'qmp.sock'), 'query-status'], { MAINPID: '' });
+  assert.equal(r.code, 1);
+});
+
 // ── pure pieces ──────────────────────────────────────────────────────────
 
 const cfg = (over = {}) => ({ ...loadConfig({ HOME: '/home/x' }), ...over });
