@@ -121,16 +121,34 @@ papercusp_mount_key() {
 
 # Old mount-key claims remain readable until their owners exit or TTLs pass.
 # New check-and-reserve callers serialize on the same device-key mutex.
+#
+# This runs in front of EVERY build (vite-build-singleflight calls the preflight on
+# each invocation), so it must not cost a subprocess per mount. `df -a` lists every
+# mount on the host (285 here; more with containers), and the old per-mount
+# `$(printf | tr)` sanitizer forked twice for each one. Measured 2026-10-13 under
+# fleet load: ~1.6s of a ~1.8s trivial build, which timed out the
+# vite-build-singleflight tests on the gate (WI-6554700010009957). So: skip the scan
+# when no legacy (non `dev-*`) key directory exists (a sanitized mount name never
+# contains '-', so the two formats cannot collide), and sanitize in-shell when one
+# does. LC_ALL=C keeps the expansion byte-wise, identical to the `tr -c` that wrote
+# those directories.
 papercusp_reservation_keys() {
-  local path="$1" primary dev fs blocks used avail capacity mount legacy root
+  local path="$1" primary dev fs blocks used avail capacity mount legacy root entry has_legacy=0
+  local LC_ALL=C
   primary="$(papercusp_mount_key "$path")"
   [ -n "$primary" ] && printf '%s\n' "$primary"
   dev="$(papercusp_device_id "$path")"
   [ -n "$dev" ] || return 0
   root="$(papercusp_reservation_dir)"
+  for entry in "$root"/*/; do
+    [ -d "$entry" ] || continue
+    entry="${entry%/}"
+    case "${entry##*/}" in dev-*) ;; *) has_legacy=1; break ;; esac
+  done
+  [ "$has_legacy" = 1 ] || return 0
   while read -r fs blocks used avail capacity mount; do
     [ -n "$mount" ] || continue
-    legacy="$(printf '%s' "$mount" | tr -c 'A-Za-z0-9' '_')"
+    legacy="${mount//[!A-Za-z0-9]/_}"
     [ -d "$root/$legacy" ] || continue
     [ "$(papercusp_device_id "$mount")" = "$dev" ] && printf '%s\n' "$legacy"
   done < <(df -Pk -a 2>/dev/null)
