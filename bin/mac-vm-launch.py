@@ -199,7 +199,8 @@ def main():
     if not options.launch:
         print(json.dumps({'ok': True, 'inputs': len(files), 'storageTrial': options.storage_trial is not None}))
         return
-    stopped(options.unit, files.values(), starting=True)
+    _, originals = generation(options.backup, options.runtime)
+    stopped(options.unit, list(files.values()) + list(originals.values()), starting=True)
     pidfile = options.runtime / 'qemu.pid'
     require(not pidfile.exists() and not (options.runtime / 'qmp.sock').exists(), 'control files still exist')
     for name in ('./OpenCore/OpenCore.qcow2', './mac_hdd_ng.img', './builddata-20260820-160g.qcow2'):
