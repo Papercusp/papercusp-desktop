@@ -565,7 +565,18 @@ _candidate_pin_fail() {
   [[ -z "$_dirty_source_tmp" ]] || rm -f "$_dirty_source_tmp"
   exit 2
 }
-if [[ "${PROVENANCE_REQUIRE_CANDIDATE_PIN:-}" == "1" ]]; then
+# PROVENANCE_REQUIRE_CANDIDATE_PIN=auto (release-local.sh's leg emits, WI-6554700010010000):
+# enforce exactly when buildSha is a bare commit, i.e. when the leg could be nominated as
+# a candidate. A -dirty (or otherwise non-hex) buildSha can never satisfy the consumer's
+# startsWith pin, so it is exempt rather than refused: dirty alpha cuts stay legitimate.
+# Any other value is a typo that would silently disable the guard, so it is refused.
+_candidate_pin="${PROVENANCE_REQUIRE_CANDIDATE_PIN:-0}"
+case "$_candidate_pin" in
+  0|1) ;;
+  auto) if [[ "$BUILD_SHA" =~ ^[0-9a-f]{7,64}$ ]]; then _candidate_pin=1; else _candidate_pin=0; fi ;;
+  *) _candidate_pin_fail "PROVENANCE_REQUIRE_CANDIDATE_PIN must be 0, 1 or auto (got '$_candidate_pin')" ;;
+esac
+if [[ "$_candidate_pin" == "1" ]]; then
   [[ "$BUILD_SHA" =~ ^[0-9a-f]{7,64}$ && "$GIT_HEAD" == "$BUILD_SHA"* ]] \
     || _candidate_pin_fail "gitHead '$GIT_HEAD' does not start with buildSha '$BUILD_SHA'; point PROVENANCE_GIT_ROOT and PROVENANCE_SOURCE_GIT_HEAD at the desktop repository whose head was baked"
   node - "$DIRTY_SOURCE_JSON" <<'NODE' \

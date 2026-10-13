@@ -3023,6 +3023,7 @@ emit_linux_build_provenance() {
   PROVENANCE_SIDECAR_DIR="$ROOT/src-tauri/sidecar" \
   PROVENANCE_SOURCE_GIT_HEAD="$head" \
   PROVENANCE_SOURCE_GIT_DIRTY="$dirty" \
+  PROVENANCE_REQUIRE_CANDIDATE_PIN="${PROVENANCE_REQUIRE_CANDIDATE_PIN:-auto}" \
   PROVENANCE_GIT_ROOT="$ROOT" bash "$ROOT/bin/emit-build-provenance.sh" \
     "$bundle" "$VERSION" "$sha" "$reused" \
     "$bundle"/deb/*_"$VERSION"_*.deb "$bundle"/appimage/*_"$VERSION"_*.AppImage
@@ -3678,6 +3679,7 @@ if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
   fi
   PROVENANCE_SOURCE_GIT_HEAD="$_mac_prov_head" \
   PROVENANCE_SOURCE_GIT_DIRTY="$_mac_prov_dirty" \
+  PROVENANCE_REQUIRE_CANDIDATE_PIN="${PROVENANCE_REQUIRE_CANDIDATE_PIN:-auto}" \
   PROVENANCE_GIT_ROOT="$ROOT" bash "$ROOT/bin/emit-build-provenance.sh" \
     "$MAC_OUT" "$VERSION" "$_mac_prov_sha" "$([[ "${MAC_REUSE:-0}" == "1" ]] && echo true || echo false)" \
     "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg "$MAC_OUT"/macos/*.app.tar.gz \
