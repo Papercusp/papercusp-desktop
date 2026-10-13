@@ -551,6 +551,32 @@ process.stdout.write(JSON.stringify(value));
 NODE
 )" || { echo "ERROR: invalid dirty-source manifest: $_dirty_source_manifest" >&2; exit 2; }
 
+# EI-25852209928775891 — candidate pin, opt-in for candidate producers.
+# The P-521 candidate consumer (apps/operator/lib/release/p2p-candidate-evidence.ts,
+# deriveCandidateProvenance) pins each leg by `gitHead.startsWith(buildSha)` and
+# reads the workspace revision from a dirtySource repository labelled `workspace`.
+# A producer that aims PROVENANCE_GIT_ROOT / PROVENANCE_SOURCE_GIT_HEAD at the
+# superproject writes a record that verify-provenance.sh accepts but the consumer
+# rejects — and that was found only at acceptance time, after a full cut. With
+# PROVENANCE_REQUIRE_CANDIDATE_PIN=1 the same contract fails here, before any
+# record is written. Release-local's labels (desktop=ROOT workspace=ROOT/..) pass.
+_candidate_pin_fail() {
+  echo "ERROR: candidate pin: $1 (EI-25852209928775891)" >&2
+  [[ -z "$_dirty_source_tmp" ]] || rm -f "$_dirty_source_tmp"
+  exit 2
+}
+if [[ "${PROVENANCE_REQUIRE_CANDIDATE_PIN:-}" == "1" ]]; then
+  [[ "$BUILD_SHA" =~ ^[0-9a-f]{7,64}$ && "$GIT_HEAD" == "$BUILD_SHA"* ]] \
+    || _candidate_pin_fail "gitHead '$GIT_HEAD' does not start with buildSha '$BUILD_SHA'; point PROVENANCE_GIT_ROOT and PROVENANCE_SOURCE_GIT_HEAD at the desktop repository whose head was baked"
+  node - "$DIRTY_SOURCE_JSON" <<'NODE' \
+    || _candidate_pin_fail "dirtySource records no single 'workspace' repository head; capture --capture-dirty-source OUT desktop=<desktop root> workspace=<workspace root> at cut start"
+const value = JSON.parse(process.argv[2]);
+const repos = Array.isArray(value.repositories) ? value.repositories : [];
+const workspace = repos.filter((r) => r && r.label === 'workspace' && /^[0-9a-f]{40,64}$/.test(String(r.gitHead ?? '')));
+process.exit(workspace.length === 1 ? 0 : 3);
+NODE
+fi
+
 SOURCE_REPAIR_JSON=""
 if [[ -n "${PROVENANCE_SOURCE_REPAIR_MANIFEST:-}" ]]; then
   SOURCE_REPAIR_JSON="$(node "$(dirname "${BASH_SOURCE[0]}")/lib/windows-source-repair.js" \

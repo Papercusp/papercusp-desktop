@@ -169,13 +169,30 @@ NODE
   export PAPERCUSP_BUILD_SHA="$PAPERCUSP_PRODUCER_BUILD_SHA"
   export PROVENANCE_SOURCE_GIT_HEAD="$PAPERCUSP_PRODUCER_SOURCE_HEAD" PROVENANCE_SOURCE_GIT_DIRTY=false
   export PAPERCUSP_DESKTOP_TARGET_ROOT="$PAPERCUSP_PRODUCER_SOURCE/papercusp-desktop"
+  # EI-25852209928775891: this leg's record is read by the P-521 candidate consumer
+  # (apps/operator/lib/release/p2p-candidate-evidence.ts), which pins gitHead to the
+  # baked buildSha (the DESKTOP head) and reads the workspace revision from a
+  # `workspace`-labelled dirtySource repository — release-local.sh's schema. Capture
+  # both at cut start for the final leg emit; the build chain keeps its inputs above.
+  PAPERCUSP_PRODUCER_DESKTOP_HEAD="$(git -C "$PAPERCUSP_DESKTOP_TARGET_ROOT" rev-parse --verify HEAD)" \
+    || { echo 'cannot read the desktop head of the prepared source' >&2; exit 2; }
+  readonly PAPERCUSP_PRODUCER_DESKTOP_HEAD
+  [[ "$PAPERCUSP_PRODUCER_DESKTOP_HEAD" == "$PAPERCUSP_PRODUCER_BUILD_SHA"* ]] || {
+    echo "baked buildSha $PAPERCUSP_PRODUCER_BUILD_SHA is not the prepared desktop head $PAPERCUSP_PRODUCER_DESKTOP_HEAD" >&2; exit 2;
+  }
+  bash "$PAPERCUSP_PRODUCER_TOOL/bin/emit-build-provenance.sh" --capture-dirty-source \
+    "$RUN/candidate-source-state.json" \
+    "desktop=$PAPERCUSP_DESKTOP_TARGET_ROOT" "workspace=$PAPERCUSP_PRODUCER_SOURCE"
   bash "$PAPERCUSP_PRODUCER_TOOL/bin/emit-build-provenance.sh" --capture-source \
     "$PAPERCUSP_PRODUCER_SOURCE" "$RUN/source-state.json" >"$RUN/source-capture.log"
   export PROVENANCE_SOURCE_DIRTY_MANIFEST="$RUN/source-state.json" CARGO_TARGET_DIR="$RUN/cargo"
   export TAURI_SIGNING_PRIVATE_KEY="${TAURI_SIGNING_PRIVATE_KEY_PATH:?preflight must bind signing key path}"
   npm exec --yes --package=@tauri-apps/cli@2.11.0 -- bash "$PAPERCUSP_PRODUCER_TOOL/bin/build-deb-repacked.sh"
   bash "$PAPERCUSP_PRODUCER_TOOL/bin/assert-release-host-baked.sh" "$RUN/cargo/release/papercusp-desktop"
-  PROVENANCE_GIT_ROOT="$PAPERCUSP_PRODUCER_SOURCE" bash "$PAPERCUSP_PRODUCER_TOOL/bin/emit-build-provenance.sh" \
+  PROVENANCE_REQUIRE_CANDIDATE_PIN=1 PROVENANCE_GIT_ROOT="$PAPERCUSP_DESKTOP_TARGET_ROOT" \
+  PROVENANCE_SOURCE_GIT_HEAD="$PAPERCUSP_PRODUCER_DESKTOP_HEAD" \
+  PROVENANCE_SOURCE_DIRTY_MANIFEST="$RUN/candidate-source-state.json" \
+    bash "$PAPERCUSP_PRODUCER_TOOL/bin/emit-build-provenance.sh" \
     "$RUN/cargo/release/bundle/deb" "$PAPERCUSP_PRODUCER_VERSION" "$PAPERCUSP_PRODUCER_BUILD_SHA" false
   echo 'LINUX_GUI_PRODUCTION_COMPLETE; final-byte qualification and physical GO remain required'
   exit 0
