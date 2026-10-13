@@ -29,10 +29,63 @@ def stamp(path):
             'mtimeNs': s.st_mtime_ns}
 
 
-def stopped(unit, images, starting=False):
+def unit_state(unit):
     state = subprocess.check_output(['systemctl', '--user', 'show', unit,
-                                    '--property=MainPID,ActiveState'], text=True)
-    values = dict(line.split('=', 1) for line in state.splitlines() if '=' in line)
+                                    '--property=MainPID,ActiveState,Result,NRestarts'], text=True)
+    return dict(line.split('=', 1) for line in state.splitlines() if '=' in line)
+
+
+def process_identity(pid):
+    try:
+        return (Path('/proc') / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()[19]
+    except FileNotFoundError:
+        return None
+
+
+def verified_shutdown(unit, runtime, ssh_host, ssh_port, ssh_key, timeout=240, settle=25):
+    require(timeout > 0 and settle > 0, 'shutdown windows must be positive')
+    before = unit_state(unit)
+    pid = int((runtime / 'qemu.pid').read_text().strip())
+    require(pid > 1 and before.get('MainPID') == str(pid) and
+            before.get('ActiveState') == 'active' and before.get('NRestarts', '').isdigit(),
+            'shutdown requires the active unit matching the runtime PID')
+    identity = process_identity(pid)
+    require(identity is not None, 'shutdown process identity unavailable')
+    deadline = time.monotonic() + timeout
+    try:
+        request = subprocess.run(['ssh', '-i', str(ssh_key), '-p', str(ssh_port),
+                                  '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
+                                  '-o', 'ConnectTimeout=10', ssh_host,
+                                  'sudo -n shutdown -h now'], capture_output=True,
+                                 timeout=min(30, timeout), check=False)
+        ssh_code = request.returncode
+    except subprocess.TimeoutExpired:
+        ssh_code = None
+    # SSH commonly closes before acknowledging shutdown. Its exit status is
+    # request evidence, never proof of guest exit (or of failure to exit).
+    while True:
+        state = unit_state(unit)
+        require(state.get('NRestarts') == before['NRestarts'], 'VM restarted during shutdown')
+        require(state.get('MainPID') in ('0', str(pid)), 'VM process changed during shutdown')
+        departed = process_identity(pid) != identity
+        if departed and state.get('MainPID') == '0' and state.get('ActiveState') == 'inactive':
+            require(state.get('Result') == 'success', 'VM stop did not finish successfully')
+            break
+        require(time.monotonic() < deadline, 'guest shutdown not verified before deadline')
+        time.sleep(1)
+    stable_until = time.monotonic() + settle
+    while time.monotonic() < stable_until:
+        time.sleep(min(1, max(0, stable_until - time.monotonic())))
+        state = unit_state(unit)
+        require(process_identity(pid) != identity and state.get('MainPID') == '0' and
+                state.get('ActiveState') == 'inactive' and state.get('Result') == 'success' and
+                state.get('NRestarts') == before['NRestarts'], 'VM did not remain stopped')
+    return {'ok': True, 'sshReturnCode': ssh_code, 'processDeparted': True,
+            'unitInactive': True, 'result': 'success', 'noRestartWindowSec': settle}
+
+
+def stopped(unit, images, starting=False):
+    values = unit_state(unit)
     require(values.get('MainPID') == '0' and values.get('ActiveState') in (('inactive', 'activating') if starting else ('inactive',)),
             'VM must be inactive with MainPID=0')
     # A stopped service alone cannot exclude an orphan holding a disk.
@@ -190,7 +243,19 @@ def main():
     parser.add_argument('--prepare-storage-trial', action='store_true')
     parser.add_argument('--unit', default='papercusp-vm-mac.service')
     parser.add_argument('--launch', action='store_true')
+    parser.add_argument('--shutdown', action='store_true')
+    parser.add_argument('--ssh-host', default='aviweiss@127.0.0.1')
+    parser.add_argument('--ssh-port', type=int, default=2222)
+    parser.add_argument('--ssh-key', type=Path, default=Path.home() / '.ssh/papercup-vm-mac')
+    parser.add_argument('--shutdown-timeout', type=int, default=240)
     options = parser.parse_args()
+    require(sum((options.launch, options.shutdown, options.prepare_storage_trial)) <= 1,
+            'launch, shutdown and storage preparation are mutually exclusive')
+    if options.shutdown:
+        print(json.dumps(verified_shutdown(options.unit, options.runtime, options.ssh_host,
+                                           options.ssh_port, options.ssh_key,
+                                           timeout=options.shutdown_timeout)))
+        return
     if options.prepare_storage_trial:
         require(options.storage_trial is not None and not options.launch, 'prepare needs trial and forbids launch')
         prepare_trial(options.backup, options.runtime, options.storage_trial, options.unit)
