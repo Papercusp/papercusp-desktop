@@ -789,6 +789,40 @@ esac
   }
 });
 
+test('Mac native preflight refuses a full symlinked PG volume before GUI or install admission', () => {
+  const root = mkdtempSync(join(tmpdir(), 'native-mac-data-volume-'));
+  try {
+    const data = join(root, 'BuildData');
+    const home = join(root, 'home');
+    const shims = join(root, 'shims');
+    mkdirSync(join(data, '.shared', 'embedded-pg-data'), { recursive: true });
+    mkdirSync(home);
+    mkdirSync(shims);
+    symlinkSync(data, join(home, '.papercusp-workspaces'));
+    executable(shims, 'df', `#!/bin/sh
+physical=$(cd "$2" && pwd -P) || exit 1
+printf '%s' "$physical" > "$TEST_DF_PATH"
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 2000000 1900000 %s 99%% /BuildData\\n' "$TEST_FREE_KIB"
+`);
+    executable(shims, 'stat', '#!/bin/sh\necho root\n');
+    const body = readFileSync(join(__dirname, '..', 'bin', 'lib', 'mac-native-preflight.sh'), 'utf8');
+    for (const [free, override] of [['32844', false], ['1048575', true], ['1048576', false], ['bad', false]]) {
+      const result = spawnSync('bash', ['-c', body], {
+        encoding: 'utf8',
+        env: { ...process.env, HOME: home, PATH: `${shims}:${process.env.PATH}`,
+          PAPERCUSP_WORKSPACES_ROOT: override ? data : '', TEST_FREE_KIB: free,
+          TEST_DF_PATH: join(root, 'measured-path') },
+      });
+      assert.equal(result.status, 2);
+      assert.equal(readFileSync(join(root, 'measured-path'), 'utf8'), join(data, '.shared', 'embedded-pg-data'));
+      assert.match(result.stderr, free === '1048576' ? /GUI console/ : free === 'bad' ? /cannot measure PostgreSQL/ : /PostgreSQL data volume.*requires 1048576/);
+      assert.doesNotMatch(result.stdout, /PAPERCUSP_NATIVE_MAC_PREFLIGHT_OK/);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('installed-DMG resume compares real file content, inventory, permissions and symlink targets', () => {
   const source = readFileSync(SCRIPT, 'utf8');
   const command = source.match(/cat <<'VERIFY_INSTALLED'\n([\s\S]*?)\nVERIFY_INSTALLED\n/);
