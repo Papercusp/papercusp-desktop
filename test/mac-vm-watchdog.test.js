@@ -604,7 +604,7 @@ test('coldRestart refuses to start while the old qemu is still alive', async () 
 
 // Real qcow2 operations verify preservation and admission, without booting a VM.
 const storageTrialFixture = String.raw`
-import hashlib, importlib.util, json, subprocess, sys
+import hashlib, importlib.util, json, shutil, subprocess, sys
 from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -645,9 +645,11 @@ if case == 'orphan':
     (orphan/'comm').write_text('qemu-system-x86\n')
     (orphan/'fd/17').symlink_to(paths[3])
 real_output = subprocess.check_output
+real_run = subprocess.run
+active = [case == 'live']
 def output(args, **kwargs):
     if args[0] == 'systemctl':
-        return 'MainPID=4242\nActiveState=active\n' if case == 'live' else 'MainPID=0\nActiveState=inactive\n'
+        return 'MainPID=4242\nActiveState=active\n' if active[0] else 'MainPID=0\nActiveState=inactive\n'
     return real_output(args, **kwargs)
 def refused(fn):
     try: fn()
@@ -662,6 +664,112 @@ with patch.object(m.subprocess,'check_output',side_effect=output), \
         with patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=1)):
             refused(lambda:m.prepare_trial(backup,runtime,trial,'test.service'))
         assert not trial.exists()
+    elif case.startswith(('resume-', 'legacy-', 'compared-', 'compare-failure')):
+        boot = trial/'mac_hdd_ng.img'
+        original_stamps = {str(p):m.stamp(p) for p in paths}
+        commands = []
+        def interrupted(args, **kwargs):
+            if args[:2] == ['qemu-img','convert']:
+                real_run(['qemu-img','create','-f','qcow2',str(boot),'8M'],check=True)
+                real_run(['qemu-io','-f','qcow2','-c','write -P 0x99 0 16384',str(boot)],check=True)
+                raise subprocess.CalledProcessError(143,args)
+            return real_run(args, **kwargs)
+        def replay(args, **kwargs):
+            commands.append(args)
+            result=real_run(args, **kwargs)
+            if case=='resume-change-after-compare' and args[:2]==['qemu-img','compare'] and str(paths[-1]) in args:
+                real_run(['qemu-io','-f','qcow2','-c','write -P 0x55 8192 4096',str(boot)],check=True)
+            return result
+        def stop_before_data(args, **kwargs):
+            if args[:2] == ['qemu-img','create'] and str(trial/'builddata-20260820-160g.qcow2') in args:
+                raise subprocess.CalledProcessError(143,args)
+            return real_run(args, **kwargs)
+        def failed_compare(args, **kwargs):
+            if args[:2] == ['qemu-img','compare']:
+                raise subprocess.CalledProcessError(1,args)
+            return real_run(args, **kwargs)
+        if case.startswith('legacy-'):
+            trial.mkdir()
+            for p in paths[:3]: shutil.copyfile(p,trial/p.name)
+            run('qemu-img','create','-f','qcow2',str(boot),'8M')
+            run('qemu-io','-f','qcow2','-c','write -P 0x99 0 16384',str(boot))
+        elif case=='compared-all-replay':
+            real_atomic=m.atomic_json
+            def fail_ready(p,value):
+                if p.name=='storage-ready.json': raise RuntimeError('cut before ready')
+                return real_atomic(p,value)
+            with patch.object(m,'atomic_json',side_effect=fail_ready):
+                refused(lambda:m.prepare_trial(backup,runtime,trial,'test.service'))
+            assert m.read(trial/'storage-progress.json')['phase']=='data-compared'
+        else:
+            action = stop_before_data if case.startswith('compared-') else (
+                failed_compare if case=='compare-failure' else interrupted)
+            with patch.object(m.subprocess,'run',side_effect=action):
+                try: m.prepare_trial(backup,runtime,trial,'test.service')
+                except subprocess.CalledProcessError: pass
+                else: raise AssertionError('expected interrupted operation')
+        assert not (trial/'storage-ready.json').exists()
+        if case=='resume-source-change':
+            paths[0].write_bytes(b'changed')
+        elif case=='resume-target-symlink':
+            boot.unlink(); boot.symlink_to(paths[3])
+        elif case=='resume-trial-symlink':
+            trial.rename(root/'actual'); trial.symlink_to(root/'actual',target_is_directory=True)
+        elif case=='resume-orphan-img':
+            orphan=procroot/'9999'; orphan.mkdir(); (orphan/'fd').mkdir()
+            (orphan/'comm').write_text('qemu-img\n'); (orphan/'fd/17').symlink_to(boot)
+        elif case=='resume-live':
+            active[0]=True
+        elif case=='compared-stamp-change':
+            run('qemu-io','-f','qcow2','-c','write -P 0x55 8192 4096',str(boot))
+        elif case=='legacy-wrong-stamps':
+            original_stamps[str(paths[3])]['mtimeNs']+=1
+        elif case=='legacy-wrong-copy':
+            (trial/paths[0].name).write_bytes(b'wrong firmware')
+        elif case=='resume-size':
+            run('qemu-img','resize',str(boot),'16M')
+        elif case=='resume-snapshot':
+            run('qemu-img','snapshot','-c','unbound-snapshot',str(boot))
+        elif case=='resume-backing':
+            run('qemu-img','rebase','-u','-f','qcow2','-F','qcow2','-b',str(paths[3]),str(boot))
+        denied = case in ('resume-source-change','resume-target-symlink','resume-trial-symlink',
+            'resume-orphan-img','resume-live','compared-stamp-change','legacy-unbound',
+            'legacy-wrong-stamps','legacy-wrong-copy','resume-size','resume-snapshot','resume-backing')
+        expected = original_stamps if case.startswith('legacy-') and case!='legacy-unbound' else None
+        with patch.object(m.subprocess,'run',side_effect=replay):
+            if denied:
+                refused(lambda:m.prepare_trial(backup,runtime,trial,'test.service',resume=True,
+                    expected_originals=expected))
+                assert not (trial/'storage-ready.json').exists()
+                assert not any(a[1] in ('convert','compare','create') for a in commands)
+            elif case=='resume-change-after-compare':
+                refused(lambda:m.prepare_trial(backup,runtime,trial,'test.service',resume=True))
+                assert not (trial/'storage-ready.json').exists()
+                assert m.read(trial/'storage-progress.json')['phase']=='data-compared'
+            else:
+                if case=='resume-capacity':
+                    remaining=max(0,8*2**20-boot.stat().st_blocks*512)
+                    with patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=remaining+20*2**30)):
+                        m.prepare_trial(backup,runtime,trial,'test.service',resume=True)
+                else:
+                    m.prepare_trial(backup,runtime,trial,'test.service',resume=True,expected_originals=expected)
+                assert m.read(trial/'storage-ready.json')['bootCompared'] is True
+                assert m.read(trial/'storage-ready.json')['dataCompared'] is True
+                m.prepare(backup,runtime,trial)
+                conversions=[a for a in commands if a[:2]==['qemu-img','convert']]
+                if case.startswith('compared-') or case=='compare-failure':
+                    assert not conversions
+                else:
+                    assert len(conversions)==1 and '-n' in conversions[0]
+                    assert '--target-is-zero' not in conversions[0]
+                if case=='compared-all-replay':
+                    assert not any(a[:2]==['qemu-img','compare'] for a in commands)
+                if case=='compared-boot-replay':
+                    assert not any(a[:2]==['qemu-img','compare'] and str(paths[3]) in a for a in commands)
+                # Independent full comparison proves stale nonzero sectors were
+                # overwritten by both source data and source zero sectors.
+                run('qemu-img','compare','-f','qcow2','-F','qcow2',str(paths[3]),str(boot))
+        if case=='resume-source-change': paths[0].write_bytes(b'firmware state')
     else:
         m.prepare_trial(backup,runtime,trial,'test.service')
         source, files, selected, receipt_path = m.prepare(backup,runtime,trial)
@@ -699,7 +807,11 @@ print(json.dumps({'ok':True,'case':case,'originalBytesUnchanged':True}))
 `;
 
 for (const scenario of ['preserved', 'live', 'orphan', 'capacity', 'source-change', 'trial-change',
-  'bad-receipt', 'existing', 'booted-trial', 'wrong-backing']) {
+  'bad-receipt', 'existing', 'booted-trial', 'wrong-backing', 'resume-convert', 'resume-capacity',
+  'resume-source-change', 'resume-target-symlink', 'resume-trial-symlink', 'resume-orphan-img',
+  'resume-live', 'legacy-adopt', 'legacy-unbound', 'legacy-wrong-stamps', 'legacy-wrong-copy',
+  'compared-boot-replay', 'compared-all-replay', 'compared-stamp-change', 'compare-failure',
+  'resume-size', 'resume-snapshot', 'resume-backing', 'resume-change-after-compare']) {
   test('preserved Mac storage trial: ' + scenario, async () => {
     const dir = await tempDir();
     const helper = new URL('../bin/mac-vm-launch.py', import.meta.url).pathname;

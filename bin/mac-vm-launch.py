@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 import time
 
 
@@ -94,13 +95,13 @@ def stopped(unit, images, starting=False):
         if not proc.name.isdigit():
             continue
         try:
-            if not (proc / 'comm').read_text().startswith('qemu-system'):
+            if not (proc / 'comm').read_text().startswith(('qemu-system', 'qemu-img', 'qemu-io')):
                 continue
             for fd in (proc / 'fd').iterdir():
                 try:
                     s = fd.stat()
                     require((s.st_dev, s.st_ino) not in identities,
-                            'QEMU still holds a source image')
+                            'QEMU still holds a storage image')
                 except FileNotFoundError:
                     pass
         except (FileNotFoundError, ProcessLookupError):
@@ -141,45 +142,165 @@ def check(image):
     subprocess.run(['qemu-img', 'check', '-f', 'qcow2', str(image)], check=True)
 
 
-def prepare_trial(backup, runtime, trial, unit):
+def atomic_json(path, value):
+    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, prefix='.' + path.name,
+                                     delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            json.dump(value, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def image_info(image):
+    return json.loads(subprocess.check_output(
+        ['qemu-img', 'info', '--output=json', str(image)], text=True))
+
+
+def prepare_trial(backup, runtime, trial, unit, resume=False, expected_originals=None):
     source, originals = generation(backup, runtime)
     stopped(unit, originals.values())
-    require(not trial.exists(), 'trial destination exists; inspect rather than overwrite')
-    info = json.loads(subprocess.check_output(
-        ['qemu-img', 'info', '--output=json', str(originals['./mac_hdd_ng.img'])], text=True))
-    require(shutil.disk_usage(trial.parent).free >= info['virtual-size'] + 20 * 2**30,
-            'insufficient trial capacity including reserve')
+    require(not trial.is_symlink() and trial.parent.absolute() == trial.parent.resolve(),
+            'trial destination or parent is a symlink')
+    require(resume or expected_originals is None, 'adoption stamps require explicit resume')
+    require(trial.exists() == resume, 'trial destination exists; inspect rather than overwrite' if
+            not resume else 'resume requires an existing trial')
+    files = {name: trial / p.name for name, p in originals.items()}
+    boot, data = files['./mac_hdd_ng.img'], files['./builddata-20260820-160g.qcow2']
+    journal_path = trial / 'storage-progress.json'
+    info = image_info(originals['./mac_hdd_ng.img'])
     originals_stamps = {str(p): stamp(p) for p in originals.values()}
+    copied_names = ('./OVMF_CODE_4M.fd', './OVMF_VARS-1920x1080.fd', './OpenCore/OpenCore.qcow2')
+    binding = {'schemaVersion': 1, 'sourceStarttime': source['starttime'],
+               'runtime': str(runtime.resolve()), 'backup': str(backup.resolve()),
+               'trial': str(trial.absolute()), 'originals': originals_stamps,
+               'virtualBytes': info['virtual-size'],
+               'generationSha256': {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in
+                   (backup / 'source.json', backup / 'preserved.json', runtime / 'runtime-ready.json')}}
+    if resume:
+        require(trial.is_dir(), 'trial must be a directory')
+        require(not (trial / 'storage-ready.json').exists() and
+                not (trial / 'boot-receipt.json').exists(), 'ready or booted trial cannot resume')
+        allowed = {p.name for p in files.values()} | {journal_path.name}
+        require(all(p.name in allowed and not p.is_symlink() and p.is_file() and
+                    p.stat().st_nlink == 1 for p in trial.iterdir()), 'unbound or linked trial input')
+        present = [p for p in files.values() if p.exists()]
+        require(all(not p.samefile(original) for p in present for original in originals.values()),
+                'trial aliases preserved input')
+        stopped(unit, list(originals.values()) + present)
+        if journal_path.exists():
+            require(expected_originals is None, 'journaled trial cannot adopt different evidence')
+            journal = read(journal_path)
+            require(all(journal.get(key) == value for key, value in binding.items()),
+                    'storage journal source or generation changed')
+        else:
+            # Legacy partials need an explicit stamp record from the interrupted
+            # attempt. Never bind an arbitrary existing directory to today's source.
+            require(expected_originals == originals_stamps, 'legacy trial requires exact recorded source stamps')
+            require(boot.is_file() and not data.exists() and
+                    all(files[name].is_file() for name in copied_names), 'legacy trial shape mismatch')
+            journal = dict(binding, phase='adopted-partial', copied={})
+        for name in copied_names:
+            require(files[name].is_file() and
+                    hashlib.sha256(files[name].read_bytes()).digest() ==
+                    hashlib.sha256(originals[name].read_bytes()).digest(), 'copied firmware or OpenCore mismatch')
+        if journal['copied']:
+            require(journal['copied'] == {name: stamp(files[name]) for name in copied_names},
+                    'copied trial inputs changed')
+        if boot.exists():
+            boot_info = image_info(boot)
+            require(boot_info.get('format') == 'qcow2' and
+                    boot_info['virtual-size'] == info['virtual-size'] and
+                    not boot_info.get('backing-filename') and not boot_info.get('snapshots'),
+                    'partial boot shape mismatch')
+            check(boot)
+    else:
+        journal = dict(binding, phase='validated-inputs', copied={})
+    allocated = boot.stat().st_blocks * 512 if boot.exists() else 0
+    require(shutil.disk_usage(trial.parent).free >=
+            max(0, info['virtual-size'] - allocated) + 20 * 2**30,
+            'insufficient trial capacity including reserve')
     for name in ('./OpenCore/OpenCore.qcow2', './mac_hdd_ng.img', './builddata-20260820-160g.qcow2'):
         check(originals[name])
-    trial.mkdir(mode=0o700)
-    files = {name: trial / p.name for name, p in originals.items()}
-    for name in ('./OVMF_CODE_4M.fd', './OVMF_VARS-1920x1080.fd', './OpenCore/OpenCore.qcow2'):
-        shutil.copyfile(originals[name], files[name])
-    boot = files['./mac_hdd_ng.img']
-    print(json.dumps({'phase': 'convert-active-boot', 'trial': str(trial),
-                      'virtualBytes': info['virtual-size'],
-                      'preservedSnapshots': [s.get('name') for s in info.get('snapshots', [])]}), flush=True)
-    subprocess.run(['qemu-img', 'convert', '-p', '-f', 'qcow2', '-O', 'qcow2',
-                    str(originals['./mac_hdd_ng.img']), str(boot)], check=True)
-    check(boot)
-    subprocess.run(['qemu-img', 'compare', '-p', '-f', 'qcow2', '-F', 'qcow2',
-                    str(originals['./mac_hdd_ng.img']), str(boot)], check=True)
-    data = files['./builddata-20260820-160g.qcow2']
-    subprocess.run(['qemu-img', 'create', '-f', 'qcow2', '-F', 'qcow2', '-b',
-                    str(originals['./builddata-20260820-160g.qcow2']), str(data)], check=True)
-    check(data)
-    subprocess.run(['qemu-img', 'compare', '-f', 'qcow2', '-F', 'qcow2',
-                    str(originals['./builddata-20260820-160g.qcow2']), str(data)], check=True)
-    stopped(unit, originals.values())
-    require(all(stamp(Path(p)) == s for p, s in originals_stamps.items()),
-            'source changed during preparation')
+    if not resume:
+        trial.mkdir(mode=0o700)
+        for name in copied_names:
+            shutil.copyfile(originals[name], files[name])
+    journal['copied'] = {name: stamp(files[name]) for name in copied_names}
+
+    def unchanged():
+        require(all(stamp(Path(p)) == s for p, s in originals_stamps.items()),
+                'source changed during preparation')
+        require(journal['copied'] == {name: stamp(files[name]) for name in copied_names},
+                'copied trial inputs changed')
+        stopped(unit, list(originals.values()) + [p for p in files.values() if p.exists()])
+
+    def progress(phase):
+        unchanged()
+        journal['phase'] = phase
+        journal['updatedAt'] = time.time()
+        atomic_json(journal_path, journal)
+        print(json.dumps({'phase': phase, 'trial': str(trial),
+                          'progress': str(journal_path)}), flush=True)
+
+    def compare(name):
+        subprocess.run(['qemu-img', 'compare', '-p', '-f', 'qcow2', '-F', 'qcow2',
+                        str(originals[name]), str(files[name])], check=True)
+
+    progress(journal['phase'])
+    if 'bootComparedStamp' in journal:
+        require(boot.exists() and stamp(boot) == journal['bootComparedStamp'],
+                'compared boot changed')
+    else:
+        if 'bootConvertedStamp' in journal:
+            require(boot.exists() and stamp(boot) == journal['bootConvertedStamp'],
+                    'converted boot changed')
+        else:
+            progress('convert-active-boot')
+            # -n replays the full logical source into this owned partial. Do not
+            # use --target-is-zero: old allocated sectors can contain stale data.
+            args = ['qemu-img', 'convert', '-p', '-f', 'qcow2', '-O', 'qcow2']
+            if boot.exists():
+                args.append('-n')
+            subprocess.run(args + [str(originals['./mac_hdd_ng.img']), str(boot)], check=True)
+            journal['bootConvertedStamp'] = stamp(boot)
+            progress('boot-converted')
+        check(boot)
+        compare('./mac_hdd_ng.img')
+        journal['bootComparedStamp'] = stamp(boot)
+        progress('boot-compared')
+    if 'dataComparedStamp' in journal:
+        require(data.exists() and stamp(data) == journal['dataComparedStamp'], 'compared data changed')
+    else:
+        if not data.exists():
+            progress('create-data-overlay')
+            subprocess.run(['qemu-img', 'create', '-f', 'qcow2', '-F', 'qcow2', '-b',
+                            str(originals['./builddata-20260820-160g.qcow2']), str(data)], check=True)
+        data_info = image_info(data)
+        require(data_info.get('format') == 'qcow2' and
+                Path(data_info.get('full-backing-filename', '')).resolve() ==
+                originals['./builddata-20260820-160g.qcow2'].resolve(), 'trial data backing mismatch')
+        check(data)
+        compare('./builddata-20260820-160g.qcow2')
+        journal['dataComparedStamp'] = stamp(data)
+        progress('data-compared')
+    unchanged()
+    require(stamp(boot) == journal['bootComparedStamp'] and
+            stamp(data) == journal['dataComparedStamp'], 'compared trial changed before readiness')
     receipt = {'ok': True, 'schemaVersion': 1, 'sourceStarttime': source['starttime'],
                'runtime': str(runtime), 'bootCompared': True, 'dataCompared': True,
                'originals': originals_stamps,
                'files': {name: {'path': str(p), 'stamp': stamp(p)} for name, p in files.items()},
                'createdAt': time.time()}
-    (trial / 'storage-ready.json').write_text(json.dumps(receipt))
+    atomic_json(trial / 'storage-ready.json', receipt)
     print(json.dumps({'phase': 'storage-ready', 'ok': True,
                       'receipt': str(trial / 'storage-ready.json')}), flush=True)
 
@@ -241,6 +362,9 @@ def main():
     parser.add_argument('--runtime', type=Path, required=True)
     parser.add_argument('--storage-trial', type=Path)
     parser.add_argument('--prepare-storage-trial', action='store_true')
+    parser.add_argument('--resume-storage-trial', action='store_true')
+    parser.add_argument('--resume-source-stamps', type=Path,
+                        help='recorded original stamps to adopt a pre-journal partial')
     parser.add_argument('--unit', default='papercusp-vm-mac.service')
     parser.add_argument('--launch', action='store_true')
     parser.add_argument('--shutdown', action='store_true')
@@ -249,16 +373,21 @@ def main():
     parser.add_argument('--ssh-key', type=Path, default=Path.home() / '.ssh/papercup-vm-mac')
     parser.add_argument('--shutdown-timeout', type=int, default=240)
     options = parser.parse_args()
-    require(sum((options.launch, options.shutdown, options.prepare_storage_trial)) <= 1,
+    require(sum((options.launch, options.shutdown, options.prepare_storage_trial,
+                 options.resume_storage_trial)) <= 1,
             'launch, shutdown and storage preparation are mutually exclusive')
+    require(options.resume_storage_trial or options.resume_source_stamps is None,
+            'source stamps require explicit resume')
     if options.shutdown:
         print(json.dumps(verified_shutdown(options.unit, options.runtime, options.ssh_host,
                                            options.ssh_port, options.ssh_key,
                                            timeout=options.shutdown_timeout)))
         return
-    if options.prepare_storage_trial:
+    if options.prepare_storage_trial or options.resume_storage_trial:
         require(options.storage_trial is not None and not options.launch, 'prepare needs trial and forbids launch')
-        prepare_trial(options.backup, options.runtime, options.storage_trial, options.unit)
+        prepare_trial(options.backup, options.runtime, options.storage_trial, options.unit,
+                      resume=options.resume_storage_trial,
+                      expected_originals=read(options.resume_source_stamps) if options.resume_source_stamps else None)
         return
     source, files, argv, receipt_path = prepare(options.backup, options.runtime, options.storage_trial)
     if not options.launch:
