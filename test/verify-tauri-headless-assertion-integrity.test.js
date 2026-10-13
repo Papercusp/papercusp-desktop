@@ -513,8 +513,12 @@ fi
 printf '%s\\n' "$*" >> "$VOICE_FIXTURE_CALLS"
 if [[ "$*" == *pc-settings-page--voice* ]]; then exit 37; fi
 `);
-    fs.writeFileSync(path.join(dir, 'node'), '#!/usr/bin/env bash\ncat >/dev/null\n');
+    fs.writeFileSync(path.join(dir, 'node'), '#!/usr/bin/env bash\n' +
+      'printf "fixture-native-health:start\\n" >> "$VOICE_FIXTURE_CALLS"\n' +
+      'cat >/dev/null\n' +
+      'printf "fixture-native-health:end\\n" >> "$VOICE_FIXTURE_CALLS"\n');
     for (const file of [tool, poll, path.join(dir, 'node')]) fs.chmodSync(file, 0o755);
+    const started = Date.now();
     const result = spawnSync('bash', [path.resolve(__dirname, '../../scripts/verify-voice-settings.sh'), '--gemini-unavailable'], {
       encoding: 'utf8', timeout: 5000,
       env: { ...process.env, PATH: dir + path.delimiter + process.env.PATH,
@@ -522,19 +526,30 @@ if [[ "$*" == *pc-settings-page--voice* ]]; then exit 37; fi
         VERIFY_TAURI_AGENT_TOOLS_BIN: tool, VERIFY_TAURI_POLL: poll,
         VERIFY_TAURI_ISOLATED_DB: isolated ? '1' : '0', VOICE_FIXTURE_CALLS: calls },
     });
-    return { ...result, calls: fs.readFileSync(calls, 'utf8') };
+    const recordedCalls = fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : '';
+    // Preserve the child failure before cleanup: null status alone hides a
+    // timeout, signal, or spawn error and loses the phase that stopped.
+    const diagnostic = JSON.stringify({ elapsedMs: Date.now() - started,
+      status: result.status, signal: result.signal,
+      error: result.error ? { code: result.error.code, message: result.error.message,
+        syscall: result.error.syscall } : null,
+      stdout: result.stdout, stderr: result.stderr, calls: recordedCalls });
+    return { ...result, calls: recordedCalls, diagnostic };
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 
 test('voice native regression refuses the shared DB before any preference write', () => {
   const result = runVoiceRouteFixture(false);
-  assert.equal(result.status, 9, result.stderr);
+  assert.equal(result.error, undefined, result.diagnostic);
+  assert.equal(result.status, 9, result.diagnostic);
   assert.equal(result.calls.trim(), 'probe --pid 4242');
 });
 
 test('voice native regression preserves route failure and captures evidence before picker checks', () => {
   const result = runVoiceRouteFixture(true);
-  assert.equal(result.status, 37, result.stderr);
+  assert.equal(result.error, undefined, result.diagnostic);
+  assert.equal(result.status, 37, result.diagnostic);
+  assert.match(result.calls, /fixture-native-health:start\nfixture-native-health:end/);
   assert.match(result.stdout, /"settingsPresent":false/);
   assert.match(result.calls, /--require .pc-settings-page--voice/);
   assert.doesNotMatch(result.calls, /ArrowDown/);
