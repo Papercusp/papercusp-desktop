@@ -61,20 +61,40 @@
 # The official vm-release scan rejected both v1.83.1 binaries. The upstream
 # advisory identifies v1.83.2 as patched; its Go 1.25 and x/net v0.58.0
 # requirements fit this recipe. Keep the binary assertions and cache-pin check.
-PAPERCUSP_VM_TRUST_REVISION="2026-09-19-r1"
+# 2026-10-13-r1 — Go 1.26.6 -> 1.26.9 and golang.org/x/net v0.58.0 -> v0.60.0 in BOTH
+# Go binaries (WI-6554700010009733). The D-223 Server build on staging ccf87ab1 went RED
+# with 28 High/Critical matches: per binary, 10 stdlib@go1.26.6 (GO-2026-6603..6613,
+# two Critical) and 4 golang.org/x/net@v0.58.0 (GO-2026-6603/6610/6611/6612, one
+# Critical). All were published 2026-10-08, after the r1 pins above were set. The Go
+# vulnerability database lists stdlib fixed in 1.26.9 / 1.27.2 and x/net fixed in
+# v0.60.0. The Go archive SHA-256 below matches both the go.dev/dl JSON listing and
+# dl.google.com's own .sha256 file.
+# CO-PINS, resolved from the module proxy BEFORE rebuilding (the lesson the x/net and
+# x/text co-pins below cost): x/net v0.60.0 requires x/crypto v0.57.0 and x/text
+# v0.42.0; x/text v0.42.0 requires x/mod v0.41.0. All three are explicit `go get`
+# arguments here, so an explicitly requested LOWER version would be a hard conflict.
+# x/crypto -> v0.57.0 (both), x/text -> v0.42.0 (kopia; gh floats it), x/mod -> v0.41.0
+# (both). Checked and NOT moving: x/tools v0.49.0 (x/mod v0.41.0 and x/text v0.42.0
+# require exactly that), grpc v1.83.2 (wants x/net v0.58.0 and below). Advisory status
+# checked at the same time: x/text GO-2026-6629 is fixed in v0.41.0, and x/mod
+# GO-2026-6179/6180 in v0.40.0. Minimum fixed versions rather than the newest:
+# x/text v0.43.0 would pull x/tools v0.51.0 and widen the change for no fix.
+# gh now also asserts x/net against the built binary, because this gate's SBOM shows
+# it embedded there.
+PAPERCUSP_VM_TRUST_REVISION="2026-10-13-r1"
 
 PAPERCUSP_VM_NODE_VERSION="v24.18.1"
 PAPERCUSP_VM_NODE_LINUX_X64_SHA256="d6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0"
 
-PAPERCUSP_VM_GO_VERSION="1.26.6"
-PAPERCUSP_VM_GO_LINUX_X64_SHA256="708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89"
+PAPERCUSP_VM_GO_VERSION="1.26.9"
+PAPERCUSP_VM_GO_LINUX_X64_SHA256="42d158b4d8f7b61ac0a830567c940a86098fb7aac52e467a5ebec03ef5cc2f8d"
 
 PAPERCUSP_VM_GH_VERSION="2.98.0"
 PAPERCUSP_VM_GH_COMMIT="a255baf71d13fe5947a4eb7ad521ffd412d64cee"
 PAPERCUSP_VM_GH_SOURCE_SHA256="52e8e45fb5f5431dd269966c97bbf398fd5c8f1b6fafdc02af182ce4d7012c43"
-PAPERCUSP_VM_GH_X_CRYPTO_VERSION="v0.56.0"
-PAPERCUSP_VM_GH_X_MOD_VERSION="v0.40.0"
-PAPERCUSP_VM_GH_X_NET_VERSION="v0.58.0"
+PAPERCUSP_VM_GH_X_CRYPTO_VERSION="v0.57.0"
+PAPERCUSP_VM_GH_X_MOD_VERSION="v0.41.0"
+PAPERCUSP_VM_GH_X_NET_VERSION="v0.60.0"
 PAPERCUSP_VM_GH_X_TOOLS_VERSION="v0.49.0"
 # NEW in 2026-09-02-r1, and note it is a NEW PIN rather than a bump: gh had no grpc
 # override at all, so the module floated on MVS and shipped v1.83.0 — inside the
@@ -86,8 +106,8 @@ PAPERCUSP_VM_GH_GRPC_VERSION="v1.83.2"
 PAPERCUSP_VM_KOPIA_VERSION="0.23.1"
 PAPERCUSP_VM_KOPIA_COMMIT="72ec08fd8edb86c67ed27099bf1b955e1f308ffa"
 PAPERCUSP_VM_KOPIA_SOURCE_SHA256="5c4267ff00cc09eded390e03b6ff33f59e7df1c8d9230ce001dc509e7cadf8f1"
-PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION="v0.56.0"
-PAPERCUSP_VM_KOPIA_X_MOD_VERSION="v0.40.0"
+PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION="v0.57.0"
+PAPERCUSP_VM_KOPIA_X_MOD_VERSION="v0.41.0"
 # CO-PIN, not an independent choice: x/crypto v0.56.0 REQUIRES x/net >= v0.57.0, so
 # leaving this at v0.56.0 made the GO-2026-6303 fix unbuildable. Measured 2026-08-29,
 # the kopia leg of the 2026-08-29-r1 build failed with, verbatim:
@@ -97,7 +117,7 @@ PAPERCUSP_VM_KOPIA_X_MOD_VERSION="v0.40.0"
 # it also puts both shipped Go binaries on ONE x/net instead of two to reason about.
 # NOTE for whoever bumps x/crypto next: these two move TOGETHER. The failure mode is a
 # hard build error, not a silent downgrade, so it cannot ship a vulnerable binary.
-PAPERCUSP_VM_KOPIA_X_NET_VERSION="v0.58.0"
+PAPERCUSP_VM_KOPIA_X_NET_VERSION="v0.60.0"
 # SECOND co-pin of the x/crypto line: v0.56.0's go.mod still requires x/text v0.41.0
 # (indirect), and x/net v0.58.0 requires it directly. These are applied by ONE joint
 # `go get` below, where an explicitly-requested LOWER version is a hard conflict rather
@@ -110,7 +130,7 @@ PAPERCUSP_VM_KOPIA_X_NET_VERSION="v0.58.0"
 # x/net v0.55.0 / x/text v0.37.0, below ours — but it was never a statement about grpc's
 # own vulnerability status, and it read like one. grpc moved to v1.83.1 for
 # GHSA-vp52-pcj8-j9qc; see the trust-revision block at the top.)
-PAPERCUSP_VM_KOPIA_X_TEXT_VERSION="v0.41.0"
+PAPERCUSP_VM_KOPIA_X_TEXT_VERSION="v0.42.0"
 PAPERCUSP_VM_KOPIA_GRPC_VERSION="v1.83.2"
 
 PAPERCUSP_VM_POSTGRES_VERSION="18.6"
@@ -344,6 +364,9 @@ _pc_vm_build_go_tools() {
   fi
   _pc_vm_assert_module "$go_bin" "$output/bin/gh" golang.org/x/crypto "$PAPERCUSP_VM_GH_X_CRYPTO_VERSION"
   _pc_vm_assert_module "$go_bin" "$output/bin/gh" golang.org/x/mod "$PAPERCUSP_VM_GH_X_MOD_VERSION"
+  # 2026-10-13-r1: the vm-release SBOM shows x/net embedded in gh (GO-2026-6603/6610-6612
+  # matched there), so the security-relevant pin is asserted, not assumed.
+  _pc_vm_assert_module "$go_bin" "$output/bin/gh" golang.org/x/net "$PAPERCUSP_VM_GH_X_NET_VERSION"
   # Asserted because this is the security-relevant pin: `go get` raising a version and the
   # BUILT BINARY actually embedding it are two different claims, and only the second one
   # ships. Without this, a pin that silently failed to take would read as applied right up

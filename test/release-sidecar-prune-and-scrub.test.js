@@ -435,32 +435,37 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
     '"linuxX64": ["x86_64-unknown-linux-gnu"]',
     '"macOS": ["x86_64-apple-darwin", "aarch64-apple-darwin"]',
     '"windowsX64": ["x86_64-pc-windows-msvc"]',
-    'PAPERCUSP_VM_TRUST_REVISION="2026-09-19-r1"',
+    'PAPERCUSP_VM_TRUST_REVISION="2026-10-13-r1"',
     'PAPERCUSP_VM_NODE_VERSION="v24.18.1"',
     'license": "MIT"',
     'd6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0',
-    'PAPERCUSP_VM_GO_VERSION="1.26.6"',
+    // GO-2026-6603..6613 (published 2026-10-08) affect stdlib before 1.26.9; the
+    // D-223 vm-release gate measured them in both gh and kopia (WI-6554700010009733).
+    'PAPERCUSP_VM_GO_VERSION="1.26.9"',
     'license": "BSD-3-Clause"',
-    '708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89',
+    '42d158b4d8f7b61ac0a830567c940a86098fb7aac52e467a5ebec03ef5cc2f8d',
     'PAPERCUSP_VM_GH_VERSION="2.98.0"',
     'a255baf71d13fe5947a4eb7ad521ffd412d64cee',
     // GO-2026-6354 and GO-2026-6355 affect x/crypto before v0.56.0. gh used to
     // inherit v0.55.0 through x/net, so this must remain an explicit pin rather
-    // than an accidental MVS result.
-    'PAPERCUSP_VM_GH_X_CRYPTO_VERSION="v0.56.0"',
-    'PAPERCUSP_VM_GH_X_MOD_VERSION="v0.40.0"',
+    // than an accidental MVS result. It is v0.57.0 now because x/net v0.60.0
+    // (GO-2026-6603/6610/6611/6612) requires it; x/text v0.42.0 requires x/mod v0.41.0.
+    'PAPERCUSP_VM_GH_X_CRYPTO_VERSION="v0.57.0"',
+    'PAPERCUSP_VM_GH_X_MOD_VERSION="v0.41.0"',
+    'PAPERCUSP_VM_GH_X_NET_VERSION="v0.60.0"',
     'PAPERCUSP_VM_KOPIA_VERSION="0.23.1"',
     '72ec08fd8edb86c67ed27099bf1b955e1f308ffa',
     'license": "Apache-2.0"',
-    // These three stay compatible as x/crypto moves to v0.56.0 for GO-2026-6354/6355:
-    // it requires x/net >= v0.57.0 (v0.58.0 already pinned) and x/text v0.41.0.
+    // These move TOGETHER (2026-10-13-r1): x/net v0.60.0 fixes GO-2026-6603/6610/
+    // 6611/6612 and requires x/crypto v0.57.0 + x/text v0.42.0; x/text v0.42.0
+    // requires x/mod v0.41.0. A lower explicit pin is a hard `go get` conflict.
     // See the co-pin comments in bin/lib/vm-release-trust-toolchain.sh.
-    'PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION="v0.56.0"',
-    'PAPERCUSP_VM_KOPIA_X_MOD_VERSION="v0.40.0"',
-    'PAPERCUSP_VM_KOPIA_X_NET_VERSION="v0.58.0"',
-    'PAPERCUSP_VM_KOPIA_X_TEXT_VERSION="v0.41.0"',
+    'PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION="v0.57.0"',
+    'PAPERCUSP_VM_KOPIA_X_MOD_VERSION="v0.41.0"',
+    'PAPERCUSP_VM_KOPIA_X_NET_VERSION="v0.60.0"',
+    'PAPERCUSP_VM_KOPIA_X_TEXT_VERSION="v0.42.0"',
     // GHSA-2v4p-qf9q-27wj affects both previously pinned v1.83.1 binaries.
-    // The patched v1.83.2 requires x/net v0.58.0, already pinned above.
+    // The patched v1.83.2 requires x/net v0.58.0, below the x/net pinned above.
     // Both explicit pins, binary assertions and cache invalidation must agree.
     'PAPERCUSP_VM_GH_GRPC_VERSION="v1.83.2"',
     'PAPERCUSP_VM_KOPIA_GRPC_VERSION="v1.83.2"',
@@ -495,6 +500,9 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
   // module here once an SBOM shows it embedded, not on the assumption that it is.
   for (const [binary, name] of [
     ['gh', 'PAPERCUSP_VM_GH_X_CRYPTO_VERSION'],
+    // 2026-10-13: the vm-release SBOM matched x/net GO-2026-66xx inside /bin/gh,
+    // which is the measured evidence this list requires before asserting a module.
+    ['gh', 'PAPERCUSP_VM_GH_X_NET_VERSION'],
     ['gh', 'PAPERCUSP_VM_GH_GRPC_VERSION'],
     ['kopia', 'PAPERCUSP_VM_KOPIA_GRPC_VERSION'],
     ['kopia', 'PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION'],
