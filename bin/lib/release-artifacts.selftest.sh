@@ -328,6 +328,48 @@ if grep -Fq "decision=allow" "$PAPERCUSP_RELEASE_DELETION_AUDIT_PATH"; then
 else
   bad "allowed deletion was not audited"
 fi
+# WI-6554700010010503: admission is not a completion receipt. Interruptions,
+# failed rm wrappers and missing audit storage must never imply removal.
+if grep -Fq $'\tdecision=deleted\tpath='"$FREE"$'\t' "$PAPERCUSP_RELEASE_DELETION_AUDIT_PATH"; then
+  ok "successful deletion has a separate path-bound completion receipt"
+else
+  bad "successful deletion has no path-bound completion receipt"
+fi
+FAILED_REMOVE="$WORK/failed-remove-target"
+: > "$FAILED_REMOVE"
+if (rm() { return 47; }; release_artifacts_guarded_delete "$FAILED_REMOVE" >/dev/null 2>&1); then
+  bad "failed rm reported guarded deletion success"
+else
+  ok "failed rm returns a guarded deletion failure"
+fi
+if [[ -f "$FAILED_REMOVE" ]] &&
+   grep -Fq $'\tdecision=delete-failed\tpath='"$FAILED_REMOVE"$'\t' "$PAPERCUSP_RELEASE_DELETION_AUDIT_PATH" &&
+   ! grep -Fq $'\tdecision=deleted\tpath='"$FAILED_REMOVE"$'\t' "$PAPERCUSP_RELEASE_DELETION_AUDIT_PATH"; then
+  ok "failed rm preserves the target and records failure without a completion claim"
+else
+  bad "failed rm lost its target or emitted an incorrect completion receipt"
+fi
+NOOP_REMOVE="$WORK/noop-remove-target"
+: > "$NOOP_REMOVE"
+if (rm() { return 0; }; release_artifacts_guarded_delete "$NOOP_REMOVE" >/dev/null 2>&1); then
+  bad "successful rm status with a surviving path reported deletion success"
+else
+  ok "guard checks path disappearance independently of rm status"
+fi
+if grep -Fq $'\tdecision=delete-failed\tpath='"$NOOP_REMOVE"$'\t' "$PAPERCUSP_RELEASE_DELETION_AUDIT_PATH" &&
+   ! grep -Fq $'\tdecision=deleted\tpath='"$NOOP_REMOVE"$'\t' "$PAPERCUSP_RELEASE_DELETION_AUDIT_PATH"; then
+  ok "surviving path has a failure receipt and no completion claim"
+else
+  bad "surviving path emitted an incorrect completion receipt"
+fi
+UNAUDITED_REMOVE="$WORK/unaudited-remove-target"
+: > "$UNAUDITED_REMOVE"
+if (release_artifacts_deletion_audit() { return 1; }; release_artifacts_guarded_delete "$UNAUDITED_REMOVE" >/dev/null 2>&1); then
+  bad "guard allowed removal without a persisted admission audit"
+else
+  ok "missing admission audit fails closed"
+fi
+[[ -f "$UNAUDITED_REMOVE" ]] && ok "unaudited target remains intact" || bad "unaudited target was removed"
 # 1c) A cut must not be refused its OWN lease (EI-23946118243608426). The legs of one cut run
 # CONCURRENTLY against a shared target slot: the windows leg finished first, took a lease over
 # that slot, and the still-running linux sibling was then denied the stale-AppDir purge that

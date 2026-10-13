@@ -1362,11 +1362,11 @@ release_artifacts_deletion_audit() {
 }
 
 # release_artifacts_guarded_delete <path...> — delete only paths not covered
-# by an active retention lease. Every attempted deletion is audited, including
-# denied and missing paths. A denied path returns non-zero and is never handed
-# to rm; callers should propagate that failure rather than routing around it.
+# by an active retention lease. Admission and completion are separate audit
+# records: allow does not mean rm finished. A denied path or failed admission
+# audit is never handed to rm; callers must propagate the failure.
 release_artifacts_guarded_delete() {
-  local candidate matches status rc=0 own_lease matched_tag allow_reason
+  local candidate matches status rc=0 own_lease matched_tag allow_reason delete_status
   for candidate in "$@"; do
     [[ -n "$candidate" ]] || continue
     matches=""
@@ -1413,11 +1413,23 @@ release_artifacts_guarded_delete() {
         continue
       fi
     fi
-    release_artifacts_deletion_audit allow "$candidate" "$matches" "$allow_reason" || rc=1
+    if ! release_artifacts_deletion_audit allow "$candidate" "$matches" "$allow_reason"; then
+      echo "release-artifacts: refusing unaudited deletion of $candidate." >&2
+      rc=1
+      continue
+    fi
+    delete_status=0
     if [[ -d "$candidate" && ! -L "$candidate" ]]; then
-      rm -rf -- "$candidate" || rc=1
+      rm -rf -- "$candidate" || delete_status=$?
     else
-      rm -f -- "$candidate" || rc=1
+      rm -f -- "$candidate" || delete_status=$?
+    fi
+    if [[ "$delete_status" -eq 0 && ! -e "$candidate" && ! -L "$candidate" ]]; then
+      release_artifacts_deletion_audit deleted "$candidate" "$matches" "confirmed path absent" || rc=1
+    else
+      release_artifacts_deletion_audit delete-failed "$candidate" "$matches" "rm exit $delete_status; removal not confirmed" || true
+      echo "release-artifacts: removal not confirmed for $candidate (rm exit $delete_status)." >&2
+      rc=1
     fi
   done
   return "$rc"
