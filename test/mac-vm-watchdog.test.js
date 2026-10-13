@@ -639,6 +639,11 @@ write(runtime/'runtime-ready.json', {'ok':True,'osCompared':True,'sourceStarttim
     'files':{str(p):{'size':p.stat().st_size} for p in paths}})
 write(runtime/'boot-receipt.json', {'ok':True,'sourceStarttime':'initial'})
 before = {str(p):digest(p) for p in paths}
+procroot = root/'proc'; procroot.mkdir()
+if case == 'orphan':
+    orphan = procroot/'9999'; orphan.mkdir(); (orphan/'fd').mkdir()
+    (orphan/'comm').write_text('qemu-system-x86\n')
+    (orphan/'fd/17').symlink_to(paths[3])
 real_output = subprocess.check_output
 def output(args, **kwargs):
     if args[0] == 'systemctl':
@@ -648,8 +653,9 @@ def refused(fn):
     try: fn()
     except RuntimeError: return
     raise AssertionError('unsafe trial admitted: '+case)
-with patch.object(m.subprocess,'check_output',side_effect=output):
-    if case == 'live':
+with patch.object(m.subprocess,'check_output',side_effect=output), \
+     patch.object(m,'Path',side_effect=lambda p: procroot if str(p)=='/proc' else Path(p)):
+    if case in ('live', 'orphan'):
         refused(lambda:m.prepare_trial(backup,runtime,trial,'test.service'))
         assert not trial.exists()
     elif case == 'capacity':
@@ -692,7 +698,7 @@ assert (backup/'mac_hdd_ng.img.zst').read_bytes()==b'original retained archive'
 print(json.dumps({'ok':True,'case':case,'originalBytesUnchanged':True}))
 `;
 
-for (const scenario of ['preserved', 'live', 'capacity', 'source-change', 'trial-change',
+for (const scenario of ['preserved', 'live', 'orphan', 'capacity', 'source-change', 'trial-change',
   'bad-receipt', 'existing', 'booted-trial', 'wrong-backing']) {
   test('preserved Mac storage trial: ' + scenario, async () => {
     const dir = await tempDir();
