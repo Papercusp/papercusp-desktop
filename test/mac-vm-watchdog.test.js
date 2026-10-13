@@ -601,6 +601,114 @@ test('coldRestart refuses to start while the old qemu is still alive', async () 
   assert.ok(!typesOf(deps.calls).includes('systemctl:start'));
 });
 
+
+// Real qcow2 operations verify preservation and admission, without booting a VM.
+const storageTrialFixture = String.raw`
+import hashlib, importlib.util, json, subprocess, sys
+from pathlib import Path
+from unittest.mock import patch
+from types import SimpleNamespace
+
+spec = importlib.util.spec_from_file_location('launch', sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+root, case = Path(sys.argv[2]), sys.argv[3]
+backup, runtime, trial = root/'backup', root/'runtime', root/'trial'
+backup.mkdir(); runtime.mkdir(); (runtime/'OpenCore').mkdir()
+def run(*args): subprocess.run(args, check=True, stdout=subprocess.DEVNULL)
+def digest(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+def write(p, value): p.write_text(json.dumps(value))
+(backup/'mac_hdd_ng.img.zst').write_bytes(b'original retained archive')
+paths = [
+    runtime/'OVMF_CODE_4M.fd', runtime/'OVMF_VARS-1920x1080.fd',
+    runtime/'OpenCore/OpenCore.qcow2', runtime/'mac_hdd_ng.img',
+    backup/'builddata-20260820-160g.qcow2']
+for p in paths[:2]: p.write_bytes(b'firmware state')
+for p in paths[2:]: run('qemu-img','create','-f','qcow2',str(p),'8M')
+run('qemu-io','-f','qcow2','-c','write -P 0x35 0 4096',str(paths[3]))
+run('qemu-img','snapshot','-c','retained-rollback',str(paths[3]))
+run('qemu-io','-f','qcow2','-c','write -P 0x77 4096 4096',str(paths[3]))
+names = ['./OVMF_CODE_4M.fd','./OVMF_VARS-1920x1080.fd',
+         './OpenCore/OpenCore.qcow2','./mac_hdd_ng.img','./builddata-20260820-160g.qcow2']
+argv = ['qemu-private']
+for name in names: argv.extend(['-drive','file='+name+',format=qcow2'])
+argv.extend(['-qmp','old','-pidfile','old'])
+write(backup/'source.json', {'pid':4242,'starttime':'initial','argv':argv})
+write(backup/'preserved.json', {'ok':True,'sourcePid':4242,'sourceStarttime':'initial',
+    'osArchive':str(backup/'mac_hdd_ng.img.zst'),'buildData':str(paths[-1])})
+write(runtime/'runtime-ready.json', {'ok':True,'osCompared':True,'sourceStarttime':'initial',
+    'files':{str(p):{'size':p.stat().st_size} for p in paths}})
+write(runtime/'boot-receipt.json', {'ok':True,'sourceStarttime':'initial'})
+before = {str(p):digest(p) for p in paths}
+real_output = subprocess.check_output
+def output(args, **kwargs):
+    if args[0] == 'systemctl':
+        return 'MainPID=4242\nActiveState=active\n' if case == 'live' else 'MainPID=0\nActiveState=inactive\n'
+    return real_output(args, **kwargs)
+def refused(fn):
+    try: fn()
+    except RuntimeError: return
+    raise AssertionError('unsafe trial admitted: '+case)
+with patch.object(m.subprocess,'check_output',side_effect=output):
+    if case == 'live':
+        refused(lambda:m.prepare_trial(backup,runtime,trial,'test.service'))
+        assert not trial.exists()
+    elif case == 'capacity':
+        with patch.object(m.shutil,'disk_usage',return_value=SimpleNamespace(free=1)):
+            refused(lambda:m.prepare_trial(backup,runtime,trial,'test.service'))
+        assert not trial.exists()
+    else:
+        m.prepare_trial(backup,runtime,trial,'test.service')
+        source, files, selected, receipt_path = m.prepare(backup,runtime,trial)
+        assert len(files)==5 and receipt_path == trial/'boot-receipt.json'
+        assert all(p.parent==trial for p in files.values())
+        assert all(str(p) not in selected for p in paths)
+        assert any(str(trial/'mac_hdd_ng.img') in a for a in selected)
+        info=json.loads(real_output(['qemu-img','info','--output=json',str(paths[3])],text=True))
+        assert [s['name'] for s in info['snapshots']]==['retained-rollback']
+        receipt=trial/'storage-ready.json'
+        if case=='source-change':
+            paths[0].write_bytes(b'changed')
+            refused(lambda:m.prepare(backup,runtime,trial))
+            paths[0].write_bytes(b'firmware state')
+        elif case=='trial-change':
+            run('qemu-io','-f','qcow2','-c','write -P 0x55 8192 4096',str(trial/'mac_hdd_ng.img'))
+            refused(lambda:m.prepare(backup,runtime,trial))
+        elif case=='bad-receipt':
+            value=json.loads(receipt.read_text()); value['bootCompared']=False; write(receipt,value)
+            refused(lambda:m.prepare(backup,runtime,trial))
+        elif case=='existing':
+            refused(lambda:m.prepare_trial(backup,runtime,trial,'test.service'))
+        elif case=='booted-trial':
+            write(trial/'boot-receipt.json',{'storageReceiptSha256':digest(receipt)})
+            run('qemu-io','-f','qcow2','-c','write -P 0x55 8192 4096',str(trial/'mac_hdd_ng.img'))
+            m.prepare(backup,runtime,trial)
+        elif case=='wrong-backing':
+            run('qemu-img','rebase','-u','-f','qcow2','-F','qcow2','-b',str(paths[2]),
+                str(trial/'builddata-20260820-160g.qcow2'))
+            write(trial/'boot-receipt.json',{'storageReceiptSha256':digest(receipt)})
+            refused(lambda:m.prepare(backup,runtime,trial))
+assert all(digest(Path(p))==d for p,d in before.items())
+assert (backup/'mac_hdd_ng.img.zst').read_bytes()==b'original retained archive'
+print(json.dumps({'ok':True,'case':case,'originalBytesUnchanged':True}))
+`;
+
+for (const scenario of ['preserved', 'live', 'capacity', 'source-change', 'trial-change',
+  'bad-receipt', 'existing', 'booted-trial', 'wrong-backing']) {
+  test('preserved Mac storage trial: ' + scenario, async () => {
+    const dir = await tempDir();
+    const helper = new URL('../bin/mac-vm-launch.py', import.meta.url).pathname;
+    const result = await new Promise((resolve) => {
+      execFile('python3', ['-c', storageTrialFixture, helper, dir, scenario],
+        { timeout: 30_000 }, (error, stdout, stderr) => {
+          resolve({ code: error ? error.code : 0, stdout, stderr });
+        });
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout.trim().split('\n').at(-1)),
+      { ok: true, case: scenario, originalBytesUnchanged: true });
+  });
+}
+
 // Exercise the maintained recovery helper with real archive decoding and cmp,
 // while replacing systemd/QEMU so this regression never touches a host VM.
 const restoreFixture = String.raw`
