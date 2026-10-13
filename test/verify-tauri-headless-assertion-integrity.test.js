@@ -26,13 +26,17 @@ const devOperatorSource = fs.readFileSync(DEV_OPERATOR_SCRIPT, 'utf8');
 const dreamSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-dream-native.sh'), 'utf8');
 const voiceSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-voice-settings.sh'), 'utf8');
 
-function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false, claimSlot = false, handoff = false, peerReceipt = false, afterFreeGb = 12 }) {
+function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false, claimSlot = false, handoff = false, peerReceipt = false, afterFreeGb = 12, aggregate = false, sourceDevice = 101, bulkDevice = 101, bulkFreeGb = freeGb }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-native-capacity-'));
   const target = path.join(dir, 'cargo');
   const ledger = path.join(dir, 'reservations');
   const dfCalls = path.join(dir, 'df-calls');
+  const sourceParent = path.join(dir, 'source');
+  const work = path.join(dir, 'work');
   try {
     fs.mkdirSync(warm ? path.join(target, 'debug', 'deps') : target, { recursive: true });
+    fs.mkdirSync(sourceParent);
+    fs.mkdirSync(work);
     const bin = path.join(dir, 'bin');
     fs.mkdirSync(bin);
     fs.writeFileSync(path.join(bin, 'cargo'), '#!/usr/bin/env node\n' +
@@ -41,17 +45,32 @@ function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false
     fs.writeFileSync(path.join(bin, 'df'), '#!/usr/bin/env bash\n' +
       'printf "measured\\n" >> "$NATIVE_FIXTURE_DF_CALLS"\n' +
       `available=${freeGb * 1024 * 1024}\n` +
+      `[ "\${@: -1}" != "$NATIVE_FIXTURE_WORK" ] || available=${bulkFreeGb * 1024 * 1024}\n` +
       `[ "\${NATIVE_FIXTURE_AFTER_PREPARE:-0}" != 1 ] || available=${afterFreeGb * 1024 * 1024}\n` +
       'printf "Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 209715200 0 %s 0%% /fixture\\n" "$available"\n',
     { mode: 0o755 });
     fs.writeFileSync(path.join(bin, 'tauri'), '#!/usr/bin/env bash\nprintf "CLI_STARTED\\n"\n', { mode: 0o755 });
+    if (aggregate) fs.writeFileSync(path.join(bin, 'stat'), '#!/usr/bin/env bash\n' +
+      'case "${@: -1}" in\n' +
+      `  "$NATIVE_FIXTURE_SOURCE") printf '${sourceDevice}\\n' ;;\n` +
+      `  "$NATIVE_FIXTURE_WORK") printf '${bulkDevice}\\n' ;;\n` +
+      "  *) printf '101\\n' ;;\nesac\n", { mode: 0o755 });
     const preflight = source.match(/^preflight_native_cargo\(\) \{[\s\S]*?^\}/m)?.[0];
     assert.ok(preflight, 'the maintained native preflight must be executable');
     const result = spawnSync('bash', ['-c', preflight + '\n' +
+      maintainedShellFunction('release_verifier_disk_reservations') + '\n' +
+      maintainedShellFunction('reserve_verifier_disk') + '\n' +
       'trap \'papercusp_release_disk_reservation; [ -z "${peer:-}" ] || kill "$peer" 2>/dev/null\' EXIT\n' +
       'preflight_native_cargo || exit $?\n' +
       'printf "PREPARATION_STARTED target=%s\\n" "$CARGO_TARGET_DIR"\n' +
       'if [ -n "${NATIVE_CARGO_DISK_RESERVATION_FILE:-}" ] && [ -f "$NATIVE_CARGO_DISK_RESERVATION_FILE" ]; then echo RESERVATION_HELD; fi\n' +
+      (aggregate ? 'VERIFIER_DISK_RESERVATIONS=("$NATIVE_CARGO_DISK_RESERVATION_FILE")\n' +
+        'trap \'release_verifier_disk_reservations\' EXIT\n' +
+        'initial_receipt="$NATIVE_CARGO_DISK_RESERVATION_FILE"\n' +
+        'reserve_verifier_disk 1024 || exit $?\n' +
+        '[ "$initial_receipt" = "$NATIVE_CARGO_DISK_RESERVATION_FILE" ] || exit 99\n' +
+        'for receipt in "${VERIFIER_DISK_RESERVATIONS[@]}"; do printf "BUDGET %s\\n" "$(sed -n s/^gb=//p "$receipt")"; done\n' +
+        'printf "SOURCE_EXPORT_STARTED\\n"\n' : '') +
       (peerReceipt ? 'sleep 30 & peer=$!\n' +
         'sed "/^pid=/d; /^start=/d" "$NATIVE_CARGO_DISK_RESERVATION_FILE" > "$NATIVE_CARGO_DISK_RESERVATION_FILE.tmp"\n' +
         'printf "pid=%s\\nstart=%s\\n" "$peer" "$(papercusp_proc_starttime "$peer")" >> "$NATIVE_CARGO_DISK_RESERVATION_FILE.tmp"\n' +
@@ -63,7 +82,10 @@ function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false
       env: { ...process.env, HOME: dir, DESKTOP_DIR: path.resolve(__dirname, '..'),
         CARGO_TARGET_DIR: claimSlot ? '' : target, PREPARE_ONLY: prepareOnly ? '1' : '0',
         PATH: `${bin}:${process.env.PATH}`, PAPERCUSP_DISK_RESERVATION_DIR: ledger,
-        NATIVE_FIXTURE_DF_CALLS: dfCalls, NATIVE_FIXTURE_TARGET: target },
+        NATIVE_FIXTURE_DF_CALLS: dfCalls, NATIVE_FIXTURE_TARGET: target,
+        NATIVE_FIXTURE_SOURCE: sourceParent, NATIVE_FIXTURE_WORK: work,
+        OPERATOR_SNAPSHOT_PARENT: sourceParent, WORK: work, REPO_DIR: dir,
+        VERIFY_TAURI_DEPENDENCY_SNAPSHOT_MODE: 'hardlink', VERIFY_TAURI_ISOLATED_DB: '1' },
     });
     const claims = fs.existsSync(ledger) ? fs.readdirSync(ledger)
       .flatMap(mount => fs.readdirSync(path.join(ledger, mount))) : [];
@@ -209,6 +231,91 @@ test('native boot refuses physical disk exhaustion despite its retained Cargo re
   assert.doesNotMatch(result.stderr, /adopted/);
   assert.match(result.stderr, /insufficient disk for native dev Cargo build/);
   assert.deepEqual(result.claims, [], 'the refused descendant and preparation owner release their receipt');
+});
+
+test('combined native admission refuses the full budget before source export and releases its Cargo claim', () => {
+  // Warm Cargo alone fits in 22 GiB. Its 12 GiB plus measured source (2),
+  // profile (1) and isolated PG (8) do not. Never spend on source export.
+  const result = nativeCargoPreflightFixture({ freeGb: 22, warm: true, aggregate: true });
+  assert.equal(result.status, 28, result.stderr);
+  assert.match(result.stdout, /RESERVATION_HELD/);
+  assert.match(result.stderr, /need ~23GB/);
+  assert.doesNotMatch(result.stdout, /SOURCE_EXPORT_STARTED/);
+  assert.deepEqual(result.claims, []);
+});
+
+test('combined admission groups each physical device and retains the same Cargo receipt through boot', () => {
+  for (const [sourceDevice, bulkDevice, budgets] of [
+    [101, 101, [23]], [101, 102, [9, 14]], [102, 101, [2, 21]], [102, 103, [2, 9, 12]],
+  ]) {
+    const result = nativeCargoPreflightFixture({ freeGb: 100, warm: true,
+      aggregate: true, handoff: true, sourceDevice, bulkDevice });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /SOURCE_EXPORT_STARTED/);
+    const actual = [...result.stdout.matchAll(/^BUDGET (\d+)$/gm)].map(m => Number(m[1])).sort((a, b) => a - b);
+    assert.deepEqual(actual, budgets);
+    assert.match(result.stderr, /adopted \d+GB ancestor reservation/);
+    assert.match(result.stdout, /CLI_STARTED/);
+    assert.deepEqual(result.claims, [], 'every device receipt is released on exit');
+  }
+});
+
+test('a shortage on a later preparation device releases earlier admitted device receipts', () => {
+  const result = nativeCargoPreflightFixture({ freeGb: 100, warm: true,
+    aggregate: true, sourceDevice: 102, bulkDevice: 103, bulkFreeGb: 8 });
+  assert.equal(result.status, 28, result.stderr);
+  assert.match(result.stderr, /need ~9GB/);
+  assert.doesNotMatch(result.stdout, /SOURCE_EXPORT_STARTED/);
+  assert.deepEqual(result.claims, []);
+});
+
+test('atomic owned-reservation growth cannot overcommit competing preparation budgets', { timeout: 20_000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-reservation-growth-'));
+  const helper = path.resolve(__dirname, '../bin/lib/disk-preflight.sh');
+  const children = [];
+  try {
+    const script = 'set -u\n. "$1"\npapercusp_free_gb() { printf 20; }\n' +
+      'papercusp_require_disk_reservation "$2" 5 native || exit $?\n' +
+      'receipt="$PAPERCUSP_DISK_RESERVATION_FILE"\ntouch "$2/ready-$3"\n' +
+      'while [ ! -f "$2/go" ]; do sleep 0.02; done\n' +
+      'status=0\npapercusp_require_disk_reservation "$2" 12 native "$receipt" || status=$?\n' +
+      'printf "%s" "$status" > "$2/result-$3"\n' +
+      'while [ ! -f "$2/done" ]; do sleep 0.02; done\n' +
+      'PAPERCUSP_DISK_RESERVATION_FILE="$receipt" papercusp_release_disk_reservation\nexit "$status"\n';
+    for (const actor of ['a', 'b']) {
+      const child = spawn('bash', ['-c', script, 'fixture', helper, root, actor], {
+        env: { ...process.env, PAPERCUSP_DISK_RESERVATION_DIR: path.join(root, 'ledger') },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stderr = '';
+      child.stderr.on('data', data => { stderr += data; });
+      child.stdout.resume();
+      children.push({ child, finished: new Promise(resolve => child.once('close', code => resolve({ code, stderr }))) });
+    }
+    const waitFor = async prefix => {
+      const deadline = Date.now() + 10_000;
+      while (!['a', 'b'].every(actor => fs.existsSync(path.join(root, `${prefix}-${actor}`)))) {
+        assert.ok(Date.now() < deadline, `competing owners never reached ${prefix}`);
+        await delay(20);
+      }
+    };
+    await waitFor('ready');
+    fs.writeFileSync(path.join(root, 'go'), '');
+    await waitFor('result');
+    const verdicts = ['a', 'b'].map(actor => Number(fs.readFileSync(path.join(root, `result-${actor}`), 'utf8'))).sort((a, b) => a - b);
+    assert.deepEqual(verdicts, [0, 28]);
+    const ledger = path.join(root, 'ledger');
+    const budgets = fs.readdirSync(ledger).flatMap(key => fs.readdirSync(path.join(ledger, key))
+      .filter(name => name.endsWith('.res')).map(name => Number(fs.readFileSync(path.join(ledger, key, name), 'utf8').match(/^gb=(\d+)$/m)[1])));
+    assert.deepEqual(budgets.sort((a, b) => a - b), [5, 12], 'loser keeps its original claim until explicit cleanup');
+    fs.writeFileSync(path.join(root, 'done'), '');
+    const results = await Promise.all(children.map(c => c.finished));
+    assert.deepEqual(results.map(r => r.code).sort((a, b) => a - b), [0, 28]);
+  } finally {
+    for (const { child } of children) if (child.exitCode === null) child.kill('SIGTERM');
+    await Promise.all(children.map(c => c.finished));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('native admission precedes costly preparation and pins its maintained helpers', () => {

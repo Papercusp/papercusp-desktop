@@ -237,7 +237,7 @@ papercusp_require_disk_reservation() {
   case "$ttl" in ''|*[!0-9]*) return 28 ;; esac
   [ "$need" -gt 0 ] && [ "$ttl" -gt 0 ] || return 28
   PAPERCUSP_DISK_RESERVATION_FILE=""
-  papercusp_require_free_gb "$dir" "$need" "$label" || return $?
+  papercusp_require_free_gb "$dir" "$need" "$label" "${4:-}" || return $?
   file="${PAPERCUSP_DISK_RESERVATION_FILE:-}"
   start="$(papercusp_proc_starttime "$$")"
   now="$(date +%s)"
@@ -306,7 +306,7 @@ papercusp_require_free_gb() {
 
   # Check-and-reserve under one mutex, so two callers cannot both pass on the same
   # bytes. Any ledger failure degrades to the measure-only check below.
-  local key ldir reserved effective ttl now resfile
+  local key ldir reserved effective ttl now resfile own_claim=0
   key="$(papercusp_mount_key "$dir")"
   ldir=""
   if [ -n "$key" ]; then
@@ -316,6 +316,24 @@ papercusp_require_free_gb() {
   if [ -n "$ldir" ] && papercusp_ledger_lock "$ldir"; then
     reserved="$(papercusp_reserved_gb "$ldir" "$dir")"
     [ -n "$reserved" ] || reserved=0
+    # The owning verifier can grow its Cargo receipt to cover preparation on
+    # this same device. Validate again under the mutex; descendants and peers
+    # may adopt a sufficient ancestor receipt, but cannot resize it. Credit
+    # only this exact live claim, then replace it without a release/reclaim gap.
+    resfile=""
+    if [ -n "$inherited" ] && [ -f "$inherited" ] &&
+       [ "$(dirname "$inherited")" = "$ldir" ] &&
+       [ "$(sed -n 's/^pid=//p' "$inherited")" = "$$" ] &&
+       [ "$(sed -n 's/^start=//p' "$inherited")" = "$(papercusp_proc_starttime "$$")" ] &&
+       [ "$(sed -n 's/^label=//p' "$inherited")" = "$label" ]; then
+      claimed="$(sed -n 's/^gb=//p' "$inherited")"
+      case "$claimed" in ''|*[!0-9]*) claimed=0 ;; esac
+      if [ "$claimed" -gt 0 ] && [ "$claimed" -lt "$need_gb" ]; then
+        own_claim="$claimed"
+        resfile="$inherited"
+        reserved=$((reserved - own_claim))
+      fi
+    fi
     effective=$((free_gb - reserved))
     [ "$effective" -lt 0 ] && effective=0
     if [ "$effective" -lt "$need_gb" ]; then
@@ -331,14 +349,21 @@ papercusp_require_free_gb() {
     now="$(date +%s)"
     # $RANDOM, not date +%s%N: darwin's date has no %N and prints a literal "N"
     # rather than failing, so the fallback would never fire and names would collide.
-    resfile="$ldir/$$.${RANDOM}${RANDOM}.res"
-    {
+    [ -n "$resfile" ] || resfile="$ldir/$$.${RANDOM}${RANDOM}.res"
+    if {
       printf 'pid=%s\n' "$$"
       printf 'start=%s\n' "$(papercusp_proc_starttime "$$")"
       printf 'gb=%s\n' "$need_gb"
       printf 'expires=%s\n' "$((now + ttl))"
       printf 'label=%s\n' "$label"
-    } > "$resfile.tmp" 2>/dev/null && mv -f "$resfile.tmp" "$resfile" 2>/dev/null || true
+    } > "$resfile.tmp" 2>/dev/null && mv -f "$resfile.tmp" "$resfile" 2>/dev/null; then
+      :
+    elif [ "$own_claim" -gt 0 ]; then
+      rm -f "$resfile.tmp" 2>/dev/null || true
+      papercusp_ledger_unlock "$ldir"
+      echo "ERROR: could not grow the owned disk reservation for $label" >&2
+      return 28
+    fi
     PAPERCUSP_DISK_RESERVATION_FILE="$resfile"
     papercusp_ledger_unlock "$ldir"
     if [ "$reserved" -gt 0 ]; then
