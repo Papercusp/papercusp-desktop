@@ -343,7 +343,10 @@ try {
 NODE
 }
 echo "[3/7] ELF linkage closure (bundle libs + base allowlist only)"
-if [[ "$OS" == "Linux" ]]; then
+# Gate on the TARGET OS, not the build host: a Linux-hosted darwin/windows
+# cross build ships non-ELF payloads, so an ELF closure over them is wrong
+# (WI-6554700010009823; the [5/7] darwin check below already gates on target).
+if [[ "$TARGET_OS_N" == "linux" ]]; then
   if ! command -v objdump >/dev/null 2>&1; then
     fail "objdump not on build host — cannot verify linkage (apt install binutils)"
   else
@@ -417,7 +420,7 @@ if [[ "$OS" == "Linux" ]]; then
     [[ "$bad" == 0 ]] && ok "all $scanned bundled ELFs close over bundle libs + base allowlist"
   fi
 else
-  echo "  (skipped — not Linux)"
+  echo "  (skipped — target is not linux)"
 fi
 
 # ── [4] macOS: brew-keg absolute install-names ──────────────────────────────
