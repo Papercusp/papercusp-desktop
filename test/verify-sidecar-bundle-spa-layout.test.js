@@ -90,7 +90,7 @@ function runLinkageCheck(arch, needed, bundled = [], extra = []) {
       'fail() { printf "%s\\n" "$*"; FAIL=1; }; ok() { printf "%s\\n" "$*"; };\n' +
       'objdump() { printf "%s\\n" "$FIXTURE_NEEDED"; };\n' +
       IS_ELF + '\n' + CHECK_LINKAGE + '\nexit "$FAIL"'], {
-      encoding: 'utf8', env: { ...process.env, OS: 'Linux', BIN: bin, SIDECAR: dir,
+      encoding: 'utf8', env: { ...process.env, OS: 'Linux', TARGET_OS_N: 'linux', BIN: bin, SIDECAR: dir,
         TARGET_ARCH_N: arch, _elf_inventory_tool: INVENTORY_HELPER,
         FIXTURE_NEEDED: needed.map(name => 'NEEDED ' + name).join('\n') },
     });
@@ -182,7 +182,7 @@ function runAddonLinkageCheck({ bundled = false, runpath = '' } = {}) {
       'if [[ -n "$FIXTURE_RUNPATH" ]]; then printf "RUNPATH %s\\n" "$FIXTURE_RUNPATH"; fi ;; ' +
       '*) printf "NEEDED libc.so.6\\n" ;; esac; };\n' +
       IS_ELF + '\n' + CHECK_LINKAGE + '\nexit "$FAIL"'], {
-      encoding: 'utf8', env: { ...process.env, OS: 'Linux', BIN: bin, SIDECAR: dir,
+      encoding: 'utf8', env: { ...process.env, OS: 'Linux', TARGET_OS_N: 'linux', BIN: bin, SIDECAR: dir,
         TARGET_ARCH_N: 'arm64', _elf_inventory_tool: INVENTORY_HELPER, FIXTURE_RUNPATH: runpath },
     });
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
