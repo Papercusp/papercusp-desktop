@@ -5,6 +5,27 @@ set -eu
 # artifact push) and by bin/smoke-target-preflight.sh (before a long release
 # build). ONE source so the two can never disagree about what "a usable native
 # macOS upgrade target" means (WI-10004346).
+# The native Server stores PGDATA beside the workspace registry, not in
+# /Applications. Follow existing symlinks with df on the nearest existing
+# ancestor; free app-staging space says nothing about a separate data volume.
+# Require one GiB of runtime headroom before replacing a healthy old runtime.
+runtime_data="${PAPERCUSP_WORKSPACES_ROOT:-$HOME/.papercusp-workspaces}/.shared/embedded-pg-data"
+runtime_ancestor="$runtime_data"
+while [ ! -d "$runtime_ancestor" ]; do
+  runtime_parent="$(dirname "$runtime_ancestor")"
+  [ "$runtime_parent" != "$runtime_ancestor" ] || break
+  runtime_ancestor="$runtime_parent"
+done
+runtime_free="$(df -Pk "$runtime_ancestor" 2>/dev/null | awk 'NR==2 {print $4}')"
+case "$runtime_free" in
+  ''|*[!0-9]*)
+    echo "macOS native preflight: cannot measure PostgreSQL data-volume capacity at $runtime_data" >&2
+    exit 2 ;;
+esac
+if [ "$runtime_free" -lt 1048576 ]; then
+  echo "macOS native preflight: PostgreSQL data volume at $runtime_data has ${runtime_free} KiB free; requires 1048576 KiB before native upgrade" >&2
+  exit 2
+fi
 console_user="$(stat -f %Su /dev/console)"
 login_user="$(id -un)"
 login_uid="$(id -u)"

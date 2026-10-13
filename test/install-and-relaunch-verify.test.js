@@ -739,6 +739,7 @@ test('macOS native preflight executes console/domain/supervisor/single-instance 
   const command = [null, readFileSync(join(__dirname, '..', 'bin', 'lib', 'mac-native-preflight.sh'), 'utf8')];
   const root = mkdtempSync(join(tmpdir(), 'native-mac-preflight-'));
   try {
+    executable(root, 'df', '#!/bin/sh\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 2000000 0 2000000 0%% /fixture\\n"\n');
     executable(root, 'stat', '#!/bin/sh\nprintf "%s\\n" "$TEST_CONSOLE"\n');
     executable(root, 'id', '#!/bin/sh\ncase "$1" in -un) echo fixture ;; -u) echo 501 ;; *) exit 99 ;; esac\n');
     executable(root, 'ps', `#!/bin/sh
