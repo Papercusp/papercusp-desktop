@@ -42,12 +42,14 @@ function git(root, args) {
 // target cannot inherit the current producer's .gitignore; adjacent retention
 // would make the next source-clean preflight fail. Reuse one output-specific
 // namespace in the existing private stage mechanism, never a source exemption.
+function failedStagesParent(env = process.env) {
+  return path.resolve(env.XDG_STATE_HOME || path.join(env.HOME || os.homedir(), '.local', 'state'),
+    'papercusp', 'sidecar-failed-stages');
+}
+
 function failureEvidenceRoot(finalDir, env = process.env) {
   const key = crypto.createHash('sha256').update(path.resolve(finalDir)).digest('hex').slice(0, 24);
-  return path.resolve(env.PAPERCUSP_SIDECAR_FAILED_STAGE_ROOT || path.join(
-    env.XDG_STATE_HOME || path.join(env.HOME || os.homedir(), '.local', 'state'),
-    'papercusp', 'sidecar-failed-stages', key,
-  ));
+  return path.resolve(env.PAPERCUSP_SIDECAR_FAILED_STAGE_ROOT || path.join(failedStagesParent(env), key));
 }
 
 function streamGitOutput(root, args, digest) {
@@ -318,8 +320,213 @@ function validateResume(stage, expected) {
   return receipt;
 }
 
-module.exports = { captureIdentity, captureSpa, captureSpaFromSource, copySpa, failureEvidenceRoot,
-  inventory, portableSpaInventory, recordFailure, sourceState, spaBinding, validateResume, validateSpa, writeJson };
+// WI-6554700010010442 / plan disk-headroom-standing-reclaim-2026-10-12#D-005.
+// The failure bank used to keep every failed stage (5-9 GB each) forever. A
+// stage is reusable only by PAPERCUSP_SIDECAR_RESUME_FROM, only from phase
+// 'assembled', and only when its identity equals the next build's exactly, so
+// anything but the newest failure of an output is dead weight. Retention is a
+// policy enforced by the writer on every build, never a low-disk reaction:
+//   - an output's group keeps at most its NEWEST entry, and only while that
+//     entry is a resumable stage younger than the TTL (default 24h);
+//   - a successful build clears its output's group entirely;
+//   - orphan receipts and receipt-less stages are deleted;
+//   - a protected path (the RESUME_FROM target) is never deleted;
+//   - a group whose builder does not hold the lock is touched only outside a
+//     grace window (default 60 min), so a concurrent writer is never raced.
+const FAILED_STAGE_ENTRY = /^(.+)\.failed-stage\.([0-9]+(?:\.[0-9]+)?)(\.resume\.json)?$/;
+const FAILED_STAGE_KEY_DIR = /^[0-9a-f]{24}$/;
+
+function lstatOrNull(file) {
+  try { return fs.lstatSync(file); } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function readdirOrEmpty(dir) {
+  try { return fs.readdirSync(dir).sort(); } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+// Disk blocks, each inode counted once, never following a symlink.
+function diskBytes(target) {
+  const seen = new Set();
+  let total = 0;
+  const walk = file => {
+    const stat = lstatOrNull(file);
+    if (!stat) return;
+    const id = `${stat.dev}:${stat.ino}`;
+    if (!seen.has(id)) {
+      seen.add(id);
+      total += stat.blocks * 512;
+    }
+    if (stat.isDirectory()) for (const name of readdirOrEmpty(file)) walk(path.join(file, name));
+  };
+  walk(target);
+  return total;
+}
+
+function isResumableReceipt(receipt) {
+  return Boolean(receipt) && receipt.schemaVersion === 1 && receipt.accepted === false
+    && receipt.status === 'failed' && receipt.phase === 'assembled' && receipt.resumable === true;
+}
+
+function failedStageGroups(keyDir) {
+  const groups = new Map();
+  for (const name of readdirOrEmpty(keyDir)) {
+    const match = FAILED_STAGE_ENTRY.exec(name);
+    if (!match) continue;
+    const [, output, suffix, receiptExtension] = match;
+    if (!groups.has(output)) groups.set(output, new Map());
+    const group = groups.get(output);
+    const stage = path.join(keyDir, `${output}.failed-stage.${suffix}`);
+    if (!group.has(suffix)) group.set(suffix, { output, suffix, stage, receipt: `${stage}.resume.json` });
+    group.get(suffix)[receiptExtension ? 'hasReceipt' : 'hasStage'] = true;
+  }
+  const result = new Map();
+  for (const [output, group] of groups) {
+    const entries = [];
+    for (const entry of group.values()) {
+      const stageStat = entry.hasStage ? lstatOrNull(entry.stage) : null;
+      const receiptStat = entry.hasReceipt ? lstatOrNull(entry.receipt) : null;
+      if (!stageStat && !receiptStat) continue;
+      let receipt = null;
+      if (receiptStat?.isFile()) {
+        try { receipt = JSON.parse(fs.readFileSync(entry.receipt, 'utf8')); } catch { receipt = null; }
+      }
+      entries.push({
+        ...entry, hasStage: Boolean(stageStat), hasReceipt: Boolean(receiptStat),
+        // The receipt is written last, atomically, so its mtime is the failure
+        // time. A receipt-less stage is dated by when it entered the bank
+        // (rename sets ctime; a cross-device mv creates a new inode).
+        time: receiptStat ? receiptStat.mtimeMs : Math.max(stageStat.mtimeMs, stageStat.ctimeMs),
+        resumable: Boolean(stageStat?.isDirectory()) && isResumableReceipt(receipt),
+      });
+    }
+    entries.sort((a, b) => b.time - a.time || b.suffix.localeCompare(a.suffix, 'en', { numeric: true }));
+    result.set(output, entries);
+  }
+  return result;
+}
+
+function nonNegativeNumber(value, name) {
+  const number = Number(value);
+  if (value === '' || value === null || !Number.isFinite(number) || number < 0)
+    throw new Error(`${name} must be a non-negative number`);
+  return number;
+}
+
+function planFailedStagePrune(keyDir, { now, ttlMs, graceMs, protect, ownedOutput, clear }) {
+  const decisions = [];
+  for (const [output, entries] of failedStageGroups(keyDir)) {
+    const owned = ownedOutput === output;
+    const newest = entries[0];
+    const keeper = !(owned && clear) && newest?.resumable && now - newest.time < ttlMs ? newest : null;
+    for (const entry of entries) {
+      const age = now - entry.time;
+      const paths = [entry.hasStage && entry.stage, entry.hasReceipt && entry.receipt].filter(Boolean);
+      let action = 'delete';
+      let reason;
+      if (protect.has(entry.stage) || protect.has(entry.receipt)) [action, reason] = ['keep', 'protected'];
+      else if (entry === keeper) [action, reason] = ['keep', 'newest-resumable'];
+      else if (!owned && age < graceMs) [action, reason] = ['keep', 'within-grace'];
+      else if (owned && clear) reason = 'output-built-successfully';
+      else if (!entry.hasStage) reason = 'orphan-receipt';
+      else if (!entry.hasReceipt) reason = 'no-receipt';
+      else if (age >= ttlMs) reason = 'expired';
+      else if (!entry.resumable) reason = 'not-resumable';
+      else reason = 'superseded';
+      decisions.push({ action, reason, output, keyDir, paths, ageHours: Math.round(age / 36e3) / 100 });
+    }
+  }
+  return decisions;
+}
+
+function pruneFailedStages(options = {}, env = process.env) {
+  const now = options.now ?? Date.now();
+  const ttlMs = nonNegativeNumber(options.ttlHours ?? (env.PAPERCUSP_SIDECAR_FAILED_STAGE_TTL_HOURS || 24),
+    'PAPERCUSP_SIDECAR_FAILED_STAGE_TTL_HOURS') * 3600e3;
+  const graceMs = nonNegativeNumber(options.graceMinutes ?? (env.PAPERCUSP_SIDECAR_FAILED_STAGE_GRACE_MINUTES || 60),
+    'PAPERCUSP_SIDECAR_FAILED_STAGE_GRACE_MINUTES') * 60e3;
+  if (Boolean(options.keyDir) !== Boolean(options.output))
+    throw new Error('prune --key-dir and --output name the locked output together');
+  if (options.clear && !options.keyDir) throw new Error('prune --clear requires --key-dir and --output');
+  if (!options.keyDir && !options.all) throw new Error('prune requires --all or --key-dir with --output');
+  const protect = new Set();
+  for (const file of options.protect || []) {
+    if (!file) continue;
+    protect.add(path.resolve(file));
+    protect.add(`${path.resolve(file)}.resume.json`);
+  }
+  const parent = path.resolve(options.parent ?? failedStagesParent(env));
+  const lockedKeyDir = options.keyDir ? path.resolve(options.keyDir) : null;
+  const keyDirs = [];
+  if (lockedKeyDir) keyDirs.push(lockedKeyDir);
+  if (options.all) {
+    for (const name of readdirOrEmpty(parent)) {
+      const keyDir = path.join(parent, name);
+      if (FAILED_STAGE_KEY_DIR.test(name) && keyDir !== lockedKeyDir && lstatOrNull(keyDir)?.isDirectory())
+        keyDirs.push(keyDir);
+    }
+  }
+  const receipt = { schemaVersion: 1, kind: 'sidecar-failed-stage-prune', at: new Date(now).toISOString(),
+    dryRun: Boolean(options.dryRun), ttlHours: ttlMs / 3600e3, graceMinutes: graceMs / 60e3,
+    deleted: [], kept: [], errors: [], freedBytes: 0 };
+  for (const keyDir of keyDirs) {
+    const ownedOutput = keyDir === lockedKeyDir ? path.basename(path.resolve(options.output)) : null;
+    for (const decision of planFailedStagePrune(keyDir, { now, ttlMs, graceMs, protect, ownedOutput, clear: options.clear })) {
+      if (decision.action === 'keep') {
+        receipt.kept.push({ paths: decision.paths, reason: decision.reason, ageHours: decision.ageHours });
+        continue;
+      }
+      // The receipt goes first: a half-deleted stage must never look resumable.
+      for (const file of [...decision.paths].reverse()) {
+        try {
+          const bytes = diskBytes(file);
+          if (!options.dryRun) fs.rmSync(file, { recursive: true, force: true });
+          receipt.deleted.push({ path: file, reason: decision.reason, ageHours: decision.ageHours, diskBytes: bytes });
+          receipt.freedBytes += bytes;
+        } catch (error) {
+          receipt.errors.push({ path: file, error: error.message });
+        }
+      }
+    }
+  }
+  if (options.all && !options.dryRun && lstatOrNull(parent)?.isDirectory()) {
+    try { writeJson(path.join(parent, 'last-prune.json'), receipt); } catch (error) {
+      receipt.errors.push({ path: path.join(parent, 'last-prune.json'), error: error.message });
+    }
+  }
+  return receipt;
+}
+
+function parsePruneArgs(argv) {
+  const options = { protect: [] };
+  for (let index = 0; index < argv.length; index++) {
+    const flag = argv[index];
+    const value = () => {
+      if (index + 1 >= argv.length) throw new Error(`prune ${flag} requires a value`);
+      return argv[++index];
+    };
+    if (flag === '--all') options.all = true;
+    else if (flag === '--clear') options.clear = true;
+    else if (flag === '--dry-run') options.dryRun = true;
+    else if (flag === '--key-dir') options.keyDir = value();
+    else if (flag === '--output') options.output = value();
+    else if (flag === '--protect') options.protect.push(value());
+    else if (flag === '--parent') options.parent = value();
+    else if (flag === '--ttl-hours') options.ttlHours = value();
+    else if (flag === '--grace-minutes') options.graceMinutes = value();
+    else throw new Error(`prune: unknown argument ${flag}`);
+  }
+  return options;
+}
+
+module.exports = { captureIdentity, captureSpa, captureSpaFromSource, copySpa, failedStagesParent,
+  failureEvidenceRoot, inventory, parsePruneArgs, portableSpaInventory, pruneFailedStages, recordFailure,
+  sourceState, spaBinding, validateResume, validateSpa, writeJson };
 
 if (require.main === module) {
   try {
@@ -350,7 +557,14 @@ if (require.main === module) {
       recordFailure(file, JSON.parse(fs.readFileSync(args[0], 'utf8')), args[1], Number(args[2]));
     } else if (command === 'validate') {
       validateResume(file, JSON.parse(fs.readFileSync(args[0], 'utf8')));
-    } else throw new Error('expected capture, retain or validate');
+    } else if (command === 'prune') {
+      const receipt = pruneFailedStages(parsePruneArgs(process.argv.slice(3)));
+      const gib = (receipt.freedBytes / 2 ** 30).toFixed(2);
+      process.stdout.write(`→ failed sidecar stages: ${receipt.dryRun ? 'would delete' : 'deleted'} `
+        + `${receipt.deleted.length} path(s), ${gib} GiB; kept ${receipt.kept.length}; errors ${receipt.errors.length}\n`);
+      process.stdout.write(`SIDECAR_FAILED_STAGE_PRUNE ${JSON.stringify(receipt)}\n`);
+      if (receipt.errors.length) process.exitCode = 1;
+    } else throw new Error('expected capture, retain, validate or prune');
   } catch (error) {
     console.error(`FATAL: sidecar stage: ${error.message}`);
     process.exitCode = 1;

@@ -967,6 +967,13 @@ __pc_finish_sidecar_build() {
     fi
   else
     rm -rf "$SIDECAR_TMP_DIR" ${OLD_DIR:+"$OLD_DIR"}
+    # An accepted output makes every retained failure of it obsolete
+    # (WI-6554700010010442). The build lock is still held here.
+    if [[ -n "${SIDECAR_FAILED_STAGE_ROOT:-}" ]]; then
+      node "$HERE/lib/sidecar-stage-state.js" prune --clear \
+        --key-dir "$SIDECAR_FAILED_STAGE_ROOT" --output "$SIDECAR_FINAL_DIR" \
+        || echo "WARN: could not clear failed sidecar stages after a successful build" >&2
+    fi
   fi
   rm -rf ${SIDECAR_BUILD_LOCKDIR:+"$SIDECAR_BUILD_LOCKDIR"} ${SIDECAR_PUBLISH_LOCKDIR:+"$SIDECAR_PUBLISH_LOCKDIR"}
   [[ -z "${_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST:-}" ]] || rm -f "$_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST"
@@ -977,6 +984,18 @@ __pc_finish_sidecar_build() {
 # Store only the number, never BASH_COMMAND (which can contain credentials).
 trap '_sidecar_failure_line=$LINENO' ERR
 trap '__pc_finish_sidecar_build "$?" "${_sidecar_failure_line:-unknown}"' EXIT
+
+# WI-6554700010010442 / plan disk-headroom-standing-reclaim-2026-10-12#D-005:
+# the failed-stage bank is bounded by policy on every build, never by free
+# space. Holding this output's build lock, keep at most its newest resumable
+# stage (younger than PAPERCUSP_SIDECAR_FAILED_STAGE_TTL_HOURS, default 24) and
+# never the PAPERCUSP_SIDECAR_RESUME_FROM target. Other outputs' expired or
+# superseded stages are swept too, outside a grace window for live builders.
+# Kept outside the build-lock block that lock tests execute in isolation.
+node "$HERE/lib/sidecar-stage-state.js" prune --all \
+  --key-dir "$SIDECAR_FAILED_STAGE_ROOT" --output "$SIDECAR_FINAL_DIR" \
+  ${PAPERCUSP_SIDECAR_RESUME_FROM:+--protect "$PAPERCUSP_SIDECAR_RESUME_FROM"} \
+  || echo "WARN: failed sidecar stage prune did not complete; continuing" >&2
 
 export SIDECAR_STAGE_REPO_ROOT="$REPO_ROOT" SIDECAR_STAGE_DESKTOP_ROOT="$ROOT"
 export SIDECAR_STAGE_HELPER_ROOT="$HERE" SIDECAR_STAGE_FINAL_DIR="$SIDECAR_FINAL_DIR"
