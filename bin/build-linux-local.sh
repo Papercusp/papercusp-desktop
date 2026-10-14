@@ -229,6 +229,13 @@ case "$DISTRIBUTION_PROFILE" in
     ;;
 esac
 
+# WI-6554700010012075: a release-audited dogfood/public Server must carry the
+# first-boot seed (tauri.server.conf.json bundles seed/**) or opt out explicitly;
+# vm-release excludes seeds by design. Checked before the build, not after it.
+# shellcheck source=lib/release-seed-guard.sh
+. "$HERE/lib/release-seed-guard.sh"
+release_seed_guard "$ROLES" "$DISTRIBUTION_PROFILE" "$ROOT/src-tauri/seed" || exit 1
+
 # ── IDENTITY-POLICY COMPATIBILITY PREFLIGHT. D-112 no longer requires owner
 # name/email, but older cutters call this stable audit-owned entrypoint and future
 # machine-policy checks still belong in one place.

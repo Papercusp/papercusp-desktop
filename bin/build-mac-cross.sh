@@ -188,6 +188,12 @@ fi
 
 # ── Config / knobs ────────────────────────────────────────────────────────────
 ROLES="${PAPERCUSP_BUILD_ROLES:-gui server}"
+# WI-6554700010012075: a release-audited Server must carry the first-boot seed (or
+# opt out explicitly). Checked HERE, before hours of build, not at the copy below.
+# shellcheck source=lib/release-seed-guard.sh
+source "$HERE/lib/release-seed-guard.sh"
+release_seed_guard "$ROLES" "${PAPERCUSP_DISTRIBUTION_PROFILE:-dogfood}" "$SRC_TAURI/seed" \
+  || fail "release seed guard refused this build (see above)"
 MAC_BUILD_TARGET="${MAC_BUILD_TARGET:-universal-apple-darwin}"
 case "$MAC_BUILD_TARGET" in
   universal-apple-darwin) ARCHES=(x86_64-apple-darwin aarch64-apple-darwin); DMG_ARCH="universal-apple-darwin" ;;
@@ -483,6 +489,8 @@ assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out $
     if [[ -d "$SRC_TAURI/seed" && -f "$SRC_TAURI/seed/manifest.json" ]]; then
       cp -a "$SRC_TAURI/seed" "$app/Contents/Resources/seed"
     else
+      # Only reachable when release_seed_guard allowed it (non-audit build, or an
+      # explicit PAPERCUSP_ALLOW_SEEDLESS_RELEASE with a reason).
       echo "    WARN: no cut seed at $SRC_TAURI/seed — the Server ships without a first-boot seed"
     fi
   fi
