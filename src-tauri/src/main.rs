@@ -10029,7 +10029,14 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
     // Release-only so agent-e2e can still run a second `npm run dev` shell;
     // PAPERCUSP_DISABLE_SINGLE_INSTANCE=1 force-disables it in a packaged build.
     // See app_role.rs + the two-bundle split above.
-    let base = tauri::Builder::default();
+    // Inject into every window and every new document, before app shortcuts.
+    // WebKitGTK reports MacIntel even on Linux; select the modifier from Rust.
+    let base = tauri::Builder::default().append_invoke_initialization_script(
+        include_str!("zoom-shortcuts.js").replace(
+            "__PAPERCUSP_ZOOM_MACOS__",
+            if cfg!(target_os = "macos") { "true" } else { "false" },
+        ),
+    );
     #[cfg(not(debug_assertions))]
     let base = if std::env::var_os("PAPERCUSP_DISABLE_SINGLE_INSTANCE").is_some() {
         base
