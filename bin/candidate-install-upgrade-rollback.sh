@@ -123,8 +123,10 @@ else
   [[ "$vm_running_status" -eq 1 ]] || die "could not prove VM '$VM' is stopped (vmctl is-running exit $vm_running_status)"
 fi
 
-RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-candidate-upgrade.XXXXXX")"
+mkdir -p "$(dirname "$EVIDENCE_OUT")"
+RUN_DIR="$(mktemp -d "$EVIDENCE_OUT.diagnostics.XXXXXX")"
 VM_STARTED=0
+PHASE=vm-start
 cleanup() {
   local status=$?
   trap - EXIT
@@ -134,7 +136,23 @@ cleanup() {
       [[ "$status" -ne 0 ]] || status=1
     fi
   fi
-  rm -rf -- "$RUN_DIR"
+  if [[ "$status" -eq 0 ]]; then
+    rm -rf -- "$RUN_DIR"
+  else
+    # Preserve the exact child stdout/stderr even when the verifier fails before
+    # emitting JSON. Temporary cleanup must not erase the cause of a slow run.
+    python3 - "$RUN_DIR/failure.json" "$status" "$PHASE" "$VM" "$CANDIDATE_SHA" "$BASELINE_SHA" <<'PY'
+import datetime, json, pathlib, sys
+out, status, phase, vm, candidate, baseline = sys.argv[1:]
+pathlib.Path(out).write_text(json.dumps({
+    "schemaVersion": 1, "kind": "candidate-install-upgrade-rollback-evidence",
+    "verdict": "FAIL", "exitCode": int(status), "phase": phase, "vm": vm,
+    "candidateBuildSha": candidate, "baselineBuildSha": baseline,
+    "finishedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+}, indent=2) + "\n")
+PY
+    echo "candidate-install-upgrade-rollback: failed phase=$PHASE exit=$status; diagnostics=$RUN_DIR" >&2
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -147,6 +165,7 @@ timeout --kill-after=30 "$(( ${PAPERCUSP_CANDIDATE_VM_SSH_TIMEOUT:-300} + 30 ))"
   bash "$VMCTL" wait-ssh "$VM" "${PAPERCUSP_CANDIDATE_VM_SSH_TIMEOUT:-300}"
 
 echo "candidate-install-upgrade-rollback: installing exact rollback baseline $BASELINE_SHA"
+PHASE=baseline-install
 timeout --kill-after=30 "${PAPERCUSP_CANDIDATE_INSTALL_TIMEOUT:-2400}" bash "$VMCTL" install "$VM" "$BASELINE_SERVER"
 timeout --kill-after=30 "${PAPERCUSP_CANDIDATE_INSTALL_TIMEOUT:-2400}" bash "$VMCTL" install "$VM" "$BASELINE_GUI"
 baseline_script="$(release_artifacts_linux_smoke_baseline_start_script \
@@ -159,15 +178,26 @@ run_leg() {
   local name="$1"
   local gui="$2" server="$3" sha="$4" version="$5"
   local output="$RUN_DIR/$name.json"
-  echo "candidate-install-upgrade-rollback: running $name verifier for $sha"
-  "$VERIFIER" \
+  local stderr_output="$RUN_DIR/$name.stderr.log" verifier_status=0
+  PHASE="$name"
+  echo "candidate-install-upgrade-rollback: running $name verifier for $sha (install timeout ${PAPERCUSP_CANDIDATE_INSTALL_TIMEOUT:-2400}s)"
+  if "$VERIFIER" \
     --platform linux --artifact "$gui" --server-artifact "$server" \
     --expected-sha "$sha" --expected-version "$version" \
+    --install-timeout "${PAPERCUSP_CANDIDATE_INSTALL_TIMEOUT:-2400}" \
     --ssh-port "$SSH_PORT" --ssh-key "$SSH_KEY" --ssh-host "$SSH_HOST" \
     --ssh-option StrictHostKeyChecking=no \
     --ssh-option UserKnownHostsFile=/dev/null \
     --scp-option StrictHostKeyChecking=no \
-    --scp-option UserKnownHostsFile=/dev/null --json >"$output"
+    --scp-option UserKnownHostsFile=/dev/null --json >"$output" 2>"$stderr_output"; then
+    :
+  else
+    verifier_status=$?
+    cat "$stderr_output" >&2
+    cat "$output" >&2
+    echo "candidate-install-upgrade-rollback: $name verifier exited $verifier_status" >&2
+    return "$verifier_status"
+  fi
   python3 - "$output" "$sha" "$version" <<'PY'
 import json, pathlib, sys
 result = json.loads(pathlib.Path(sys.argv[1]).read_text())
@@ -191,8 +221,10 @@ run_leg candidate-upgrade "$CANDIDATE_GUI" "$CANDIDATE_SERVER" "$CANDIDATE_SHA" 
 run_leg exact-baseline-rollback "$BASELINE_GUI" "$BASELINE_SERVER" "$BASELINE_SHA" "$BASELINE_VERSION"
 
 # Emit evidence only after both flips pass and the VM powers down cleanly.
+PHASE=vm-shutdown
 timeout --kill-after=30 "${PAPERCUSP_CANDIDATE_VM_DOWN_TIMEOUT:-180}" bash "$VMCTL" down "$VM"
 VM_STARTED=0
+PHASE=evidence
 mkdir -p "$(dirname "$EVIDENCE_OUT")"
 python3 - "$EVIDENCE_OUT" "$started_at" "$VM" "$SSH_HOST" "$SSH_PORT" \
   "$CANDIDATE_GUI" "$CANDIDATE_SERVER" "$CANDIDATE_SHA" "$CANDIDATE_VERSION" \

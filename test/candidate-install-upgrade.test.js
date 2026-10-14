@@ -62,17 +62,23 @@ case "$3:$name" in
   *) exit 3 ;;
 esac`);
   const verifier = path.join(root, "verifier");
-  executable(verifier, `artifact=""; expected_sha=""; expected_version=""
+  executable(verifier, `artifact=""; expected_sha=""; expected_version=""; install_timeout=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --artifact) artifact="$2"; shift 2 ;;
     --expected-sha) expected_sha="$2"; shift 2 ;;
     --expected-version) expected_version="$2"; shift 2 ;;
+    --install-timeout) install_timeout="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
 printf 'VERIFY %s %s\\n' "$artifact" "$expected_sha" >>"$MOCK_LOG"
-if [[ "$(basename -- "$artifact")" == "$MOCK_FAIL_VERIFIER" ]]; then exit 17; fi
+printf 'INSTALL_TIMEOUT %s\\n' "$install_timeout" >>"$MOCK_LOG"
+if [[ "$(basename -- "$artifact")" == "$MOCK_FAIL_VERIFIER" ]]; then
+  printf '{"ok":false,"failures":["Server install failed: fixture causal diagnostic"]}\\n'
+  printf 'fixture verifier stderr\\n' >&2
+  exit 17
+fi
 printf '{"ok":true,"flipped":true,"portHeld":true,"shaAfter":"%s","versionAfter":"%s","shaBefore":"previous","versionBefore":"previous","portBefore":3999,"portAfter":3999}\\n' "$expected_sha" "$expected_version"`);
   return {
     root, log, vmScript, receipt, vmctl, verifier, key, candidateGui, candidateServer,
@@ -120,6 +126,7 @@ test("candidate upgrade and exact baseline rollback produce a content-bound rece
     assert.ok(lines.indexOf("VMCTL reset clean") < lines.indexOf(`VMCTL install clean ${f.baselineServer}`));
     assert.ok(lines.indexOf(`VMCTL install clean ${f.baselineGui}`) < lines.findIndex((line) => line.startsWith("VERIFY ")));
     assert.deepEqual(lines.filter((line) => line.startsWith("VERIFY ")).map((line) => line.split(" ").at(-1)), [f.candidateSha, f.baselineSha]);
+    assert.deepEqual(lines.filter((line) => line.startsWith("INSTALL_TIMEOUT ")), ["INSTALL_TIMEOUT 2400", "INSTALL_TIMEOUT 2400"]);
     assert.equal(lines.at(-1), "VMCTL down clean");
     assert.match(fs.readFileSync(f.vmScript, "utf8"), /systemctl --user enable --now papercusp-server\.service/);
     const evidence = JSON.parse(fs.readFileSync(f.receipt, "utf8"));
@@ -133,6 +140,15 @@ test("candidate upgrade and exact baseline rollback produce a content-bound rece
   });
 });
 
+test("the selected installation budget reaches both upgrade and rollback verifiers", () => {
+  withFixture({}, (f) => {
+    f.env.PAPERCUSP_CANDIDATE_INSTALL_TIMEOUT = "37";
+    const result = run(f);
+    assert.equal(result.status, 0, `${result.stdout}\\n${result.stderr}`);
+    assert.deepEqual(calls(f).filter((line) => line.startsWith("INSTALL_TIMEOUT ")), ["INSTALL_TIMEOUT 37", "INSTALL_TIMEOUT 37"]);
+  });
+});
+
 test("a failed candidate verifier powers down and emits no passing receipt", () => {
   withFixture({ failVerifier: "Papercusp GUI_0.0.26_amd64.deb" }, (f) => {
     const result = run(f);
@@ -141,6 +157,19 @@ test("a failed candidate verifier powers down and emits no passing receipt", () 
     assert.equal(lines.some((line) => line.startsWith("VERIFY ") && line.includes("0.0.25")), false);
     assert.equal(lines.at(-1), "VMCTL down clean");
     assert.equal(fs.existsSync(f.receipt), false);
+    assert.equal(result.status, 17);
+    assert.match(result.stderr, /fixture causal diagnostic/);
+    assert.match(result.stderr, /fixture verifier stderr/);
+    const diagnosticDirs = fs.readdirSync(path.dirname(f.receipt))
+      .filter((name) => name.startsWith("candidate-rollback.json.diagnostics."));
+    assert.equal(diagnosticDirs.length, 1);
+    const diagnostics = path.join(path.dirname(f.receipt), diagnosticDirs[0]);
+    assert.match(fs.readFileSync(path.join(diagnostics, "candidate-upgrade.json"), "utf8"), /fixture causal diagnostic/);
+    assert.match(fs.readFileSync(path.join(diagnostics, "candidate-upgrade.stderr.log"), "utf8"), /fixture verifier stderr/);
+    const failure = JSON.parse(fs.readFileSync(path.join(diagnostics, "failure.json"), "utf8"));
+    assert.equal(failure.verdict, "FAIL");
+    assert.equal(failure.phase, "candidate-upgrade");
+    assert.equal(failure.exitCode, 17);
   });
 });
 
@@ -152,6 +181,12 @@ test("a failed rollback verifier powers down and emits no passing receipt", () =
     assert.equal(lines.filter((line) => line.startsWith("VERIFY ")).length, 2);
     assert.equal(lines.at(-1), "VMCTL down clean");
     assert.equal(fs.existsSync(f.receipt), false);
+    const diagnosticDir = fs.readdirSync(path.dirname(f.receipt))
+      .find((name) => name.startsWith("candidate-rollback.json.diagnostics."));
+    assert.ok(diagnosticDir);
+    const diagnostics = path.join(path.dirname(f.receipt), diagnosticDir);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(diagnostics, "candidate-upgrade.json"), "utf8")).ok, true);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(diagnostics, "failure.json"), "utf8")).phase, "exact-baseline-rollback");
   });
 });
 
