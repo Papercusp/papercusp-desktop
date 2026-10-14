@@ -708,6 +708,8 @@ __pc_claim_target_dir() {
         # the slot, and the exe probe says nothing is running out of the dir. It used to
         # claim only the first half while an advisory two lines later contradicted it.
         echo "→ target dir: $dir (shared slot 0 — no launcher holds it, nothing running out of it)" >&2
+      elif [[ -d "$dir/debug/deps" ]]; then
+        echo "→ target dir: $dir (slot $i — free and already warm, chosen ahead of colder free slots; isolated from the shared dir, WI-7101)" >&2
       else
         echo "→ target dir: $dir (slot $i — another desktop instance holds the shared dir; isolating so we cannot corrupt its app-manifest, WI-7101)" >&2
         echo "  first build in this slot is a COLD build; later launches reuse its cache" >&2
