@@ -2548,6 +2548,77 @@ mod discovery_tests {
         assert!(error.to_string().contains("not installed"));
     }
 
+    /// WI-6554700010012567: only a loaded unit is started; everything else
+    /// keeps the desktop-entry route.
+    #[test]
+    fn linux_server_start_route_uses_the_unit_only_when_it_is_loaded() {
+        use super::linux_server_start_route;
+        use super::LinuxServerStartRoute::{DesktopEntry, SystemdUnit};
+        assert_eq!(linux_server_start_route(Some("loaded")), SystemdUnit);
+        assert_eq!(linux_server_start_route(Some("loaded\n")), SystemdUnit);
+        for state in [Some("not-found"), Some("masked"), Some("error"), Some(""), None] {
+            assert_eq!(linux_server_start_route(state), DesktopEntry, "{state:?}");
+        }
+    }
+
+    /// WI-6554700010012567 recurrence guard: the Linux sibling launch must try
+    /// the Server's systemd unit BEFORE the desktop entry, and only for the
+    /// Server product. A desktop-entry start runs serve.mjs outside the unit.
+    #[test]
+    fn linux_server_launch_prefers_the_systemd_unit_over_the_desktop_entry() {
+        let src = include_str!("main.rs");
+        let launch_start = src
+            .find(&format!("fn {}(", "launch_bundle"))
+            .expect("launch_bundle() must remain the sibling-launch seam");
+        let linux_start = launch_start
+            + src[launch_start..]
+                .find("#[cfg(target_os = \"linux\")]")
+                .expect("launch_bundle() must retain a Linux implementation");
+        let windows_start = linux_start
+            + src[linux_start..]
+                .find("#[cfg(target_os = \"windows\")]")
+                .expect("the Windows launch branch must follow Linux");
+        let linux = &src[linux_start..windows_start];
+        let unit_call = linux
+            .find(&format!("{}()", "start_server_via_systemd_unit"))
+            .expect("the Linux Server launch must try the systemd unit");
+        let gtk_call = linux
+            .find(&format!("Command::new(\"{}\")", "gtk-launch"))
+            .expect("the desktop entry must remain the fallback");
+        assert!(unit_call < gtk_call, "the unit must be tried before gtk-launch");
+        assert!(
+            linux[..unit_call].contains("bundle_id == SERVER_BUNDLE_ID"),
+            "only the Server product has a systemd unit"
+        );
+
+        let helper_start = src
+            .find(&format!("fn {}(", "start_server_via_systemd_unit"))
+            .expect("start_server_via_systemd_unit() must exist");
+        let helper_end = helper_start + src[helper_start..].find("\n}\n").expect("closed body");
+        let helper = &src[helper_start..helper_end];
+        for needle in ["linux_server_start_route(", "\"--user\", \"start\", SERVER_SYSTEMD_UNIT", ".status()"] {
+            assert!(helper.contains(needle), "the unit start must retain {needle:?}");
+        }
+        assert!(!helper.contains("--no-block"), "a failed start must be observed synchronously");
+    }
+
+    /// The unit name the GUI starts must be the unit the Server package installs.
+    #[test]
+    fn server_systemd_unit_matches_the_packaged_unit() {
+        for (name, conf) in [
+            ("tauri.server.conf.json", include_str!("../tauri.server.conf.json")),
+            ("tauri.vm-release.conf.json", include_str!("../tauri.vm-release.conf.json")),
+        ] {
+            let installed = format!("\"/usr/lib/systemd/user/{}\"", super::SERVER_SYSTEMD_UNIT);
+            assert!(conf.contains(&installed), "{name} must install {installed}");
+        }
+        let unit = include_str!("../systemd/papercusp-server.service");
+        assert!(
+            unit.contains(&format!("ExecStart=/usr/bin/papercusp-server {}", super::HEADLESS_SERVICE_ARG)),
+            "the unit must run the headless service"
+        );
+    }
+
     /// A guard that has never failed is a guard nobody has tested. This feeds
     /// the predicate the exact shape the fix REPLACED — the startup snapshot
     /// passed straight into `finish_boot` — and asserts it is rejected.
@@ -6710,7 +6781,28 @@ fn launch_bundle(bundle_id: &str, product_name: &str) -> std::io::Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = bundle_id;
+        // WI-6554700010012567: the packaged Server's always-on runtime is its
+        // systemd user unit (`--headless-service`, KillMode=control-group,
+        // Restart=on-failure). The desktop entry starts the interactive Server
+        // instead, which spawns serve.mjs in its OWN process tree outside the
+        // unit, so unit drop-ins (Environment=, restart policy) silently did not
+        // apply whenever the GUI (or its respawn supervisor) found the Server
+        // stopped. Start the unit when one is loaded; the desktop entry remains
+        // the fallback for hosts without a usable user unit.
+        if bundle_id == SERVER_BUNDLE_ID {
+            match start_server_via_systemd_unit() {
+                Some(Ok(())) => {
+                    println!("[papercusp-desktop] started {SERVER_SYSTEMD_UNIT} via systemctl --user");
+                    return Ok(());
+                }
+                Some(Err(e)) => eprintln!(
+                    "[papercusp-desktop] WARNING: could not start {SERVER_SYSTEMD_UNIT} ({e}); \
+                     falling back to the desktop entry, so this Server runs OUTSIDE the unit \
+                     and its drop-in configuration does not apply (WI-6554700010012567)"
+                ),
+                None => {}
+            }
+        }
         // Tauri's Debian bundler names these from productName. Verified from
         // the assembled sibling packages, not inferred from the config:
         //   /usr/share/applications/Papercusp GUI.desktop
@@ -6765,6 +6857,73 @@ fn launch_bundle(bundle_id: &str, product_name: &str) -> std::io::Result<()> {
             .or_else(|_| std::process::Command::new(&exe).spawn())?;
         Ok(())
     }
+}
+
+/// The packaged Linux Server's systemd user unit. Must match the unit filename
+/// the Server overlay installs under `/usr/lib/systemd/user/` (pinned by
+/// `server_systemd_unit_matches_the_packaged_unit`).
+const SERVER_SYSTEMD_UNIT: &str = "papercusp-server.service";
+
+/// How the GUI should bring up a stopped Linux Server (WI-6554700010012567).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+enum LinuxServerStartRoute {
+    /// `systemctl --user start papercusp-server.service`: the Server runs as the
+    /// unit's `--headless-service` and every unit drop-in applies.
+    SystemdUnit,
+    /// No usable unit (not installed, masked, or no user manager reachable):
+    /// launch the desktop entry as before.
+    DesktopEntry,
+}
+
+/// Decide the start route from `systemctl --user show --property=LoadState
+/// --value <unit>`. `None` means systemctl could not answer (no user manager or
+/// bus). Only a `loaded` unit is started: `not-found` means the package did not
+/// install one, and `masked` is the user's explicit opt-out of the unit.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_server_start_route(unit_load_state: Option<&str>) -> LinuxServerStartRoute {
+    match unit_load_state.map(str::trim) {
+        Some("loaded") => LinuxServerStartRoute::SystemdUnit,
+        _ => LinuxServerStartRoute::DesktopEntry,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_user_unit_load_state(unit: &str) -> Option<String> {
+    let output = Command::new("systemctl")
+        .args(["--user", "show", "--property=LoadState", "--value", unit])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Start the Server through its systemd user unit when one is loaded.
+/// `None` = no usable unit, so the caller keeps the desktop-entry route;
+/// `Some(Err)` = the unit exists but would not start. A plain blocking `start`
+/// (not `--no-block`) so a start-limit or ExecStart failure is observed here
+/// rather than surfacing as a 120s operator wait.
+#[cfg(target_os = "linux")]
+fn start_server_via_systemd_unit() -> Option<std::io::Result<()>> {
+    let load_state = linux_user_unit_load_state(SERVER_SYSTEMD_UNIT);
+    if linux_server_start_route(load_state.as_deref()) != LinuxServerStartRoute::SystemdUnit {
+        return None;
+    }
+    let status = Command::new("systemctl")
+        .args(["--user", "start", SERVER_SYSTEMD_UNIT])
+        .stdin(Stdio::null())
+        .status();
+    Some(match status {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(std::io::Error::other(format!(
+            "systemctl --user start {SERVER_SYSTEMD_UNIT} exited with {status}"
+        ))),
+        Err(e) => Err(e),
+    })
 }
 
 /// Menu-id prefix for the tray's docs-search-shortcut preset items
