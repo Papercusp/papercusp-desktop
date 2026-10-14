@@ -46,21 +46,69 @@ cleanup() {
 }
 trap cleanup EXIT
 
-set +e
-dpkg-deb --contents "$DEB_PATH" | grep -E '(^|/)\.stage-scrub-[^/]*/' > "$WORK/stage-scrub-members.txt"
-_stage_scrub_status=("${PIPESTATUS[@]}")
-set -e
-if [[ "${_stage_scrub_status[0]}" != "0" ]]; then
-  echo "FATAL: could not inspect Debian payload for stale .stage-scrub members: $DEB_PATH" >&2
-  exit 8
-fi
-if [[ -s "$WORK/stage-scrub-members.txt" ]]; then
-  echo "FATAL: Debian payload contains stale .stage-scrub members; refusing to ship duplicate scrub files: $DEB_PATH" >&2
-  sed -n '1,20p' "$WORK/stage-scrub-members.txt" >&2
-  exit 8
-fi
+check_stage_scrub() {
+  local deb="$1"
+  set +e
+  dpkg-deb --contents "$deb" | grep -E '(^|/)\.stage-scrub-[^/]*/' > "$WORK/stage-scrub-members.txt"
+  local _stage_scrub_status=("${PIPESTATUS[@]}")
+  set -e
+  if [[ "${_stage_scrub_status[0]}" != "0" ]]; then
+    echo "FATAL: could not inspect Debian payload for stale .stage-scrub members: $deb" >&2
+    exit 8
+  fi
+  if [[ -s "$WORK/stage-scrub-members.txt" ]]; then
+    echo "FATAL: Debian payload contains stale .stage-scrub members; refusing to ship duplicate scrub files: $deb" >&2
+    sed -n '1,20p' "$WORK/stage-scrub-members.txt" >&2
+    exit 8
+  fi
+}
 
-mapfile -t MEMBERS < <(ar t "$DEB_PATH")
+# WI-6554700010012467: an ar member header holds its size in 10 decimal digits, so a
+# member is capped at 9,999,999,999 bytes. Tauri writes a larger data member anyway
+# (a seeded Server's data.tar.gz was 11,962,260,753 bytes); the 11-digit size shifts
+# the header and every dpkg/ar reader then calls the package "corrupt - bad archive
+# header magic". Audit the headers first so that case is NAMED, and read its intact
+# member bytes by offset so xz can still bring the payload under the cap.
+AR_AUDIT="$SCRIPT_DIR/ar-member-audit.py"
+AR_MEMBER_CAP=9999999999
+# Tests lower the cap to exercise the refusal without a 10 GB fixture; it can only shrink.
+if [[ -n "${PAPERCUSP_DEB_MEMBER_CAP_BYTES:-}" ]]; then
+  [[ "$PAPERCUSP_DEB_MEMBER_CAP_BYTES" =~ ^[1-9][0-9]{0,9}$ ]] || {
+    echo "FATAL: PAPERCUSP_DEB_MEMBER_CAP_BYTES must be a positive integer of at most 10 digits, got: $PAPERCUSP_DEB_MEMBER_CAP_BYTES" >&2
+    exit 7
+  }
+  AR_MEMBER_CAP="$PAPERCUSP_DEB_MEMBER_CAP_BYTES"
+fi
+set +e
+python3 "$AR_AUDIT" audit "$DEB_PATH" > "$WORK/ar-audit.txt" 2>&1
+AR_AUDIT_STATUS=$?
+set -e
+OVER_CAP=0
+case "$AR_AUDIT_STATUS" in
+  0) ;;
+  3)
+    OVER_CAP=1
+    echo "==> $DEB_PATH has an ar member above the 9,999,999,999-byte member cap (dpkg reads it as corrupt);" >&2
+    echo "    reading its members by offset and recompressing (WI-6554700010012467):" >&2
+    sed 's/^/    /' "$WORK/ar-audit.txt" >&2
+    ;;
+  *)
+    echo "FATAL: $DEB_PATH is not a readable ar archive:" >&2
+    sed 's/^/    /' "$WORK/ar-audit.txt" >&2
+    exit 8
+    ;;
+esac
+
+if (( OVER_CAP )); then
+  # The stage-scrub check reads the payload through dpkg, which cannot open this
+  # archive; it runs on the repacked replacement instead, before publication.
+  mapfile -t MEMBERS < <(python3 "$AR_AUDIT" names "$DEB_PATH")
+  member_cat() { python3 "$AR_AUDIT" extract "$DEB_PATH" "$1"; }
+else
+  check_stage_scrub "$DEB_PATH"
+  mapfile -t MEMBERS < <(ar t "$DEB_PATH")
+  member_cat() { ar p "$DEB_PATH" "$1"; }
+fi
 [[ "${#MEMBERS[@]}" -eq 3 ]] || {
   echo "FATAL: expected exactly 3 deb members in $DEB_PATH, found ${#MEMBERS[@]}" >&2
   exit 4
@@ -80,6 +128,13 @@ GUARD_ONLY="${PAPERCUSP_DEB_REPACK_GUARD_ONLY:-0}"
   echo "FATAL: PAPERCUSP_DEB_REPACK_GUARD_ONLY must be 0 or 1, got: $GUARD_ONLY" >&2
   exit 7
 }
+if (( OVER_CAP )) && [[ "$GUARD_ONLY" == 1 || "${MEMBERS[2]}" == "data.tar.xz" ]]; then
+  # Guard-only keeps the data member as-is, and an xz member is already at its
+  # smallest here: either way the over-cap member would ship, and no dpkg can read it.
+  echo "FATAL: $DEB_PATH carries ${MEMBERS[2]} above the ar member cap and this mode cannot shrink it; no Debian package can carry it (WI-6554700010012467)" >&2
+  exit 11
+fi
+
 if [[ "$GUARD_ONLY" == 1 ]]; then
   dpkg-deb --info "$DEB_PATH" >/dev/null
   echo "==> guard-only: checked $DEB_PATH; data member left as ${MEMBERS[2]} (no recompression)"
@@ -132,8 +187,8 @@ if [[ -n "$_signing_key" ]]; then
   fi
 fi
 
-ar p "$DEB_PATH" debian-binary > "$WORK/debian-binary"
-ar p "$DEB_PATH" "${MEMBERS[1]}" > "$WORK/${MEMBERS[1]}"
+member_cat debian-binary > "$WORK/debian-binary"
+member_cat "${MEMBERS[1]}" > "$WORK/${MEMBERS[1]}"
 
 # A pipefail exit alone identifies none of the four components. That made a
 # real release build terminate with status 1 immediately after Tauri emitted
@@ -142,7 +197,7 @@ ar p "$DEB_PATH" "${MEMBERS[1]}" > "$WORK/${MEMBERS[1]}"
 # immediately and name every component on failure. The original deb remains
 # untouched because publication is still the atomic mv below.
 set +e
-ar p "$DEB_PATH" "${MEMBERS[2]}" \
+member_cat "${MEMBERS[2]}" \
   | "${DECOMPRESS[@]}" \
   | python3 "$SCRIPT_DIR/dedupe-env-sidecar-tar.py" \
   | xz -9 "-T${XZ_THREADS}" "--memlimit-compress=${XZ_MEMORY_LIMIT}" -c > "$WORK/data.tar.xz"
@@ -150,8 +205,17 @@ REPACK_PIPESTATUS=("${PIPESTATUS[@]}")
 set -e
 if (( REPACK_PIPESTATUS[0] != 0 || REPACK_PIPESTATUS[1] != 0 || REPACK_PIPESTATUS[2] != 0 || REPACK_PIPESTATUS[3] != 0 )); then
   echo "FATAL: Debian data repack pipeline failed for $DEB_PATH" >&2
-  echo "       component statuses: ar=${REPACK_PIPESTATUS[0]} decompress(${DECOMPRESS[0]})=${REPACK_PIPESTATUS[1]} dedupe-python=${REPACK_PIPESTATUS[2]} xz=${REPACK_PIPESTATUS[3]}" >&2
+  echo "       component statuses: $( (( OVER_CAP )) && echo member-read-by-offset || echo ar )=${REPACK_PIPESTATUS[0]} decompress(${DECOMPRESS[0]})=${REPACK_PIPESTATUS[1]} dedupe-python=${REPACK_PIPESTATUS[2]} xz=${REPACK_PIPESTATUS[3]}" >&2
   exit 9
+fi
+
+# The ar format cannot carry a member above the cap however it is written, so a
+# payload that stays too big even under xz -9 is refused here, by name, instead of
+# producing a package dpkg calls corrupt (WI-6554700010012467).
+XZ_MEMBER_BYTES="$(stat -c %s "$WORK/data.tar.xz")"
+if (( XZ_MEMBER_BYTES > AR_MEMBER_CAP )); then
+  echo "FATAL: the xz data member is $XZ_MEMBER_BYTES bytes, above the ar member cap of $AR_MEMBER_CAP bytes; no Debian package can carry this payload. Shrink it, or ship the largest component (e.g. the release seed) outside this package (WI-6554700010012467)." >&2
+  exit 12
 fi
 
 PUBLISH_DIR="$(dirname -- "$DEB_PATH")"
@@ -167,6 +231,9 @@ chmod --reference="$DEB_PATH" "$REPLACEMENT"
 # Exercise both metadata and payload readers before replacing the known-good deb.
 dpkg-deb --info "$REPLACEMENT" >/dev/null
 dpkg-deb --contents "$REPLACEMENT" >/dev/null
+if (( OVER_CAP )); then
+  check_stage_scrub "$REPLACEMENT"
+fi
 
 SIGNATURE_STATUS="UNSIGNED"
 if [[ -n "$_signing_key" ]]; then
