@@ -417,6 +417,30 @@ _sidecar_provenance() {
     "${_head:-unknown}" "${_built:-unknown}" "${_sha:-unknown}" "$(_desktop_interface_provenance)"
 }
 
+# A JSON string literal for an arbitrary value (bash 3.2 safe: the mac VM runs this).
+_json_str() {
+  local s="$1"
+  s="${s//\\/\\\\}"; s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"; s="${s//$'\r'/\\r}"; s="${s//$'\t'/\\t}"
+  printf '"%s"' "$s"
+}
+
+# WI-6554700010012218: the Server first-boot seed receipt, exported by
+# bin/lib/release-seed-guard.sh earlier in the same producer shell. `null` = no guard
+# ran in this leg (a sidecar-only or pre-guard producer); a MISSING key = an emitter
+# older than this field. deriveCandidateProvenance turns the status into the
+# candidate's server-seed check, so a seedless Server can no longer be nominated
+# unnoticed (the D-224 shape, found only at P-521 J8).
+_seed_provenance() {
+  if [[ -z "${PROVENANCE_SEED_STATUS:-}" ]]; then printf 'null'; return; fi
+  local sha="${PROVENANCE_SEED_MANIFEST_SHA256:-}" sha_json='null' reason_json='null'
+  [[ "$sha" =~ ^[0-9a-f]{64}$ ]] && sha_json="\"$sha\""
+  [[ -n "${PROVENANCE_SEED_REASON:-}" ]] && reason_json="$(_json_str "$PROVENANCE_SEED_REASON")"
+  printf '{ "status": %s, "profile": %s, "manifestSha256": %s, "reason": %s }' \
+    "$(_json_str "$PROVENANCE_SEED_STATUS")" "$(_json_str "${PROVENANCE_SEED_PROFILE:-unknown}")" \
+    "$sha_json" "$reason_json"
+}
+
 # Artifact name: relative to OUT_DIR when under it, else basename (see header).
 _OUT_REAL="$(realpath "$OUT_DIR")"
 _name() {
@@ -688,6 +712,7 @@ trap 'rm -f "$_prov_tmp"; [[ -z "$_dirty_source_tmp" ]] || rm -f "$_dirty_source
   # relies on, and the reason neither is emitted only when non-empty.
   printf '  "sidecar": %s,\n' "$(_sidecar_provenance)"
   printf '  "desktopInterface": %s,\n' "$(_desktop_interface_provenance)"
+  printf '  "seed": %s,\n' "$(_seed_provenance)"
   printf '  "builtAtUtc": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '  "artifacts": [\n'
   _first=1

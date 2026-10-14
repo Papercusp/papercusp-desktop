@@ -21,6 +21,19 @@
 #
 # Usage: source this file, then
 #   release_seed_guard "<roles>" "<distribution profile>" "<seed dir>" || exit 1
+#
+# Receipt (WI-6554700010012218): every verdict is also EXPORTED as PROVENANCE_SEED_*,
+# which emit-build-provenance.sh (run later in the same producer shell) writes into the
+# leg's build-provenance.json as "seed". The log line alone never reached the candidate
+# nomination, which is how the D-224 seedless Server went unnoticed until P-521 J8.
+# Status vocabulary: present | absent-allowed | absent-unaudited | excluded-by-profile |
+# not-applicable | refused. A non-server call records not-applicable explicitly, so a
+# GUI-only producer never inherits a parent shell's Server verdict.
+
+_release_seed_guard_record() {
+  export PROVENANCE_SEED_STATUS="$1" PROVENANCE_SEED_PROFILE="${2:-unknown}"
+  export PROVENANCE_SEED_MANIFEST_SHA256="${3:-}" PROVENANCE_SEED_REASON="${4:-}"
+}
 
 release_seed_guard() {
   local roles="${1:-}" profile="${2:-}" seed_dir="${3:-}"
@@ -28,10 +41,11 @@ release_seed_guard() {
 
   case " $roles " in
     *" server "*) ;;
-    *) return 0 ;;
+    *) _release_seed_guard_record not-applicable "$profile"; return 0 ;;
   esac
   if [[ "$profile" == "vm-release" ]]; then
     echo "SEED_GUARD role=server profile=vm-release seed=excluded-by-profile"
+    _release_seed_guard_record excluded-by-profile vm-release
     return 0
   fi
 
@@ -39,22 +53,28 @@ release_seed_guard() {
     local sha
     sha="$( (sha256sum "$manifest" 2>/dev/null || shasum -a 256 "$manifest" 2>/dev/null) | awk '{print $1}')"
     echo "SEED_GUARD role=server profile=${profile:-unknown} seed=present manifestSha256=${sha:-unknown}"
+    _release_seed_guard_record present "$profile" "$sha"
     return 0
   fi
 
   if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" != "1" ]]; then
     echo "WARN: no seed manifest at $manifest. This (non-release-audit) Server build ships without a first-boot seed." >&2
+    _release_seed_guard_record absent-unaudited "$profile"
     return 0
   fi
 
   if [[ "${PAPERCUSP_ALLOW_SEEDLESS_RELEASE:-0}" == "1" ]]; then
     if [[ -z "${PAPERCUSP_ALLOW_SEEDLESS_REASON:-}" ]]; then
       echo "ERROR: PAPERCUSP_ALLOW_SEEDLESS_RELEASE=1 needs a non-empty PAPERCUSP_ALLOW_SEEDLESS_REASON (it is recorded in the build log)." >&2
+      _release_seed_guard_record refused "$profile"
       return 1
     fi
     echo "SEED_GUARD role=server profile=${profile:-unknown} seed=absent allowed=1 reason=${PAPERCUSP_ALLOW_SEEDLESS_REASON}"
+    _release_seed_guard_record absent-allowed "$profile" "" "$PAPERCUSP_ALLOW_SEEDLESS_REASON"
     return 0
   fi
+
+  _release_seed_guard_record refused "$profile"
 
   cat >&2 <<EOF
 ERROR: release-audited Server build (profile ${profile:-unknown}) has no hive seed at
