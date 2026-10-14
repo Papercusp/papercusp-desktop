@@ -46,7 +46,7 @@
     if (event.key === '+' || event.key === '=' || event.code === 'NumpadAdd') {
       next = levels.find((level) => level > zoom) ?? levels[levels.length - 1];
     } else if (event.key === '-' || event.key === '_' || event.code === 'NumpadSubtract') {
-      next = levels.findLast((level) => level < zoom) ?? levels[0];
+      next = levels.slice().reverse().find((level) => level < zoom) ?? levels[0];
     } else if (event.key === '0') {
       next = 1;
     } else {

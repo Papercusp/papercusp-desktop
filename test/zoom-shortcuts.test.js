@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
+const { execFileSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'src-tauri/src/zoom-shortcuts.js'), 'utf8');
@@ -179,4 +180,38 @@ test('desktop startup injects the script on every navigation and grants native z
   assert.match(main, /cfg!\(target_os = "macos"\)/);
   const capability = JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/capabilities/default.json'), 'utf8'));
   assert.ok(capability.permissions.includes('core:webview:allow-set-webview-zoom'));
+});
+
+// Run through scripts/verify-tauri-headless.sh: the wrapper verifies bridge
+// ownership and supplies an isolated display/profile. Never attach to a human GUI.
+test('native webview zoom responds to keyboard shortcuts and survives reload', {
+  skip: !process.env.VERIFY_TAURI_PID,
+  timeout: 120_000,
+}, () => {
+  assert.equal(process.env.VERIFY_TAURI_ISOLATED_DB, '1', 'native zoom proof requires a disposable WebView profile');
+  assert.ok(process.env.VERIFY_TAURI_POLL);
+  const pid = process.env.VERIFY_TAURI_PID;
+  const evaluate = (script) => execFileSync('tauri-agent-tools', ['eval', '--pid', pid, script], { timeout: 15_000 });
+  const check = (predicate) => execFileSync(process.env.VERIFY_TAURI_POLL, [
+    '--require', 'body', '--eval', predicate,
+  ], { timeout: 45_000 });
+  const press = (key) => evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', {
+    key: ${JSON.stringify(key)}, ctrlKey: true, bubbles: true, cancelable: true
+  })); true`);
+
+  press('0');
+  evaluate('window.__desktopZoomBaseline = window.innerWidth; true');
+  evaluate(`const input = document.createElement('input');
+    input.id = 'desktop-zoom-verification'; document.body.appendChild(input); input.focus(); true`);
+  press('+');
+  check("document.activeElement?.id === 'desktop-zoom-verification' && window.innerWidth < window.__desktopZoomBaseline * 0.95");
+  press('-');
+  check('Math.abs(window.innerWidth - window.__desktopZoomBaseline) <= 1');
+  press('+');
+  press('+');
+  check('window.innerWidth < window.__desktopZoomBaseline * 0.85');
+  evaluate('window.sessionStorage.setItem("desktop-zoom-baseline", String(window.__desktopZoomBaseline)); location.reload(); true');
+  check('Number(window.sessionStorage.getItem("desktop-zoom-baseline")) > 0 && window.innerWidth < Number(window.sessionStorage.getItem("desktop-zoom-baseline")) * 0.85');
+  press('0');
+  check('Number(window.sessionStorage.getItem("desktop-zoom-baseline")) > 0 && Math.abs(window.innerWidth - Number(window.sessionStorage.getItem("desktop-zoom-baseline"))) <= 1');
 });

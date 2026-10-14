@@ -10034,7 +10034,11 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
     let base = tauri::Builder::default().append_invoke_initialization_script(
         include_str!("zoom-shortcuts.js").replace(
             "__PAPERCUSP_ZOOM_MACOS__",
-            if cfg!(target_os = "macos") { "true" } else { "false" },
+            if cfg!(target_os = "macos") {
+                "true"
+            } else {
+                "false"
+            },
         ),
     );
     #[cfg(not(debug_assertions))]
