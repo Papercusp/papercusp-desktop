@@ -520,6 +520,29 @@ __pc_reap_private_target_slots() {
   return 0
 }
 
+# True when the root slot <index> WOULD build into already holds a debug Cargo
+# cache: the criterion papercusp_native_dev_cargo_need_gb uses to price a build.
+# Mirrors __pc_prepare_derived_target_root: a usable preferred sibling wins; an
+# absent one is created (cold) when its parent allows; otherwise the
+# same-filesystem fallback is used.
+__pc_target_slot_is_warm() {
+  local shared="${1:?shared target root required}" index="${2:?slot index required}"
+  local preferred
+  if ((index == 0)); then
+    [[ -d "$shared/debug/deps" ]]
+    return
+  fi
+  preferred="${shared}-dev$((index + 1))"
+  if [[ -d "$preferred" && -w "$preferred" && -x "$preferred" ]]; then
+    [[ -d "$preferred/debug/deps" ]]
+    return
+  fi
+  if [[ ! -e "$preferred" && ! -L "$preferred" && -w "$(dirname -- "$preferred")" ]]; then
+    return 1
+  fi
+  [[ -d "$shared/.papercusp-target-slots/dev$((index + 1))/debug/deps" ]]
+}
+
 __pc_claim_target_dir() {
   # An explicit CARGO_TARGET_DIR is a deliberate choice (a .deb cut on an
   # isolated dir, a test harness) — never second-guess it.
@@ -577,12 +600,23 @@ __pc_claim_target_dir() {
       own_slot_index_set+="$i,"
     fi
   done
-  for ((i = 0; i < slots; i++)); do
-    case "$own_slot_index_set" in
-      *,"$i",*) continue ;;
-    esac
-    slot_order[$slot_count]="$i"
-    slot_count=$((slot_count + 1))
+  # Among ordinary slots, scan WARM roots (an existing debug/deps cache) before
+  # COLD ones, index order within each class. First-free used to hand a launch
+  # an empty slot while a warm one sat free, and the native-dev admission then
+  # demanded the cold budget (65 GiB vs 12 GiB in cargo-target-root.sh): on a
+  # nearly-full data disk every verifier was refused (WI-6554700010011501).
+  local pass warm
+  for pass in warm cold; do
+    for ((i = 0; i < slots; i++)); do
+      case "$own_slot_index_set" in
+        *,"$i",*) continue ;;
+      esac
+      warm=cold
+      __pc_target_slot_is_warm "$shared" "$i" && warm=warm
+      [[ "$warm" == "$pass" ]] || continue
+      slot_order[$slot_count]="$i"
+      slot_count=$((slot_count + 1))
+    done
   done
 
   for ((j = 0; j < slot_count; j++)); do

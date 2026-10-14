@@ -630,6 +630,52 @@ test('lock files live outside the target dirs they guard', async () => {
   }
 });
 
+// WI-6554700010011501: first-free handed a launch a COLD slot while a WARM one
+// sat free, so the native-dev admission priced the cold budget (65 GiB) and a
+// nearly-full data disk refused every verifier.
+test('a free warm slot is claimed before a free cold slot', () => {
+  mkdirSync(join(home, '.cargo-target-dev3', 'debug', 'deps'), { recursive: true });
+  assert.strictEqual(claim(), join(home, '.cargo-target-dev3'));
+});
+
+test('a warm fallback root counts as warm only when the preferred sibling cannot be created', () => {
+  const relocationParent = join(home, 'root-owned-warm');
+  const relocated = join(relocationParent, 'cargo-target');
+  const fallbackWarm = join(relocated, '.papercusp-target-slots', 'dev3');
+  mkdirSync(join(fallbackWarm, 'debug', 'deps'), { recursive: true });
+  configureTarget(relocated);
+  chmodSync(relocationParent, 0o555);
+  try {
+    assert.strictEqual(claim(), fallbackWarm);
+  } finally {
+    chmodSync(relocationParent, 0o700);
+  }
+});
+
+test('a creatable preferred sibling is cold even when a stale fallback root is warm', () => {
+  mkdirSync(join(home, '.cargo-target', '.papercusp-target-slots', 'dev2', 'debug', 'deps'), { recursive: true });
+  // The claim would create ~/.cargo-target-dev2 (cold), so slot 0 keeps first place.
+  assert.strictEqual(claim(), join(home, '.cargo-target'));
+});
+
+test('index order still decides among warm slots, so a warm shared dir keeps slot 0', () => {
+  mkdirSync(join(home, '.cargo-target', 'debug', 'deps'), { recursive: true });
+  mkdirSync(join(home, '.cargo-target-dev3', 'debug', 'deps'), { recursive: true });
+  assert.strictEqual(claim(), join(home, '.cargo-target'));
+});
+
+test('a held warm slot falls back to the next warm slot before any cold one', async () => {
+  mkdirSync(join(home, '.cargo-target', 'debug', 'deps'), { recursive: true });
+  mkdirSync(join(home, '.cargo-target-dev4', 'debug', 'deps'), { recursive: true });
+  const held = await holdSlotViaExec();
+  try {
+    assert.strictEqual(held.dir, join(home, '.cargo-target'));
+    assert.strictEqual(claim(), join(home, '.cargo-target-dev4'));
+  } finally {
+    held.child.kill();
+  }
+});
+
 test('disabling slots is possible but says loudly what it costs', () => {
   const out = execFileSync(
     'bash',
