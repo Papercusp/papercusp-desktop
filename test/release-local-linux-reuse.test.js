@@ -244,6 +244,8 @@ function runFreshWithFailedSibling({ emitterFails = false } = {}) {
     const command = [
       'set -euo pipefail',
       `source ${JSON.stringify(path.join(root, 'bin', 'lib', 'release-artifacts.sh'))}`,
+      // D-236: the Linux leg repacks through papercusp_repack_linux_deb, defined outside the slice.
+      `source ${JSON.stringify(path.join(root, 'bin', 'lib', 'repack-linux-deb.sh'))}`,
       `ROOT=${JSON.stringify(temp)}`,
       `ORCHESTRATOR_HERE=${JSON.stringify(bin)}`,
       `CARGO_TARGET_ROOT=${JSON.stringify(path.join(temp, 'target'))}`,
@@ -375,6 +377,8 @@ function runReuse({
   const command = [
     'set -euo pipefail',
     `source ${JSON.stringify(path.join(root, 'bin', 'lib', 'release-artifacts.sh'))}`,
+      // D-236: the Linux leg repacks through papercusp_repack_linux_deb, defined outside the slice.
+      `source ${JSON.stringify(path.join(root, 'bin', 'lib', 'repack-linux-deb.sh'))}`,
     `ROOT=${JSON.stringify(temp)}`,
     `CARGO_TARGET_ROOT=${JSON.stringify(path.join(temp, 'target'))}`,
     'VERSION=0.0.18',
@@ -1828,6 +1832,8 @@ function runArm64Collection({ includeArm64Artifact = true } = {}) {
     // collector-side signature guard, a5f47fb9); source its real definition,
     // as the linux/mac collection harnesses above do.
     `source ${JSON.stringify(path.join(root, 'bin', 'lib', 'release-artifacts.sh'))}`,
+      // D-236: the Linux leg repacks through papercusp_repack_linux_deb, defined outside the slice.
+      `source ${JSON.stringify(path.join(root, 'bin', 'lib', 'repack-linux-deb.sh'))}`,
     `source ${JSON.stringify(path.join(root, 'bin', 'lib', 'seed-reuse-age.sh'))}`,
     collectorHarness,
     'printf "COLLECTED=%s\\n" "${#ARTIFACTS[@]}"',

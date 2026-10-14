@@ -62,6 +62,11 @@ if [ -f "$SERVER_USER_PATH" ] \
     if ! deb-systemd-helper --user enable "$SERVER_USER_UNIT" >/dev/null; then
       echo "WARN: could not enable $SERVER_USER_UNIT on first install" >&2
     fi
+    # A user unit starts with its account's login session. Which account should
+    # own a headless peer is the administrator's choice, so only name the
+    # opt-in helper here (WI-479556 / WI-6554700010012562).
+    echo "Papercusp Server starts when its user logs in. To run it at boot with no login session:"
+    echo "  sudo papercusp-server-enable-boot-start --user <account>"
   else
     SERVER_USER_WAS_ENABLED=0
     SERVER_USER_NEEDS_STATE_REPAIR=0

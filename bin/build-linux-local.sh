@@ -235,6 +235,8 @@ esac
 # shellcheck source=lib/release-seed-guard.sh
 . "$HERE/lib/release-seed-guard.sh"
 release_seed_guard "$ROLES" "$DISTRIBUTION_PROFILE" "$ROOT/src-tauri/seed" || exit 1
+# shellcheck source=lib/repack-linux-deb.sh
+. "$HERE/lib/repack-linux-deb.sh"
 
 # ── IDENTITY-POLICY COMPATIBILITY PREFLIGHT. D-112 no longer requires owner
 # name/email, but older cutters call this stable audit-owned entrypoint and future
@@ -616,8 +618,11 @@ if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
     assert_vm_release_deb_runtime_only "$deb"
   done
 else
+  # D-236: a seeded Server sheds its seed into papercusp-server-seed_<ver>_all.deb here; the
+  # collection globs below match it, and the glob in this loop was expanded before it exists.
   for deb in "$SRC_ROOT"/release/bundle/deb/*_"$VERSION"_*.deb; do
-    [[ -f "$deb" ]] && bash "$HERE/repack-deb-xz.sh" "$deb"
+    [[ -f "$deb" ]] || continue
+    papercusp_repack_linux_deb "$deb" "$HERE/repack-deb-xz.sh"
   done
 fi
 

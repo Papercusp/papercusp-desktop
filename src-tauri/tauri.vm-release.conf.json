@@ -38,7 +38,8 @@
       "deb": {
         "depends": ["bubblewrap"],
         "files": {
-          "/usr/lib/systemd/user/papercusp-server.service": "systemd/papercusp-server.service"
+          "/usr/lib/systemd/user/papercusp-server.service": "systemd/papercusp-server.service",
+          "/usr/sbin/papercusp-server-enable-boot-start": "systemd/enable-boot-start.sh"
         }
       }
     }

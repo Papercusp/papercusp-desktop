@@ -350,6 +350,8 @@ source "$ORCHESTRATOR_HERE/lib/release-host.sh"
 # EI-12913: the ONE source of truth for this cut's artifact set — release-local.sh
 # writes it (below), upload-release.sh reads it, so the two halves can never drift.
 source "$ORCHESTRATOR_HERE/lib/release-artifacts.sh"
+# shellcheck source=lib/repack-linux-deb.sh
+source "$ORCHESTRATOR_HERE/lib/repack-linux-deb.sh"
 # WI-20118266632432430: shared Inno Server DiskSpan normalization used by the
 # direct cross-builder and incremental publisher as well as this full cut.
 # shellcheck source=lib/inno-spanned-server.sh
@@ -3078,8 +3080,10 @@ else
     # Repack BOTH role artifacts after Tauri finishes writing them. The helper
     # verifies the ar structure and dpkg readability, atomically replaces each
     # deb, and regenerates its updater signature over the final bytes.
+    # A seeded Server first sheds its seed into a companion package (D-236).
     for deb in "$CARGO_TARGET_ROOT"/release/bundle/deb/*_"$VERSION"_*.deb; do
-      [[ -f "$deb" ]] && PAPERCUSP_TAURI_CLI_VERSION="$TAURI_CLI_VERSION" bash "$ROOT/bin/repack-deb-xz.sh" "$deb"
+      [[ -f "$deb" ]] || continue
+      PAPERCUSP_TAURI_CLI_VERSION="$TAURI_CLI_VERSION" papercusp_repack_linux_deb "$deb" "$ROOT/bin/repack-deb-xz.sh"
     done
     # AppImage — built SEPARATELY (WI-2918): tauri's appimage target crashes linuxdeploy
     # on the sidecar tree; build-appimage.sh finishes with appimagetool (no ELF-scan).
@@ -3211,8 +3215,10 @@ if [[ "$WITH_ARM64" == "1" ]]; then
   # The base Tauri config includes deb among the unfiltered arm64 targets.
   # Repack both role artifacts before they enter ARTIFACTS, regenerating updater
   # signatures over the final xz + hardlink-deduplicated bytes.
+  # A seeded Server first sheds its seed into a companion package (D-236).
   for deb in "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/deb/*_"$VERSION"_*.deb; do
-    [[ -f "$deb" ]] && PAPERCUSP_TAURI_CLI_VERSION="$TAURI_CLI_VERSION" bash "$ROOT/bin/repack-deb-xz.sh" "$deb"
+    [[ -f "$deb" ]] || continue
+    PAPERCUSP_TAURI_CLI_VERSION="$TAURI_CLI_VERSION" papercusp_repack_linux_deb "$deb" "$ROOT/bin/repack-deb-xz.sh"
   done
   # NOTE: collection deliberately does NOT happen here. The canonical collector
   # below resets ARTIFACTS=() post-join, so an append at this point is discarded

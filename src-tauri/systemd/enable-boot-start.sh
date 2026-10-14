@@ -18,9 +18,9 @@
 # account should own the peer, and enabling linger for every account with a login
 # shell is far too broad.
 #
-#   sudo ./enable-boot-start.sh                  # for the invoking user
-#   sudo ./enable-boot-start.sh --user alice     # for a named account
-#   sudo ./enable-boot-start.sh --disable        # stop starting at boot
+#   sudo papercusp-server-enable-boot-start               # for the invoking user
+#   sudo papercusp-server-enable-boot-start --user alice  # for a named account
+#   sudo papercusp-server-enable-boot-start --disable     # stop starting at boot
 #
 # Idempotent: re-running is a no-op that re-verifies.
 

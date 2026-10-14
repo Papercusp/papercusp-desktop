@@ -1107,7 +1107,30 @@ test('Linux Server ships an opt-in boot-start helper, because a user unit alone 
     'postinstall cannot know which account to enable linger for; keep this opt-in',
   );
 
-  assert.equal(contract.server.installedIdentities.linuxBootStartHelper, 'systemd/enable-boot-start.sh');
+  // WI-6554700010012562: until 0.0.26 the helper existed only in the SOURCE
+  // tree — this test read the source file and passed while no package shipped
+  // it, so an installed Server could not run its own remedy. The contract now
+  // names an INSTALLED path, and every Linux Server overlay must map it.
+  const installedHelper = contract.server.installedIdentities.linuxBootStartHelper;
+  assert.equal(installedHelper, '/usr/sbin/papercusp-server-enable-boot-start');
+  for (const overlay of ['tauri.server.conf.json', 'tauri.vm-release.conf.json']) {
+    const config = JSON.parse(
+      fs.readFileSync(path.join(desktopRoot, 'src-tauri', overlay), 'utf8'),
+    );
+    assert.equal(
+      config.bundle?.linux?.deb?.files?.[installedHelper],
+      'systemd/enable-boot-start.sh',
+      `${overlay} must package the boot-start helper at ${installedHelper}`,
+    );
+  }
+  // Tauri's deb tar keeps only the executable bit, so the shipped helper is
+  // runnable only if the source file is executable.
+  assert.notEqual(fs.statSync(helperPath).mode & 0o111, 0, 'the helper must be executable');
+  assert.match(
+    helper,
+    /sudo papercusp-server-enable-boot-start/,
+    'the usage text must name the installed command, not a source-tree path',
+  );
   assert.equal(childProcess.spawnSync('bash', ['-n', helperPath]).status, 0);
 });
 
@@ -1253,6 +1276,7 @@ test('Linux Server deb installs and package-enables one systemd user service', (
   assert.equal(baseConfig.bundle.linux.deb.files, undefined, 'the GUI package must not ship the Server unit');
   assert.deepEqual(serverConfig.bundle.linux.deb.files, {
     '/usr/lib/systemd/user/papercusp-server.service': 'systemd/papercusp-server.service',
+    '/usr/sbin/papercusp-server-enable-boot-start': 'systemd/enable-boot-start.sh',
   });
   assert.equal(serverConfig.mainBinaryName, 'papercusp-server');
 
