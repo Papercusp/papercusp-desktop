@@ -1226,6 +1226,9 @@ mod tests {
             // WI-39304: logical seed restore needs the bundled pg_restore path;
             // dropping it here makes Windows silently fall back to full replay.
             "PAPERCUSP_PG_RESTORE_BIN",
+            // WI-6554700010012477: a packaged build keys embedded PG to per-host
+            // passwords. Dropped here, a Windows install would keep the defaults.
+            "PAPERCUSP_PG_HOST_CREDENTIALS",
             // WI-5305: the isolation escape hatch (papercusp-root.ts resolve())
             // must cross the WSL boundary too, or a caller's env override
             // silently no-ops on Windows while working on Linux/Mac.
@@ -1265,6 +1268,32 @@ mod tests {
             }
         }
         assert_eq!(provision_env_operators_for("vm-release", false, Some("1")), "0");
+    }
+
+    /// WI-6554700010012477: every packaged (release) build keys embedded PG to
+    /// per-host generated passwords; a dev build leaves the inherited opt-in alone.
+    #[test]
+    fn packaged_builds_key_embedded_pg_to_host_credentials() {
+        assert_eq!(pg_host_credentials_for(false), Some("1"));
+        assert_eq!(pg_host_credentials_for(true), None);
+    }
+
+    /// The release-build branch must reach the serve spawn: a helper nothing
+    /// calls would pass the test above and still ship the defaults.
+    #[test]
+    fn spawn_serve_passes_host_credentials_flag() {
+        let src = include_str!("main.rs");
+        let spawn = src
+            .find("\nfn spawn_serve(")
+            .expect("spawn_serve must exist");
+        let body = &src[spawn..];
+        let end = body.find("\n}\n").expect("spawn_serve body must close");
+        let body = &body[..end];
+        assert!(
+            body.contains("pg_host_credentials_for(cfg!(debug_assertions))")
+                && body.contains("\"PAPERCUSP_PG_HOST_CREDENTIALS\""),
+            "spawn_serve must set PAPERCUSP_PG_HOST_CREDENTIALS from pg_host_credentials_for"
+        );
     }
 
     #[test]
@@ -7297,7 +7326,7 @@ fn bring_up_sidecar(
 /// are load-bearing.
 const SIDECAR_WSLENV: &str = "PORT:HOSTNAME:NODE_ENV:PAPERCUSP_BUILD_SHA:PAPERCUSP_BUILD_VERSION:PAPERCUSP_DISTRIBUTION_PROFILE:PAPERCUSP_HARNESS_DIR/p:PAPERCUSP_TEMPLATES_DIR/p:PAPERCUSP_RUBRICS_DIR/p:PAPERCUSP_GOAL_PACKAGES_DIR/p:\
      PAPERCUSP_DESKTOP:PAPERCUSP_SHARED_OPERATOR:PAPERCUSP_OPERATOR_BASE:HOME/p:USERPROFILE/p:\
-     PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:PAPERCUSP_PG_DATA_DIR:\
+     PAPERCUSP_USE_EMBEDDED_PG:PAPERCUSP_PG_PORT:PAPERCUSP_PG_DATA_DIR:PAPERCUSP_PG_HOST_CREDENTIALS:\
      PAPERCUSP_PG_SQL_DIR/p:PAPERCUSP_PG_SEED_PATH/p:PAPERCUSP_PG_RESTORE_BIN/p:PAPERCUSP_IDENTITY_DIR/p:PAPERCUSP_ANNOUNCE_IDENTITY_CACHE/p:\
      PAPERCUSP_HONO_PORT:PAPERCUSP_BIND_HOST:\
      PAPERCUSP_SERVE_UI:PAPERCUSP_DBOS_ENABLE:PAPERCUSP_DBOS_ROUTINES:\
@@ -7396,6 +7425,27 @@ fn provision_env_operators_for(
         "0"
     } else {
         "1"
+    }
+}
+
+/// WI-6554700010012477: the `PAPERCUSP_PG_HOST_CREDENTIALS` value for the operator.
+/// That is the WI-10003627 seam in `apps/operator/bin/serve.ts`: it keys every
+/// embedded Postgres role to a per-host generated password held in a 0600 file,
+/// and refuses to serve while a repo-public default still authenticates.
+/// EVERY packaged build turns it on, whatever its profile. A Server or desktop
+/// install shares loopback TCP with every other local account, and loopback is
+/// not a uid boundary. With the documented DEV passwords
+/// (`harness_admin_pwd`), any local user could open the cluster as its
+/// superuser. Measured on a fresh 0.0.26 Server install (P-010a). A dev
+/// (`tauri dev`) build returns `None` and leaves the inherited value alone, so
+/// developer clusters keep the defaults unless a developer opts in. Once the
+/// credentials file exists, serve.ts keeps using it, so an install cannot fall
+/// back to the defaults later.
+fn pg_host_credentials_for(dev_build: bool) -> Option<&'static str> {
+    if dev_build {
+        None
+    } else {
+        Some("1")
     }
 }
 
@@ -7840,6 +7890,9 @@ fn spawn_serve(
     // /dev/null and every serve diagnostic is lost — tee to a rotated on-disk log
     // instead (WI-1707). If the log can't be prepared, fall back to inherit so
     // logging setup never blocks the sidecar from launching.
+    if let Some(value) = pg_host_credentials_for(cfg!(debug_assertions)) {
+        cmd.env("PAPERCUSP_PG_HOST_CREDENTIALS", value);
+    }
     if cfg!(debug_assertions) {
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     } else if let Some((out, err)) = rotating_log_stdio(workspace_home, "serve.log") {
