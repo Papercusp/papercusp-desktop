@@ -72,7 +72,11 @@ function buildDeb(root, name, pkg, { serve = SERVE, migrations = ['1236-a.sql', 
   mkdirSync(join(dir, 'DEBIAN'), { recursive: true });
   const rel = depends[pkg] ?? {};
   writeFileSync(join(dir, 'DEBIAN', 'control'), `Package: ${pkg}\nVersion: ${VERSION}\nArchitecture: amd64\nMaintainer: t\n${rel.depends ? `Depends: ${rel.depends}\n` : ''}${rel.recommends ? `Recommends: ${rel.recommends}\n` : ''}Description: t\n`);
-  if (pkg === 'papercusp-server') {
+  if (pkg === 'papercusp-server-seed') {
+    // D-236: the companion seed package — data only, under the Server's own tree.
+    mkdirSync(join(dir, 'usr', 'lib', 'Papercusp Server', 'seed'), { recursive: true });
+    writeFileSync(join(dir, 'usr', 'lib', 'Papercusp Server', 'seed', 'corestore.bin'), 'seed bytes\n');
+  } else if (pkg === 'papercusp-server') {
     const side = join(dir, 'usr', 'lib', 'Papercusp Server', 'sidecar');
     mkdirSync(join(side, 'bin'), { recursive: true });
     mkdirSync(join(side, 'db-sql'), { recursive: true });
@@ -94,7 +98,15 @@ function buildDeb(root, name, pkg, { serve = SERVE, migrations = ['1236-a.sql', 
   return out;
 }
 
-function fixture({ depends = DEPENDS } = {}) {
+// Shaped like bin/split-server-seed-deb.py's output: the split Server Recommends
+// its seed at the exact version; the seed itself Enhances/Replaces the Server and
+// declares no Depends or Recommends.
+const SPLIT_DEPENDS = {
+  ...DEPENDS,
+  'papercusp-server': { depends: 'libc6 (>= 2.35)', recommends: 'papercusp-server-seed (= 0.0.25)' },
+};
+
+function fixture({ depends = DEPENDS, seed = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pcoij-test-'));
   roots.push(root);
   const stubs = join(root, 'stubs');
@@ -105,6 +117,7 @@ function fixture({ depends = DEPENDS } = {}) {
 
   const gui = buildDeb(root, 'Papercusp GUI_0.0.25_amd64', 'papercusp-gui', { depends });
   const server = buildDeb(root, 'Papercusp Server_0.0.25_amd64', 'papercusp-server', { depends });
+  const seedDeb = seed ? buildDeb(root, 'papercusp-server-seed_0.0.25_amd64', 'papercusp-server-seed', { depends }) : null;
 
   // ssh: run the real remote script locally, in the sandbox, behind the stubs.
   const ssh = join(stubs, 'ssh-shim');
@@ -176,7 +189,9 @@ if [ -n "$missing" ]; then
 fi
 for d in "\${debs[@]}"; do
   dpkg-deb -x "$d" "$FAKE_ROOT" || exit 1
-  printf '%s=ii\\n' "$(dpkg-deb -f "$d" Package)" >> "$FAKE_STATE/dpkg-status"
+  # FAKE_APT_UNCONFIGURED=<package> leaves that package unpacked but unconfigured.
+  p="$(dpkg-deb -f "$d" Package)"; st=ii; [ "$p" = "\${FAKE_APT_UNCONFIGURED:-}" ] && st=iU
+  printf '%s=%s\\n' "$p" "$st" >> "$FAKE_STATE/dpkg-status"
 done
 `);
   exe(join(stubs, 'systemctl'), `#!/usr/bin/env bash
@@ -229,8 +244,9 @@ print(json.dumps({'ok': True, 'count': len(hives), 'hives': hives}))
   writeFileSync(ledger, JSON.stringify([
     { name: 'Papercusp GUI_0.0.25_amd64.deb', sha256: sha(gui), size: readFileSync(gui).length },
     { name: 'Papercusp Server_0.0.25_amd64.deb', sha256: sha(server), size: readFileSync(server).length },
+    ...(seedDeb ? [{ name: 'papercusp-server-seed_0.0.25_amd64.deb', sha256: sha(seedDeb), size: readFileSync(seedDeb).length }] : []),
   ]));
-  return { root, stubs, target, home, state, gui, server, ssh, scp, mcp, ledger };
+  return { root, stubs, target, home, state, gui, server, seed: seedDeb, ssh, scp, mcp, ledger };
 }
 
 // A Discovery/join operational-test-evidence document, shaped like
@@ -610,10 +626,76 @@ test('a target that already carries Papercusp voids preflight and installs nothi
   for (const leg of ['os-prerequisites', 'offline', 'install', 'first-launch', 'restart-reresolve']) assert.equal(r.legs[leg].status, 'unmeasured', leg);
 });
 
+// ── D-236: the Linux Server seed ships as a companion package ───────────────
+test('a split Server installs WITH its seed companion in one offline transaction; the seed is ledger-matched, configured and named (D-236)', opts, () => {
+  const fx = fixture({ depends: SPLIT_DEPENDS, seed: true });
+  const r = run(fx, { args: ['--seed-artifact', fx.seed] });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.doc.verdict, 'PASS');
+  // One apt transaction carries all three, after egress is denied.
+  assert.match(r.calls, /PCOIJ_OFFLINE -j REJECT[\s\S]*apt-get install --yes \S+server\.deb \S+gui\.deb \S+seed-1\.deb/);
+  assert.match(r.calls, /apt-get -s install \S+server\.deb \S+gui\.deb \S+seed-1\.deb/);
+  // The Server's Recommends on its seed is a Papercusp relation: never provisioned online.
+  const satisfy = r.calls.split('\n').find((l) => l.startsWith('apt-get satisfy'));
+  assert.doesNotMatch(satisfy, /papercusp/);
+  assert.match(r.doc.osPrerequisites['declared.server.Recommends'], /papercusp-server-seed \(= 0\.0\.25\)/);
+  assert.match(r.legs['installer-identity'].detail, /GUI\+Server\+1 seed installer/);
+  assert.match(r.legs.install.detail, /papercusp-server-seed=ii/);
+  assert.equal(r.doc.install.seedPackages, 'papercusp-server-seed');
+  assert.equal(r.doc.installerIdentity.seeds.length, 1);
+  assert.equal(r.doc.installerIdentity.seeds[0].sha256, sha(fx.seed));
+  assert.deepEqual(r.doc.subject.artifacts.filter((a) => a.role === 'seed-installer').map((a) => a.sha256), [sha(fx.seed)]);
+  // The runtime identity is still the Server's sidecar, never the seed package.
+  assert.equal(r.doc.subject.debSha256, sha(fx.server));
+  assert.ok(existsSync(join(fx.target, 'usr', 'lib', 'Papercusp Server', 'seed', 'corestore.bin')), 'seed bytes laid down');
+});
+
+test('a seed companion absent from the release ledger fails installer-identity', opts, () => {
+  const fx = fixture({ depends: SPLIT_DEPENDS, seed: true });
+  writeFileSync(fx.ledger, JSON.stringify(JSON.parse(readFileSync(fx.ledger, 'utf8')).slice(0, 2)));
+  const r = run(fx, { args: ['--seed-artifact', fx.seed] });
+  assert.equal(r.status, 1, r.stderr);
+  assert.equal(r.legs['installer-identity'].status, 'fail');
+  assert.match(r.legs['installer-identity'].detail, /papercusp-server-seed_0\.0\.25_amd64\.deb: not in ledger/);
+});
+
+test('a seed companion that does not end configured fails install; offline-restore is then never measured', opts, () => {
+  const fx = fixture({ depends: SPLIT_DEPENDS, seed: true });
+  const r = run(fx, { args: ['--seed-artifact', fx.seed], env: { FAKE_APT_UNCONFIGURED: 'papercusp-server-seed' } });
+  assert.equal(r.status, 1, r.stderr);
+  assert.equal(r.legs.install.status, 'fail');
+  assert.match(r.legs.install.detail, /seed package papercusp-server-seed not configured/);
+  assert.equal(r.legs['offline-restore'].status, 'unmeasured');
+});
+
+test('a seed companion whose control fields cannot be read fails os-prerequisites', opts, () => {
+  const fx = fixture({ depends: SPLIT_DEPENDS, seed: true });
+  const r = run(fx, { args: ['--seed-artifact', fx.seed], env: { FAKE_DPKG_UNREADABLE: 'seed-1.deb' } });
+  assert.equal(r.status, 1, r.stderr);
+  assert.equal(r.legs['os-prerequisites'].status, 'fail');
+  assert.match(r.doc.osPrerequisites.satisfyRefused, /unreadable: seed-1\.deb/);
+});
+
 test('usage errors exit 2 before touching a target', () => {
   const r = spawnSync('bash', [SCRIPT, '--platform', 'linux'], { encoding: 'utf8' });
   assert.equal(r.status, 2);
   const m = spawnSync('bash', [SCRIPT, '--platform', 'mac', '--offline', 'enforce'], { encoding: 'utf8' });
   assert.equal(m.status, 2);
   assert.match(m.stderr, /not implemented for mac/);
+});
+
+test('--seed-artifact is refused on mac, when missing, and when not a .deb (exit 2)', opts, () => {
+  const fx = fixture({ seed: true });
+  const base = ['--gui-artifact', fx.gui, '--server-artifact', fx.server, '--evidence-out', join(fx.root, 'e.json'), '--ssh-host', 'fake@target', '--mcp-call', fx.mcp];
+  const sh = (args) => spawnSync('bash', [SCRIPT, ...args], { encoding: 'utf8' });
+  const missing = sh(['--platform', 'linux', ...base, '--seed-artifact', join(fx.root, 'nope.deb')]);
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr, /--seed-artifact not found/);
+  const notDeb = sh(['--platform', 'linux', ...base, '--seed-artifact', fx.ledger]);
+  assert.equal(notDeb.status, 2);
+  assert.match(notDeb.stderr, /--seed-artifact must be a \.deb/);
+  const dmg = join(fx.root, 'x.dmg'); writeFileSync(dmg, 'x');
+  const mac = sh(['--platform', 'mac', '--gui-artifact', dmg, '--server-artifact', dmg, '--witness', fx.server, '--evidence-out', join(fx.root, 'm.json'), '--ssh-host', 'fake@target', '--mcp-call', fx.mcp, '--seed-artifact', fx.seed]);
+  assert.equal(mac.status, 2);
+  assert.match(mac.stderr, /--seed-artifact is linux-only/);
 });

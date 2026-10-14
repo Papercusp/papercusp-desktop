@@ -84,7 +84,8 @@
 #
 # Usage:
 #   offline-installer-journey.sh --platform linux|mac \
-#     --gui-artifact PATH --server-artifact PATH [--witness PATH] \
+#     --gui-artifact PATH --server-artifact PATH [--seed-artifact PATH]... \
+#     [--witness PATH] \
 #     --evidence-out PATH [--ledger-json PATH] [--expected-version V] \
 #     [--expected-sha SHA] [--ssh-host H] [--ssh-port N] [--ssh-key K] \
 #     [--ssh-option K=V]... [--remote-dir DIR] [--offline enforce|verify] \
@@ -102,6 +103,12 @@
 #   identity; it is recorded, not compared against /api/health.
 #   --join-evidence is the Discovery/join operational-test-evidence JSON for
 #   the same candidate (e.g. docs/evidence/p505-run34-exact-0025-physical-*.json).
+#   --seed-artifact (linux, repeatable) is a companion seed .deb split off the
+#   Server package (plan D-236: the offline pot seed ships as its own package
+#   because the Server .deb's data member would exceed dpkg's ar size cap). Each
+#   one is pushed, provisioned, installed in the SAME apt transaction as the GUI
+#   and Server, matched to the ledger, and must end configured (=ii). Without it
+#   a split Server installs with no seed, so offline-restore measures nothing.
 #   --witness defaults to the Server .deb on linux (the drill's exact bytes);
 #   on mac pass the updater "Papercusp Server.app.tar.gz" the Mac VM boots.
 #   --ledger-json is a JSON array of {name, sha256, size|bytes}, e.g.
@@ -125,6 +132,7 @@ SCHEMA="p521-offline-installer-journey/v1"
 PLATFORM=""
 GUI_ARTIFACT=""
 SERVER_ARTIFACT=""
+SEED_ARTIFACTS=()
 WITNESS=""
 EVIDENCE_OUT=""
 LEDGER_JSON=""
@@ -153,6 +161,7 @@ while [[ $# -gt 0 ]]; do
     --platform) PLATFORM="${2:-}"; shift 2 ;;
     --gui-artifact) GUI_ARTIFACT="${2:-}"; shift 2 ;;
     --server-artifact) SERVER_ARTIFACT="${2:-}"; shift 2 ;;
+    --seed-artifact) SEED_ARTIFACTS+=("${2:-}"); shift 2 ;;
     --witness) WITNESS="${2:-}"; shift 2 ;;
     --evidence-out) EVIDENCE_OUT="${2:-}"; shift 2 ;;
     --ledger-json) LEDGER_JSON="${2:-}"; shift 2 ;;
@@ -202,6 +211,13 @@ case "$PLATFORM:$GUI_ARTIFACT:$SERVER_ARTIFACT" in
   linux:*.deb:*.deb|mac:*.dmg:*.dmg) ;;
   *) die2 "installers must be .deb (linux) or .dmg (mac): $GUI_ARTIFACT / $SERVER_ARTIFACT" ;;
 esac
+if [[ ${#SEED_ARTIFACTS[@]} -gt 0 ]]; then
+  [[ "$PLATFORM" == linux ]] || die2 "--seed-artifact is linux-only (the Mac Server .dmg carries its seed inside the app bundle)"
+  for s in "${SEED_ARTIFACTS[@]}"; do
+    [[ -f "$s" ]] || die2 "--seed-artifact not found: ${s:-<unset>}"
+    [[ "$s" == *.deb ]] || die2 "--seed-artifact must be a .deb: $s"
+  done
+fi
 for tool in python3 tar; do command -v "$tool" >/dev/null || die2 "missing local tool: $tool"; done
 [[ "$PLATFORM" == mac ]] || command -v dpkg-deb >/dev/null || die2 "missing local tool: dpkg-deb"
 
@@ -267,6 +283,7 @@ remote_header() {
   printf 'PCOIJ_ROOT=%q\nREMOTE_DIR=%q\nPLATFORM=%q\n' "${PCOIJ_TARGET_ROOT:-}" "$REMOTE_DIR" "$PLATFORM"
   printf 'HEALTH_TIMEOUT=%q\nHEALTH_POLL=%q\nEXPECT_POT=%q\n' "$HEALTH_TIMEOUT" "${PCOIJ_HEALTH_POLL:-3}" "$EXPECT_POT"
   printf 'RESTORE_TIMEOUT=%q\nRESTORE_POLL=%q\n' "$RESTORE_TIMEOUT" "${PCOIJ_RESTORE_POLL:-5}"
+  printf 'SEED_COUNT=%q\n' "${SEED_COUNT:-0}"
   printf '%s\n' "$RUNTIME_DIGEST_FN"
   cat <<'PATHS'
 if [ "$PLATFORM" = linux ]; then
@@ -311,6 +328,14 @@ for role in gui server; do
   ident "installer.$role" sha256 "$(sha256_local "$f")"
   ident "installer.$role" bytes "$(stat -c %s "$f")"
 done
+SEED_COUNT=${#SEED_ARTIFACTS[@]}
+for ((i = 1; i <= SEED_COUNT; i++)); do
+  f="${SEED_ARTIFACTS[i-1]}"
+  ident "installer.seed.$i" name "$(basename "$f")"
+  ident "installer.seed.$i" sha256 "$(sha256_local "$f")"
+  ident "installer.seed.$i" bytes "$(stat -c %s "$f")"
+done
+INSTALLER_SET="GUI+Server"; [[ "$SEED_COUNT" -gt 0 ]] && INSTALLER_SET="GUI+Server+$SEED_COUNT seed"
 ident witness name "$(basename "$WITNESS")"
 WITNESS_SHA="$(sha256_local "$WITNESS")"
 ident witness sha256 "$WITNESS_SHA"
@@ -327,7 +352,8 @@ ids = {}
 for line in open(sys.argv[2]):
     s, k, v = line.rstrip('\n').split('\t', 2); ids.setdefault(s, {})[k] = v
 bad = []
-for role in ('installer.gui', 'installer.server'):
+# Every installer the run will install is matched: GUI, Server and each seed companion.
+for role in sorted(s for s in ids if s.startswith('installer.')):
     i = ids[role]; a = by.get(i['name'])
     if a is None: bad.append(f"{i['name']}: not in ledger"); continue
     size = a.get('size', a.get('bytes'))
@@ -336,7 +362,7 @@ for role in ('installer.gui', 'installer.server'):
 print('OK' if not bad else 'BAD ' + '; '.join(bad))
 PY
 )"
-  if [[ "$ledger_out" == OK ]]; then leg installer-identity pass "GUI+Server installer sha256/bytes match the release ledger"
+  if [[ "$ledger_out" == OK ]]; then leg installer-identity pass "$INSTALLER_SET installer sha256/bytes match the release ledger"
   else leg installer-identity fail "${ledger_out#BAD }"; fi
 fi
 
@@ -423,7 +449,7 @@ read -r -d '' PREFLIGHT <<'SH'
 echo "PCOIJ uname=$(uname -srm)"
 mkdir -p "$REMOTE_DIR" && [ -w "$REMOTE_DIR" ] && echo "PCOIJ remoteDir=ok" || echo "PCOIJ remoteDir=unwritable"
 if [ "$PLATFORM" = linux ]; then
-  st=$(dpkg-query -W -f='${Package}=${db:Status-Abbrev} ' papercusp-server papercusp-gui 2>/dev/null)
+  st=$(dpkg-query -W -f='${Package}=${db:Status-Abbrev} ' papercusp-server papercusp-gui papercusp-server-seed 2>/dev/null)
   echo "PCOIJ dpkgStatus=$st"
   case "$st" in *ii*|*iU*|*iF*|*rc*) echo "PCOIJ existing=yes" ;; *) echo "PCOIJ existing=no" ;; esac
 else
@@ -473,11 +499,13 @@ SH
 
 read -r -d '' PROVISION_LINUX <<'SH'
 GUI="$REMOTE_DIR/gui.deb"; SRV="$REMOTE_DIR/server.deb"
-# Declared Depends + Recommends of BOTH .debs, from their control fields. An entry
-# naming a Papercusp package (alternatives included) is dropped: this step must
-# never install Papercusp itself.
+set -- "$SRV" "$GUI"; i=1
+while [ "$i" -le "$SEED_COUNT" ]; do set -- "$@" "$REMOTE_DIR/seed-$i.deb"; i=$((i + 1)); done
+# Declared Depends + Recommends of EVERY .deb (GUI, Server, seed companions), from
+# their control fields. An entry naming a Papercusp package (alternatives included)
+# is dropped: this step must never install Papercusp itself.
 decl=""; unreadable=""
-for d in "$SRV" "$GUI"; do
+for d in "$@"; do
   # An empty Depends read is only "declares nothing" once the control file itself
   # was readable; a failed read must never pass as an empty declaration.
   dpkg-deb -f "$d" Package >/dev/null 2>&1 || unreadable="$unreadable $(basename "$d")"
@@ -517,11 +545,19 @@ SH
 
 read -r -d '' INSTALL_LINUX <<'SH'
 GUI="$REMOTE_DIR/gui.deb"; SRV="$REMOTE_DIR/server.deb"
+# Seed companions (D-236) go in the SAME transaction: the split Server only
+# Recommends its seed, and offline apt cannot fetch a Recommends from a repo.
+set -- "$SRV" "$GUI"; seedpkgs=""; i=1
+while [ "$i" -le "$SEED_COUNT" ]; do
+  s="$REMOTE_DIR/seed-$i.deb"; set -- "$@" "$s"
+  seedpkgs="$seedpkgs${seedpkgs:+ }$(dpkg-deb -f "$s" Package 2>/dev/null)"; i=$((i + 1))
+done
+echo "PCOIJ seedPackages=$seedpkgs"
 # Offline dependency closure: anything apt would still have to fetch is named.
 # Simulate WITHOUT --no-download: `-s` never downloads, and with --no-download apt
 # aborts ("Unable to fetch some archives") before printing a single Inst line,
 # which left this list empty on the real 0.0.25 VM run.
-sudo -n apt-get -s install "$SRV" "$GUI" > "$REMOTE_DIR/apt-sim.log" 2>&1; echo "PCOIJ aptSimExit=$?"
+sudo -n apt-get -s install "$@" > "$REMOTE_DIR/apt-sim.log" 2>&1; echo "PCOIJ aptSimExit=$?"
 need=$(sed -n 's/^Inst \([^ ]*\).*/\1/p' "$REMOTE_DIR/apt-sim.log" | grep -v '^papercusp-' | while read -r p; do
   ls "$PCOIJ_ROOT"/var/cache/apt/archives/"${p}"_*.deb >/dev/null 2>&1 || printf '%s ' "$p"; done)
 echo "PCOIJ needsDownload=$need"
@@ -530,12 +566,13 @@ echo "PCOIJ needsDownload=$need"
 # "Internal Error, Pathname to install is not absolute" (measured, 0.0.25 VM run 4).
 # "Fetch nothing" is instead ENFORCED by the egress firewall above and PROVEN
 # below: every remote Get/Err/Ign line apt prints is counted and must be zero.
-sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes "$SRV" "$GUI" > "$REMOTE_DIR/apt-install.log" 2>&1
+sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes "$@" > "$REMOTE_DIR/apt-install.log" 2>&1
 echo "PCOIJ installExit=$?"
 echo "PCOIJ remoteFetches=$(grep -cE '^(Get|Err|Ign):[0-9]+ [a-z0-9+.-]+://' "$REMOTE_DIR/apt-install.log")"
 echo "PCOIJ aptError=$(grep -E '^E:' "$REMOTE_DIR/apt-install.log" | head -2 | tr '\n' ' ')"
 tail -n 20 "$REMOTE_DIR/apt-install.log" | sed 's/^/PCOIJ-LOG /'
-st=$(dpkg-query -W -f='${Package}=${db:Status-Abbrev} ' papercusp-server papercusp-gui 2>/dev/null)
+# shellcheck disable=SC2086 # seedpkgs is a space-separated package list
+st=$(dpkg-query -W -f='${Package}=${db:Status-Abbrev} ' papercusp-server papercusp-gui $seedpkgs 2>/dev/null)
 echo "PCOIJ dpkgStatus=$st"
 SH
 read -r -d '' INSTALL_MAC <<'SH'
@@ -706,6 +743,10 @@ else
   ext=deb; [[ "$PLATFORM" == mac ]] && ext=dmg
   PUSH_OK=0
   push "$GUI_ARTIFACT" "$REMOTE_DIR/gui.$ext" && push "$SERVER_ARTIFACT" "$REMOTE_DIR/server.$ext" && push "$MCP_CALL" "$REMOTE_DIR/mcp-call.mjs" && PUSH_OK=1
+  for ((i = 1; i <= SEED_COUNT; i++)); do
+    [[ "$PUSH_OK" == 1 ]] || break
+    push "${SEED_ARTIFACTS[i-1]}" "$REMOTE_DIR/seed-$i.deb" || PUSH_OK=0
+  done
 
   # ── Leg 3b: OS prerequisites, provisioned ONLINE (linux) ─────────────────
   if [[ "$PLATFORM" == linux ]]; then
@@ -766,8 +807,20 @@ else
     elif [[ "$PLATFORM" == linux && "$(kv dpkgStatus "$IN")" != *papercusp-server=ii* ]] || [[ "$PLATFORM" == linux && "$(kv dpkgStatus "$IN")" != *papercusp-gui=ii* ]]; then
       leg install fail "packages not fully configured: $(kv dpkgStatus "$IN")" "$IN"; INSTALL_OK=0
     else
-      fetched=""; [[ "$PLATFORM" == linux ]] && fetched="; 0 remote fetches"
-      leg install pass "GUI+Server installers exit 0 ($(kv dpkgStatus "$IN"))$fetched" "$IN"; INSTALL_OK=1
+      # Each seed companion must name its package and end configured, or the
+      # offline-restore below would run against a Server with no seed (D-236).
+      seed_bad=""; seed_pkgs="$(kv seedPackages "$IN")"; ident install seedPackages "$seed_pkgs"
+      read -r -a seed_arr <<< "$seed_pkgs"
+      [[ "${#seed_arr[@]}" == "$SEED_COUNT" ]] || seed_bad="$SEED_COUNT seed artifact(s) but package names read: '${seed_pkgs}'"
+      for p in ${seed_arr[@]+"${seed_arr[@]}"}; do
+        [[ " $(kv dpkgStatus "$IN") " == *" $p=ii"* ]] || seed_bad="${seed_bad:+$seed_bad; }seed package $p not configured"
+      done
+      if [[ -n "$seed_bad" ]]; then
+        leg install fail "$seed_bad ($(kv dpkgStatus "$IN"))" "$IN"; INSTALL_OK=0
+      else
+        fetched=""; [[ "$PLATFORM" == linux ]] && fetched="; 0 remote fetches"
+        leg install pass "$INSTALLER_SET installers exit 0 ($(kv dpkgStatus "$IN"))$fetched" "$IN"; INSTALL_OK=1
+      fi
     fi
   else
     leg install fail "artifact transfer failed — see $LOG_DIR/push.log" "$LOG_DIR/push.log"; INSTALL_OK=0
@@ -868,7 +921,9 @@ exit_code = {'PASS': 0, 'FAIL': 1, 'INCOMPLETE': 3}[verdict]
 witness = ids.get('witness', {})
 cand = ids.get('candidate', {})
 artifacts, seen = [], set()
-for role, scope in (('gui-installer', 'installer.gui'), ('server-installer', 'installer.server'), ('runtime-witness', 'witness')):
+seed_scopes = sorted((s for s in ids if s.startswith('installer.seed.')), key=lambda s: int(s.rsplit('.', 1)[1]))
+for role, scope in (('gui-installer', 'installer.gui'), ('server-installer', 'installer.server'),
+                    *(('seed-installer', s) for s in seed_scopes), ('runtime-witness', 'witness')):
     a = ids.get(scope, {})
     if a.get('sha256') and a['sha256'] not in seen:
         seen.add(a['sha256'])
@@ -902,7 +957,8 @@ doc = {
     'join': ids.get('join', {}),
     'candidate': ids.get('candidate', {}),
     # Installer identity is recorded SEPARATELY from the runtime artifact (P-521 candidate admission).
-    'installerIdentity': {'gui': ids.get('installer.gui', {}), 'server': ids.get('installer.server', {})},
+    'installerIdentity': {'gui': ids.get('installer.gui', {}), 'server': ids.get('installer.server', {}),
+                          'seeds': [ids[s] for s in seed_scopes]},
     'witness': {'artifact': ids.get('witness', {}), 'runtime': ids.get('runtime.witness', {})},
     'installedRuntime': ids.get('runtime.installed', {}),
     'serving': {'launch': ids.get('serving.launch', {}), 'restart': ids.get('serving.restart', {})},
