@@ -475,7 +475,9 @@ mod tests {
         c.args(["-c", "tar -C \"$1\" -cf - .; exit 19", "producer"])
             .arg(f.0.join("source"));
         let err = stage_archive(c, f.consumer(), Duration::from_secs(5)).unwrap_err();
-        assert!(err.to_string().contains("archive producer"));
+        assert_eq!(err.kind(), io::ErrorKind::Other, "{err:?}");
+        assert!(err.to_string().contains("archive producer"), "{err:?}");
+        assert!(err.to_string().contains("19"), "{err:?}");
         assert!(!f.0.join("runtime").exists());
         assert!(!f.0.join("stage/.papercusp-runtime-complete").exists());
     }
@@ -575,7 +577,11 @@ mod tests {
         producer.args(["-c", "sleep 0.1; exit 19"]);
         let consumer = delayed_ready("0", &["/bin/true"]);
         let err = stage_archive(producer, consumer, Duration::from_secs(3)).unwrap_err();
-        assert!(err.to_string().contains("archive producer"));
+        // Preserve the actual kind/message if startup, wait or deadline errors
+        // prevent observing the intended exit. A bare predicate hid that evidence.
+        assert_eq!(err.kind(), io::ErrorKind::Other, "{err:?}");
+        assert!(err.to_string().contains("archive producer"), "{err:?}");
+        assert!(err.to_string().contains("19"), "{err:?}");
     }
 
     #[test]
@@ -599,7 +605,7 @@ mod tests {
             ])
             .arg(f.0.join("producer.pid"));
         let error = stage_archive(producer, consumer, Duration::from_secs(3)).unwrap_err();
-        assert!(error.to_string().contains("WSL archive extractor"));
+        assert!(error.to_string().contains("WSL archive extractor"), "{error:?}");
         let pid = fs::read_to_string(f.0.join("producer.pid")).unwrap();
         assert!(!PathBuf::from(format!("/proc/{}", pid.trim())).exists());
         assert!(unrelated.0.try_wait().unwrap().is_none());
@@ -617,7 +623,8 @@ mod tests {
             } else {
                 delayed_ready("0", &["/bin/sleep", "20"])
             };
-            assert!(stage_archive(producer, consumer, Duration::from_millis(300)).is_err());
+            let error = stage_archive(producer, consumer, Duration::from_millis(300)).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut, "producer_stalls={producer_stalls}: {error:?}");
         }
     }
 
@@ -873,7 +880,7 @@ mod tests {
             Duration::from_secs(4),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("before readiness"));
+        assert!(error.to_string().contains("before readiness"), "{error:?}");
         let pid = fs::read_to_string(f.0.join("startup.pid")).unwrap();
         assert!(!PathBuf::from(format!("/proc/{}", pid.trim())).exists());
         assert!(unrelated.0.try_wait().unwrap().is_none());
@@ -891,7 +898,7 @@ mod tests {
         match result {
             // The real Linux timeout may beat the parent watchdog to the exit.
             Ok(status) => assert_eq!(status.code(), Some(124)),
-            Err(error) => assert!(error.to_string().contains("after readiness")),
+            Err(error) => assert!(error.to_string().contains("after readiness"), "{error:?}"),
         }
     }
 
