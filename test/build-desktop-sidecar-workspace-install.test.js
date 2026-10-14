@@ -35,6 +35,68 @@ function extractFunction(name) {
 
 const LDCONFIG_RESOLVER = extractFunction('resolve_ldconfig');
 
+test('headless Server shutdown lets operator children finish after the parent exits', { timeout: 120000 }, async (t) => {
+  if (process.platform !== 'linux' || childProcess.spawnSync(
+    'systemctl', ['--user', 'show-environment'], { stdio: 'ignore', timeout: 5000 },
+  ).status !== 0) {
+    t.skip('requires a Linux user systemd manager');
+    return;
+  }
+  const unit = fs.readFileSync(path.join(desktopRoot, 'src-tauri/systemd/papercusp-server.service'), 'utf8');
+  const productionMode = unit.match(/^KillMode=(.+)$/m)?.[1];
+  const productionExitType = unit.match(/^ExitType=(.+)$/m)?.[1] ?? 'main';
+  assert.ok(productionMode, 'packaged unit must declare its shutdown policy');
+
+  // The mixed control reproduces the real failure: the headless parent exits
+  // on TERM without forwarding it, so systemd KILLs its still-live children.
+  for (const [mode, exitType, expectGraceful] of [
+    ['mixed', 'main', false], [productionMode, productionExitType, true],
+  ]) {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-headless-stop-'));
+    const name = `pc-headless-stop-${process.pid}-${path.basename(fixture)}.service`;
+    const ready = path.join(fixture, 'ready');
+    const clean = path.join(fixture, 'clean');
+    fs.writeFileSync(path.join(fixture, 'child.cjs'), [
+      'const fs = require("node:fs"), path = require("node:path");',
+      'const root = process.argv[2];',
+      'process.once("SIGTERM", () => setTimeout(() => {',
+      '  fs.writeFileSync(path.join(root, "clean"), "graceful"); process.exit(0);',
+      '}, 250));',
+      'fs.writeFileSync(path.join(root, "ready"), String(process.pid));',
+      'setInterval(() => {}, 1000);',
+    ].join('\n'));
+    fs.writeFileSync(path.join(fixture, 'parent.cjs'), [
+      'const { spawn } = require("node:child_process"), path = require("node:path");',
+      'process.on("SIGTERM", () => process.exit(0));',
+      'spawn(process.execPath, [path.join(__dirname, "child.cjs"), process.argv[2]], { stdio: "ignore" });',
+      'setInterval(() => {}, 1000);',
+    ].join('\n'));
+    try {
+      const start = childProcess.spawnSync('systemd-run', [
+        '--user', '--quiet', '--collect', `--unit=${name}`,
+        '--property=Type=exec', `--property=KillMode=${mode}`,
+        `--property=ExitType=${exitType}`,
+        '--property=TimeoutStopSec=5s', '--property=Restart=no',
+        process.execPath, path.join(fixture, 'parent.cjs'), fixture,
+      ], { encoding: 'utf8', timeout: 15000 });
+      assert.equal(start.status, 0, start.stderr);
+      const deadline = Date.now() + 20000;
+      while (!fs.existsSync(ready) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.ok(fs.existsSync(ready), 'fixture child must be ready before stopping');
+      const stop = childProcess.spawnSync('systemctl', ['--user', 'stop', name], {
+        encoding: 'utf8', timeout: 15000,
+      });
+      assert.equal(stop.status, 0, stop.stderr);
+      assert.equal(fs.existsSync(clean), expectGraceful, `${mode}/${exitType}: child cleanup after parent exit`);
+    } finally {
+      childProcess.spawnSync('systemctl', ['--user', 'stop', name], { stdio: 'ignore', timeout: 15000 });
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
+  }
+});
+
 function runPinnedReleaseInstallGuard(t, {
   profile = 'dogfood', audited = '1', pinned = true, skip = '', dirty = 'false', external = false,
 } = {}) {
@@ -1214,7 +1276,8 @@ test('Linux Server deb installs and package-enables one systemd user service', (
   );
   assert.match(unit, /^ExecStart=\/usr\/bin\/papercusp-server --headless-service$/m);
   assert.match(unit, /^Restart=on-failure$/m);
-  assert.match(unit, /^KillMode=mixed$/m);
+  assert.match(unit, /^KillMode=control-group$/m);
+  assert.match(unit, /^ExitType=cgroup$/m);
   assert.match(unit, /^WantedBy=default\.target$/m);
   assert.doesNotMatch(
     unit,

@@ -7,13 +7,18 @@ StartLimitBurst=6
 
 [Service]
 Type=simple
+# systemd >=250: the Rust parent can exit before the operator's graceful stop.
+ExitType=cgroup
 Environment="PAPERCUSP_SIDECAR_DIR=/usr/lib/Papercusp Server/sidecar"
 StateDirectory=papercusp/controller
 StateDirectoryMode=0700
 ExecStart=/usr/bin/papercusp-server --headless-service
 Restart=on-failure
 RestartSec=5s
-KillMode=mixed
+# The headless Rust parent does not relay SIGTERM. Signal the operator and PG
+# too; ExitType=cgroup keeps the service alive for their graceful cleanup.
+# mixed kills those children as soon as the parent exits (EI-25945403268513862).
+KillMode=control-group
 TimeoutStopSec=30s
 
 [Install]
