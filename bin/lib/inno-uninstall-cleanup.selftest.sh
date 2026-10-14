@@ -77,7 +77,7 @@ bad() { echo "  ✗ $1"; RC=1; }
 # evidence that a product guard returned false.
 rvalue() {
   local key=$1 name=$2 output status parsed
-  if output=$(WINEPREFIX="$TESTPREFIX" xvfb-run -a wine reg query "$key" /v "$name" 2>&1); then
+  if output=$(WINEPREFIX="$TESTPREFIX" wine reg query "$key" /v "$name" 2>&1); then
     status=0
   else
     status=$?
@@ -183,8 +183,19 @@ require_rvalue_present() {
   fi
 }
 
+# The display and server outlive every command in this test. With a separate
+# xvfb-run per command, Wine can close its listening socket while it still holds
+# the prefix lock and flushes the registry; the next client then cannot connect
+# (EI-25971079786392324). Persistence prevents that shutdown between phases.
+owned_display() { xvfb-run -a "$@"; }
+start_wine_server() { WINEPREFIX="$TESTPREFIX" timeout 30 wineserver -p; }
+stop_wine_server() {
+  WINEPREFIX="$TESTPREFIX" timeout 30 wineserver -k || return
+  WINEPREFIX="$TESTPREFIX" timeout 30 wineserver -w
+}
+
 run_install() {
-  WINEPREFIX="$TESTPREFIX" timeout 300 xvfb-run -a wine "$HARNESS_EXE" \
+  WINEPREFIX="$TESTPREFIX" timeout 300 wine "$HARNESS_EXE" \
     /VERYSILENT /NORESTART /SUPPRESSMSGBOXES >"$WORK/install-$1.log" 2>&1
 }
 
@@ -201,7 +212,7 @@ checked_command() {
 
 compile_harness() {
   local status
-  if WINEPREFIX="$TESTPREFIX" timeout 300 xvfb-run -a wine "$ISCC_EXE" "$HARNESS_WIN" \
+  if WINEPREFIX="$TESTPREFIX" timeout 300 wine "$ISCC_EXE" "$HARNESS_WIN" \
       >"$WORK/iscc.log" 2>&1; then
     return 0
   else
@@ -227,10 +238,27 @@ failure_reporting_contract_selftest() {
   cat >"$mockbin/xvfb-run" <<'MOCK_XVFB'
 #!/usr/bin/env bash
 [[ "${1:-}" == "-a" ]] && shift
+if [[ "${MOCK_REQUIRE_SERVER:-0}" == 1 ]]; then
+  export DISPLAY=:owned-inno-selftest
+  printf 'display-start\n' >>"$MOCK_SERVER_LOG"
+  "$@"
+  status=$?
+  [[ ! -f "$MOCK_SERVER_STATE" ]] || exit 64
+  printf 'display-stop\n' >>"$MOCK_SERVER_LOG"
+  exit "$status"
+fi
 exec "$@"
 MOCK_XVFB
   cat >"$mockbin/wine" <<'MOCK_WINE'
 #!/usr/bin/env bash
+if [[ "${MOCK_REQUIRE_SERVER:-0}" == 1 ]]; then
+  [[ "${WINEPREFIX:-}" == "${EXPECTED_COMPILER_PREFIX:-}" ]] || exit 61
+  [[ "${DISPLAY:-}" == :owned-inno-selftest && -f "$MOCK_SERVER_STATE" ]] || {
+    printf 'wine: owned server is shutting down; case measured nothing.\n' >&2
+    exit 19
+  }
+  printf 'client\n' >>"$MOCK_SERVER_LOG"
+fi
 if [[ "${1:-}" == fake-iscc ]]; then
   [[ "${WINEPREFIX:-}" == "${EXPECTED_COMPILER_PREFIX:-}" ]] || exit 61
   case "${MOCK_COMPILER_MODE:-success}" in
@@ -261,7 +289,17 @@ if [[ "${MOCK_INSTALL_MODE:-success}" == "failure" ]]; then
 fi
 exit 0
 MOCK_WINE
-  chmod +x "$mockbin/xvfb-run" "$mockbin/wine"
+  cat >"$mockbin/wineserver" <<'MOCK_SERVER'
+#!/usr/bin/env bash
+[[ "${WINEPREFIX:-}" == "${EXPECTED_COMPILER_PREFIX:-}" ]] || exit 61
+case "${1:-}" in
+  -p) touch "$MOCK_SERVER_STATE"; printf 'server-persist\n' >>"$MOCK_SERVER_LOG" ;;
+  -k) printf 'server-stop\n' >>"$MOCK_SERVER_LOG" ;;
+  -w) rm -f "$MOCK_SERVER_STATE"; printf 'server-wait\n' >>"$MOCK_SERVER_LOG" ;;
+  *) exit 62 ;;
+esac
+MOCK_SERVER
+  chmod +x "$mockbin/xvfb-run" "$mockbin/wine" "$mockbin/wineserver"
 
   local MOCK_REG_MODE=readable MOCK_INSTALL_MODE=success
   export MOCK_REG_MODE MOCK_INSTALL_MODE
@@ -332,22 +370,56 @@ MOCK_WINE
   done
   ok "Wine startup and compiler failures retain diagnostics and fail the test"
 
+  # Run the real lifecycle helpers against a server that refuses clients after
+  # shutdown. The negative control fails without persistence; the positive case
+  # uses one display, keeps the server through compiler/install/query, and waits
+  # for owned teardown BEFORE that display disappears.
+  local MOCK_REQUIRE_SERVER=1 MOCK_SERVER_STATE="$root/server-live" MOCK_SERVER_LOG="$root/server.log"
+  MOCK_COMPILER_MODE=success MOCK_INSTALL_MODE=success MOCK_REG_MODE=readable
+  export MOCK_REQUIRE_SERVER MOCK_SERVER_STATE MOCK_SERVER_LOG
+  export TESTPREFIX WORK HARNESS_EXE ISCC_EXE HARNESS_WIN
+  export -f start_wine_server stop_wine_server compile_harness run_install rvalue fail
+  if output=$(owned_display bash -c 'compile_harness' 2>&1); then
+    fail "nonpersistent server fixture was allowed to reach product assertions"
+  fi
+  [[ $output == *"case measured nothing"* ]] || fail "shutdown fixture lost its diagnostic"
+  : >"$MOCK_SERVER_LOG"
+  owned_display bash -c 'set -e; start_wine_server; compile_harness; run_install lifecycle; rvalue "HKCU\Software\PapercuspSelftest" SharedRuntimeStillNeeded >/dev/null; stop_wine_server' \
+    || fail "owned display/server lifecycle fixture failed"
+  [[ $(cat "$MOCK_SERVER_LOG") == $'display-start\nserver-persist\nclient\nclient\nclient\nserver-stop\nserver-wait\ndisplay-stop' ]] \
+    || fail "owned Wine lifecycle stopped early or escaped its prefix/display"
+  ok "one owned display and persistent server survive every phase; teardown waits before display exit"
+
   rm -rf "$root"
 }
 
-failure_reporting_contract_selftest
+if [[ "${1:-}" != --owned-wine-session ]]; then
+  failure_reporting_contract_selftest
+fi
 
 [[ -f "$ISS" ]] || fail "papercusp.iss not found at $ISS"
 command -v wine     >/dev/null 2>&1 || skip "wine not installed"
 command -v xvfb-run >/dev/null 2>&1 || skip "xvfb-run not installed"
+command -v wineserver >/dev/null 2>&1 || skip "wineserver not installed"
 [[ -f "$ISCC_EXE" ]] || skip "ISCC not provisioned at $ISCC_EXE"
+
+# Re-enter the maintained test under ONE private display. The inner process owns
+# its prefix and completes the cleanup trap before xvfb-run tears the display down.
+if [[ "${1:-}" != --owned-wine-session ]]; then
+  owned_display bash "$0" --owned-wine-session
+  exit "$?"
+fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/inno-uninst-selftest.XXXXXX")" || fail "mktemp failed"
 # A wine prefix must live somewhere WE own; wine refuses a prefix under a
 # directory it does not own (a shared /tmp).
 TESTPREFIX="$(mktemp -d "$HOME/.cache/inno-uninst-prefix.XXXXXX")" || fail "mktemp (prefix) failed"
 cleanup() {
-  WINEPREFIX="$TESTPREFIX" wineserver -k >/dev/null 2>&1 || true
+  if ! stop_wine_server >"$WORK/wineserver-cleanup.log" 2>&1; then
+    echo "FAIL inno-uninstall-cleanup: owned Wine server did not settle; prefix retained at $TESTPREFIX" >&2
+    echo "DIAGNOSTICS PRESERVED AT: $WORK" >&2
+    exit 1
+  fi
   for _ in 1 2 3; do
     if [[ $KEEP_WORK -eq 1 ]]; then
       rm -rf "$TESTPREFIX" 2>/dev/null && break
@@ -433,7 +505,12 @@ PROBE
 
 # Reading ISCC from the provisioned directory does not require its shared
 # wineserver. Boot and use the test's owned prefix (EI-25284908496408631).
-WINEPREFIX="$TESTPREFIX" timeout 300 xvfb-run -a wineboot -i >"$WORK/wineboot.log" 2>&1
+checked_command "owned Wine server persistence" "$WORK/wineserver-start.log" \
+  start_wine_server >"$WORK/wineserver-start.log" 2>&1
+if ! WINEPREFIX="$TESTPREFIX" timeout 300 wineboot -i >"$WORK/wineboot.log" 2>&1; then
+  tail -5 "$WORK/wineboot.log" >&2
+  fail "could not boot a test wine prefix; case measured nothing"
+fi
 [[ -d "$TESTPREFIX/drive_c" ]] || { tail -5 "$WORK/wineboot.log"; fail "could not boot a test wine prefix"; }
 HARNESS_WIN="$(WINEPREFIX="$TESTPREFIX" winepath -w "$WORK/harness.iss" 2>/dev/null)"
 [[ -n "$HARNESS_WIN" ]] || fail "winepath could not map $WORK/harness.iss"
@@ -448,7 +525,7 @@ APPROVED_KEY='HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApp
 UNINST_ROOT='HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall'
 PROBE_KEY='HKCU\Software\PapercuspSelftest'
 
-wreg()  { WINEPREFIX="$TESTPREFIX" xvfb-run -a wine reg "$@" >/dev/null 2>&1; }
+wreg()  { WINEPREFIX="$TESTPREFIX" wine reg "$@" >/dev/null 2>&1; }
 # Registry assertion helpers above keep instrument errors and missing probe
 # values out of product verdicts.
 # Two things make the naive `awk '$1 == name { print $3 }'` wrong here, and both
@@ -520,7 +597,7 @@ mkdir -p "$(dirname "$CONFIG_SENTINEL")" 2>/dev/null
 printf 'keep-user-config' > "$CONFIG_SENTINEL"
 UNINST_LOG_WIN="$(WINEPREFIX="$TESTPREFIX" winepath -w "$WORK" 2>/dev/null)\\inno-uninstall.log"
 run_uninstall() {
-  WINEPREFIX="$TESTPREFIX" timeout 300 xvfb-run -a wine "$UNINST" \
+  WINEPREFIX="$TESTPREFIX" timeout 300 wine "$UNINST" \
     /VERYSILENT /NORESTART /SUPPRESSMSGBOXES "/LOG=$UNINST_LOG_WIN" >"$WORK/uninstall-launch.log" 2>&1
 }
 checked_command "uninstall invocation" "$WORK/uninstall-launch.log" run_uninstall
