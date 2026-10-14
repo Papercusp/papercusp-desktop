@@ -60,6 +60,32 @@ TESTS=(
   vm-boot-extra-drives.selftest.sh
 )
 
+# Read-only discovery from the actual runner array AND its guard population.
+# Never run the source guards or selftests while preparing the original selection.
+if [ "${1:-}" = "--print-selection" ]; then
+  node --input-type=module - "$DIR" "${TESTS[@]}" <<'NODE'
+import { createHash } from 'node:crypto';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
+const [dir, ...listed] = process.argv.slice(2);
+const root = dirname(dirname(dirname(dir)));
+const disk = readdirSync(dir).filter(file => file.endsWith('.selftest.sh')).sort();
+const inputs = [...new Set(['run-selftests.sh', 'pipefail-predicate.baseline.txt', ...listed, ...disk])]
+  .sort().map(file => {
+    const absolute = join(dir, file);
+    if (!statSync(absolute).isFile()) throw new Error(`Invalid aggregate input: ${file}`);
+    return { path: relative(root, absolute).split('\\').join('/'),
+      sha256: createHash('sha256').update(readFileSync(absolute)).digest('hex') };
+  });
+console.log(`COMMAND_CHECK_SELECTION=${JSON.stringify({ schemaVersion: 1,
+  kind: 'command-check-inputs', check: 'desktop-selftest-aggregate',
+  files: listed.map(file => relative(root, join(dir, file)).split('\\').join('/')),
+  inputs, listed, disk, guards: ['array-disk-completeness', 'pipefail-predicate-baseline'],
+  executed: false, runtimeClosure: 'unmeasured', operationalAcceptance: false })}`);
+NODE
+  exit "$?"
+fi
+
 # COMPLETENESS GATE (WI-6181) — fixed; this array is no longer silently partial.
 #
 # The array above is the source of truth for WHAT RUNS; the files on disk are the
