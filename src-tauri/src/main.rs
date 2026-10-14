@@ -2619,6 +2619,43 @@ mod discovery_tests {
         );
     }
 
+    /// WI-6554700010013259: only a release Server build delegates to the unit.
+    #[test]
+    fn server_bring_up_delegates_only_for_a_release_server() {
+        use super::server_bring_up_delegates_to_unit as delegates;
+        assert!(delegates(true, false));
+        assert!(!delegates(true, true), "dev Server builds keep the in-process sidecar");
+        assert!(!delegates(false, false), "the desktop product has no systemd unit");
+        assert!(!delegates(false, true));
+    }
+
+    /// WI-6554700010013259 recurrence guard: a hand-launched release Linux
+    /// Server must start its unit and attach, never spawn serve.mjs outside it.
+    #[test]
+    fn server_bring_up_starts_the_unit_before_spawning_serve() {
+        let src = include_str!("main.rs");
+        let start = src
+            .find(&format!("\nfn {}(", "bring_up_sidecar"))
+            .expect("bring_up_sidecar() must remain the sidecar bring-up seam");
+        let end = start + 1 + src[start + 1..].find("\nfn ").expect("a following fn");
+        let body = &src[start..end];
+        let at = |needle: String, from: usize, why: &str| {
+            from + body[from..].find(&needle).unwrap_or_else(|| panic!("{why}"))
+        };
+        let gate = at(
+            format!("{}(is_server_product(app), cfg!(debug_assertions))", "server_bring_up_delegates_to_unit"),
+            0,
+            "the unit route must be gated on a release Server build",
+        );
+        let unit = at(format!("{}()", "start_server_via_systemd_unit"), gate, "try the unit");
+        let attach = at(format!("{}(", "finish_boot"), unit, "attach to the unit's operator");
+        let ret = at("return;".to_string(), attach, "return before spawning serve.mjs");
+        let spawn = at(format!("{}(", "spawn_serve"), ret, "keep the in-process fallback");
+        assert!(body[..gate].contains("#[cfg(target_os = \"linux\")]"));
+        let sweep = at(format!("{}(", "sweep_stale_operator_orphan"), 0, "keep the orphan sweep");
+        assert!(ret < sweep && sweep < spawn, "the unit route must return before the sweep");
+    }
+
     /// A guard that has never failed is a guard nobody has tested. This feeds
     /// the predicate the exact shape the fix REPLACED — the startup snapshot
     /// passed straight into `finish_boot` — and asserts it is rejected.
@@ -6926,6 +6963,15 @@ fn start_server_via_systemd_unit() -> Option<std::io::Result<()>> {
     })
 }
 
+/// WI-6554700010013259: whether this process's own sidecar bring-up should
+/// delegate the operator to the Server's systemd user unit instead of spawning
+/// serve.mjs. Release Server builds only — dev builds and verify-tauri-headless
+/// runs keep the in-process sidecar.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn server_bring_up_delegates_to_unit(is_server: bool, debug_build: bool) -> bool {
+    is_server && !debug_build
+}
+
 /// Menu-id prefix for the tray's docs-search-shortcut preset items
 /// (`docs-shortcut::<accelerator>`), so the menu-event handler can tell a rebind
 /// click from the open/quit items and recover the chosen accelerator.
@@ -7411,6 +7457,30 @@ fn bring_up_sidecar(
     // own ppid. This catches anything that watch missed (an older build, a
     // crash before it installed) by checking the ONE pid THIS workspace's
     // operator.json actually names, right before we spawn our own fresh one.
+    // WI-6554700010013259: a hand-launched release Linux Server (the app-menu
+    // entry, not the GUI's launch_bundle) used to spawn serve.mjs in its own
+    // process tree, outside papercusp-server.service, so the unit's drop-ins
+    // (Environment=, Restart=) silently did not apply. Start the unit instead
+    // and attach to its operator through finish_boot's discovery. No in-process
+    // child or supervisor is created, so tray Quit and app exit leave the
+    // always-on unit running. Spawning serve.mjs as well would race serve --ensure.
+    #[cfg(target_os = "linux")]
+    if server_bring_up_delegates_to_unit(is_server_product(app), cfg!(debug_assertions)) {
+        match start_server_via_systemd_unit() {
+            Some(Ok(())) => {
+                println!(
+                    "[papercusp-server] started {SERVER_SYSTEMD_UNIT}; attaching to its operator instead of spawning serve.mjs (WI-6554700010013259)"
+                );
+                let app_handle = app.clone();
+                std::thread::spawn(move || finish_boot(app_handle, workspace_home, via_wsl));
+                return;
+            }
+            Some(Err(error)) => eprintln!(
+                "[papercusp-server] WARNING: {SERVER_SYSTEMD_UNIT} would not start ({error}); spawning serve.mjs outside the unit, so its drop-ins will NOT apply (WI-6554700010013259)"
+            ),
+            None => {}
+        }
+    }
     sweep_stale_operator_orphan(&workspace_home, via_wsl);
     let serve_child = match spawn_serve(
         via_wsl,
