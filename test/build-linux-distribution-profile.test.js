@@ -110,9 +110,21 @@ test('current Debian repacker invokes Tauri from the frozen product directory', 
     fs.mkdirSync(fakeBin);
     const entry = path.join(tooling, 'bin/build-deb-repacked.sh');
     fs.copyFileSync(path.join(root, 'bin/build-deb-repacked.sh'), entry);
-    for (const helper of ['release-host.sh', 'rust-path-remap.sh', 'cargo-target-root.sh']) {
+    // Freeze every lib helper the entry script names, derived from the script itself:
+    // a hand-kept list went red when build-deb-repacked.sh gained spa-freshness.js
+    // (WI-6554700010012587). The known helpers pin the derivation against matching nothing.
+    const helpers = [...new Set([...fs.readFileSync(entry, 'utf8')
+      .matchAll(/\$SCRIPT_DIR\/lib\/([\w.-]+)/g)].map((match) => match[1]))];
+    for (const known of ['spa-freshness.js', 'release-host.sh', 'rust-path-remap.sh', 'cargo-target-root.sh']) {
+      assert.ok(helpers.includes(known), `derived helper list ${JSON.stringify(helpers)} lacks ${known}`);
+    }
+    for (const helper of helpers) {
       fs.copyFileSync(path.join(root, 'bin/lib', helper), path.join(tooling, 'bin/lib', helper));
     }
+    // The repacker refuses a non-legacy public interface before invoking Tauri.
+    const spaIndex = path.join(product, 'src-tauri/sidecar/spa/index.html');
+    fs.mkdirSync(path.dirname(spaIndex), { recursive: true });
+    fs.writeFileSync(spaIndex, '<!doctype html><meta name="papercusp-desktop-interface" content="legacy"><script type="module" src="/assets/index-fixture.js"></script>');
     fs.writeFileSync(path.join(fakeBin, 'cargo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     fs.writeFileSync(path.join(fakeBin, 'tauri'), '#!/bin/sh\nprintf "%s" "$PWD" > "$PC_TEST_CWD"\nexit 77\n', { mode: 0o755 });
     const result = spawnSync('bash', [entry], { encoding: 'utf8', env: { ...process.env,
@@ -265,6 +277,7 @@ test('vm-release Tauri overlay is an exact runtime allowlist with Server identit
   assert.deepEqual(vmConfig.bundle.resources, expectedVmResources);
   assert.deepEqual(vmConfig.bundle.linux.deb.files, {
     '/usr/lib/systemd/user/papercusp-server.service': 'systemd/papercusp-server.service',
+    '/usr/sbin/papercusp-server-enable-boot-start': 'systemd/enable-boot-start.sh',
   });
 
   for (const forbidden of [
