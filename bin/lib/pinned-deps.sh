@@ -405,6 +405,55 @@ EOF
     return "$_fail"
   fi
 
+  # Complete verifier trees need the output reached by workspace .bin shims;
+  # Git export omits it. Dependency-only overlay floors have no source receipt.
+  # Freeze declared output under the same donor mutex, never replacing source.
+  if [ -f "$_snap/.verifier-source.json" ]; then
+    node -e '
+const fs = require("node:fs"), path = require("node:path"), cp = require("node:child_process");
+const donor = fs.realpathSync(process.argv[1]), dest = fs.realpathSync(process.argv[2]);
+const mode = process.argv[3], receipt = JSON.parse(fs.readFileSync(path.join(dest, ".verifier-source.json"), "utf8"));
+const source = new Set(receipt.files.map(row => row.path));
+const inside = (root, file) => file === root || file.startsWith(root + path.sep);
+for (const rel of source) {
+  if (!rel.endsWith("/package.json")) continue;
+  const manifest = path.join(dest, rel), pkg = JSON.parse(fs.readFileSync(manifest, "utf8"));
+  const bins = typeof pkg.bin === "string" ? [pkg.bin] : Object.values(pkg.bin || {});
+  for (const bin of bins) {
+    if (typeof bin !== "string" || !/^(\.\/)?dist\//.test(bin)) continue;
+    const packageDir = path.dirname(manifest), target = path.resolve(packageDir, bin);
+    if (!inside(packageDir, target)) throw Error("escaping-workspace-bin:" + rel);
+    if (fs.existsSync(target)) continue;
+    const outputRel = path.relative(dest, path.join(packageDir, "dist"));
+    if ([...source].some(p => p === outputRel || p.startsWith(outputRel + "/")))
+      throw Error("recorded-workspace-bin-output:" + outputRel);
+    const donorManifest = path.join(donor, rel), donorOutput = path.join(donor, outputRel);
+    if (!fs.readFileSync(donorManifest).equals(fs.readFileSync(manifest)))
+      throw Error("workspace-bin-manifest-mismatch:" + rel);
+    if (!fs.existsSync(path.resolve(path.dirname(donorManifest), bin)))
+      throw Error("missing-workspace-bin-output:" + rel);
+    if (!fs.lstatSync(donorOutput).isDirectory() || !inside(donor, fs.realpathSync(donorOutput)))
+      throw Error("unsafe-workspace-bin-output:" + outputRel);
+    const output = path.join(dest, outputRel);
+    if (fs.existsSync(output) || fs.lstatSync(output, { throwIfNoEntry: false }))
+      throw Error("incomplete-workspace-bin-output:" + outputRel);
+    const staging = output + ".pinned-deps-tmp." + process.pid;
+    try {
+      fs.mkdirSync(staging);
+      const args = ["-aH", ...(mode === "hardlink" ? ["--link-dest=" + donorOutput] : []), donorOutput + "/", staging + "/"];
+      const result = cp.spawnSync("rsync", args, { stdio: "inherit" });
+      if (result.error || result.status !== 0) throw Error("workspace-bin-copy-failed:" + outputRel);
+      fs.renameSync(staging, output);
+    } finally { fs.rmSync(staging, { recursive: true, force: true }); }
+    console.log("snapshotted workspace executable output " + outputRel);
+  }
+}
+' "$_donor" "$_snap" "$_copy_mode" || return 1
+    # Donor validity does not imply copied-tree validity. Refuse broken links
+    # before stamping success or allowing a child to allocate providers.
+    papercusp_pinned_deps_preflight "$_snap" || return 1
+  fi
+
   # The stamp is what a later reader (and the gate below) can point at to say WHICH donor and
   # WHEN. It is written last, so an interrupted snapshot leaves no stamp rather than a stamp
   # describing a tree that was never finished.
