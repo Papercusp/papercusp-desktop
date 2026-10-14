@@ -98,6 +98,11 @@ EOF
 # WI-41095: refuse invalid donor links before allocating a copy. With a source
 # capture (or '-' for stdin JSON), also require their targets in the planned copy.
 # Repeat inside the install mutex; the final copied-tree guard remains authoritative.
+# The donor must be a physical install. lint-as-committed's node_modules shadow
+# deliberately links package files back to its install and is a SOURCE checkout,
+# not a snapshot donor. Use the physical install as donor; never dereference its
+# package links or edit a shadow to make it pass. Disposable cache entries alone
+# are excluded from both preflight and copying, regardless of their entry type.
 papercusp_pinned_deps_preflight() {
   local _donor="${1:-}" _population="${2:-}" _trees
   _trees="$(papercusp_pinned_deps_trees "$_donor")" || return 1
@@ -137,7 +142,10 @@ const visit = file => {
       !files.has(target))) fail("unplanned-pinned-dependency-target", file);
   } else if (stat.isDirectory()) {
     for (const entry of fs.readdirSync(file, { withFileTypes: true })) {
-      if (entry.isDirectory() && caches.has(entry.name)) continue;
+      // Materialized donors may link these disposable outputs to a live cache.
+      // Exclude the entry before following or validating its target, just as the
+      // snapshot copy does; real package links still take the strict guard above.
+      if (caches.has(entry.name)) continue;
       visit(path.join(file, entry.name));
     }
   }
@@ -197,8 +205,8 @@ papercusp_pinned_deps_snapshot() (
   # Live tool caches can disappear even under the install mutex. Filter before
   # copying, using dependency-generation's policy; package failures remain fatal.
   local -a _cache_filters
-  _cache_filters=(--delete-excluded --exclude=.cache/ --exclude=.astro/ --exclude=.vite/ \
-    --exclude=.vite-temp/ --exclude=.verdict-data/)
+  _cache_filters=(--delete-excluded --exclude=.cache --exclude=.astro --exclude=.vite \
+    --exclude=.vite-temp --exclude=.verdict-data)
   if ! command -v rsync >/dev/null 2>&1; then
     echo "ERROR: pinned dependency snapshots require rsync for cache-safe copying." >&2
     return 1
