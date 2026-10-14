@@ -55,7 +55,7 @@ key_exists() {
   if [[ -n "${WORK:-}" ]]; then
     printf 'registry query %s (exit %s):\n%s\n' "$key" "$status" "$output" >>"$WORK/registry-queries.log"
   fi
-  if [[ $status -eq 1 && ${output,,} == *"unable to find the specified registry key or value"* ]]; then
+  if [[ $status -eq 1 && ${output,,} == *"unable to find the specified registry key"* ]]; then
     return 1
   fi
   if [[ $status -eq 0 ]]; then
@@ -108,7 +108,8 @@ registry_contract_selftest() {
 #!/usr/bin/env bash
 case "$MOCK_REGISTRY_MODE" in
   present) printf 'HKEY_CURRENT_USER\\Software\\PapercuspSelftest\r\n'; exit 0 ;;
-  absent) printf 'reg: Unable to find the specified registry key or value\n' >&2; exit 1 ;;
+  absent) printf 'reg: Unable to find the specified registry key\r\n' >&2; exit 1 ;;
+  absent-key-or-value) printf 'reg: Unable to find the specified registry key or value\n' >&2; exit 1 ;;
   denied) printf 'ERROR: Access is denied.\n' >&2; exit 13 ;;
   timeout) printf 'reg: Unable to find the specified registry key or value\n' >&2; exit 124 ;;
   unreadable) printf 'unrecognized successful output\n'; exit 0 ;;
@@ -125,6 +126,10 @@ MOCK_REGISTRY
   MOCK_REGISTRY_MODE=absent
   assert_key_state 'HKCU\Software\PapercuspSelftest' absent 'ghost reaped' 'GHOST NOT REAPED'
   [[ $RC -eq 0 ]] || fail "absent key control failed (diagnostics: $root)"
+  MOCK_REGISTRY_MODE=absent-key-or-value
+  assert_key_state 'HKCU\Software\PapercuspSelftest' absent 'ghost reaped' 'GHOST NOT REAPED'
+  [[ $RC -eq 0 ]] || fail "absent key/value diagnostic control failed (diagnostics: $root)"
+  MOCK_REGISTRY_MODE=absent
   assert_key_state 'HKCU\Software\PapercuspSelftest' present 'live entry spared' 'LIVE ENTRY DELETED' >"$root/product-failure.log"
   [[ $RC -eq 1 ]] || fail "confirmed missing live key did not fail the product assertion (diagnostics: $root)"
   RC=0
