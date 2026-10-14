@@ -168,6 +168,8 @@ ssh "${SSH_OPTS[@]}" "$VM" 'chmod 600 .papercusp-updater.key; bash -lc "
   export PAPERCUSP_BUILD_SHA='"$SHA"'
   export PAPERCUSP_BUILD_VERSION='"$VER"'
   export PAPERCUSP_SKIP_SEED_CUT=1
+  export PAPERCUSP_ALLOW_SEEDLESS_RELEASE=1
+  export PAPERCUSP_ALLOW_SEEDLESS_REASON=mac-vm-verify-build-install-launch-placeholder-never-shipped
   export MAC_BUILD_TARGET='"$MAC_BUILD_TARGET"'
   export PAPERCUSP_FAST_ITER=1
   bash bin/mac-vm-build.sh

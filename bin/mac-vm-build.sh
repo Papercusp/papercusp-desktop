@@ -175,7 +175,7 @@ df -h "$HOME" | tail -1
 cut_release_seed() {
   if [[ "${PAPERCUSP_SKIP_SEED_CUT:-0}" == "1" ]]; then
     echo "--- seed: PAPERCUSP_SKIP_SEED_CUT=1 — using existing src-tauri/seed payload ---"
-    [[ -f "$ROOT/src-tauri/seed/manifest.json" ]] || echo "WARN: no seed manifest present; this build will ship the placeholder seed"
+    # A missing seed is judged by release_seed_guard right after this function.
     return 0
   fi
   local repo
@@ -282,6 +282,15 @@ cut_release_seed() {
 }
 
 cut_release_seed
+
+# WI-6554700010012186: a release-audited Server must carry the first-boot seed (or an
+# explicit, logged opt-out) before any expensive build step. PAPERCUSP_RELEASE_AUDIT
+# defaults to 1 above; PAPERCUSP_SKIP_SEED_CUT=1 only REUSES src-tauri/seed, which a
+# clean checkout never has (it is gitignored). Roles default here exactly as the role
+# loop below defaults them. mac-vm-verify-build.sh opts out for its placeholder build.
+# shellcheck source=lib/release-seed-guard.sh
+source "$HERE/lib/release-seed-guard.sh"
+release_seed_guard "${PAPERCUSP_BUILD_ROLES:-gui server}" "${PAPERCUSP_DISTRIBUTION_PROFILE:-dogfood}" "$ROOT/src-tauri/seed" || exit 1
 
 echo "--- term shim (SwiftPM) ---"
 # WI-484916: which slices must this artifact carry to be shippable for the

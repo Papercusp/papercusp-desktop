@@ -2522,6 +2522,15 @@ cut_doc_vector_seed() {
 cut_doc_vector_seed
 cut_release_seed
 
+# WI-6554700010012186: whichever cut_release_seed branch ran (a fresh cut, a snapshot
+# hydrate, or PAPERCUSP_SKIP_SEED_CUT=1 reuse), a release cut must hold the first-boot
+# Server seed, or an explicit logged opt-out, before the sidecar build starts. The
+# PAPERCUSP_RELEASE_AUDIT=1 export comes later in this script, so pass it here:
+# release-local is always a release cut. The SEED_GUARD line is the cut's seed receipt.
+# shellcheck source=lib/release-seed-guard.sh
+source "$ORCHESTRATOR_HERE/lib/release-seed-guard.sh"
+PAPERCUSP_RELEASE_AUDIT=1 release_seed_guard "$PAPERCUSP_BUILD_ROLES" "${PAPERCUSP_DISTRIBUTION_PROFILE:-dogfood}" "$ROOT/src-tauri/seed" || exit 1
+
 # Belt-and-braces (0.0.11 cut r3, WI-4736): cut-seed-cli now prunes RocksDB's
 # info log at cut time, but a reused/as-is seed (PAPERCUSP_SKIP_SEED_CUT=1) or a
 # later store re-open can regenerate it — and `LOG` embeds the build box's
