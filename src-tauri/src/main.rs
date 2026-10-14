@@ -1167,8 +1167,8 @@ pub(crate) static HOME_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::n
 #[cfg(test)]
 mod tests {
     use super::{
-        provision_env_operators_for, sidecar_runtime_generation, sidecar_wslenv,
-        windows_path_to_wsl, wsl_runtime_sidecar_path,
+        pg_host_credentials_for, provision_env_operators_for, sidecar_runtime_generation,
+        sidecar_wslenv, windows_path_to_wsl, wsl_runtime_sidecar_path,
     };
     use std::path::PathBuf;
 
@@ -7876,6 +7876,11 @@ fn spawn_serve(
     if let Ok(v) = std::env::var("PAPERCUSP_USE_EMBEDDED_PG") {
         cmd.env("PAPERCUSP_USE_EMBEDDED_PG", v);
     }
+    // WI-6554700010012477: a packaged (release) build keys embedded PG to
+    // per-host generated passwords instead of the shipped well-known defaults.
+    if let Some(value) = pg_host_credentials_for(cfg!(debug_assertions)) {
+        cmd.env("PAPERCUSP_PG_HOST_CREDENTIALS", value);
+    }
 
     // Endpoint IPC opt-in (default ON — it dodges WebKitGTK's ~6-connection
     // libsoup cap for the webview's SSE/fetch traffic). runBootstrap inside
@@ -7890,9 +7895,6 @@ fn spawn_serve(
     // /dev/null and every serve diagnostic is lost — tee to a rotated on-disk log
     // instead (WI-1707). If the log can't be prepared, fall back to inherit so
     // logging setup never blocks the sidecar from launching.
-    if let Some(value) = pg_host_credentials_for(cfg!(debug_assertions)) {
-        cmd.env("PAPERCUSP_PG_HOST_CREDENTIALS", value);
-    }
     if cfg!(debug_assertions) {
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     } else if let Some((out, err)) = rotating_log_stdio(workspace_home, "serve.log") {
