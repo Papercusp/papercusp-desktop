@@ -32,7 +32,121 @@ WINEPREFIX_INNO="${PAPERCUSP_WINEPREFIX_INNO:-$HOME/.papercusp/wine-inno}"
 ISCC_EXE="${PAPERCUSP_ISCC_EXE:-$WINEPREFIX_INNO/drive_c/InnoSetup6/ISCC.exe}"
 
 skip() { echo "SKIP inno-legacy-reaper: $1"; exit 0; }
-fail() { echo "FAIL inno-legacy-reaper: $1"; exit 1; }
+KEEP_WORK=0
+fail() {
+  echo "FAIL inno-legacy-reaper: $1" >&2
+  if [[ -n "${WORK:-}" && -d "${WORK:-}" ]]; then
+    KEEP_WORK=1
+    echo "DIAGNOSTICS PRESERVED AT: $WORK" >&2
+  fi
+  exit 1
+}
+
+# Match the uninstall test's three-way registry result: 0 = present,
+# 1 = confirmed absent, 2 = failed/unreadable instrument. A timeout or Wine
+# failure must never count as evidence that the reaper deleted a ghost key.
+key_exists() {
+  local key=$1 output status line expected
+  if output=$(WINEPREFIX="$TESTPREFIX" timeout 30 wine reg query "$key" 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  if [[ -n "${WORK:-}" ]]; then
+    printf 'registry query %s (exit %s):\n%s\n' "$key" "$status" "$output" >>"$WORK/registry-queries.log"
+  fi
+  if [[ $status -eq 1 && ${output,,} == *"unable to find the specified registry key or value"* ]]; then
+    return 1
+  fi
+  if [[ $status -eq 0 ]]; then
+    expected=${key/#HKCU/HKEY_CURRENT_USER}
+    while IFS= read -r line; do
+      [[ ${line,,} != "${expected,,}" ]] || return 0
+    done <<<"${output//$'\r'/}"
+  fi
+  printf 'registry query failed or was unreadable for %s (exit %s): %s\n' "$key" "$status" "$output" >&2
+  return 2
+}
+
+require_key_present() {
+  local key=$1 label=$2 status
+  if key_exists "$key"; then
+    return 0
+  else
+    status=$?
+  fi
+  [[ $status -ne 1 ]] || fail "$label: confirmed absent; fixture did not establish its precondition"
+  fail "$label: registry query failed (status $status); case measured nothing"
+}
+
+assert_key_state() {
+  local key=$1 expected=$2 pass_message=$3 fail_message=$4 actual status
+  if key_exists "$key"; then
+    actual=present
+  else
+    status=$?
+    [[ $status -eq 1 ]] || fail "registry query failed for $key (status $status); case measured nothing"
+    actual=absent
+  fi
+  if [[ $actual == "$expected" ]]; then
+    echo "  $pass_message"
+  else
+    echo "  $fail_message"
+    RC=1
+  fi
+}
+
+# These fault controls run in the maintained shell suite even without Wine.
+# Exercise the actual assertion, not only the query classifier: an unchecked
+# nonzero result in the ghost branch would otherwise still falsely pass.
+registry_contract_selftest() {
+  local root mockbin output status mode
+  root=$(mktemp -d "${TMPDIR:-/tmp}/inno-reaper-registry.XXXXXX") || fail "registry fixture mktemp failed"
+  mockbin="$root/bin"
+  mkdir -p "$mockbin" "$root/work" || fail "registry fixture mkdir failed"
+  cat >"$mockbin/wine" <<'MOCK_REGISTRY'
+#!/usr/bin/env bash
+case "$MOCK_REGISTRY_MODE" in
+  present) printf 'HKEY_CURRENT_USER\\Software\\PapercuspSelftest\r\n'; exit 0 ;;
+  absent) printf 'reg: Unable to find the specified registry key or value\n' >&2; exit 1 ;;
+  denied) printf 'ERROR: Access is denied.\n' >&2; exit 13 ;;
+  timeout) printf 'reg: Unable to find the specified registry key or value\n' >&2; exit 124 ;;
+  unreadable) printf 'unrecognized successful output\n'; exit 0 ;;
+  wrong-key) printf 'HKEY_CURRENT_USER\\Software\\OtherKey\r\n'; exit 0 ;;
+esac
+MOCK_REGISTRY
+  chmod +x "$mockbin/wine"
+  local PATH="$mockbin:$PATH" TESTPREFIX="$root/prefix" WORK="$root/work" RC=0
+  local MOCK_REGISTRY_MODE=present
+  export MOCK_REGISTRY_MODE
+  require_key_present 'HKCU\Software\PapercuspSelftest' 'present control'
+  assert_key_state 'HKCU\Software\PapercuspSelftest' present 'live entry spared' 'LIVE ENTRY DELETED'
+  [[ $RC -eq 0 ]] || fail "present key control failed (diagnostics: $root)"
+  MOCK_REGISTRY_MODE=absent
+  assert_key_state 'HKCU\Software\PapercuspSelftest' absent 'ghost reaped' 'GHOST NOT REAPED'
+  [[ $RC -eq 0 ]] || fail "absent key control failed (diagnostics: $root)"
+  assert_key_state 'HKCU\Software\PapercuspSelftest' present 'live entry spared' 'LIVE ENTRY DELETED' >"$root/product-failure.log"
+  [[ $RC -eq 1 ]] || fail "confirmed missing live key did not fail the product assertion (diagnostics: $root)"
+  RC=0
+  MOCK_REGISTRY_MODE=present
+  assert_key_state 'HKCU\Software\PapercuspSelftest' absent 'ghost reaped' 'GHOST NOT REAPED' >>"$root/product-failure.log"
+  [[ $RC -eq 1 ]] || fail "surviving ghost key did not fail the product assertion (diagnostics: $root)"
+  for mode in denied timeout unreadable wrong-key; do
+    MOCK_REGISTRY_MODE=$mode
+    if output=$(assert_key_state 'HKCU\Software\PapercuspSelftest' absent 'ghost reaped' 'GHOST NOT REAPED' 2>&1); then
+      fail "$mode query falsely reached a ghost verdict (diagnostics: $root)"
+    fi
+    [[ $output == *"case measured nothing"* && $output != *"ghost reaped"* && $output != *"GHOST NOT REAPED"* ]] \
+      || fail "$mode query lost its instrument failure (diagnostics: $root)"
+    if output=$(require_key_present 'HKCU\Software\PapercuspSelftest' 'seed control' 2>&1); then
+      fail "$mode query falsely satisfied a seed precondition (diagnostics: $root)"
+    fi
+    [[ $output == *"case measured nothing"* ]] || fail "$mode seed failure was misclassified (diagnostics: $root)"
+  done
+  [[ -s "$WORK/registry-queries.log" ]] || fail "registry fault diagnostics missing (diagnostics: $root)"
+  rm -rf "$root"
+  echo "  ✓ registry controls distinguish present/absent from denied, timeout, unreadable and wrong-key results"
+}
 
 # Reuse the private lifecycle used by inno-uninstall-cleanup.selftest.sh:
 # the server must not shut its listener while flushing between client phases.
@@ -108,6 +222,7 @@ MOCK_CLIENT
 
 if [[ "${1:-}" != --owned-wine-session ]]; then
   lifecycle_contract_selftest
+  registry_contract_selftest
 fi
 
 [[ -f "$ISS" ]] || fail "papercusp.iss not found at $ISS"
@@ -136,7 +251,11 @@ cleanup() {
     exit 1
   fi
   for _ in 1 2 3; do
-    rm -rf "$WORK" "$TESTPREFIX" 2>/dev/null && break
+    if [[ $KEEP_WORK -eq 1 ]]; then
+      rm -rf "$TESTPREFIX" 2>/dev/null && break
+    else
+      rm -rf "$WORK" "$TESTPREFIX" 2>/dev/null && break
+    fi
     sleep 1
   done
 }
@@ -186,7 +305,6 @@ HARNESS_EXE="$WORK/out/reaper-harness.exe"
 
 REG_ROOT='HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall'
 wreg() { WINEPREFIX="$TESTPREFIX" timeout 30 wine reg "$@" >/dev/null 2>&1; }
-key_exists() { WINEPREFIX="$TESTPREFIX" timeout 30 wine reg query "$1" >/dev/null 2>&1; }
 
 RC=0
 # The product's real directory names contain spaces — that is the whole point
@@ -206,26 +324,17 @@ for MODE in quoted unquoted; do
   wreg add "$REG_ROOT\\Papercusp GUI"    /v UninstallString /d '"C:\Papercusp GUI\uninstall.exe"' /f || fail "[$MODE] ghost registry write failed"
   wreg add "$REG_ROOT\\Papercusp Server" /v UninstallString /d "$LIVE_VAL" /f || fail "[$MODE] live registry write failed"
 
-  key_exists "$REG_ROOT\\Papercusp GUI"    || fail "[$MODE] seeding failed: ghost key absent before the run"
-  key_exists "$REG_ROOT\\Papercusp Server" || fail "[$MODE] seeding failed: live key absent before the run"
+  require_key_present "$REG_ROOT\\Papercusp GUI" "[$MODE] seeding ghost key"
+  require_key_present "$REG_ROOT\\Papercusp Server" "[$MODE] seeding live key"
 
   WINEPREFIX="$TESTPREFIX" timeout 300 wine "$HARNESS_EXE" \
     /VERYSILENT /NORESTART /SUPPRESSMSGBOXES >"$WORK/install-$MODE.log" 2>&1 \
     || { tail -30 "$WORK/install-$MODE.log"; fail "[$MODE] installer failed; case measured nothing"; }
 
-  if key_exists "$REG_ROOT\\Papercusp GUI"; then
-    echo "  [$MODE] GHOST NOT REAPED — a dead entry the user cannot remove survives (WI-4490)"
-    RC=1
-  else
-    echo "  [$MODE] ghost reaped ✓"
-  fi
-
-  if key_exists "$REG_ROOT\\Papercusp Server"; then
-    echo "  [$MODE] live entry spared ✓"
-  else
-    echo "  [$MODE] LIVE ENTRY DELETED — the guard destroyed a real install's uninstall entry (EI-19481728463683227)"
-    RC=1
-  fi
+  assert_key_state "$REG_ROOT\\Papercusp GUI" absent "[$MODE] ghost reaped ✓" \
+    "[$MODE] GHOST NOT REAPED — a dead entry the user cannot remove survives (WI-4490)"
+  assert_key_state "$REG_ROOT\\Papercusp Server" present "[$MODE] live entry spared ✓" \
+    "[$MODE] LIVE ENTRY DELETED — the guard destroyed a real install's uninstall entry (EI-19481728463683227)"
 done
 
 if [[ $RC -eq 0 ]]; then
