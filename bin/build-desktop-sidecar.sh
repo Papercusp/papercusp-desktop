@@ -1859,6 +1859,17 @@ for _psu_cli in psu:psu-launcher ptool:ptool onboard:onboard-launcher tutorial-r
   fi
 done
 
+# WI-6554700010012487 — the sidecar ships no @modelcontextprotocol tree, so ptool's
+# SDK must be inlined. esbuild inlines only string-literal import() specifiers; a
+# computed one survives as a runtime lookup that resolves here (the repo
+# node_modules is an ancestor of $SIDECAR_DIR) and fails on every install. Load
+# every SDK loader from an isolated copy of the bundle and fail the build if one
+# cannot resolve. (Server 0.0.26 shipped a /usr/bin/ptool that could not start.)
+if ! node "$ROOT/bin/check-ptool-sdk-bundle.mjs" "$SIDECAR_DIR/scripts/ptool.mjs"; then
+  echo "ERROR: bundled ptool cannot load @modelcontextprotocol/sdk without a node_modules tree" >&2
+  exit 1
+fi
+
 # The bundled psu entrypoint loads these as runtime file URLs (not static
 # imports), so esbuild cannot inline or trace them. Keep them adjacent to
 # scripts/psu.mjs: resolveNativeMcpAssets() prefers this relocatable packaged
