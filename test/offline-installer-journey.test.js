@@ -129,6 +129,7 @@ exec env HOME="$FAKE_HOME" PATH="$FAKE_STUBS:$PATH" bash -s
   exe(scp, `#!/usr/bin/env bash
 src="\${@: -2:1}"; dst="\${@: -1}"; dst="\${dst#*:}"
 printf 'SCP %s -> %s\\n' "$src" "$dst" >> "$FAKE_STATE/transport.log"
+src="\${src#*:}"
 mkdir -p "$(dirname "$dst")" && cp "$src" "$dst"
 `);
   exe(join(stubs, 'sudo'), '#!/usr/bin/env bash\n[ "$1" = -n ] && shift\nexec "$@"\n');
@@ -614,6 +615,34 @@ test('a readable serve.log with no bootstrap line names that file, and invents n
   assert.match(r.doc.restore.hiveLogSource, SERVE_LOG_SOURCE);
   assert.match(r.doc.restore.seedRestore, /^no seed-restore line in \S*\/\.papercusp\/logs\/serve\.log$/);
   assert.match(r.doc.restore.bootstrapLast, /^no \[papercusp-hive\] line in \S*\/\.papercusp\/logs\/serve\.log$/);
+});
+
+test('marker-free first boot retains full active and rotated logs plus allowlisted state before restart', opts, () => {
+  const fx = fixture();
+  serveLog(fx, 'boot without hive marker\n');
+  const logs = join(fx.home, '.papercusp', 'logs');
+  writeFileSync(join(logs, 'serve.log.1'), 'original first boot: early return\n');
+  writeFileSync(join(logs, 'serve.log.2'), 'older startup context\n');
+  const r = run(fx);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.doc.restore.startupCapture, 'complete');
+  assert.equal(r.doc.restore.startupFiles, '3');
+  assert.equal(r.doc.restore.startupTruncated, '0');
+  assert.equal(r.doc.restore.startupMissing, '0');
+  for (const [name, content] of [
+    ['startup-serve.log.log', 'boot without hive marker\n'],
+    ['startup-serve.log.1.log', 'original first boot: early return\n'],
+    ['startup-serve.log.2.log', 'older startup context\n'],
+  ]) {
+    const file = join(r.doc.runDir, 'logs', name);
+    assert.equal(readFileSync(file, 'utf8'), content);
+    assert.ok(r.doc.logs.some((entry) => entry.sha256 === sha(file)));
+  }
+  const state = readFileSync(join(r.doc.runDir, 'logs', 'bootstrap-state.log'), 'utf8');
+  assert.match(state, /operatorRecord=present/);
+  assert.match(state, /seed.manifest.json=absent/);
+  assert.doesNotMatch(state, /PAPERCUSP_.*=/);
+  assert.match(r.doc.restore.bootstrapLast, /^no \[papercusp-hive\] line/);
 });
 
 test('a target that already carries Papercusp voids preflight and installs nothing', opts, () => {
