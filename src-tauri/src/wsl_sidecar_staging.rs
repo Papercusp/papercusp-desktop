@@ -303,6 +303,7 @@ pub fn stage_archive(
     let remaining = timeout.saturating_sub(start.elapsed());
     let (mut consumer_child, deadline) =
         start_ready(&mut consumer, WSL_STARTUP_TIMEOUT, remaining, remaining)?;
+    let ready_at = Instant::now();
     let writer = consumer_child
         .0
         .stdin
@@ -311,59 +312,81 @@ pub fn stage_archive(
     producer.stdin(Stdio::null()).stdout(Stdio::from(writer));
     let mut producer_child = OwnedChild(producer.spawn()?);
     drop(producer); // Close the parent's configured writer, not only the child's.
+    let producer_started_at = Instant::now();
     eprintln!(
         "[wsl-staging] binary archive stream starting elapsed_ms={}",
         start.elapsed().as_millis()
     );
     let (mut producer_done, mut consumer_done) = (false, false);
-    loop {
-        for (child, done, label) in [
-            (
-                &mut producer_child.0,
-                &mut producer_done,
-                "archive producer",
-            ),
-            (
-                &mut consumer_child.0,
-                &mut consumer_done,
-                "WSL archive extractor",
-            ),
-        ] {
-            if !*done {
-                if let Some(status) = child.try_wait()? {
-                    eprintln!(
-                        "[wsl-staging] {label} exited with {status} elapsed_ms={}",
-                        start.elapsed().as_millis()
-                    );
-                    if !status.success() {
-                        // GNU timeout may beat the parent watchdog to this
-                        // observation. Keep both deadline paths classifiable.
-                        let kind = if label == "WSL archive extractor" && status.code() == Some(124)
-                        {
-                            io::ErrorKind::TimedOut
-                        } else {
-                            io::ErrorKind::Other
-                        };
-                        return Err(io::Error::new(
-                            kind,
-                            format!("{label} exited with {status}"),
-                        ));
+    let result = (|| {
+        loop {
+            for (child, done, label) in [
+                (
+                    &mut producer_child.0,
+                    &mut producer_done,
+                    "archive producer",
+                ),
+                (
+                    &mut consumer_child.0,
+                    &mut consumer_done,
+                    "WSL archive extractor",
+                ),
+            ] {
+                if !*done {
+                    if let Some(status) = child.try_wait()? {
+                        eprintln!(
+                            "[wsl-staging] {label} exited with {status} elapsed_ms={}",
+                            start.elapsed().as_millis()
+                        );
+                        if !status.success() {
+                            // GNU timeout may beat the parent watchdog to this
+                            // observation. Keep both deadline paths classifiable.
+                            let kind = if label == "WSL archive extractor" && status.code() == Some(124)
+                            {
+                                io::ErrorKind::TimedOut
+                            } else {
+                                io::ErrorKind::Other
+                            };
+                            return Err(io::Error::new(
+                                kind,
+                                format!("{label} exited with {status}"),
+                            ));
+                        }
+                        *done = true;
                     }
-                    *done = true;
                 }
             }
+            if producer_done && consumer_done {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Windows sidecar stream deadline expired; only owned children were stopped",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
-        if producer_done && consumer_done {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Windows sidecar stream deadline expired; only owned children were stopped",
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    })();
+    // Include reaping in the evidence: returning a timeout alone cannot tell
+    // a late watchdog from a slow owned-child cleanup. Keep the same cleanup
+    // order and deadline; these measurements do not grant any extra time.
+    let supervision_ended_at = Instant::now();
+    drop(producer_child);
+    let producer_reaped_at = Instant::now();
+    drop(consumer_child);
+    let consumer_reaped_at = Instant::now();
+    result.map_err(|error: io::Error| {
+        io::Error::new(error.kind(), format!(
+            "{error}; ready_ms={} producer_spawn_ms={} supervision_ms={} producer_cleanup_ms={} consumer_cleanup_ms={} total_ms={}",
+            ready_at.duration_since(start).as_millis(),
+            producer_started_at.duration_since(ready_at).as_millis(),
+            supervision_ended_at.duration_since(producer_started_at).as_millis(),
+            producer_reaped_at.duration_since(supervision_ended_at).as_millis(),
+            consumer_reaped_at.duration_since(producer_reaped_at).as_millis(),
+            consumer_reaped_at.duration_since(start).as_millis(),
+        ))
+    })
 }
 
 #[cfg(all(test, unix))]
@@ -509,13 +532,18 @@ mod tests {
         c.args(["-c", "echo $$ > \"$1\"; exec sleep 20", "producer"])
             .arg(&pid_file);
         let start = Instant::now();
-        assert_eq!(
-            stage_archive(c, f.consumer(), Duration::from_millis(300))
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::TimedOut
-        );
-        assert!(start.elapsed() < Duration::from_secs(3));
+        let error = stage_archive(c, f.consumer(), Duration::from_millis(300)).unwrap_err();
+        let elapsed = start.elapsed();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+        assert!(elapsed < Duration::from_secs(3), "elapsed={elapsed:?}; {error}");
+        let diagnostic = error.to_string();
+        for field in ["ready_ms", "producer_spawn_ms", "supervision_ms",
+            "producer_cleanup_ms", "consumer_cleanup_ms", "total_ms"] {
+            let value = diagnostic.split_once(&format!("{field}="))
+                .unwrap_or_else(|| panic!("missing {field}: {diagnostic}"))
+                .1.split_whitespace().next().unwrap();
+            assert!(value.parse::<u128>().is_ok(), "invalid {field}: {diagnostic}");
+        }
         assert!(unrelated.0.try_wait().unwrap().is_none());
         let pid = fs::read_to_string(pid_file).unwrap();
         assert!(!PathBuf::from(format!("/proc/{}", pid.trim())).exists());
