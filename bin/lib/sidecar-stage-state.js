@@ -353,8 +353,11 @@ function readdirOrEmpty(dir) {
 // Disk blocks, each inode counted once, never following a symlink.
 function diskBytes(target) {
   const seen = new Set();
+  let budget = 100000;
+  const deadline = Date.now() + 30000;
   let total = 0;
   const walk = file => {
+    if (--budget < 0 || Date.now() >= deadline) throw new Error('failed stage byte census budget exceeded');
     const stat = lstatOrNull(file);
     if (!stat) return;
     const id = `${stat.dev}:${stat.ino}`;
@@ -438,7 +441,7 @@ function planFailedStagePrune(keyDir, { now, ttlMs, graceMs, protect, ownedOutpu
       else if (age >= ttlMs) reason = 'expired';
       else if (!entry.resumable) reason = 'not-resumable';
       else reason = 'superseded';
-      decisions.push({ action, reason, output, keyDir, paths, ageHours: Math.round(age / 36e3) / 100 });
+      decisions.push({ action, reason, output, keyDir, paths, time: entry.time, ageHours: Math.round(age / 36e3) / 100 });
     }
   }
   return decisions;
@@ -459,6 +462,8 @@ function pruneFailedStagesWithProtection(options = {}, env = process.env, isPinn
     'PAPERCUSP_SIDECAR_FAILED_STAGE_TTL_HOURS') * 3600e3;
   const graceMs = nonNegativeNumber(options.graceMinutes ?? (env.PAPERCUSP_SIDECAR_FAILED_STAGE_GRACE_MINUTES || 60),
     'PAPERCUSP_SIDECAR_FAILED_STAGE_GRACE_MINUTES') * 60e3;
+  const maxBytes = Number(options.maxBytes ?? 20 * 1024 ** 3);
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error('failed stage maxBytes must be a positive safe integer');
   if (Boolean(options.keyDir) !== Boolean(options.output))
     throw new Error('prune --key-dir and --output name the locked output together');
   if (options.clear && !options.keyDir) throw new Error('prune --clear requires --key-dir and --output');
@@ -469,8 +474,8 @@ function pruneFailedStagesWithProtection(options = {}, env = process.env, isPinn
     protect.add(path.resolve(file));
     protect.add(`${path.resolve(file)}.resume.json`);
   }
-  const parent = path.resolve(options.parent ?? failedStagesParent(env));
   const lockedKeyDir = options.keyDir ? path.resolve(options.keyDir) : null;
+  const parent = path.resolve(options.parent ?? (lockedKeyDir ? path.dirname(lockedKeyDir) : failedStagesParent(env)));
   const keyDirs = [];
   if (lockedKeyDir) keyDirs.push(lockedKeyDir);
   if (options.all) {
@@ -483,14 +488,28 @@ function pruneFailedStagesWithProtection(options = {}, env = process.env, isPinn
   const receipt = { schemaVersion: 1, kind: 'sidecar-failed-stage-prune', at: new Date(now).toISOString(),
     dryRun: Boolean(options.dryRun), ttlHours: ttlMs / 3600e3, graceMinutes: graceMs / 60e3,
     deleted: [], kept: [], errors: [], freedBytes: 0 };
+  const decisions = [];
   for (const keyDir of keyDirs) {
     const ownedOutput = keyDir === lockedKeyDir ? path.basename(path.resolve(options.output)) : null;
-    for (const decision of planFailedStagePrune(keyDir, { now, ttlMs, graceMs, protect, ownedOutput, clear: options.clear })) {
+    decisions.push(...planFailedStagePrune(keyDir, { now, ttlMs, graceMs, protect, ownedOutput, clear: options.clear }));
+  }
+  // One ceiling for the whole bank, rather than one per output identity. Unknown
+  // entries count toward usage but are never turned into deletion candidates.
+  const beforeBytes = diskBytes(parent);
+  const pinnedBytes = decisions.filter(d => d.paths.some(isPinned))
+    .reduce((total, d) => total + d.paths.reduce((sum, file) => sum + diskBytes(file), 0), 0);
+  const cap = receipt.cap = { root: parent, maxBytes, beforeBytes, afterBytes: beforeBytes,
+    pinnedBytes, overByBytes: Math.max(0, beforeBytes - maxBytes), pinnedOverageBytes: Math.max(0, pinnedBytes - maxBytes) };
+  if (beforeBytes > maxBytes) decisions.sort((a, b) => a.time - b.time || a.paths[0].localeCompare(b.paths[0]));
+  for (const decision of decisions) {
       if (decision.paths.some(isPinned)) {
         receipt.kept.push({ paths: decision.paths, reason: 'retention-pin', ageHours: decision.ageHours });
         continue;
       }
-      if (decision.action === 'keep') {
+      // An explicit producer protection or a foreign stage still being admitted
+      // remains protected. A resumable fallback can be evicted under the ceiling.
+      const capVictim = cap.afterBytes > maxBytes && decision.reason !== 'protected' && decision.reason !== 'within-grace';
+      if (decision.action === 'keep' && !capVictim) {
         receipt.kept.push({ paths: decision.paths, reason: decision.reason, ageHours: decision.ageHours });
         continue;
       }
@@ -499,14 +518,16 @@ function pruneFailedStagesWithProtection(options = {}, env = process.env, isPinn
         try {
           const bytes = diskBytes(file);
           if (!options.dryRun) fs.rmSync(file, { recursive: true, force: true });
-          receipt.deleted.push({ path: file, reason: decision.reason, ageHours: decision.ageHours, diskBytes: bytes });
+          receipt.deleted.push({ path: file, reason: capVictim ? 'size-cap' : decision.reason, ageHours: decision.ageHours, diskBytes: bytes });
           receipt.freedBytes += bytes;
+          cap.afterBytes = Math.max(0, cap.afterBytes - bytes);
         } catch (error) {
           receipt.errors.push({ path: file, error: error.message });
         }
       }
-    }
   }
+  cap.overByBytes = Math.max(0, cap.afterBytes - maxBytes);
+  if (cap.overByBytes > cap.pinnedOverageBytes) receipt.errors.push({ path: parent, error: `failed stage size cap remains exceeded:${cap.overByBytes}` });
   if (options.all && !options.dryRun && lstatOrNull(parent)?.isDirectory()) {
     try { writeJson(path.join(parent, 'last-prune.json'), receipt); } catch (error) {
       receipt.errors.push({ path: path.join(parent, 'last-prune.json'), error: error.message });
@@ -532,6 +553,7 @@ function parsePruneArgs(argv) {
     else if (flag === '--parent') options.parent = value();
     else if (flag === '--ttl-hours') options.ttlHours = value();
     else if (flag === '--grace-minutes') options.graceMinutes = value();
+    else if (flag === '--max-bytes') options.maxBytes = value();
     else throw new Error(`prune: unknown argument ${flag}`);
   }
   return options;

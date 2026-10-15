@@ -82,6 +82,56 @@ function orphanReceipt(keyDir, suffix, ageHours) {
 const exists = file => fs.existsSync(file);
 const reasons = receipt => Object.fromEntries(receipt.deleted.map(row => [path.basename(row.path), row.reason]));
 
+test('bank byte cap evicts oldest outputs across key dirs and can evict newest resumable fallback', async () => {
+  const f = scratch();
+  try {
+    const old = stage(f.keyDir, '100', { ageHours: 4 });
+    const secondKey = path.join(f.parent, 'a'.repeat(24));
+    fs.mkdirSync(secondKey);
+    const newer = stage(secondKey, '200', { ageHours: 2 });
+    const maxBytes = 100 * 1024;
+    const receipt = await pruneFailedStages({ all: true, parent: f.parent, maxBytes }, {});
+    assert.equal(exists(old), false);
+    assert.equal(exists(newer), true);
+    assert.equal(receipt.deleted.find(row => row.path === old)?.reason, 'size-cap');
+    assert.ok(receipt.cap.afterBytes <= maxBytes);
+    assert.deepEqual(receipt.errors, []);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('bank cap reports exempt pins and continues past an older pinned output', async () => {
+  const f = scratch();
+  try {
+    const old = stage(f.keyDir, '100', { ageHours: 4 });
+    const secondKey = path.join(f.parent, 'b'.repeat(24));
+    fs.mkdirSync(secondKey);
+    const newer = stage(secondKey, '200', { ageHours: 2 });
+    pin(path.join(old, 'serve.mjs'));
+    const receipt = await pruneFailedStages({ all: true, parent: f.parent, maxBytes: 1 }, {});
+    assert.equal(exists(old), true);
+    assert.equal(exists(newer), false);
+    assert.ok(receipt.cap.pinnedBytes >= 64 * 1024);
+    assert.ok(receipt.cap.pinnedOverageBytes > 0);
+    assert.ok(receipt.kept.some(row => row.reason === 'retention-pin'));
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('locked-output cap measures its own bank and dry-run leaves the fallback intact', async () => {
+  const f = scratch();
+  try {
+    const candidate = stage(f.keyDir, '100', { ageHours: 2 });
+    const options = { keyDir: f.keyDir, output: f.finalDir, maxBytes: 1 };
+    const preview = await pruneFailedStages({ ...options, dryRun: true }, {});
+    assert.equal(preview.cap.root, f.parent);
+    assert.equal(preview.deleted.find(row => row.path === candidate)?.reason, 'size-cap');
+    assert.ok(exists(candidate));
+    assert.equal(exists(`${candidate}.resume.json`), true);
+    const receipt = await pruneFailedStages(options, {});
+    assert.equal(exists(candidate), false);
+    assert.ok(receipt.cap.beforeBytes >= 64 * 1024);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test('locked output keeps only its newest resumable stage and deletes every other entry', async () => {
   const f = scratch();
   try {
