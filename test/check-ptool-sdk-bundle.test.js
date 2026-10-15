@@ -138,6 +138,21 @@ test('a bundle that exports no loader table fails the self-check', () => {
   }
 });
 
+test('the self-check rejects a bundle whose loaders pass but CLI bootstrap fails', () => {
+  const { outDir, outfile } = bundle(`
+    export const PTOOL_SDK_MODULE_LOADERS = { fixture: async () => ({}) };
+    if (process.argv.includes('--list')) throw new TypeError('fixture CLI bootstrap failure');
+  `, 'cli-bootstrap');
+  try {
+    const { status, output } = runChecker(outfile);
+    assert.equal(status, 1, output);
+    assert.match(output, /bundled ptool CLI bootstrap failed/);
+    assert.match(output, /fixture CLI bootstrap failure/);
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
 test('the self-check refuses an isolation dir that can reach a node_modules tree', async () => {
   const { findNodeModulesAncestor } = await import(pathToFileURL(checker).href);
   assert.equal(findNodeModulesAncestor(isolatedTmpRoot()), null);

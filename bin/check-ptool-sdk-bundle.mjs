@@ -19,7 +19,8 @@
 // Exit 0 = every loader resolved from the isolated copy; 1 = a loader failed or
 // the bundle exports no loader table; 2 = usage or isolation error.
 
-import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -78,6 +79,28 @@ export async function checkPtoolSdkBundle(bundlePath, { tmpRoot = tmpdir() } = {
         );
       }
       loaded.push(specifier);
+    }
+    // Exercise the entrypoint too: loader imports miss bundled CLI guards and
+    // initialization races in optional dependencies.
+    const tokenFile = join(isolated, 'test-token');
+    writeFileSync(tokenFile, 'ptool-bundle-selfcheck', { mode: 0o600 });
+    const mockTransport = `globalThis.fetch = async (_url, init) => {
+      const request = JSON.parse(init.body);
+      if (!('id' in request)) return new Response(null, { status: 202 });
+      const result = request.method === 'initialize'
+        ? { protocolVersion: request.params.protocolVersion, capabilities: {}, serverInfo: { name: 'bundle-selfcheck', version: '1' } }
+        : { tools: [] };
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }), { headers: { 'Content-Type': 'application/json' } });
+    };`;
+    const cli = spawnSync(process.execPath, [
+      '--import', 'data:text/javascript,' + encodeURIComponent(mockTransport), copy,
+      '--list', '--url', 'http://127.0.0.1:1', '--token-file', tokenFile,
+    ], {
+      encoding: 'utf8', timeout: 20_000,
+      env: { ...process.env, PAPERCUSP_MCP_TRANSPORT: 'http' },
+    });
+    if (cli.status !== 0) {
+      throw new Error(`bundled ptool CLI bootstrap failed: ${cli.error?.message ?? cli.stderr}`);
     }
     return { loaded };
   } finally {
