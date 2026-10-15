@@ -40,7 +40,7 @@ test.afterEach(async () => {
 
 // ── qmp-command.py against a fake QMP server ─────────────────────────────
 
-async function fakeQmp({ status = 'running', resetsBeforeReply = 0, resetsDuringWindow = 0, greet = true } = {}) {
+async function fakeQmp({ status = 'running', resetsBeforeReply = 0, resetsDuringWindow = 0, greet = true, onPowerdown = () => {} } = {}) {
   const dir = await tempDir();
   const sock = path.join(dir, 'qmp.sock');
   const commands = [];
@@ -64,6 +64,7 @@ async function fakeQmp({ status = 'running', resetsBeforeReply = 0, resetsDuring
           for (let n = 0; n < resetsDuringWindow; n += 1) timers.push(setTimeout(reset, 50 + n * 50));
         } else {
           conn.write('{"return": {}}\n');
+          if (msg.execute === 'system_powerdown') onPowerdown();
         }
       }
     });
@@ -147,13 +148,23 @@ test('powerdown-if-running refuses a missing socket while the main process is al
   assert.match(r.stderr, /unable to connect/);
 });
 
-test('powerdown-if-running sends ACPI powerdown to a live VM', async () => {
-  const qmp = await fakeQmp();
+test('powerdown-if-running waits beyond ACPI acknowledgement for observed process exit', async () => {
+  const child = spawn('sleep', ['30']);
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  let acknowledgedAt;
+  const qmp = await fakeQmp({ onPowerdown: () => {
+    acknowledgedAt = Date.now();
+    setTimeout(() => child.kill(), 250);
+  } });
   try {
-    const r = await runQmp([qmp.sock, 'powerdown-if-running', path.join(path.dirname(qmp.sock), 'qemu.pid')], { MAINPID: String(process.pid) });
+    const r = await runQmp([qmp.sock, 'powerdown-if-running', path.join(path.dirname(qmp.sock), 'qemu.pid')], { MAINPID: String(child.pid) });
     assert.equal(r.code, 0, r.stderr);
+    assert.ok(Date.now() - acknowledgedAt >= 250);
+    assert.equal(JSON.parse(r.stdout).processExited, true);
+    await exited;
     assert.deepEqual(qmp.commands, ['qmp_capabilities', 'system_powerdown']);
   } finally {
+    child.kill();
     await qmp.close();
   }
 });
@@ -172,12 +183,28 @@ test('powerdown-if-running refuses unverified and malformed process identities',
 });
 
 test('powerdown-if-running uses the live QEMU pidfile when systemd MAINPID is absent', async () => {
-  const qmp = await fakeQmp();
+  const child = spawn('sleep', ['30']);
+  const qmp = await fakeQmp({ onPowerdown: () => child.kill() });
   try {
     const pidfile = path.join(path.dirname(qmp.sock), 'qemu.pid');
-    await writeFile(pidfile, String(process.pid));
+    await writeFile(pidfile, String(child.pid));
     const r = await runQmp([qmp.sock, 'powerdown-if-running', pidfile], { MAINPID: '' });
     assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(qmp.commands, ['qmp_capabilities', 'system_powerdown']);
+  } finally {
+    child.kill();
+    await qmp.close();
+  }
+});
+
+test('powerdown-if-running refuses ACK-only success without terminating the live process', async () => {
+  const qmp = await fakeQmp();
+  try {
+    const r = await runQmp([qmp.sock, 'powerdown-if-running', path.join(path.dirname(qmp.sock), 'qemu.pid')], {
+      MAINPID: String(process.pid), PAPERCUSP_QMP_POWERDOWN_TIMEOUT_SEC: '0.2',
+    });
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /acknowledged but process .* did not exit/);
     assert.deepEqual(qmp.commands, ['qmp_capabilities', 'system_powerdown']);
   } finally {
     await qmp.close();

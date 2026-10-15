@@ -45,6 +45,16 @@ def process_alive(pid: int) -> bool:
     return True
 
 
+def wait_for_powerdown(pid: int, timeout: float) -> None:
+    """An ACPI command reply is not a shutdown receipt. Never signal the VM."""
+    deadline = time.monotonic() + timeout
+    while process_alive(pid):
+        if time.monotonic() >= deadline:
+            fail(f"QMP powerdown acknowledged but process {pid} did not exit within {timeout:g}s")
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+    print(json.dumps({"powerdownAcknowledged": True, "processExited": True, "pid": pid}))
+
+
 def powerdown_pid(pidfile: str, qmp_sock: str) -> int | None:
     # systemd omits MAINPID after reaping the main process. The QEMU pidfile
     # is the fallback; absence of both control files is an already-stopped VM.
@@ -139,11 +149,15 @@ def main() -> int:
 
     window = 0.0
     departed_pid = None
+    powerdown_timeout = 0.0
     payload: dict[str, object] = {"execute": execute}
     if execute == "powerdown-if-running":
         if len(sys.argv) != 4 or not sys.argv[3]:
             fail("powerdown-if-running requires the QEMU pidfile")
         departed_pid = powerdown_pid(sys.argv[3], qmp_sock)
+        powerdown_timeout = float(os.environ.get("PAPERCUSP_QMP_POWERDOWN_TIMEOUT_SEC", "150"))
+        if not 0 < powerdown_timeout < float("inf"):
+            fail("PAPERCUSP_QMP_POWERDOWN_TIMEOUT_SEC must be finite and positive")
         if departed_pid is None or not process_alive(departed_pid):
             print(json.dumps({"alreadyStopped": True}))
             return 0
@@ -235,6 +249,8 @@ def main() -> int:
             stream.close()
     finally:
         sock.close()
+    if departed_pid is not None:
+        wait_for_powerdown(departed_pid, powerdown_timeout)
     return 0
 
 
