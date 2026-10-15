@@ -8,6 +8,33 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'src-tauri/src/main.rs'), 'utf8');
 
+function applicableStagingTestCount(stagingSource, platform = process.platform) {
+  // Keep function attributes together so cfg may precede OR follow #[test].
+  // The staging module's Linux lifecycle tests are absent on other Unix hosts.
+  const functions = stagingSource.matchAll(
+    /((?:^[\t ]*#\[[^\n]+\][\t ]*\r?\n)+)[\t ]*fn[\t ]+\w+/gm);
+  let count = 0;
+  for (const [, attributes] of functions) {
+    if (!/#\[test\]/.test(attributes)) continue;
+    if (/#\[cfg\(target_os\s*=\s*"linux"\)\]/.test(attributes) && platform !== 'linux') continue;
+    count++;
+  }
+  return count;
+}
+
+test('staging test count selects Linux-only guards on the applicable host', () => {
+  const fixture = [
+    '#[test]', 'fn ordinary() {}',
+    '#[cfg(target_os = "linux")]', '#[test]', 'fn linux_before_test() {}',
+    '#[test]', '#[cfg(target_os = "linux")]', 'fn linux_after_test() {}',
+    '#[cfg(target_os = "linux")]', 'fn helper_not_a_test() {}',
+  ].join('\n');
+  assert.equal(applicableStagingTestCount(fixture, 'linux'), 3);
+  for (const platform of ['darwin', 'freebsd']) {
+    assert.equal(applicableStagingTestCount(fixture, platform), 1, platform);
+  }
+});
+
 test('complete hot-payload identity changes for non-serve repairs and removed files', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'wsl-runtime-identity-'));
   try {
@@ -78,9 +105,9 @@ test('production staging executes archive, corruption, failure and timeout contr
     const run = spawnSync(binary, ['--nocapture'], { encoding: 'utf8', timeout: 30000 });
     assert.equal(run.status, 0, String(run.error || run.stderr || run.stdout));
     const stagingSource = fs.readFileSync(path.join(root, 'src-tauri/src/wsl_sidecar_staging.rs'), 'utf8');
-    const declaredTests = (stagingSource.match(/#\[test\]/g) || []).length;
-    assert.ok(declaredTests > 0, 'production staging declares no tests');
-    assert.ok(run.stdout.includes(`${declaredTests} passed; 0 failed; 0 ignored`), run.stdout);
+    const expectedPassed = applicableStagingTestCount(stagingSource);
+    assert.ok(expectedPassed > 0, 'production staging declares no applicable tests');
+    assert.ok(run.stdout.includes(`${expectedPassed} passed; 0 failed; 0 ignored`), run.stdout);
     // The native fixture imports the real module, so compile it on the host too:
     // a changed protocol must not leave the only Windows witness using old APIs.
     const fixture = spawnSync(process.env.RUSTC || 'rustc', [
