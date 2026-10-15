@@ -16,8 +16,22 @@ function ownedProcessSnapshot(pid, rows = [], seen = new Set()) {
     rows.push({ pid, command: fs.readFileSync(`/proc/${pid}/comm`, 'utf8').trim(),
       state: fields[0], cpuTicks: Number(fields[11]) + Number(fields[12]),
       waitChannel: fs.readFileSync(`/proc/${pid}/wchan`, 'utf8').trim() });
-    const children = fs.readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim();
-    for (const child of children.split(/\s+/).filter(Boolean)) ownedProcessSnapshot(Number(child), rows, seen);
+    // A child is recorded under the Linux task (thread) that created it, not
+    // necessarily the process-group leader. Cargo/rustc helpers may be spawned
+    // by a worker thread, so reading only task/<pid>/children can omit the very
+    // compiler process this timeout diagnostic is meant to explain.
+    const childPids = new Set();
+    for (const taskId of fs.readdirSync(`/proc/${pid}/task`)) {
+      try {
+        const children = fs.readFileSync(`/proc/${pid}/task/${taskId}/children`, 'utf8').trim();
+        for (const child of children.split(/\s+/).filter(Boolean)) childPids.add(Number(child));
+      } catch (error) {
+        // Threads can exit between readdir and read; the process snapshot is
+        // still useful, and any surviving child is reachable from another row.
+        if (!['ENOENT', 'ESRCH'].includes(error.code)) throw error;
+      }
+    }
+    for (const child of childPids) ownedProcessSnapshot(child, rows, seen);
   } catch (error) {
     rows.push({ pid, unavailable: error.code || error.message });
   }
@@ -98,6 +112,30 @@ test('Cargo fixture timeout captures the live owned process tree before cleanup'
     assert.match(message, /stage: timeout-regression/);
     assert.match(message, /owned processes before timeout:/);
     assert.match(message, /timeout: 2000ms/);
+  });
+
+test('Cargo fixture timeout captures children spawned by a worker thread',
+  { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
+    const driver = `const { Worker } = require('node:worker_threads');
+      const worker = new Worker(\`
+        const { spawn } = require('node:child_process');
+        const { parentPort } = require('node:worker_threads');
+        const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'],
+          { stdio: ['ignore', 'inherit', 'inherit'] });
+        parentPort.postMessage(child.pid);
+        setInterval(() => {}, 1000);
+      \`, { eval: true });
+      worker.once('message', pid => console.log('WORKER_DESCENDANT_PID=' + pid));
+      setInterval(() => {}, 1000);`;
+    const result = await runFixtureCommand(process.execPath, ['-e', driver],
+      { timeout: 2000, stage: 'worker-thread-timeout-regression' });
+    assert.equal(result.error?.code, 'ETIMEDOUT');
+    assert.equal(result.signal, 'SIGKILL');
+    const descendantPid = Number(result.stdout.match(/WORKER_DESCENDANT_PID=(\d+)/)?.[1]);
+    assert.ok(descendantPid > 0, result.stdout);
+    assert.ok(result.processesBeforeTimeout.some(row => row.pid === descendantPid && row.state),
+      JSON.stringify(result.processesBeforeTimeout));
+    assert.equal(fs.existsSync(`/proc/${result.pid}`), false, 'timed-out command must be reaped');
   });
 
 const root = path.resolve(import.meta.dirname, '..');
