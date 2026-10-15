@@ -1125,6 +1125,61 @@ release_artifacts_retention_root() {
   printf '%s\n' "${PAPERCUSP_RELEASE_RETENTION_ROOT:-${HOME}/.papercusp/release-retention}"
 }
 
+# Bridge the shell's critical section to the SAME mkdir mutex as storage:pin.
+# Keep the existing parser, deletion function and caller descriptors in this
+# shell. The small Node coprocess holds the mutex until its input closes; EOF
+# also releases it when this shell dies. No second lock algorithm or pin store.
+# The standing reclaim alone supplies the internal HELD flag: it already owns
+# this mutex while awaiting its native delegate (taking it again deadlocks).
+release_artifacts_retention_mutex_acquire() {
+  local module="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/scripts/lib/fs-mutex.mjs"
+  local holder_input holder_output holder_pid readiness
+  if [[ "${PAPERCUSP_DISK_RETENTION_MUTEX_HELD:-0}" == 1 ]]; then
+    printf -v "$1" '%s' ''; printf -v "$2" '%s' ''; return 0
+  fi
+  [[ -r "$module" ]] || { echo "release-artifacts: retention mutex runtime missing: $module" >&2; return 2; }
+  coproc RELEASE_RETENTION_MUTEX {
+    # Never let the lock holder retain a launcher's Cargo/sidecar flock.
+    for fd in /proc/"$BASHPID"/fd/*; do
+      fd="${fd##*/}"
+      [[ "$fd" =~ ^[0-9]+$ ]] && ((fd > 2)) && eval "exec ${fd}>&-" 2>/dev/null || true
+    done
+    exec node --input-type=module -e '
+      import { pathToFileURL } from "node:url";
+      const { withFsMutex } = await import(pathToFileURL(process.argv[1]).href);
+      const released = new Promise(resolve => {
+        process.stdin.once("end", resolve);
+        process.stdin.once("data", resolve);
+        process.stdin.resume();
+      });
+      await withFsMutex("papercusp-disk-retention", async () => {
+        process.stdout.write("LOCKED\n");
+        await released;
+      });
+      process.stdin.destroy();
+    ' "$module"
+  }
+  holder_pid="$RELEASE_RETENTION_MUTEX_PID"
+  holder_input="${RELEASE_RETENTION_MUTEX[1]}"
+  holder_output="${RELEASE_RETENTION_MUTEX[0]}"
+  if ! IFS= read -r readiness <&"$holder_output" || [[ "$readiness" != LOCKED ]]; then
+    exec {holder_input}>&-; exec {holder_output}<&-
+    wait "$holder_pid" || true
+    echo 'release-artifacts: retention mutex admission failed; refusing mutation' >&2
+    return 2
+  fi
+  exec {holder_output}<&-
+  printf -v "$1" '%s' "$holder_input"
+  printf -v "$2" '%s' "$holder_pid"
+}
+
+release_artifacts_retention_mutex_release() {
+  local input="${1:-}" pid="${2:-}"
+  [[ -n "$input" ]] || return 0
+  exec {input}>&-
+  wait "$pid"
+}
+
 release_artifacts_retention_validate_tag() {
   local tag="${1:-}"
   [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || {
@@ -1366,6 +1421,16 @@ release_artifacts_deletion_audit() {
 # records: allow does not mean rm finished. A denied path or failed admission
 # audit is never handed to rm; callers must propagate the failure.
 release_artifacts_guarded_delete() {
+  local mutex_input mutex_pid status=0
+  release_artifacts_retention_mutex_acquire mutex_input mutex_pid || return $?
+  release_artifacts_guarded_delete_unlocked "$@" || status=$?
+  release_artifacts_retention_mutex_release "$mutex_input" "$mutex_pid" || status=1
+  return "$status"
+}
+
+# Private seam: the public guard holds the pin mutex through the final check,
+# admission audit, rm and completion audit. Caller overrides remain observable.
+release_artifacts_guarded_delete_unlocked() {
   local candidate matches status rc=0 own_lease matched_tag allow_reason delete_status
   for candidate in "$@"; do
     [[ -n "$candidate" ]] || continue

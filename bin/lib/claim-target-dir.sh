@@ -525,10 +525,22 @@ __pc_reap_private_target_slots() {
   local grace="${PAPERCUSP_DESKTOP_PRIVATE_SLOT_GRACE_SEC:-1800}"
   [[ "$grace" =~ ^[0-9]+$ ]] || grace=1800
 
-  local reap_fd
-  exec {reap_fd}>>"${__pc_slot_lockdir}/private-slots.lock" || return 0
+  local reap_fd mutex_input='' mutex_pid='' candidate has_candidates=0
+  # Protect the original path through its rename: checking only the renamed
+  # deletion path loses a pin committed against the original Cargo root.
+  # Empty launches have no original path to mutate and must not queue behind
+  # unrelated retention work. Renamed debris has its own guarded-delete lock.
+  while IFS= read -r candidate; do has_candidates=1; break; done < <(__pc_private_slot_candidates "$shared")
+  if ((has_candidates)); then
+    release_artifacts_retention_mutex_acquire mutex_input mutex_pid || return $?
+  fi
+  if ! exec {reap_fd}>>"${__pc_slot_lockdir}/private-slots.lock"; then
+    release_artifacts_retention_mutex_release "$mutex_input" "$mutex_pid"
+    return 2
+  fi
   if ! flock -w 30 "$reap_fd"; then
     exec {reap_fd}>&-
+    release_artifacts_retention_mutex_release "$mutex_input" "$mutex_pid"
     return 0
   fi
 
@@ -539,13 +551,19 @@ __pc_reap_private_target_slots() {
   if [[ ! "$max_bytes" =~ ^[0-9]{1,15}$ ]]; then
     echo 'private target-slot cap requires positive safe-integer bytes' >&2
     exec {reap_fd}>&-
+    release_artifacts_retention_mutex_release "$mutex_input" "$mutex_pid"
     return 2
   fi
   max_bytes=$((10#$max_bytes))
-  if ((max_bytes <= 0)); then exec {reap_fd}>&-; return 2; fi
+  if ((max_bytes <= 0)); then
+    exec {reap_fd}>&-
+    release_artifacts_retention_mutex_release "$mutex_input" "$mutex_pid"
+    return 2
+  fi
   if ! before_bytes="$(__pc_private_slot_bytes "$shared")"; then
     echo 'private target-slot cap measurement failed; keeping all roots' >&2
     exec {reap_fd}>&-
+    release_artifacts_retention_mutex_release "$mutex_input" "$mutex_pid"
     return 2
   fi
   now="$(date +%s)"
@@ -645,6 +663,7 @@ $(while IFS= read -r row; do [[ "$row" == "$adopt_row" ]] || printf '%s\n' "$row
 
   flock -u "$reap_fd" || true
   exec {reap_fd}>&-
+  release_artifacts_retention_mutex_release "$mutex_input" "$mutex_pid"
   __pc_private_slot_delete_renamed "$shared"
   if ! after_bytes="$(__pc_private_slot_bytes "$shared")"; then
     echo 'private target-slot cap post-measurement failed' >&2

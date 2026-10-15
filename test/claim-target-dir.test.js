@@ -64,6 +64,9 @@ function isolatedEnv(env = {}) {
     CARGO_TARGET_DIR: '',
     CARGO_BUILD_TARGET_DIR: undefined,
     PAPERCUSP_DESKTOP_TARGET_ROOT: home,
+    PAPERCUSP_FS_MUTEX_LOCK_DIR: join(home, 'mutexes'),
+    PAPERCUSP_DISABLE_FS_MUTEX: undefined,
+    PAPERCUSP_DISK_RETENTION_MUTEX_HELD: undefined,
     ...env,
   };
 }
@@ -458,6 +461,133 @@ function auditLines() {
   const audit = join(home, 'retention', 'deletion-audit.tsv');
   return existsSync(audit) ? readFileSync(audit, 'utf8').trim().split('\n') : [];
 }
+
+test('private reaping waits for a pin writer before renaming its root', async () => {
+  const root = makePrivateRoot('pid99999989');
+  const control = makePrivateRoot('pid99999988');
+  const { pathToFileURL } = require('node:url');
+  const { withFsMutex } = await import(pathToFileURL(join(__dirname, '../../scripts/lib/fs-mutex.mjs')).href);
+  const oldLockRoot = process.env.PAPERCUSP_FS_MUTEX_LOCK_DIR;
+  const oldDisable = process.env.PAPERCUSP_DISABLE_FS_MUTEX;
+  process.env.PAPERCUSP_FS_MUTEX_LOCK_DIR = join(home, 'mutexes');
+  delete process.env.PAPERCUSP_DISABLE_FS_MUTEX;
+  let child, completion, output = '', prematureExit = false;
+  try {
+    await withFsMutex('papercusp-disk-retention', async () => {
+      child = spawn('bash', [join(__dirname, '../bin/reap-private-target-slots.sh')], {
+        cwd: home, env: isolatedEnv(reapEnv({ ROOT: home })), stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      child.stdout.on('data', chunk => { output += chunk; });
+      child.stderr.on('data', chunk => { output += chunk; });
+      completion = new Promise((resolve, reject) => {
+        child.once('error', reject);
+        child.once('close', code => { prematureExit = true; resolve(code); });
+      });
+      // The writer deliberately has not committed its pin yet. A different
+      // flock or a pre-lock lease read would rename/delete the root here.
+      const deadline = Date.now() + 5000;
+      while (!prematureExit && existsSync(root) && Date.now() < deadline &&
+          !readdirSync(join(home, 'mutexes')).some(name => name.endsWith('.queue') &&
+            readdirSync(join(home, 'mutexes', name)).length)) await new Promise(resolve => setTimeout(resolve, 20));
+      assert.ok(existsSync(root), 'a pin writer must exclude even the rename');
+      assert.strictEqual(prematureExit, false, output);
+      writeRetentionLease('agent-pin-concurrent-writer', root);
+    });
+    assert.strictEqual(await completion, 0, output);
+    assert.ok(existsSync(root), 'the final read must observe the newly written pin');
+    assert.ok(!existsSync(control), 'an unpinned root remains reclaimable');
+  } finally {
+    if (child && child.exitCode === null) child.kill('SIGKILL');
+    if (completion) await completion;
+    if (oldLockRoot === undefined) delete process.env.PAPERCUSP_FS_MUTEX_LOCK_DIR;
+    else process.env.PAPERCUSP_FS_MUTEX_LOCK_DIR = oldLockRoot;
+    if (oldDisable === undefined) delete process.env.PAPERCUSP_DISABLE_FS_MUTEX;
+    else process.env.PAPERCUSP_DISABLE_FS_MUTEX = oldDisable;
+  }
+});
+
+test('guarded deletion holds the pin mutex through the actual removal', async () => {
+  const root = makePrivateRoot('pid99999987');
+  const ready = join(home, 'removal-entered');
+  const proceed = join(home, 'finish-removal');
+  const script = `set -euo pipefail
+    source "$1"
+    # Capture barrier paths separately from rm's own arguments.
+    ready="$2"; proceed="$3"
+    rm() { touch "$ready"; while [[ ! -e "$proceed" ]]; do sleep 0.02; done; command rm "$@"; }
+    release_artifacts_guarded_delete "$4"`;
+  const child = spawn('bash', ['-c', script, 'guarded-delete', join(__dirname, '../bin/lib/release-artifacts.sh'), ready, proceed, root], {
+    cwd: home, env: isolatedEnv(reapEnv()), stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  child.stderr.on('data', chunk => { output += chunk; });
+  const completion = new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
+  const { pathToFileURL } = require('node:url');
+  const { withFsMutex } = await import(pathToFileURL(join(__dirname, '../../scripts/lib/fs-mutex.mjs')).href);
+  const saved = [process.env.PAPERCUSP_FS_MUTEX_LOCK_DIR, process.env.PAPERCUSP_DISABLE_FS_MUTEX];
+  process.env.PAPERCUSP_FS_MUTEX_LOCK_DIR = join(home, 'mutexes');
+  delete process.env.PAPERCUSP_DISABLE_FS_MUTEX;
+  let writer, acquired = false;
+  try {
+    const deadline = Date.now() + 5000;
+    while (!existsSync(ready) && child.exitCode === null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.ok(existsSync(ready), output);
+    writer = withFsMutex('papercusp-disk-retention', async () => { acquired = true; }, { retryMs: 10, timeoutMs: 5000 });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.strictEqual(acquired, false, 'pin mutations must wait until rm finishes');
+    writeFileSync(proceed, '');
+    assert.strictEqual(await completion, 0, output);
+    await writer;
+    assert.strictEqual(acquired, true);
+    assert.ok(!existsSync(root));
+  } finally {
+    writeFileSync(proceed, '');
+    await completion;
+    if (writer) await writer;
+    for (const [index, key] of ['PAPERCUSP_FS_MUTEX_LOCK_DIR', 'PAPERCUSP_DISABLE_FS_MUTEX'].entries()) {
+      if (saved[index] === undefined) delete process.env[key]; else process.env[key] = saved[index];
+    }
+  }
+});
+
+test('the scheduled reaper reuses its enclosing pin mutex and lock timeouts keep roots intact', async () => {
+  const root = makePrivateRoot('pid99999986');
+  const control = makePrivateRoot('pid99999985');
+  const { pathToFileURL } = require('node:url');
+  const { withFsMutex } = await import(pathToFileURL(join(__dirname, '../../scripts/lib/fs-mutex.mjs')).href);
+  const saved = [process.env.PAPERCUSP_FS_MUTEX_LOCK_DIR, process.env.PAPERCUSP_DISABLE_FS_MUTEX];
+  process.env.PAPERCUSP_FS_MUTEX_LOCK_DIR = join(home, 'mutexes');
+  delete process.env.PAPERCUSP_DISABLE_FS_MUTEX;
+  const run = env => new Promise((resolve, reject) => {
+    const child = spawn('bash', [join(__dirname, '../bin/reap-private-target-slots.sh')], {
+      cwd: home, env: isolatedEnv(reapEnv({ ROOT: home, PAPERCUSP_FS_MUTEX_TIMEOUT_MS: '100', ...env })),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    child.stdout.on('data', chunk => { output += chunk; });
+    child.stderr.on('data', chunk => { output += chunk; });
+    child.once('error', reject); child.once('close', code => resolve({ code, output }));
+  });
+  try {
+    await withFsMutex('papercusp-disk-retention', async () => {
+      const refused = await run({});
+      assert.notStrictEqual(refused.code, 0, refused.output);
+      assert.ok(existsSync(root)); assert.ok(existsSync(control));
+      writeRetentionLease('agent-pin-inherited-mutex', root);
+      const scheduled = await run({ PAPERCUSP_DISK_RETENTION_MUTEX_HELD: '1' });
+      assert.strictEqual(scheduled.code, 0, scheduled.output);
+      assert.ok(existsSync(root));
+      assert.ok(!existsSync(control), 'the owner-held route must finish without taking the mutex twice');
+      rmSync(root, { recursive: true });
+      const empty = await run({});
+      assert.strictEqual(empty.code, 0, 'an empty launch has no mutation to lock: ' + empty.output);
+    });
+  } finally {
+    for (const [index, key] of ['PAPERCUSP_FS_MUTEX_LOCK_DIR', 'PAPERCUSP_DISABLE_FS_MUTEX'].entries()) {
+      if (saved[index] === undefined) delete process.env[key]; else process.env[key] = saved[index];
+    }
+  }
+});
 
 test('private slot eviction removes the oldest root first and reports a finite cap', () => {
   const newer = makePrivateRoot('pid99999999', { ageSec: 7200 });
