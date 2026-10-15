@@ -191,6 +191,46 @@ test('stale IPC cleanup cannot remove a host advertisement from a private PID na
   assert.equal(unknownNamespace.hostAdvertRemains, true, 'unknown namespace identity must fail closed');
 });
 
+for (const instrumented of [false, true]) for (const preflightPasses of [false, true]) {
+test(`assertion source preflight preserves its verdict and evidence (instrumented=${instrumented}, passes=${preflightPasses})`, () => {
+  const start = source.indexOf('vh_begin assert');
+  const end = source.indexOf('log "running assertion command: $*"', start);
+  assert.ok(start >= 0 && end > start, 'assertion boundary must be present');
+  const boundary = source.slice(start, end);
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-tauri-disabled-harness-'));
+  const phase = instrumented ? path.join(fixture, 'phases', 'assert') : fixture;
+  fs.mkdirSync(phase, { recursive: true });
+  try {
+    const result = spawnSync('bash', ['-c', [
+      'set -uo pipefail',
+      instrumented ? 'vh_begin() { VH_PHASE_DIR="$TEST_PHASE"; }' : 'vh_begin() { :; }',
+      'log() { printf "%s\\n" "$*"; }',
+      'node() { printf "SOURCE_PROVENANCE_CHECK\\n"; return "$TEST_PREFLIGHT_EXIT"; }',
+      'WORK="$TEST_WORK"',
+      'unset VH_PHASE_DIR',
+      'VERIFY_TAURI_SOURCE_RECEIPT=fixture-receipt; OPERATOR_SOURCE_ROOT=/frozen-source',
+      boundary,
+      'printf "ASSERTION_REACHED phase=%s\\n" "$VH_PHASE_DIR"',
+    ].join('\n')], {
+      encoding: 'utf8',
+      timeout: 5_000,
+      env: { ...process.env, TEST_WORK: fixture, TEST_PHASE: phase, TEST_PREFLIGHT_EXIT: preflightPasses ? '0' : '23' },
+    });
+    assert.equal(result.status, preflightPasses ? 0 : 1, result.stderr);
+    assert.equal(fs.readFileSync(path.join(phase, 'verifier-source-preflight.log'), 'utf8'), 'SOURCE_PROVENANCE_CHECK\n');
+    if (preflightPasses) {
+      assert.match(result.stdout, /committed verifier source preflight passed before assertions/);
+      assert.ok(result.stdout.includes(`ASSERTION_REACHED phase=${phase}`));
+    } else {
+      assert.match(result.stderr, /FATAL: committed verifier source changed before assertions/);
+      assert.doesNotMatch(result.stdout, /ASSERTION_REACHED/);
+    }
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+}
+
 test('native admission rejects cold and warm shortages before verifier preparation', () => {
   for (const [warm, need] of [[false, 65], [true, 12]]) {
     const refused = nativeCargoPreflightFixture({ freeGb: need - 1, warm });
