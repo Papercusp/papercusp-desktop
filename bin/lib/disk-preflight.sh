@@ -86,7 +86,9 @@ papercusp_free_gb() {
 # One file per live claim: pid=, start=, gb=, expires=, label=.
 
 papercusp_reservation_dir() {
-  printf '%s' "${PAPERCUSP_DISK_RESERVATION_DIR:-${TMPDIR:-/tmp}/papercusp-disk-reservations}"
+  # TMPDIR may be redirected to another filesystem for build scratch. Claims
+  # must remain visible to every builder on this host regardless of that choice.
+  printf '%s' "${PAPERCUSP_DISK_RESERVATION_DIR:-/tmp/papercusp-disk-reservations}"
 }
 
 # Reservations are per physical filesystem, including bind-mount aliases.
