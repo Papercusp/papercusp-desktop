@@ -188,6 +188,154 @@ test('dev refuses a full explicit Cargo mount before invoking Tauri', () => {
   }
 });
 
+test('native dev releases each compile claim before the app runs and re-admits a rebuild', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ei25948716-tauri-reservation-'));
+  const bin = join(root, 'bin');
+  const target = join(root, 'target');
+  const ledger = join(root, 'ledger');
+  try {
+    mkdirSync(bin);
+    mkdirSync(join(target, 'debug', 'deps'), { recursive: true });
+    writeFileSync(join(bin, 'tauri'),
+      '#!/usr/bin/env bash\n' +
+      'set -euo pipefail\n' +
+      'runner=""\n' +
+      'while [[ $# -gt 0 ]]; do\n' +
+      '  if [[ "$1" == "--runner" ]]; then runner="$2"; shift 2; else shift; fi\n' +
+      'done\n' +
+      '[[ -n "$runner" ]] || exit 41\n' +
+      '"$runner" run\n' +
+      '"$runner" run\n',
+      { mode: 0o755 });
+    writeFileSync(join(bin, 'cargo'),
+      '#!/usr/bin/env bash\n' +
+      'set -euo pipefail\n' +
+      '[[ "$1" == "run" ]] || exit 42\n' +
+      'receipt="$(find "$PAPERCUSP_DISK_RESERVATION_DIR" -name "*.res" -print -quit)"\n' +
+      '[[ -n "$receipt" ]] || exit 43\n' +
+      'printf "%s\\n" "$receipt" >> "$PAPERCUSP_TEST_ROOT/receipts"\n' +
+      'exec "$CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER" bash "$PAPERCUSP_TEST_ROOT/app.sh"\n',
+      { mode: 0o755 });
+    writeFileSync(join(bin, 'rustc'),
+      '#!/usr/bin/env bash\nprintf "host: x86_64-unknown-linux-gnu\\n"\n',
+      { mode: 0o755 });
+    writeFileSync(join(bin, 'df'),
+      '#!/usr/bin/env bash\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 209715200 0 104857600 0%% /fixture\\n"\n',
+      { mode: 0o755 });
+    writeFileSync(join(root, 'app.sh'),
+      '#!/usr/bin/env bash\n' +
+      'set -euo pipefail\n' +
+      'for ((i=0; i<100; i++)); do\n' +
+      '  if [[ -z "$(find "$PAPERCUSP_DISK_RESERVATION_DIR" -name "*.res" -print -quit)" ]]; then\n' +
+      '    printf "APP_AFTER_RELEASE\\n"\n' +
+      '    exit 0\n' +
+      '  fi\n' +
+      '  sleep 0.02\n' +
+      'done\n' +
+      'echo "compile claim persisted into app runtime" >&2\n' +
+      'exit 44\n',
+      { mode: 0o755 });
+
+    const result = spawnSync('bash', [GUARD, 'dev'], {
+      env: {
+        ...process.env,
+        HOME: root,
+        CARGO_TARGET_DIR: target,
+        PAPERCUSP_DISK_RESERVATION_DIR: ledger,
+        PAPERCUSP_SIDECAR_LOCK: join(root, 'sidecar.lock'),
+        PAPERCUSP_TEST_ROOT: root,
+        PAPERCUSP_TAURI_INTERNAL_RUNNER: '',
+        PATH: bin + ':' + process.env.PATH,
+      },
+      encoding: 'utf8',
+      timeout: 20_000,
+    });
+    assert.strictEqual(result.status, 0, result.stderr);
+    assert.equal((result.stdout.match(/APP_AFTER_RELEASE/g) || []).length, 2, result.stdout);
+    const receipts = readFileSync(join(root, 'receipts'), 'utf8').trim().split('\n');
+    assert.equal(receipts.length, 2, 'both Cargo builds must start with a live receipt');
+    assert.notEqual(receipts[0], receipts[1], 'the rebuild must own a new reservation');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('real Cargo starts the app only after the native dev compile claim is released', (t) => {
+  const realCargo = spawnSync('bash', ['-c', 'command -v cargo'], { encoding: 'utf8' }).stdout.trim();
+  if (!realCargo) {
+    t.skip('needs Cargo for the native runner integration proof');
+    return;
+  }
+
+  const root = mkdtempSync(join(tmpdir(), 'ei25948716-real-cargo-'));
+  const bin = join(root, 'bin');
+  const app = join(root, 'app');
+  const target = join(root, 'target');
+  const ledger = join(root, 'ledger');
+  try {
+    mkdirSync(bin);
+    mkdirSync(join(app, 'src'), { recursive: true });
+    mkdirSync(join(target, 'debug', 'deps'), { recursive: true });
+    writeFileSync(join(app, 'Cargo.toml'),
+      '[package]\nname = "reservation_phase_probe"\nversion = "0.1.0"\nedition = "2021"\n');
+    writeFileSync(join(app, 'src', 'main.rs'),
+      'use std::{env, path::Path, thread, time::Duration};\n' +
+      'fn main() {\n' +
+      '  let receipt = env::var("PAPERCUSP_DISK_RESERVATION_FILE").unwrap();\n' +
+      '  for _ in 0..100 {\n' +
+      '    if !Path::new(&receipt).exists() { println!("APP_AFTER_RELEASE"); return; }\n' +
+      '    thread::sleep(Duration::from_millis(20));\n' +
+      '  }\n' +
+      '  panic!("compile claim persisted into app runtime");\n' +
+      '}\n');
+    writeFileSync(join(bin, 'tauri'),
+      '#!/usr/bin/env bash\n' +
+      'set -euo pipefail\n' +
+      'runner=""\n' +
+      'while [[ $# -gt 0 ]]; do\n' +
+      '  if [[ "$1" == "--runner" ]]; then runner="$2"; shift 2; else shift; fi\n' +
+      'done\n' +
+      '[[ -n "$runner" ]] || exit 41\n' +
+      '"$runner" run --manifest-path "$PAPERCUSP_TEST_ROOT/app/Cargo.toml" --quiet\n' +
+      '"$runner" run --manifest-path "$PAPERCUSP_TEST_ROOT/app/Cargo.toml" --quiet\n',
+      { mode: 0o755 });
+    writeFileSync(join(bin, 'cargo'),
+      '#!/usr/bin/env bash\n' +
+      'set -euo pipefail\n' +
+      '[[ "$1" == "run" ]] || exit 42\n' +
+      'receipt="$(find "$PAPERCUSP_DISK_RESERVATION_DIR" -name "*.res" -print -quit)"\n' +
+      '[[ -n "$receipt" ]] || exit 43\n' +
+      'printf "%s\\n" "$receipt" >> "$PAPERCUSP_TEST_ROOT/receipts"\n' +
+      'exec "$PAPERCUSP_REAL_CARGO" "$@"\n',
+      { mode: 0o755 });
+    writeFileSync(join(bin, 'df'),
+      '#!/usr/bin/env bash\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 209715200 0 104857600 0%% /fixture\\n"\n',
+      { mode: 0o755 });
+
+    const result = spawnSync('bash', [GUARD, 'dev'], {
+      env: {
+        ...process.env,
+        HOME: root,
+        CARGO_TARGET_DIR: target,
+        PAPERCUSP_DISK_RESERVATION_DIR: ledger,
+        PAPERCUSP_SIDECAR_LOCK: join(root, 'sidecar.lock'),
+        PAPERCUSP_TEST_ROOT: root,
+        PAPERCUSP_REAL_CARGO: realCargo,
+        PAPERCUSP_TAURI_INTERNAL_RUNNER: '',
+        PATH: bin + ':' + process.env.PATH,
+      },
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    assert.strictEqual(result.status, 0, result.stderr);
+    assert.equal((result.stdout.match(/APP_AFTER_RELEASE/g) || []).length, 2, result.stdout);
+    const receipts = readFileSync(join(root, 'receipts'), 'utf8').trim().split('\n');
+    assert.notEqual(receipts[0], receipts[1], 'Cargo rebuild must acquire a fresh receipt');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('ordinary Tauri success and failure do not claim a SIGUSR1 yield', () => {
   for (const [label, exitCode] of [['success', 0], ['failure', 23]]) {
     const result = runGuardResult(
