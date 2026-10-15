@@ -80,7 +80,7 @@ cd "$__here/.."
 # (WI-7101 — it took down the owner's live desktop). Sourced, not executed: it
 # exports CARGO_TARGET_DIR and holds a lock fd that the `exec` below inherits.
 # Single-instance launches keep the shared dir and its warm cache, unchanged.
-. "$__here/lib/claim-target-dir.sh"
+PAPERCUSP_DESKTOP_NATIVE_DEV=1 . "$__here/lib/claim-target-dir.sh"
 . "$__here/lib/resolve-dev-operator-port.sh"
 
 # Select the session's operator at STARTUP. Rust reads OPERATOR_DEV_PORT before

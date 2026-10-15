@@ -47,6 +47,10 @@
 #   CARGO_TARGET_DIR=...                    already set ⇒ respected, no claim
 #   PAPERCUSP_DESKTOP_TARGET_SLOTS=N        how many slots to offer (default 4)
 #   PAPERCUSP_DESKTOP_TARGET_SLOTS=0        disable entirely (legacy behaviour)
+#   PAPERCUSP_DESKTOP_NATIVE_DEV=1         reserve each candidate's native budget
+#   PAPERCUSP_DESKTOP_CARGO_FALLBACK_ROOTS  ordered absolute roots, one per line;
+#       native dev only, after primary candidates cannot be admitted. These are
+#       build-cache placements, never backup/archive volumes. No cache is moved.
 
 # Lock files live OUTSIDE the target dirs they guard: a `cargo clean` (or an
 # agent reclaiming disk) wipes a target dir, and a lock file vanishing out from
@@ -62,6 +66,70 @@ __pc_claim_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$__pc_claim_dir/release-artifacts.sh"
 # shellcheck source=cargo-target-root.sh
 source "$__pc_claim_dir/cargo-target-root.sh"
+# shellcheck source=disk-preflight.sh
+source "$__pc_claim_dir/disk-preflight.sh"
+
+# Keep the atomic receipt in the launcher's shell, never a command substitution
+# whose owning process exits before the build starts.
+__pc_admit_target() {
+  [[ "${__pc_native_admission:-0}" == 1 ]] || return 0
+  local need inherited="${__pc_native_inherited:-}" receipt expires now
+  need="$(papercusp_native_dev_cargo_need_gb "$1")" || return $?
+  if [[ -n "$inherited" ]]; then
+    papercusp_require_free_gb "$1" "$need" "native dev Cargo build" "$inherited" >&2 || return $?
+    receipt="${PAPERCUSP_DISK_RESERVATION_FILE:-}"
+    if [[ "$receipt" == "$inherited" ]]; then
+      # Handoff spends the preparation owner's existing time window; it does
+      # not request a brand-new six-hour window after preparation has elapsed.
+      # require_free_gb verified the device, purpose, live owner and ancestry;
+      # require_disk_reservation below still verifies the complete receipt.
+      expires="$(sed -n 's/^expires=//p' "$receipt")"
+      now="$(date +%s)"
+      if [[ "$expires" =~ ^[0-9]+$ ]] && ((expires > now)); then
+        local PAPERCUSP_DISK_RESERVATION_TTL_SEC="$((expires - now))"
+      fi
+    else
+      inherited="$receipt"
+    fi
+  fi
+  papercusp_require_disk_reservation "$1" "$need" "native dev Cargo build" \
+    "$inherited" >&2 || return $?
+  export PAPERCUSP_DISK_RESERVATION_FILE
+}
+
+# Slot locks retain their legacy names, while this second lock serializes the
+# actual canonical target across primary/fallback configurations and aliases.
+# fd 7 is inherited across exec like slot fd 8 (sidecar locking uses fd 9).
+__pc_lock_target_root() {
+  local root key claim_fd lockdir="${HOME}/.papercusp/desktop-dev-slots/target-roots"
+  root="$(realpath -m -- "$1")" || return 1
+  key="$(node -e 'process.stdout.write(require("node:crypto").createHash("sha256").update(process.argv[1]).digest("hex"))' "$root")" || return 1
+  mkdir -p -- "$lockdir" || return 1
+  exec {claim_fd}>>"$lockdir/$key.lock" || return 1
+  if ! flock -n "$claim_fd"; then
+    exec {claim_fd}>&-
+    return 1
+  fi
+  if [[ -n "${2:-}" ]]; then
+    # Reaping may run while fd 7 protects the caller's selected target. Use a
+    # separate temporary descriptor, without releasing the launcher's claim.
+    printf -v "$2" '%s' "$claim_fd"
+  else
+    exec 7>&"$claim_fd"
+    exec {claim_fd}>&-
+  fi
+}
+
+__pc_target_retention_allows() {
+  local tags status=0
+  tags="$(release_artifacts_retention_path_is_leased "$1" 2>/dev/null)" || status=$?
+  case "$status" in
+    1) return 0 ;;
+    0) release_artifacts_retention_matches_are_own_cut "$tags" && return 0 ;;
+  esac
+  echo "→ target root $1 SKIPPED: foreign or unreadable release-retention lease (${tags//$'\n'/,}; status $status)" >&2
+  return 1
+}
 
 # Is a live process EXECUTING out of this target dir?
 #
@@ -471,12 +539,24 @@ __pc_reap_private_target_slots() {
     fi
   fi
 
-  local stamp target adopted=0 adopt_fd
+  local stamp target adopted=0 adopt_fd root_guard_fd
   while IFS=$'\t' read -r last dir name; do
     [[ -n "$dir" ]] || continue
     if grep -qxF -- "$dir" <<< "$refs"; then continue; fi
+    # A different primary/fallback configuration can hold the same physical
+    # root under another slot namespace. Hold its canonical lock throughout
+    # adoption/rename, then re-check claimant and retention state under it.
+    root_guard_fd=""
+    __pc_lock_target_root "$dir" root_guard_fd || continue
+    lease_status=0
+    reap_lease_tags="$(release_artifacts_retention_path_is_leased "$dir" 2>/dev/null)" || lease_status=$?
+    if ((lease_status != 1)) || ! __pc_private_slot_unclaimed "$name"; then
+      exec {root_guard_fd}>&-
+      continue
+    fi
     if [[ "${PAPERCUSP_DESKTOP_PRIVATE_SLOT_REAP_DRY_RUN:-0}" == "1" ]]; then
       echo "would reap: $dir (idle since $(date -u -d "@$last" +%FT%TZ 2>/dev/null || echo "$last"))"
+      exec {root_guard_fd}>&-
       continue
     fi
     if [[ -n "$adopt_name" && "$adopted" == 0 ]]; then
@@ -492,11 +572,13 @@ __pc_reap_private_target_slots() {
           __pc_adopted_private_root="$dir"
           __pc_adopted_private_lock_fd="$adopt_fd"
           adopted=1
+          exec {root_guard_fd}>&-
           continue
         fi
         # Its lock was taken since the eligibility check: it has a claimant now,
         # so neither adopt nor reap it.
         if [[ -n "$adopt_fd" ]]; then exec {adopt_fd}>&-; fi
+        exec {root_guard_fd}>&-
         continue
       fi
     fi
@@ -512,6 +594,7 @@ __pc_reap_private_target_slots() {
         "dead private target slot (no claimant, unreferenced, idle >= ${grace}s); renamed to $target for deletion" 2>/dev/null || true
       echo "→ reaped dead private target slot $dir" >&2
     fi
+    exec {root_guard_fd}>&-
   done <<< "$sorted"
 
   flock -u "$reap_fd" || true
@@ -543,17 +626,23 @@ __pc_target_slot_is_warm() {
   [[ -d "$shared/.papercusp-target-slots/dev$((index + 1))/debug/deps" ]]
 }
 
-__pc_claim_target_dir() {
+__pc_claim_target_root() {
   # An explicit CARGO_TARGET_DIR is a deliberate choice (a .deb cut on an
   # isolated dir, a test harness) — never second-guess it.
   if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
     echo "→ target dir: honouring preset CARGO_TARGET_DIR=$CARGO_TARGET_DIR (no slot claimed)" >&2
-    return 0
+    __pc_admit_target "$CARGO_TARGET_DIR"
+    return $?
   fi
 
   local slots="${PAPERCUSP_DESKTOP_TARGET_SLOTS:-4}"
   if [[ "$slots" == "0" ]]; then
     echo "⚠ target-dir slots DISABLED (PAPERCUSP_DESKTOP_TARGET_SLOTS=0) — a second concurrent desktop build will corrupt the shared app-manifest (WI-7101)" >&2
+    if [[ "${__pc_native_admission:-0}" == 1 ]]; then
+      local disabled_target
+      disabled_target="$(__pc_cargo_target_root)" || return $?
+      __pc_admit_target "$disabled_target" || return $?
+    fi
     return 0
   fi
 
@@ -562,11 +651,17 @@ __pc_claim_target_dir() {
   # back a slot whose exclusivity we cannot actually guarantee.
   if ! command -v flock >/dev/null 2>&1; then
     echo "⚠ flock(1) unavailable — cannot claim a target-dir slot; concurrent desktop builds may corrupt the shared app-manifest (WI-7101)" >&2
+    if [[ "${__pc_native_admission:-0}" == 1 ]]; then
+      local unlocked_target
+      unlocked_target="$(__pc_cargo_target_root)" || return $?
+      __pc_admit_target "$unlocked_target" || return $?
+    fi
     return 0
   fi
 
   local shared
-  shared="$(__pc_cargo_target_root)" || return 1
+  shared="${1:-}"
+  [[ -n "$shared" ]] || shared="$(__pc_cargo_target_root)" || return 1
   # Cargo metadata tells us the authoritative root, but does not promise that
   # it already exists.  Materialize that explicit configured path before slot
   # selection so a writable relocation parent remains usable and every derived
@@ -643,9 +738,7 @@ __pc_claim_target_dir() {
       # it was authored expecting those legs to run inside it (EI-23946118243608426).
       # Keep the tags the predicate reports instead of discarding them, and defer to
       # the shared own-cut rule, which fails closed on an unset/foreign/invalid tag.
-      if lease_tags="$(release_artifacts_retention_path_is_leased "$dir" 2>/dev/null)" \
-        && ! release_artifacts_retention_matches_are_own_cut "$lease_tags"; then
-        echo "→ slot $i SKIPPED: target root $dir is covered by an active release-retention lease (${lease_tags//$'\n'/,})" >&2
+      if ! __pc_target_retention_allows "$dir"; then
         exec 8>&-
         continue
       fi
@@ -678,10 +771,7 @@ __pc_claim_target_dir() {
         }
         # Same own-cut rule as the preferred-root check above: refuse a FOREIGN
         # cut's lease, never this cut's own (EI-23946118243608426).
-        if [[ "$dir" != "$preferred_dir" ]] \
-          && lease_tags="$(release_artifacts_retention_path_is_leased "$dir" 2>/dev/null)" \
-          && ! release_artifacts_retention_matches_are_own_cut "$lease_tags"; then
-          echo "→ slot $i SKIPPED: fallback target root $dir is covered by an active release-retention lease (${lease_tags//$'\n'/,})" >&2
+        if [[ "$dir" != "$preferred_dir" ]] && ! __pc_target_retention_allows "$dir"; then
           exec 8>&-
           continue
         fi
@@ -699,6 +789,15 @@ __pc_claim_target_dir() {
       # output, so the damage was committed before anyone could read it.
       if __pc_desktop_running_in "$dir"; then
         echo "→ slot $i SKIPPED: a desktop is still running out of $dir but holds no slot lock (its launcher is gone) — isolating so we cannot corrupt its app-manifest (WI-7101)" >&2
+        exec 8>&-
+        continue
+      fi
+      if ! __pc_lock_target_root "$dir"; then
+        exec 8>&-
+        continue
+      fi
+      if ! __pc_admit_target "$dir"; then
+        exec 7>&-
         exec 8>&-
         continue
       fi
@@ -744,6 +843,15 @@ __pc_claim_target_dir() {
     exec 8>&"$__pc_adopted_private_lock_fd"
     exec {__pc_adopted_private_lock_fd}>&-
     rm -f -- "${__pc_slot_lockdir}/${private_name}.lock"
+    if ! __pc_lock_target_root "$__pc_adopted_private_root"; then
+      exec 8>&-
+      return 28
+    fi
+    if ! __pc_admit_target "$__pc_adopted_private_root"; then
+      exec 7>&-
+      exec 8>&-
+      return 28
+    fi
     export CARGO_TARGET_DIR="$__pc_adopted_private_root"
     echo "⚠ all $slots target-dir slots are busy — reusing a dead private root's warm cache as $CARGO_TARGET_DIR." >&2
     echo "  Raise PAPERCUSP_DESKTOP_TARGET_SLOTS if this box routinely runs more desktops than that." >&2
@@ -752,12 +860,64 @@ __pc_claim_target_dir() {
   local private_target="${shared}-${private_name}"
   private_target="$(__pc_prepare_derived_target_root "$private_target" "$shared" "$private_name")" || {
     echo "ERROR: all target-dir slots are busy and no private target root can be prepared safely" >&2
+    exec 8>&-
     return 1
   }
+  if ! __pc_target_retention_allows "$private_target" || __pc_desktop_running_in "$private_target"; then
+    exec 8>&-
+    return 28
+  fi
+  if ! __pc_lock_target_root "$private_target"; then
+    exec 8>&-
+    return 28
+  fi
+  if ! __pc_admit_target "$private_target"; then
+    exec 7>&-
+    exec 8>&-
+    return 28
+  fi
   export CARGO_TARGET_DIR="$private_target"
   echo "⚠ all $slots target-dir slots are busy — using private $CARGO_TARGET_DIR (cold build)." >&2
   echo "  Raise PAPERCUSP_DESKTOP_TARGET_SLOTS if this box routinely runs more desktops than that." >&2
   return 0
+}
+
+__pc_claim_target_dir() {
+  if [[ "${PAPERCUSP_DESKTOP_NATIVE_DEV:-0}" != 1 ]]; then
+    __pc_claim_target_root
+    return $?
+  fi
+  local __pc_native_admission=1
+  local __pc_native_inherited="${PAPERCUSP_DISK_RESERVATION_FILE:-}"
+  # Explicit caller placement is authoritative, including when it cannot fit.
+  if [[ -n "${CARGO_TARGET_DIR:-}" || "${PAPERCUSP_DESKTOP_TARGET_SLOTS:-4}" == 0 ]] \
+    || ! command -v flock >/dev/null 2>&1; then
+    __pc_claim_target_root
+    return $?
+  fi
+  local primary root key
+  primary="$(__pc_cargo_target_root)" || return $?
+  if __pc_claim_target_root "$primary"; then return 0; fi
+  # Alternative placements have independent stable slot locks. No filesystem
+  # fallback is guessed, and every candidate uses the same safety/admission path.
+  local __pc_slot_lockdir="$__pc_slot_lockdir"
+  local primary_lockdir="$__pc_slot_lockdir" seen
+  seen="$(realpath -m -- "$primary")" || return 28
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    if [[ "$root" != /* ]]; then
+      echo "ERROR: native Cargo fallback root must be absolute: $root" >&2
+      continue
+    fi
+    root="$(realpath -m -- "$root")" || continue
+    if grep -qxF -- "$root" <<< "$seen"; then continue; fi
+    seen+=$'\n'"$root"
+    key="$(node -e 'process.stdout.write(require("node:crypto").createHash("sha256").update(process.argv[1]).digest("hex"))' "$root")" || return 28
+    __pc_slot_lockdir="$primary_lockdir/roots/$key"
+    if __pc_claim_target_root "$root"; then return 0; fi
+  done <<< "${PAPERCUSP_DESKTOP_CARGO_FALLBACK_ROOTS:-}"
+  echo "ERROR: no safe native Cargo target has sufficient reserved capacity in the configured roots" >&2
+  return 28
 }
 
 # PAPERCUSP_DESKTOP_REAP_ONLY=1 loads the helpers without claiming a slot

@@ -91,6 +91,142 @@ function writeRetentionLease(tag, targetPath) {
   return retentionRoot;
 }
 
+// Exercise the real allocator and atomic reservation ledger. Only the physical
+// filesystem probes are hermetic: primary and alternate are separate devices.
+function nativeClaimScript(tail = 'printf "%s\\n%s\\n" "$CARGO_TARGET_DIR" "$PAPERCUSP_DISK_RESERVATION_FILE"; cat "$PAPERCUSP_DISK_RESERVATION_FILE"') {
+  return `set -euo pipefail
+    PAPERCUSP_DESKTOP_REAP_ONLY=1 . "${HELPER}"
+    . "${join(__dirname, '..', 'bin', 'lib', 'disk-preflight.sh')}"
+    papercusp_free_gb() {
+      case "$1" in "$HOME"/alternate*) printf '%s' "$TEST_ALTERNATE_FREE";;
+        *) printf '%s' "$TEST_PRIMARY_FREE";; esac
+    }
+    papercusp_device_id() {
+      case "$1" in "$HOME"/alternate*) printf '2';; *) printf '1';; esac
+    }
+    PAPERCUSP_DESKTOP_NATIVE_DEV=1 __pc_claim_target_dir
+    ${tail}`;
+}
+
+function nativeEnv(env = {}) {
+  return isolatedEnv({
+    PAPERCUSP_DESKTOP_CARGO_FALLBACK_ROOTS: join(home, 'alternate'),
+    PAPERCUSP_DESKTOP_PRIVATE_SLOT_REAP: '0',
+    PAPERCUSP_DISK_RESERVATION_DIR: join(home, 'reservations'),
+    TEST_PRIMARY_FREE: '20',
+    TEST_ALTERNATE_FREE: '100',
+    ...env,
+  });
+}
+
+function claimNative(env = {}) {
+  const output = execFileSync('bash', ['-c', nativeClaimScript()], {
+    cwd: home, env: nativeEnv(env), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const [dir, receipt, ...record] = output.trim().split('\n');
+  return { dir, receipt, record: record.join('\n') };
+}
+
+test('native capacity admission skips a leased primary and insufficient cold slots for a roomy configured root', () => {
+  const primary = join(home, '.cargo-target');
+  const retention = writeRetentionLease('other-cut', primary);
+  const result = claimNative({ PAPERCUSP_RELEASE_RETENTION_ROOT: retention });
+  assert.strictEqual(result.dir, join(home, 'alternate'));
+  assert.match(result.receipt, /reservations\/dev-2\//);
+  assert.match(result.record, /gb=65\n/);
+  assert.match(result.record, /label=native dev Cargo build/);
+  assert.ok(existsSync(join(retention, 'lease-other-cut.tsv')));
+});
+
+test('native capacity admission prefers an affordable warm primary and reserves its actual budget', () => {
+  mkdirSync(join(home, '.cargo-target', 'debug', 'deps'), { recursive: true });
+  const result = claimNative();
+  assert.strictEqual(result.dir, join(home, '.cargo-target'));
+  assert.match(result.record, /gb=12\n/);
+  assert.ok(!existsSync(join(home, 'alternate')));
+});
+
+test('native capacity admission fails 28 before Cargo when every configured filesystem is insufficient', () => {
+  assert.throws(() => claimNative({ TEST_ALTERNATE_FREE: '20' }), (error) => {
+    assert.strictEqual(error.status, 28);
+    assert.match(error.stderr.toString(), /insufficient disk/);
+    return true;
+  });
+});
+
+test('native capacity admission honors and reserves an explicit target without switching roots', () => {
+  const explicit = join(home, 'explicit');
+  const result = claimNative({ CARGO_TARGET_DIR: explicit, TEST_PRIMARY_FREE: '100' });
+  assert.strictEqual(result.dir, explicit);
+  assert.match(result.record, /gb=65\n/);
+  assert.throws(() => claimNative({ CARGO_TARGET_DIR: explicit }), (error) => error.status === 28);
+});
+
+test('native capacity admission subtracts live reservations and cannot overcommit a roomy fallback', async () => {
+  const child = spawn('bash', ['-c', nativeClaimScript('echo "$CARGO_TARGET_DIR"; exec sleep 30')], {
+    cwd: home, env: nativeEnv({ TEST_ALTERNATE_FREE: '100' }), stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  try {
+    const dir = await new Promise((resolve, reject) => {
+      child.stdout.once('data', (buf) => resolve(buf.toString().trim()));
+      child.once('exit', (code) => reject(new Error(`native holder exited ${code}`)));
+    });
+    assert.strictEqual(dir, join(home, 'alternate'));
+    assert.throws(() => claimNative(), (error) => {
+      assert.strictEqual(error.status, 28);
+      assert.match(error.stderr.toString(), /65GB is already RESERVED/);
+      return true;
+    });
+  } finally {
+    child.kill();
+    await new Promise((resolve) => child.once('exit', resolve));
+  }
+});
+
+test('native capacity admission keeps a live preparation receipt after time has elapsed', () => {
+  const childScript = nativeClaimScript('printf "ADOPTED=%s\\n" "$PAPERCUSP_DISK_RESERVATION_FILE"');
+  const script = nativeClaimScript(`
+    receipt="$PAPERCUSP_DISK_RESERVATION_FILE"
+    expires="$(sed -n 's/^expires=//p' "$receipt")"
+    sed "s/^expires=.*/expires=$((expires - 60))/" "$receipt" > "$receipt.tmp"
+    mv "$receipt.tmp" "$receipt"
+    bash -c "$1"
+    [ "$receipt" = "$PAPERCUSP_DISK_RESERVATION_FILE" ]
+    papercusp_release_disk_reservation`);
+  const result = execFileSync('bash', ['-c', script, 'handoff', childScript], {
+    cwd: home, env: nativeEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  assert.match(result, /ADOPTED=.*reservations\/dev-2\//);
+});
+
+test('native capacity admission skips foreign and unreadable fallback leases without altering them', () => {
+  const alternate = join(home, 'alternate');
+  const retention = writeRetentionLease('foreign', alternate);
+  assert.notStrictEqual(claimNative({ PAPERCUSP_RELEASE_RETENTION_ROOT: retention }).dir, alternate);
+  const invalid = join(retention, 'lease-invalid.tsv');
+  writeFileSync(invalid, 'invalid retention marker\n');
+  assert.throws(() => claimNative({ PAPERCUSP_RELEASE_RETENTION_ROOT: retention }), (error) => error.status === 28);
+  assert.strictEqual(readFileSync(invalid, 'utf8'), 'invalid retention marker\n');
+});
+
+test('native capacity admission protects a fallback root also configured as another launcher primary', async () => {
+  const child = spawn('bash', ['-c', nativeClaimScript('echo "$CARGO_TARGET_DIR"; exec sleep 30')], {
+    cwd: home, env: nativeEnv({ TEST_ALTERNATE_FREE: '1000' }), stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      child.stdout.once('data', resolve);
+      child.once('exit', (code) => reject(new Error(`native holder exited ${code}`)));
+    });
+    configureTarget(join(home, 'alternate'));
+    const second = claimNative({ TEST_ALTERNATE_FREE: '1000' });
+    assert.notStrictEqual(second.dir, join(home, 'alternate'));
+  } finally {
+    child.kill();
+    await new Promise((resolve) => child.once('exit', resolve));
+  }
+});
+
 function prepareCollectionTarget(root) {
   return execFileSync(
     'bash',
@@ -332,6 +468,30 @@ test('a dead private overflow root is reaped by the next claim, and the deletion
   const lines = auditLines();
   assert.ok(lines.some((l) => l.includes('decision=reap') && l.includes(`path=${dead}\t`)), lines.join('\n'));
   assert.ok(lines.some((l) => l.includes('decision=allow') && l.includes('reaping-pid99999999')), lines.join('\n'));
+});
+
+test('private reaping respects the canonical root lock across slot namespaces', async () => {
+  const root = makePrivateRoot('pid99999994');
+  const child = spawn('bash', ['-c', `set -euo pipefail
+    PAPERCUSP_DESKTOP_REAP_ONLY=1 . "${HELPER}"
+    __pc_lock_target_root "$1"
+    echo READY
+    exec sleep 30`, 'root-holder', root], {
+    cwd: home, env: isolatedEnv(), stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      child.stdout.once('data', resolve);
+      child.once('exit', (code) => reject(new Error(`root holder exited ${code}`)));
+    });
+    claim(reapEnv());
+    assert.ok(existsSync(root), 'a canonical root claimant protects the root even without this namespace slot lock');
+  } finally {
+    child.kill();
+    await new Promise((resolve) => child.once('exit', resolve));
+  }
+  claim(reapEnv());
+  assert.ok(!existsSync(root), 'negative control: after the claimant exits, the old private root is reclaimable');
 });
 
 test('live, recent, leased and referenced private roots are all kept', async () => {

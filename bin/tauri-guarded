@@ -294,18 +294,14 @@ if [[ "$__subcommand" == "dev" ]]; then
   # `npm run tauri -- dev`)? Then CARGO_TARGET_DIR is already exported and the
   # helper honours it and returns without taking a second lock. Double-sourcing
   # is idempotent by design, so belt-and-braces callers cost nothing.
-  . "$__here/lib/claim-target-dir.sh"
+  PAPERCUSP_DESKTOP_NATIVE_DEV=1 . "$__here/lib/claim-target-dir.sh" || exit $?
 
   # WI-10007854: the verifier's source/profile reservations can live on other
   # filesystems. Rust still writes to the selected Cargo slot, so reserve there
   # before either the frontend command or the compiler starts. Reuse the shared
   # target resolver and reservation ledger; explicit targets need this too.
-  . "$__here/lib/cargo-target-root.sh"
-  . "$__here/lib/disk-preflight.sh"
-  __pc_cargo_target="$(papercusp_cargo_target_root "$__here/../src-tauri")"
-  __pc_cargo_need_gb="$(papercusp_native_dev_cargo_need_gb "$__pc_cargo_target")"
-  papercusp_require_free_gb "$__pc_cargo_target" "$__pc_cargo_need_gb" \
-    "native dev Cargo build" "${PAPERCUSP_DISK_RESERVATION_FILE:-}" >&2 || exit $?
+  # Selection already reserved the actual candidate, or adopted the verifier's
+  # ancestor receipt. A second admission here would double-count that budget.
 fi
 
 # `dev` is the documented rig path; `build`/`bundle` also have Cargo/build.rs
