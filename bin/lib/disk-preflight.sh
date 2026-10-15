@@ -258,17 +258,21 @@ papercusp_release_disk_reservation() {
 # lifetime. Only the owner may resize or release it.
 papercusp_require_disk_reservation() {
   local dir="$1" need="$2" label="${3:-evidence}" ttl="${PAPERCUSP_DISK_RESERVATION_TTL_SEC:-21600}"
-  local file start expires now key owner claimed cursor hops=0 ancestor=0
+  local file start expires now requested_at required_until key owner claimed reason="" cursor hops=0 ancestor=0
   case "$need" in ''|*[!0-9]*) return 28 ;; esac
   case "$ttl" in ''|*[!0-9]*) return 28 ;; esac
   [ "$need" -gt 0 ] && [ "$ttl" -gt 0 ] || return 28
   PAPERCUSP_DISK_RESERVATION_FILE=""
+  # The requested window starts at admission, not after reading back the
+  # receipt. Otherwise slow validation shifts its own horizon past a freshly
+  # issued expiry. Retain the existing 5s allowance for inherited receipts.
+  requested_at="$(date +%s)"
+  required_until=$((requested_at + ttl - 5))
   papercusp_require_free_gb "$dir" "$need" "$label" "${4:-}" || return $?
   file="${PAPERCUSP_DISK_RESERVATION_FILE:-}"
   owner="$(sed -n 's/^pid=//p' "$file" 2>/dev/null)"
   claimed="$(sed -n 's/^gb=//p' "$file" 2>/dev/null)"
   start="$(papercusp_proc_starttime "$owner")"
-  now="$(date +%s)"
   key="$(papercusp_mount_key "$dir")"
   expires="$(sed -n 's/^expires=//p' "$file" 2>/dev/null)"
   case "$expires" in ''|*[!0-9]*) expires=0 ;; esac
@@ -280,15 +284,29 @@ papercusp_require_disk_reservation() {
     cursor="$(papercusp_proc_parent_pid "$cursor")" || break
     hops=$((hops + 1))
   done
-  if [ -z "$key" ] || [ -z "$start" ] || [ ! -f "$file" ] ||
-     [ "$(dirname "$file")" != "$(papercusp_reservation_dir)/$key" ] ||
-     [ "$ancestor" != 1 ] || ! kill -0 "$owner" 2>/dev/null ||
-     [ "$(sed -n 's/^start=//p' "$file" 2>/dev/null)" != "$start" ] ||
-     [ "$(sed -n 's/^label=//p' "$file" 2>/dev/null)" != "$label" ] ||
-     [ "$claimed" -lt "$need" ] ||
-     [ "$expires" -lt "$((now + ttl - 5))" ]; then
+  if [ ! -f "$file" ]; then reason=missing-receipt
+  elif [ -z "$key" ]; then reason=device-unmeasured
+  elif [ -z "$start" ]; then reason=owner-identity-unmeasured
+  elif [ "$(dirname "$file")" != "$(papercusp_reservation_dir)/$key" ]; then reason=receipt-device-mismatch
+  elif [ "$ancestor" != 1 ]; then reason=owner-not-ancestor
+  elif ! kill -0 "$owner" 2>/dev/null; then reason=owner-not-live
+  elif [ "$(sed -n 's/^start=//p' "$file" 2>/dev/null)" != "$start" ]; then reason=owner-start-mismatch
+  elif [ "$(sed -n 's/^label=//p' "$file" 2>/dev/null)" != "$label" ]; then reason=purpose-mismatch
+  elif [ "$claimed" -lt "$need" ]; then reason=capacity-shortfall
+  fi
+  # Admission can itself take longer than the requested window. A fixed
+  # horizon must never authorize a receipt that has actually expired now.
+  now="$(date +%s)"
+  if [ -z "$reason" ]; then
+    if [ "$expires" -lt "$now" ]; then reason=expired
+    elif [ "$expires" -lt "$required_until" ]; then reason=lifetime-shortfall
+    fi
+  fi
+  if [ -n "$reason" ]; then
     papercusp_release_disk_reservation
     echo "ERROR: $label requires a verified live disk reservation receipt" >&2
+    printf '       reason=%s requested_at=%s validated_at=%s expires=%s required_until=%s\n' \
+      "$reason" "$requested_at" "$now" "$expires" "$required_until" >&2
     return 28
   fi
 }

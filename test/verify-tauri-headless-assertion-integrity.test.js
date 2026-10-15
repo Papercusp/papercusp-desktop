@@ -261,6 +261,76 @@ test('disk receipt ancestry reads kernel parents without ps and rejects missing 
     assert.doesNotMatch(result.stderr, /UNEXPECTED_ANCESTRY_PS/);
   });
 
+function diskReceiptValidationFixture(mode = 'delayed') {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-receipt-clock-'));
+  const helper = path.resolve(__dirname, '../bin/lib/disk-preflight.sh');
+  try {
+    return spawnSync('bash', ['-c', [
+      'set -u',
+      '. "$1"',
+      'papercusp_free_gb() { printf 100; }',
+      'PAPERCUSP_DISK_RESERVATION_FILE=""',
+      'trap \'papercusp_release_disk_reservation; [ -z "${peer:-}" ] || kill "$peer" 2>/dev/null\' EXIT',
+      '[ "$RECEIPT_MODE" != peer ] || { sleep 30 & peer=$!; }',
+      // Advance the clock only after the real producer commits its receipt.
+      // This models validation work without a real sleep or host-ledger writes.
+      'date() {',
+      '  [ "$1" = +%s ] || { command date "$@"; return $?; }',
+      '  if [ ! -f "$RECEIPT_ROOT/issued" ]; then printf 1000;',
+      '  elif [ "$RECEIPT_MODE" = expired ]; then printf 1061;',
+      '  else printf 1006; fi',
+      '}',
+      'mv() {',
+      '  command mv "$@" || return $?',
+      '  local receipt="${@: -1}"',
+      '  case "$receipt" in *.res) ;; *) return 0 ;; esac',
+      '  case "$RECEIPT_MODE" in',
+      '    peer) sed -i "s/^pid=.*/pid=$peer/; s/^start=.*/start=$(papercusp_proc_starttime "$peer")/" "$receipt" ;;',
+      '    purpose) sed -i "s/^label=.*/label=unrelated build/" "$receipt" ;;',
+      '    capacity) sed -i "s/^gb=.*/gb=3/" "$receipt" ;;',
+      '    lifetime) sed -i "s/^expires=.*/expires=1050/" "$receipt" ;;',
+      '  esac',
+      '  touch "$RECEIPT_ROOT/issued"',
+      '}',
+      'status=0',
+      'papercusp_require_disk_reservation "$RECEIPT_ROOT" 4 "verifier source + dependency snapshot" || status=$?',
+      'if [ "$status" = 0 ]; then printf "RECEIPT_ACCEPTED\\n"; fi',
+      'exit "$status"',
+    ].join('\n'), 'receipt-test', helper], {
+      encoding: 'utf8', timeout: 10_000,
+      env: { ...process.env, RECEIPT_ROOT: root, RECEIPT_MODE: mode,
+        PAPERCUSP_DISK_RESERVATION_DIR: path.join(root, 'ledger'),
+        PAPERCUSP_DISK_RESERVATION_TTL_SEC: '60' },
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test('disk receipt accepts delayed fresh validation within its requested lifetime',
+  { skip: process.platform !== 'linux' }, () => {
+    const result = diskReceiptValidationFixture();
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /RECEIPT_ACCEPTED/);
+  });
+
+test('disk receipt still rejects expiry, peers, wrong purpose, capacity and short lifetime',
+  { skip: process.platform !== 'linux' }, () => {
+    for (const [mode, reason] of [
+      ['expired', 'expired'], ['peer', 'owner-not-ancestor'], ['purpose', 'purpose-mismatch'],
+      ['capacity', 'capacity-shortfall'], ['lifetime', 'lifetime-shortfall'],
+    ]) {
+      const result = diskReceiptValidationFixture(mode);
+      assert.equal(result.error, undefined, mode);
+      assert.equal(result.status, 28, mode + ': ' + result.stdout + result.stderr);
+      assert.match(result.stderr, /requires a verified live disk reservation receipt/);
+      assert.ok(result.stderr.includes(`reason=${reason} requested_at=1000 validated_at=`), result.stderr);
+      assert.match(result.stderr, /expires=\d+ required_until=1055/);
+      assert.doesNotMatch(result.stdout, /RECEIPT_ACCEPTED/);
+    }
+  });
+
 test('native boot cannot adopt an unrelated live peer reservation', () => {
   const result = nativeCargoPreflightFixture({ freeGb: 100, warm: true, handoff: true, peerReceipt: true });
   assert.equal(result.status, 28, result.stderr);
