@@ -15,9 +15,21 @@ const { inspectSpaFreshness, blocksBuild, describe, assertPublicDesktopInterface
 
 const desktopDir = path.resolve(__dirname, '..');
 const repoRoot = process.env.PAPERCUSP_REPO_DIR || path.resolve(desktopDir, '..');
+// The verifier keeps PAPERCUSP_REPO_DIR pointed at its dependency/coordination
+// donor. Package assertions must compare against the SPA frozen for that run,
+// rather than whichever frontend a peer last built in the donor checkout.
+const isolatedVerifier = process.env.PAPERCUSP_VERIFY_TAURI_ISOLATED === '1';
+const frozenSpaDir = process.env.VERIFY_TAURI_SPA_DIST;
+if (isolatedVerifier && !frozenSpaDir) {
+  console.error('[spa-freshness] FATAL: isolated packaging requires VERIFY_TAURI_SPA_DIST as its frozen SPA baseline.');
+  process.exit(4);
+}
 
 const SIDECAR_INDEX = path.join(desktopDir, 'src-tauri/sidecar/spa/index.html');
-const DIST_INDEX = path.join(repoRoot, 'apps/operator-vite/dist/index.html');
+const DIST_INDEX = path.join(
+  isolatedVerifier ? frozenSpaDir : path.join(repoRoot, 'apps/operator-vite/dist'),
+  'index.html',
+);
 
 function readOrNull(file) {
   try {
@@ -41,6 +53,14 @@ try {
   process.exit(4);
 }
 const message = describe(result);
+
+// An isolated acceptance run needs a measured match. A missing or unreadable
+// baseline cannot inherit the ordinary build's non-blocking no-dist behavior,
+// and the stale-SPA escape hatch cannot turn it into acceptance evidence.
+if (isolatedVerifier && result.verdict !== 'match') {
+  console.error(`[spa-freshness] FATAL: isolated package does not match its frozen SPA baseline (${DIST_INDEX}).\n${message}`);
+  process.exit(4);
+}
 
 if (blocksBuild(result.verdict) && process.env.PAPERCUSP_ALLOW_STALE_SPA === '1') {
   console.warn(`[spa-freshness] OVERRIDDEN by PAPERCUSP_ALLOW_STALE_SPA=1:\n${message}`);

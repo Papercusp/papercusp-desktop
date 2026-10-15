@@ -100,6 +100,68 @@ test('the CLI exits 4 on skew and 0 under the documented override', () => {
   assert.equal(noDist.status, 0, noDist.stderr);
 });
 
+test('isolated package freshness uses its frozen SPA and fails closed without weakening ambient builds', () => {
+  const fs = require('node:fs');
+  const { makeDesktopTestScratchDirSync } = require('./test-scratch.cjs');
+  const root = makeDesktopTestScratchDirSync('isolated-spa-freshness-');
+  const desktop = path.join(root, 'desktop');
+  const ambient = path.join(root, 'ambient');
+  const frozen = path.join(root, 'frozen');
+  const stagedIndex = path.join(desktop, 'src-tauri/sidecar/spa/index.html');
+  const frozenIndex = path.join(frozen, 'index.html');
+  try {
+    fs.mkdirSync(path.join(desktop, 'bin/lib'), { recursive: true });
+    fs.mkdirSync(path.dirname(stagedIndex), { recursive: true });
+    fs.mkdirSync(path.join(ambient, 'apps/operator-vite/dist'), { recursive: true });
+    fs.mkdirSync(frozen);
+    for (const file of ['check-spa-freshness.js', 'lib/spa-freshness.js']) {
+      fs.copyFileSync(path.resolve(__dirname, '../bin', file), path.join(desktop, 'bin', file));
+    }
+    fs.writeFileSync(stagedIndex, html('index-PINNED.js'));
+    fs.writeFileSync(path.join(ambient, 'apps/operator-vite/dist/index.html'), html('index-AMBIENT.js'));
+    const cli = path.join(desktop, 'bin/check-spa-freshness.js');
+    const run = (overrides = {}) => spawnSync(process.execPath, [cli], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PAPERCUSP_REPO_DIR: ambient,
+        PAPERCUSP_VERIFY_TAURI_ISOLATED: '1',
+        VERIFY_TAURI_SPA_DIST: frozen,
+        PAPERCUSP_ALLOW_STALE_SPA: '0',
+        PAPERCUSP_DESKTOP_INTERFACE: 'legacy',
+        PAPERCUSP_RELEASE_HOST: '',
+        PAPERCUSP_RELEASE_TAG: '',
+        PAPERCUSP_DISTRIBUTION_PROFILE: 'dogfood',
+        ...overrides,
+      },
+    });
+
+    fs.writeFileSync(frozenIndex, html('index-PINNED.js'));
+    const matching = run();
+    assert.equal(matching.status, 0, matching.stderr);
+    assert.match(matching.stdout, /SPA freshness OK/);
+
+    const ambientSkew = run({ PAPERCUSP_VERIFY_TAURI_ISOLATED: '0' });
+    assert.equal(ambientSkew.status, 4, 'ordinary packaging must still compare against the ambient built SPA');
+    assert.match(ambientSkew.stderr, /index-AMBIENT\.js/);
+
+    fs.writeFileSync(frozenIndex, html('index-DIFFERENT.js'));
+    const frozenSkew = run({ PAPERCUSP_ALLOW_STALE_SPA: '1' });
+    assert.equal(frozenSkew.status, 4, 'a stale-SPA override must not turn a mismatched isolated artifact into acceptance');
+    assert.match(frozenSkew.stderr, /index-DIFFERENT\.js/);
+
+    fs.writeFileSync(frozenIndex, '<html></html>');
+    assert.equal(run().status, 4, 'an unreadable frozen baseline is not measured acceptance');
+    fs.rmSync(frozenIndex);
+    assert.equal(run().status, 4, 'a missing frozen baseline must not use the ordinary no-dist exemption');
+    const missingSelection = run({ VERIFY_TAURI_SPA_DIST: '' });
+    assert.equal(missingSelection.status, 4);
+    assert.match(missingSelection.stderr, /requires VERIFY_TAURI_SPA_DIST/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('public interface selection defaults to legacy and refuses candidate or unknown requests', () => {
   assert.equal(desktopInterfaceChoice({}), 'legacy');
   assert.doesNotThrow(() => assertPublicDesktopInterface(undefined, {}));
