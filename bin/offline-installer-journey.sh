@@ -310,6 +310,9 @@ remote() {
 push() { # LOCAL REMOTE_PATH
   "$SCP_BIN" "${scp_args[@]}" "$1" "$SSH_HOST:$2" >> "$LOG_DIR/push.log" 2>&1
 }
+pull() { # REMOTE_PATH LOCAL
+  "$SCP_BIN" "${scp_args[@]}" "$SSH_HOST:$1" "$2" >> "$LOG_DIR/pull.log" 2>&1
+}
 
 finish() {
   local rc
@@ -699,6 +702,69 @@ else
   echo "PCOIJ bootstrapLast=absent: $HIVE_LOG missing or unreadable"
 fi
 SH
+read -r -d '' STARTUP_DIAGNOSTICS <<'SH'
+# Capture BEFORE restart rotates the first-boot logs. Keep complete files when
+# they fit the bound; a larger file is explicitly marked as a tail, never
+# presented as complete. Raw logs stay in the private run directory, not JSON.
+umask 077
+diag="$REMOTE_DIR/startup-diagnostics"
+mkdir -p "$diag" || exit 1
+for generation in 0 1 2 3 4 5; do
+  name=serve.log; [ "$generation" = 0 ] || name="serve.log.$generation"
+  source="$(dirname "$OPJSON")/logs/$name"
+  if [ ! -r "$source" ]; then echo "PCOIJ snapshot.$generation=absent"; continue; fi
+  bytes=$(wc -c < "$source" | tr -d ' ')
+  if [ "$bytes" -le 16777216 ]; then
+    cp "$source" "$diag/$name" || exit 1
+    echo "PCOIJ snapshot.$generation=full:$bytes"
+  else
+    tail -c 16777216 "$source" > "$diag/$name" || exit 1
+    echo "PCOIJ snapshot.$generation=tail:$bytes"
+  fi
+  chmod 600 "$diag/$name"
+done
+# Allowlist only nonsecret bootstrap facts. Never copy operator.json, process
+# environment, seed keys, or the canonical invite into the evidence document.
+seed_dir="$(dirname "$SIDECAR")/seed"
+state="$diag/bootstrap-state.txt"
+{
+  if [ -r "$OPJSON" ]; then
+    echo 'operatorRecord=present'
+    sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/operatorPort=\1/p' "$OPJSON" | head -1
+  else echo 'operatorRecord=absent'; fi
+  # Only named gate inputs leave /proc: never persist the complete environment.
+  pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$OPJSON" 2>/dev/null | head -1)
+  if [ "$PLATFORM" = linux ] && [ -n "$pid" ] && [ -r "/proc/$pid/environ" ]; then
+    for name in PAPERCUSP_BACKGROUND_WORKERS PAPERCUSP_HONO_PORT PAPERCUSP_DISABLE_DOGFOOD_HIVE PAPERCUSP_DESKTOP VITEST; do
+      line=$(tr '\0' '\n' < "/proc/$pid/environ" | grep -am1 "^$name=" || true)
+      if [ -z "$line" ]; then echo "process.$name=unset"; continue; fi
+      value="${line#*=}"
+      if [ "$name" = VITEST ]; then
+        if [ -n "$value" ]; then echo 'process.VITEST=nonempty'; else echo 'process.VITEST=empty'; fi
+        continue
+      fi
+      if [ "$name" = PAPERCUSP_HONO_PORT ] && [[ "$value" =~ ^[0-9]{1,5}$ ]] &&
+         [ "$value" -ge 1 ] && [ "$value" -le 65535 ]; then
+        echo "process.$name=$value"; continue
+      fi
+      case "$value" in '' ) echo "process.$name=empty" ;; 0|1) echo "process.$name=$value" ;; * ) echo "process.$name=other" ;; esac
+    done
+  else echo 'processGateInputs=unavailable'; fi
+  echo 'flag.DOGFOOD_PAPERCUSP_POT=unmeasured'
+  for name in manifest.json epoch-keys.json; do
+    file="$seed_dir/$name"
+    if [ -r "$file" ]; then
+      echo "seed.$name=present"
+      echo "seed.$name.sha256=$(pcoij_sha "$file")"
+    else echo "seed.$name=absent"; fi
+  done
+  file="$SIDECAR/build-provenance.json"
+  if [ -r "$file" ]; then echo "sidecarProvenance.sha256=$(pcoij_sha "$file")"
+  else echo 'sidecarProvenance=absent'; fi
+} > "$state"
+chmod 600 "$state"
+echo 'PCOIJ snapshot.state=present'
+SH
 read -r -d '' RESTART <<'SH'
 if [ "$PLATFORM" = linux ]; then
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -889,6 +955,30 @@ else
       else
         leg offline-restore fail "pot '$EXPECT_POT' absent $polled (last pot:list exit $(kv potListExit "$RS")); $diag" "$RS"
       fi
+      # Preserve the original startup window before the restart rotates it.
+      rc=$(remote startup-diagnostics "$STARTUP_DIAGNOSTICS" 90); SD="$LOG_DIR/startup-diagnostics.log"
+      captured=0; missing=0; truncated=0
+      for generation in 0 1 2 3 4 5; do
+        status="$(kv "snapshot.$generation" "$SD")"
+        [[ "$status" == absent || -z "$status" ]] && continue
+        name=serve.log; [[ "$generation" == 0 ]] || name="serve.log.$generation"
+        if pull "$REMOTE_DIR/startup-diagnostics/$name" "$LOG_DIR/startup-$name.log"; then
+          chmod 600 "$LOG_DIR/startup-$name.log"
+          captured=$((captured + 1))
+          [[ "$status" == tail:* ]] && truncated=$((truncated + 1))
+        else missing=$((missing + 1)); fi
+      done
+      if [[ "$(kv snapshot.state "$SD")" == present ]] &&
+         pull "$REMOTE_DIR/startup-diagnostics/bootstrap-state.txt" "$LOG_DIR/bootstrap-state.log"; then
+        chmod 600 "$LOG_DIR/bootstrap-state.log"
+      else missing=$((missing + 1)); fi
+      capture_status=complete
+      [[ "$rc" != 0 || "$missing" -gt 0 ]] && capture_status=partial
+      [[ "$captured" == 0 && "$capture_status" == complete ]] && capture_status=no-startup-log
+      ident restore startupCapture "$capture_status"
+      ident restore startupFiles "$captured"
+      ident restore startupTruncated "$truncated"
+      ident restore startupMissing "$missing"
       # ── Leg 10: restart, a new pid re-resolved to the same bytes ───────
       rc=$(remote restart "$HEALTH_FN"$'\n'"$RESTART" $((HEALTH_TIMEOUT + 120))); RR="$LOG_DIR/restart.log"
       for k in port pid sha version exe exeSha; do ident serving.restart "$k" "$(kv "restart.$k" "$RR")"; done

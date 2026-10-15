@@ -129,6 +129,9 @@ exec env HOME="$FAKE_HOME" PATH="$FAKE_STUBS:$PATH" bash -s
   exe(scp, `#!/usr/bin/env bash
 src="\${@: -2:1}"; dst="\${@: -1}"; dst="\${dst#*:}"
 printf 'SCP %s -> %s\\n' "$src" "$dst" >> "$FAKE_STATE/transport.log"
+if [ -n "\${FAKE_SCP_FAIL_PULL:-}" ] && [[ "$src" == *:/* ]]; then
+  echo 'injected diagnostic pull failure' >&2; exit 23
+fi
 src="\${src#*:}"
 mkdir -p "$(dirname "$dst")" && cp "$src" "$dst"
 `);
@@ -623,8 +626,15 @@ test('marker-free first boot retains full active and rotated logs plus allowlist
   const logs = join(fx.home, '.papercusp', 'logs');
   writeFileSync(join(logs, 'serve.log.1'), 'original first boot: early return\n');
   writeFileSync(join(logs, 'serve.log.2'), 'older startup context\n');
-  const r = run(fx);
-  assert.equal(r.status, 0, r.stderr);
+  // This process cannot bootstrap the pot: workers and the dogfood hive are
+  // disabled, and VITEST also suppresses background workers. The fake pot:list
+  // must agree, while diagnostics still survive the failed offline restore.
+  const r = run(fx, {
+    args: ['--restore-timeout', '0'],
+    env: { PAPERCUSP_BACKGROUND_WORKERS: '0', PAPERCUSP_HONO_PORT: '3170', PAPERCUSP_DISABLE_DOGFOOD_HIVE: '1', PAPERCUSP_DESKTOP: '1', VITEST: '1', FAKE_POT_AFTER: '9999' },
+  });
+  assert.equal(r.status, 1, r.stderr);
+  assert.equal(r.legs['offline-restore'].status, 'fail');
   assert.equal(r.doc.restore.startupCapture, 'complete');
   assert.equal(r.doc.restore.startupFiles, '3');
   assert.equal(r.doc.restore.startupTruncated, '0');
@@ -640,9 +650,28 @@ test('marker-free first boot retains full active and rotated logs plus allowlist
   }
   const state = readFileSync(join(r.doc.runDir, 'logs', 'bootstrap-state.log'), 'utf8');
   assert.match(state, /operatorRecord=present/);
+  assert.match(state, /process\.PAPERCUSP_BACKGROUND_WORKERS=0/);
+  assert.match(state, /process\.PAPERCUSP_HONO_PORT=3170/);
+  assert.match(state, /process\.PAPERCUSP_DISABLE_DOGFOOD_HIVE=1/);
+  assert.match(state, /process\.PAPERCUSP_DESKTOP=1/);
+  assert.match(state, /process\.VITEST=nonempty/);
+  assert.match(state, /flag\.DOGFOOD_PAPERCUSP_POT=unmeasured/);
   assert.match(state, /seed.manifest.json=absent/);
-  assert.doesNotMatch(state, /PAPERCUSP_.*=/);
+  assert.doesNotMatch(state, /PAPERCUSP_SEED_DIR=/);
   assert.match(r.doc.restore.bootstrapLast, /^no \[papercusp-hive\] line/);
+});
+
+test('startup diagnostics report a failed pull as partial instead of claiming complete evidence', opts, () => {
+  const fx = fixture();
+  serveLog(fx, 'marker-free first boot\n');
+  const r = run(fx, { env: { FAKE_SCP_FAIL_PULL: '1' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.doc.restore.startupCapture, 'partial');
+  assert.equal(r.doc.restore.startupFiles, '0');
+  assert.equal(r.doc.restore.startupMissing, '2');
+  assert.ok(!existsSync(join(r.doc.runDir, 'logs', 'startup-serve.log.log')));
+  assert.ok(!existsSync(join(r.doc.runDir, 'logs', 'bootstrap-state.log')));
+  assert.equal(r.legs['offline-restore'].status, 'pass', 'capture diagnostics do not forge an offline-restore failure');
 });
 
 test('a target that already carries Papercusp voids preflight and installs nothing', opts, () => {
