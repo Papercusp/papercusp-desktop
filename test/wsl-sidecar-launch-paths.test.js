@@ -8,12 +8,14 @@ const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 
 const source = fs.readFileSync(path.join(__dirname, '../src-tauri/src/main.rs'), 'utf8');
-function fn(name) {
-  const start = source.indexOf(`fn ${name}(`);
+function fn(name, input = source) {
+  // main.rs also mentions function signatures inside test strings. Only a
+  // top-level declaration can supply the production converter under test.
+  const start = input.search(new RegExp(`^fn ${name}\\(`, 'm'));
   assert.notEqual(start, -1, name);
-  const end = source.indexOf('\n}\n', start);
+  const end = input.indexOf('\n}\n', start);
   assert.notEqual(end, -1, name);
-  return source.slice(start, end + 3);
+  return input.slice(start, end + 3);
 }
 function constant(name) {
   const start = source.indexOf(`const ${name}:`);
@@ -92,6 +94,12 @@ function compileAndRun(rust) {
     return result;
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 }
+
+test('production function extraction ignores signature mentions in strings and comments', () => {
+  const declaration = 'fn converter() {\n    actual();\n}\n';
+  const input = 'let text = "fn converter() { fake(); }";\n// fn converter() { fake(); }\n' + declaration;
+  assert.equal(fn('converter', input), declaration);
+});
 
 test('actual production converters preserve WSL argv and runtime env paths', () => {
   const r = compileAndRun(driver);

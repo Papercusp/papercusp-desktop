@@ -12,7 +12,7 @@ const helper = path.join(root, 'bin', 'lib', 'release-artifacts.sh');
 const upload = path.join(root, 'bin', 'upload-release.sh');
 const base = 'https://download-test.example.invalid/secret-prefix';
 
-function debHostFixture(t, { configured = true, mismatch = false, profile = 'public', binary = 'papercusp-desktop', ambiguous = false } = {}) {
+function debHostFixture(t, { configured = true, mismatch = false, profile = 'public', binary = 'papercusp-desktop', ambiguous = false, spaKind = 'legacy' } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-host-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -21,7 +21,10 @@ function debHostFixture(t, { configured = true, mismatch = false, profile = 'pub
   const record = path.join(dir, 'tauri-env.json');
   const hostFile = path.join(dir, 'release-host.env');
   fs.mkdirSync(bin);
-  fs.mkdirSync(path.join(product, 'src-tauri'), { recursive: true });
+  const spa = path.join(product, 'src-tauri/sidecar/spa');
+  fs.mkdirSync(spa, { recursive: true });
+  if (spaKind !== null) fs.writeFileSync(path.join(spa, 'index.html'),
+    `<html><head><meta name="papercusp-desktop-interface" content="${spaKind}"></head></html>`);
   if (configured) fs.writeFileSync(hostFile, `PAPERCUSP_RELEASE_HOST=${base}\n`);
   fs.writeFileSync(path.join(bin, 'cargo'),
     '#!/bin/sh\nprintf \'{"target_directory":"%s"}\\n\' "$FIXTURE_TARGET"\n', { mode: 0o755 });
@@ -72,6 +75,15 @@ test('public Debian producer refuses missing updater configuration before compil
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stderr, /REFUSING TO CUT/);
   assert.equal(fs.existsSync(f.record), false);
+});
+
+test('public Debian producer rejects absent, unknown and candidate SPA identity before compiling', t => {
+  for (const spaKind of [null, 'unknown', 'portal-candidate']) {
+    const f = debHostFixture(t, { spaKind });
+    const result = f.run();
+    assert.equal(result.status, 4, result.stdout + result.stderr);
+    assert.equal(fs.existsSync(f.record), false, `unqualified SPA ${spaKind} reached Tauri`);
+  }
 });
 
 test('public Debian producer rejects a child binary which omitted the exported host', t => {

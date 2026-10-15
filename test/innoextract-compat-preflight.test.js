@@ -54,6 +54,9 @@ test('a sourced current Windows producer keeps frozen source paths but loads cur
   // wrong-answer failure, not a missing-file failure that could mask routing.
   for (const [directory, marker] of [[current, 'current'], [frozen, 'stale']]) {
     fs.mkdirSync(path.join(directory, 'bin/lib'), { recursive: true });
+    // The executable prelude also invokes this maintained JavaScript guard.
+    fs.copyFileSync(path.join(root, 'bin/lib/spa-freshness.js'),
+      path.join(directory, 'bin/lib/spa-freshness.js'));
     for (const library of libraries) {
       let body = '# fixture helper\n';
       if (library === 'release-host.sh') body += 'load_release_host() { :; }\n';

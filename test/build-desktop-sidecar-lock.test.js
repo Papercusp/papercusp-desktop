@@ -331,7 +331,9 @@ test('the real builder lock path survives vanished fuser PIDs and yields a live 
       'exec 8>"$1"',
       'flock -s 8',
       'printf ready >"$2"',
-      'trap \'exec 8>&-; printf yielded >"$3"\' USR1',
+      // Deliberately separate unlocking from the asynchronous acknowledgement:
+      // acquiring the lock cannot prove that the trap has finished writing.
+      'trap \'exec 8>&-; sleep 0.2; printf yielded >"$3"\' USR1',
       'while :; do sleep 0.05; done',
     ].join('\n'),
   );
@@ -380,6 +382,7 @@ test('the real builder lock path survives vanished fuser PIDs and yields a live 
     assert.equal(result.status, 0, `builder lock path exited ${result.status}:\n${result.stdout}${result.stderr}`);
     assert.match(result.stdout, /LOCK_ACQUIRED/, 'the writer must cross the cooperative-yield boundary');
     assert.equal(fs.readFileSync(fuserFdState, 'utf8'), 'closed', 'fuser helpers must not inherit writer fd 9');
+    await waitForFile(yielded);
     assert.equal(fs.existsSync(yielded), true, 'the real tauri-guarded holder must receive SIGUSR1');
   } finally {
     if (holder.exitCode === null) {

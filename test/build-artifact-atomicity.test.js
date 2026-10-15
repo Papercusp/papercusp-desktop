@@ -135,6 +135,10 @@ test('maintained Linux producer consumes the bound source and output in the nomi
     'REVIEW="$OLD_BANK"; BANK="$REVIEW"; SRC="$OLD_BANK/source"',
     'PAPERCUSP_BUILD_SHA=e7752b9e; PROVENANCE_SOURCE_GIT_HEAD=bb0f15e16648907717ad34dae04858b06787b051',
     'TAURI_SIGNING_PRIVATE_KEY_PATH="$OLD_BANK/test-key"',
+    'git() {',
+    '  [[ "$#" == 5 && "$1" == -C && "$2" == "$SRC/papercusp-desktop" && "$3 $4 $5" == "rev-parse --verify HEAD" ]] || return 96',
+    '  printf "%s\\n" "${FIXTURE_DESKTOP_HEAD:-e7752b9e00000000000000000000000000000000}"',
+    '}',
     'npm() {',
     '  if [[ "$*" == *"tauri --version" ]]; then printf "tauri-cli 2.11.0\\n"; return; fi',
     '  [[ "$*" == *"build-deb-repacked.sh" ]] || return 96',
@@ -154,7 +158,17 @@ test('maintained Linux producer consumes the bound source and output in the nomi
   assert.match(refused.stderr, /packet does not bind/);
   assert.equal(fs.existsSync(f.output), false);
   leg.sourceIdentity = 'bb0f15e16648907717ad34dae04858b06787b051';
-  const accepted = runLinuxProducer(f, false, { PAPERCUSP_NOMINATED_PACKET_SHA256: writePacket() });
+  const nomination = writePacket();
+  const wrongHead = runLinuxProducer(f, false, {
+    PAPERCUSP_NOMINATED_PACKET_SHA256: nomination,
+    FIXTURE_DESKTOP_HEAD: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  });
+  assert.notEqual(wrongHead.status, 0);
+  assert.match(wrongHead.stderr, /is not the prepared desktop head/);
+  assert.equal(fs.existsSync(path.join(f.output, 'build-call')), false);
+  // The identity guard runs after destination creation, before compilation.
+  fs.rmSync(f.output, { recursive: true, force: true });
+  const accepted = runLinuxProducer(f, false, { PAPERCUSP_NOMINATED_PACKET_SHA256: nomination });
   assert.equal(accepted.status, 0, accepted.stdout + accepted.stderr);
   assert.equal(fs.readFileSync(path.join(f.output, 'build-call'), 'utf8').trim(),
     `public|gui|${source}/papercusp-desktop|${f.output}/cargo`);
