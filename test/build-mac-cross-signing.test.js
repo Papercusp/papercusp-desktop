@@ -241,6 +241,28 @@ for (const phase of ['mkfs', 'addall', 'chmod', 'convert']) {
   });
 }
 
+for (const explicit of [false, true]) {
+  test(`DMG temporary files use ${explicit ? 'explicit TMPDIR' : 'the output volume by default'}`, t => {
+    const f = fixture(t);
+    if (!explicit) delete f.env.TMPDIR;
+    const expected = explicit ? f.root : path.join(f.out, 'dmg');
+    const record = path.join(f.root, 'temporary-roots');
+    f.env.TEMP_ROOT_RECORD = record;
+    const realMktemp = spawnSync('sh', ['-c', 'command -v mktemp'], { encoding: 'utf8' }).stdout.trim();
+    assert.ok(realMktemp, 'mktemp must be on PATH');
+    fs.writeFileSync(path.join(f.root, 'bin/mktemp'), `#!/bin/sh
+printf '%s\\n' "\${TMPDIR:-/tmp}" >> "$TEMP_ROOT_RECORD"
+exec ${JSON.stringify(realMktemp)} "$@"
+`, { mode: 0o755 });
+    const result = run(f);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const roots = fs.readFileSync(record, 'utf8').trim().split('\n');
+    assert.ok(roots.length >= 2, 'stage and image must allocate temporary paths');
+    assert.ok(roots.every(root => root === expected), JSON.stringify(roots));
+    assert.equal(fs.existsSync(f.dmg + '.sig'), true);
+  });
+}
+
 test('DMG packaging refuses insufficient scratch space before allocating an image', t => {
   const f = fixture(t);
   fs.writeFileSync(path.join(f.root, 'bin/df'),

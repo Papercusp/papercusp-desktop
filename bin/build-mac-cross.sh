@@ -617,7 +617,13 @@ make_dmg() { # $1=app $2=productName
     || fail "DMG packaging requires SRC_TAURI for tutorial metadata"
   local dmg="$OUT_BUNDLE/dmg/${name}_${VERSION}_${DMG_ARCH}.dmg"
   local diagnostics="${PAPERCUSP_DMG_DIAGNOSTICS_DIR:-$OUT_BUNDLE/dmg/diagnostics}/${name}_${VERSION}_${DMG_ARCH}-$$-$RANDOM"
-  mkdir -p "$diagnostics"
+  # Keep an unconfigured packaging continuation on its selected output volume.
+  # An implicit /tmp can be full/reserved even when that volume has headroom.
+  # A function-local export also routes every mktemp to the volume we reserve,
+  # while preserving an explicit caller TMPDIR and restoring it on return.
+  local TMPDIR="${TMPDIR:-$OUT_BUNDLE/dmg}"
+  export TMPDIR
+  mkdir -p "$diagnostics" "$TMPDIR"
   local preflight="${PAPERCUSP_HFSPLUS_PREFLIGHT_SCRIPT:-$HERE/lib/hfsplus-allocation-preflight.py}"
   # Qualify the actual utility before copying the app or allocating a large image.
   # A successful file round trip is insufficient: the old allocator corrupts
@@ -634,7 +640,7 @@ make_dmg() { # $1=app $2=productName
   # Keep failed scratch visible to the same retention reader used by release cuts.
   source "$HERE/lib/disk-preflight.sh"
   source "$HERE/lib/release-artifacts.sh"
-  local scratch_root="${TMPDIR:-/tmp}" app_bytes image_bytes scratch_gb output_gb
+  local scratch_root="$TMPDIR" app_bytes image_bytes scratch_gb output_gb
   app_bytes="$(du -sb "$app" | cut -f1)"
   image_bytes=$(( (app_bytes/1024/1024 + app_bytes/1024/1024/4 + 301) * 1024 * 1024 ))
   local PAPERCUSP_DISK_RESERVATION_FILE="" scratch_reservation="" output_reservation=""
