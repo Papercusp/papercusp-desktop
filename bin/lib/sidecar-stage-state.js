@@ -444,7 +444,16 @@ function planFailedStagePrune(keyDir, { now, ttlMs, graceMs, protect, ownedOutpu
   return decisions;
 }
 
-function pruneFailedStages(options = {}, env = process.env) {
+async function pruneFailedStages(options = {}, env = process.env) {
+  const { withRetentionPinProtection } = await import('../../../scripts/lib/retention-pins.mjs');
+  return withRetentionPinProtection(isPinned => pruneFailedStagesWithProtection(options, env, isPinned),
+    { dir: env.PAPERCUSP_RELEASE_RETENTION_ROOT, nowMs: options.now });
+}
+
+// The scheduled reclaimer already holds the shared retention mutex. Its
+// predicate comes from the protection read inside that lock.
+function pruneFailedStagesWithProtection(options = {}, env = process.env, isPinned) {
+  if (typeof isPinned !== 'function') throw new Error('retention protection is required');
   const now = options.now ?? Date.now();
   const ttlMs = nonNegativeNumber(options.ttlHours ?? (env.PAPERCUSP_SIDECAR_FAILED_STAGE_TTL_HOURS || 24),
     'PAPERCUSP_SIDECAR_FAILED_STAGE_TTL_HOURS') * 3600e3;
@@ -477,6 +486,10 @@ function pruneFailedStages(options = {}, env = process.env) {
   for (const keyDir of keyDirs) {
     const ownedOutput = keyDir === lockedKeyDir ? path.basename(path.resolve(options.output)) : null;
     for (const decision of planFailedStagePrune(keyDir, { now, ttlMs, graceMs, protect, ownedOutput, clear: options.clear })) {
+      if (decision.paths.some(isPinned)) {
+        receipt.kept.push({ paths: decision.paths, reason: 'retention-pin', ageHours: decision.ageHours });
+        continue;
+      }
       if (decision.action === 'keep') {
         receipt.kept.push({ paths: decision.paths, reason: decision.reason, ageHours: decision.ageHours });
         continue;
@@ -525,7 +538,7 @@ function parsePruneArgs(argv) {
 }
 
 module.exports = { captureIdentity, captureSpa, captureSpaFromSource, copySpa, failedStagesParent,
-  failureEvidenceRoot, inventory, parsePruneArgs, portableSpaInventory, pruneFailedStages, recordFailure,
+  failureEvidenceRoot, inventory, parsePruneArgs, portableSpaInventory, pruneFailedStages, pruneFailedStagesWithProtection, recordFailure,
   sourceState, spaBinding, validateResume, validateSpa, writeJson };
 
 if (require.main === module) {
@@ -558,12 +571,13 @@ if (require.main === module) {
     } else if (command === 'validate') {
       validateResume(file, JSON.parse(fs.readFileSync(args[0], 'utf8')));
     } else if (command === 'prune') {
-      const receipt = pruneFailedStages(parsePruneArgs(process.argv.slice(3)));
-      const gib = (receipt.freedBytes / 2 ** 30).toFixed(2);
-      process.stdout.write(`→ failed sidecar stages: ${receipt.dryRun ? 'would delete' : 'deleted'} `
-        + `${receipt.deleted.length} path(s), ${gib} GiB; kept ${receipt.kept.length}; errors ${receipt.errors.length}\n`);
-      process.stdout.write(`SIDECAR_FAILED_STAGE_PRUNE ${JSON.stringify(receipt)}\n`);
-      if (receipt.errors.length) process.exitCode = 1;
+      pruneFailedStages(parsePruneArgs(process.argv.slice(3))).then(receipt => {
+        const gib = (receipt.freedBytes / 2 ** 30).toFixed(2);
+        process.stdout.write(`→ failed sidecar stages: ${receipt.dryRun ? 'would delete' : 'deleted'} `
+          + `${receipt.deleted.length} path(s), ${gib} GiB; kept ${receipt.kept.length}; errors ${receipt.errors.length}\n`);
+        process.stdout.write(`SIDECAR_FAILED_STAGE_PRUNE ${JSON.stringify(receipt)}\n`);
+        if (receipt.errors.length) process.exitCode = 1;
+      }).catch(error => { console.error('FATAL: sidecar stage: ' + error.message); process.exitCode = 1; });
     } else throw new Error('expected capture, retain, validate or prune');
   } catch (error) {
     console.error(`FATAL: sidecar stage: ${error.message}`);

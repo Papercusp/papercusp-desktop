@@ -3,7 +3,7 @@
 // sidecar stage bank kept every failed stage (5-9 GB each) forever. These tests pin the
 // retention policy the producer now enforces on every build, and drive the real shell
 // seams in build-desktop-sidecar.sh that call it.
-const { test } = require('node:test');
+const { test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -21,6 +21,29 @@ const trap = builder.match(/^trap '[^\n]*' EXIT$/m)[0];
 const startPruneAt = builder.indexOf('# WI-6554700010010442 / plan disk-headroom');
 const startPrune = builder.slice(startPruneAt, builder.indexOf('export SIDECAR_STAGE_REPO_ROOT=', startPruneAt));
 const HOUR = 3600e3;
+let pinScratch;
+let previousPinEnv;
+beforeEach(() => {
+  pinScratch = makeDesktopTestScratchDirSync('sidecar-pins-');
+  previousPinEnv = [process.env.PAPERCUSP_RELEASE_RETENTION_ROOT, process.env.PAPERCUSP_FS_MUTEX_LOCK_DIR];
+  process.env.PAPERCUSP_RELEASE_RETENTION_ROOT = path.join(pinScratch, 'leases');
+  process.env.PAPERCUSP_FS_MUTEX_LOCK_DIR = path.join(pinScratch, 'mutex');
+});
+afterEach(() => {
+  for (const [index, key] of ['PAPERCUSP_RELEASE_RETENTION_ROOT', 'PAPERCUSP_FS_MUTEX_LOCK_DIR'].entries()) {
+    if (previousPinEnv[index] === undefined) delete process.env[key]; else process.env[key] = previousPinEnv[index];
+  }
+  fs.rmSync(pinScratch, { recursive: true, force: true });
+});
+function pin(target, expiresAt = Date.now() + HOUR) {
+  const id = crypto.randomUUID();
+  const tag = 'agent-pin-' + Buffer.from(JSON.stringify({ version: 1, id, owner: 'test', reason: 'review',
+    createdAt: new Date().toISOString() })).toString('base64url');
+  const dir = process.env.PAPERCUSP_RELEASE_RETENTION_ROOT;
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `lease-agent-pin-${id}.tsv`),
+    `schema=papercusp-release-retention/v1\ntag=${tag}\nexpires_ns=${BigInt(expiresAt) * 1000000n}\npath=${target}\n`);
+}
 
 function scratch() {
   const root = makeDesktopTestScratchDirSync('sidecar-failed-stage-prune-');
@@ -59,7 +82,7 @@ function orphanReceipt(keyDir, suffix, ageHours) {
 const exists = file => fs.existsSync(file);
 const reasons = receipt => Object.fromEntries(receipt.deleted.map(row => [path.basename(row.path), row.reason]));
 
-test('locked output keeps only its newest resumable stage and deletes every other entry', () => {
+test('locked output keeps only its newest resumable stage and deletes every other entry', async () => {
   const f = scratch();
   try {
     const newest = stage(f.keyDir, '300', { ageHours: 1 });
@@ -68,7 +91,7 @@ test('locked output keeps only its newest resumable stage and deletes every othe
     const orphan = orphanReceipt(f.keyDir, '10', 6);
     fs.writeFileSync(path.join(f.keyDir, 'unrelated.txt'), 'not a stage');
     fs.writeFileSync(`${newest}.resume.json.tmp.999`, 'in-flight receipt write');
-    const receipt = pruneFailedStages({ keyDir: f.keyDir, output: f.finalDir }, {});
+    const receipt = await pruneFailedStages({ keyDir: f.keyDir, output: f.finalDir }, {});
     assert.ok(exists(newest) && exists(`${newest}.resume.json`), 'newest resumable stage is kept');
     for (const gone of [older, `${older}.resume.json`, broken, `${broken}.resume.json`, orphan])
       assert.equal(exists(gone), false, `${gone} must be deleted`);
@@ -85,56 +108,56 @@ test('locked output keeps only its newest resumable stage and deletes every othe
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test('under the lock a receipt-less stage is deleted and, being newest, keeps nothing older', () => {
+test('under the lock a receipt-less stage is deleted and, being newest, keeps nothing older', async () => {
   const f = scratch();
   try {
     const resumable = stage(f.keyDir, '1', { ageHours: 1 });
     const noReceipt = stage(f.keyDir, '2', { receipt: false });
-    const receipt = pruneFailedStages({ keyDir: f.keyDir, output: f.finalDir }, {});
+    const receipt = await pruneFailedStages({ keyDir: f.keyDir, output: f.finalDir }, {});
     assert.equal(exists(noReceipt), false);
     assert.equal(exists(resumable), false, 'a newer failed build supersedes the older identity');
     assert.equal(reasons(receipt)['sidecar.failed-stage.2'], 'no-receipt');
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test('a newer non-resumable failure supersedes an older resumable stage', () => {
+test('a newer non-resumable failure supersedes an older resumable stage', async () => {
   const f = scratch();
   try {
     const resumable = stage(f.keyDir, '1', { ageHours: 2 });
     const latest = stage(f.keyDir, '2', { phase: 'qualifying', ageHours: 1 });
-    pruneFailedStages({ keyDir: f.keyDir, output: f.finalDir }, {});
+    await pruneFailedStages({ keyDir: f.keyDir, output: f.finalDir }, {});
     assert.equal(exists(resumable), false, 'an older identity cannot be resumed after a newer build');
     assert.equal(exists(latest), false, 'a non-resumable newest stage is not kept either');
     assert.deepEqual(fs.readdirSync(f.keyDir), []);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test('the newest resumable stage expires after the TTL', () => {
+test('the newest resumable stage expires after the TTL', async () => {
   const f = scratch();
   try {
     const old = stage(f.keyDir, '7', { ageHours: 30 });
-    const receipt = pruneFailedStages({ keyDir: f.keyDir, output: f.finalDir }, {});
+    const receipt = await pruneFailedStages({ keyDir: f.keyDir, output: f.finalDir }, {});
     assert.equal(exists(old), false);
     assert.equal(reasons(receipt)['sidecar.failed-stage.7'], 'expired');
     const kept = stage(f.keyDir, '8', { ageHours: 30 });
-    pruneFailedStages({ keyDir: f.keyDir, output: f.finalDir },
+    await pruneFailedStages({ keyDir: f.keyDir, output: f.finalDir },
       { PAPERCUSP_SIDECAR_FAILED_STAGE_TTL_HOURS: '48' });
     assert.ok(exists(kept), 'PAPERCUSP_SIDECAR_FAILED_STAGE_TTL_HOURS widens the window');
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test('the RESUME_FROM target and its receipt are never deleted, even by --clear', () => {
+test('the RESUME_FROM target and its receipt are never deleted, even by --clear', async () => {
   const f = scratch();
   try {
     const target = stage(f.keyDir, '40', { ageHours: 50 });
     const other = stage(f.keyDir, '41', { ageHours: 1 });
-    pruneFailedStages({ keyDir: f.keyDir, output: f.finalDir, clear: true, protect: [target] }, {});
+    await pruneFailedStages({ keyDir: f.keyDir, output: f.finalDir, clear: true, protect: [target] }, {});
     assert.ok(exists(target) && exists(`${target}.resume.json`));
     assert.equal(exists(other), false, '--clear removes the unprotected newest stage too');
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test('--all sweeps other outputs outside the grace window and writes a receipt', () => {
+test('--all sweeps other outputs outside the grace window and writes a receipt', async () => {
   const f = scratch();
   try {
     const otherKey = path.join(f.parent, 'a'.repeat(24));
@@ -144,7 +167,7 @@ test('--all sweeps other outputs outside the grace window and writes a receipt',
     const ignoredDir = path.join(f.parent, 'not-a-key');
     const ignored = stage(ignoredDir, '1', { ageHours: 100 });
     const own = stage(f.keyDir, '9', { phase: 'assembling', receipt: true });
-    const receipt = pruneFailedStages({ all: true, keyDir: f.keyDir, output: f.finalDir }, { XDG_STATE_HOME: f.state });
+    const receipt = await pruneFailedStages({ all: true, keyDir: f.keyDir, output: f.finalDir }, { XDG_STATE_HOME: f.state });
     assert.equal(exists(own), false, 'the locked output is pruned without a grace window');
     assert.ok(exists(freshNoReceipt), 'another builder may still be writing its receipt');
     assert.equal(exists(oldSuperseded), false);
@@ -153,28 +176,28 @@ test('--all sweeps other outputs outside the grace window and writes a receipt',
     const written = JSON.parse(fs.readFileSync(path.join(f.parent, 'last-prune.json'), 'utf8'));
     assert.equal(written.kind, 'sidecar-failed-stage-prune');
     assert.deepEqual(written.deleted.map(row => row.path).sort(), receipt.deleted.map(row => row.path).sort());
-    pruneFailedStages({ all: true }, { XDG_STATE_HOME: f.state, PAPERCUSP_SIDECAR_FAILED_STAGE_GRACE_MINUTES: '0' });
+    await pruneFailedStages({ all: true }, { XDG_STATE_HOME: f.state, PAPERCUSP_SIDECAR_FAILED_STAGE_GRACE_MINUTES: '0' });
     assert.equal(exists(freshNoReceipt), false, 'outside the grace window it is deleted');
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test('--dry-run reports without deleting; invalid arguments refuse', () => {
+test('--dry-run reports without deleting; invalid arguments refuse', async () => {
   const f = scratch();
   try {
     const victim = stage(f.keyDir, '5', { ageHours: 40 });
-    const receipt = pruneFailedStages({ ...parsePruneArgs(['--key-dir', f.keyDir, '--output', f.finalDir, '--dry-run']) }, {});
+    const receipt = await pruneFailedStages({ ...parsePruneArgs(['--key-dir', f.keyDir, '--output', f.finalDir, '--dry-run']) }, {});
     assert.ok(exists(victim));
     assert.equal(receipt.dryRun, true);
     assert.equal(receipt.deleted.length, 2);
-    assert.throws(() => pruneFailedStages({}, {}), /requires --all or --key-dir/);
-    assert.throws(() => pruneFailedStages({ keyDir: f.keyDir }, {}), /together/);
-    assert.throws(() => pruneFailedStages({ all: true, clear: true }, {}), /--clear requires/);
-    assert.throws(() => pruneFailedStages({ all: true, ttlHours: 'soon' }, {}), /non-negative/);
+    await assert.rejects(() => pruneFailedStages({}, {}), /requires --all or --key-dir/);
+    await assert.rejects(() => pruneFailedStages({ keyDir: f.keyDir }, {}), /together/);
+    await assert.rejects(() => pruneFailedStages({ all: true, clear: true }, {}), /--clear requires/);
+    await assert.rejects(() => pruneFailedStages({ all: true, ttlHours: 'soon' }, {}), /non-negative/);
     assert.throws(() => parsePruneArgs(['--bogus']), /unknown argument/);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test('the build-start prune runs after the EXIT trap and outside the isolated build-lock block', () => {
+test('the build-start prune runs after the EXIT trap and outside the isolated build-lock block', async () => {
   const lockStart = builder.indexOf('SIDECAR_BUILD_LOCK="$SIDECAR_FINAL_DIR.build.lock"');
   const lockEnd = builder.indexOf('# Acquire/release the reader-facing lock', lockStart);
   const exitTrapAt = builder.indexOf(trap);
@@ -187,7 +210,7 @@ test('the build-start prune runs after the EXIT trap and outside the isolated bu
     'prune precedes stage capture and any RESUME_FROM move');
 });
 
-test('build start prunes under the lock and protects a RESUME_FROM path containing spaces', () => {
+test('build start prunes under the lock and protects a RESUME_FROM path containing spaces', async () => {
   const f = scratch();
   try {
     const target = stage(f.keyDir, '11', { ageHours: 50 });
@@ -210,7 +233,7 @@ test('build start prunes under the lock and protects a RESUME_FROM path containi
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test('a successful build clears its own output group through the real EXIT trap', () => {
+test('a successful build clears its own output group through the real EXIT trap', async () => {
   const f = scratch();
   try {
     const failedBefore = stage(f.keyDir, '20', { ageHours: 1 });
@@ -232,8 +255,37 @@ test('a successful build clears its own output group through the real EXIT trap'
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test('the helper CLI exits non-zero only on a refused invocation', () => {
+test('the helper CLI exits non-zero only on a refused invocation', async () => {
   const result = spawnSync(process.execPath, [helper, 'prune'], { encoding: 'utf8' });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /requires --all or --key-dir/);
+});
+
+
+test('finite descendant pins protect stages and receipts through aliases; expiry restores cleanup', async () => {
+  const f = scratch();
+  try {
+    const target = stage(f.keyDir, '40', { ageHours: 50 });
+    const other = stage(f.keyDir, '41', { ageHours: 50 });
+    const child = path.join(target, 'review'); fs.mkdirSync(child);
+    pin(child);
+    const alias = path.join(f.root, 'stage-alias'); fs.symlinkSync(f.keyDir, alias);
+    const receipt = await pruneFailedStages({ keyDir: alias, output: f.finalDir, clear: true }, {});
+    assert.ok(exists(target) && exists(`${target}.resume.json`));
+    assert.equal(exists(other), false);
+    assert.equal(receipt.kept[0].reason, 'retention-pin');
+    await pruneFailedStages({ keyDir: f.keyDir, output: f.finalDir, clear: true, now: Date.now() + 2 * HOUR }, {});
+    assert.equal(exists(target), false);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('an unreadable pin store refuses the complete standalone sweep before deletion', async () => {
+  const f = scratch();
+  try {
+    const target = stage(f.keyDir, '40', { ageHours: 50 });
+    fs.mkdirSync(process.env.PAPERCUSP_RELEASE_RETENTION_ROOT, { recursive: true });
+    fs.writeFileSync(path.join(process.env.PAPERCUSP_RELEASE_RETENTION_ROOT, 'lease-broken.tsv'), 'broken');
+    await assert.rejects(() => pruneFailedStages({ keyDir: f.keyDir, output: f.finalDir }, {}), /retention pins unreadable/);
+    assert.ok(exists(target) && exists(`${target}.resume.json`));
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
