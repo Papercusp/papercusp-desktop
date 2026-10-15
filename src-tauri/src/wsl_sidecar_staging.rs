@@ -62,7 +62,7 @@ fn run_ready_bounded(
     // Non-streaming commands have only the control message on stdin.
     drop(child.0.stdin.take());
     loop {
-        if let Some(status) = child.0.try_wait()? {
+        if let Some(status) = child.try_wait()? {
             return Ok(status);
         }
         if Instant::now() >= operation_deadline {
@@ -86,12 +86,11 @@ fn start_ready(
     let start = Instant::now();
     let total_deadline = start + total_timeout;
     let startup_deadline = (start + startup_timeout).min(total_deadline);
-    let mut child = OwnedChild(
+    let mut child = OwnedChild::spawn(
         command
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()?,
-    );
+            .stdout(Stdio::piped()),
+    )?;
     let mut stdout = child.0.stdout.take().expect("stdout was piped");
     let (tx, rx) = mpsc::channel();
     // A cold WSL stdout must never block the supervising thread. Read a fixed
@@ -223,26 +222,83 @@ else
 fi
 "#;
 
-/// An error at ANY spawn/wait boundary must reap only our own child, never
+/// An error at ANY spawn/wait boundary must stop our own processes, never
 /// terminate the distro (which may still contain a working older operator).
+/// Linux keeps the direct child UNREAPED until group cleanup: its reserved PID
+/// anchors the process-group identity even when the leader exited first.
 struct OwnedChild(Child);
+
+impl OwnedChild {
+    fn spawn(command: &mut Command) -> io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        command.spawn().map(Self)
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            // Linux siginfo_t is 128 bytes, aligned for its pointer union.
+            // waitid(P_PID, ..., WEXITED|WNOHANG|WNOWAIT) observes the exit
+            // without releasing the child identity as Child::try_wait does.
+            unsafe extern "C" {
+                fn waitid(kind: i32, id: u32, info: *mut std::ffi::c_void, options: i32) -> i32;
+            }
+            let mut info = [0usize; 128 / std::mem::size_of::<usize>()];
+            let result = unsafe { waitid(1, self.0.id(), info.as_mut_ptr().cast(), 4 | 1 | 0x0100_0000) };
+            if result == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            // The first three ints are signo, errno, code; the payload union
+            // starts after their pointer-aligned padding. SIGCHLD's payload
+            // is pid, uid, status. No libc crate is needed by the native
+            // standalone fixture that imports this production module.
+            let fields = unsafe { std::slice::from_raw_parts(info.as_ptr().cast::<i32>(), 32) };
+            if fields[0] == 0 {
+                return Ok(None);
+            }
+            let payload = if std::mem::size_of::<usize>() == 8 { 4 } else { 3 };
+            let status = fields[payload + 2];
+            let raw = match fields[2] {
+                1 => status << 8,   // CLD_EXITED
+                2 => status,        // CLD_KILLED
+                3 => status | 0x80, // CLD_DUMPED
+                code => return Err(io::Error::other(format!("unexpected child exit code {code}"))),
+            };
+            Ok(Some(ExitStatus::from_raw(raw)))
+        }
+        #[cfg(not(target_os = "linux"))]
+        self.0.try_wait()
+    }
+}
 
 impl Drop for OwnedChild {
     fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            unsafe extern "C" { fn kill(pid: i32, signal: i32) -> i32; }
+            // Only spawn() creates these groups; try_wait() never reaps their
+            // leader. Signal before wait(), so no recycled PID/PGID can match.
+            let _ = unsafe { kill(-(self.0.id() as i32), 9) };
+        }
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
 }
 
 pub fn run_bounded(command: &mut Command, timeout: Duration) -> io::Result<ExitStatus> {
-    let mut child = OwnedChild(command.spawn()?);
+    let mut child = OwnedChild::spawn(command)?;
     wait_bounded(&mut child, timeout)
 }
 
 /// Capture a small capability receipt while draining both pipes concurrently.
 /// Reuse the owned-child deadline so a settings service cannot stall a launch.
 pub fn run_bounded_output(command: &mut Command, timeout: Duration) -> io::Result<Output> {
-    let mut child = OwnedChild(command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?);
+    let mut child = OwnedChild::spawn(command.stdout(Stdio::piped()).stderr(Stdio::piped()))?;
     let stdout = child.0.stdout.take().expect("piped stdout");
     let stderr = child.0.stderr.take().expect("piped stderr");
     let deadline = Instant::now() + timeout;
@@ -276,7 +332,7 @@ pub fn run_bounded_output(command: &mut Command, timeout: Duration) -> io::Resul
 fn wait_bounded(child: &mut OwnedChild, timeout: Duration) -> io::Result<ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(status) = child.0.try_wait()? {
+        if let Some(status) = child.try_wait()? {
             return Ok(status);
         }
         if Instant::now() >= deadline {
@@ -310,7 +366,7 @@ pub fn stage_archive(
         .take()
         .expect("ready stdin was piped");
     producer.stdin(Stdio::null()).stdout(Stdio::from(writer));
-    let mut producer_child = OwnedChild(producer.spawn()?);
+    let mut producer_child = OwnedChild::spawn(&mut producer)?;
     drop(producer); // Close the parent's configured writer, not only the child's.
     let producer_started_at = Instant::now();
     eprintln!(
@@ -322,12 +378,12 @@ pub fn stage_archive(
         loop {
             for (child, done, label) in [
                 (
-                    &mut producer_child.0,
+                    &mut producer_child,
                     &mut producer_done,
                     "archive producer",
                 ),
                 (
-                    &mut consumer_child.0,
+                    &mut consumer_child,
                     &mut consumer_done,
                     "WSL archive extractor",
                 ),
@@ -505,6 +561,94 @@ mod tests {
         assert!(!f.0.join("stage/.papercusp-runtime-complete").exists());
     }
 
+    #[cfg(target_os = "linux")]
+    fn process_is_running(pid: &str) -> bool {
+        // A killed grandchild may briefly be a zombie awaiting its own parent;
+        // it cannot execute or retain a pipe. Do not mistake that for a live leak.
+        fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
+            .ok()
+            .and_then(|stat| stat.rsplit_once(") ").map(|(_, rest)| rest.starts_with('Z')))
+            == Some(false)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn observe_stopped(pid: &str) -> bool {
+        // SIGKILL prevents further user code immediately, but /proc may still
+        // show a runnable task until the kernel finishes delivering it.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while process_is_running(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        !process_is_running(pid)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn producer_failure_stops_extractor_descendants_before_return() {
+        let f = Fixture::new();
+        let mut unrelated = Command::new("sleep").arg("20").spawn().unwrap();
+        let mut consumer = Command::new("bash");
+        consumer.args(["-c", WSL_READY_SCRIPT, "ready", "/bin/bash", "-c",
+            "bash -c 'echo $$ > \"$1/descendant.pid\"; while ! test -f \"$1/release\"; do sleep 0.01; done; touch \"$1/escaped\"' descendant \"$1\" & wait",
+            "extractor"]).arg(&f.0);
+        let mut producer = Command::new("bash");
+        producer.args(["-c", "while ! test -f \"$1/descendant.pid\"; do sleep 0.01; done; exit 19", "producer"])
+            .arg(&f.0);
+        let error = stage_archive(producer, consumer, Duration::from_secs(3)).unwrap_err();
+        let pid = fs::read_to_string(f.0.join("descendant.pid")).unwrap();
+        let stopped = observe_stopped(&pid);
+        let unrelated_survived = unrelated.try_wait().unwrap().is_none();
+        // Release the fixture even on the deliberately failing pre-fix run:
+        // the regression itself must not strand the process it detects.
+        fs::write(f.0.join("release"), b"").unwrap();
+        observe_stopped(&pid);
+        let _ = unrelated.kill();
+        let _ = unrelated.wait();
+        assert!(error.to_string().contains("archive producer"), "{error}");
+        assert!(unrelated_survived, "cleanup signalled an unrelated process");
+        assert!(stopped, "extractor descendant {pid} survived stage_archive failure");
+        assert!(!f.0.join("escaped").exists(), "extractor mutated files after return");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exited_leader_remains_anchored_until_descendant_cleanup() {
+        let f = Fixture::new();
+        let mut command = Command::new("bash");
+        command.args(["-c",
+            "bash -c 'echo $$ > \"$1/descendant.pid\"; while ! test -f \"$1/release\"; do sleep 0.01; done' descendant \"$1\" & while ! test -f \"$1/descendant.pid\"; do sleep 0.01; done; exit 19",
+            "leader"]).arg(&f.0);
+        let mut child = OwnedChild::spawn(&mut command).unwrap();
+        let leader = child.0.id();
+        let status = wait_bounded(&mut child, Duration::from_secs(3)).unwrap();
+        let descendant = fs::read_to_string(f.0.join("descendant.pid")).unwrap();
+        let still_anchored = PathBuf::from(format!("/proc/{leader}")).exists();
+        let descendant_started = process_is_running(&descendant);
+        // Repeated observation must preserve the exit code AND its identity.
+        let repeated_status = child.try_wait().unwrap().unwrap();
+        drop(child);
+        let stopped = observe_stopped(&descendant);
+        fs::write(f.0.join("release"), b"").unwrap();
+        observe_stopped(&descendant);
+        assert_eq!(status.code(), Some(19));
+        assert_eq!(repeated_status.code(), Some(19));
+        assert!(still_anchored, "polling reaped the process-group identity");
+        assert!(descendant_started, "fixture did not start a real descendant");
+        assert!(stopped, "exited leader left its descendant running");
+        assert!(!PathBuf::from(format!("/proc/{leader}")).exists(), "direct child was not reaped");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_command_preserves_signal_exit_status() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut command = Command::new("bash");
+        command.args(["-c", "kill -TERM $$"]);
+        let status = run_bounded(&mut command, Duration::from_secs(3)).unwrap();
+        assert_eq!(status.signal(), Some(15));
+        assert_eq!(status.code(), None);
+    }
+
     #[test]
     fn corrupt_archive_is_rejected_by_real_extractor() {
         let f = Fixture::new();
@@ -526,7 +670,7 @@ mod tests {
     #[test]
     fn timeout_stops_only_owned_children_and_reaps_them() {
         let f = Fixture::new();
-        let mut unrelated = OwnedChild(Command::new("sleep").arg("20").spawn().unwrap());
+        let mut unrelated = OwnedChild::spawn(Command::new("sleep").arg("20")).unwrap();
         let pid_file = f.0.join("producer.pid");
         let mut c = Command::new("bash");
         c.args(["-c", "echo $$ > \"$1\"; exec sleep 20", "producer"])
@@ -544,7 +688,7 @@ mod tests {
                 .1.split_whitespace().next().unwrap();
             assert!(value.parse::<u128>().is_ok(), "invalid {field}: {diagnostic}");
         }
-        assert!(unrelated.0.try_wait().unwrap().is_none());
+        assert!(unrelated.try_wait().unwrap().is_none());
         let pid = fs::read_to_string(pid_file).unwrap();
         assert!(!PathBuf::from(format!("/proc/{}", pid.trim())).exists());
         assert!(!f.0.join("runtime").exists());
@@ -615,7 +759,7 @@ mod tests {
     #[test]
     fn consumer_failure_reaps_owned_producer_not_unrelated_process() {
         let f = Fixture::new();
-        let mut unrelated = OwnedChild(Command::new("sleep").arg("20").spawn().unwrap());
+        let mut unrelated = OwnedChild::spawn(Command::new("sleep").arg("20")).unwrap();
         let mut producer = Command::new("bash");
         producer
             .args(["-c", "echo $$ > \"$1\"; exec sleep 20", "producer"])
@@ -636,7 +780,7 @@ mod tests {
         assert!(error.to_string().contains("WSL archive extractor"), "{error:?}");
         let pid = fs::read_to_string(f.0.join("producer.pid")).unwrap();
         assert!(!PathBuf::from(format!("/proc/{}", pid.trim())).exists());
-        assert!(unrelated.0.try_wait().unwrap().is_none());
+        assert!(unrelated.try_wait().unwrap().is_none());
     }
 
     #[test]
@@ -673,7 +817,7 @@ mod tests {
 
     #[test]
     fn bounded_command_timeout_does_not_signal_other_children() {
-        let mut unrelated = OwnedChild(Command::new("sleep").arg("20").spawn().unwrap());
+        let mut unrelated = OwnedChild::spawn(Command::new("sleep").arg("20")).unwrap();
         let mut c = Command::new("sleep");
         c.arg("20");
         assert_eq!(
@@ -682,7 +826,7 @@ mod tests {
                 .kind(),
             io::ErrorKind::TimedOut
         );
-        assert!(unrelated.0.try_wait().unwrap().is_none());
+        assert!(unrelated.try_wait().unwrap().is_none());
     }
 
     #[test]
@@ -896,7 +1040,7 @@ mod tests {
     #[test]
     fn startup_timeout_reaps_only_the_owned_process() {
         let f = Fixture::new();
-        let mut unrelated = OwnedChild(Command::new("sleep").arg("20").spawn().unwrap());
+        let mut unrelated = OwnedChild::spawn(Command::new("sleep").arg("20")).unwrap();
         let mut command = Command::new("bash");
         command
             .args(["-c", "echo $$ > \"$1\"; exec sleep 20", "startup"])
@@ -911,7 +1055,7 @@ mod tests {
         assert!(error.to_string().contains("before readiness"), "{error:?}");
         let pid = fs::read_to_string(f.0.join("startup.pid")).unwrap();
         assert!(!PathBuf::from(format!("/proc/{}", pid.trim())).exists());
-        assert!(unrelated.0.try_wait().unwrap().is_none());
+        assert!(unrelated.try_wait().unwrap().is_none());
     }
 
     #[test]
