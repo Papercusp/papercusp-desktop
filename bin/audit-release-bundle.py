@@ -4182,13 +4182,21 @@ def portable_source_tar(argv):
                 else:
                     os.makedirs(os.path.dirname(dest), exist_ok=True)
                     open(dest, 'wb').close()
-            query = subprocess.Popen([tar_bin, *excludes, '-C', shape, '-cf', '-', './' + name],
-                                     stdout=subprocess.PIPE)
-            with tarfile.open(fileobj=query.stdout, mode='r|') as selected:
-                allowed = {relative_name(member.name) for member in selected}
-            query.stdout.close()
-            if query.wait() != 0:
-                raise ValueError('GNU source selection failed for dependency links')
+            # tarfile stops at archive EOF, before GNU tar's final record padding.
+            # Closing a pipe there can SIGPIPE a valid selector. Spool the small
+            # zero-byte shape archive so the producer completes before parsing;
+            # dependency payload bytes still stream directly into the output.
+            with tempfile.TemporaryFile() as selection:
+                query = subprocess.run(
+                    [tar_bin, *excludes, '-C', shape, '-cf', '-', './' + name],
+                    stdout=selection, stderr=subprocess.PIPE, text=True)
+                if query.returncode != 0:
+                    raise ValueError('GNU source selection failed for dependency links: '
+                                     + name + ' (exit ' + str(query.returncode) + '): '
+                                     + query.stderr.strip())
+                selection.seek(0)
+                with tarfile.open(fileobj=selection, mode='r:') as selected:
+                    allowed = {relative_name(member.name) for member in selected}
         return [(member, *entries[member]) for member in entries if member in allowed]
 
     def add_link(output, member, target):

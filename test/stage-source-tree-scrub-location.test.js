@@ -231,6 +231,47 @@ test('portable source projection keeps dependency bytes and relocated workspace/
     'the real stager must project the selected tar before compression and final audit');
 });
 
+test('portable source projection consumes the complete GNU selection record before checking its producer', t => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-source-selection-record-'));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const donor = path.join(tmp, 'donor'), source = path.join(tmp, 'source');
+  fs.mkdirSync(donor);
+  fs.writeFileSync(path.join(donor, 'runtime.js'), 'module.exports = 41;\n');
+  fs.writeFileSync(path.join(donor, 'private.txt'), 'excluded bytes');
+  fs.mkdirSync(path.join(source, 'node_modules'), { recursive: true });
+  fs.symlinkSync(donor, path.join(source, 'node_modules/dep'));
+  const selected = spawnSync('tar', ['-C', source, '-cf', '-', './node_modules']);
+  assert.equal(selected.status, 0, selected.stderr.toString());
+  const projected = spawnSync('python3', [path.join(root, 'bin/audit-release-bundle.py'),
+    '--portable-source-tar', source, 'tar', '--exclude=./node_modules/dep/private.txt'], {
+    input: selected.stdout,
+    // A valid GNU record larger than a pipe makes closing at tar EOF, before
+    // padding has drained, deterministically kill the otherwise successful tar.
+    env: { ...process.env, TAR_OPTIONS: '--blocking-factor=8192' },
+    maxBuffer: 1024 * 1024,
+    timeout: 15000,
+  });
+  assert.equal(projected.status, 0, projected.stderr.toString());
+  const archive = path.join(tmp, 'projected.tar');
+  const installed = path.join(tmp, 'installed');
+  fs.writeFileSync(archive, projected.stdout);
+  fs.mkdirSync(installed);
+  run('tar', ['-xf', archive, '-C', installed]);
+  assert.equal(fs.readFileSync(path.join(installed, 'node_modules/dep/runtime.js'), 'utf8'),
+    'module.exports = 41;\n');
+  assert.equal(fs.existsSync(path.join(installed, 'node_modules/dep/private.txt')), false);
+  assert.equal(fs.readlinkSync(path.join(source, 'node_modules/dep')), donor);
+
+  const refused = spawnSync('python3', [path.join(root, 'bin/audit-release-bundle.py'),
+    '--portable-source-tar', source, 'tar'], {
+    input: selected.stdout,
+    env: { ...process.env, TAR_OPTIONS: '--blocking-factor=invalid' },
+    timeout: 15000,
+  });
+  assert.notEqual(refused.status, 0, 'a failed GNU selector must remain a hard refusal');
+  assert.match(refused.stderr.toString(), /node_modules\/dep \(exit 2\).*Invalid blocking factor/s);
+});
+
 test('portable source projection refuses external source links and dependency cycles', t => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-portable-refuse-'));
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
