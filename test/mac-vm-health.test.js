@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'n
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import net from 'node:net';
 import test from 'node:test';
 import testScratch from './test-scratch.cjs';
@@ -18,6 +19,76 @@ const loginPreflight = new URL('../bin/vm-rig/preflight-login.sh', import.meta.u
 const currentBoot = new URL('../bin/vm-rig/boot-headless-current.sh', import.meta.url).pathname;
 const currentComposer = new URL('../bin/vm-rig/compose-rig-sidecar-current.sh', import.meta.url).pathname;
 const { desktopTestScratchRoot, makeDesktopTestScratchDir, makeDesktopTestScratchDirSync } = testScratch;
+
+test('live current-build Mac worker executes from transported hash-bound bytes', {
+  skip: process.env.PAPERCUSP_LIVE_MAC_WORKER_ACCEPTANCE !== '1',
+  timeout: 60_000,
+}, async () => {
+  // Opt-in hardware acceptance: the caller holds the registered Mac VM lease.
+  // Only a private temporary payload is written; the running rig stays intact.
+  const workerDir = process.env.PAPERCUSP_CURRENT_WORKER_DIR;
+  assert.ok(workerDir, 'build current workers with bundle_host_workers first');
+  const bytes = await readFile(path.join(workerDir, 'snapshot-fold.worker.mjs'));
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const payload = { worker: bytes.toString('base64'), sha256 };
+  const remote = `
+    import assert from 'node:assert/strict';
+    import { createHash } from 'node:crypto';
+    import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+    import { tmpdir } from 'node:os';
+    import { join } from 'node:path';
+    import { Worker } from 'node:worker_threads';
+    const payload = ${JSON.stringify(payload)};
+    const dir = await mkdtemp(join(tmpdir(), 'papercusp-worker-acceptance-'));
+    let worker;
+    try {
+      const file = join(dir, 'snapshot-fold.worker.mjs');
+      const bytes = Buffer.from(payload.worker, 'base64');
+      await writeFile(file, bytes);
+      await symlink('/Users/aviweiss/rig-sidecar-current/node_modules', join(dir, 'node_modules'));
+      assert.equal(createHash('sha256').update(await readFile(file)).digest('hex'), payload.sha256);
+      worker = new Worker(file, { execArgv: [] });
+      const request = message => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { cleanup(); reject(new Error('Mac worker response timed out')); }, 10000);
+        const cleanup = () => { clearTimeout(timer); worker.off('message', ok); worker.off('error', bad); };
+        const ok = value => { cleanup(); resolve(value); };
+        const bad = error => { cleanup(); reject(error); };
+        worker.once('message', ok); worker.once('error', bad); worker.postMessage(message);
+      });
+      assert.deepEqual(await request({ kind: 'init', id: 1, excludeTables: [] }), { kind: 'ok', id: 1 });
+      const block = new TextEncoder().encode(JSON.stringify({ type: 'put', table: 'acceptance', hbKey: 'row',
+        value: { answer: 42 }, ts: 1, schema_version: 1, author_pubkey: 'fixture' }));
+      const folded = await request({ kind: 'fold', id: 2, buf: block.buffer.slice(0), lengths: [block.byteLength] });
+      assert.equal(folded.decodedOps, 1); assert.equal(folded.keyCount, 1);
+      assert.deepEqual(await request({ kind: 'pending', id: 3 }), { kind: 'pending', id: 3, indexes: [0] });
+      await request({ kind: 'materialize', id: 4, buf: block.buffer.slice(0), lengths: [block.byteLength], indexes: [0], now: 2 });
+      const result = await request({ kind: 'finish', id: 5, now: 2, coversUpTo: 1,
+        author_pubkey: 'fixture', ts: 2, schema_version: 1, excludeTables: [] });
+      assert.equal(result.kind, 'finished'); assert.equal(result.rowCount, 1);
+      assert.match(new TextDecoder().decode(result.buf), /"answer":42/);
+      console.log('MAC_CURRENT_WORKER_EXECUTED ' + JSON.stringify({ platform: process.platform,
+        node: process.version, sourceSha256: payload.sha256, rowCount: result.rowCount }));
+    } finally {
+      if (worker) await worker.terminate();
+      await rm(dir, { recursive: true, force: true });
+      console.log('MAC_CURRENT_WORKER_CLEANED ' + dir);
+    }
+  `;
+  const result = spawnSync('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
+    process.env.PCUSP_VM_SSH ?? 'aviweiss@172.31.44.2',
+    "'/Applications/Papercusp Server.app/Contents/Resources/sidecar/bin/node' --input-type=module -"], {
+    input: remote, encoding: 'utf8', timeout: 50_000, maxBuffer: 2 * 1024 * 1024,
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const line = result.stdout.split('\n').find(value => value.startsWith('MAC_CURRENT_WORKER_EXECUTED '));
+  assert.ok(line, result.stdout);
+  const receipt = JSON.parse(line.slice('MAC_CURRENT_WORKER_EXECUTED '.length));
+  assert.equal(receipt.platform, 'darwin');
+  assert.equal(receipt.sourceSha256, sha256);
+  assert.equal(receipt.rowCount, 1);
+  assert.match(result.stdout, /MAC_CURRENT_WORKER_CLEANED /);
+  console.log(JSON.stringify({ kind: 'mac-current-worker-acceptance', ...receipt, temporaryPayloadRemoved: true }));
+});
 
 const fixtureDirs = new Set();
 
