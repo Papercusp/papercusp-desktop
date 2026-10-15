@@ -22,7 +22,7 @@ const {
   mkdtempSync, rmSync, readFileSync, writeFileSync, chmodSync, readdirSync, statSync,
   mkdirSync, copyFileSync, existsSync, readlinkSync,
 } = require('node:fs');
-const { tmpdir } = require('node:os');
+const { homedir, tmpdir } = require('node:os');
 const { join, relative } = require('node:path');
 
 const DESKTOP_DIR = join(__dirname, '..');
@@ -262,8 +262,10 @@ test('native dev releases each compile claim before the app runs and re-admits a
 
 test('real Cargo starts the app only after the native dev compile claim is released', (t) => {
   const realCargo = spawnSync('bash', ['-c', 'command -v cargo'], { encoding: 'utf8' }).stdout.trim();
-  if (!realCargo) {
-    t.skip('needs Cargo for the native runner integration proof');
+  const usableCargo = realCargo && spawnSync(realCargo, ['--version'], { encoding: 'utf8' }).status === 0;
+  const usableRustc = spawnSync('rustc', ['--version'], { encoding: 'utf8' }).status === 0;
+  if (!usableCargo || !usableRustc) {
+    t.skip('needs a usable Cargo and rustc toolchain for the native runner integration proof');
     return;
   }
 
@@ -321,6 +323,9 @@ test('real Cargo starts the app only after the native dev compile claim is relea
         PAPERCUSP_SIDECAR_LOCK: join(root, 'sidecar.lock'),
         PAPERCUSP_TEST_ROOT: root,
         PAPERCUSP_REAL_CARGO: realCargo,
+        // The probe isolates HOME for disk receipts, but rustup's installed
+        // toolchain still lives under the invoking user's original home.
+        RUSTUP_HOME: process.env.RUSTUP_HOME || join(homedir(), '.rustup'),
         PAPERCUSP_TAURI_INTERNAL_RUNNER: '',
         PATH: bin + ':' + process.env.PATH,
       },

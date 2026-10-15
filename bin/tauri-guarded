@@ -34,6 +34,98 @@ set -euo pipefail
 
 __here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Tauri 2.11 starts a separate `cargo run` for each dev rebuild. Its Cargo
+# target runner starts only after compilation, which gives us a real phase
+# boundary without parsing progress text or watching a long-lived CLI PID.
+# Keep both stages behind this existing chokepoint instead of adding another
+# launcher that a future dev command could forget.
+if [[ "${PAPERCUSP_TAURI_INTERNAL_RUNNER:-}" == "app" ]]; then
+  source "$__here/lib/disk-preflight.sh"
+  __pc_runner_pid="${PAPERCUSP_TAURI_CARGO_WRAPPER_PID:-}"
+  __pc_cursor="$$"
+  __pc_ancestor=0
+  for ((__pc_hops = 0; __pc_hops < 256; __pc_hops++)); do
+    __pc_cursor="$(papercusp_proc_parent_pid "$__pc_cursor")" || break
+    if [[ "$__pc_cursor" == "$__pc_runner_pid" ]]; then
+      __pc_ancestor=1
+      break
+    fi
+    [[ "$__pc_cursor" -gt 1 ]] || break
+  done
+  if [[ "$__pc_ancestor" != 1 ]]; then
+    echo "ERROR: Cargo app runner cannot verify its reservation-owning ancestor" >&2
+    exit 28
+  fi
+  kill -USR2 "$__pc_runner_pid"
+  exec "$@"
+fi
+
+if [[ "${PAPERCUSP_TAURI_INTERNAL_RUNNER:-}" == "cargo" ]]; then
+  [[ "${1:-}" == run && -n "${CARGO_TARGET_DIR:-}" ]] || {
+    echo "ERROR: native Tauri reservation runner requires cargo run and CARGO_TARGET_DIR" >&2
+    exit 28
+  }
+  source "$__here/lib/cargo-target-root.sh"
+  source "$__here/lib/disk-preflight.sh"
+  __pc_inherited="${PAPERCUSP_DISK_RESERVATION_FILE:-}"
+  __pc_need="$(papercusp_native_dev_cargo_need_gb "$CARGO_TARGET_DIR")" || exit $?
+  papercusp_require_disk_reservation "$CARGO_TARGET_DIR" "$__pc_need" \
+    "native dev Cargo build" "$__pc_inherited" >&2 || exit $?
+  export PAPERCUSP_DISK_RESERVATION_FILE
+  __pc_receipt_owner="$(sed -n 's/^pid=//p' "$PAPERCUSP_DISK_RESERVATION_FILE")"
+  __pc_released=0
+  __pc_release_compile_claim() {
+    [[ "$__pc_released" == 0 ]] || return 0
+    __pc_released=1
+    if [[ "$__pc_receipt_owner" == "$$" ]]; then
+      papercusp_release_disk_reservation
+    elif [[ "$__pc_receipt_owner" == "${PAPERCUSP_TAURI_LAUNCHER_PID:-}" ]]; then
+      # The first compile borrowed the launcher's already-admitted receipt.
+      # Later rebuilds acquire their own claims after this one is released.
+      kill -USR2 "$PAPERCUSP_TAURI_LAUNCHER_PID" 2>/dev/null || true
+    fi
+  }
+
+  __pc_target="$(rustc -vV | sed -n 's/^host: //p')"
+  for ((__pc_i = 1; __pc_i <= $#; __pc_i++)); do
+    __pc_arg="${!__pc_i}"
+    [[ "$__pc_arg" == -- ]] && break
+    if [[ "$__pc_arg" == --target ]]; then
+      __pc_i=$((__pc_i + 1))
+      __pc_target="${!__pc_i:-}"
+    elif [[ "$__pc_arg" == --target=* ]]; then
+      __pc_target="${__pc_arg#--target=}"
+    fi
+  done
+  [[ "$__pc_target" =~ ^[A-Za-z0-9_-]+$ ]] || {
+    __pc_release_compile_claim
+    echo "ERROR: cannot resolve Cargo runner target: $__pc_target" >&2
+    exit 28
+  }
+  __pc_runner_env="CARGO_TARGET_$(printf '%s' "$__pc_target" | tr '[:lower:]-' '[:upper:]_')_RUNNER"
+  __pc_previous_runner="${!__pc_runner_env:-}"
+  if [[ -n "$__pc_previous_runner" && "$__pc_previous_runner" != "$__here/tauri-guarded" ]]; then
+    __pc_release_compile_claim
+    echo "ERROR: native Tauri admission cannot replace configured $__pc_runner_env" >&2
+    exit 28
+  fi
+  export "$__pc_runner_env=$__here/tauri-guarded"
+  export PAPERCUSP_TAURI_INTERNAL_RUNNER=app PAPERCUSP_TAURI_CARGO_WRAPPER_PID="$$"
+  trap '__pc_release_compile_claim' USR2 EXIT
+  trap 'kill -TERM "$__pc_cargo_pid" 2>/dev/null || true; __pc_release_compile_claim; exit 143' INT TERM HUP
+  cargo "$@" &
+  __pc_cargo_pid=$!
+  while :; do
+    if wait "$__pc_cargo_pid"; then __pc_status=0; break; else __pc_status=$?; fi
+    # SIGUSR2 interrupts wait when Cargo's app runner starts. Keep waiting
+    # for the app so Tauri retains its ordinary watcher/restart semantics.
+    if kill -0 "$__pc_cargo_pid" 2>/dev/null; then continue; fi
+    break
+  done
+  __pc_release_compile_claim
+  exit "$__pc_status"
+fi
+
 # FAIL FAST AND SAY WHY (WI-39358)
 #
 # Every path below ends in a bare `tauri` — the two `exec tauri` sites here, and
@@ -76,6 +168,16 @@ fi
 __pc_sidecar_lock="${PAPERCUSP_SIDECAR_LOCK:-$__here/../src-tauri/sidecar.lock}"
 __pc_sidecar_lockdir="${PAPERCUSP_SIDECAR_LOCKDIR:-$__here/../src-tauri/sidecar.lockdir}"
 __pc_sidecar_lock_held=0
+
+__pc_release_native_claim() {
+  [[ -n "${PAPERCUSP_DISK_RESERVATION_FILE:-}" ]] || return 0
+  local receipt_owner
+  receipt_owner="$(sed -n 's/^pid=//p' "$PAPERCUSP_DISK_RESERVATION_FILE" 2>/dev/null)"
+  papercusp_release_disk_reservation
+  if [[ "$receipt_owner" == "$$" ]]; then
+    echo "→ native dev Cargo compile finished; released launch reservation" >&2
+  fi
+}
 
 __pc_release_sidecar_read_lock() {
   local reason="${1:-}"
@@ -130,7 +232,8 @@ __pc_run_dev_with_yieldable_reader() {
   # inherit fd 9: an inherited flock would survive this shell closing its own
   # descriptor and recreate the daemon-lifetime deadlock.
   trap '__pc_release_sidecar_read_lock sigusr1' USR1
-  trap 'if [[ -n "${child_pid:-}" ]]; then kill -TERM "$child_pid" 2>/dev/null || true; fi; __pc_release_sidecar_read_lock; exit 143' INT TERM HUP
+  trap '__pc_release_native_claim' USR2
+  trap 'if [[ -n "${child_pid:-}" ]]; then kill -TERM "$child_pid" 2>/dev/null || true; fi; __pc_release_sidecar_read_lock; __pc_release_native_claim; exit 143' INT TERM HUP
 
   (
     exec 9>&-
@@ -160,7 +263,8 @@ __pc_run_dev_with_yieldable_reader() {
     break
   done
   __pc_release_sidecar_read_lock
-  trap - USR1 INT TERM HUP
+  __pc_release_native_claim
+  trap - USR1 USR2 INT TERM HUP
   return "$status"
 }
 
@@ -296,6 +400,24 @@ if [[ "$__subcommand" == "dev" ]]; then
   # is idempotent by design, so belt-and-braces callers cost nothing.
   PAPERCUSP_DESKTOP_NATIVE_DEV=1 . "$__here/lib/claim-target-dir.sh" || exit $?
 
+  if [[ -n "${PAPERCUSP_DISK_RESERVATION_FILE:-}" ]]; then
+    export PAPERCUSP_TAURI_LAUNCHER_PID="$$"
+    # Tauri's --runner wraps every cargo run, including watcher rebuilds.
+    # Refuse a competing runner: silently bypassing this one would restore
+    # the daemon-lifetime 65GB reservation or leave later builds unadmitted.
+    for __arg in "${__tauri_args[@]}"; do
+      case "$__arg" in
+        -r|--runner|--runner=*|-r?*)
+          echo "ERROR: native Tauri disk admission owns --runner; remove the custom runner" >&2
+          papercusp_release_disk_reservation
+          exit 28
+          ;;
+      esac
+    done
+    __tauri_args=("${__tauri_args[@]:0:__subcommand_index+1}" --runner "$__here/tauri-guarded" "${__tauri_args[@]:__subcommand_index+1}")
+    export PAPERCUSP_TAURI_INTERNAL_RUNNER=cargo
+  fi
+
   # WI-10007854: the verifier's source/profile reservations can live on other
   # filesystems. Rust still writes to the selected Cargo slot, so reserve there
   # before either the frontend command or the compiler starts. Reuse the shared
@@ -315,8 +437,8 @@ esac
 # the `tauri` npm SCRIPT. No recursion. `dev` gets a supervisor so the parent
 # can yield its startup-only reader lock. Debian-producing finite commands exec
 # the canonical repacking wrapper; explicit non-Debian filters remain direct.
-if [[ "$__subcommand" == "dev" ]] && [[ "$__pc_sidecar_lock_held" == 1 ]]; then
-  __pc_run_dev_with_yieldable_reader "$@"
+if [[ "$__subcommand" == "dev" ]]; then
+  __pc_run_dev_with_yieldable_reader "${__tauri_args[@]}"
 elif [[ "$__pc_repack_deb" == 1 ]]; then
   __wrapper_args=("${__tauri_args[@]}")
   unset '__wrapper_args[__subcommand_index]'
