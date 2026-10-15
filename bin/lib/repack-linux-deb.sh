@@ -38,6 +38,9 @@ papercusp_repack_linux_deb() {
       echo "ERROR: the seed split of $deb reported no seed package" >&2
       return 1
     }
+    # Control-only preflight is cheap and catches a D-236 contract mismatch before
+    # the multi-hour xz repack. The splitter also checks before publishing either .deb.
+    python3 -I "$splitter" verify-control "$deb" "$seed_deb" || return 1
     bash "$repack" "$seed_deb" || return 1
   fi
   bash "$repack" "$deb"

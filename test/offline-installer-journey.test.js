@@ -99,11 +99,11 @@ function buildDeb(root, name, pkg, { serve = SERVE, migrations = ['1236-a.sql', 
 }
 
 // Shaped like bin/split-server-seed-deb.py's output: the split Server Recommends
-// its seed at the exact version; the seed itself Enhances/Replaces the Server and
+// its seed without a version constraint; the seed itself Enhances/Replaces the Server and
 // declares no Depends or Recommends.
 const SPLIT_DEPENDS = {
   ...DEPENDS,
-  'papercusp-server': { depends: 'libc6 (>= 2.35)', recommends: 'papercusp-server-seed (= 0.0.25)' },
+  'papercusp-server': { depends: 'libc6 (>= 2.35)', recommends: 'papercusp-server-seed' },
 };
 
 function fixture({ depends = DEPENDS, seed = false } = {}) {
@@ -638,7 +638,7 @@ test('a split Server installs WITH its seed companion in one offline transaction
   // The Server's Recommends on its seed is a Papercusp relation: never provisioned online.
   const satisfy = r.calls.split('\n').find((l) => l.startsWith('apt-get satisfy'));
   assert.doesNotMatch(satisfy, /papercusp/);
-  assert.match(r.doc.osPrerequisites['declared.server.Recommends'], /papercusp-server-seed \(= 0\.0\.25\)/);
+  assert.equal(r.doc.osPrerequisites['declared.server.Recommends'].trim(), 'papercusp-server-seed');
   assert.match(r.legs['installer-identity'].detail, /GUI\+Server\+1 seed installer/);
   assert.match(r.legs.install.detail, /papercusp-server-seed=ii/);
   assert.equal(r.doc.install.seedPackages, 'papercusp-server-seed');

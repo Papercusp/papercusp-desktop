@@ -21,8 +21,8 @@ every tar entry goes to exactly one output:
 Every regular file's md5 is computed while it streams and checked against the input's
 md5sums, so a corrupt or mis-routed byte fails the split instead of shipping. The Server
 keeps its maintainer scripts and fields, its md5sums minus the seed lines, an
-Installed-Size reduced by the seed's share, and gains `Recommends: <Package>-seed
-(= <Version>)`. The seed package has no maintainer scripts and declares `Replaces:
+Installed-Size reduced by the seed's share, and gains the unversioned
+`Recommends: <Package>-seed`. The seed package has no maintainer scripts and declares `Replaces:
 <Package> (<= <Version>)`, so it can take over seed files from an older seeded Server
 during an upgrade, whichever package dpkg unpacks first.
 
@@ -37,6 +37,12 @@ Usage:
       Write the Server package (same file name) and the seed package into DIR, or replace
       the input in place (its now-stale .sig is removed) and write the seed beside it.
       Prints `server<TAB><path>` and `seed<TAB><path>` on stdout.
+  split-server-seed-deb.py verify-control <server.deb> <seed.deb>
+      Check the D-236 split-package control contract without reading either data member.
+  split-server-seed-deb.py rewrite-control <server.deb> <seed.deb> <output.deb>
+      Correct an existing versioned Server recommendation in a NEW package. Copy the
+      data member byte-for-byte; verify the companion contract before publication.
+      The output is unsigned and must be signed for updater use.
 
 Exit status:
    0  success
@@ -49,6 +55,7 @@ Exit status:
   14  a hardlink crosses the Server/seed boundary
   15  the payload does not match the input's md5sums
   16  unsupported data or control compression
+  17  the split-package control contract is invalid
 """
 from __future__ import annotations
 
@@ -71,7 +78,7 @@ DEFAULT_SEED_ROOT = 'usr/lib/Papercusp Server/seed'
 BUF = 1 << 20
 
 EXIT_CORRUPT, EXIT_USAGE, EXIT_PIPE = 2, 7, 9
-EXIT_NO_SEED, EXIT_OVER_CAP, EXIT_CROSS_LINK, EXIT_MD5, EXIT_COMPRESSION = 10, 13, 14, 15, 16
+EXIT_NO_SEED, EXIT_OVER_CAP, EXIT_CROSS_LINK, EXIT_MD5, EXIT_COMPRESSION, EXIT_CONTRACT = 10, 13, 14, 15, 16, 17
 
 DECOMPRESSORS = {
     'data.tar.gz': ['gzip', '-dc'],
@@ -490,8 +497,9 @@ def md5sums_bytes(lines: list[tuple[str, str]]) -> bytes:
     return ''.join(f'{digest}  {path}\n' for digest, path in lines).encode('utf-8')
 
 
-def write_ar(path: str, members: list[tuple[str, bytes | str]], cap: int, mtime: int) -> None:
-    sizes = [len(src) if isinstance(src, bytes) else os.path.getsize(src) for _, src in members]
+def write_ar(path: str, members: list[tuple[str, bytes | str | tuple[str, int, int]]], cap: int, mtime: int) -> None:
+    sizes = [len(src) if isinstance(src, bytes) else os.path.getsize(src) if isinstance(src, str) else src[2]
+             for _, src in members]
     for (name, _), size in zip(members, sizes):
         if size > cap:
             raise SplitError(EXIT_OVER_CAP, f'{os.path.basename(path)}: member {name} would be {size} bytes, above the ar '
@@ -505,21 +513,30 @@ def write_ar(path: str, members: list[tuple[str, bytes | str]], cap: int, mtime:
             out.write(header)
             if isinstance(src, bytes):
                 out.write(src)
-            else:
+            elif isinstance(src, str):
                 with open(src, 'rb') as f:
                     shutil.copyfileobj(f, out, BUF)
+            else:
+                source_path, offset, remaining = src
+                with open(source_path, 'rb') as f:
+                    f.seek(offset)
+                    while remaining:
+                        chunk = f.read(min(BUF, remaining))
+                        if not chunk:
+                            raise SplitError(EXIT_CORRUPT, f'{source_path}: short read copying {name}')
+                        out.write(chunk)
+                        remaining -= len(chunk)
             if size & 1:
                 out.write(b'\n')
 
 
 def server_control_entries(pkg: Package, router: Router, seed_package: str) -> tuple[list, Control]:
     """Same scripts and fields; md5sums minus the seed; smaller Installed-Size; Recommends the seed."""
-    version = pkg.control.get('Version') or ''
     control = Control([list(field) for field in pkg.control.fields])
     original_kib = control.get('Installed-Size')
     if original_kib and original_kib.isdigit():
         control.set('Installed-Size', str(max(1, int(original_kib) - router.seed_kib)))
-    recommendation = f'{seed_package} (= {version})'
+    recommendation = seed_package
     existing = control.get('Recommends')
     control.set('Recommends', f'{existing}, {recommendation}' if existing else recommendation, after='Depends')
     md5 = [(digest, path) for digest, path in pkg.md5sums() if not router.in_seed(path)]
@@ -558,6 +575,59 @@ def seed_control_entries(pkg: Package, router: Router, seed_package: str, mtime:
         (root_file_info(f'{dot}control', 0o644, mtime), Control(fields).render()),
         (root_file_info(f'{dot}md5sums', 0o644, mtime), md5sums_bytes(router.seed_md5)),
     ]
+
+
+def verify_split_control(server_path: str, seed_path: str) -> None:
+    """Reject a split pair whose control fields violate D-236 before expensive repacking."""
+    server, seed = Package(server_path), Package(seed_path)
+    package = server.control.get('Package') or ''
+    version = server.control.get('Version') or ''
+    seed_package = f'{package}-seed'
+    recommendations = [part.strip() for part in (server.control.get('Recommends') or '').split(',')]
+    if recommendations.count(seed_package) != 1 or any(
+            re.match(rf'^{re.escape(seed_package)}(?:\s|\()', part) for part in recommendations):
+        raise SplitError(EXIT_CONTRACT, f'{server_path}: D-236 requires one unversioned Recommends: {seed_package}; got {server.control.get("Recommends")!r}')
+    expected_replaces = f'{package} (<= {version})'
+    if (seed.control.get('Package') != seed_package or seed.control.get('Version') != version
+            or seed.control.get('Architecture') != 'all'
+            or seed.control.get('Replaces') != expected_replaces
+            or seed.control.get('Depends') or seed.control.get('Recommends')):
+        raise SplitError(EXIT_CONTRACT, f'{seed_path}: D-236 companion control does not match {package} {version}')
+
+
+def rewrite_server_control(server_path: str, seed_path: str, output_path: str) -> None:
+    """Produce a distinct Server .deb with only the D-236 control relation changed."""
+    if os.path.realpath(server_path) == os.path.realpath(output_path) or os.path.exists(output_path):
+        raise SplitError(EXIT_USAGE, f'{output_path}: rewrite-control requires a new output path')
+    server = Package(server_path)
+    package = server.control.get('Package') or ''
+    version = server.control.get('Version') or ''
+    seed_package = f'{package}-seed'
+    old_relation = f'{seed_package} (= {version})'
+    recommendations = [part.strip() for part in (server.control.get('Recommends') or '').split(',')]
+    if recommendations.count(old_relation) != 1 or any(
+            part != old_relation and (part == seed_package or re.match(rf'^{re.escape(seed_package)}(?:\s|\()', part))
+            for part in recommendations):
+        raise SplitError(EXIT_CONTRACT, f'{server_path}: expected exactly one {old_relation!r} to correct')
+    if any(path == DEFAULT_SEED_ROOT or path.startswith(DEFAULT_SEED_ROOT + '/') for _, path in server.md5sums()):
+        raise SplitError(EXIT_CONTRACT, f'{server_path}: Server still owns seed files; control-only rewrite is unsafe')
+    control = Control([list(field) for field in server.control.fields])
+    control.set('Recommends', ', '.join(seed_package if part == old_relation else part for part in recommendations))
+    entries = []
+    for name, (info, payload) in server.control_entries.items():
+        entries.append((info, control.render() if name == 'control' else payload))
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    if not os.path.isdir(output_dir):
+        raise SplitError(EXIT_USAGE, f'{output_dir}: output directory does not exist')
+    with tempfile.TemporaryDirectory(prefix='.server-control.', dir=output_dir) as work:
+        staged = os.path.join(work, 'server.deb')
+        write_ar(staged, [('debian-binary', server.debian_binary),
+                          (server.control_name, control_tar(entries)),
+                          (server.data_name, (server.path, *server.members[server.data_name]))],
+                 member_cap(), int(os.environ.get('SOURCE_DATE_EPOCH') or time.time()))
+        verify_split_control(staged, seed_path)
+        os.chmod(staged, os.stat(server_path).st_mode & 0o777)
+        os.link(staged, output_path)
 
 
 def split(path: str, out_dir: str, in_place: bool, seed_root: str) -> tuple[str, str]:
@@ -599,6 +669,7 @@ def split(path: str, out_dir: str, in_place: bool, seed_root: str) -> tuple[str,
                 result = subprocess.run(['dpkg-deb', '--info', built], capture_output=True, text=True)
                 if result.returncode != 0:
                     raise SplitError(EXIT_CORRUPT, f'dpkg-deb cannot read the {os.path.basename(built)} just written: {result.stderr.strip()}')
+        verify_split_control(server_tmp, seed_tmp)
         mode = os.stat(path).st_mode & 0o777
         os.chmod(server_tmp, mode)
         os.chmod(seed_tmp, mode)
@@ -624,10 +695,24 @@ def split(path: str, out_dir: str, in_place: bool, seed_root: str) -> tuple[str,
 
 def main(argv: list[str]) -> int:
     usage = (__doc__ or '').split('Usage:')[1].split('Exit status')[0].rstrip()
-    if len(argv) < 3 or argv[1] not in ('info', 'split'):
+    if len(argv) < 3 or argv[1] not in ('info', 'split', 'verify-control', 'rewrite-control'):
         print(usage, file=sys.stderr)
         return EXIT_USAGE
     command, path, rest = argv[1], argv[2], argv[3:]
+    if command == 'verify-control':
+        if len(rest) != 1:
+            print(usage, file=sys.stderr)
+            return EXIT_USAGE
+        verify_split_control(path, rest[0])
+        print(f'D236_SPLIT_CONTROL_OK server={path} seed={rest[0]}')
+        return 0
+    if command == 'rewrite-control':
+        if len(rest) != 2:
+            print(usage, file=sys.stderr)
+            return EXIT_USAGE
+        rewrite_server_control(path, rest[0], rest[1])
+        print(f'D236_CONTROL_REWRITE_OK server={rest[1]} seed={rest[0]}')
+        return 0
     out_dir, in_place, seed_root = None, False, DEFAULT_SEED_ROOT
     while rest:
         flag = rest.pop(0)

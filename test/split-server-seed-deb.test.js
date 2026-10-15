@@ -39,7 +39,7 @@ function withTmp(fn) {
 }
 
 /** A small Server .deb shaped like the real one: seed subtree, sidecar, binary, postinst. */
-function buildServerDeb(dir, { seed = true, crossLink = false, badMd5 = false, seedBytes = 3000, packageName = 'papercusp-server' } = {}) {
+function buildServerDeb(dir, { seed = true, crossLink = false, badMd5 = false, seedBytes = 3000, packageName = 'papercusp-server', recommends } = {}) {
   const pkg = path.join(dir, 'pkg');
   const files = new Map([
     ['usr/bin/papercusp-server', { bytes: Buffer.from('#!/bin/sh\necho server\n'), mode: 0o755 }],
@@ -69,6 +69,7 @@ function buildServerDeb(dir, { seed = true, crossLink = false, badMd5 = false, s
     'Maintainer: Papercusp <test@example.invalid>',
     'Installed-Size: 400',
     'Depends: bubblewrap',
+    ...(recommends ? [`Recommends: ${recommends}`] : []),
     'Section: utils',
     'Priority: optional',
     'Description: Papercusp Server fixture',
@@ -188,7 +189,7 @@ test('control metadata: Server Recommends the seed, seed Replaces older Servers,
   assert.equal(field(server, 'Package'), 'papercusp-server');
   assert.equal(field(server, 'Version'), VERSION);
   assert.equal(field(server, 'Depends'), 'bubblewrap');
-  assert.equal(field(server, 'Recommends'), `papercusp-server-seed (= ${VERSION})`);
+  assert.equal(field(server, 'Recommends'), 'papercusp-server-seed');
   const seedKib = Number(field(seed, 'Installed-Size'));
   assert.ok(seedKib >= 5, `seed Installed-Size ${seedKib}`);
   assert.equal(Number(field(server, 'Installed-Size')), 400 - seedKib);
@@ -198,6 +199,7 @@ test('control metadata: Server Recommends the seed, seed Replaces older Servers,
   assert.equal(field(seed, 'Architecture'), 'all');
   assert.equal(field(seed, 'Replaces'), `papercusp-server (<= ${VERSION})`);
   assert.equal(field(seed, 'Enhances'), 'papercusp-server');
+  assert.match(run('python3', ['-I', splitter, 'verify-control', server, seed]), /D236_SPLIT_CONTROL_OK/);
 
   assert.equal(controlFile(server, 'postinst'), '#!/bin/sh\nexit 0\n', 'the Server keeps its maintainer scripts');
   const seedControl = run('bash', ['-c', 'dpkg-deb --ctrl-tarfile "$1" | tar -t', '_', seed]);
@@ -209,6 +211,38 @@ test('control metadata: Server Recommends the seed, seed Replaces older Servers,
   assert.ok(serverSums.every((l) => !underSeed(l.slice(34))), 'Server md5sums lists no seed file');
   assert.ok(seedSums.every((l) => underSeed(l.slice(34))), 'seed md5sums lists only seed files');
   assert.deepEqual(new Set([...serverSums, ...seedSums]), new Set(originalSums));
+}));
+
+test('D-236 control guard rejects a versioned seed relation before publishing a split pair', () => withTmp((tmp) => {
+  const deb = buildServerDeb(tmp, { recommends: `papercusp-server-seed (= ${VERSION})` });
+  const out = path.join(tmp, 'out');
+  fs.mkdirSync(out);
+  const res = split(deb, out);
+  assert.equal(res.status, 17, res.stderr);
+  assert.match(res.stderr, /one unversioned Recommends: papercusp-server-seed/);
+  assert.deepEqual(fs.readdirSync(out), [], 'contract failure must publish neither package');
+}));
+
+test('control-only successor corrects a versioned relation while preserving the exact data member', () => withTmp((tmp) => {
+  const seeded = buildServerDeb(tmp);
+  const splitDir = path.join(tmp, 'split');
+  fs.mkdirSync(splitDir);
+  const { seed } = splitOk(seeded, splitDir);
+  const sourceDir = path.join(tmp, 'source');
+  fs.mkdirSync(sourceDir);
+  const source = buildServerDeb(sourceDir, { seed: false, recommends: `papercusp-server-seed (= ${VERSION})` });
+  const successor = path.join(tmp, 'successor.deb');
+  const originalSha = md5(fs.readFileSync(source));
+  const originalData = spawnSync('ar', ['p', source, 'data.tar.gz']).stdout;
+  assert.match(run('python3', ['-I', splitter, 'rewrite-control', source, seed, successor]), /D236_CONTROL_REWRITE_OK/);
+  assert.equal(md5(fs.readFileSync(source)), originalSha, 'source package must remain untouched');
+  assert.deepEqual(spawnSync('ar', ['p', successor, 'data.tar.gz']).stdout, originalData);
+  assert.equal(run('dpkg-deb', ['-f', successor, 'Recommends']).trim(), 'papercusp-server-seed');
+  assert.equal(controlFile(successor, 'md5sums'), controlFile(source, 'md5sums'));
+  assert.match(run('python3', ['-I', splitter, 'verify-control', successor, seed]), /D236_SPLIT_CONTROL_OK/);
+  const refused = spawnSync('python3', ['-I', splitter, 'rewrite-control', successor, seed, path.join(tmp, 'again.deb')], { encoding: 'utf8' });
+  assert.equal(refused.status, 17, refused.stderr);
+  assert.ok(!fs.existsSync(path.join(tmp, 'again.deb')));
 }));
 
 test('dpkg --unpack of both outputs reproduces the original tree', () => withTmp((tmp) => {
