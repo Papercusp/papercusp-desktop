@@ -495,6 +495,25 @@ __pc_private_slot_delete_renamed() {
 # its claim onto it). Never rename a root to adopt it: a moved Cargo root strands
 # the absolute paths its build scripts wrote (WI-10004841), so a root that an
 # older reaper already moved is reaped, never adopted.
+# Count the same private population, including interrupted/background deletions.
+# A failed bounded measurement refuses this pass rather than reporting zero.
+__pc_private_slot_bytes() {
+  local shared="$1" dir name usage bytes total=0
+  local -a roots=()
+  while IFS=$'\t' read -r dir name; do roots+=("$dir"); done < <(__pc_private_slot_candidates "$shared")
+  for dir in "${shared%/*}/.${shared##*/}-reaping-"* "${shared}/.papercusp-target-slots"/.reaping-*; do
+    [[ -d "$dir" && ! -L "$dir" ]] && roots+=("$dir")
+  done
+  if ((${#roots[@]} == 0)); then printf '0\n'; return 0; fi
+  # One deadline covers the whole population, including a large backlog.
+  usage="$(timeout --signal=KILL 10s du -sx -B1 -- "${roots[@]}" 2>/dev/null)" || return 2
+  while read -r bytes dir; do
+    [[ "$bytes" =~ ^[0-9]+$ ]] || return 2
+    total=$((total + bytes))
+  done <<< "$usage"
+  printf '%s\n' "$total"
+}
+
 __pc_reap_private_target_slots() {
   local shared="${1:?shared target root required}" adopt_name="${2:-}"
   __pc_adopted_private_root=""
@@ -513,29 +532,56 @@ __pc_reap_private_target_slots() {
     return 0
   fi
 
-  local now dir name last lease_status reap_lease_tags
+  local now dir name last lease_status reap_lease_tags before_bytes after_bytes max_bytes
   local -a eligible=()
+  local -a leased_paths=() retained_paths=()
+  max_bytes="${PAPERCUSP_DESKTOP_PRIVATE_SLOT_MAX_BYTES:-21474836480}"
+  if [[ ! "$max_bytes" =~ ^[0-9]{1,15}$ ]]; then
+    echo 'private target-slot cap requires positive safe-integer bytes' >&2
+    exec {reap_fd}>&-
+    return 2
+  fi
+  max_bytes=$((10#$max_bytes))
+  if ((max_bytes <= 0)); then exec {reap_fd}>&-; return 2; fi
+  if ! before_bytes="$(__pc_private_slot_bytes "$shared")"; then
+    echo 'private target-slot cap measurement failed; keeping all roots' >&2
+    exec {reap_fd}>&-
+    return 2
+  fi
   now="$(date +%s)"
   while IFS=$'\t' read -r dir name; do
     [[ -n "$dir" ]] || continue
-    __pc_private_slot_unclaimed "$name" || continue
-    last="$(__pc_private_slot_last_active "$dir")"
-    (( now - last >= grace )) || continue
     # 0 = leased, 2 = unreadable retention marker: both keep the root. ANY lease
     # keeps a private root (a reaper is no cut, so no own-cut exemption applies);
     # the tags are captured, not discarded to /dev/null, which the release-artifacts
     # selftest forbids for every caller in this file.
     lease_status=0
     reap_lease_tags="$(release_artifacts_retention_path_is_leased "$dir" 2>/dev/null)" || lease_status=$?
-    (( lease_status == 1 )) || continue
+    if (( lease_status != 1 )); then leased_paths+=("$dir"); continue; fi
+    __pc_private_slot_unclaimed "$name" || continue
+    last="$(__pc_private_slot_last_active "$dir")"
+    (( now - last >= grace )) || continue
     eligible+=("$last"$'\t'"$dir"$'\t'"$name")
   done < <(__pc_private_slot_candidates "$shared")
 
-  local refs="" sorted=""
+  local refs="" sorted="" adopt_row="" row
   if ((${#eligible[@]} > 0)); then
     if refs="$(printf '%s\n' "${eligible[@]}" | cut -f2 | __pc_private_slots_referenced)"; then
-      # Newest first, so an adoption takes the warmest cache.
-      sorted="$(printf '%s\n' "${eligible[@]}" | sort -rn)"
+      # Evict oldest first. Only adoption prefers the warmest eligible cache;
+      # the remaining deletions still run in ascending last-write order.
+      sorted="$(printf '%s\n' "${eligible[@]}" | sort -n)"
+      if [[ -n "$adopt_name" ]]; then
+        while IFS=$'\t' read -r last dir name; do
+          if ! grep -qxF -- "$dir" <<< "$refs" && __pc_private_slot_paths_anchored "$dir"; then
+            adopt_row="$last"$'\t'"$dir"$'\t'"$name"
+            break
+          fi
+        done < <(printf '%s\n' "${eligible[@]}" | sort -rn)
+        if [[ -n "$adopt_row" ]]; then
+          sorted="$adopt_row
+$(while IFS= read -r row; do [[ "$row" == "$adopt_row" ]] || printf '%s\n' "$row"; done <<< "$sorted")"
+        fi
+      fi
     fi
   fi
 
@@ -600,6 +646,18 @@ __pc_reap_private_target_slots() {
   flock -u "$reap_fd" || true
   exec {reap_fd}>&-
   __pc_private_slot_delete_renamed "$shared"
+  if ! after_bytes="$(__pc_private_slot_bytes "$shared")"; then
+    echo 'private target-slot cap post-measurement failed' >&2
+    return 2
+  fi
+  while IFS=$'\t' read -r dir name; do retained_paths+=("$dir"); done < <(__pc_private_slot_candidates "$shared")
+  node -e 'const [root, max, before, after, dry, leased, ...retainedPaths] = process.argv.slice(1);
+    const pinnedPaths = leased ? leased.split("\n") : [];
+    process.stderr.write("private-slot-cap " + JSON.stringify({root, maxBytes: Number(max),
+      beforeBytes: Number(before), afterBytes: Number(after), dryRun: dry === "1",
+      overByBytes: Math.max(0, Number(after) - Number(max)), pinnedPaths,
+      retainedPaths}) + "\n");' "$shared/.papercusp-target-slots" "$max_bytes" "$before_bytes" "$after_bytes" \
+    "${PAPERCUSP_DESKTOP_PRIVATE_SLOT_REAP_DRY_RUN:-0}" "$(printf '%s\n' "${leased_paths[@]}")" "${retained_paths[@]}"
   return 0
 }
 

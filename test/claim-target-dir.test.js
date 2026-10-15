@@ -459,6 +459,71 @@ function auditLines() {
   return existsSync(audit) ? readFileSync(audit, 'utf8').trim().split('\n') : [];
 }
 
+test('private slot eviction removes the oldest root first and reports a finite cap', () => {
+  const newer = makePrivateRoot('pid99999999', { ageSec: 7200 });
+  const older = makePrivateRoot('pid99999998', { ageSec: 10800 });
+  const script = join(__dirname, '..', 'bin', 'reap-private-target-slots.sh');
+  const output = execFileSync('bash', ['-c', 'exec bash "$1" 2>&1', 'reap', script], {
+    cwd: home, env: isolatedEnv(reapEnv({ ROOT: home, PAPERCUSP_DESKTOP_PRIVATE_SLOT_MAX_BYTES: '1' })), encoding: 'utf8',
+  });
+  const removed = auditLines().filter(line => line.includes('decision=reap'));
+  assert.ok(removed[0].includes(`path=${older}\t`), removed.join('\n'));
+  assert.ok(removed[1].includes(`path=${newer}\t`), removed.join('\n'));
+  const cap = JSON.parse(output.split('\n').find(line => line.startsWith('private-slot-cap ')).slice(17));
+  assert.strictEqual(cap.maxBytes, 1);
+  assert.ok(cap.beforeBytes > 1);
+  assert.strictEqual(cap.afterBytes, 0);
+  assert.strictEqual(cap.overByBytes, 0);
+});
+
+test('private slot cap reports leased overage and dry-run leaves roots intact', () => {
+  const pinned = makePrivateRoot('pid99999999');
+  const ordinary = makePrivateRoot('pid99999998');
+  const retention = writeRetentionLease('agent-pin-fixture', pinned);
+  const script = join(__dirname, '..', 'bin', 'reap-private-target-slots.sh');
+  const invoke = args => execFileSync('bash', ['-c', 'exec bash "$1" "$2" 2>&1', 'reap', script, ...args], {
+    cwd: home, env: isolatedEnv(reapEnv({ ROOT: home, PAPERCUSP_RELEASE_RETENTION_ROOT: retention,
+      PAPERCUSP_DESKTOP_PRIVATE_SLOT_MAX_BYTES: '1' })), encoding: 'utf8',
+  });
+  const dry = invoke(['--dry-run']);
+  assert.ok(existsSync(ordinary));
+  assert.ok(existsSync(pinned));
+  assert.match(dry, /would reap:/);
+  const output = invoke(['']);
+  assert.ok(!existsSync(ordinary));
+  assert.ok(existsSync(pinned));
+  const cap = JSON.parse(output.split('\n').find(line => line.startsWith('private-slot-cap ')).slice(17));
+  assert.ok(cap.afterBytes > 1);
+  assert.strictEqual(cap.overByBytes, cap.afterBytes - 1);
+  assert.ok(cap.pinnedPaths.includes(pinned));
+  assert.ok(cap.retainedPaths.includes(pinned));
+});
+
+test('an invalid private slot cap refuses before deleting any root', () => {
+  const dead = makePrivateRoot('pid99999999');
+  const script = join(__dirname, '..', 'bin', 'reap-private-target-slots.sh');
+  assert.throws(() => execFileSync('bash', [script], {
+    cwd: home, env: isolatedEnv(reapEnv({ ROOT: home, PAPERCUSP_DESKTOP_PRIVATE_SLOT_MAX_BYTES: 'invalid' })),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }), error => error.status === 2);
+  assert.ok(existsSync(dead));
+  assert.deepStrictEqual(auditLines(), []);
+});
+
+test('a failed private slot measurement refuses deletion instead of reporting zero', () => {
+  const dead = makePrivateRoot('pid99999999');
+  const bin = join(home, 'bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'du'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const script = join(__dirname, '..', 'bin', 'reap-private-target-slots.sh');
+  assert.throws(() => execFileSync('bash', [script], {
+    cwd: home, env: isolatedEnv(reapEnv({ ROOT: home, PATH: `${bin}:${process.env.PATH}` })),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }), error => error.status === 2 && /measurement failed/.test(error.stderr.toString()));
+  assert.ok(existsSync(dead));
+  assert.deepStrictEqual(auditLines(), []);
+});
+
 test('a dead private overflow root is reaped by the next claim, and the deletion is audited', () => {
   const dead = makePrivateRoot('pid99999999');
   assert.strictEqual(claim(reapEnv()), join(home, '.cargo-target'));
