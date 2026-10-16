@@ -197,7 +197,17 @@ pub fn list_windows_by_title(prefix: Option<String>) -> Vec<DesktopWindow> {
 /// No-op returning false on non-Windows (Linux focus stays the wmctrl path).
 #[tauri::command]
 #[specta::specta]
-pub async fn focus_window_by_title(title: String) -> bool {
+pub async fn focus_window_by_title(title: String, verification: Option<bool>) -> serde_json::Value {
+    let focused = focus_window_by_title_observed(title).await;
+    if verification.unwrap_or(false) {
+        serde_json::json!({ "protocol": "visible-window-v1", "focused": focused })
+    } else {
+        // Preserve the existing Boolean wire for older onboarding callers.
+        serde_json::json!(focused)
+    }
+}
+
+async fn focus_window_by_title_observed(title: String) -> bool {
     #[cfg(target_os = "windows")]
     {
         use std::ffi::c_void;
