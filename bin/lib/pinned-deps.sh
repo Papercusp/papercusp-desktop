@@ -293,6 +293,7 @@ papercusp_pinned_deps_snapshot() (
           if [ -z "$_changes" ]; then
             echo "  reused verified completed snapshot $_rel"
             _n=$((_n + 1))
+            echo "snapshot progress: completed=$_n tree=$_rel"
             continue
           fi
         fi
@@ -404,6 +405,9 @@ papercusp_pinned_deps_snapshot() (
     fi
     rm -rf "$_old" 2>/dev/null
     _n=$((_n + 1))
+    # Small trees can finish before the byte sampler's first interval. Count
+    # only published (or checksum-verified reused) trees as forward progress.
+    echo "snapshot progress: completed=$_n tree=$_rel"
   done <<EOF
 $(papercusp_pinned_deps_trees "$_donor")
 EOF
