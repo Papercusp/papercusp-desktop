@@ -112,9 +112,17 @@ fn persisted_target_path() -> Option<std::path::PathBuf> {
 /// The persisted target port (only if it's one of the known TARGETS), or None.
 fn read_persisted_target() -> Option<u16> {
     let txt = std::fs::read_to_string(persisted_target_path()?).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
-    let port = v.get("port")?.as_u64()? as u16;
-    fixed_targets()
+    parse_persisted_target(&txt, fixed_targets())
+}
+
+fn parse_persisted_target(
+    txt: &str,
+    targets: &[(&str, &str, u16, &str)],
+) -> Option<u16> {
+    let v: serde_json::Value = serde_json::from_str(txt).ok()?;
+    // Reject overflow before the allowlist: `as u16` would wrap 68_606 to 3_070.
+    let port = u16::try_from(v.get("port")?.as_u64()?).ok()?;
+    targets
         .iter()
         .any(|(_, _, p, _)| *p == port)
         .then_some(port)
@@ -527,6 +535,38 @@ pub fn init(app: &tauri::App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persisted_target_rejects_oversized_ports_before_allowlist_lookup() {
+        for (_, _, port, _) in TARGETS {
+            let wrapped = u64::from(port) + 65_536;
+            let payload = serde_json::json!({ "port": wrapped }).to_string();
+            assert_eq!(parse_persisted_target(&payload, &TARGETS), None, "{wrapped}");
+        }
+        assert_eq!(
+            parse_persisted_target(&serde_json::json!({ "port": u64::MAX }).to_string(), &TARGETS),
+            None,
+        );
+    }
+
+    #[test]
+    fn persisted_target_preserves_known_ports_and_honors_empty_profile() {
+        for (_, _, port, _) in TARGETS {
+            let payload = serde_json::json!({ "port": port }).to_string();
+            assert_eq!(parse_persisted_target(&payload, &TARGETS), Some(port));
+            assert_eq!(parse_persisted_target(&payload, fixed_targets_for_profile(Some("vm-release"))), None);
+        }
+    }
+
+    #[test]
+    fn persisted_target_rejects_malformed_and_unknown_ports() {
+        for payload in [
+            "{", "null", "[]", "{}", "{\"port\":null}", "{\"port\":\"3070\"}",
+            "{\"port\":-1}", "{\"port\":3070.5}", "{\"port\":0}", "{\"port\":65535}",
+        ] {
+            assert_eq!(parse_persisted_target(payload, &TARGETS), None, "{payload}");
+        }
+    }
 
     #[test]
     fn api_port_mapping() {
