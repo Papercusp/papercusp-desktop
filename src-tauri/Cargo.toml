@@ -110,6 +110,7 @@ rand = "0.8"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 libc = "0.2"
+signal-hook = "0.3"
 
 # WebKitGTK direct access — only used on Linux to auto-grant the
 # getUserMedia permission so the operator's voice paths work without

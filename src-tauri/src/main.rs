@@ -63,8 +63,18 @@ mod workspaces;
 mod wsl_setup;
 
 use endpoint_ipc::is_tcp_endpoint;
+#[cfg(unix)]
+use signal_hook::{
+    consts::{SIGINT, SIGTERM},
+    flag,
+};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+#[cfg(unix)]
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
 use tauri_specta::Event as _;
@@ -10036,6 +10046,22 @@ fn run_headless_service() -> ! {
         pg_port_hint
     );
 
+    #[cfg(unix)]
+    let shutdown_requested = {
+        let requested = Arc::new(AtomicBool::new(false));
+        for signal in [SIGTERM, SIGINT] {
+            if let Err(error) = flag::register(signal, Arc::clone(&requested)) {
+                eprintln!(
+                    "[papercusp-server] failed to install signal handler for {signal}: {error}"
+                );
+                // Running without the forwarding handler would let systemd's
+                // SIGKILL fallback tear down embedded Postgres ungracefully.
+                std::process::exit(1);
+            }
+        }
+        requested
+    };
+
     let mut child = match spawn_serve(
         false,
         port_hint,
@@ -10054,6 +10080,13 @@ fn run_headless_service() -> ! {
         }
     };
 
+    #[cfg(unix)]
+    let status = match wait_for_headless_child(&mut child, &shutdown_requested) {
+        Ok(HeadlessWaitResult::ShutdownRequested) => std::process::exit(0),
+        Ok(HeadlessWaitResult::Exited(status)) => Ok(status),
+        Err(error) => Err(error),
+    };
+    #[cfg(not(unix))]
     let status = child.wait();
     eprintln!("[papercusp-server] headless operator exited: {status:?}");
 
@@ -10063,16 +10096,112 @@ fn run_headless_service() -> ! {
     // Once it disappears, exit non-zero so Restart=on-failure creates a fresh
     // owned operator.
     if status.as_ref().is_ok_and(|status| status.success()) {
-        while find_operator_discovery(&workspace_home, false)
-            .as_ref()
-            .is_some_and(|discovery| {
-                discovery_pid_alive(discovery.pid, false) && operator_http_ready(discovery.port)
-            })
-        {
+        loop {
+            #[cfg(unix)]
+            if shutdown_requested.load(Ordering::Relaxed) {
+                break;
+            }
+            let healthy = find_operator_discovery(&workspace_home, false)
+                .as_ref()
+                .is_some_and(|discovery| {
+                    discovery_pid_alive(discovery.pid, false) && operator_http_ready(discovery.port)
+                });
+            if !healthy {
+                break;
+            }
+            #[cfg(unix)]
+            {
+                if shutdown_requested.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
             std::thread::sleep(Duration::from_secs(2));
+        }
+        #[cfg(unix)]
+        if shutdown_requested.load(Ordering::Relaxed) {
+            std::process::exit(0);
         }
     }
     std::process::exit(1);
+}
+
+#[cfg(unix)]
+enum HeadlessWaitResult {
+    Exited(std::process::ExitStatus),
+    ShutdownRequested,
+}
+
+#[cfg(unix)]
+fn wait_for_headless_child(
+    child: &mut Child,
+    shutdown_requested: &AtomicBool,
+) -> std::io::Result<HeadlessWaitResult> {
+    loop {
+        if shutdown_requested.load(Ordering::Relaxed) {
+            // systemd sends SIGTERM to this wrapper, not the serve child.
+            // Forward it through the existing process-group shutdown path so
+            // serve can stop embedded Postgres with pg_ctl before we exit.
+            graceful_kill(child, "headless operator", 25_000);
+            return Ok(HeadlessWaitResult::ShutdownRequested);
+        }
+
+        match child.try_wait()? {
+            Some(status) => return Ok(HeadlessWaitResult::Exited(status)),
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod headless_service_shutdown_tests {
+    use super::{isolate_process_group, wait_for_headless_child, HeadlessWaitResult};
+    use std::fs;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn shutdown_request_forwards_term_before_reaping_headless_child() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let marker = std::env::temp_dir().join(format!(
+            "papercusp-headless-shutdown-term-{}-{nonce}",
+            std::process::id()
+        ));
+        let ready = marker.with_extension("ready");
+
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("trap 'printf reached > \"$1\"; exit 0' TERM; printf ready > \"$2\"; while :; do sleep 1; done")
+            .arg("sh")
+            .arg(&marker)
+            .arg(&ready);
+        isolate_process_group(&mut command);
+        let mut child = command.spawn().expect("spawn TERM fixture");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !ready.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "fixture did not become ready");
+
+        let shutdown_requested = AtomicBool::new(true);
+        let result = wait_for_headless_child(&mut child, &shutdown_requested)
+            .expect("wait for headless child");
+        assert!(matches!(result, HeadlessWaitResult::ShutdownRequested));
+        assert!(shutdown_requested.load(Ordering::Relaxed));
+        assert_eq!(
+            fs::read_to_string(&marker).expect("read TERM marker"),
+            "reached"
+        );
+
+        let _ = fs::remove_file(marker);
+        let _ = fs::remove_file(ready);
+    }
 }
 
 #[cfg(test)]
