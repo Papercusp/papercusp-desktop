@@ -26,7 +26,7 @@ const devOperatorSource = fs.readFileSync(DEV_OPERATOR_SCRIPT, 'utf8');
 const dreamSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-dream-native.sh'), 'utf8');
 const voiceSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-voice-settings.sh'), 'utf8');
 
-function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false, claimSlot = false, handoff = false, backgroundHandoff = false, peerReceipt = false, afterFreeGb = 12, aggregate = false, sourceDevice = 101, bulkDevice = 101, bulkFreeGb = freeGb, preAdmissionGb = 0 }) {
+function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false, claimSlot = false, handoff = false, backgroundHandoff = false, peerReceipt = false, afterFreeGb = 12, aggregate = false, sourceDevice = 101, bulkDevice = 101, bulkFreeGb = freeGb, preAdmissionGb = 0, preparationAgeSec = 0, compileAgeSec = 0, cargoStage = false }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-native-capacity-'));
   const target = path.join(dir, 'cargo');
   const ledger = path.join(dir, 'reservations');
@@ -40,7 +40,7 @@ function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false
     const bin = path.join(dir, 'bin');
     fs.mkdirSync(bin);
     fs.writeFileSync(path.join(bin, 'cargo'), '#!/usr/bin/env node\n' +
-      'process.stdout.write(JSON.stringify({target_directory: process.env.NATIVE_FIXTURE_TARGET}));\n',
+      'process.stdout.write(process.argv[2] === "run" ? "CARGO_STARTED\\n" : JSON.stringify({target_directory: process.env.NATIVE_FIXTURE_TARGET}));\n',
     { mode: 0o755 });
     fs.writeFileSync(path.join(bin, 'df'), '#!/usr/bin/env bash\n' +
       'printf "measured\\n" >> "$NATIVE_FIXTURE_DF_CALLS"\n' +
@@ -49,7 +49,18 @@ function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false
       `[ "\${NATIVE_FIXTURE_AFTER_PREPARE:-0}" != 1 ] || available=${afterFreeGb * 1024 * 1024}\n` +
       'printf "Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 209715200 0 %s 0%% /fixture\\n" "$available"\n',
     { mode: 0o755 });
-    fs.writeFileSync(path.join(bin, 'tauri'), '#!/usr/bin/env bash\nprintf "CLI_STARTED\\n"\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, 'tauri'), '#!/usr/bin/env bash\nprintf "CLI_STARTED\\n"\n' +
+      (cargoStage ? `printf '%s' ${1000 + preparationAgeSec + compileAgeSec} > "$NATIVE_FIXTURE_CLOCK"\n` +
+        'while [ "$#" -gt 0 ]; do\n' +
+        '  if [ "$1" = --runner ]; then exec bash "$2" run; fi\n' +
+        '  shift\ndone\nexit 95\n' : ''), { mode: 0o755 });
+    const clock = path.join(dir, 'clock');
+    fs.writeFileSync(clock, '1000');
+    if (preparationAgeSec || compileAgeSec) fs.writeFileSync(path.join(bin, 'date'),
+      '#!/usr/bin/env bash\nif [ "$1" = +%s ]; then cat "$NATIVE_FIXTURE_CLOCK"; else exec /bin/date "$@"; fi\n',
+      { mode: 0o755 });
+    if (cargoStage) fs.writeFileSync(path.join(bin, 'rustc'),
+      '#!/usr/bin/env bash\nprintf "host: x86_64-unknown-linux-gnu\\n"\n', { mode: 0o755 });
     if (aggregate) fs.writeFileSync(path.join(bin, 'stat'), '#!/usr/bin/env bash\n' +
       'case "${@: -1}" in\n' +
       `  "$NATIVE_FIXTURE_SOURCE") printf '${sourceDevice}\\n' ;;\n` +
@@ -88,20 +99,23 @@ function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false
         'sed "/^pid=/d; /^start=/d" "$NATIVE_CARGO_DISK_RESERVATION_FILE" > "$NATIVE_CARGO_DISK_RESERVATION_FILE.tmp"\n' +
         'printf "pid=%s\\nstart=%s\\n" "$peer" "$(papercusp_proc_starttime "$peer")" >> "$NATIVE_CARGO_DISK_RESERVATION_FILE.tmp"\n' +
         'mv "$NATIVE_CARGO_DISK_RESERVATION_FILE.tmp" "$NATIVE_CARGO_DISK_RESERVATION_FILE"\n' : '') +
-      (handoff ? 'export NATIVE_FIXTURE_AFTER_PREPARE=1 PAPERCUSP_DISK_RESERVATION_FILE="$NATIVE_CARGO_DISK_RESERVATION_FILE"\n' +
+      (handoff ? 'initial_expiry="$(sed -n s/^expires=//p "$NATIVE_CARGO_DISK_RESERVATION_FILE")"\n' +
+        `printf '%s' ${1000 + preparationAgeSec} > "$NATIVE_FIXTURE_CLOCK"\n` +
+        'export NATIVE_FIXTURE_AFTER_PREPARE=1 PAPERCUSP_DISK_RESERVATION_FILE="$NATIVE_CARGO_DISK_RESERVATION_FILE"\n' +
         (backgroundHandoff ? 'VERIFY_SCOPE_MODE=inherit\nTAURI_SCOPE_UNIT=fixture\nLOG="$WORK/launch.log"\n' +
           backgroundLaunch + '\n' +
           'touch "$WORK/launch-go"\n' +
           'while [ ! -f "$WORK/launch-status" ]; do sleep 0.01; done\n' +
           'cat "$LOG"\nstatus=$(cat "$WORK/launch-status")\n' +
           'wait "$TAURI_PID" 2>/dev/null || true\n[ "$status" = 0 ] || exit "$status"\n' :
-          'PAPERCUSP_SIDECAR_LOCK="$HOME/sidecar.lock" bash "$DESKTOP_DIR/bin/tauri-guarded" dev || exit $?\n') : '') +
+          'PAPERCUSP_SIDECAR_LOCK="$HOME/sidecar.lock" bash "$DESKTOP_DIR/bin/tauri-guarded" dev || exit $?\n') +
+        'printf "RECEIPT_EXPIRES before=%s after=%s\\n" "$initial_expiry" "$(sed -n s/^expires=//p "$NATIVE_CARGO_DISK_RESERVATION_FILE")"\n' : '') +
       (claimSlot ? 'if flock -n "$HOME/.papercusp/desktop-dev-slots/slot0.lock" true; then echo SLOT_UNPROTECTED; else echo SLOT_HELD; fi\n' : '')], {
       encoding: 'utf8', timeout: 15_000,
       env: { ...process.env, HOME: dir, DESKTOP_DIR: path.resolve(__dirname, '..'),
         CARGO_TARGET_DIR: claimSlot ? '' : target, PREPARE_ONLY: prepareOnly ? '1' : '0',
         PATH: `${bin}:${process.env.PATH}`, PAPERCUSP_DISK_RESERVATION_DIR: ledger,
-        NATIVE_FIXTURE_DF_CALLS: dfCalls, NATIVE_FIXTURE_TARGET: target,
+        NATIVE_FIXTURE_DF_CALLS: dfCalls, NATIVE_FIXTURE_TARGET: target, NATIVE_FIXTURE_CLOCK: clock,
         NATIVE_FIXTURE_SOURCE: sourceParent, NATIVE_FIXTURE_WORK: work,
         OPERATOR_SNAPSHOT_PARENT: sourceParent, WORK: work, REPO_DIR: dir,
         VERIFY_TAURI_DEPENDENCY_SNAPSHOT_MODE: 'hardlink', VERIFY_TAURI_ISOLATED_DB: '1' },
@@ -318,6 +332,26 @@ test('background native boot adopts its preparation owner Cargo receipt', () => 
   assert.match(result.stdout, /adopted 12GB ancestor reservation/);
   assert.match(result.stdout, /CLI_STARTED/);
   assert.deepEqual(result.claims, [], 'the owning verifier releases the adopted receipt');
+});
+
+test('delayed preparation and Cargo launch spend the original admitted window without renewing it', () => {
+  const result = nativeCargoPreflightFixture({ freeGb: 100, warm: true,
+    aggregate: true, handoff: true, backgroundHandoff: true, cargoStage: true,
+    preparationAgeSec: 731, compileAgeSec: 91 });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /CARGO_STARTED/);
+  assert.match(result.stdout, /RECEIPT_EXPIRES before=22600 after=22600/);
+  assert.doesNotMatch(result.stdout + result.stderr, /lifetime-shortfall/);
+  assert.deepEqual(result.claims, [], 'the entire chain borrows one owner receipt');
+});
+
+test('delayed native handoff still refuses actual Cargo capacity exhaustion', () => {
+  const result = nativeCargoPreflightFixture({ freeGb: 100, warm: true,
+    handoff: true, cargoStage: true, preparationAgeSec: 731, afterFreeGb: 11 });
+  assert.equal(result.status, 28, result.stdout + result.stderr);
+  assert.match(result.stderr, /insufficient disk/);
+  assert.doesNotMatch(result.stdout, /CARGO_STARTED/);
+  assert.deepEqual(result.claims, []);
 });
 
 test('disk receipt ancestry reads kernel parents without ps and rejects missing metadata',
