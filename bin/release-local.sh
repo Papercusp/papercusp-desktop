@@ -1551,6 +1551,7 @@ release_task_commit_manifest_stage() { # <artifact>...
         return 1
       fi
       verification_ms="$(release_task_elapsed_ms "$verify_started")" || return $?
+      RELEASE_TASK_PREPARATION_MS="$(release_task_elapsed_ms "$RELEASE_TASK_MANIFEST_PREPARATION_START_MS")" || return $?
       release_task_emit_timing release.manifest verified-reuse "$verification_ms"
       return 0
       ;;
@@ -1581,6 +1582,9 @@ release_task_commit_manifest_stage() { # <artifact>...
     return 1
   }
   decision="$([[ "$RELEASE_TASK_MANIFEST_ACTION" == "reconcile" ]] && printf cache-hit || printf built)"
+  # Later verification in this process must compare against the digest we just
+  # committed, including when begin returned an unresolved intent with no refs.
+  RELEASE_TASK_MANIFEST_OUTPUT_DIGEST="$output_digest"
   RELEASE_TASK_MANIFEST_ACTION=reuse
   release_task_emit_timing release.manifest "$decision" "$verification_ms"
 }
@@ -1622,19 +1626,13 @@ release_task_prepare_manifest_stage() { # <artifact>...
     return 0
   fi
 
-  local verify_started verification_ms
-  verify_started="$(release_task_now_ms)" || return $?
   release_task_verify_manifest_outputs "$@" || {
     echo "ERROR: release.manifest receipt has present but mismatched/partial outputs; not treating corruption as absence." >&2
     return 1
   }
-  verification_ms="$(release_task_elapsed_ms "$verify_started")" || return $?
-  if [[ "$RELEASE_TASK_MANIFEST_ACTION" == "reconcile" ]]; then
-    release_task_commit_manifest_stage "$@" || return $?
-  else
-    RELEASE_TASK_PREPARATION_MS="$(release_task_elapsed_ms "$RELEASE_TASK_MANIFEST_PREPARATION_START_MS")" || return $?
-    release_task_emit_timing release.manifest verified-reuse "$verification_ms"
-  fi
+  # The caller skips generation AND commit when SKIP=1. Check the stored output
+  # digest here as well as canonical content before authorizing that skip.
+  release_task_commit_manifest_stage "$@" || return $?
   RELEASE_TASK_MANIFEST_ACTION=reuse
   RELEASE_TASK_MANIFEST_SKIP=1
   echo "==> [journal] release.manifest verified; reusing the immutable manifest/artifact-ledger outputs"

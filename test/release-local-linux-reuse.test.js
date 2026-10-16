@@ -1608,7 +1608,12 @@ test('a stale unversioned mac updater bundle is contamination, never a retryable
   assert.equal(journalMacOutputShape(honestShortfall, 'gui server'), 'absent');
 });
 
-function runRealManifestReceiptVerification({ tamper = false } = {}) {
+function runRealManifestReceiptVerification({
+  tamper = false,
+  receiptAction,
+  changeReceiptBytes = false,
+  settleAgain = false,
+} = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-manifest-receipt-'));
   const artifact = path.join(temp, 'Papercusp_GUI_0.0.18_amd64.AppImage');
   const signature = `${artifact}.sig`;
@@ -1642,7 +1647,25 @@ function runRealManifestReceiptVerification({ tamper = false } = {}) {
     ...(tamper
       ? ["python3 - \"$LATEST_JSON\" <<'PY'\nimport json, sys\np=sys.argv[1]\nv=json.load(open(p))\nv['platforms']['linux-x86_64']['url'] += '.tampered'\nopen(p, 'w').write(json.dumps(v) + '\\n')\nPY"]
       : []),
-    'release_task_verify_manifest_outputs "${ARTIFACTS[@]}"',
+    ...(receiptAction ? [
+      'RELEASE_TASK_JOURNAL_ENABLED=1',
+      `INITIAL_MANIFEST_ACTION=${JSON.stringify(receiptAction)}`,
+      'INITIAL_MANIFEST_DIGEST="$(release_task_manifest_output_digest)"',
+      '[[ "$INITIAL_MANIFEST_ACTION" == reuse ]] || INITIAL_MANIFEST_DIGEST=',
+      'release_task_begin_stage() { RELEASE_TASK_LAST_ACTION="$INITIAL_MANIFEST_ACTION"; RELEASE_TASK_LAST_REQUEST_ID=manifest-request; RELEASE_TASK_LAST_MANIFEST_RECEIPT="$INITIAL_MANIFEST_DIGEST"; }',
+      "release_task_audit_reuse_expiry() { printf '2099-01-01T00:00:00.000Z\\n'; }",
+      "release_task_journal_call() { printf '%s\\n' '{\"state\":\"committed\"}'; }",
+      ...(changeReceiptBytes ? [
+        // This remains valid canonical output after timestamp normalization.
+        // Only comparison with the committed receipt can reject the change.
+        "python3 - \"$LATEST_JSON\" <<'PY'\nimport json, sys\np=sys.argv[1]\nv=json.load(open(p))\nv['pub_date']='2000-01-01T00:00:00Z'\nopen(p, 'w').write(json.dumps(v) + '\\n')\nPY",
+      ] : []),
+      'release_task_prepare_manifest_stage "${ARTIFACTS[@]}"',
+      ...(settleAgain ? [
+        'release_task_commit_manifest_stage "${ARTIFACTS[@]}"',
+        'release_task_commit_manifest_stage "${ARTIFACTS[@]}"',
+      ] : []),
+    ] : ['release_task_verify_manifest_outputs "${ARTIFACTS[@]}"']),
   ].join('\n');
   const result = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
   fs.rmSync(temp, { recursive: true, force: true });
@@ -1656,6 +1679,21 @@ test('real manifest receipt matches the canonical generator and rejects changed 
   assert.notEqual(changed.status, 0, 'changed manifest unexpectedly matched its receipt inputs');
   assert.match(changed.stderr, /does not match the canonical generator/);
 });
+
+test('ordinary manifest resume compares the committed digest before skipping generation', () => {
+  const valid = runRealManifestReceiptVerification({ receiptAction: 'reuse' });
+  assert.equal(valid.status, 0, valid.stderr || valid.stdout);
+  const changed = runRealManifestReceiptVerification({ receiptAction: 'reuse', changeReceiptBytes: true });
+  assert.notEqual(changed.status, 0, 'prepare skipped generation with bytes its receipt never committed');
+  assert.match(changed.stderr, /NOT the ones its receipt committed/);
+});
+
+for (const receiptAction of ['run', 'reconcile']) {
+  test(`manifest ${receiptAction} retains its committed digest for later in-process verification`, () => {
+    const result = runRealManifestReceiptVerification({ receiptAction, settleAgain: true });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+  });
+}
 
 // ── P-004 / R-4: DOWNSTREAM INVALIDATION ─────────────────────────────────────
 // R-4 requires a retry to reject stale receipts and never republish an
