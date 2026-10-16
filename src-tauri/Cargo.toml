@@ -157,6 +157,9 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
     "Win32_System_Console",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_Graphics_Dwm",
 ] }
 
 # ── Release build-speed profile (desktop-build-speed-2026-07-16 P-008) ────────

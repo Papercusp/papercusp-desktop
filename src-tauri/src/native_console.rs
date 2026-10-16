@@ -192,34 +192,52 @@ pub fn list_windows_by_title(prefix: Option<String>) -> Vec<DesktopWindow> {
 /// Bring the window whose title EXACTLY equals `title` to the foreground
 /// (restoring it first if minimized). USER-INITIATED ONLY — mirrors the
 /// `feedback_e2e_no_focus_steal` memory; never call from an automated driver.
-/// Returns true iff a matching window was found and the foreground call issued.
+/// Returns true only after observing foreground, restoration and current-desktop
+/// visibility. Uses the public Windows 10+ virtual desktop API; no key simulation.
 /// No-op returning false on non-Windows (Linux focus stays the wmctrl path).
 #[tauri::command]
 #[specta::specta]
-pub fn focus_window_by_title(title: String) -> bool {
+pub async fn focus_window_by_title(title: String) -> bool {
     #[cfg(target_os = "windows")]
     {
         use std::ffi::c_void;
         use windows::Win32::Foundation::HWND;
-        use windows::Win32::UI::WindowsAndMessaging::{
-            IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE,
-        };
-        let handle = enumerate_windows(None)
-            .into_iter()
-            .find(|w| w.title == title)
-            .and_then(|w| w.hwnd.parse::<isize>().ok());
-        match handle {
-            Some(h) => {
-                let hwnd = HWND(h as *mut c_void);
-                unsafe {
-                    if IsIconic(hwnd).as_bool() {
-                        let _ = ShowWindow(hwnd, SW_RESTORE);
-                    }
-                    SetForegroundWindow(hwnd).as_bool()
-                }
+        use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+        use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow, SW_RESTORE};
+        return tauri::async_runtime::spawn_blocking(move || {
+            let matches: Vec<_> = enumerate_windows(None).into_iter().filter(|w| w.title == title).collect();
+            if matches.len() != 1 { return false; }
+            let Some(h) = matches[0].hwnd.parse::<isize>().ok() else { return false; };
+            struct ComGuard(bool);
+            impl Drop for ComGuard {
+                fn drop(&mut self) { if self.0 { unsafe { CoUninitialize() }; } }
             }
-            None => false,
-        }
+            unsafe {
+                let _com = ComGuard(CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok());
+                let manager: IVirtualDesktopManager = match CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_INPROC_SERVER) {
+                    Ok(manager) => manager, Err(_) => return false,
+                };
+                let hwnd = HWND(h as *mut c_void);
+                if !manager.IsWindowOnCurrentVirtualDesktop(hwnd).map(|b| b.as_bool()).unwrap_or(false) {
+                    let current = match manager.GetWindowDesktopId(GetForegroundWindow()) {
+                        Ok(id) => id, Err(_) => return false,
+                    };
+                    if manager.MoveWindowToDesktop(hwnd, &current).is_err() { return false; }
+                }
+                if IsIconic(hwnd).as_bool() { let _ = ShowWindow(hwnd, SW_RESTORE); }
+                let _ = SetForegroundWindow(hwnd);
+                for _ in 0..10 {
+                    let mut cloaked: u32 = 1;
+                    let uncloaked = DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut c_void, std::mem::size_of::<u32>() as u32).is_ok() && cloaked == 0;
+                    if GetForegroundWindow() == hwnd && IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool()
+                        && uncloaked && manager.IsWindowOnCurrentVirtualDesktop(hwnd).map(|b| b.as_bool()).unwrap_or(false) { return true; }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                false
+            }
+        }).await.unwrap_or(false);
     }
     #[cfg(not(target_os = "windows"))]
     {
