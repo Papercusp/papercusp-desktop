@@ -121,6 +121,41 @@ function maintainedShellFunction(name) {
   return source.slice(start, end + 2);
 }
 
+test('pinned verifier teardown refuses lost completion proof and preserves its source', () => {
+  for (const [assertionExit, retentionExit] of [[0, 0], [0, 1], [7, 1]]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-completion-retention-'));
+    try {
+      const shell = [
+        'set -u',
+        'log() { printf "%s\\n" "$*"; }',
+        'retain_boot_attempt_evidence() { return 0; }',
+        'retain_assertion_artifacts() { return 0; }',
+        'vh_capture_phase_stop() { :; }',
+        `vh_exit() { VH_FINISH_RC=${retentionExit}; }`,
+        'capture_isolated_pg_diagnostics() { :; }',
+        'write_stop_script() { printf "#!/usr/bin/env bash\\nexit 0\\n" > "$WORK/stop.sh"; chmod +x "$WORK/stop.sh"; }',
+        'wait_owned_ports_free() { :; }',
+        'fed_release_port_locks() { :; }',
+        'display_lock_release() { :; }',
+        'cleanup_operator_source_snapshot() { touch "$WORK/source-cleaned"; }',
+        'release_verifier_disk_reservations() { touch "$WORK/reservations-released"; }',
+        'cleanup_assertion_script_snapshot() { :; }',
+        'cleanup_verifier_source_snapshot() { :; }',
+        maintainedShellFunction('teardown'),
+        `(exit ${assertionExit})`,
+        'teardown',
+      ].join('\n');
+      const result = spawnSync('bash', ['-c', shell], { encoding: 'utf8', timeout: 10_000,
+        env: { ...process.env, WORK: root, SIGNAL_EXIT_CODE: '0', ISOLATED_PG_PID: '',
+          VERIFY_TAURI_SOURCE_REF: 'a'.repeat(40), OPERATOR_SOURCE_ROOT: path.join(root, 'source') } });
+      assert.equal(result.status, assertionExit || retentionExit, result.stderr);
+      assert.equal(fs.existsSync(path.join(root, 'source-cleaned')), retentionExit === 0);
+      assert.equal(fs.existsSync(path.join(root, 'reservations-released')), retentionExit !== 0);
+      if (retentionExit) assert.match(result.stdout, /completion evidence was not retained/);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
 function staleIpcAdvertCleanupFixture(nspidValue) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-tauri-ipc-pidns-'));
   try {
