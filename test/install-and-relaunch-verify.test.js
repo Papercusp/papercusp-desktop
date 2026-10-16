@@ -196,8 +196,12 @@ function linuxFixture({ emitDpkgWarning = false, policyCase = 'old-baseline', po
   // replaced. No command can read the host policy or dial any HTTP endpoint.
   executable(shims, 'python3', `#!/usr/bin/python3
 import io, json, os, stat, sys, urllib.request
+if sys.argv[1:2] == ['-I']:
+    os.execv('/usr/bin/python3', ['python3', '-I', __file__] + sys.argv[2:])
 if len(sys.argv) < 3 or sys.argv[1] != '-' or sys.argv[2] not in ('before', 'after'):
-    os.execv('/usr/bin/python3', ['python3'] + sys.argv[1:])
+    os.execv('/usr/bin/python3', ['python3'] + (['-I'] if sys.flags.isolated else []) + sys.argv[1:])
+if not sys.flags.isolated or sys.flags.optimize:
+    raise RuntimeError('managed-policy probe must run in an isolated, unoptimized interpreter')
 source = sys.stdin.read()
 sys.argv = ['-'] + sys.argv[2:]
 phase = sys.argv[1]
@@ -833,7 +837,7 @@ for (const policyCase of ['missing', 'untrusted-owner', 'writable', 'no-identity
   test(`Linux managed policy refuses ${policyCase} before any push/install`, () => {
     const f = linuxFixture({ policyCase });
     try {
-      const result = runVerify(f, ['--verify-managed-policy', 'stable'], 'linux', f.deb);
+      const result = runVerify(f, ['--verify-managed-policy', 'stable'], 'linux', f.deb, { PYTHONOPTIMIZE: '1' });
       assert.equal(result.status, 2, result.stdout + result.stderr);
       assert.match(result.stderr, /baseline qualification failed/);
       assert.equal(transportLines(f).some(line => line.startsWith('SCP')), false);
@@ -854,7 +858,7 @@ for (const policyCase of ['mode-changed', 'bytes-changed', 'identity-changed', '
   test(`Linux managed policy rejects ${policyCase} and withholds the smoke receipt`, () => {
     const f = linuxFixture({ policyCase });
     try {
-      const result = runVerify(f, ['--verify-managed-policy', 'stable', '--smoke-receipt-tag', SMOKE_TAG], 'linux', f.deb);
+      const result = runVerify(f, ['--verify-managed-policy', 'stable', '--smoke-receipt-tag', SMOKE_TAG], 'linux', f.deb, { PYTHONOPTIMIZE: '1' });
       assert.equal(result.status, 1, result.stdout + result.stderr);
       const verdict = JSON.parse(result.stdout);
       assert.equal(verdict.ok, false);
