@@ -73,27 +73,10 @@ source "$__pc_claim_dir/disk-preflight.sh"
 # whose owning process exits before the build starts.
 __pc_admit_target() {
   [[ "${__pc_native_admission:-0}" == 1 ]] || return 0
-  local need inherited="${__pc_native_inherited:-}" receipt expires now
+  local need
   need="$(papercusp_native_dev_cargo_need_gb "$1")" || return $?
-  if [[ -n "$inherited" ]]; then
-    papercusp_require_free_gb "$1" "$need" "native dev Cargo build" "$inherited" >&2 || return $?
-    receipt="${PAPERCUSP_DISK_RESERVATION_FILE:-}"
-    if [[ "$receipt" == "$inherited" ]]; then
-      # Handoff spends the preparation owner's existing time window; it does
-      # not request a brand-new six-hour window after preparation has elapsed.
-      # require_free_gb verified the device, purpose, live owner and ancestry;
-      # require_disk_reservation below still verifies the complete receipt.
-      expires="$(sed -n 's/^expires=//p' "$receipt")"
-      now="$(date +%s)"
-      if [[ "$expires" =~ ^[0-9]+$ ]] && ((expires > now)); then
-        local PAPERCUSP_DISK_RESERVATION_TTL_SEC="$((expires - now))"
-      fi
-    else
-      inherited="$receipt"
-    fi
-  fi
-  papercusp_require_disk_reservation "$1" "$need" "native dev Cargo build" \
-    "$inherited" >&2 || return $?
+  papercusp_require_native_dev_disk_reservation "$1" "$need" \
+    "${__pc_native_inherited:-}" >&2 || return $?
   export PAPERCUSP_DISK_RESERVATION_FILE
 }
 
