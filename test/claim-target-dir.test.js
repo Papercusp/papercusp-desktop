@@ -105,11 +105,52 @@ function nativeClaimScript(tail = 'printf "%s\\n%s\\n" "$CARGO_TARGET_DIR" "$PAP
         *) printf '%s' "$TEST_PRIMARY_FREE";; esac
     }
     papercusp_device_id() {
-      case "$1" in "$HOME"/alternate*) printf '2';; *) printf '1';; esac
+      case "$1" in /) printf '0';; "$HOME"/alternate*) printf '2';; *) printf '1';; esac
     }
     PAPERCUSP_DESKTOP_NATIVE_DEV=1 __pc_claim_target_dir
     ${tail}`;
 }
+
+test('root-side Cargo defaults redirect to data without creating or moving a cache', () => {
+  const output = execFileSync('bash', ['-c', `set -euo pipefail
+    PAPERCUSP_DESKTOP_REAP_ONLY=1 . "$1"
+    papercusp_cargo_metadata_target_dir() { printf '%s' "$HOME/root-target"; }
+    papercusp_device_id() { case "$1" in /|"$HOME"/root*) printf '0';; *) printf '1';; esac; }
+    __pc_cargo_target_root`, 'placement', HELPER], { cwd: home, env: isolatedEnv(), encoding: 'utf8' });
+  assert.strictEqual(output, '/mnt/data/cargo-target');
+  assert.ok(!existsSync(join(home, 'root-target')));
+});
+
+test('unmounted data storage refuses a root-side default instead of falling back to root', () => {
+  assert.throws(() => execFileSync('bash', ['-c', `set -euo pipefail
+    PAPERCUSP_DESKTOP_REAP_ONLY=1 . "$1"
+    papercusp_cargo_metadata_target_dir() { printf '%s' "$HOME/root-target"; }
+    papercusp_device_id() { printf '0'; }
+    __pc_cargo_target_root`, 'placement', HELPER], { cwd: home, env: isolatedEnv(), encoding: 'utf8' }),
+  error => error.status === 2 && /root filesystem/.test(error.stderr.toString()));
+  assert.ok(!existsSync(join(home, 'root-target')));
+});
+
+test('an explicit root-side Cargo target is refused before claiming a slot, including disabled slots', () => {
+  for (const slots of ['0', '4']) {
+    assert.throws(() => execFileSync('bash', ['-c', `set -euo pipefail
+      PAPERCUSP_DESKTOP_REAP_ONLY=1 . "$1"
+      papercusp_device_id() { printf '0'; }
+      __pc_claim_target_root`, 'placement', HELPER], { cwd: home, encoding: 'utf8',
+      env: isolatedEnv({ CARGO_TARGET_DIR: join(home, 'root-target'), PAPERCUSP_DESKTOP_TARGET_SLOTS: slots }) }),
+    error => error.status === 2 && /root filesystem/.test(error.stderr.toString()));
+  }
+  assert.ok(!existsSync(join(home, 'root-target')));
+  assert.ok(!existsSync(join(home, '.papercusp', 'desktop-dev-slots')));
+});
+
+test('a target symlink back to root is refused using its actual device', { skip: process.platform !== 'linux' }, () => {
+  const alias = join(home, 'root-link');
+  symlinkSync('/', alias);
+  assert.throws(() => claim({ CARGO_TARGET_DIR: join(alias, 'p009-must-not-create') }),
+    error => error.status === 2 && /root filesystem/.test(error.stderr.toString()));
+  assert.ok(lstatSync(alias).isSymbolicLink());
+});
 
 function nativeEnv(env = {}) {
   return isolatedEnv({

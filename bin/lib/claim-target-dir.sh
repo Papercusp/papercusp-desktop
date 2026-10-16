@@ -71,7 +71,19 @@ source "$__pc_claim_dir/disk-preflight.sh"
 
 # Keep the atomic receipt in the launcher's shell, never a command substitution
 # whose owning process exits before the build starts.
+__pc_require_target_placement() {
+  [[ "$(uname -s)" == Linux ]] || return 0
+  local device root_device
+  device="$(papercusp_device_id "$1")"
+  root_device="$(papercusp_device_id /)"
+  if [[ -z "$device" || -z "$root_device" || "$device" == "$root_device" ]]; then
+    echo "ERROR: refusing Cargo output on the root filesystem (or unmeasured storage): $1; choose a separate /mnt/data target" >&2
+    return 2
+  fi
+}
+
 __pc_admit_target() {
+  __pc_require_target_placement "$1" || return $?
   [[ "${__pc_native_admission:-0}" == 1 ]] || return 0
   local need
   need="$(papercusp_native_dev_cargo_need_gb "$1")" || return $?
@@ -296,14 +308,24 @@ papercusp_prepare_collection_target_root() {
 # (EI-22589688521091797). Query the actual target project, not the current
 # orchestrator's checkout, when executing an exact-source release retry.
 __pc_cargo_target_root() {
-  local project="${PAPERCUSP_DESKTOP_TARGET_ROOT:-${ROOT:-$PWD}}"
+  local project="${PAPERCUSP_DESKTOP_TARGET_ROOT:-${ROOT:-$PWD}}" target device root_device
   if [[ -f "$project/src-tauri/Cargo.toml" ]]; then
     project="$project/src-tauri"
   elif [[ ! -f "$project/Cargo.toml" ]]; then
     project="$__pc_claim_dir/../../src-tauri"
   fi
-  # The shared resolver (bin/lib/cargo-target-root.sh) is the single reader.
-  papercusp_cargo_metadata_target_dir "$project"
+  # The shared resolver remains the single reader. The allocator may redirect
+  # a root-side default, but never relocates existing cache or changes config.
+  target="$(papercusp_cargo_metadata_target_dir "$project")" || return $?
+  if [[ "$(uname -s)" == Linux ]]; then
+    device="$(papercusp_device_id "$target")"
+    root_device="$(papercusp_device_id /)"
+    if [[ -n "$device" && "$device" == "$root_device" ]]; then
+      target=/mnt/data/cargo-target
+    fi
+  fi
+  __pc_require_target_placement "$target" || return $?
+  printf '%s' "$target"
 }
 
 # PRIVATE OVERFLOW SLOTS — reaping and warm reuse (WI-10004764)
@@ -687,8 +709,8 @@ __pc_target_slot_is_warm() {
 }
 
 __pc_claim_target_root() {
-  # An explicit CARGO_TARGET_DIR is a deliberate choice (a .deb cut on an
-  # isolated dir, a test harness) — never second-guess it.
+  # Preserve explicit targets on admitted storage; root-side output is refused
+  # even outside native-dev mode, before Cargo can start writing.
   if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
     echo "→ target dir: honouring preset CARGO_TARGET_DIR=$CARGO_TARGET_DIR (no slot claimed)" >&2
     __pc_admit_target "$CARGO_TARGET_DIR"
@@ -698,11 +720,10 @@ __pc_claim_target_root() {
   local slots="${PAPERCUSP_DESKTOP_TARGET_SLOTS:-4}"
   if [[ "$slots" == "0" ]]; then
     echo "⚠ target-dir slots DISABLED (PAPERCUSP_DESKTOP_TARGET_SLOTS=0) — a second concurrent desktop build will corrupt the shared app-manifest (WI-7101)" >&2
-    if [[ "${__pc_native_admission:-0}" == 1 ]]; then
-      local disabled_target
-      disabled_target="$(__pc_cargo_target_root)" || return $?
-      __pc_admit_target "$disabled_target" || return $?
-    fi
+    local disabled_target
+    disabled_target="$(__pc_cargo_target_root)" || return $?
+    __pc_admit_target "$disabled_target" || return $?
+    export CARGO_TARGET_DIR="$disabled_target"
     return 0
   fi
 
@@ -711,17 +732,17 @@ __pc_claim_target_root() {
   # back a slot whose exclusivity we cannot actually guarantee.
   if ! command -v flock >/dev/null 2>&1; then
     echo "⚠ flock(1) unavailable — cannot claim a target-dir slot; concurrent desktop builds may corrupt the shared app-manifest (WI-7101)" >&2
-    if [[ "${__pc_native_admission:-0}" == 1 ]]; then
-      local unlocked_target
-      unlocked_target="$(__pc_cargo_target_root)" || return $?
-      __pc_admit_target "$unlocked_target" || return $?
-    fi
+    local unlocked_target
+    unlocked_target="$(__pc_cargo_target_root)" || return $?
+    __pc_admit_target "$unlocked_target" || return $?
+    export CARGO_TARGET_DIR="$unlocked_target"
     return 0
   fi
 
   local shared
   shared="${1:-}"
   [[ -n "$shared" ]] || shared="$(__pc_cargo_target_root)" || return 1
+  __pc_require_target_placement "$shared" || return $?
   # Cargo metadata tells us the authoritative root, but does not promise that
   # it already exists.  Materialize that explicit configured path before slot
   # selection so a writable relocation parent remains usable and every derived
