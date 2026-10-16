@@ -121,8 +121,9 @@ function maintainedShellFunction(name) {
   return source.slice(start, end + 2);
 }
 
-test('pinned verifier teardown refuses lost completion proof and preserves its source', () => {
-  for (const [assertionExit, retentionExit] of [[0, 0], [0, 1], [7, 1]]) {
+test('pinned verifier teardown distinguishes retained failing verdicts from lost completion proof', () => {
+  for (const [assertionExit, finalizationExit] of [[0, 0], [7, 1], [0, 2], [7, 2]]) {
+    const retentionFailed = finalizationExit > 1;
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-completion-retention-'));
     try {
       const shell = [
@@ -131,7 +132,7 @@ test('pinned verifier teardown refuses lost completion proof and preserves its s
         'retain_boot_attempt_evidence() { return 0; }',
         'retain_assertion_artifacts() { return 0; }',
         'vh_capture_phase_stop() { :; }',
-        `vh_exit() { VH_FINISH_RC=${retentionExit}; }`,
+        `vh_exit() { VH_FINISH_RC=${finalizationExit}; }`,
         'capture_isolated_pg_diagnostics() { :; }',
         'write_stop_script() { printf "#!/usr/bin/env bash\\nexit 0\\n" > "$WORK/stop.sh"; chmod +x "$WORK/stop.sh"; }',
         'wait_owned_ports_free() { :; }',
@@ -148,10 +149,11 @@ test('pinned verifier teardown refuses lost completion proof and preserves its s
       const result = spawnSync('bash', ['-c', shell], { encoding: 'utf8', timeout: 10_000,
         env: { ...process.env, WORK: root, SIGNAL_EXIT_CODE: '0', ISOLATED_PG_PID: '',
           VERIFY_TAURI_SOURCE_REF: 'a'.repeat(40), OPERATOR_SOURCE_ROOT: path.join(root, 'source') } });
-      assert.equal(result.status, assertionExit || retentionExit, result.stderr);
-      assert.equal(fs.existsSync(path.join(root, 'source-cleaned')), retentionExit === 0);
-      assert.equal(fs.existsSync(path.join(root, 'reservations-released')), retentionExit !== 0);
-      if (retentionExit) assert.match(result.stdout, /completion evidence was not retained/);
+      assert.equal(result.status, assertionExit || (retentionFailed ? 1 : 0), result.stderr);
+      assert.equal(fs.existsSync(path.join(root, 'source-cleaned')), !retentionFailed);
+      assert.equal(fs.existsSync(path.join(root, 'reservations-released')), retentionFailed);
+      if (retentionFailed) assert.match(result.stdout, /completion evidence was not retained/);
+      else assert.doesNotMatch(result.stdout, /completion evidence was not retained/);
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   }
 });
