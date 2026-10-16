@@ -69,8 +69,8 @@ if [[ "${PAPERCUSP_TAURI_INTERNAL_RUNNER:-}" == "cargo" ]]; then
   source "$__here/lib/disk-preflight.sh"
   __pc_inherited="${PAPERCUSP_DISK_RESERVATION_FILE:-}"
   __pc_need="$(papercusp_native_dev_cargo_need_gb "$CARGO_TARGET_DIR")" || exit $?
-  papercusp_require_disk_reservation "$CARGO_TARGET_DIR" "$__pc_need" \
-    "native dev Cargo build" "$__pc_inherited" >&2 || exit $?
+  papercusp_require_native_dev_disk_reservation "$CARGO_TARGET_DIR" "$__pc_need" \
+    "$__pc_inherited" >&2 || exit $?
   export PAPERCUSP_DISK_RESERVATION_FILE
   __pc_receipt_owner="$(sed -n 's/^pid=//p' "$PAPERCUSP_DISK_RESERVATION_FILE")"
   __pc_released=0
