@@ -1214,6 +1214,20 @@ test('committed manifest receipt never bypasses missing or tampered outputs', ()
   assert.doesNotMatch(tampered.log, /refuse release\.manifest/);
 });
 
+test('fault-injection resume matrix covers every journalled desktop phase', () => {
+  for (const leg of ['linux', 'windows', 'mac']) {
+    const { result, log } = runJournalLegResume({ leg, action: 'reconcile' });
+    assert.equal(result.status, 0, `${leg} interruption did not reconcile: ${result.stderr}`);
+    assert.match(result.stdout, /RESULT action=reuse request=old-request reuse=1/);
+    assert.match(log, new RegExp(`commit release\\.build\\.${leg} `));
+  }
+
+  const manifest = runJournalManifestResume({ action: 'reconcile' });
+  assert.equal(manifest.result.status, 0, `manifest interruption did not reconcile: ${manifest.result.stderr}`);
+  assert.match(manifest.result.stdout, /RESULT action=reuse request=old-request skip=1/);
+  assert.match(manifest.log, /verify\ncommit/);
+});
+
 test('journal byte gate composes exact health, hash, and signature verification', () => {
   assert.match(releaseTaskJournalHarness, /verify-provenance\.sh" "\$bundle"/);
   assert.match(releaseTaskJournalHarness, /--health-sha "\$BUILD_SHA"/);
