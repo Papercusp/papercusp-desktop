@@ -683,7 +683,8 @@ def refused(fn):
     except RuntimeError: return
     raise AssertionError('unsafe trial admitted: '+case)
 with patch.object(m.subprocess,'check_output',side_effect=output), \
-     patch.object(m,'Path',side_effect=lambda p: procroot if str(p)=='/proc' else Path(p)):
+     patch.object(m,'Path',side_effect=lambda p: procroot if str(p)=='/proc' else (
+         SimpleNamespace(stat=lambda:SimpleNamespace(st_dev=-1)) if str(p)=='/' else Path(p))):
     if case in ('live', 'orphan'):
         refused(lambda:m.prepare_trial(backup,runtime,trial,'test.service'))
         assert not trial.exists()
@@ -851,6 +852,72 @@ for (const scenario of ['preserved', 'live', 'orphan', 'capacity', 'source-chang
     assert.equal(result.code, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout.trim().split('\n').at(-1)),
       { ok: true, case: scenario, originalBytesUnchanged: true });
+  });
+}
+
+// Exercise the real destination checks before generation reads, QEMU or writes.
+const storagePlacementFixture = String.raw`
+import importlib.util, json, stat, sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location('launch', sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+root, case = Path(sys.argv[2]), sys.argv[3]
+trial = root/'trial'
+if case=='root-resume':
+    trial.mkdir(); (trial/'preserved').write_text('unchanged')
+if case=='parent-symlink':
+    (root/'alias').symlink_to(root, target_is_directory=True)
+    trial = root/'alias'/'trial'
+real_stat = Path.stat
+def observed_stat(p, *args, **kwargs):
+    if str(p)=='/mnt/data' and case=='default-missing': raise FileNotFoundError(str(p))
+    if str(p) in ('/', '/mnt/data'):
+        device = 2 if str(p)=='/mnt/data' and case not in ('default-root','default-missing') else 1
+        return SimpleNamespace(st_dev=device, st_mode=stat.S_IFDIR)
+    result = real_stat(p, *args, **kwargs)
+    if p in (root, trial) and not kwargs.get('follow_symlinks') is False:
+        if case=='unknown-device': raise PermissionError('device unavailable')
+        return SimpleNamespace(st_dev=2 if case=='explicit-data' else 1, st_mode=result.st_mode)
+    return result
+with patch.object(Path,'stat',observed_stat), \
+     patch.object(m,'generation',side_effect=AssertionError('generation must not run')) as generation, \
+     patch.object(m.subprocess,'run',side_effect=AssertionError('QEMU must not run')):
+    if case=='explicit-data':
+        m.require_trial_storage(trial)
+    elif case=='default-data':
+        with patch.object(m.time,'time_ns',return_value=123):
+            chosen = m.default_storage_trial()
+            assert chosen == Path('/mnt/data/mac-storage-trial-123')
+            with patch.object(sys,'argv',['launch','--backup',str(root/'backup'),
+                 '--runtime',str(root/'runtime'),'--prepare-storage-trial']), \
+                 patch.object(m,'prepare_trial') as prepare:
+                m.main()
+                assert prepare.call_args.args[2] == chosen
+    else:
+        try:
+            if case.startswith('default-'): m.default_storage_trial()
+            else: m.prepare_trial(root/'backup',root/'runtime',trial,'unused',resume=case=='root-resume')
+        except (RuntimeError, OSError): pass
+        else: raise AssertionError('unsafe placement admitted: '+case)
+    generation.assert_not_called()
+assert not trial.exists() if case!='root-resume' else (trial/'preserved').read_text()=='unchanged'
+print(json.dumps({'ok':True,'case':case,'noHeavyWrites':True}))
+`;
+
+for (const scenario of ['root-new', 'root-resume', 'parent-symlink', 'unknown-device',
+  'explicit-data', 'default-data', 'default-root', 'default-missing']) {
+  test('Mac storage trial placement: ' + scenario, async () => {
+    const dir = await tempDir();
+    const helper = new URL('../bin/mac-vm-launch.py', import.meta.url).pathname;
+    const result = await new Promise((resolve) => {
+      execFile('python3', ['-B', '-c', storagePlacementFixture, helper, dir, scenario],
+        { timeout: 10_000 }, (error, stdout, stderr) => resolve({ code: error ? error.code : 0, stdout, stderr }));
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout.trim()), { ok: true, case: scenario, noHeavyWrites: true });
   });
 }
 

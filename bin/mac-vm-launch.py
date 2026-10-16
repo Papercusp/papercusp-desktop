@@ -165,11 +165,27 @@ def image_info(image):
         ['qemu-img', 'info', '--output=json', str(image)], text=True))
 
 
+def require_trial_storage(trial):
+    # Check the actual destination device, including an existing resumed trial:
+    # capacity alone also admits a large root filesystem or an unmounted /mnt/data.
+    destination = trial if trial.exists() else trial.parent
+    require(destination.is_dir(), 'storage trial needs an existing destination directory')
+    require(destination.stat().st_dev != Path('/').stat().st_dev,
+            'storage trial refuses the root filesystem; choose mounted /mnt/data storage')
+
+
+def default_storage_trial():
+    trial = Path('/mnt/data') / ('mac-storage-trial-' + str(time.time_ns()))
+    require_trial_storage(trial)
+    return trial
+
+
 def prepare_trial(backup, runtime, trial, unit, resume=False, expected_originals=None):
-    source, originals = generation(backup, runtime)
-    stopped(unit, originals.values())
     require(not trial.is_symlink() and trial.parent.absolute() == trial.parent.resolve(),
             'trial destination or parent is a symlink')
+    require_trial_storage(trial)
+    source, originals = generation(backup, runtime)
+    stopped(unit, originals.values())
     require(resume or expected_originals is None, 'adoption stamps require explicit resume')
     require(trial.exists() == resume, 'trial destination exists; inspect rather than overwrite' if
             not resume else 'resume requires an existing trial')
@@ -384,7 +400,10 @@ def main():
                                            timeout=options.shutdown_timeout)))
         return
     if options.prepare_storage_trial or options.resume_storage_trial:
-        require(options.storage_trial is not None and not options.launch, 'prepare needs trial and forbids launch')
+        require(not options.launch, 'storage preparation forbids launch')
+        if options.storage_trial is None:
+            require(not options.resume_storage_trial, 'resume needs an explicit existing trial')
+            options.storage_trial = default_storage_trial()
         prepare_trial(options.backup, options.runtime, options.storage_trial, options.unit,
                       resume=options.resume_storage_trial,
                       expected_originals=read(options.resume_source_stamps) if options.resume_source_stamps else None)
