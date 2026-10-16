@@ -202,7 +202,7 @@ test('managed policy is provisioned exclusively on the reset Linux guest, then b
     const provision = lines.findIndex(line => line.startsWith('VMCTL-SSH-SCRIPT') && line.includes('PAPERCUSP_LINUX_MANAGED_POLICY'));
     const verify = lines.findIndex(line => line.startsWith('VERIFY '));
     assert.ok(baseline >= 0 && provision > baseline && verify > provision, lines.join('\n'));
-    assert.match(lines[provision], /sudo python3 - stable/);
+    assert.match(lines[provision], /sudo python3 -I - stable/);
     assert.match(lines[provision], /os\.O_EXCL/);
     assert.match(lines[provision], /\/etc\/papercusp\/managed-policy\.json/);
     assert.match(lines[verify], /--verify-managed-policy stable/);

@@ -676,7 +676,9 @@ note() { NOTES+=("$1"); }
 # accepted. stdout is evidence only; errors fail closed before a smoke receipt.
 managed_policy_probe() { # $1=before|after, $2=sticky operator port
   local command
-  command="$(printf 'python3 - %q %q %q ' "$1" "$2" "$MANAGED_POLICY_CHANNEL")$(cat <<'PROBE'
+  # Isolated Python ignores PYTHONOPTIMIZE/PYTHONPATH: qualification predicates
+  # must never disappear or import caller-controlled modules via ambient env.
+  command="$(printf 'python3 -I - %q %q %q ' "$1" "$2" "$MANAGED_POLICY_CHANNEL")$(cat <<'PROBE'
 <<'PAPERCUSP_MANAGED_POLICY_PROBE'
 import hashlib, json, os, stat, sys, urllib.error, urllib.request
 
@@ -842,7 +844,7 @@ if [[ -n "$MANAGED_POLICY_CHANNEL" ]]; then
     exit 2
   }
   # Parse evidence before trusting a successful transport exit.
-  python3 -c 'import json,sys; e=json.load(sys.stdin); assert e["policy"]["sha256"] and e["setupFingerprint"]' <<<"$MANAGED_POLICY_BEFORE" || exit 2
+  python3 -I -c 'import json,sys; e=json.load(sys.stdin); assert e["policy"]["sha256"] and e["setupFingerprint"]' <<<"$MANAGED_POLICY_BEFORE" || exit 2
   note "managed-policy baseline support: $(printf '%s' "$MANAGED_POLICY_BEFORE" | json_str baselineSupport); only the candidate is required to enforce policy"
 fi
 # A custom staging destination may not exist yet. Create it idempotently and
@@ -1085,7 +1087,7 @@ if [[ ${#FAILURES[@]} -eq 0 && -n "$MANAGED_POLICY_CHANNEL" ]]; then
     fail_check "managed-policy candidate preservation/enforcement probe failed"
   }
   if [[ ${#FAILURES[@]} -eq 0 ]]; then
-    python3 -c 'import json,sys; a,b=map(json.loads,sys.argv[1:]); assert a["policy"] == b["policy"], "administrator policy bytes/ownership/permissions changed"; assert a["setupFingerprint"] == b["setupFingerprint"], "setup identity/state changed across installation"; assert b["conflictingWriteRejected"] is True' "$MANAGED_POLICY_BEFORE" "$MANAGED_POLICY_AFTER" || fail_check "managed-policy or setup state changed across package install/relaunch"
+    python3 -I -c 'import json,sys; a,b=map(json.loads,sys.argv[1:]); assert a["policy"] == b["policy"], "administrator policy bytes/ownership/permissions changed"; assert a["setupFingerprint"] == b["setupFingerprint"], "setup identity/state changed across installation"; assert b["conflictingWriteRejected"] is True' "$MANAGED_POLICY_BEFORE" "$MANAGED_POLICY_AFTER" || fail_check "managed-policy or setup state changed across package install/relaunch"
   fi
 fi
 

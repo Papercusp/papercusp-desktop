@@ -967,7 +967,7 @@ release_artifacts_linux_vm_smoke() {
   } && {
     [[ -z "$policy_channel" ]] || {
       policy_out="$(
-        printf 'set -euo pipefail\nsudo python3 - %q ' "$policy_channel"
+        printf 'set -euo pipefail\nsudo python3 -I - %q ' "$policy_channel"
         cat <<'POLICY'
 <<'PAPERCUSP_LINUX_MANAGED_POLICY'
 import json, os, stat, sys
