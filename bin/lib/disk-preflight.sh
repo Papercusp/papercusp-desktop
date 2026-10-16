@@ -313,6 +313,28 @@ papercusp_require_disk_reservation() {
   fi
 }
 
+# Native preparation, the Tauri launcher and each Cargo invocation share one
+# admitted window. Reuse its remaining lifetime after verifying adoption rather
+# than requesting another full window at every phase. Keep ordinary evidence
+# windows on require_disk_reservation's strict full-duration contract.
+papercusp_require_native_dev_disk_reservation() {
+  local dir="$1" need="$2" inherited="${3:-}" receipt expires now
+  if [ -n "$inherited" ]; then
+    papercusp_require_free_gb "$dir" "$need" "native dev Cargo build" "$inherited" >&2 || return $?
+    receipt="${PAPERCUSP_DISK_RESERVATION_FILE:-}"
+    if [ "$receipt" = "$inherited" ]; then
+      expires="$(sed -n 's/^expires=//p' "$receipt")"
+      now="$(date +%s)"
+      if [[ "$expires" =~ ^[0-9]+$ ]] && ((expires > now)); then
+        local PAPERCUSP_DISK_RESERVATION_TTL_SEC="$((expires - now))"
+      fi
+    else
+      inherited="$receipt"
+    fi
+  fi
+  papercusp_require_disk_reservation "$dir" "$need" "native dev Cargo build" "$inherited"
+}
+
 # Refuse the build unless $1 has at least $2 GB free *that no other live build has
 # already claimed*, and record this build's claim so concurrent callers see it. $3
 # is a human label for the message ("sidecar staging", "cold compile"). Exits 28
