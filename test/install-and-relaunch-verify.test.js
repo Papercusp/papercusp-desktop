@@ -163,7 +163,7 @@ fi
   };
 }
 
-function linuxFixture({ emitDpkgWarning = false } = {}) {
+function linuxFixture({ emitDpkgWarning = false, policyCase = 'old-baseline', policyChannel = 'stable' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'install-relaunch-linux-'));
   const artifacts = join(root, 'artifacts');
   const shims = join(root, 'shims');
@@ -188,8 +188,77 @@ function linuxFixture({ emitDpkgWarning = false } = {}) {
   const flipped = join(root, 'flipped');
   const configured = join(root, 'configured');
   const updated = join(root, 'updated');
+  const policy = join(root, 'managed-policy.json');
+  writeFileSync(policy, JSON.stringify({ version: 1, update_channel: policyChannel }));
+  if (policyCase === 'boolean-version') writeFileSync(policy, JSON.stringify({ version: true, update_channel: policyChannel }));
+  chmodSync(policy, 0o644);
+  // Execute the ACTUAL remote Python probe, with only filesystem/HTTP effects
+  // replaced. No command can read the host policy or dial any HTTP endpoint.
+  executable(shims, 'python3', `#!/usr/bin/python3
+import io, json, os, stat, sys, urllib.request
+if len(sys.argv) < 3 or sys.argv[1] != '-' or sys.argv[2] not in ('before', 'after'):
+    os.execv('/usr/bin/python3', ['python3'] + sys.argv[1:])
+source = sys.stdin.read()
+sys.argv = ['-'] + sys.argv[2:]
+phase = sys.argv[1]
+scenario = os.environ['MOCK_POLICY_CASE']
+policy = os.environ['MOCK_POLICY_FILE']
+channel = os.environ['MOCK_POLICY_CHANNEL']
+real_lstat, real_open, real_fstat = os.lstat, os.open, os.fstat
+def owned(s, uid=0):
+    values = list(s)
+    values[4] = uid
+    return os.stat_result(values)
+def lstat(path):
+    assert path in ('/', '/etc', '/etc/papercusp'), 'unexpected host file access'
+    return owned(real_lstat(os.environ['HOME']))
+def policy_open(path, flags):
+    assert path == '/etc/papercusp/managed-policy.json', 'unexpected policy path'
+    if scenario == 'missing':
+        raise FileNotFoundError(path)
+    return real_open(policy, flags)
+def fstat(fd):
+    return owned(real_fstat(fd), 1000 if scenario == 'untrusted-owner' else 0)
+if scenario == 'writable': os.chmod(policy, 0o666)
+if phase == 'after' and scenario == 'mode-changed': os.chmod(policy, 0o600)
+if phase == 'after' and scenario == 'bytes-changed':
+    with open(policy, 'a') as handle: handle.write(' ')
+os.lstat, os.open, os.fstat = lstat, policy_open, fstat
+mutated = False
+class Response(io.BytesIO):
+    def __init__(self, code, body):
+        super().__init__(json.dumps(body).encode())
+        self.code = code
+def urlopen(request, timeout):
+    global mutated
+    assert request.full_url.startswith('http://127.0.0.1:15747/api/'), 'unexpected HTTP host'
+    with open(os.environ['MOCK_LOG'], 'a') as log:
+        log.write('API ' + phase + ' ' + request.method + ' ' + request.full_url + '\\n')
+    if request.method == 'PATCH':
+        assert json.loads(request.data)['update_channel'] != channel, 'write must conflict'
+        mutated = scenario == 'rejection-mutates'
+        return Response(200, {}) if scenario == 'write-accepted' else Response(409, {'error': 'wrong_code' if scenario == 'wrong-error' else 'update_channel_managed'})
+    if '/updates/history?' in request.full_url:
+        assert ('channel=' + ('alpha' if channel != 'alpha' else 'stable')) in request.full_url
+        if phase == 'before' and scenario != 'supported-baseline': return Response(200, {'channel': 'unmanaged'})
+        return Response(200, {'channel': 'unmanaged' if scenario == 'history-ignored' else channel})
+    assert request.full_url.endswith('/desktop/setup-wizard-state')
+    state = {'install_id': 'changed' if mutated or phase == 'after' and scenario == 'identity-changed' else 'fixture-install', 'step_status': {'account': 'completed'}, 'telemetry_enabled': False}
+    if scenario == 'no-identity': state.pop('install_id')
+    return Response(200, state)
+urllib.request.urlopen = urlopen
+exec(compile(source, '<managed-policy-remote-probe>', 'exec'))
+`);
+  const vmctl = executable(shims, 'vmctl', `#!/usr/bin/env bash
+[[ "$1" == endpoint ]] || exit 97
+printf 'ssh_port=2224\\nssh_key=%s/.ssh/papercup-vm-linux\\nssh_host=tester@127.0.0.1\\n' "$HOME"
+`);
   const ssh = executable(shims, 'ssh', `#!/usr/bin/env bash
 printf 'SSH %s\\n' "$*" >> "$MOCK_LOG"
+if [[ "$*" == *PAPERCUSP_MANAGED_POLICY_PROBE* ]]; then
+  bash -c "\${!#}"
+  exit $?
+fi
 if [[ "$*" == *"PC-REMOTE-DIR-READY"* ]]; then
   printf 'PC-REMOTE-DIR-READY\\n'
   exit 0
@@ -247,7 +316,7 @@ esac
 printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
 `);
 
-  return { root, deb, server, log, flipped, configured, updated, ssh, scp, emitDpkgWarning };
+  return { root, deb, server, log, flipped, configured, updated, ssh, scp, emitDpkgWarning, shims, vmctl, policy, policyCase, policyChannel };
 }
 
 function macFixture({ executeInstall = false, executeTransfer = false, freeGb = 20, nativePreflight = 'healthy', installedMismatch = false } = {}) {
@@ -421,6 +490,13 @@ function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui, ex
   if (f.configured) env.MOCK_CONFIGURED = f.configured;
   if (f.updated) env.MOCK_UPDATED = f.updated;
   if (f.emitDpkgWarning) env.MOCK_EMIT_DPKG_WARNING = '1';
+  if (f.policy) {
+    env.PATH = `${f.shims}:${process.env.PATH}`;
+    env.MOCK_POLICY_FILE = f.policy;
+    env.MOCK_POLICY_CASE = f.policyCase;
+    env.MOCK_POLICY_CHANNEL = f.policyChannel;
+    env.PAPERCUSP_LINUX_VMCTL = f.vmctl;
+  }
   if (f.requireHostKeyOptions) env.MOCK_REQUIRE_HOST_KEY_OPTIONS = '1';
   if (f.nativePreflight) env.MOCK_NATIVE_PREFLIGHT = f.nativePreflight;
   if (f.installedMismatch) env.MOCK_INSTALLED_MISMATCH = '1';
@@ -728,6 +804,76 @@ test('Linux resolves missing WebKit dependencies before relaunching the installe
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
+});
+
+for (const policyChannel of ['stable', 'beta', 'alpha']) {
+  test(`Linux managed ${policyChannel} qualification executes real probe with an explicitly unproven old baseline`, () => {
+    const f = linuxFixture({ policyChannel });
+    try {
+      const result = runVerify(f, ['--verify-managed-policy', policyChannel], 'linux', f.deb);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      const verdict = JSON.parse(result.stdout);
+      assert.equal(verdict.managedPolicy.before.baselineSupport, 'not-demonstrated');
+      assert.equal(verdict.managedPolicy.after.conflictingWriteRejected, true);
+      assert.deepEqual(verdict.managedPolicy.before.policy, verdict.managedPolicy.after.policy);
+      assert.equal(verdict.managedPolicy.before.setupFingerprint, verdict.managedPolicy.after.setupFingerprint);
+      const lines = transportLines(f);
+      const before = lines.findIndex(line => line.startsWith('API before GET'));
+      const push = lines.findIndex(line => line.startsWith('SCP'));
+      const install = lines.findIndex(line => line.includes('apt-get install --yes'));
+      const relaunch = lines.findIndex(line => line.includes('setsid bash -c'));
+      const after = lines.findIndex(line => line.startsWith('API after PATCH'));
+      assert.ok(before >= 0 && push > before && install > push && relaunch > install && after > relaunch);
+      assert.equal(lines.some(line => line.startsWith('API before PATCH')), false, 'old baselines must never receive a possibly accepted write');
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+}
+
+for (const policyCase of ['missing', 'untrusted-owner', 'writable', 'no-identity', 'boolean-version']) {
+  test(`Linux managed policy refuses ${policyCase} before any push/install`, () => {
+    const f = linuxFixture({ policyCase });
+    try {
+      const result = runVerify(f, ['--verify-managed-policy', 'stable'], 'linux', f.deb);
+      assert.equal(result.status, 2, result.stdout + result.stderr);
+      assert.match(result.stderr, /baseline qualification failed/);
+      assert.equal(transportLines(f).some(line => line.startsWith('SCP')), false);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+}
+
+test('Linux managed-policy evidence distinguishes a baseline that already enforces the channel', () => {
+  const f = linuxFixture({ policyCase: 'supported-baseline' });
+  try {
+    const result = runVerify(f, ['--verify-managed-policy', 'stable'], 'linux', f.deb);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(JSON.parse(result.stdout).managedPolicy.before.baselineSupport, 'observed-enforced');
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+for (const policyCase of ['mode-changed', 'bytes-changed', 'identity-changed', 'history-ignored', 'write-accepted', 'wrong-error', 'rejection-mutates']) {
+  test(`Linux managed policy rejects ${policyCase} and withholds the smoke receipt`, () => {
+    const f = linuxFixture({ policyCase });
+    try {
+      const result = runVerify(f, ['--verify-managed-policy', 'stable', '--smoke-receipt-tag', SMOKE_TAG], 'linux', f.deb);
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      const verdict = JSON.parse(result.stdout);
+      assert.equal(verdict.ok, false);
+      assert.equal(verdict.smokeReceipt, '');
+      assert.equal(existsSync(join(f.root, `papercusp-smoke-${SMOKE_TAG}-linux.json`)), false);
+      assert.ok(verdict.failures.some(failure => failure.includes('managed-policy')));
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+}
+
+test('managed-policy flag rejects a wrong platform or channel before transport', () => {
+  const f = fixture();
+  try {
+    for (const [platform, channel] of [['windows', 'stable'], ['mac', 'stable'], ['linux', 'nightly'], ['linux', '']]) {
+      const result = runVerify(f, ['--verify-managed-policy', channel], platform);
+      assert.equal(result.status, 2, result.stdout + result.stderr);
+      assert.deepEqual(transportLines(f), []);
+    }
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
 test('macOS native preflight executes console/domain/supervisor/single-instance predicates', () => {

@@ -33,7 +33,7 @@ function executable(file, source) {
   return file;
 }
 
-function fixture({ running = false, failAt = '', verifyFail = false, baseline = 'dir', baselineVersion = BASELINE_VERSION } = {}) {
+function fixture({ running = false, failAt = '', verifyFail = false, policyFail = false, baseline = 'dir', baselineVersion = BASELINE_VERSION } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'linux-smoke-vm-'));
   const artifacts = join(root, 'bundle');
   const baselineDir = join(root, 'baseline');
@@ -70,6 +70,11 @@ case "$cmd" in
   ssh)
     script="$(cat)"
     printf 'VMCTL-SSH-SCRIPT %s\\n' "$(printf '%s' "$script" | tr '\\n' ' ')" >> "$MOCK_LOG"
+    if [[ "$script" == *PAPERCUSP_LINUX_MANAGED_POLICY* ]]; then
+      [[ "$MOCK_POLICY_FAIL" == 0 ]] || exit 1
+      printf 'PAPERCUSP_LINUX_MANAGED_POLICY_READY\\n'
+      exit 0
+    fi
     printf 'PAPERCUSP_LINUX_BASELINE_OPERATOR_OK port=17043 health={"sha":"01a67545","version":"${BASELINE_VERSION}"}\\n'
     ;;
   *) exit 0 ;;
@@ -78,6 +83,10 @@ esac
   const verifier = executable(join(root, 'fake-verify.sh'), `#!/usr/bin/env bash
 printf 'VERIFY %s\\n' "$*" >> "$MOCK_LOG"
 [[ "$MOCK_VERIFY_FAIL" == 1 ]] && exit 1
+if [[ -n "$PAPERCUSP_LINUX_SMOKE_MANAGED_POLICY_CHANNEL" && "$*" != *"--verify-managed-policy $PAPERCUSP_LINUX_SMOKE_MANAGED_POLICY_CHANNEL"* ]]; then
+  echo 'managed-policy scenario was silently dropped' >&2
+  exit 1
+fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --artifact) gui="$2"; shift 2 ;;
@@ -103,6 +112,7 @@ release_artifacts_smoke_receipt_write "$tag" "$version" linux fake-verify.sh "${
     MOCK_RUNNING: running ? '1' : '0',
     MOCK_FAIL_AT: failAt,
     MOCK_VERIFY_FAIL: verifyFail ? '1' : '0',
+    MOCK_POLICY_FAIL: policyFail ? '1' : '0',
     PAPERCUSP_LINUX_VMCTL: vmctl,
     PAPERCUSP_PLATFORM_SMOKE_VERIFIER: verifier,
     PAPERCUSP_SMOKE_RECEIPT_ROOT: root,
@@ -178,6 +188,58 @@ test('explicit baseline paths are honoured', () => {
     assert.ok(calls(f).includes(`VMCTL install clean ${f.baseServer}`));
   });
 });
+
+test('managed policy is provisioned exclusively on the reset Linux guest, then bound to the canonical verifier', () => {
+  withFixture({}, f => {
+    // A pre-existing ordinary smoke receipt is insufficient policy evidence.
+    assert.equal(runGate(f).status, 0);
+    writeFileSync(f.log, '');
+    f.env.PAPERCUSP_LINUX_SMOKE_MANAGED_POLICY_CHANNEL = 'stable';
+    const result = runGate(f);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const lines = calls(f);
+    const baseline = lines.findIndex(line => line.startsWith('VMCTL-SSH-SCRIPT') && line.includes('BASELINE_OPERATOR_OK'));
+    const provision = lines.findIndex(line => line.startsWith('VMCTL-SSH-SCRIPT') && line.includes('PAPERCUSP_LINUX_MANAGED_POLICY'));
+    const verify = lines.findIndex(line => line.startsWith('VERIFY '));
+    assert.ok(baseline >= 0 && provision > baseline && verify > provision, lines.join('\n'));
+    assert.match(lines[provision], /sudo python3 - stable/);
+    assert.match(lines[provision], /os\.O_EXCL/);
+    assert.match(lines[provision], /\/etc\/papercusp\/managed-policy\.json/);
+    assert.match(lines[verify], /--verify-managed-policy stable/);
+    assert.equal(lines.at(-1), 'VMCTL down clean');
+    assert.equal(lines.some(line => line.startsWith('LEAK')), false);
+  });
+});
+
+test('failed managed-policy provisioning powers down without invoking verifier or writing receipt', () => {
+  withFixture({ policyFail: true }, f => {
+    f.env.PAPERCUSP_LINUX_SMOKE_MANAGED_POLICY_CHANNEL = 'stable';
+    const result = runGate(f);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /managed-policy provisioning/);
+    assert.equal(calls(f).some(line => line.startsWith('VERIFY ')), false);
+    assert.equal(calls(f).at(-1), 'VMCTL down clean');
+    assert.equal(existsSync(join(f.root, `papercusp-smoke-${TAG}-linux.json`)), false);
+  });
+});
+
+for (const extraEnv of [
+  { PAPERCUSP_LINUX_SMOKE_MANAGED_POLICY_CHANNEL: 'nightly' },
+  { PAPERCUSP_LINUX_SMOKE_RESET: '0' },
+  { PAPERCUSP_LINUX_SMOKE_VM_MANAGED: '0' },
+  { PAPERCUSP_PLATFORM_SMOKE_CMD: 'exit 0' },
+  { PAPERCUSP_SKIP_PLATFORM_SMOKE: '1', PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON: 'fixture' },
+]) {
+  test(`managed-policy scenario refuses an unsafe or bypassed lifecycle ${JSON.stringify(extraEnv)}`, () => {
+    withFixture({}, f => {
+      Object.assign(f.env, { PAPERCUSP_LINUX_SMOKE_MANAGED_POLICY_CHANNEL: 'stable' }, extraEnv);
+      const result = runGate(f);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /managed-policy qualification requires/);
+      assert.deepEqual(calls(f), [], 'no VM command or real transport may run');
+    });
+  });
+}
 
 test('a failed verifier still powers the VM down and writes no receipt', () => {
   withFixture({ verifyFail: true }, (f) => {

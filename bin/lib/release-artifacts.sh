@@ -782,6 +782,9 @@ release_artifacts_smoke_inputs() {
 #   PAPERCUSP_LINUX_SMOKE_VM_MANAGED=0  skip the lifecycle (VM already prepared)
 #   PAPERCUSP_LINUX_SMOKE_RESET=0    boot the existing overlay; no reset, no
 #                                    baseline install (it must already hold one)
+#   PAPERCUSP_LINUX_SMOKE_MANAGED_POLICY_CHANNEL=alpha|beta|stable
+#                                  additionally qualify administrator policy;
+#                                  requires the managed, freshly reset Linux VM.
 #   PAPERCUSP_LINUX_SMOKE_{RESET,UP,SSH,BASELINE,BASELINE_START,VERIFY,DOWN}_TIMEOUT
 #                                    per-step budgets in seconds
 #   PAPERCUSP_LINUX_VMCTL            vmctl path (tests substitute a fake)
@@ -880,9 +883,14 @@ release_artifacts_linux_vm_smoke() {
   local version="${1:-}" verifier="${2:-}"
   shift 2 2>/dev/null || return 2
   local vmctl vm reset endpoint port key host baseline="" base_gui="" base_server=""
-  local rc=0 booted=0 lock_fd lock_file start_out
+  local rc=0 booted=0 lock_fd lock_file start_out policy_out
+  local policy_channel="${PAPERCUSP_LINUX_SMOKE_MANAGED_POLICY_CHANNEL:-}"
   vm="${PAPERCUSP_LINUX_SMOKE_VM:-clean}"
   reset="${PAPERCUSP_LINUX_SMOKE_RESET:-1}"
+  [[ -z "$policy_channel" || ( "$policy_channel" =~ ^(alpha|beta|stable)$ && "$reset" == 1 ) ]] || {
+    echo "release-artifacts: managed-policy qualification requires a valid channel and a freshly reset Linux VM" >&2
+    return 2
+  }
   [[ "$vm" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "release-artifacts: unsafe PAPERCUSP_LINUX_SMOKE_VM '$vm'." >&2; return 2; }
   # Resolve and judge each reading where it is taken (WI-40549 discarded-measurement
   # guard): nothing may return between a measurement and its verdict.
@@ -957,6 +965,39 @@ release_artifacts_linux_vm_smoke() {
       [[ "$start_rc" -eq 0 && "$start_out" == *PAPERCUSP_LINUX_BASELINE_OPERATOR_OK* ]]
     } || { echo "release-artifacts: the baseline operator on $vm never became healthy" >&2; false; }
   } && {
+    [[ -z "$policy_channel" ]] || {
+      policy_out="$(
+        printf 'set -euo pipefail\nsudo python3 - %q ' "$policy_channel"
+        cat <<'POLICY'
+<<'PAPERCUSP_LINUX_MANAGED_POLICY'
+import json, os, stat, sys
+channel = sys.argv[1]
+assert channel in ('alpha', 'beta', 'stable')
+for path in ('/', '/etc'):
+    s = os.lstat(path)
+    assert stat.S_ISDIR(s.st_mode) and s.st_uid == 0 and not s.st_mode & 0o022
+try:
+    os.mkdir('/etc/papercusp', 0o755)
+except FileExistsError:
+    pass
+s = os.lstat('/etc/papercusp')
+assert stat.S_ISDIR(s.st_mode) and s.st_uid == 0 and not s.st_mode & 0o022
+# Never replace an existing administrator file, even on the disposable VM.
+fd = os.open('/etc/papercusp/managed-policy.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+with os.fdopen(fd, 'w') as handle:
+    os.fchmod(handle.fileno(), 0o644)
+    json.dump(dict(version=1, update_channel=channel), handle)
+    handle.flush()
+    os.fsync(handle.fileno())
+print('PAPERCUSP_LINUX_MANAGED_POLICY_READY')
+PAPERCUSP_LINUX_MANAGED_POLICY
+POLICY
+      )"
+      policy_out="$(printf '%s\n' "$policy_out" | timeout --kill-after=30 90 bash "$vmctl" ssh "$vm" 'bash -s' 2>&1)"
+      local policy_rc=$?
+      [[ "$policy_rc" -eq 0 && "$policy_out" == *PAPERCUSP_LINUX_MANAGED_POLICY_READY* ]]
+    } || { echo "release-artifacts: managed-policy provisioning on $vm failed (existing files are never overwritten): $policy_out" >&2; false; }
+  } && {
     timeout --kill-after=60 "${PAPERCUSP_LINUX_SMOKE_VERIFY_TIMEOUT:-5400}" "$verifier" "$@" \
       --ssh-port "$port" --ssh-key "$key" --ssh-host "$host" \
       --ssh-option StrictHostKeyChecking=no --ssh-option UserKnownHostsFile=/dev/null --ssh-option LogLevel=ERROR \
@@ -984,6 +1025,19 @@ release_artifacts_run_platform_smoke() {
   shift 3 2>/dev/null || return 2
   [[ $# -gt 0 ]] || return 1
 
+  local policy_channel="${PAPERCUSP_LINUX_SMOKE_MANAGED_POLICY_CHANNEL:-}"
+  [[ "$platform" == linux ]] || policy_channel=""
+  if [[ -n "$policy_channel" ]]; then
+    [[ "$policy_channel" =~ ^(alpha|beta|stable)$ \
+       && "${PAPERCUSP_LINUX_SMOKE_VM_MANAGED:-1}" == 1 \
+       && "${PAPERCUSP_LINUX_SMOKE_RESET:-1}" == 1 \
+       && "${PAPERCUSP_SKIP_PLATFORM_SMOKE:-0}" == 0 \
+       && -z "${PAPERCUSP_PLATFORM_SMOKE_CMD:-}" ]] || {
+      echo "release-artifacts: managed-policy qualification requires alpha|beta|stable, a managed reset Linux VM, and the canonical verifier; no skip/custom command." >&2
+      return 2
+    }
+  fi
+
   if [[ "${PAPERCUSP_SKIP_PLATFORM_SMOKE:-0}" == "1" ]]; then
     [[ -n "${PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON:-}" \
        && "${PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON//[[:space:]]/}" != "" ]] || {
@@ -1000,7 +1054,9 @@ release_artifacts_run_platform_smoke() {
 
   # A valid receipt is already the verifier's durable result; do not repeat a
   # potentially destructive install on a re-publish.
-  if release_artifacts_assert_smoke_receipts "$tag" "$version" "$@" >/dev/null 2>&1; then
+  # An ordinary smoke receipt contains no managed-policy evidence. It cannot
+  # stand in for this explicit additional qualification scenario.
+  if [[ -z "$policy_channel" ]] && release_artifacts_assert_smoke_receipts "$tag" "$version" "$@" >/dev/null 2>&1; then
     echo "release-artifacts: existing platform smoke receipt is current; verifier run reused"
     return 0
   fi
@@ -1046,6 +1102,7 @@ release_artifacts_run_platform_smoke() {
       --smoke-provenance "$provenance"
       --json
     )
+    [[ -z "$policy_channel" ]] || verifier_args+=( --verify-managed-policy "$policy_channel" )
     local verifier_rc
     if [[ "$platform" == linux && "${PAPERCUSP_LINUX_SMOKE_VM_MANAGED:-1}" != 0 ]]; then
       # WI-10004052: the Linux leg owns its clean-room VM lifecycle and dials

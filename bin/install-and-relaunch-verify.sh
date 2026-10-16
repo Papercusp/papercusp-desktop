@@ -70,6 +70,10 @@
 #                                  exact mounted-DMG/installed tree equality and
 #                                  strict codesign for BOTH roles, then relaunch.
 #                                  Does not copy/replace apps; reported explicitly.
+#   --verify-managed-policy CHANNEL Linux only: require an already provisioned,
+#                                  trusted /etc/papercusp/managed-policy.json;
+#                                  preserve policy/setup identity and verify the
+#                                  candidate enforces it. Never provisions policy.
 #   --relaunch-cmd CMD             relaunch command (must NOT terminate the operator)
 #   --flip-timeout SEC             how long to wait for the post-install health flip (default 180)
 #   --baseline-timeout SEC         how long to wait for a healthy pre-update operator (default 900)
@@ -121,6 +125,9 @@ JSON=0
 SMOKE_RECEIPT_TAG="${PAPERCUSP_SMOKE_RECEIPT_TAG:-}"
 SMOKE_PROVENANCE=""
 VERIFY_INSTALLED_MAC=0
+MANAGED_POLICY_CHANNEL=""
+MANAGED_POLICY_BEFORE=null
+MANAGED_POLICY_AFTER=null
 SSH_OPTIONS=()
 SCP_OPTIONS=()
 
@@ -146,6 +153,9 @@ while [[ $# -gt 0 ]]; do
     --install-cmd) INSTALL_CMD="${2:-}"; shift 2 ;;
     --server-install-cmd) SERVER_INSTALL_CMD="${2:-}"; shift 2 ;;
     --verify-installed-mac) VERIFY_INSTALLED_MAC=1; shift ;;
+    --verify-managed-policy)
+      [[ "${2:-}" =~ ^(alpha|beta|stable)$ ]] || { echo "--verify-managed-policy needs alpha|beta|stable" >&2; exit 2; }
+      MANAGED_POLICY_CHANNEL="$2"; shift 2 ;;
     --relaunch-cmd) RELAUNCH_CMD="${2:-}"; shift 2 ;;
     --flip-timeout) FLIP_TIMEOUT="${2:-}"; shift 2 ;;
     --baseline-timeout) BASELINE_TIMEOUT="${2:-}"; shift 2 ;;
@@ -159,6 +169,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -n "$MANAGED_POLICY_CHANNEL" && "$PLATFORM" != linux ]]; then
+  echo "--verify-managed-policy requires --platform linux" >&2
+  exit 2
+fi
 [[ -n "$ARTIFACT" ]] || { echo "need --artifact PATH (the new installer to push+install)" >&2; exit 2; }
 [[ -f "$ARTIFACT" ]] || { echo "artifact not found: $ARTIFACT" >&2; exit 2; }
 REMOTE_BASENAME="$(basename "$ARTIFACT")"
@@ -657,6 +671,77 @@ NOTES=()
 fail_check() { FAILURES+=("$1"); }
 note() { NOTES+=("$1"); }
 
+# Read the fixed administrator path AS THE OPERATOR USER, then exercise the
+# existing loopback APIs. No policy path, API host or executable override is
+# accepted. stdout is evidence only; errors fail closed before a smoke receipt.
+managed_policy_probe() { # $1=before|after, $2=sticky operator port
+  local command
+  command="$(printf 'python3 - %q %q %q ' "$1" "$2" "$MANAGED_POLICY_CHANNEL")$(cat <<'PROBE'
+<<'PAPERCUSP_MANAGED_POLICY_PROBE'
+import hashlib, json, os, stat, sys, urllib.error, urllib.request
+
+phase, port, channel = sys.argv[1:]
+try:
+    assert phase in ('before', 'after') and port.isdecimal() and 0 < int(port) < 65536
+    assert channel in ('alpha', 'beta', 'stable')
+    chain = []
+    for path in ('/', '/etc', '/etc/papercusp'):
+        s = os.lstat(path)
+        assert stat.S_ISDIR(s.st_mode) and s.st_uid == 0 and not s.st_mode & 0o022, 'untrusted policy directory'
+        chain.append([s.st_uid, s.st_gid, stat.S_IMODE(s.st_mode)])
+    fd = os.open('/etc/papercusp/managed-policy.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as handle:
+        s = os.fstat(handle.fileno())
+        assert stat.S_ISREG(s.st_mode) and s.st_uid == 0 and not s.st_mode & 0o022 and s.st_nlink == 1, 'untrusted policy file'
+        assert 0 < s.st_size <= 16384, 'invalid policy size'
+        raw = handle.read(16385)
+        end = os.fstat(handle.fileno())
+        assert len(raw) == s.st_size and (s.st_size, s.st_mtime_ns, s.st_ctime_ns, s.st_uid, s.st_gid, s.st_mode, s.st_nlink) == (end.st_size, end.st_mtime_ns, end.st_ctime_ns, end.st_uid, end.st_gid, end.st_mode, end.st_nlink), 'policy changed during read'
+    parsed = json.loads(raw)
+    assert isinstance(parsed, dict) and type(parsed.get('version')) is int and parsed == {'version': 1, 'update_channel': channel}, 'policy does not match qualification channel'
+    policy = dict(sha256=hashlib.sha256(raw).hexdigest(), uid=s.st_uid, gid=s.st_gid, mode=stat.S_IMODE(s.st_mode), ancestors=chain)
+
+    def api(path, payload=None):
+        request = urllib.request.Request('http://127.0.0.1:' + port + '/api/' + path,
+            data=None if payload is None else json.dumps(payload).encode(),
+            headers={'Content-Type': 'application/json'}, method='GET' if payload is None else 'PATCH')
+        try:
+            response = urllib.request.urlopen(request, timeout=15)
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            body = response.read(1048577)
+            assert len(body) <= 1048576, 'oversized API response'
+            return response.code, json.loads(body)
+
+    def setup():
+        status, body = api('desktop/setup-wizard-state')
+        assert status == 200 and isinstance(body, dict), 'setup state unavailable'
+        assert isinstance(body.get('install_id'), str) and body['install_id'], 'setup installation identity absent'
+        body.pop('updated_at', None)
+        return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+    identity = setup()
+    conflict = 'alpha' if channel != 'alpha' else 'stable'
+    status, history = api('updates/history?channel=' + conflict)
+    enforced = status == 200 and isinstance(history, dict) and history.get('channel') == channel
+    evidence = dict(policy=policy, setupFingerprint=identity, baselineSupport='observed-enforced' if enforced else 'not-demonstrated', historyStatus=status)
+    if phase == 'after':
+        assert enforced, 'candidate history did not enforce managed channel'
+        status, body = api('desktop/setup-wizard-state', {'update_channel': conflict})
+        assert status == 409 and isinstance(body, dict) and body.get('error') == 'update_channel_managed', 'candidate did not reject conflicting channel write'
+        assert setup() == identity, 'rejected write changed setup state'
+        evidence['conflictingWriteRejected'] = True
+    print(json.dumps(evidence, sort_keys=True))
+except Exception as error:
+    print('managed-policy ' + phase + ': ' + str(error), file=sys.stderr)
+    sys.exit(1)
+PAPERCUSP_MANAGED_POLICY_PROBE
+PROBE
+)"
+  timeout 90 "${SSH[@]}" "$command"
+}
+
 # ── Reachability ────────────────────────────────────────────────────────────
 if [[ "$PLATFORM" == "windows" ]]; then
   REACH_CMD='cmd /c echo VM-OK'
@@ -751,6 +836,15 @@ if [[ -z "$SHA_BEFORE" ]]; then
 fi
 
 # ── 2. PUSH ─────────────────────────────────────────────────────────────────
+if [[ -n "$MANAGED_POLICY_CHANNEL" ]]; then
+  MANAGED_POLICY_BEFORE="$(managed_policy_probe before "$PORT_BEFORE")" || {
+    echo "managed-policy baseline qualification failed — no artifacts were pushed" >&2
+    exit 2
+  }
+  # Parse evidence before trusting a successful transport exit.
+  python3 -c 'import json,sys; e=json.load(sys.stdin); assert e["policy"]["sha256"] and e["setupFingerprint"]' <<<"$MANAGED_POLICY_BEFORE" || exit 2
+  note "managed-policy baseline support: $(printf '%s' "$MANAGED_POLICY_BEFORE" | json_str baselineSupport); only the candidate is required to enforce policy"
+fi
 # A custom staging destination may not exist yet. Create it idempotently and
 # require positive readback BEFORE copying any bytes. Windows OpenSSH parses
 # command text through cmd.exe: encode PowerShell instead of nesting shell
@@ -985,6 +1079,16 @@ if [[ ${#FAILURES[@]} -eq 0 ]]; then
   fi
 fi
 
+if [[ ${#FAILURES[@]} -eq 0 && -n "$MANAGED_POLICY_CHANNEL" ]]; then
+  MANAGED_POLICY_AFTER="$(managed_policy_probe after "$PORT_AFTER")" || {
+    MANAGED_POLICY_AFTER=null
+    fail_check "managed-policy candidate preservation/enforcement probe failed"
+  }
+  if [[ ${#FAILURES[@]} -eq 0 ]]; then
+    python3 -c 'import json,sys; a,b=map(json.loads,sys.argv[1:]); assert a["policy"] == b["policy"], "administrator policy bytes/ownership/permissions changed"; assert a["setupFingerprint"] == b["setupFingerprint"], "setup identity/state changed across installation"; assert b["conflictingWriteRejected"] is True' "$MANAGED_POLICY_BEFORE" "$MANAGED_POLICY_AFTER" || fail_check "managed-policy or setup state changed across package install/relaunch"
+  fi
+fi
+
 SMOKE_RECEIPT=""
 if [[ ${#FAILURES[@]} -eq 0 && -n "$SMOKE_RECEIPT_TAG" ]]; then
   if [[ -z "$PROV" || ! -f "$PROV" ]]; then
@@ -1026,6 +1130,7 @@ if [[ "$JSON" == "1" ]]; then
   printf '  "flipped": %s,\n' "$FLIPPED"
   printf '  "portHeld": %s,\n' "$([[ -n "$PORT_AFTER" && "$PORT_AFTER" == "$PORT_BEFORE" ]] && echo true || echo false)"
   printf '  "smokeReceipt": %s,\n' "$(jstr "$SMOKE_RECEIPT")"
+  printf '  "managedPolicy": {"before": %s, "after": %s},\n' "$MANAGED_POLICY_BEFORE" "$MANAGED_POLICY_AFTER"
   printf '  "failures": ['
   for i in "${!FAILURES[@]}"; do [[ $i -gt 0 ]] && printf ', '; printf '%s' "$(jstr "${FAILURES[$i]}")"; done
   printf '],\n'
