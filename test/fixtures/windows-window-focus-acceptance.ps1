@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][int]$GuiPid, [Parameter(Mandatory=$true)][string]$GuiTitle, [Parameter(Mandatory=$true)][int]$TargetPid, [Parameter(Mandatory=$true)][guid]$ClientId, [switch]$SetupOnly, [ValidateSet('all','same-desktop','minimized','other-desktop')][string]$Case='all')
+param([Parameter(Mandatory=$true)][int]$GuiPid, [Parameter(Mandatory=$true)][string]$GuiTitle, [Parameter(Mandatory=$true)][int]$TargetPid, [Parameter(Mandatory=$true)][guid]$ClientId, [switch]$SetupOnly, [ValidateSet('all','same-desktop','minimized','other-desktop')][string]$Case='all', [string]$CleanupOwnedDesktops='', [guid]$ProtectedDesktop=[guid]::Empty)
 # Run through an Interactive scheduled task in the reserved Windows test VM.
 # Only setup uses Win32 activation/keys. Every measured focus goes through the
 # real WSL operator HTTP route, its UI-intent stream and the native GUI handler.
@@ -191,6 +191,24 @@ try {
   $out.guiPid=$GuiPid;$out.targetPid=$TargetPid;$out.sessionId=$process.SessionId
   $out.nativeSha256=(Get-FileHash $process.Path -Algorithm SHA256).Hash.ToLowerInvariant()
   $out.initial=@{gui=[FocusWitness]::Observe($gui);target=[FocusWitness]::Observe($target)}
+  if($CleanupOwnedDesktops){
+    if($ProtectedDesktop -eq [guid]::Empty){throw 'Cleanup requires the original protected desktop identity'}
+    $out.deletedDesktops=@()
+    foreach($owned in $CleanupOwnedDesktops.Split(',')){
+      $identity=([guid]$owned).ToString()
+      if($identity -eq $ProtectedDesktop.ToString()){throw 'Refusing to delete the protected original desktop'}
+      Select-OwnedDesktop $identity
+      if([FocusWitness]::CurrentDesktopId() -ne $identity){throw 'Cleanup desktop identity mismatch'}
+      [FocusWitness]::DesktopKey(0x73)
+      Start-Sleep -Milliseconds 700
+      if([FocusWitness]::CurrentDesktopId() -eq $identity){throw 'Fixture desktop removal did not converge'}
+      $out.deletedDesktops+=$identity
+      Save-Receipt
+    }
+    Select-OwnedDesktop $ProtectedDesktop.ToString()
+    $out.cleanupOnly=$true;$out.completed=$true
+    return
+  }
   if($SetupOnly){
     Focus-Gui
     $out.setupOnly=$true
