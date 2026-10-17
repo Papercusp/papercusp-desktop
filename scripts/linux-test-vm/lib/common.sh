@@ -187,6 +187,25 @@ vm_monitor() { echo "$RUN_DIR/$1/qemu-monitor.sock"; }
 vm_pidfile() { echo "$RUN_DIR/$1/qemu.pid"; }
 vm_serial()  { echo "$RUN_DIR/$1/serial.log"; }
 
+# Internal implementation of vmctl's stopped-copy command. No environment or
+# manifest option may select a verifier, executable, procfs or authority result.
+vm_diagnostic_copy_driver() {
+  python3 "$SCRIPT_DIR/lib/diagnostic-copy.py" "$@"
+}
+
+vm_diagnostic_copy_authority() {
+  # Neither a coordination message nor caller-authored approved:true JSON is a
+  # runtime lease/capability verification. D262 permits independent source work
+  # while this concrete canonical interface is absent; it permits no copy.
+  vm_diagnostic_copy_driver authority "$1" "$RUN_DIR"
+}
+
+vm_diagnostic_copy_reserve() {
+  source "$DESKTOP_REPO/bin/lib/disk-preflight.sh"
+  local PAPERCUSP_DISK_RESERVATION_TTL_SEC="$3"
+  papercusp_require_disk_reservation "$1" "$2" 'vmctl diagnostic copy'
+}
+
 # ── Logging ────────────────────────────────────────────────────────────────
 log()  { printf '\033[1;36m[testvm]\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[1;33m[testvm] WARN:\033[0m %s\n' "$*" >&2; }

@@ -19,6 +19,266 @@ const federationDriver = fs.readFileSync(
   "utf8",
 );
 
+// D262: the production command and Python orchestration run on tiny private
+// files. Only canonical authority, procfs, image utilities and reservation are
+// fixtures. No VM, daemon, actual image utility or host process scan is used.
+function runDiagnosticCopy(fault = "none", mutate = () => {}) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "vmctl-diagnostic-copy-"));
+  const run = path.join(temp, "run");
+  const sourceDir = path.join(run, "protected");
+  const evidence = path.join(temp, "evidence");
+  const proc = path.join(temp, "proc");
+  const bin = path.join(temp, "bin");
+  const tracePath = path.join(temp, "trace");
+  const requestPath = path.join(temp, "request.json");
+  const implementation = path.join(root, "scripts/linux-test-vm/lib/diagnostic-copy.py");
+  try {
+    for (const dir of [sourceDir, evidence, bin, path.join(proc, "sys/kernel/random")]) {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    }
+    const source = path.join(sourceDir, "overlay.qcow2");
+    fs.writeFileSync(source, "synthetic image bytes\n");
+    const before = fs.readFileSync(source);
+    const st = fs.statSync(source);
+    const digest = require("node:crypto").createHash("sha256").update(before).digest("hex");
+    const manifest = {
+      schemaVersion: 1, operationId: "copy-fixture", ownerId: "fixture-owner",
+      source: { name: "protected", chain: [{ path: source, dev: st.dev, ino: st.ino,
+        size: st.size, sha256: digest, format: "qcow2", virtualSize: 4096 }],
+        stopped: { bootId: "fixture-boot", pid: 424242, startTicks: 100 } },
+      destination: { name: "diagnostic", path: path.join(run, "diagnostic/overlay.qcow2") },
+      evidenceDir: evidence, lineage: ["fixture-source-receipt"],
+      retentionUntil: Math.floor(Date.now() / 1000) + 10000,
+      authority: { leaseRef: "fixture-lease", capabilityRef: "fixture-capability" },
+      limits: { copyBytes: 65536, guestWriteBytes: 4096, evidenceBytes: 65536,
+        rollbackBytes: 4096, retainedBytes: 4096, timeoutSec: fault === "timeout" ? 1 : 15,
+        leaseLifetimeSec: 60 },
+    };
+    fs.writeFileSync(path.join(proc, "sys/kernel/random/boot_id"), "fixture-boot\n");
+    const procStat = (pid, start) => `${pid} (fixture process) S ${Array(18).fill("0").join(" ")} ${start}\n`;
+    if (["running", "wrong-birth"].includes(fault)) {
+      fs.mkdirSync(path.join(proc, "424242/fd"), { recursive: true });
+      fs.writeFileSync(path.join(proc, "424242/stat"), procStat(424242, fault === "running" ? 100 : 99));
+    }
+    if (fault === "open-holder") {
+      fs.mkdirSync(path.join(proc, "424243/fd"), { recursive: true });
+      fs.writeFileSync(path.join(proc, "424243/stat"), procStat(424243, 200));
+      fs.symlinkSync(source, path.join(proc, "424243/fd/7"));
+    }
+    if (fault === "unknown-writer") {
+      fs.mkdirSync(path.join(proc, "424244"));
+      fs.writeFileSync(path.join(proc, "424244/stat"), procStat(424244, 200));
+      // A live proc entry without enumerable descriptors cannot prove no writer.
+    }
+    if (fault === "boot") fs.writeFileSync(path.join(proc, "sys/kernel/random/boot_id"), "different-boot");
+    mutate(manifest, { temp, source, run, evidence });
+    fs.writeFileSync(requestPath, JSON.stringify(manifest));
+    const runner = path.join(temp, "runner.py");
+    fs.writeFileSync(runner, `import importlib.util,json,os,sys,time,fcntl
+from pathlib import Path
+sys.dont_write_bytecode=True
+spec=importlib.util.spec_from_file_location('copy_impl',os.environ['COPY_IMPL'])
+mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+mod.PROC_ROOT=Path(os.environ['FIXTURE_PROC'])
+fault=os.environ['COPY_FAULT']
+def authority(m,digest):
+    with open(os.environ['COPY_TRACE'],'a') as f:f.write('authority\\n')
+    a=dict(schemaVersion=1,decision='allow',verifierRef='fixture-canonical-verifier',manifestSha256=digest,
+           ownerId=m['ownerId'],scope=mod.SCOPE,leaseRef=m['authority']['leaseRef'],
+           capabilityRef=m['authority']['capabilityRef'],leaseOwner=dict(bootId='fixture-owner-boot',pid=123,startTicks=456),
+           notBefore=0,expiresAt=int(time.time())+10000)
+    if fault=='foreign-owner':a['ownerId']='another-owner'
+    if fault=='foreign-scope':a['scope']='another-operation'
+    if fault=='expired':a['expiresAt']=1
+    if fault=='wrong-manifest':a['manifestSha256']='f'*64
+    if fault=='missing-owner-lifetime':a['leaseOwner']['startTicks']=0
+    if fault=='revoked-at-publication' and sys.argv[1]=='materialize':
+        authority.calls+=1
+        if authority.calls>1:raise mod.Refusal('fixture-authority-revoked')
+    return a
+authority.calls=0
+if fault!='default-authority':mod.verify_authority=authority
+held=None
+if fault=='image-lock' and sys.argv[1]=='materialize':
+    held=open(json.loads(Path(sys.argv[2]).read_text())['source']['chain'][0]['path'],'rb')
+    fcntl.flock(held,fcntl.LOCK_EX|fcntl.LOCK_NB)
+sys.exit(mod.main(sys.argv[1:]))
+`);
+    const imageTool = path.join(bin, "qemu-img");
+    fs.writeFileSync(imageTool, `#!/usr/bin/env python3
+import json,os,sys,time
+from pathlib import Path
+a=sys.argv[1:];fault=os.environ['COPY_FAULT']
+m=json.loads(Path(os.environ['COPY_REQUEST']).read_text())
+with open(os.environ['COPY_TRACE'],'a') as f:f.write('image:'+a[0]+'\\n')
+if a[0]=='info':
+    if a[-1]==m['source']['chain'][0]['path']:
+        images=[dict(filename=e['path'],format=e['format'],**{'virtual-size':e['virtualSize']}) for e in m['source']['chain']]
+        for i in range(len(images)-1):images[i]['full-backing-filename']=m['source']['chain'][i+1]['path']
+        if fault=='backing-missing':images[0]['full-backing-filename']='/unlisted/backing'
+        if fault=='unsupported-metadata':images[0]['data-file']='/external/data'
+        if fault=='malformed-metadata':images[0]['format-specific']=None
+    else:
+        images=[dict(filename=a[-1],format='qcow2',**{'virtual-size':4096})]
+        if fault=='output-backed':images[0]['backing-filename']=m['source']['chain'][0]['path']
+    print(json.dumps(images))
+elif a[0]=='convert':
+    Path(a[-1]).write_bytes(Path(a[-2]).read_bytes())
+    if fault=='timeout':time.sleep(5)
+    if fault=='foreign-partial':Path(a[-1]).with_name('foreign').write_text('retain me')
+    if fault in ['convert-failure','foreign-partial']:sys.exit(17)
+elif a[0]=='compare':
+    if fault=='logical-mismatch':sys.exit(1)
+    if fault=='source-mutation':Path(a[-2]).write_bytes(b'changed source bytes!\\n')
+    if fault=='output-alias':Path(a[-1]).unlink();Path(a[-1]).symlink_to(a[-2])
+    if fault=='publication-race':
+        dest=Path(m['destination']['path']).parent;dest.mkdir();(dest/'foreign').write_text('retain me')
+else:sys.exit(99)
+`, { mode: 0o755 });
+    const reservation = path.join(temp, "reservation");
+    fs.writeFileSync(reservation, "fixture validated reservation\n", { mode: 0o600 });
+    const result = spawnSync("bash", ["-c", [
+      'PAPERCUSP_VMCTL_SOURCE_ONLY=1 source "$1"',
+      'vm_diagnostic_copy_driver() { python3 "$COPY_RUNNER" "$@"; }',
+      'vm_diagnostic_copy_reserve() {',
+      '  printf "reserve:%s:%s:%s\\n" "$1" "$2" "$3" >>"$COPY_TRACE"',
+      '  case "$COPY_FAULT" in capacity|unreserved|unmeasured) return 28 ;; esac',
+      '  PAPERCUSP_DISK_RESERVATION_FILE="$COPY_RESERVATION"',
+      '  if [ "$COPY_FAULT" = missing-receipt ]; then PAPERCUSP_DISK_RESERVATION_FILE="$COPY_RESERVATION.missing"; fi',
+      '}',
+      'papercusp_release_disk_reservation() { printf "release\\n" >>"$COPY_TRACE"; }',
+      'for fn in cmd_up cmd_down cmd_reset cmd_install cmd_hotpatch vm_ssh vm_run; do',
+      '  eval "$fn() { echo forbidden:$fn >>\\\"\\$COPY_TRACE\\\"; return 99; }"',
+      'done',
+      'cmd_prepare_diagnostic_copy "$2"',
+    ].join("\n"), "bash", vmctlPath, requestPath], {
+      encoding: "utf8", timeout: 10000,
+      env: { ...process.env, PAPERCUSP_TESTVM_HOME: temp, COPY_IMPL: implementation,
+        FIXTURE_PROC: proc, COPY_RUNNER: runner, COPY_FAULT: fault, COPY_TRACE: tracePath,
+        COPY_REQUEST: requestPath, COPY_RESERVATION: reservation, PATH: `${bin}:${process.env.PATH}` },
+    });
+    const trace = fs.existsSync(tracePath) ? fs.readFileSync(tracePath, "utf8").trim().split("\n") : [];
+    const lines = result.stdout.trim().split("\n").filter(Boolean);
+    const receipt = lines.length ? JSON.parse(lines.at(-1)) : null;
+    const saved = receipt?.receiptPath && fs.existsSync(receipt.receiptPath)
+      ? JSON.parse(fs.readFileSync(receipt.receiptPath, "utf8")) : null;
+    return { result, receipt, saved, trace, before, after: fs.readFileSync(source),
+      published: fs.existsSync(manifest.destination.path),
+      destinationEntries: fs.existsSync(path.dirname(manifest.destination.path))
+        ? fs.readdirSync(path.dirname(manifest.destination.path)) : [],
+      partials: fs.readdirSync(run).filter(p => p.startsWith(".diagnostic-copy-")),
+      receiptMode: receipt?.receiptPath && fs.existsSync(receipt.receiptPath)
+        ? fs.statSync(receipt.receiptPath).mode & 0o777 : null };
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+}
+
+test("production diagnostic copy publishes a standalone stopped copy and private bound custody receipt", () => {
+  const p = runDiagnosticCopy();
+  assert.equal(p.result.status, 0, p.result.stderr + p.result.stdout);
+  assert.deepEqual(p.trace.map(s => s.replace(/^reserve:.*/, "reserve")),
+    ["authority", "reserve", "authority", "image:info", "image:convert", "image:info", "image:compare", "authority", "release"]);
+  assert.equal(p.receipt.status, "success");
+  assert.equal(p.receipt.published, true);
+  assert.equal(p.receipt.sourceUnchanged, true);
+  assert.equal(p.receipt.logicalComparison, "equal");
+  assert.deepEqual(p.saved, p.receipt);
+  assert.equal(p.receiptMode, 0o600);
+  assert.deepEqual(p.before, p.after);
+  assert.deepEqual(p.partials, []);
+  assert.equal(p.receipt.authority.scope, "vmctl:prepare-diagnostic-copy");
+  assert.equal(p.receipt.authority.manifestSha256, p.receipt.manifestSha256);
+  assert.equal(p.receipt.commands.length, 4);
+  assert.ok(p.receipt.commands.every(c => c.status === 0 && !c.argv.includes("-U")));
+  assert.equal(p.receipt.reservation.budgetBytes, 143360);
+  assert.ok(p.trace.find(s => /^reserve:.*:1:60$/.test(s)), "all budgets use the existing reservation in GiB for the full lease window");
+});
+
+for (const [fault, reason] of [
+  ["default-authority", /canonical-authority-verifier-unavailable/],
+  ["foreign-owner", /authority-binding/], ["foreign-scope", /authority-binding/],
+  ["wrong-manifest", /authority-binding/], ["expired", /authority-lifetime/],
+  ["missing-owner-lifetime", /authority-owner-lifetime/],
+  ["capacity", /disk-reservation-refused/], ["unreserved", /disk-reservation-refused/],
+  ["unmeasured", /disk-reservation-refused/], ["running", /source-running/],
+  ["missing-receipt", /missing-reservation-receipt/],
+  ["wrong-birth", /source-wrong-birth/], ["boot", /source-boot-mismatch/],
+  ["open-holder", /source-open-holder/], ["unknown-writer", /writer-enumeration-incomplete/],
+  ["image-lock", /Resource temporarily unavailable/],
+  ["backing-missing", /image-backing-mismatch/], ["unsupported-metadata", /unsupported-image-metadata/],
+  ["malformed-metadata", /unsupported-image-metadata/],
+]) {
+  test(`production diagnostic copy refuses ${fault} before conversion`, () => {
+    const p = runDiagnosticCopy(fault);
+    assert.notEqual(p.result.status, 0, p.result.stderr);
+    assert.match(p.receipt.reason, reason);
+    assert.equal(p.published, false);
+    assert.ok(!p.trace.includes("image:convert"));
+    assert.ok(!p.trace.some(s => s.startsWith("forbidden:")));
+    assert.deepEqual(p.before, p.after);
+    assert.deepEqual(p.partials, []);
+  });
+}
+
+for (const [name, mutate, reason] of [
+  ["self approval", m => { m.approved = true; }, /manifest-shape/],
+  ["protected destination", m => { m.destination.name = m.source.name; }, /protected-destination/],
+  ["existing destination", (m, f) => { fs.mkdirSync(path.dirname(m.destination.path)); }, /destination-exists/],
+  ["symlink destination", (m, f) => { fs.symlinkSync(path.dirname(f.source), path.dirname(m.destination.path)); }, /noncanonical-path/],
+  ["hardlinked destination", (m, f) => { fs.mkdirSync(path.dirname(m.destination.path)); fs.linkSync(f.source, m.destination.path); }, /destination-exists/],
+  ["wrong source digest", m => { m.source.chain[0].sha256 = "0".repeat(64); }, /source-digest-changed/],
+  ["missing backing", m => { m.source.chain.push({ ...m.source.chain[0], path: path.join(path.dirname(m.source.chain[0].path), "missing"), ino: 1 }); }, /No such file/],
+  ["insufficient lifetime", m => { m.limits.leaseLifetimeSec = 1; }, /budget-window/],
+]) {
+  test(`production diagnostic copy refuses ${name} without materialization`, () => {
+    const p = runDiagnosticCopy("none", mutate);
+    assert.notEqual(p.result.status, 0);
+    assert.match(p.receipt.reason, reason);
+    assert.ok(!p.trace.includes("image:convert"));
+    assert.deepEqual(p.before, p.after);
+    assert.deepEqual(p.partials, []);
+  });
+}
+
+for (const [fault, reason] of [
+  ["convert-failure", /image-command-failed/], ["timeout", /image-timeout/],
+  ["logical-mismatch", /image-command-failed/], ["output-backed", /image-backing-mismatch/],
+  ["source-mutation", /source-identity-changed|source-digest-changed/],
+  ["publication-race", /File exists/], ["revoked-at-publication", /fixture-authority-revoked/],
+]) {
+  test(`production diagnostic copy preserves failure evidence and refuses publication for ${fault}`, () => {
+    const p = runDiagnosticCopy(fault);
+    assert.notEqual(p.result.status, 0);
+    assert.match(p.receipt.reason, reason);
+    assert.equal(p.receipt.published, false);
+    assert.deepEqual(p.saved, p.receipt);
+    assert.deepEqual(p.partials, []);
+    assert.ok(!p.trace.some(s => s.startsWith("forbidden:")));
+    if (fault !== "source-mutation") assert.deepEqual(p.before, p.after);
+    if (fault === "publication-race") assert.deepEqual(p.destinationEntries, ["foreign"]);
+    else assert.equal(p.published, false);
+  });
+}
+
+test("diagnostic copy retains unexpected partial contents instead of deleting foreign evidence", () => {
+  const p = runDiagnosticCopy("foreign-partial");
+  assert.notEqual(p.result.status, 0);
+  assert.equal(p.receipt.partialCleaned, false);
+  assert.equal(p.receipt.cleanupReason, "partial-foreign-content");
+  assert.equal(p.partials.length, 1);
+  assert.deepEqual(p.before, p.after);
+  assert.equal(p.published, false);
+});
+
+test("diagnostic copy refuses output replacement and never follows its cleanup symlink into protected source", () => {
+  const p = runDiagnosticCopy("output-alias");
+  assert.notEqual(p.result.status, 0);
+  assert.equal(p.receipt.reason, "copy-identity-changed");
+  assert.equal(p.receipt.partialCleaned, false);
+  assert.equal(p.receipt.cleanupReason, "partial-foreign-content");
+  assert.deepEqual(p.before, p.after);
+  assert.equal(p.published, false);
+});
+
 function federationFragment(startNeedle, endNeedle) {
   const start = federationDriver.indexOf(startNeedle);
   const end = federationDriver.indexOf(endNeedle, start);

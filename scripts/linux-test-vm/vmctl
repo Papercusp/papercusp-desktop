@@ -24,6 +24,8 @@
 #                                 other tools derive this VM's SSH endpoint from)
 #   vmctl is-running [name]       exit 0 when the instance's qemu is alive, 1 otherwise
 #   vmctl wait-ssh [name] [sec]   block until SSH answers; exit 1 after the budget
+#   vmctl prepare-diagnostic-copy MANIFEST  prepare a stopped standalone copy;
+#                                 requires canonical authority (currently unavailable)
 #   vmctl help
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
@@ -741,6 +743,33 @@ cmd_endpoint() {
 
 cmd_is_running() { vm_running "${1:-clean}"; }
 
+# D262: a separate source-only boundary, never an implicit reset/up/attachment.
+# The canonical authority seam is deliberately closed until its maintained
+# verifier exists. SOURCE_ONLY tests replace primitives, not this composition.
+cmd_prepare_diagnostic_copy() (
+  umask 077
+  [ "$#" -eq 1 ] || { echo 'prepare-diagnostic-copy requires one manifest' >&2; return 2; }
+  local manifest="$1" config authority
+  config="$(vm_diagnostic_copy_driver request "$manifest" "$RUN_DIR")" || {
+    local status=$?
+    printf '%s\n' "$config"
+    return "$status"
+  }
+  local -a fields
+  mapfile -t fields <<<"$config"
+  if ! authority="$(vm_diagnostic_copy_authority "$manifest")"; then
+    printf '%s\n' "$authority"
+    return 78
+  fi
+  vm_diagnostic_copy_reserve "${fields[0]}" "${fields[1]}" "${fields[2]}" || {
+    vm_diagnostic_copy_driver refusal "$manifest" disk-reservation-refused || :
+    return 28
+  }
+  trap 'papercusp_release_disk_reservation' EXIT
+  vm_diagnostic_copy_driver materialize "$manifest" \
+    "${PAPERCUSP_DISK_RESERVATION_FILE:-}" "$RUN_DIR"
+)
+
 # cmd_up only WARNS when SSH is late; an automated caller needs a hard verdict.
 cmd_wait_ssh() {
   local name="${1:-clean}" budget="${2:-300}"
@@ -785,6 +814,7 @@ case "$cmd" in
   endpoint)  cmd_endpoint "$@" ;;
   is-running) cmd_is_running "$@" ;;
   wait-ssh)  cmd_wait_ssh "$@" ;;
+  prepare-diagnostic-copy) cmd_prepare_diagnostic_copy "$@" ;;
   help|-h|--help) cmd_help ;;
   *) die "unknown command: $cmd (try: vmctl help)" ;;
 esac
