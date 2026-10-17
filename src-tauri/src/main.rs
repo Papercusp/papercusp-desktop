@@ -10423,15 +10423,21 @@ pub fn run() {
 export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: never; Object?: never; String?: never } | ({ Number: ({ f64: number }) & { i64?: never; u64?: never } | ({ i64: number }) & { f64?: never; u64?: never } | ({ u64: number }) & { f64?: never; i64?: never } }) & { Array?: never; Bool?: never; Object?: never; String?: never } | ({ String: string }) & { Array?: never; Bool?: never; Number?: never; Object?: never } | ({ Array: Value[] }) & { Bool?: never; Number?: never; Object?: never; String?: never } | ({ Object: { [key in string]: Value } }) & { Array?: never; Bool?: never; Number?: never; String?: never };"#;
 
     #[cfg(debug_assertions)]
-    specta_builder
-        .export(
-            specta_typescript::Typescript::default().header(BINDINGS_HEADER),
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../packages/operator-core/lib/tauri-bindings.ts"
-            ),
-        )
-        .ok();
+    if std::env::var_os("VERIFY_TAURI_SOURCE_RECEIPT").is_none() {
+        // Receipt-backed verification runs consume the committed bindings.
+        // Regenerating this tracked input at startup invalidates the frozen
+        // source census before browser assertions can run. Ordinary development
+        // still exports bindings whenever the desktop starts.
+        specta_builder
+            .export(
+                specta_typescript::Typescript::default().header(BINDINGS_HEADER),
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../packages/operator-core/lib/tauri-bindings.ts"
+                ),
+            )
+            .ok();
+    }
 
     // P-009 single-instance guard — MUST be the FIRST plugin so a duplicate
     // launch is rejected before any sidecar/window init runs. The plugin keys
