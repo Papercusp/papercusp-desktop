@@ -141,6 +141,14 @@ test('Cargo fixture timeout captures children spawned by a worker thread',
 const root = path.resolve(import.meta.dirname, '..');
 const source = fs.readFileSync(path.join(root, 'src-tauri/src/native_console.rs'), 'utf8');
 const mainSource = fs.readFileSync(path.join(root, 'src-tauri/src/main.rs'), 'utf8');
+
+test('Windows focus keeps an observed activation fallback when virtual-desktop move is denied', () => {
+  assert.match(source, /MoveWindowToDesktop\(hwnd, &current\)/);
+  assert.match(source, /SwitchToThisWindow\(hwnd, true\)/);
+  assert.match(source, /IsWindowOnCurrentVirtualDesktop\(hwnd\)/);
+  assert.match(source, /GetForegroundWindow\(\) == hwnd/);
+});
+
 function functionSource(name) {
   const start = source.indexOf(`fn ${name}(`);
   const indent = source.slice(source.lastIndexOf('\n', start) + 1, start);
