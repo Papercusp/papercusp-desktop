@@ -215,7 +215,7 @@ async fn focus_window_by_title_observed(title: String) -> bool {
         use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
         use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
         use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
-        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow, SW_RESTORE};
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow, SwitchToThisWindow, SW_RESTORE};
         return tauri::async_runtime::spawn_blocking(move || {
             let matches: Vec<_> = enumerate_windows(None).into_iter().filter(|w| w.title == title).collect();
             if matches.len() != 1 { return false; }
@@ -234,7 +234,15 @@ async fn focus_window_by_title_observed(title: String) -> bool {
                     let current = match manager.GetWindowDesktopId(GetForegroundWindow()) {
                         Ok(id) => id, Err(_) => return false,
                     };
-                    if manager.MoveWindowToDesktop(hwnd, &current).is_err() { return false; }
+                    if manager.MoveWindowToDesktop(hwnd, &current).is_err() {
+                        // A window owned by another interactive process can
+                        // reject IVirtualDesktopManager with E_ACCESSDENIED.
+                        // The documented user activation path still moves it
+                        // to the foreground desktop; retain the same observed
+                        // verification below instead of reporting a false
+                        // negative after the OS has completed the move.
+                        SwitchToThisWindow(hwnd, true);
+                    }
                 }
                 if IsIconic(hwnd).as_bool() { let _ = ShowWindow(hwnd, SW_RESTORE); }
                 let _ = SetForegroundWindow(hwnd);
