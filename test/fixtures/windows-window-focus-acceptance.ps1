@@ -92,6 +92,100 @@ public class FocusWitness {
 }
 '@
 function Save-Receipt { $out | ConvertTo-Json -Depth 14 | Set-Content -Encoding UTF8 $receipt }
+function Install-FocusTrace {
+  # Own the instrumentation before the first measured request. Previously the
+  # finalizer silently depended on a recorder installed by an external driver.
+  $installTraceJs=@'
+(() => {
+  window.__focusTraceRestore?.();
+  const internals = window.__TAURI_INTERNALS__;
+  const callbacks = internals?.callbacks;
+  if (!callbacks || typeof callbacks.set !== 'function' || typeof callbacks.entries !== 'function') {
+    throw new Error('native callback instrumentation unavailable');
+  }
+  const trace = window.__focusTrace = [];
+  const record = (entry) => {
+    try {
+      trace.push({ t: Date.now(), ...entry });
+      if (trace.length > 300) trace.splice(0, trace.length - 300);
+    } catch { /* diagnostics must not change native delivery */ }
+  };
+  // Tauri defines runCallback/invoke as non-writable and non-configurable.
+  // Its documented debug registry is mutable; wrap its values, including
+  // callbacks registered after setup, without replacing those native methods.
+  const originalSet = callbacks.set;
+  const ownSet = Object.getOwnPropertyDescriptor(callbacks, 'set');
+  const originals = new WeakMap();
+  const wrap = (id, original) => {
+    if (typeof original !== 'function') return original;
+    function callback(message) {
+      // Metadata only: never retain response bodies, arguments or tokens.
+      record({ kind: 'callback', id, index: message?.index,
+        event: message?.message?.name, terminal: message?.message?.kind });
+      try { return original.apply(this, arguments); }
+      catch (error) {
+        record({ kind: 'callback-error', id, error: String(error?.name ?? 'Error') });
+        throw error;
+      }
+    }
+    originals.set(callback, original);
+    return callback;
+  };
+  function set(id, callback) {
+    return originalSet.call(this, id, this === callbacks ? wrap(id, callback) : callback);
+  }
+  callbacks.set = set;
+  if (callbacks.set !== set) throw new Error('native callback registry is not instrumentable');
+  for (const [id, callback] of callbacks.entries()) originalSet.call(callbacks, id, wrap(id, callback));
+  window.__focusTraceRestore = () => {
+    if (callbacks.set === set) {
+      if (ownSet) Object.defineProperty(callbacks, 'set', ownSet);
+      else delete callbacks.set;
+    }
+    for (const [id, callback] of callbacks.entries()) {
+      if (originals.has(callback)) originalSet.call(callbacks, id, originals.get(callback));
+    }
+    delete window.__focusTraceRestore;
+  };
+  return { ready: true, at: Date.now() };
+})()
+'@
+  $bridge=Get-Content (Join-Path $env:TEMP ('tauri-dev-bridge-'+$GuiPid+'.token')) | ConvertFrom-Json
+  $out.traceSetup=Invoke-RestMethod -Method Post -Uri ('http://127.0.0.1:'+$bridge.port+'/eval') -ContentType 'application/json' -Body (@{token=$bridge.token;js=$installTraceJs}|ConvertTo-Json -Compress) -TimeoutSec 8
+  $ready=$out.traceSetup.result
+  if($ready -is [string]){$ready=$ready|ConvertFrom-Json}
+  if($ready.ready -ne $true){throw 'Native callback trace was not installed'}
+}
+function Save-FocusDiagnostics {
+  # These bridge reads do not execute JS. They remain useful when /eval itself
+  # is the stalled path. Save before desktop cleanup or a later process restart.
+  $diagnostics=@{guiPid=$GuiPid;attemptId=$out.attemptId;atUtc=[DateTime]::UtcNow.ToString('o');bridge=@{};logs=@()}
+  try {
+    $bridge=Get-Content (Join-Path $env:TEMP ('tauri-dev-bridge-'+$GuiPid+'.token'))|ConvertFrom-Json
+    foreach($endpoint in @('health','logs')){
+      try {
+        $diagnostics.bridge[$endpoint]=Invoke-RestMethod -Method Post -Uri ('http://127.0.0.1:'+$bridge.port+'/'+$endpoint) -ContentType 'application/json' -Body (@{token=$bridge.token}|ConvertTo-Json -Compress) -TimeoutSec 3
+      } catch {$diagnostics.bridge[$endpoint]=@{error=$_.Exception.Message}}
+    }
+  } catch {$diagnostics.bridgeError=$_.Exception.Message}
+  foreach($name in @(('stdout-'+$GuiPid+'.log'),'stdout.log')){
+    $source=Join-Path $dir $name
+    if(!(Test-Path $source)){continue}
+    # A shared stdout.log can belong to a later GUI. Never label that as this
+    # process's evidence. The native startup record supplies the PID binding.
+    $head=[string]::Join("`n", @([IO.File]::ReadLines($source)|Select-Object -First 40))
+    if($head -notmatch ('version self-report .* pid '+$GuiPid+' ->')){
+      $diagnostics.logs+=@{source=$name;error='process identity mismatch'};continue
+    }
+    $archive='native-stdout-'+$out.attemptId+'-'+$name
+    try {
+      [IO.File]::Copy($source, (Join-Path $dir $archive), $false)
+      $diagnostics.logs+=@{source=$name;archive=$archive;sha256=(Get-FileHash (Join-Path $dir $archive) -Algorithm SHA256).Hash.ToLowerInvariant()}
+    } catch {$diagnostics.logs+=@{source=$name;error=$_.Exception.Message}}
+  }
+  $out.diagnostics='native-diagnostics-'+$out.attemptId+'.json'
+  $diagnostics|ConvertTo-Json -Depth 10|Set-Content -Encoding UTF8 (Join-Path $dir $out.diagnostics)
+}
 function Wait-Client {
   # WebView background timer throttling can stale presence. Observe the real
   # hook's heartbeat before requesting focus; never manufacture a presence row.
@@ -209,6 +303,7 @@ try {
     $out.cleanupOnly=$true;$out.completed=$true
     return
   }
+  Install-FocusTrace
   if($SetupOnly){
     Focus-Gui
     $out.setupOnly=$true
@@ -255,12 +350,13 @@ try {
   $out.completed=$true
 } catch { $out.error=$_.Exception.Message }
 finally {
+  try {Save-FocusDiagnostics} catch {$out.diagnosticsError=$_.Exception.Message}
   if($desktopProbe -and $desktopProbe -ne [IntPtr]::Zero){[FocusWitness]::DestroyWindow($desktopProbe)|Out-Null}
   # An instrumented WebView may expose bounded callback evidence. Preserve it
   # separately; a trace timeout is diagnostic evidence, never acceptance.
   try {
     $bridge=Get-Content (Join-Path $env:TEMP ('tauri-dev-bridge-'+$GuiPid+'.token')) | ConvertFrom-Json
-    $trace=Invoke-RestMethod -Method Post -Uri ('http://127.0.0.1:'+$bridge.port+'/eval') -ContentType 'application/json' -Body (@{token=$bridge.token;js='({at:Date.now(),visibility:document.visibilityState,trace:window.__focusTrace?.filter(x=>x.kind!=="callback"||x.message?.name==="sse-chunk"||x.kind.includes("error")).slice(-150)})'}|ConvertTo-Json -Compress) -TimeoutSec 8
+    $trace=Invoke-RestMethod -Method Post -Uri ('http://127.0.0.1:'+$bridge.port+'/eval') -ContentType 'application/json' -Body (@{token=$bridge.token;js='(() => {const snapshot={at:Date.now(),visibility:document.visibilityState,trace:window.__focusTrace?.slice(-300)};window.__focusTraceRestore?.();return snapshot;})()'}|ConvertTo-Json -Compress) -TimeoutSec 8
     $trace.result | Set-Content -Encoding UTF8 (Join-Path $dir ('native-trace-'+$out.attemptId+'.json'))
     $out.trace='native-trace-'+$out.attemptId+'.json'
   } catch { $out.traceError=$_.Exception.Message }

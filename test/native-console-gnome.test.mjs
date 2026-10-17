@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import test from 'node:test';
+import vm from 'node:vm';
 
 // Capture only this command's descendants, while they still exist. Sampling after
 // spawnSync returns loses the wait state that distinguishes a compiler from a lock.
@@ -141,6 +142,126 @@ test('Cargo fixture timeout captures children spawned by a worker thread',
 const root = path.resolve(import.meta.dirname, '..');
 const source = fs.readFileSync(path.join(root, 'src-tauri/src/native_console.rs'), 'utf8');
 const mainSource = fs.readFileSync(path.join(root, 'src-tauri/src/main.rs'), 'utf8');
+
+const focusFixture = fs.readFileSync(path.join(root, 'test/fixtures/windows-window-focus-acceptance.ps1'), 'utf8');
+const focusTraceScript = focusFixture.match(/\$installTraceJs=@'\r?\n([\s\S]*?)\r?\n'@/)[1];
+function installFocusTrace(internals) {
+  const window = { __TAURI_INTERNALS__: internals };
+  const context = vm.createContext({ window });
+  const install = () => vm.runInContext(focusTraceScript, context);
+  assert.equal(install().ready, true);
+  return { window, install };
+}
+function nativeCallbacks(entries = []) {
+  const internals = {};
+  // Match Tauri's actual property descriptors; assigning these methods must
+  // not make a fake-only recorder appear to work.
+  Object.defineProperties(internals, {
+    callbacks: { value: new Map(entries) },
+    invoke: { value: () => Promise.resolve(null) },
+    runCallback: { value: (id, message) => internals.callbacks.get(id)?.(message) },
+  });
+  return internals;
+}
+
+test('native witness trace preserves callback order, return values and thrown errors', () => {
+  const failure = new Error('callback failed');
+  let state;
+  const receiver = {};
+  const internals = nativeCallbacks([
+    [1, function (message) {
+      assert.equal(this, receiver);
+      assert.equal(state.window.__focusTrace.at(-1).id, 1, 'record before forwarding');
+      return message.index;
+    }],
+    [2, () => { throw failure; }],
+  ]);
+  state = installFocusTrace(internals);
+  assert.equal(internals.callbacks.get(1).call(receiver, { index: 4, message: { name: 'sse-chunk', data: 'private body' } }), 4);
+  assert.throws(() => internals.runCallback(2, { index: 5 }), error => error === failure);
+  assert.deepEqual(Array.from(state.window.__focusTrace, row => row.kind), ['callback', 'callback', 'callback-error']);
+  assert.equal(JSON.stringify(state.window.__focusTrace).includes('private body'), false);
+});
+
+test('native witness trace is bounded and reinstalling never stacks wrappers', () => {
+  const original = function () { return 7; };
+  const internals = nativeCallbacks([[1, original]]);
+  const { window, install } = installFocusTrace(internals);
+  for (let index = 0; index < 350; index++) internals.runCallback(1, { index });
+  assert.equal(window.__focusTrace.length, 300);
+  assert.equal(window.__focusTrace[0].index, 50);
+  install();
+  assert.equal(internals.callbacks.get(1)({ index: 0 }), 7);
+  assert.equal(window.__focusTrace.length, 1);
+  window.__focusTraceRestore();
+  assert.equal(internals.callbacks.get(1), original);
+  assert.equal(Object.hasOwn(internals.callbacks, 'set'), false);
+});
+
+test('native witness trace follows future callbacks without resurrecting retired ones', () => {
+  const internals = nativeCallbacks();
+  const { window } = installFocusTrace(internals);
+  const callback = () => 'native result';
+  assert.equal(internals.callbacks.set(5, callback), internals.callbacks);
+  assert.equal(internals.callbacks.get(5)({ index: 0, message: { data: 'private' } }), 'native result');
+  internals.callbacks.set(6, callback);
+  internals.callbacks.delete(6);
+  window.__focusTraceRestore();
+  assert.equal(internals.callbacks.has(6), false);
+  assert.equal(internals.callbacks.get(5), callback);
+  assert.equal(JSON.stringify(window.__focusTrace).includes('private'), false);
+});
+
+test('native witness diagnostics survive a dead bridge and refuse another process log',
+  { skip: process.platform !== 'win32', timeout: 15000 }, async () => {
+    const start = focusFixture.indexOf('function Save-FocusDiagnostics {');
+    const end = focusFixture.indexOf('\nfunction Wait-Client', start);
+    assert.ok(start >= 0 && end > start);
+    const driver = `
+$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
+${focusFixture.slice(start, end)}
+$GuiPid=$PID
+$out=@{attemptId=[guid]::NewGuid().ToString();error='original focus failure';completed=$false}
+$dir=Join-Path $env:TEMP ('focus-diagnostics-test-'+$out.attemptId)
+$tokenPath=Join-Path $env:TEMP ('tauri-dev-bridge-'+$GuiPid+'.token')
+if(Test-Path $tokenPath){throw 'Refusing to overwrite an existing bridge token'}
+New-Item -ItemType Directory $dir|Out-Null
+function Invoke-RestMethod {
+  param($Method,$Uri,$ContentType,$Body,$TimeoutSec)
+  if($Uri.EndsWith('/health')){throw 'simulated unresponsive bridge'}
+  if($Uri.EndsWith('/logs')){return @{entries=@(@{message='native channel error'})}}
+  throw 'Unexpected endpoint'
+}
+try {
+  @{port=1;token='diagnostic-test-secret'}|ConvertTo-Json|Set-Content $tokenPath
+  $ownLog=Join-Path $dir ('stdout-'+$GuiPid+'.log')
+  [IO.File]::WriteAllText($ownLog,('version self-report vtest pid '+$GuiPid+' -> fixture'))
+  [IO.File]::WriteAllText((Join-Path $dir 'stdout.log'),'version self-report vtest pid 1 -> another process')
+  Save-FocusDiagnostics
+  $saved=Get-Content (Join-Path $dir $out.diagnostics) -Raw|ConvertFrom-Json
+  if($saved.bridge.health.error -ne 'simulated unresponsive bridge'){throw 'Lost bridge failure'}
+  if($saved.bridge.logs.entries[0].message -ne 'native channel error'){throw 'Lost native logs'}
+  if($saved.logs.Count -ne 2 -or $saved.logs[1].error -ne 'process identity mismatch'){throw 'Accepted a foreign process log'}
+  $archive=Join-Path $dir $saved.logs[0].archive
+  if(!(Test-Path $archive)){throw 'Did not archive the PID-bound log'}
+  $before=[IO.File]::ReadAllText($archive)
+  [IO.File]::WriteAllText($ownLog,('version self-report vtest pid '+$GuiPid+' -> replacement bytes'))
+  Save-FocusDiagnostics
+  if([IO.File]::ReadAllText($archive) -ne $before){throw 'Overwrote preserved attempt evidence'}
+  if((Get-Content (Join-Path $dir $out.diagnostics) -Raw).Contains('diagnostic-test-secret')){throw 'Persisted bridge token'}
+  if($out.error -ne 'original focus failure' -or $out.completed){throw 'Diagnostics changed the verdict'}
+  Write-Output 'diagnostic capture passed'
+} finally {
+  Remove-Item $tokenPath -ErrorAction SilentlyContinue
+  Remove-Item $dir -Recurse -Force
+}
+`;
+    const result = await runFixtureCommand('powershell', ['-NoProfile', '-NonInteractive',
+      '-EncodedCommand', Buffer.from(driver, 'utf16le').toString('base64')],
+    { timeout: 10000, stage: 'windows-focus-diagnostics' });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /diagnostic capture passed/);
+  });
 
 test('production Windows focus handles a denied foreign-window move and verifies activation', { timeout: 30000 }, async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'native-console-focus-'));
