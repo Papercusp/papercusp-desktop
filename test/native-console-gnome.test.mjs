@@ -269,6 +269,43 @@ try {
     assert.match(result.stdout, /diagnostic capture passed/);
   });
 
+test('native witness rejects unresolved or foreign IPC before measuring focus',
+  { skip: process.platform !== 'win32', timeout: 15000 }, async () => {
+    const start = focusFixture.indexOf('function Assert-NativeTransport {');
+    const end = focusFixture.indexOf('\nfunction Wait-Client', start);
+    assert.ok(start >= 0 && end > start);
+    const driver = `
+$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
+${focusFixture.slice(start, end)}
+$GuiPid=$PID;$out=@{cases=@()};$script:requests=0
+function Get-Content { '{"port":1,"token":"private-transport-test-token"}' }
+function Invoke-RestMethod {
+  param($Method,$Uri,$ContentType,$Body,$TimeoutSec)
+  $script:requests++
+  return @{result=($script:status|ConvertTo-Json -Depth 8 -Compress)}
+}
+$script:status=@{ipc=@{client='never-connected';ownerIsContentOrigin=$false;connectedPath=$null;resolutionDetail='live WSL PID rejected'};wsl=@{state=@{kind='Error';message='papercup-rootfs-recipe missing'}}}
+$message=$null
+try{Assert-NativeTransport}catch{$message=$_.Exception.Message}
+if($message -notlike '*live WSL PID rejected*papercup-rootfs-recipe missing*'){throw 'Missing actionable native readiness reason'}
+if($out.transport.ipc.client -ne 'never-connected' -or $out.cases.Count -ne 0){throw 'Failed preflight polluted focus verdict'}
+$script:status=@{ipc=@{client='connected';ownerIsContentOrigin=$false;connectedPath='tcp://127.0.0.1:1';resolutionDetail='foreign singleton'}}
+$message=$null
+try{Assert-NativeTransport}catch{$message=$_.Exception.Message}
+if($message -notlike '*foreign singleton*'){throw 'Accepted IPC belonging to another content origin'}
+$script:status=@{ipc=@{client='connected';ownerIsContentOrigin=$true;connectedPath='tcp://127.0.0.1:1'}}
+Assert-NativeTransport
+if($script:requests -ne 3){throw 'Unexpected transport requests'}
+if(($out|ConvertTo-Json -Depth 10).Contains('private-transport-test-token')){throw 'Persisted bridge credential'}
+Write-Output 'transport preflight passed'
+`;
+    const result = await runFixtureCommand('powershell', ['-NoProfile', '-NonInteractive',
+      '-EncodedCommand', Buffer.from(driver, 'utf16le').toString('base64')],
+    { timeout: 10000, stage: 'windows-focus-transport-preflight' });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /transport preflight passed/);
+  });
+
 test('production Windows focus handles a denied foreign-window move and verifies activation', { timeout: 30000 }, async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'native-console-focus-'));
   try {

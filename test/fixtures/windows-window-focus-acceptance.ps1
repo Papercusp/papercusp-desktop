@@ -205,6 +205,25 @@ function Save-FocusDiagnostics {
   $out.diagnostics='native-diagnostics-'+$out.attemptId+'.json'
   $diagnostics|ConvertTo-Json -Depth 10|Set-Content -Encoding UTF8 (Join-Path $dir $out.diagnostics)
 }
+function Assert-NativeTransport {
+  # HTTP readiness cannot prove the WebView can consume UI intents. In a
+  # copied debug rig, a missing Server recipe can latch the Windows PID route
+  # for a WSL operator and leave every IPC request retrying forever.
+  $bridge=Get-Content (Join-Path $env:TEMP ('tauri-dev-bridge-'+$GuiPid+'.token'))|ConvertFrom-Json
+  $js=@'
+(async () => {
+  const ipc = await window.__TAURI__.core.invoke('endpoint_ipc_status');
+  if (ipc.client === 'connected' && ipc.ownerIsContentOrigin && ipc.connectedPath) return { ipc };
+  return { ipc, wsl: await window.__TAURI__.core.invoke('wsl_status') };
+})()
+'@
+  $response=Invoke-RestMethod -Method Post -Uri ('http://127.0.0.1:'+$bridge.port+'/eval') -ContentType 'application/json' -Body (@{token=$bridge.token;js=$js}|ConvertTo-Json -Compress) -TimeoutSec 8
+  $out.transport=$response.result|ConvertFrom-Json
+  $ipc=$out.transport.ipc
+  if($ipc.client -ne 'connected' -or -not $ipc.ownerIsContentOrigin -or -not $ipc.connectedPath){
+    throw ('Native IPC precondition failed: '+$ipc.resolutionDetail+'; WSL '+($out.transport.wsl.state|ConvertTo-Json -Compress))
+  }
+}
 function Wait-Client {
   # WebView background timer throttling can stale presence. Observe the real
   # hook's heartbeat before requesting focus; never manufacture a presence row.
@@ -323,6 +342,7 @@ try {
     return
   }
   Install-FocusTrace
+  Assert-NativeTransport
   if($SetupOnly){
     Focus-Gui
     $out.setupOnly=$true
