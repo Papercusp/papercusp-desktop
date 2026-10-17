@@ -273,12 +273,43 @@ EOF
 # effect?" that depends on remembering a second step is a footgun on a rig whose
 # entire failure mode is confidently measuring the wrong bytes.
 cmd_hotpatch() {
-  local name="${1:-clean}" src="${2:-}"
+  local name="${1:-clean}" src="${2:-${RIG_SERVE_HOTPATCH:-$DESKTOP_REPO/src-tauri/sidecar/serve.mjs}}" before after hp expected
   vm_running "$name" || die "$name is not running. vmctl up $name"
-  vm_hotpatch_sidecar "$name" ${src:+"$src"}
-  log "relaunching the app so the hotpatched bundle is what actually runs…"
+  require_federation_launch_context "$name"
+  [ -f "$src" ] || die "no sidecar bundle to hotpatch at '$src'"
+  expected="$(sha256sum "$src" | cut -d' ' -f1)"
+  # A GUI relaunch deliberately leaves the Server alone. Qualify its supported
+  # user-service ownership BEFORE copying anything; never fall back to pkill.
+  before="$(vm_server_loaded_identity "$name" ownership)" \
+    || die "cannot identify the service-owned Server on '$name'; no hotpatch applied"
+  vm_hotpatch_sidecar "$name" "$src"
+  hp="$(vm_hotpatch_provenance "$name")"
+  [ -n "$hp" ] || die "hotpatch disk provenance missing on '$name'; Server reload refused"
+  [ "${hp%%|*}" = "${expected:0:12}" ] \
+    || die "hotpatch disk provenance differs from intended source on '$name'"
+  log "restarting the Server user service to load the hotpatched bundle…"
+  vm_run "$name" <<'EOF'
+set -euo pipefail
+timeout 60s systemctl --user restart papercusp-server.service
+EOF
+  # Startup can include migrations. Every attempt and the overall wait are
+  # bounded; an old discovery record or service invocation cannot satisfy it.
+  local deadline=$(( $(date +%s) + 120 ))
+  while :; do
+    after="$(vm_server_loaded_identity "$name" 2>/dev/null)" || after=""
+    if [ -n "$after" ] && [ "${after%%|*}" != "${before%%|*}" ] \
+       && [ "${after##*|}" != "${before##*|}" ]; then
+      local loaded="${after#*|}"; loaded="${loaded%%|*}"
+      [ "$loaded" = "$expected" ] \
+        || die "Server loaded identity differs from hotpatch disk provenance on '$name'; GUI not relaunched"
+      break
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] \
+      || die "Server reload on '$name' did not establish a new loaded identity; GUI not relaunched"
+    sleep 2
+  done
   cmd_launch "$name"
-  log "hotpatched + relaunched. Verify identity: vmctl status $name  ·  log: vmctl ssh $name 'tail -f papercusp-app.log'"
+  log "hotpatched + Server reload verified ($after); GUI relaunched"
 }
 
 # ── destructive updater/revert E2E preparation ────────────────────────────

@@ -524,6 +524,188 @@ test("vmctl GUI launch preserves the independently-owned Server runtime", () => 
   assert.doesNotMatch(launch, /pgrep[^\n]*serve\.mjs/);
 });
 
+// Run the production command composition; only the VM transport, disk copy,
+// service and identity observation are replaced. No SSH, VM or daemon exists.
+function runHotpatchCommand(mode = "ok", command = "hotpatch", name = "clean") {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "vmctl-hotpatch-"));
+  const source = path.join(temp, "serve.mjs");
+  fs.writeFileSync(source, "new bundle\n");
+  const digest = require("node:crypto").createHash("sha256")
+    .update(fs.readFileSync(source)).digest("hex");
+  try {
+    const result = spawnSync("bash", ["-c", [
+      'PAPERCUSP_VMCTL_SOURCE_ONLY=1 source "$1"',
+      'vm_running() { return 0; }',
+      'vm_ssh() { return 1; }',
+      'vm_hotpatch_sidecar() { printf "copy:%s\\n" "$1" >>"$TRACE"; }',
+      'vm_hotpatch_provenance() { printf "%s|desktop|outer|clean\\n" "${DIGEST:0:12}"; }',
+      'vm_server_loaded_identity() {',
+      '  printf "identity\\n" >>"$TRACE"',
+      '  [ "$MODE" != unsupported ] || return 1',
+      '  if [ ! -f "$RESTARTED" ] || [ "$MODE" = unchanged ]; then',
+      '    printf "linux:boot:10|old-bundle|11111111111111111111111111111111\\n"',
+      '  elif [ "$MODE" = unavailable ]; then return 1',
+      '  elif [ "$MODE" = stale ]; then',
+      '    printf "linux:boot:20|old-bundle|22222222222222222222222222222222\\n"',
+      '  else printf "linux:boot:20|%s|22222222222222222222222222222222\\n" "$DIGEST"; fi',
+      '}',
+      'xdpyinfo() { return 0; }; pgrep() { return 1; }',
+      'pkill() { printf "kill:%s\\n" "$*" >>"$TRACE"; }',
+      'setsid() { printf "gui\\n" >>"$TRACE"; }',
+      'sleep() { :; }',
+      'export -f xdpyinfo pgrep pkill setsid sleep',
+      'vm_run() {',
+      '  local script; script="$(cat)"',
+      '  if [[ "$script" == *"systemctl --user restart papercusp-server.service"* ]]; then',
+      '    printf "restart:%s\\n" "$1" >>"$TRACE"',
+      '    [ "$MODE" != failed ] || return 17',
+      '    touch "$RESTARTED"',
+      '  else { printf "%s\\n" "$script"; echo wait; } | bash -s; fi',
+      '}',
+      // Virtual controller clock expires a failed observation immediately.
+      'date() { if [ -f "$CLOCK" ]; then echo 222; else touch "$CLOCK"; echo 100; fi; }',
+      'if [ "$3" = launch ]; then cmd_launch "$4"; else cmd_hotpatch "$4" "$2"; fi',
+    ].join("\n"), "bash", vmctlPath, source, command, name], {
+      encoding: "utf8", timeout: 5000,
+      env: { ...process.env, MODE: mode, DIGEST: digest, HOME: temp,
+        TRACE: path.join(temp, "trace"), RESTARTED: path.join(temp, "restarted"),
+        CLOCK: path.join(temp, "clock") },
+    });
+    const trace = fs.existsSync(path.join(temp, "trace"))
+      ? fs.readFileSync(path.join(temp, "trace"), "utf8").trim().split("\n") : [];
+    return { result, trace };
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+}
+
+test("production GUI-only launch preserves Server; hotpatch reloads Server before GUI acceptance", () => {
+  const gui = runHotpatchCommand("ok", "launch");
+  assert.equal(gui.result.status, 0, gui.result.stderr);
+  assert.deepEqual(gui.trace, ["gui"]);
+  const patched = runHotpatchCommand();
+  assert.equal(patched.result.status, 0, patched.result.stderr);
+  assert.deepEqual(patched.trace, ["identity", "copy:clean", "restart:clean", "identity", "gui"]);
+  assert.match(patched.result.stdout + patched.result.stderr, /Server reload verified \(linux:boot:20\|[a-f0-9]{64}\|2222/);
+});
+
+for (const [mode, refusal, trace] of [
+  ["unsupported", /cannot identify the service-owned Server/, ["identity"]],
+  ["failed", /restarting the Server user service/, ["identity", "copy:clean", "restart:clean"]],
+  ["stale", /loaded identity differs from hotpatch disk provenance/, ["identity", "copy:clean", "restart:clean", "identity"]],
+  ["unchanged", /did not establish a new loaded identity/, ["identity", "copy:clean", "restart:clean", "identity"]],
+  ["unavailable", /did not establish a new loaded identity/, ["identity", "copy:clean", "restart:clean", "identity"]],
+]) {
+  test(`production hotpatch refuses ${mode} Server reload without GUI or success acceptance`, () => {
+    const probe = runHotpatchCommand(mode);
+    assert.notEqual(probe.result.status, 0);
+    assert.match(probe.result.stdout + probe.result.stderr, refusal);
+    assert.deepEqual(probe.trace, trace);
+    assert.doesNotMatch(probe.result.stdout + probe.result.stderr, /Server reload verified|GUI relaunched/);
+  });
+}
+
+test("production hotpatch validates federation context before copying or restarting", () => {
+  const probe = runHotpatchCommand("ok", "hotpatch", "fed-a");
+  assert.equal(probe.result.status, 1);
+  assert.match(probe.result.stderr, /without a validated ~\/fed\.env/);
+  assert.deepEqual(probe.trace, []);
+});
+
+// Execute the real emitted identity probe against synthetic procfs, with the
+// service and HTTP primitives stubbed. This exercises the actual birth/path/
+// cgroup/digest assertions rather than returning a preselected identity string.
+function runServerIdentityFixture(fault = "none", phase = "loaded") {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "vmctl-server-identity-"));
+  const side = path.join(temp, "lib/Papercusp Server/sidecar");
+  const proc = path.join(temp, "proc");
+  const bin = path.join(temp, "bin");
+  const birth = `linux:fixture-boot:${fault === "old-process" ? "1" : "99000"}`;
+  const group = "/user.slice/papercusp-server.service";
+  try {
+    for (const dir of [side, bin, path.join(temp, ".papercusp"),
+      path.join(proc, "4242"), path.join(proc, "sys/kernel/random")]) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    const entry = path.join(side, "serve.mjs");
+    fs.writeFileSync(entry, "Server bundle\n");
+    const guiSide = path.join(temp, "lib/Papercusp GUI/sidecar");
+    fs.mkdirSync(guiSide, { recursive: true });
+    fs.writeFileSync(path.join(guiSide, "serve.mjs"), "unrelated GUI bundle\n");
+    fs.writeFileSync(path.join(temp, ".papercusp/operator.json"), JSON.stringify({
+      pid: 4242, port: 3093, processIdentity: fault === "birth" ? "linux:fixture-boot:1" : birth,
+    }));
+    const fields = Array(20).fill("0"); fields[0] = "S";
+    fields[19] = fault === "old-process" ? "1" : "99000";
+    fs.writeFileSync(path.join(proc, "4242/stat"), `4242 (node) ${fields.join(" ")}\n`);
+    fs.writeFileSync(path.join(proc, "sys/kernel/random/boot_id"), "fixture-boot\n");
+    fs.writeFileSync(path.join(proc, "uptime"), "1000 0\n");
+    fs.writeFileSync(path.join(proc, "4242/cgroup"), `0::${fault === "foreign" ? "/other.service" : group}\n`);
+    fs.writeFileSync(path.join(bin, "node"), "fixture executable\n");
+    fs.symlinkSync(path.join(bin, "node"), path.join(proc, "4242/exe"));
+    fs.writeFileSync(path.join(proc, "4242/cmdline"), ["node", "--require",
+      path.join(side, "sidecar-preload.js"), fault === "gui-path" ? path.join(guiSide, "serve.mjs") : entry,
+      "--ensure", ""].join("\0"));
+    fs.writeFileSync(path.join(proc, "4242/environ"), "GH_TOKEN=fixture-token\0");
+    if (fault === "federation") fs.writeFileSync(path.join(temp, "fed.env"), "GH_TOKEN=other-token\n");
+    fs.writeFileSync(path.join(bin, "systemctl"), ["#!/usr/bin/env bash",
+      '[ "$FAULT" != unsupported ] || exit 1',
+      'case "$*" in',
+      '  "--user is-active --quiet papercusp-server.service") exit 0 ;;',
+      `  "--user show -p ControlGroup --value papercusp-server.service") echo '${group}' ;;`,
+      '  "--user show -p InvocationID --value papercusp-server.service") echo 11111111111111111111111111111111 ;;',
+      '  *) exit 99 ;;', "esac", ""].join("\n"), { mode: 0o755 });
+    fs.writeFileSync(path.join(temp, "sitecustomize.py"), [
+      "import io,json,os,time,urllib.request",
+      `time.time = lambda: ${Date.now() / 1000 + 100}`,
+      "def health(url, timeout):",
+      "    assert url == 'http://127.0.0.1:3093/api/health' and timeout == 3",
+      "    return io.BytesIO(json.dumps({'ok':True,'service':'other' if os.environ['FAULT']=='health' else 'papercusp-operator'}).encode())",
+      "urllib.request.urlopen = health", ""].join("\n"));
+    const result = spawnSync("bash", ["-c", [
+      'PAPERCUSP_VMCTL_SOURCE_ONLY=1 source "$1"',
+      'vm_run() { shift; for kv in "$@"; do export "$kv"; done; bash -s; }',
+      'vm_ssh() { shift; bash -c "$1"; }',
+      'vm_server_loaded_identity fixture "$2"',
+      'printf "disk="; vm_deployed_sidecar_id fixture',
+    ].join("\n"), "bash", vmctlPath, phase], {
+      encoding: "utf8", timeout: 5000,
+      env: { ...process.env, HOME: temp, VM_SIDE_ROOT: path.join(temp, "lib"),
+        VM_PROC_ROOT: proc, PATH: `${bin}:${process.env.PATH}`, PYTHONPATH: temp,
+        FAULT: fault },
+    });
+    const digest = require("node:crypto").createHash("sha256").update(fs.readFileSync(entry)).digest("hex");
+    return { result, digest, birth };
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+}
+
+test("loaded identity binds the Server service, birth, packaged entry and health to its full digest", () => {
+  const probe = runServerIdentityFixture();
+  assert.equal(probe.result.status, 0, probe.result.stderr);
+  assert.match(probe.result.stdout, new RegExp(`${probe.birth}\\|${probe.digest}\\|11111111111111111111111111111111`));
+  assert.match(probe.result.stdout, new RegExp(`disk=${probe.digest.slice(0, 12)} `));
+});
+
+test("ownership preflight permits recovery of an old process without claiming its disk bytes are loaded", () => {
+  const probe = runServerIdentityFixture("old-process", "ownership");
+  assert.equal(probe.result.status, 0, probe.result.stderr);
+  assert.match(probe.result.stdout, /linux:fixture-boot:1\|unverified\|1111/);
+});
+
+for (const [fault, refusal] of [
+  ["birth", /operator birth identity mismatch/],
+  ["foreign", /operator is outside Server service/],
+  ["gui-path", /unsupported Server Node entry/],
+  ["old-process", /bundle changed after Server started/],
+  ["federation", /Server federation environment mismatch/],
+  ["health", /operator is not healthy/],
+]) {
+  test(`loaded identity rejects ${fault} despite a readable on-disk Server bundle`, () => {
+    const probe = runServerIdentityFixture(fault);
+    assert.equal(probe.result.status, 1);
+    assert.match(probe.result.stderr, refusal);
+    assert.doesNotMatch(probe.result.stdout, new RegExp(probe.digest));
+  });
+}
+
 test("vmctl gui-paste preserves exact URL bytes and captures before submit", () => {
   const fn = guiPasteFunction();
   assert.match(fn, /CLIPBOARD_B64=/);

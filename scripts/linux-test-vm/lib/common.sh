@@ -398,11 +398,80 @@ _warn_if_deb_stale() {
 # baked into the emitted script text because ssh forwards no environment.
 _vm_side_dir_sh() {
   local root="${VM_SIDE_ROOT:-/usr/lib}"
-  printf 'R=%q; p="$(ls -1 "$R/Papercusp GUI/sidecar/serve.mjs" "$R"/Papercusp*/sidecar/serve.mjs 2>/dev/null | head -1)"; SIDE=""; [ -n "$p" ] && SIDE="$(dirname "$p")"' "$root"
+  printf 'R=%q; SIDE=""; if [ -f "$R/Papercusp Server/sidecar/serve.mjs" ]; then SIDE="$R/Papercusp Server/sidecar"; else p="$(ls -1 "$R/Papercusp GUI/sidecar/serve.mjs" "$R"/Papercusp*/sidecar/serve.mjs 2>/dev/null | head -1)"; [ -z "$p" ] || SIDE="$(dirname "$p")"; fi' "$root"
 }
 
 vm_deployed_sidecar_id() {
   vm_ssh "$1" "$(_vm_side_dir_sh)"'; [ -n "$SIDE" ] && printf "%s %s\n" "$(sha256sum "$SIDE/serve.mjs" | cut -c1-12)" "$(stat -c%s "$SIDE/serve.mjs")"' 2>/dev/null | tr -d '\r' | head -1
+}
+
+# vm_server_loaded_identity <vm> [ownership] -> processIdentity|digest|InvocationID
+# Reuse the installed user-service lifecycle and operator.json birth identity
+# contract (vmctl updater-e2e), with runtime-vintage's conservative entry pin:
+# the file must predate the Node process and remain unchanged across hashing.
+# A disk marker alone says nothing about bytes already loaded by an old Server.
+# ownership preflights service/birth/path only (digest=unverified), permitting a
+# retry after a failed reload left new disk bytes under an old process. It NEVER
+# qualifies provenance; only the default loaded mode establishes the digest.
+# VM_PROC_ROOT, like VM_SIDE_ROOT, is solely a hermetic procfs-fixture seam.
+vm_server_loaded_identity() {
+  vm_run "$1" "SIDE_ROOT=${VM_SIDE_ROOT:-/usr/lib}" "PROC_ROOT=${VM_PROC_ROOT:-/proc}" "IDENTITY_PHASE=${2:-loaded}" <<'EOF'
+set -euo pipefail
+timeout 15s systemctl --user is-active --quiet papercusp-server.service
+group="$(timeout 15s systemctl --user show -p ControlGroup --value papercusp-server.service)"
+invocation="$(timeout 15s systemctl --user show -p InvocationID --value papercusp-server.service)"
+if [ -f "$HOME/fed.env" ]; then set -a; . "$HOME/fed.env"; set +a; fi
+timeout 15s python3 - "$SIDE_ROOT" "$PROC_ROOT" "$group" "$invocation" "$IDENTITY_PHASE" <<'PY'
+import hashlib, json, os, pathlib, re, sys, time, urllib.request
+side = pathlib.Path(sys.argv[1]) / "Papercusp Server/sidecar"
+proc = pathlib.Path(sys.argv[2])
+group, invocation, phase = sys.argv[3:6]
+def require(ok, message):
+    if not ok: raise RuntimeError(message)
+require(group.startswith("/") and len(group) > 1, "Server service has no control group")
+require(re.fullmatch(r"[a-f0-9]{32}", invocation), "Server service has no invocation identity")
+require(phase in ("loaded", "ownership"), "unknown Server identity phase")
+record = json.loads((pathlib.Path.home() / ".papercusp/operator.json").read_text())
+pid = int(record["pid"])
+require(pid > 0, "invalid operator pid")
+base = proc / str(pid)
+def identity():
+    stat = (base / "stat").read_text()
+    fields = stat[stat.rfind(")") + 1:].split()
+    require(fields[0] != "Z", "operator is a zombie")
+    ticks = int(fields[19])
+    boot = (proc / "sys/kernel/random/boot_id").read_text().strip()
+    return f"linux:{boot}:{ticks}", ticks
+birth, ticks = identity()
+require(record.get("processIdentity") == birth, "operator birth identity mismatch")
+groups = [line.split(":", 2)[2] for line in (base / "cgroup").read_text().splitlines()]
+require(any(g == group or g.startswith(group + "/") for g in groups), "operator is outside Server service")
+require(re.fullmatch(r"node(?:js)?", (base / "exe").resolve().name), "operator is not Node")
+argv = (base / "cmdline").read_bytes().rstrip(b"\0").decode().split("\0")
+entry = (side / "serve.mjs").resolve(strict=True)
+preload = str((side / "sidecar-preload.js").resolve())
+require(argv[1:] == ["--require", preload, str(entry), "--ensure"], "unsupported Server Node entry")
+env = dict(part.split("=", 1) for part in (base / "environ").read_bytes().rstrip(b"\0").decode().split("\0") if "=" in part)
+for key in ("GH_TOKEN", "PAPERCUSP_DHT_BOOTSTRAP", "PAPERCUSP_FED_DHT_MODE"):
+    if os.environ.get(key): require(env.get(key) == os.environ[key], "Server federation environment mismatch: " + key)
+before = entry.stat()
+def signature(stat):
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+uptime = float((proc / "uptime").read_text().split()[0])
+started = time.time() - uptime + ticks / os.sysconf("SC_CLK_TCK")
+if phase == "loaded":
+    require(0 < ticks / os.sysconf("SC_CLK_TCK") <= uptime and max(before.st_mtime, before.st_ctime) < started - .025, "bundle changed after Server started")
+digest = hashlib.sha256(entry.read_bytes()).hexdigest() if phase == "loaded" else "unverified"
+require(signature(entry.stat()) == signature(before) and identity()[0] == birth, "Server entry changed during identity read")
+port = int(record["port"])
+require(0 < port < 65536, "invalid operator port")
+with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=3) as response:
+    health = json.load(response)
+require(health.get("service") == "papercusp-operator" and health.get("ok") is True, "operator is not healthy")
+require(identity()[0] == birth and signature(entry.stat()) == signature(before), "Server changed during health read")
+print(f"{birth}|{digest}|{invocation}")
+PY
+EOF
 }
 
 # vm_assert_uniform_sidecar <vmname>... — die unless EVERY named VM runs the same
@@ -448,7 +517,7 @@ vm_assert_uniform_sidecar() {
 # vm_hotpatch_sidecar <vmname> [serve.mjs] — replace the installed sidecar bundle
 # (and its db-sql) with a locally-built one, and record what was installed.
 # Source precedence: $2 > $RIG_SERVE_HOTPATCH > the tree's built sidecar.
-# Does NOT restart the app — the caller relaunches (vmctl hotpatch, or
+# Does NOT restart the Server — the caller owns its explicit lifecycle (vmctl hotpatch, or
 # vm-federation.sh's launch_vm_instance). Overwriting the file a running node
 # process already read is harmless; it simply has no effect until the relaunch.
 vm_hotpatch_sidecar() {
@@ -530,7 +599,7 @@ vm_hotpatch_sidecar() {
   [ -n "$check" ] || die "hotpatched '$vm' but the provenance marker does NOT verify against the" \
     "bundle now on disk. The rig would run unidentifiable code — refusing to leave it in that" \
     "state. Investigate before re-running (did the install land? is $side writable?)."
-  log "hotpatch $vm OK — verified $check  (relaunch the app for it to take effect)"
+  log "hotpatch $vm disk copy verified $check (Server reload/loaded identity still required)"
 }
 
 # vm_hotpatch_provenance <vmname> — echo "<bundle-sha12>|<desktop-sha>|<outer-sha>|<clean|dirty>"
@@ -621,6 +690,12 @@ vm_assert_build_provenance() {
     hp="$(vm_hotpatch_provenance "$vm")"
     if [ -n "$hp" ]; then
       hp_bundle="${hp%%|*}"; hp="${hp#*|}"
+      local loaded loaded_hash
+      loaded="$(vm_server_loaded_identity "$vm")" \
+        || die "'$vm' has a hotpatch on disk but no verified service-owned loaded identity"
+      loaded_hash="${loaded#*|}"; loaded_hash="${loaded_hash%%|*}"
+      [ "${loaded_hash:0:12}" = "$hp_bundle" ] \
+        || die "'$vm' hotpatch disk marker differs from Server-loaded identity"
       hp_desktop="${hp%%|*}"; hp="${hp#*|}"
       hp_outer="${hp%%|*}"; hp_dirty="${hp#*|}"
       echo "  $vm HOTPATCHED: sidecar bundle $hp_bundle from desktop=$hp_desktop outer=$hp_outer ($hp_dirty)"
