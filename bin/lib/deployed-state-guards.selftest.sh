@@ -116,7 +116,7 @@ echo "=== hotpatched sidecar (WI-6212 piece 2) ==="
 # A hotpatch replaces the JS but CANNOT change /api/health's sha (that comes from
 # the Rust binary's option_env! bake, forwarded by main.rs). So the .deb reads as
 # unprovenanced exactly as before, and only the marker can rescue the run.
-HP='vm_hotpatch_provenance() { echo "beefcafe1234|d35c70p|0u73r5|clean"; }; '
+HP='vm_hotpatch_provenance() { echo "beefcafe1234|d35c70p|0u73r5|clean"; }; vm_server_loaded_identity() { echo "linux:boot:123|beefcafe1234000000000000000000000000000000000000000000000000000000|invocation"; }; '
 
 run_guard "$HP"'vm_build_provenance() { echo "|0.0.0"; }' \
   'vm_assert_build_provenance vm1' \
@@ -137,6 +137,17 @@ run_guard "$HP"'vm_build_provenance() { echo "|0.0.0"; }' \
   'vm_assert_build_provenance vm1' RIG_EXPECT_SHA=deadbee \
   && bad "CONTROL: a hotpatch from an UNRELATED commit satisfied RIG_EXPECT_SHA" \
   || ok "CONTROL: hotpatch sha matches neither desktop nor outer expectation → refused"
+
+out="$(run_guard_out "$HP"'vm_server_loaded_identity() { return 1; }; vm_build_provenance() { echo "|0.0.0"; }' 'vm_assert_build_provenance vm1')"
+case "$out" in
+  *"no verified service-owned loaded identity"*) ok "CONTROL: disk-only hotpatch marker cannot prove loaded provenance" ;;
+  *) bad "disk-only marker refusal was not observed: $out" ;;
+esac
+out="$(run_guard_out "$HP"'vm_server_loaded_identity() { echo "linux:boot:1|aaaaaaaaaaaa|old"; }; vm_build_provenance() { echo "|0.0.0"; }' 'vm_assert_build_provenance vm1')"
+case "$out" in
+  *"disk marker differs from Server-loaded identity"*) ok "CONTROL: stale Server cannot borrow the hotpatch disk marker" ;;
+  *) bad "stale loaded identity refusal was not observed: $out" ;;
+esac
 
 # The marker is only worth anything if it cannot outlive the bytes it describes.
 # This case runs the REAL vm_hotpatch_provenance against a real fixture directory
