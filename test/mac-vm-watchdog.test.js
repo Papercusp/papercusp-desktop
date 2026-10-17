@@ -921,6 +921,57 @@ for (const scenario of ['root-new', 'root-resume', 'parent-symlink', 'unknown-de
   });
 }
 
+test('Mac storage trial native filesystem placement refuses root before generation and accepts the data default',
+  { skip: process.platform !== 'linux' }, async () => {
+    const helper = new URL('../bin/mac-vm-launch.py', import.meta.url).pathname;
+    const fixture = String.raw`
+import importlib.util, json, sys, tempfile
+from pathlib import Path
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location('launch', sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+root_device = Path('/').stat().st_dev
+assert Path.home().stat().st_dev == root_device, 'native root control must be on /'
+assert Path('/mnt/data').stat().st_dev != root_device, 'native data control must be a separate device'
+with tempfile.TemporaryDirectory(prefix='.native-vm-placement-', dir=Path.home()) as directory:
+    root = Path(directory)
+    fresh, resumed, alias = root/'fresh', root/'resumed', root/'alias'
+    resumed.mkdir(); (resumed/'preserved').write_text('unchanged')
+    alias.symlink_to(root, target_is_directory=True)
+    with patch.object(m, 'generation', side_effect=AssertionError('generation must not run')) as generation, \
+         patch.object(m.subprocess, 'run', side_effect=AssertionError('QEMU must not run')):
+        chosen = m.default_storage_trial()
+        assert chosen.parent == Path('/mnt/data') and not chosen.exists()
+        assert chosen.parent.stat().st_dev != root_device
+        m.require_trial_storage(chosen)
+        for trial, resume, reason in [(fresh, False, 'root filesystem'),
+                                      (resumed, True, 'root filesystem'),
+                                      (alias/'fresh', False, 'symlink')]:
+            try:
+                m.prepare_trial(root/'backup', root/'runtime', trial, 'unused', resume=resume)
+            except RuntimeError as error:
+                assert reason in str(error), str(error)
+            else:
+                raise AssertionError('native unsafe placement admitted: '+str(trial))
+        generation.assert_not_called()
+        assert not fresh.exists() and not chosen.exists()
+        assert (resumed/'preserved').read_text() == 'unchanged'
+        assert sorted(p.name for p in root.iterdir()) == ['alias', 'resumed']
+print(json.dumps({'ok': True, 'rootDevice': root_device,
+                  'dataDevice': Path('/mnt/data').stat().st_dev, 'noHeavyWrites': True}))
+`;
+    const result = await new Promise((resolve) => {
+      execFile('python3', ['-B', '-c', fixture, helper], { timeout: 10_000 },
+        (error, stdout, stderr) => resolve({ code: error ? error.code : 0, stdout, stderr }));
+    });
+    assert.equal(result.code, 0, result.stderr);
+    const observed = JSON.parse(result.stdout.trim());
+    assert.equal(observed.ok, true);
+    assert.equal(observed.noHeavyWrites, true);
+    assert.notEqual(observed.dataDevice, observed.rootDevice);
+  });
+
 // SSH closure must not hide successful native exit or imply an exit that never
 // happened. Replace the clock, guest command and native observations only.
 const shutdownFixture = String.raw`
