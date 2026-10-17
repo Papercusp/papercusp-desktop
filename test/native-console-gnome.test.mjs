@@ -150,12 +150,12 @@ test('production Windows focus handles a denied foreign-window move and verifies
     fs.writeFileSync(driver, `
 #![allow(non_snake_case, non_upper_case_globals, dead_code, unused_unsafe)]
 use std::cell::RefCell;
-#[derive(Clone)] struct State { current: bool, allow_move: bool, allow_activation: bool, cloaked: bool, minimized: bool, foreground: isize, moves: usize, switches: usize, duplicate: bool }
-impl Default for State { fn default() -> Self { Self { current: false, allow_move: false, allow_activation: true, cloaked: false, minimized: true, foreground: 2, moves: 0, switches: 0, duplicate: false } } }
+#[derive(Clone)] struct State { current: bool, target_desktop: u32, active_desktop: u32, wrong_move: bool, allow_move: bool, allow_activation: bool, cloaked: bool, minimized: bool, foreground: isize, moves: usize, switches: usize, duplicate: bool }
+impl Default for State { fn default() -> Self { Self { current: false, target_desktop: 2, active_desktop: 1, wrong_move: false, allow_move: false, allow_activation: true, cloaked: false, minimized: true, foreground: 2, moves: 0, switches: 0, duplicate: false } } }
 thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
 fn state<R>(f: impl FnOnce(&mut State) -> R) -> R { STATE.with(|s| f(&mut s.borrow_mut())) }
 #[derive(Clone, Copy)] struct Bool(bool); impl Bool { fn as_bool(self) -> bool { self.0 } }
-mod windows { pub mod Win32 {
+mod windows { pub mod core { pub struct GUID; impl GUID { pub fn zeroed() -> u32 { 0 } } } pub mod Win32 {
  pub mod Foundation { #[derive(Clone, Copy, PartialEq)] pub struct HWND(pub *mut std::ffi::c_void); }
  pub mod Graphics { pub mod Dwm { pub const DWMWA_CLOAKED: u32 = 14; pub unsafe fn DwmGetWindowAttribute(_: super::super::Foundation::HWND, _: u32, v: *mut std::ffi::c_void, _: u32) -> Result<(),()> { *(v as *mut u32) = crate::state(|s| s.cloaked as u32); Ok(()) } } }
  pub mod System { pub mod Com {
@@ -168,8 +168,8 @@ mod windows { pub mod Win32 {
    pub const VirtualDesktopManager: () = (); pub struct IVirtualDesktopManager;
    impl IVirtualDesktopManager {
     pub fn IsWindowOnCurrentVirtualDesktop(&self, _: super::super::Foundation::HWND) -> Result<crate::Bool,()> { Ok(crate::Bool(crate::state(|s| s.current))) }
-    pub fn GetWindowDesktopId(&self, _: super::super::Foundation::HWND) -> Result<u32,()> { Ok(1) }
-    pub fn MoveWindowToDesktop(&self, _: super::super::Foundation::HWND, _: &u32) -> Result<(),()> { crate::state(|s| { s.moves += 1; if s.allow_move { s.current = true; Ok(()) } else { Err(()) } }) }
+    pub fn GetWindowDesktopId(&self, h: super::super::Foundation::HWND) -> Result<u32,()> { Ok(crate::state(|s| if h.0 as isize==1 {s.target_desktop} else {s.active_desktop})) }
+    pub fn MoveWindowToDesktop(&self, _: super::super::Foundation::HWND, d: &u32) -> Result<(),()> { crate::state(|s| { s.moves += 1; if s.allow_move { s.current = true; if s.wrong_move {s.active_desktop=s.target_desktop} else {s.target_desktop=*d}; Ok(()) } else { Err(()) } }) }
    }
   }
   pub mod WindowsAndMessaging {
@@ -179,27 +179,30 @@ mod windows { pub mod Win32 {
    pub fn IsWindowVisible(_: HWND) -> crate::Bool { crate::Bool(true) }
    pub fn SetForegroundWindow(h: HWND) -> Result<(),()> { crate::state(|s| { if s.current { s.foreground = h.0 as isize; } }); Ok(()) }
    pub fn ShowWindow(_: HWND, _: i32) -> crate::Bool { crate::state(|s| s.minimized = false); crate::Bool(true) }
-   pub fn SwitchToThisWindow(h: HWND, _: bool) { crate::state(|s| { s.switches += 1; if s.allow_activation { s.current = true; s.foreground = h.0 as isize; } }); }
+   pub fn SwitchToThisWindow(h: HWND, _: bool) { crate::state(|s| { s.switches += 1; if s.allow_activation { s.active_desktop=s.target_desktop; s.current = true; s.foreground = h.0 as isize; } }); }
   }
  }
 } }
 mod tauri { pub mod async_runtime { pub async fn spawn_blocking<T>(f: impl FnOnce() -> T) -> Result<T,()> { Ok(f()) } } }
 struct DesktopWindow { title: String, hwnd: String }
 fn enumerate_windows(_: Option<&str>) -> Vec<DesktopWindow> { (0..crate::state(|s| if s.duplicate {2} else {1})).map(|_| DesktopWindow { title: "Agent".into(), hwnd: "1".into() }).collect() }
-fn run() -> bool { let mut future = std::pin::pin!(focus_window_by_title_observed("Agent".into())); let mut cx = std::task::Context::from_waker(std::task::Waker::noop()); match std::future::Future::poll(future.as_mut(), &mut cx) { std::task::Poll::Ready(v) => v, _ => panic!("unexpected pending fixture") } }
+fn run_mode(mode: &str) -> bool { let mut future = std::pin::pin!(focus_window_by_title_observed("Agent".into(),mode.into())); let mut cx = std::task::Context::from_waker(std::task::Waker::noop()); match std::future::Future::poll(future.as_mut(), &mut cx) { std::task::Poll::Ready(v) => v, _ => panic!("unexpected pending fixture") } }
+fn run() -> bool {run_mode("window")}
 ${functionSource('focus_window_by_title_observed')}
-#[test] fn denied_foreign_move_uses_activation_and_observes_success() { assert!(run()); state(|s| { assert_eq!(s.moves,1); assert_eq!(s.switches,1); assert_eq!(s.foreground,1); assert!(!s.minimized); }); }
+#[test] fn switch_mode_observes_target_desktop_without_foreign_move() { assert!(run()); state(|s| { assert_eq!(s.moves,0); assert_eq!(s.switches,1); assert_eq!(s.foreground,1); assert_eq!(s.active_desktop,2); assert!(!s.minimized); }); }
+#[test] fn denied_bring_here_never_switches_or_reports_success() {assert!(!run_mode("current"));state(|s|{assert_eq!(s.moves,1);assert_eq!(s.switches,0);assert_eq!(s.active_desktop,1);assert_eq!(s.foreground,2);});}
+#[test] fn switched_desktop_cannot_masquerade_as_successful_move() {state(|s|{s.allow_move=true;s.wrong_move=true;});assert!(!run_mode("current"));}
 #[test] fn denied_activation_never_reports_success() { state(|s| s.allow_activation=false); assert!(!run()); }
 #[test] fn still_cloaked_never_reports_success() { state(|s| s.cloaked=true); assert!(!run()); }
 #[test] fn current_desktop_needs_no_move_or_fallback() { state(|s| s.current=true); assert!(run()); state(|s| { assert_eq!(s.moves,0); assert_eq!(s.switches,0); }); }
-#[test] fn successful_move_needs_no_fallback() { state(|s| s.allow_move=true); assert!(run()); state(|s| assert_eq!(s.switches,0)); }
+#[test] fn successful_move_needs_no_fallback() { state(|s| s.allow_move=true); assert!(run_mode("current")); state(|s| {assert_eq!(s.switches,0);assert_eq!(s.target_desktop,1);assert_eq!(s.active_desktop,1);}); }
 #[test] fn ambiguous_windows_are_untouched() { state(|s| s.duplicate=true); assert!(!run()); state(|s| { assert_eq!(s.moves,0); assert_eq!(s.switches,0); assert!(s.minimized); }); }
 `);
     const compile = await runFixtureCommand('rustc', ['--edition=2021', '--test', '--cfg', 'target_os="windows"', '-Aexplicit_builtin_cfgs_in_flags', driver, '-o', binary], { timeout: 15000, stage: 'windows-focus-fixture-compile' });
     assert.equal(compile.status, 0, compile.stderr);
     const run = await runFixtureCommand(binary, [], { timeout: 10000, stage: 'windows-focus-fixture-run' });
     assert.equal(run.status, 0, run.stdout + run.stderr);
-    assert.match(run.stdout, /6 passed; 0 failed/);
+    assert.match(run.stdout, /8 passed; 0 failed/);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }

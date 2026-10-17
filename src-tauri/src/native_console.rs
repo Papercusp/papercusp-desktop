@@ -197,17 +197,18 @@ pub fn list_windows_by_title(prefix: Option<String>) -> Vec<DesktopWindow> {
 /// No-op returning false on non-Windows (Linux focus stays the wmctrl path).
 #[tauri::command]
 #[specta::specta]
-pub async fn focus_window_by_title(title: String, verification: Option<bool>) -> serde_json::Value {
-    let focused = focus_window_by_title_observed(title).await;
+pub async fn focus_window_by_title(title: String, verification: Option<bool>, workspace: Option<String>) -> serde_json::Value {
+    let workspace = workspace.unwrap_or_else(|| "window".to_string());
+    let focused = focus_window_by_title_observed(title, workspace.clone()).await;
     if verification.unwrap_or(false) {
-        serde_json::json!({ "protocol": "visible-window-v1", "focused": focused })
+        serde_json::json!({ "protocol": "visible-window-v2", "workspace": workspace, "focused": focused })
     } else {
         // Preserve the existing Boolean wire for older onboarding callers.
         serde_json::json!(focused)
     }
 }
 
-async fn focus_window_by_title_observed(title: String) -> bool {
+async fn focus_window_by_title_observed(title: String, workspace: String) -> bool {
     #[cfg(target_os = "windows")]
     {
         use std::ffi::c_void;
@@ -217,6 +218,7 @@ async fn focus_window_by_title_observed(title: String) -> bool {
         use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
         use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow, SwitchToThisWindow, SW_RESTORE};
         return tauri::async_runtime::spawn_blocking(move || {
+            if workspace != "current" && workspace != "window" { return false; }
             let matches: Vec<_> = enumerate_windows(None).into_iter().filter(|w| w.title == title).collect();
             if matches.len() != 1 { return false; }
             let Some(h) = matches[0].hwnd.parse::<isize>().ok() else { return false; };
@@ -230,17 +232,18 @@ async fn focus_window_by_title_observed(title: String) -> bool {
                     Ok(manager) => manager, Err(_) => return false,
                 };
                 let hwnd = HWND(h as *mut c_void);
+                // Pin the destination BEFORE activation. IsWindowOnCurrent...
+                // alone also becomes true when Windows switches desktops.
+                let expected_desktop = match manager.GetWindowDesktopId(if workspace == "current" { GetForegroundWindow() } else { hwnd }) {
+                    Ok(id) if id != windows::core::GUID::zeroed() => id,
+                    _ => return false,
+                };
                 if !manager.IsWindowOnCurrentVirtualDesktop(hwnd).map(|b| b.as_bool()).unwrap_or(false) {
-                    let current = match manager.GetWindowDesktopId(GetForegroundWindow()) {
-                        Ok(id) => id, Err(_) => return false,
-                    };
-                    if manager.MoveWindowToDesktop(hwnd, &current).is_err() {
-                        // A window owned by another interactive process can
-                        // reject IVirtualDesktopManager with E_ACCESSDENIED.
-                        // The documented user activation path still moves it
-                        // to the foreground desktop; retain the same observed
-                        // verification below instead of reporting a false
-                        // negative after the OS has completed the move.
+                    if workspace == "current" {
+                        // A foreign-process move can be denied. The activation
+                        // fallback would silently switch desktops instead.
+                        if manager.MoveWindowToDesktop(hwnd, &expected_desktop).is_err() { return false; }
+                    } else {
                         SwitchToThisWindow(hwnd, true);
                     }
                 }
@@ -250,6 +253,7 @@ async fn focus_window_by_title_observed(title: String) -> bool {
                     let mut cloaked: u32 = 1;
                     let uncloaked = DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut c_void, std::mem::size_of::<u32>() as u32).is_ok() && cloaked == 0;
                     if GetForegroundWindow() == hwnd && IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool()
+                        && manager.GetWindowDesktopId(hwnd).map(|id| id == expected_desktop).unwrap_or(false)
                         && uncloaked && manager.IsWindowOnCurrentVirtualDesktop(hwnd).map(|b| b.as_bool()).unwrap_or(false) { return true; }
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
@@ -259,7 +263,7 @@ async fn focus_window_by_title_observed(title: String) -> bool {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = title;
+        let _ = (title, workspace);
         false
     }
 }

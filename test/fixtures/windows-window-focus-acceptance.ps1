@@ -139,13 +139,13 @@ function Focus-Gui {
   $out.setupFailure=@{gui=[FocusWitness]::Observe($gui);target=[FocusWitness]::Observe($target);atUtc=[DateTime]::UtcNow.ToString('o')}
   throw 'GUI foreground setup was refused'
 }
-function Measure-Case([string]$name,[bool]$expectCurrent,[bool]$expectMinimized) {
+function Measure-Case([string]$name,[bool]$expectCurrent,[bool]$expectMinimized,[string]$workspace='window',[bool]$expectSuccess=$true) {
   Focus-Gui
   $client=Wait-Client
   $before=[FocusWitness]::Observe($target)
   $guiBefore=[FocusWitness]::Observe($gui)
   if($before.current -ne $expectCurrent -or $before.minimized -ne $expectMinimized) { throw ('Invalid before state for '+$name) }
-  $body=@{windowId=$title;workspace='current'} | ConvertTo-Json -Compress
+  $body=@{windowId=$title;workspace=$workspace} | ConvertTo-Json -Compress
   try {
     $response=Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:3270/api/adv/sessions/focus' -Headers @{'x-papercusp-workspace'='focus-449b1'} -ContentType 'application/json' -Body $body -TimeoutSec 10
   } catch {
@@ -158,10 +158,28 @@ function Measure-Case([string]$name,[bool]$expectCurrent,[bool]$expectMinimized)
     }
   }
   $after=[FocusWitness]::Observe($target)
-  $ok=($response.status -eq 'ok' -and $response.windowId -eq $title -and $after.foreground -eq $after.hwnd -and $after.current -and !$after.minimized -and $after.visible -and $after.cloaked -eq 0 -and $after.desktop -eq $guiBefore.desktop)
-  $out.cases+=@{name=$name;client=$client;before=$before;guiBefore=$guiBefore;response=$response;after=$after;pass=$ok}
+  $expectedDesktop=if($workspace -eq 'window'){$before.desktop}else{$guiBefore.desktop}
+  $ok=($response.status -eq 'ok' -and $response.windowId -eq $title -and $after.foreground -eq $after.hwnd -and $after.current -and !$after.minimized -and $after.visible -and $after.cloaked -eq 0 -and $after.desktop -eq $expectedDesktop)
+  if(!$expectSuccess){
+    $guiAfter=[FocusWitness]::Observe($gui)
+    $ok=($response.status -eq 'error' -and $response.httpStatus -eq 500 -and !$after.current -and $after.desktop -eq $before.desktop -and $guiAfter.current -and $guiAfter.desktop -eq $guiBefore.desktop -and $guiAfter.foreground -eq $guiAfter.hwnd)
+  }
+  $out.cases+=@{name=$name;workspace=$workspace;expectSuccess=$expectSuccess;client=$client;before=$before;guiBefore=$guiBefore;response=$response;after=$after;pass=$ok}
   Save-Receipt
   if(!$ok){throw ('Focus predicate failed for '+$name)}
+}
+function Select-OwnedDesktop([string]$desktop) {
+  $bytes=(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops').VirtualDesktopIDs
+  $ids=@();for($i=0;$i -lt $bytes.Length;$i+=16){$part=New-Object byte[] 16;[Array]::Copy($bytes,$i,$part,0,16);$ids+=([guid]::new($part)).ToString()}
+  $current=[FocusWitness]::CurrentDesktopId();$index=[Array]::IndexOf($ids,$current);$destination=[Array]::IndexOf($ids,$desktop)
+  if($index -lt 0 -or $destination -lt 0){throw 'Owned desktop selection identity unavailable'}
+  while($index -ne $destination){
+    $next=if($destination -gt $index){$index+1}else{$index-1}
+    [FocusWitness]::DesktopKey($(if($next -gt $index){0x27}else{0x25}))
+    Start-Sleep -Milliseconds 600
+    if([FocusWitness]::CurrentDesktopId() -ne $ids[$next]){throw 'Owned desktop selection did not converge'}
+    $index=$next
+  }
 }
 try {
   $process=Get-Process -Id $GuiPid
@@ -205,7 +223,7 @@ try {
   # IVirtualDesktopManager API. This is setup; the target remains on its old
   # desktop and its measured focus still goes through the WSL HTTP route.
   $bridge=Get-Content (Join-Path $env:TEMP ('tauri-dev-bridge-'+$GuiPid+'.token')) | ConvertFrom-Json
-  $setupJs='window.__TAURI__.core.invoke("focus_window_by_title",{title:'+($GuiTitle|ConvertTo-Json -Compress)+',verification:true})'
+  $setupJs='window.__TAURI__.core.invoke("focus_window_by_title",{title:'+($GuiTitle|ConvertTo-Json -Compress)+',verification:true,workspace:"current"})'
   $out.guiMoveSetup=Invoke-RestMethod -Method Post -Uri ('http://127.0.0.1:'+$bridge.port+'/eval') -ContentType 'application/json' -Body (@{token=$bridge.token;js=$setupJs}|ConvertTo-Json -Compress) -TimeoutSec 8
   [FocusWitness]::DestroyWindow($desktopProbe)|Out-Null
   $desktopProbe=[IntPtr]::Zero
@@ -214,7 +232,8 @@ try {
   $new=[FocusWitness]::Observe($gui)
   if($new.desktop -eq $old.desktop){throw 'New virtual desktop setup was not observed'}
   if($new.desktop -ne $out.createdDesktop){throw 'GUI did not reach the owned fixture desktop'}
-  Measure-Case 'other-desktop' $false $false
+  Measure-Case 'bring-here-refused' $false $false 'current' $false
+  Measure-Case 'other-desktop' $false $false 'window'
   $out.completed=$true
 } catch { $out.error=$_.Exception.Message }
 finally {
@@ -228,6 +247,7 @@ finally {
     $out.trace='native-trace-'+$out.attemptId+'.json'
   } catch { $out.traceError=$_.Exception.Message }
   if($out.createdDesktop){
+    Select-OwnedDesktop $out.createdDesktop
     $now=[FocusWitness]::CurrentDesktopId()
     if($now -eq $out.createdDesktop){
       [FocusWitness]::DesktopKey(0x73) # Win+Ctrl+F4: remove only our current fixture desktop.
