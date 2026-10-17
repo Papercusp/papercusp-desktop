@@ -24,6 +24,7 @@ const {
   chmodSync,
   readFileSync,
   readdirSync,
+  statSync,
   utimesSync,
 } = require('node:fs');
 const { tmpdir, homedir } = require('node:os');
@@ -151,6 +152,64 @@ test('a target symlink back to root is refused using its actual device', { skip:
     error => error.status === 2 && /root filesystem/.test(error.stderr.toString()));
   assert.ok(lstatSync(alias).isSymbolicLink());
 });
+
+const nativePlacementSkip = process.platform !== 'linux' ? 'Linux filesystem placement'
+  : !existsSync('/mnt/data') || statSync('/mnt/data').dev === statSync('/').dev
+    ? 'requires a separately mounted /mnt/data' : false;
+
+test('native filesystem placement redirects real Cargo root metadata and accepts a separate data target',
+  { skip: nativePlacementSkip }, () => {
+    // No device or Cargo stubs: Cargo reads a real project on the root device,
+    // while stat supplies an oracle independent of the shell placement helper.
+    const project = mkdtempSync('/var/tmp/p009-native-cargo-');
+    try {
+      assert.strictEqual(statSync(project).dev, statSync('/').dev);
+      mkdirSync(join(project, '.cargo'));
+      mkdirSync(join(project, 'src-tauri', 'src'), { recursive: true });
+      writeFileSync(join(project, 'src-tauri', 'Cargo.toml'),
+        '[package]\nname = "native-placement-control"\nversion = "0.1.0"\nedition = "2021"\n');
+      writeFileSync(join(project, 'src-tauri', 'src', 'lib.rs'), '');
+      const rootTarget = join(project, 'target-must-stay-absent');
+      writeFileSync(join(project, '.cargo', 'config.toml'),
+        `[build]\ntarget-dir = ${JSON.stringify(rootTarget)}\n`);
+      const resolveTarget = (env = {}) => execFileSync('bash', ['-c',
+        'set -euo pipefail; PAPERCUSP_DESKTOP_REAP_ONLY=1 . "$1"; __pc_cargo_target_root',
+        'native-placement', HELPER], { cwd: project, encoding: 'utf8',
+        env: isolatedEnv({ PAPERCUSP_DESKTOP_TARGET_ROOT: project, ...env }) });
+      assert.strictEqual(resolveTarget(), '/mnt/data/cargo-target');
+      assert.ok(!existsSync(rootTarget));
+      const dataTarget = join('/mnt/data', home.split('/').pop(), 'native-data-target');
+      assert.notStrictEqual(statSync('/mnt/data').dev, statSync('/').dev);
+      writeFileSync(join(project, '.cargo', 'config.toml'),
+        `[build]\ntarget-dir = ${JSON.stringify(dataTarget)}\n`);
+      assert.strictEqual(resolveTarget(), dataTarget);
+      assert.ok(!existsSync(dataTarget), 'resolving placement must not create a cache');
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+test('native filesystem placement refuses explicit root and root symlink before any slot or cache write',
+  { skip: nativePlacementSkip }, () => {
+    const project = mkdtempSync('/var/tmp/p009-native-refusal-');
+    try {
+      assert.strictEqual(statSync(project).dev, statSync('/').dev);
+      const alias = join(home, 'native-root-link');
+      symlinkSync(project, alias);
+      for (const target of [join(project, 'target-must-stay-absent'), join(alias, 'target-must-stay-absent')]) {
+        assert.throws(() => execFileSync('bash', ['-c',
+          'set -euo pipefail; PAPERCUSP_DESKTOP_REAP_ONLY=1 . "$1"; __pc_claim_target_root',
+          'native-placement', HELPER], { cwd: home, encoding: 'utf8',
+          env: isolatedEnv({ CARGO_TARGET_DIR: target, PAPERCUSP_DESKTOP_TARGET_SLOTS: '0' }) }),
+        error => error.status === 2 && /root filesystem/.test(error.stderr.toString()));
+        assert.ok(!existsSync(target));
+      }
+      assert.ok(lstatSync(alias).isSymbolicLink());
+      assert.ok(!existsSync(join(home, '.papercusp', 'desktop-dev-slots')));
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
 
 function nativeEnv(env = {}) {
   return isolatedEnv({
