@@ -38,6 +38,8 @@ public class FocusWitness {
  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h,uint flags);
  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h,IntPtr after,int x,int y,int cx,int cy,uint flags);
  [DllImport("user32.dll")] public static extern void mouse_event(uint flags,uint dx,uint dy,uint data,UIntPtr extra);
+ [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern IntPtr CreateWindowEx(uint ex,string cls,string title,uint style,int x,int y,int w,int h,IntPtr parent,IntPtr menu,IntPtr instance,IntPtr data);
+ [DllImport("user32.dll")] public static extern bool DestroyWindow(IntPtr h);
  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h,int attribute,out int value,int size);
  public static IntPtr Window(int pid,string title) {
    IntPtr found=IntPtr.Zero;int count=0;
@@ -54,6 +56,19 @@ public class FocusWitness {
  public static void DesktopKey(byte key) {
    keybd_event(0x5b,0,0,UIntPtr.Zero);keybd_event(0x11,0,0,UIntPtr.Zero);keybd_event(key,0,0,UIntPtr.Zero);
    keybd_event(key,0,2,UIntPtr.Zero);keybd_event(0x11,0,2,UIntPtr.Zero);keybd_event(0x5b,0,2,UIntPtr.Zero);
+ }
+ public static string CurrentDesktopId() {
+   // Desktop switches may legitimately leave GetForegroundWindow()==NULL.
+   // A newly created fixture window provides an independent current-desktop
+   // identity without assuming that Explorer has activated another window.
+   IntPtr h=CreateWindowEx(0,"STATIC","Papercusp-Focus-449b1-DesktopProbe",0x10CF0000,100,100,200,120,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
+   if(h==IntPtr.Zero)throw new Exception("Desktop probe creation failed");
+   try {
+     Guid desktop=Guid.Empty;int hr=0;var manager=(VDFocusWitness)new VDFocusManager();
+     for(int n=0;n<20;n++){hr=manager.GetWindowDesktopId(h,out desktop);if(hr==0&&desktop!=Guid.Empty)return desktop.ToString();System.Threading.Thread.Sleep(50);}
+     throw new Exception("Desktop probe identity unavailable: HRESULT="+hr.ToString("X8")+", GUID="+desktop);
+   }
+   finally {DestroyWindow(h);}
  }
  public static bool ClickOwnedCaption(IntPtr h) {
    Rect rect;Point old;
@@ -156,7 +171,7 @@ try {
   if($SetupOnly){
     Focus-Gui
     $out.setupOnly=$true
-    $out.setup=@{client=Wait-Client;gui=[FocusWitness]::Observe($gui);target=[FocusWitness]::Observe($target)}
+    $out.setup=@{client=Wait-Client;gui=[FocusWitness]::Observe($gui);target=[FocusWitness]::Observe($target);currentDesktop=[FocusWitness]::CurrentDesktopId()}
     return
   }
   # Put this fixture on the GUI desktop before the baseline measurement.
@@ -172,9 +187,9 @@ try {
   $old=[FocusWitness]::Observe($target)
   [FocusWitness]::DesktopKey(0x44) # Win+Ctrl+D: fixture setup only.
   Start-Sleep -Milliseconds 900
-  $created=[FocusWitness]::Observe([FocusWitness]::GetForegroundWindow())
-  if($created.desktop -eq $old.desktop -or !$created.current){throw 'New virtual desktop setup was not observed'}
-  $out.createdDesktop=$created.desktop
+  $created=[FocusWitness]::CurrentDesktopId()
+  if($created -eq $old.desktop){throw 'New virtual desktop setup was not observed'}
+  $out.createdDesktop=$created
   Save-Receipt # Own the desktop even if later GUI setup fails.
   # Only the GUI process can reliably move its own window through the public
   # IVirtualDesktopManager API. This is setup; the target remains on its old
@@ -200,13 +215,13 @@ finally {
     $out.trace='native-trace-'+$out.attemptId+'.json'
   } catch { $out.traceError=$_.Exception.Message }
   if($out.createdDesktop){
-    $now=[FocusWitness]::Observe([FocusWitness]::GetForegroundWindow())
-    if($now.current -and $now.desktop -eq $out.createdDesktop){
+    $now=[FocusWitness]::CurrentDesktopId()
+    if($now -eq $out.createdDesktop){
       [FocusWitness]::DesktopKey(0x73) # Win+Ctrl+F4: remove only our current fixture desktop.
       $out.desktopCleanup='requested for verified owned desktop'
       Start-Sleep -Milliseconds 700
-      $out.desktopAfterCleanup=[FocusWitness]::Observe([FocusWitness]::GetForegroundWindow())
-      if($out.desktopAfterCleanup.desktop -eq $out.createdDesktop){$out.completed=$false;$out.error='Owned desktop cleanup did not converge'}
+      $out.desktopAfterCleanup=[FocusWitness]::CurrentDesktopId()
+      if($out.desktopAfterCleanup -eq $out.createdDesktop){$out.completed=$false;$out.error='Owned desktop cleanup did not converge'}
     } else { $out.desktopCleanup='refused: owned desktop is not current' }
   }
   Save-Receipt
