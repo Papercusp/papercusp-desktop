@@ -212,7 +212,7 @@ test('native witness trace follows future callbacks without resurrecting retired
   assert.equal(JSON.stringify(window.__focusTrace).includes('private'), false);
 });
 
-test('native witness diagnostics survive a dead bridge and refuse another process log',
+test('native witness diagnostics snapshot a live writer, survive a dead bridge and refuse foreign logs',
   { skip: process.platform !== 'win32', timeout: 15000 }, async () => {
     const start = focusFixture.indexOf('function Save-FocusDiagnostics {');
     const end = focusFixture.indexOf('\nfunction Wait-Client', start);
@@ -232,11 +232,14 @@ function Invoke-RestMethod {
   if($Uri.EndsWith('/logs')){return @{entries=@(@{message='native channel error'})}}
   throw 'Unexpected endpoint'
 }
+$writer=$null
 try {
   @{port=1;token='diagnostic-test-secret'}|ConvertTo-Json|Set-Content $tokenPath
   $ownLog=Join-Path $dir ('stdout-'+$GuiPid+'.log')
   [IO.File]::WriteAllText($ownLog,('version self-report vtest pid '+$GuiPid+' -> fixture'))
   [IO.File]::WriteAllText((Join-Path $dir 'stdout.log'),'version self-report vtest pid 1 -> another process')
+  $writer=[IO.File]::Open($ownLog,[IO.FileMode]::Open,[IO.FileAccess]::Write,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+  $writer.SetLength(1049088)
   Save-FocusDiagnostics
   $saved=Get-Content (Join-Path $dir $out.diagnostics) -Raw|ConvertFrom-Json
   if($saved.bridge.health.error -ne 'simulated unresponsive bridge'){throw 'Lost bridge failure'}
@@ -244,7 +247,9 @@ try {
   if($saved.logs.Count -ne 2 -or $saved.logs[1].error -ne 'process identity mismatch'){throw 'Accepted a foreign process log'}
   $archive=Join-Path $dir $saved.logs[0].archive
   if(!(Test-Path $archive)){throw 'Did not archive the PID-bound log'}
+  if((Get-Item $archive).Length -ne 1048576 -or !$saved.logs[0].truncated){throw 'Live snapshot was not bounded'}
   $before=[IO.File]::ReadAllText($archive)
+  $writer.Dispose();$writer=$null
   [IO.File]::WriteAllText($ownLog,('version self-report vtest pid '+$GuiPid+' -> replacement bytes'))
   Save-FocusDiagnostics
   if([IO.File]::ReadAllText($archive) -ne $before){throw 'Overwrote preserved attempt evidence'}
@@ -252,6 +257,7 @@ try {
   if($out.error -ne 'original focus failure' -or $out.completed){throw 'Diagnostics changed the verdict'}
   Write-Output 'diagnostic capture passed'
 } finally {
+  if($writer){$writer.Dispose()}
   Remove-Item $tokenPath -ErrorAction SilentlyContinue
   Remove-Item $dir -Recurse -Force
 }

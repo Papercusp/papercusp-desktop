@@ -171,17 +171,36 @@ function Save-FocusDiagnostics {
   foreach($name in @(('stdout-'+$GuiPid+'.log'),'stdout.log')){
     $source=Join-Path $dir $name
     if(!(Test-Path $source)){continue}
-    # A shared stdout.log can belong to a later GUI. Never label that as this
-    # process's evidence. The native startup record supplies the PID binding.
-    $head=[string]::Join("`n", @([IO.File]::ReadLines($source)|Select-Object -First 40))
-    if($head -notmatch ('version self-report .* pid '+$GuiPid+' ->')){
-      $diagnostics.logs+=@{source=$name;error='process identity mismatch'};continue
-    }
     $archive='native-stdout-'+$out.attemptId+'-'+$name
+    $sourceStream=$null;$snapshotStream=$null
     try {
-      [IO.File]::Copy($source, (Join-Path $dir $archive), $false)
-      $diagnostics.logs+=@{source=$name;archive=$archive;sha256=(Get-FileHash (Join-Path $dir $archive) -Algorithm SHA256).Hash.ToLowerInvariant()}
+      # The GUI keeps stdout open for writing. Default .NET readers deny that
+      # existing writer; explicitly share it and copy a finite snapshot from
+      # the same handle used to verify the startup PID.
+      $sourceStream=[IO.File]::Open($source,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+      $sourceLength=$sourceStream.Length
+      $prefix=[byte[]]::new(65536)
+      $prefixLength=$sourceStream.Read($prefix,0,$prefix.Length)
+      $head=[Text.Encoding]::UTF8.GetString($prefix,0,$prefixLength)
+      if($head -notmatch ('version self-report .* pid '+$GuiPid+' ->')){
+        $diagnostics.logs+=@{source=$name;error='process identity mismatch'};continue
+      }
+      $sourceStream.Position=0
+      $remaining=[Math]::Min($sourceLength,1048576)
+      $snapshotStream=[IO.File]::Open((Join-Path $dir $archive),[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+      $buffer=[byte[]]::new(8192)
+      while($remaining -gt 0){
+        $read=$sourceStream.Read($buffer,0,[int][Math]::Min($remaining,$buffer.Length))
+        if($read -eq 0){break}
+        $snapshotStream.Write($buffer,0,$read);$remaining-=$read
+      }
+      $snapshotStream.Dispose();$snapshotStream=$null
+      $diagnostics.logs+=@{source=$name;archive=$archive;sourceBytes=$sourceLength;truncated=($sourceLength -gt 1048576);sha256=(Get-FileHash (Join-Path $dir $archive) -Algorithm SHA256).Hash.ToLowerInvariant()}
     } catch {$diagnostics.logs+=@{source=$name;error=$_.Exception.Message}}
+    finally {
+      if($snapshotStream){$snapshotStream.Dispose()}
+      if($sourceStream){$sourceStream.Dispose()}
+    }
   }
   $out.diagnostics='native-diagnostics-'+$out.attemptId+'.json'
   $diagnostics|ConvertTo-Json -Depth 10|Set-Content -Encoding UTF8 (Join-Path $dir $out.diagnostics)
