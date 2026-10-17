@@ -122,6 +122,8 @@ if a[0]=='info':
         images=[dict(filename=a[-1],format='qcow2',**{'virtual-size':4096})]
         if fault=='output-backed':images[0]['backing-filename']=m['source']['chain'][0]['path']
     print(json.dumps(images))
+elif a[0]=='create':
+    Path(a[-2]).write_bytes(b'fixture created image')
 elif a[0]=='convert':
     Path(a[-1]).write_bytes(Path(a[-2]).read_bytes())
     if fault=='timeout':time.sleep(5)
@@ -131,6 +133,10 @@ elif a[0]=='compare':
     if fault=='logical-mismatch':sys.exit(1)
     if fault=='source-mutation':Path(a[-2]).write_bytes(b'changed source bytes!\\n')
     if fault=='output-alias':Path(a[-1]).unlink();Path(a[-1]).symlink_to(a[-2])
+    if fault=='output-inplace':
+        p=Path(a[-1]);p.write_bytes(b'x'*p.stat().st_size)
+    if fault=='output-regular-replacement':
+        p=Path(a[-1]);foreign=p.with_name('replacement');foreign.write_bytes(b'foreign regular output');foreign.replace(p)
     if fault=='publication-race':
         dest=Path(m['destination']['path']).parent;dest.mkdir();(dest/'foreign').write_text('retain me')
 else:sys.exit(99)
@@ -167,6 +173,11 @@ else:sys.exit(99)
       destinationEntries: fs.existsSync(path.dirname(manifest.destination.path))
         ? fs.readdirSync(path.dirname(manifest.destination.path)) : [],
       partials: fs.readdirSync(run).filter(p => p.startsWith(".diagnostic-copy-")),
+      retainedOutputs: fs.readdirSync(run).filter(p => p.startsWith(".diagnostic-copy-")).map(p => {
+        const output = path.join(run, p, "overlay.qcow2");
+        return fs.existsSync(output) && !fs.lstatSync(output).isSymbolicLink()
+          ? fs.readFileSync(output, "utf8") : null;
+      }),
       receiptMode: receipt?.receiptPath && fs.existsSync(receipt.receiptPath)
         ? fs.statSync(receipt.receiptPath).mode & 0o777 : null };
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
@@ -176,7 +187,7 @@ test("production diagnostic copy publishes a standalone stopped copy and private
   const p = runDiagnosticCopy();
   assert.equal(p.result.status, 0, p.result.stderr + p.result.stdout);
   assert.deepEqual(p.trace.map(s => s.replace(/^reserve:.*/, "reserve")),
-    ["authority", "reserve", "authority", "image:info", "image:convert", "image:info", "image:compare", "authority", "release"]);
+    ["authority", "reserve", "authority", "image:info", "image:create", "image:convert", "image:info", "image:compare", "authority", "release"]);
   assert.equal(p.receipt.status, "success");
   assert.equal(p.receipt.published, true);
   assert.equal(p.receipt.sourceUnchanged, true);
@@ -187,7 +198,8 @@ test("production diagnostic copy publishes a standalone stopped copy and private
   assert.deepEqual(p.partials, []);
   assert.equal(p.receipt.authority.scope, "vmctl:prepare-diagnostic-copy");
   assert.equal(p.receipt.authority.manifestSha256, p.receipt.manifestSha256);
-  assert.equal(p.receipt.commands.length, 4);
+  assert.equal(p.receipt.commands.length, 5);
+  assert.ok(p.receipt.commands.find(c => c.argv.includes("convert")).argv.includes("-n"));
   assert.ok(p.receipt.commands.every(c => c.status === 0 && !c.argv.includes("-U")));
   assert.equal(p.receipt.reservation.budgetBytes, 143360);
   assert.ok(p.trace.find(s => /^reserve:.*:1:60$/.test(s)), "all budgets use the existing reservation in GiB for the full lease window");
@@ -277,6 +289,28 @@ test("diagnostic copy refuses output replacement and never follows its cleanup s
   assert.equal(p.receipt.cleanupReason, "partial-foreign-content");
   assert.deepEqual(p.before, p.after);
   assert.equal(p.published, false);
+});
+
+test("diagnostic copy rejects same-length output mutation after logical comparison", () => {
+  const p = runDiagnosticCopy("output-inplace");
+  assert.notEqual(p.result.status, 0, "changed bytes must not inherit an earlier logical comparison verdict");
+  assert.equal(p.receipt.published, false);
+  assert.match(p.receipt.reason, /copy-(?:identity|stability)-changed/);
+  assert.ok(p.trace.includes("image:compare"));
+  assert.deepEqual(p.before, p.after);
+  assert.deepEqual(p.partials, [], "the same owned inode may be cleaned after a content-stability refusal");
+});
+
+test("diagnostic copy retains a substituted regular output instead of deleting its foreign inode", () => {
+  const p = runDiagnosticCopy("output-regular-replacement");
+  assert.notEqual(p.result.status, 0);
+  assert.equal(p.receipt.published, false);
+  assert.equal(p.receipt.reason, "copy-identity-changed");
+  assert.equal(p.receipt.partialCleaned, false);
+  assert.equal(p.receipt.cleanupReason, "partial-output-not-owned");
+  assert.equal(p.partials.length, 1);
+  assert.deepEqual(p.retainedOutputs, ["foreign regular output"]);
+  assert.deepEqual(p.before, p.after);
 });
 
 function federationFragment(startNeedle, endNeedle) {

@@ -146,6 +146,26 @@ def file_identity(st):
     return (st.st_dev, st.st_ino, st.st_size)
 
 
+def stable_identity(st):
+    return (*file_identity(st), st.st_mtime_ns, st.st_ctime_ns)
+
+
+def assert_output_stable(output, fd, expected, deadline, digest=None, hash_bytes=True):
+    def check():
+        observed = output.lstat()
+        held = os.fstat(fd)
+        require(stat.S_ISREG(observed.st_mode) and observed.st_nlink == 1
+                and file_identity(observed)[:2] == file_identity(held)[:2] == expected[:2], 'copy-identity-changed')
+        require(stable_identity(observed) == stable_identity(held) == expected, 'copy-stability-changed')
+    check()
+    if hash_bytes:
+        observed_digest = digest_fd(fd, deadline)
+        require(digest is None or observed_digest == digest, 'copy-stability-changed')
+        digest = observed_digest
+    check()
+    return digest
+
+
 def assert_sources(m, fds, deadline):
     for entry, fd in zip(m['source']['chain'], fds):
         canonical(entry['path'])
@@ -253,6 +273,7 @@ def materialize(m, digest, authority, reservation_file):
                'status': 'failure', 'stage': 'preflight', 'commands': [], 'published': False}
     deadline = time.monotonic() + m['limits']['timeoutSec']
     fds, temp, temp_identity, evidence = [], None, None, None
+    copy_fd, owned_output = None, None
     try:
         root = Path(m['destination']['path']).parent.parent
         root_identity = file_identity(root.stat())[:2]
@@ -286,10 +307,21 @@ def materialize(m, digest, authority, reservation_file):
         temp_identity = file_identity(temp.stat())[:2]
         output = temp / 'overlay.qcow2'
         receipt.update(stage='conversion', partialDirectory=str(temp))
-        run_image(['convert', '-f', m['source']['chain'][0]['format'], '-O', 'qcow2', '--', m['source']['chain'][0]['path'], str(output)], deadline, m['limits']['copyBytes'], receipt)
+        # Claim the inode BEFORE either utility runs, retaining its read-only FD
+        # even on conversion failure. -n populates that image rather than asking
+        # convert to create a new output whose ownership could not be recovered.
+        copy_fd = os.open(output, os.O_RDONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        owned_output = file_identity(os.fstat(copy_fd))[:2]
+        run_image(['create', '-f', 'qcow2', '--', str(output), str(m['source']['chain'][0]['virtualSize'])], deadline, m['limits']['copyBytes'], receipt)
+        require(file_identity(output.lstat())[:2] == owned_output and not output.is_symlink(), 'copy-identity-changed')
+        run_image(['convert', '-n', '-f', m['source']['chain'][0]['format'], '-O', 'qcow2', '--', m['source']['chain'][0]['path'], str(output)], deadline, m['limits']['copyBytes'], receipt)
         require(output.is_file() and not output.is_symlink() and output.stat().st_nlink == 1
                 and output.stat().st_size <= m['limits']['copyBytes'], 'copy-output-budget-or-custody')
-        output_identity = file_identity(output.stat())
+        require(file_identity(output.lstat())[:2] == owned_output, 'copy-identity-changed')
+        fcntl.flock(copy_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        fcntl.lockf(copy_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        output_identity = stable_identity(os.fstat(copy_fd))
+        copy_digest = assert_output_stable(output, copy_fd, output_identity, deadline)
         receipt['stage'] = 'verification'
         copied = json.loads(run_image(['info', '--backing-chain', '--output=json', '--', str(output)], deadline, m['limits']['copyBytes'], receipt))
         # Compare temporary path before publication, retaining exact metadata.
@@ -306,20 +338,14 @@ def materialize(m, digest, authority, reservation_file):
         require(file_identity(root.stat())[:2] == root_identity
                 and file_identity(evidence_root.stat())[:2] == file_identity(ev_st)[:2], 'parent-identity-changed')
         require(not temp.is_symlink() and file_identity(temp.stat())[:2] == temp_identity, 'partial-identity-changed')
-        require(not output.is_symlink() and file_identity(output.stat()) == output_identity
-                and output.stat().st_nlink == 1, 'copy-identity-changed')
-        copy_fd = os.open(output, os.O_RDONLY | os.O_NOFOLLOW)
-        try:
-            require(file_identity(os.fstat(copy_fd)) == output_identity, 'copy-identity-changed')
-            copy_digest = digest_fd(copy_fd, deadline)
-            os.fsync(copy_fd)
-        finally:
-            os.close(copy_fd)
+        assert_output_stable(output, copy_fd, output_identity, deadline, copy_digest)
+        os.fsync(copy_fd)
         receipt.update(stage='publication', logicalComparison='equal', outputMetadata=copied,
                        sourceUnchanged=True,
                        copyIdentity={'dev': output.stat().st_dev, 'ino': output.stat().st_ino,
                                      'size': output.stat().st_size, 'sha256': copy_digest})
         require(len(json.dumps(receipt).encode()) + 4096 <= m['limits']['evidenceBytes'], 'receipt-evidence-budget')
+        assert_output_stable(output, copy_fd, output_identity, deadline, copy_digest, hash_bytes=False)
         rename_no_replace(temp, dest)
         temp = None
         receipt.update(status='success', stage='complete', published=True)
@@ -334,6 +360,9 @@ def materialize(m, digest, authority, reservation_file):
                 require(not temp.is_symlink() and file_identity(temp.stat())[:2] == temp_identity, 'partial-identity-changed')
                 children = list(temp.iterdir())
                 require(all(p.name == 'overlay.qcow2' and p.is_file() and not p.is_symlink() and p.stat().st_nlink == 1 for p in children), 'partial-foreign-content')
+                require(all(owned_output is not None and file_identity(p.lstat())[:2] == owned_output
+                            and copy_fd is not None and file_identity(os.fstat(copy_fd))[:2] == owned_output
+                            for p in children), 'partial-output-not-owned')
                 for p in children:
                     p.unlink()
                 temp.rmdir()
@@ -341,6 +370,8 @@ def materialize(m, digest, authority, reservation_file):
             except (Refusal, OSError) as error:
                 receipt['partialCleaned'] = False
                 receipt['cleanupReason'] = str(error)
+        if copy_fd is not None:
+            os.close(copy_fd)
         if evidence is not None:
             receipt_path = evidence / 'receipt.json'
             receipt['receiptPath'] = str(receipt_path)
