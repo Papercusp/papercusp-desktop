@@ -101,13 +101,13 @@ EOF
 # The donor must be a physical install. lint-as-committed's node_modules shadow
 # deliberately links package files back to its install and is a SOURCE checkout,
 # not a snapshot donor. Use the physical install as donor; never dereference its
-# package links or edit a shadow to make it pass. Disposable cache entries alone
-# are excluded from both preflight and copying, regardless of their entry type.
+# package links or edit a shadow to make it pass. Disposable caches and exact npm
+# retired executable shims are excluded from both preflight and copying.
 papercusp_pinned_deps_preflight() {
-  local _donor="${1:-}" _population="${2:-}" _trees
+  local _donor="${1:-}" _population="${2:-}" _emit="${3:-}" _trees
   _trees="$(papercusp_pinned_deps_trees "$_donor")" || return 1
   node -e '
-const fs = require("node:fs"), path = require("node:path");
+const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto");
 const root = fs.realpathSync(process.argv[1]), population = process.argv[2];
 const trees = process.argv[3].split("\n").filter(Boolean).map(p => path.join(root, p));
 const inside = (parent, child) => child === parent || child.startsWith(parent + path.sep);
@@ -128,9 +128,28 @@ if (population) {
 const fail = (reason, file) => { throw new Error(reason + ":" + path.relative(root, file)); };
 // Match dependency_generation_prune_ephemeral before traversing disposable outputs.
 const caches = new Set([".cache", ".astro", ".vite", ".vite-temp", ".verdict-data"]);
-const visit = file => {
+const exclusions = [];
+const visit = (file, tree) => {
   const stat = fs.lstatSync(file);
   if (stat.isSymbolicLink()) {
+    // Arborist retires binPaths to .<name>-<pathSafeHash(absolute binPath)>.
+    // These rollback/trash entries may outlive an interrupted npm cleanup;
+    // they are not executable dependencies. Match the exact writer identity,
+    // not every hidden shim, and use this same list for the snapshot copy.
+    const retired = path.basename(file).match(/^\.(.+)-([a-zA-Z0-9]{8})$/);
+    if (path.basename(path.dirname(file)) === ".bin" && retired) {
+      const original = path.join(path.dirname(file), retired[1]);
+      const hash = crypto.createHash("sha1").update(original).digest("base64")
+        .replace(/[^a-zA-Z0-9]+/g, "").slice(0, 8);
+      if (hash === retired[2]) {
+        const rel = path.relative(tree, file), treeRel = path.relative(root, tree);
+        if (/[\r\n\t]/.test(rel + treeRel)) fail("unrepresentable-pinned-exclusion", file);
+        // rsync filters are globs. Escape package/bin names before anchoring
+        // the exclusion to this dependency tree, including on resumed copies.
+        exclusions.push(treeRel + "\t/" + rel.replace(/[\\*?\[\]]/g, "\\$&"));
+        return;
+      }
+    }
     const link = fs.readlinkSync(file);
     if (path.isAbsolute(link)) fail("absolute-pinned-dependency-link", file);
     const lexical = path.resolve(path.dirname(file), link);
@@ -146,15 +165,16 @@ const visit = file => {
       // Exclude the entry before following or validating its target, just as the
       // snapshot copy does; real package links still take the strict guard above.
       if (caches.has(entry.name)) continue;
-      visit(path.join(file, entry.name));
+      visit(path.join(file, entry.name), tree);
     }
   }
 };
 for (const tree of trees) {
   if (fs.lstatSync(tree).isSymbolicLink()) fail("REFUSING symlinked dependency tree", tree);
-  visit(tree);
+  visit(tree, tree);
 }
-' "$_donor" "$_population" "$_trees"
+if (process.argv[4] === "rsync-filters") process.stdout.write(exclusions.join("\n"));
+' "$_donor" "$_population" "$_trees" "$_emit"
 }
 
 # Usage: papercusp_pinned_deps_snapshot <donor_root> <snapshot_root> [hardlink|copy]
@@ -200,7 +220,8 @@ papercusp_pinned_deps_snapshot() (
 
   # A refused retry must not leave the previous attempt attested by its stamp.
   if [ -d "$_snap" ]; then rm -f "$_snap/.papercusp-pinned-deps" || return 1; fi
-  papercusp_pinned_deps_preflight "$_donor" "$_population" || return 1
+  local _retired_filters _filter_tree _filter_pattern
+  _retired_filters="$(papercusp_pinned_deps_preflight "$_donor" "$_population" rsync-filters)" || return 1
 
   # Live tool caches can disappear even under the install mutex. Filter before
   # copying, using dependency-generation's policy; package failures remain fatal.
@@ -260,6 +281,15 @@ papercusp_pinned_deps_snapshot() (
     [ -n "$_rel" ] || continue
     _src="$_donor/$_rel"
     _dst="$_snap/$_rel"
+    local -a _tree_filters
+    _tree_filters=("${_cache_filters[@]}")
+    while IFS=$'\t' read -r _filter_tree _filter_pattern; do
+      if [ "$_filter_tree" = "$_rel" ]; then
+        _tree_filters+=("--exclude=$_filter_pattern")
+      fi
+    done <<EOF
+$_retired_filters
+EOF
     _tmp="$_dst.pinned-deps-tmp.$$"
     _old="$_dst.pinned-deps-old.$$"
     [ -d "$_src" ] || continue
@@ -286,7 +316,7 @@ papercusp_pinned_deps_snapshot() (
         if [ -z "$_linked" ]; then
           echo "verifying completed snapshot $_rel (checksums, independent inodes)"
           if ! _changes="$(rsync -aH --checksum --dry-run --delete --itemize-changes \
-            "${_cache_filters[@]}" "$_src/" "$_dst/")"; then
+            "${_tree_filters[@]}" "$_src/" "$_dst/")"; then
             _fail=1
             continue
           fi
@@ -367,14 +397,14 @@ papercusp_pinned_deps_snapshot() (
     if [ "$_copy_mode" = copy ]; then
       echo "  verifying retained staging bytes before reuse: $_tmp"
       dependency_generation_copy_with_progress "$_src" "$_tmp" --rsync-checksum \
-        "${_cache_filters[@]}" || _copy_rc=$?
+        "${_tree_filters[@]}" || _copy_rc=$?
     else
       # Preserve rsync's path-specific diagnosis. A generic incomplete receipt
       # cannot distinguish a disappearing cache entry, EXDEV or ENOSPC, and
       # forces callers to repeat the whole expensive snapshot to investigate.
       mkdir -p "$_tmp" || _copy_rc=$?
       if [ "$_copy_rc" -eq 0 ]; then
-        rsync -aH --link-dest="$_src" "${_cache_filters[@]}" "$_src/" "$_tmp/" || _copy_rc=$?
+        rsync -aH --link-dest="$_src" "${_tree_filters[@]}" "$_src/" "$_tmp/" || _copy_rc=$?
       fi
     fi
     if [ "$_copy_rc" -ne 0 ]; then
