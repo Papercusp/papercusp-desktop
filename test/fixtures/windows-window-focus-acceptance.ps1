@@ -57,17 +57,22 @@ public class FocusWitness {
    keybd_event(0x5b,0,0,UIntPtr.Zero);keybd_event(0x11,0,0,UIntPtr.Zero);keybd_event(key,0,0,UIntPtr.Zero);
    keybd_event(key,0,2,UIntPtr.Zero);keybd_event(0x11,0,2,UIntPtr.Zero);keybd_event(0x5b,0,2,UIntPtr.Zero);
  }
- public static string CurrentDesktopId() {
+ public static IntPtr OpenDesktopProbe() {
    // Desktop switches may legitimately leave GetForegroundWindow()==NULL.
    // A newly created fixture window provides an independent current-desktop
    // identity without assuming that Explorer has activated another window.
    IntPtr h=CreateWindowEx(0,"STATIC","Papercusp-Focus-449b1-DesktopProbe",0x10CF0000,100,100,200,120,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
    if(h==IntPtr.Zero)throw new Exception("Desktop probe creation failed");
-   try {
+   return h;
+ }
+ public static string DesktopId(IntPtr h) {
      Guid desktop=Guid.Empty;int hr=0;var manager=(VDFocusWitness)new VDFocusManager();
      for(int n=0;n<20;n++){hr=manager.GetWindowDesktopId(h,out desktop);if(hr==0&&desktop!=Guid.Empty)return desktop.ToString();System.Threading.Thread.Sleep(50);}
      throw new Exception("Desktop probe identity unavailable: HRESULT="+hr.ToString("X8")+", GUID="+desktop);
-   }
+ }
+ public static string CurrentDesktopId() {
+   IntPtr h=OpenDesktopProbe();
+   try { return DesktopId(h); }
    finally {DestroyWindow(h);}
  }
  public static bool ClickOwnedCaption(IntPtr h) {
@@ -187,16 +192,23 @@ try {
   $old=[FocusWitness]::Observe($target)
   [FocusWitness]::DesktopKey(0x44) # Win+Ctrl+D: fixture setup only.
   Start-Sleep -Milliseconds 900
-  $created=[FocusWitness]::CurrentDesktopId()
+  $desktopProbe=[FocusWitness]::OpenDesktopProbe()
+  $created=[FocusWitness]::DesktopId($desktopProbe)
   if($created -eq $old.desktop){throw 'New virtual desktop setup was not observed'}
   $out.createdDesktop=$created
   Save-Receipt # Own the desktop even if later GUI setup fails.
+  $out.probeClick=[FocusWitness]::ClickOwnedCaption($desktopProbe)
+  Start-Sleep -Milliseconds 150
+  $out.probeBefore=[FocusWitness]::Observe($desktopProbe)
+  if($out.probeBefore.foreground -ne $out.probeBefore.hwnd){throw 'Desktop probe foreground setup was refused'}
   # Only the GUI process can reliably move its own window through the public
   # IVirtualDesktopManager API. This is setup; the target remains on its old
   # desktop and its measured focus still goes through the WSL HTTP route.
   $bridge=Get-Content (Join-Path $env:TEMP ('tauri-dev-bridge-'+$GuiPid+'.token')) | ConvertFrom-Json
   $setupJs='window.__TAURI__.core.invoke("focus_window_by_title",{title:'+($GuiTitle|ConvertTo-Json -Compress)+',verification:true})'
   $out.guiMoveSetup=Invoke-RestMethod -Method Post -Uri ('http://127.0.0.1:'+$bridge.port+'/eval') -ContentType 'application/json' -Body (@{token=$bridge.token;js=$setupJs}|ConvertTo-Json -Compress) -TimeoutSec 8
+  [FocusWitness]::DestroyWindow($desktopProbe)|Out-Null
+  $desktopProbe=[IntPtr]::Zero
   # Pull only our GUI into the newly created desktop; the target stays behind.
   Focus-Gui
   $new=[FocusWitness]::Observe($gui)
@@ -206,6 +218,7 @@ try {
   $out.completed=$true
 } catch { $out.error=$_.Exception.Message }
 finally {
+  if($desktopProbe -and $desktopProbe -ne [IntPtr]::Zero){[FocusWitness]::DestroyWindow($desktopProbe)|Out-Null}
   # An instrumented WebView may expose bounded callback evidence. Preserve it
   # separately; a trace timeout is diagnostic evidence, never acceptance.
   try {
