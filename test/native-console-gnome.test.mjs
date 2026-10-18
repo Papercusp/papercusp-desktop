@@ -269,6 +269,28 @@ try {
     assert.match(result.stdout, /diagnostic capture passed/);
   });
 
+test('native witness transport probe reads native title only from connected content-origin IPC', async () => {
+  const preflight = focusFixture.slice(focusFixture.indexOf('function Assert-NativeTransport {'),
+    focusFixture.indexOf('\nfunction Wait-Client'));
+  const script = preflight.match(/\$js=@'\r?\n([\s\S]*?)\r?\n'@/)[1];
+  for (const [client, ownerIsContentOrigin, healthy] of [
+    ['connected', true, true], ['never-connected', false, false], ['connected', false, false],
+  ]) {
+    const calls = [];
+    const ipc = { client, ownerIsContentOrigin, connectedPath: 'tcp://127.0.0.1:1' };
+    const wsl = { state: { kind: 'Error', message: 'Server recipe missing' } };
+    const context = vm.createContext({ window: { __TAURI__: {
+      core: { invoke: async command => { calls.push(command); return command === 'endpoint_ipc_status' ? ipc : wsl; } },
+      window: { getCurrentWindow: () => ({ title: async () => { calls.push('native-title'); return 'Papercusp'; } }) },
+    } }, document: { title: 'Papercusp Operator' } });
+    const result = await vm.runInContext(script, context);
+    assert.equal(result.ipc, ipc);
+    assert.deepEqual(calls, healthy ? ['endpoint_ipc_status', 'native-title'] : ['endpoint_ipc_status', 'wsl_status']);
+    assert.equal(result.nativeTitle, healthy ? 'Papercusp' : undefined);
+    assert.equal(result.wsl, healthy ? undefined : wsl);
+  }
+});
+
 test('native witness rejects unresolved or foreign IPC before measuring focus',
   { skip: process.platform !== 'win32', timeout: 15000 }, async () => {
     const start = focusFixture.indexOf('function Assert-NativeTransport {');
@@ -277,7 +299,7 @@ test('native witness rejects unresolved or foreign IPC before measuring focus',
     const driver = `
 $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
 ${focusFixture.slice(start, end)}
-$GuiPid=$PID;$out=@{cases=@()};$script:requests=0
+$GuiPid=$PID;$GuiTitle='Papercusp';$out=@{cases=@()};$script:requests=0
 function Get-Content { '{"port":1,"token":"private-transport-test-token"}' }
 function Invoke-RestMethod {
   param($Method,$Uri,$ContentType,$Body,$TimeoutSec)
@@ -293,9 +315,13 @@ $script:status=@{ipc=@{client='connected';ownerIsContentOrigin=$false;connectedP
 $message=$null
 try{Assert-NativeTransport}catch{$message=$_.Exception.Message}
 if($message -notlike '*foreign singleton*'){throw 'Accepted IPC belonging to another content origin'}
-$script:status=@{ipc=@{client='connected';ownerIsContentOrigin=$true;connectedPath='tcp://127.0.0.1:1'}}
+$script:status=@{ipc=@{client='connected';ownerIsContentOrigin=$true;connectedPath='tcp://127.0.0.1:1'};nativeTitle='Papercusp'}
+$GuiTitle='Papercusp Operator';$message=$null
+try{Assert-NativeTransport}catch{$message=$_.Exception.Message}
+if($message -notlike '*expected "Papercusp Operator", observed "Papercusp"*'){throw 'Page title was accepted as a native window title'}
+$GuiTitle='Papercusp'
 Assert-NativeTransport
-if($script:requests -ne 3){throw 'Unexpected transport requests'}
+if($script:requests -ne 4){throw 'Unexpected transport requests'}
 if(($out|ConvertTo-Json -Depth 10).Contains('private-transport-test-token')){throw 'Persisted bridge credential'}
 Write-Output 'transport preflight passed'
 `;

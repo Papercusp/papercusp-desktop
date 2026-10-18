@@ -213,7 +213,9 @@ function Assert-NativeTransport {
   $js=@'
 (async () => {
   const ipc = await window.__TAURI__.core.invoke('endpoint_ipc_status');
-  if (ipc.client === 'connected' && ipc.ownerIsContentOrigin && ipc.connectedPath) return { ipc };
+  if (ipc.client === 'connected' && ipc.ownerIsContentOrigin && ipc.connectedPath) {
+    return { ipc, nativeTitle: await window.__TAURI__.window.getCurrentWindow().title() };
+  }
   return { ipc, wsl: await window.__TAURI__.core.invoke('wsl_status') };
 })()
 '@
@@ -222,6 +224,9 @@ function Assert-NativeTransport {
   $ipc=$out.transport.ipc
   if($ipc.client -ne 'connected' -or -not $ipc.ownerIsContentOrigin -or -not $ipc.connectedPath){
     throw ('Native IPC precondition failed: '+$ipc.resolutionDetail+'; WSL '+($out.transport.wsl.state|ConvertTo-Json -Compress))
+  }
+  if($out.transport.nativeTitle -ne $GuiTitle){
+    throw ('Native window title precondition failed: expected "'+$GuiTitle+'", observed "'+$out.transport.nativeTitle+'"')
   }
 }
 function Wait-Client {
@@ -317,6 +322,7 @@ try {
   $process=Get-Process -Id $GuiPid
   if($process.Path -ne (Join-Path $dir 'papercusp-desktop.exe')){throw 'Refusing an unowned GUI process'}
   if($process.SessionId -ne (Get-Process -Id $PID).SessionId){throw 'Witness must run in the GUI interactive session'}
+  if(-not $CleanupOwnedDesktops){Install-FocusTrace;Assert-NativeTransport}
   $title='Papercusp-Focus-449b1-Target'
   $gui=[FocusWitness]::Window($GuiPid,$GuiTitle)
   $target=[FocusWitness]::Window($TargetPid,$title)
@@ -341,8 +347,6 @@ try {
     $out.cleanupOnly=$true;$out.completed=$true
     return
   }
-  Install-FocusTrace
-  Assert-NativeTransport
   if($SetupOnly){
     Focus-Gui
     $out.setupOnly=$true
