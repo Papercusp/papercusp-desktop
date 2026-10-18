@@ -61,6 +61,59 @@ echo "==> 3. app process"
 pass "app running"
 
 if [[ "$VM_SMOKE_GUI_ONLY" == "1" ]]; then
+  # Both apps have the same image name. A Server or a task launched with
+  # password logon in Session 0 cannot establish interactive GUI acceptance.
+  GUI_PROBE="$(cat <<'POWERSHELL'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class PapercuspSmokeDesktop {
+  [DllImport("kernel32.dll")] public static extern uint WTSGetActiveConsoleSessionId();
+  [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool IsWindowVisible(IntPtr hWnd);
+}
+'@
+$guiPath = Join-Path $env:LOCALAPPDATA 'Papercusp GUI\papercusp-desktop.exe'
+$processes = @(Get-Process -Name papercusp-desktop -ErrorAction SilentlyContinue | ForEach-Object {
+  @{ id = $_.Id; path = $_.Path; sessionId = $_.SessionId;
+     windowHandle = $_.MainWindowHandle.ToInt64();
+     windowVisible = [PapercuspSmokeDesktop]::IsWindowVisible($_.MainWindowHandle) }
+})
+@{ guiPath = $guiPath; activeSessionId = [PapercuspSmokeDesktop]::WTSGetActiveConsoleSessionId();
+   processes = $processes } | ConvertTo-Json -Depth 4 -Compress
+POWERSHELL
+)"
+  # EncodedCommand preserves quoting through the Windows SSH command shell.
+  GUI_PROBE_BASE64="$(printf '%s' "$GUI_PROBE" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)" \
+    || fail "could not encode GUI inventory probe"
+  GUI_STATE="$(timeout 45 "${SSH[@]}" "powershell -NoProfile -NonInteractive -EncodedCommand $GUI_PROBE_BASE64")" \
+    || fail "could not read interactive GUI inventory"
+  printf '%s' "$GUI_STATE" | node -e '
+    let input = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", chunk => input += chunk);
+    process.stdin.on("end", () => {
+      try {
+        const state = JSON.parse(input);
+        const session = state.activeSessionId;
+        if (!Number.isInteger(session) || session <= 0 || session === 4294967295)
+          throw new Error("no active console session");
+        const normalize = value => typeof value === "string"
+          ? require("node:path").win32.normalize(value).toLowerCase() : null;
+        const expected = normalize(state.guiPath);
+        const gui = Array.isArray(state.processes) && state.processes.find(p =>
+          expected && normalize(p.path) === expected && p.sessionId === session &&
+          Number.isFinite(p.windowHandle) && p.windowHandle !== 0 && p.windowVisible === true);
+        if (!gui) throw new Error("no installed GUI with a visible window in the active console session");
+        console.log(`  ✓ visible GUI pid ${gui.id} in session ${session}`);
+      } catch (error) {
+        console.error(`  ✗ interactive GUI: ${error.message}`);
+        process.exitCode = 1;
+      }
+    });
+  ' || fail "GUI-only smoke requires a visible interactive GUI"
   for n in 4 5 6 7 8 9; do skip "check $n"; done
   echo "GUI-ONLY SMOKE: checks 1-3 green, 4-9 skipped by explicit opt-in (not a release blocker)"
   exit 0
