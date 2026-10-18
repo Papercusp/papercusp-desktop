@@ -35,6 +35,33 @@ function probeTarget(metadata, targetOs, targetArch) {
   } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
 }
 
+function validateReleaseTarget(targetOs, targetArch) {
+  return spawnSync('bash', ['-c', [
+    'set -euo pipefail', helper('papercusp_validate_vm_release_target'),
+    'papercusp_validate_vm_release_target "$1" "$2"',
+  ].join('\n'), 'fixture', targetOs, targetArch], { encoding: 'utf8' });
+}
+
+test('vm-release candidate qualification accepts the supported Linux x64 target', () => {
+  const result = validateReleaseTarget('linux', 'x64');
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test('vm-release candidate qualification rejects unsupported native targets', () => {
+  for (const [targetOs, targetArch] of [
+    ['darwin', 'x64'], ['darwin', 'arm64'],
+    ['windows', 'x64'], ['linux', 'arm64'],
+  ]) {
+    const result = validateReleaseTarget(targetOs, targetArch);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1, `${targetOs}-${targetArch}: ${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, /supports only linux-x64/);
+    assert.ok(result.stderr.includes(`requested: ${targetOs}-${targetArch}`), result.stderr);
+    assert.match(result.stderr, /refusing to fall back to stale ambient binaries/);
+  }
+});
+
 test('pinned Go CLI target guard accepts complete Linux and Darwin target metadata', () => {
   for (const [os, arch] of [['linux', 'amd64'], ['darwin', 'amd64'], ['darwin', 'arm64']]) {
     const result = probeTarget(`\tbuild\tGOOS=${os}\n\tbuild\tGOARCH=${arch}\n`, os, arch);
