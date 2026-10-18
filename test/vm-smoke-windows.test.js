@@ -30,7 +30,7 @@ function runSmoke(processes, overrides = {}) {
       encoding: 'utf8', timeout: 5000,
       env: {
         ...process.env, PATH: `${fixture}:${process.env.PATH}`, VM_SMOKE_GUI_ONLY: '1',
-        WINDOWS_SMOKE_FIXTURE: JSON.stringify({ guiPath, activeSessionId: 1, processes, ...overrides }),
+        WINDOWS_SMOKE_FIXTURE: JSON.stringify({ guiPath, activeSessionId: 1, probeSessionId: 1, processes, ...overrides }),
       },
     });
   } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
@@ -68,6 +68,12 @@ test('GUI-only smoke rejects an unavailable active console session', () => {
     assert.equal(result.status, 1, result.stdout + result.stderr);
     assert.match(result.stderr, /no active console session/);
   }
+});
+
+test('GUI-only smoke rejects a window witness collected from SSH Session 0', () => {
+  const result = runSmoke([visibleGui], { probeSessionId: 0 });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /window witness did not run in the active console session/);
 });
 
 test('GUI-only smoke accepts the exact GUI visible in the active console session', () => {

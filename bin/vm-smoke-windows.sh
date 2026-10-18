@@ -66,7 +66,11 @@ if [[ "$VM_SMOKE_GUI_ONLY" == "1" ]]; then
   GUI_PROBE="$(cat <<'POWERSHELL'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-Add-Type @'
+$inventory = @'
+param([string]$OutputPath)
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public static class PapercuspSmokeDesktop {
@@ -74,15 +78,42 @@ public static class PapercuspSmokeDesktop {
   [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
   public static extern bool IsWindowVisible(IntPtr hWnd);
 }
-'@
+"@
 $guiPath = Join-Path $env:LOCALAPPDATA 'Papercusp GUI\papercusp-desktop.exe'
 $processes = @(Get-Process -Name papercusp-desktop -ErrorAction SilentlyContinue | ForEach-Object {
   @{ id = $_.Id; path = $_.Path; sessionId = $_.SessionId;
      windowHandle = $_.MainWindowHandle.ToInt64();
      windowVisible = [PapercuspSmokeDesktop]::IsWindowVisible($_.MainWindowHandle) }
 })
-@{ guiPath = $guiPath; activeSessionId = [PapercuspSmokeDesktop]::WTSGetActiveConsoleSessionId();
-   processes = $processes } | ConvertTo-Json -Depth 4 -Compress
+$state = @{ guiPath = $guiPath; activeSessionId = [PapercuspSmokeDesktop]::WTSGetActiveConsoleSessionId();
+   probeSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId; processes = $processes }
+[IO.File]::WriteAllText($OutputPath, ($state | ConvertTo-Json -Depth 4 -Compress), [Text.UTF8Encoding]::new($false))
+'@
+# SSH runs in Session 0. EnumWindows/MainWindowHandle there cannot witness
+# windows on the console desktop. Use an owned temporary interactive task.
+$name = 'Papercusp-GuiSmoke-' + [Guid]::NewGuid().ToString('N')
+$dir = Join-Path $env:TEMP $name
+$script = Join-Path $dir 'inventory.ps1'
+$receipt = Join-Path $dir 'inventory.json'
+New-Item -ItemType Directory -Path $dir | Out-Null
+try {
+  [IO.File]::WriteAllText($script, $inventory)
+  $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -OutputPath "{1}"' -f $script, $receipt)
+  $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
+  Register-ScheduledTask -TaskName $name -Action $action -Principal $principal | Out-Null
+  Start-ScheduledTask -TaskName $name
+  $deadline = [DateTime]::UtcNow.AddSeconds(30)
+  while (!(Test-Path -LiteralPath $receipt) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
+  if (!(Test-Path -LiteralPath $receipt)) { throw 'interactive GUI inventory task produced no receipt' }
+  Get-Content -LiteralPath $receipt -Raw
+} finally {
+  $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+  if ($task) {
+    if ($task.State -eq 'Running') { Stop-ScheduledTask -TaskName $name }
+    Unregister-ScheduledTask -TaskName $name -Confirm:$false
+  }
+  Remove-Item -LiteralPath $dir -Recurse -Force
+}
 POWERSHELL
 )"
   # EncodedCommand preserves quoting through the Windows SSH command shell.
@@ -100,6 +131,8 @@ POWERSHELL
         const session = state.activeSessionId;
         if (!Number.isInteger(session) || session <= 0 || session === 4294967295)
           throw new Error("no active console session");
+        if (state.probeSessionId !== session)
+          throw new Error("window witness did not run in the active console session");
         const normalize = value => typeof value === "string"
           ? require("node:path").win32.normalize(value).toLowerCase() : null;
         const expected = normalize(state.guiPath);
