@@ -189,7 +189,7 @@ test('native filesystem placement redirects real Cargo root metadata and accepts
     }
   });
 
-test('native filesystem placement refuses explicit root and root symlink before any slot or cache write',
+test('native filesystem placement refuses explicit root and root symlink through the public allocator with slots enabled or disabled',
   { skip: nativePlacementSkip }, () => {
     const project = mkdtempSync('/var/tmp/p009-native-refusal-');
     try {
@@ -197,12 +197,20 @@ test('native filesystem placement refuses explicit root and root symlink before 
       const alias = join(home, 'native-root-link');
       symlinkSync(project, alias);
       for (const target of [join(project, 'target-must-stay-absent'), join(alias, 'target-must-stay-absent')]) {
-        assert.throws(() => execFileSync('bash', ['-c',
-          'set -euo pipefail; PAPERCUSP_DESKTOP_REAP_ONLY=1 . "$1"; __pc_claim_target_root',
-          'native-placement', HELPER], { cwd: home, encoding: 'utf8',
-          env: isolatedEnv({ CARGO_TARGET_DIR: target, PAPERCUSP_DESKTOP_TARGET_SLOTS: '0' }) }),
-        error => error.status === 2 && /root filesystem/.test(error.stderr.toString()));
-        assert.ok(!existsSync(target));
+        for (const slots of ['0', '4']) for (const nativeDev of ['0', '1']) {
+          // Exercise the public dispatcher: both allocation modes must admit
+          // storage before selecting a slot or creating its reservation/cache.
+          assert.throws(() => execFileSync('bash', ['-c',
+            'set -euo pipefail; PAPERCUSP_DESKTOP_REAP_ONLY=1 . "$1"; __pc_claim_target_dir',
+            'native-placement', HELPER], { cwd: home, encoding: 'utf8',
+            env: isolatedEnv({ CARGO_TARGET_DIR: target, PAPERCUSP_DESKTOP_TARGET_SLOTS: slots,
+              PAPERCUSP_DESKTOP_NATIVE_DEV: nativeDev }) }),
+          error => error.status === 2 && /root filesystem/.test(error.stderr.toString()),
+          `target=${target}; slots=${slots}; nativeDev=${nativeDev}`);
+          assert.ok(!existsSync(target));
+          assert.ok(!existsSync(join(home, '.papercusp', 'desktop-dev-slots')));
+          assert.ok(!existsSync(join(home, 'reservations')));
+        }
       }
       assert.ok(lstatSync(alias).isSymbolicLink());
       assert.ok(!existsSync(join(home, '.papercusp', 'desktop-dev-slots')));
