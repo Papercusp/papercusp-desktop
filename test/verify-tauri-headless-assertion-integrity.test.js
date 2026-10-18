@@ -608,10 +608,10 @@ test('atomic owned-reservation growth cannot overcommit competing preparation bu
 });
 
 test('native admission precedes costly preparation and pins its maintained helpers', () => {
-  const admission = source.indexOf('vh_run_step native-cargo-capacity preflight_native_cargo');
+  const admission = source.indexOf('verifier_run_step native-cargo-capacity preflight_native_cargo');
   assert.ok(admission > 0);
   for (const step of ['shared-schema-readiness', 'operator-source-snapshot']) {
-    assert.ok(admission < source.indexOf(`vh_run_step ${step} `), step);
+    assert.ok(admission < source.indexOf(`verifier_run_step ${step} `), step);
   }
   assert.match(source, /local input_args=\(--tauri-inputs\)/);
   for (const helper of ['tauri-guarded', 'lib/claim-target-dir.sh',
@@ -638,9 +638,9 @@ test('native console compile preflight refuses failures before setup and skips n
     assert.equal(result.stdout.includes('CHECK_ARGS'), runsCheck);
     if (runsCheck) assert.match(result.stdout, /--test --test-global-setup=\/fixture\/desktop\/test\/monorepo-host-preflight.mjs \/fixture\/desktop\/test\/native-console-gnome.test.mjs/);
   }
-  const admission = source.indexOf('vh_run_step native-console-platform-check preflight_native_console_platform');
-  assert.ok(admission > source.indexOf('vh_run_step native-cargo-capacity preflight_native_cargo'));
-  assert.ok(admission < source.indexOf('vh_run_step operator-source-snapshot '));
+  const admission = source.indexOf('verifier_run_step native-console-platform-check preflight_native_console_platform');
+  assert.ok(admission > source.indexOf('verifier_run_step native-cargo-capacity preflight_native_cargo'));
+  assert.ok(admission < source.indexOf('verifier_run_step operator-source-snapshot '));
   for (const input of ['papercusp-desktop/src-tauri/src/main.rs',
     'papercusp-desktop/src-tauri/src/native_console.rs', 'papercusp-desktop/src-tauri/src/wsl_sidecar_staging.rs',
     'papercusp-desktop/test/native-console-gnome.test.mjs', 'papercusp-desktop/test/monorepo-host-preflight.mjs',
