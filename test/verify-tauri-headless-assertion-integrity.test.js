@@ -26,7 +26,7 @@ const devOperatorSource = fs.readFileSync(DEV_OPERATOR_SCRIPT, 'utf8');
 const dreamSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-dream-native.sh'), 'utf8');
 const voiceSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-voice-settings.sh'), 'utf8');
 
-function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false, claimSlot = false, handoff = false, backgroundHandoff = false, peerReceipt = false, afterFreeGb = 12, aggregate = false, sourceDevice = 101, bulkDevice = 101, bulkFreeGb = freeGb, preAdmissionGb = 0, preparationAgeSec = 0, compileAgeSec = 0, cargoStage = false }) {
+function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false, claimSlot = false, handoff = false, backgroundHandoff = false, peerReceipt = false, afterFreeGb = 12, aggregate = false, sourceDevice = 101, bulkDevice = 101, bulkFreeGb = freeGb, preAdmissionGb = 0, preparationAgeSec = 0, compileAgeSec = 0, cargoStage = false, targetOnRoot = false }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-native-capacity-'));
   const target = path.join(dir, 'cargo');
   const ledger = path.join(dir, 'reservations');
@@ -61,11 +61,15 @@ function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false
       { mode: 0o755 });
     if (cargoStage) fs.writeFileSync(path.join(bin, 'rustc'),
       '#!/usr/bin/env bash\nprintf "host: x86_64-unknown-linux-gnu\\n"\n', { mode: 0o755 });
-    if (aggregate) fs.writeFileSync(path.join(bin, 'stat'), '#!/usr/bin/env bash\n' +
+    // Device placement is part of admission too. Model it explicitly rather
+    // than inheriting whichever filesystem happens to hold os.tmpdir().
+    fs.writeFileSync(path.join(bin, 'stat'), '#!/usr/bin/env bash\n' +
+      'if [[ " $* " != *" %d "* ]]; then exec /usr/bin/stat "$@"; fi\n' +
       'case "${@: -1}" in\n' +
+      "  /) printf '1\\n' ;;\n" +
       `  "$NATIVE_FIXTURE_SOURCE") printf '${sourceDevice}\\n' ;;\n` +
       `  "$NATIVE_FIXTURE_WORK") printf '${bulkDevice}\\n' ;;\n` +
-      "  *) printf '101\\n' ;;\nesac\n", { mode: 0o755 });
+      `  *) printf '${targetOnRoot ? 1 : 101}\\n' ;;\nesac\n`, { mode: 0o755 });
     const preflight = source.match(/^preflight_native_cargo\(\) \{[\s\S]*?^\}/m)?.[0];
     assert.ok(preflight, 'the maintained native preflight must be executable');
     const backgroundLaunch = source.match(/^  TAURI_SCOPE_UNIT=.*\n([\s\S]*?)\n\}/m)?.[1];
@@ -134,6 +138,45 @@ function maintainedShellFunction(name) {
   assert.ok(start >= 0 && end > start, 'maintained shell function missing: ' + name);
   return source.slice(start, end + 2);
 }
+
+function desktopBinaryMarkerFixture(log) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-binary-marker-'));
+  try {
+    const logPath = path.join(root, 'tauri.log');
+    if (log !== null) fs.writeFileSync(logPath, log);
+    const stripAnsi = source.match(/^strip_ansi\(\) \{.*\}$/m)?.[0];
+    assert.ok(stripAnsi, 'the maintained ANSI normalizer must be executable');
+    return spawnSync('bash', ['-c', stripAnsi + '\n' +
+      maintainedShellFunction('desktop_binary_started') + '\ndesktop_binary_started'], {
+      encoding: 'utf8', timeout: 10_000, env: { ...process.env, LOG: logPath },
+    });
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+}
+
+test('desktop binary marker refuses Tauri command announcements while Cargo is compiling', () => {
+  for (const line of [
+    '     Running DevCommand (`/source/papercusp-desktop/bin/tauri-guarded run --no-default-features --color always --`)',
+    '     Running BeforeDevCommand (`node /source/papercusp-desktop/bin/dev-operator.mjs`)',
+    '     Running `/source/papercusp-desktop/target/debug/build/dependency/build-script-build`',
+    '     Running `/target/debug/papercusp-desktop-helper`',
+  ]) {
+    const result = desktopBinaryMarkerFixture(line + '\n');
+    assert.equal(result.status, 1, line + '\n' + result.stderr);
+  }
+});
+
+test('desktop binary marker accepts only the actual Cargo launch with optional guarded runner and ANSI colors', () => {
+  for (const command of [
+    '/target/debug/papercusp-desktop',
+    '/source/papercusp-desktop/bin/tauri-guarded /target/debug/papercusp-desktop',
+  ]) {
+    const result = desktopBinaryMarkerFixture('\u001b[1m\u001b[92m     Running\u001b[0m `' + command + '`\n');
+    assert.equal(result.status, 0, result.stderr);
+  }
+  const missing = desktopBinaryMarkerFixture(null);
+  assert.equal(missing.status, 1);
+  assert.equal(missing.stderr, '');
+});
 
 test('pinned verifier teardown distinguishes retained failing verdicts from lost completion proof', () => {
   for (const [assertionExit, finalizationExit] of [[0, 0], [7, 1], [0, 2], [7, 2]]) {
@@ -244,7 +287,7 @@ test('stale IPC cleanup cannot remove a host advertisement from a private PID na
 
 for (const instrumented of [false, true]) for (const preflightPasses of [false, true]) {
 test(`assertion source preflight preserves its verdict and evidence (instrumented=${instrumented}, passes=${preflightPasses})`, () => {
-  const start = source.indexOf('vh_begin assert');
+  const start = source.indexOf('verifier_begin_phase assert');
   const end = source.indexOf('log "running assertion command: $*"', start);
   assert.ok(start >= 0 && end > start, 'assertion boundary must be present');
   const boundary = source.slice(start, end);
@@ -255,6 +298,7 @@ test(`assertion source preflight preserves its verdict and evidence (instrumente
     const result = spawnSync('bash', ['-c', [
       'set -uo pipefail',
       instrumented ? 'vh_begin() { VH_PHASE_DIR="$TEST_PHASE"; }' : 'vh_begin() { :; }',
+      maintainedShellFunction('verifier_begin_phase'),
       'log() { printf "%s\\n" "$*"; }',
       'node() { printf "SOURCE_PROVENANCE_CHECK\\n"; return "$TEST_PREFLIGHT_EXIT"; }',
       'WORK="$TEST_WORK"',
@@ -297,6 +341,14 @@ test('native admission rejects cold and warm shortages before verifier preparati
     assert.match(admitted.stdout, /RESERVATION_HELD/, 'preparation retains the admitted Cargo budget');
     assert.deepEqual(admitted.claims, [], 'the preparation owner releases its receipt on exit');
   }
+});
+
+test('native admission still refuses a target on the root device before preparation', () => {
+  const result = nativeCargoPreflightFixture({ freeGb: 100, warm: true, targetOnRoot: true });
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /refusing Cargo output on the root filesystem/);
+  assert.doesNotMatch(result.stdout, /PREPARATION_STARTED/);
+  assert.deepEqual(result.claims, []);
 });
 
 test('prepare-only does not require native Cargo capacity', () => {
