@@ -131,7 +131,7 @@ test('verifier readiness runs before source/dependency snapshots, and skips only
   assert.ok(call >= 0);
   // Scratch placement is selected earlier in the same shell to retain its
   // dependency mode. Readiness must precede the actual source/dependency copy.
-  const snapshotAt = src.indexOf('vh_run_step operator-source-snapshot snapshot_operator_source');
+  const snapshotAt = src.indexOf('verifier_run_step operator-source-snapshot snapshot_operator_source');
   assert.ok(snapshotAt >= 0, 'the verifier must still create its source snapshot');
   assert.ok(call < snapshotAt);
   assert.ok(call < src.indexOf('WORK="$(mktemp -d'));
@@ -259,7 +259,7 @@ test('pinned schema probe uses the selected gitlink, ignoring newer committed an
 test('real native preflight passes the selected source pin to the read-only schema probe', (t) => {
   const f = committedSchemaFixture(t);
   const src = fs.readFileSync(VERIFIER, 'utf8');
-  const fn = src.slice(src.indexOf('shared_schema_readiness_preflight() {'), src.indexOf('vh_run_step shared-schema-readiness'));
+  const fn = src.slice(src.indexOf('shared_schema_readiness_preflight() {'), src.indexOf('verifier_run_step shared-schema-readiness'));
   const env = { ...process.env, REPO_DIR: f.root, DESKTOP_DIR: path.join(REPO_ROOT, 'papercusp-desktop'),
     HARNESS_ADMIN_DATABASE_URL: 'postgresql://fixture:secret@selected/db', PAPERCUSP_PG_SQL_DIR: f.sqlDir,
     TEST_PROBE_RECEIPT: f.receipt, TEST_PROBE_APPLIED: '["374-old.sql"]', TEST_PROBE_FAILURE: '', VERIFY_TAURI_ISOLATED_DB: '0' };
@@ -294,7 +294,7 @@ test('real probe CLI reports ready/pending/unavailable exits with the selected s
 test('real verifier preflight binds sourced .env.local, propagates refusal, and leaves isolated DB alone', (t) => {
   const f = cliFixture(t);
   const src = fs.readFileSync(VERIFIER, 'utf8');
-  const fn = src.slice(src.indexOf('shared_schema_readiness_preflight() {'), src.indexOf('vh_run_step shared-schema-readiness'));
+  const fn = src.slice(src.indexOf('shared_schema_readiness_preflight() {'), src.indexOf('verifier_run_step shared-schema-readiness'));
   const work = path.join(f.root, 'private-run');
   fs.mkdirSync(work);
   fs.writeFileSync(path.join(f.root, 'apps', 'operator', '.env.local'), 'HARNESS_ADMIN_DATABASE_URL=postgresql://fixture:sourced@selected/db\n');
