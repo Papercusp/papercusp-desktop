@@ -165,6 +165,16 @@ async function main(argv) {
 
 // realpath both sides: node realpaths import.meta.url but keeps argv[1] as invoked.
 const self = realpathSync(fileURLToPath(import.meta.url));
-if (process.argv[1] && realpathSync(resolve(process.argv[1])) === self) {
+// Stdin uses '-' and importers may supply a non-file entrypoint. Neither runs
+// this CLI; avoid turning a successful library import into a filesystem error.
+let entryPoint;
+if (process.argv[1] && process.argv[1] !== '-') {
+  try {
+    entryPoint = realpathSync(resolve(process.argv[1]));
+  } catch (error) {
+    if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
+  }
+}
+if (entryPoint === self) {
   main(process.argv.slice(2)).then((c) => process.exit(c), () => process.exit(1));
 }

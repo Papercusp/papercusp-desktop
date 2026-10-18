@@ -129,10 +129,10 @@ test('verifier readiness runs before source/dependency snapshots, and skips only
   const src = fs.readFileSync(VERIFIER, 'utf8');
   const call = src.indexOf('shared_schema_readiness_preflight || exit $?');
   assert.ok(call >= 0);
-  // The selection may be wrapped in the vh_run_step phase recorder.
-  const snapshotAt =
-    /OPERATOR_SNAPSHOT_PARENT="\$\((?:vh_run_step \S+ )?select_verifier_snapshot_root\)"/.exec(src)?.index ?? -1;
-  assert.ok(snapshotAt >= 0, 'the verifier must still select its snapshot root');
+  // Scratch placement is selected earlier in the same shell to retain its
+  // dependency mode. Readiness must precede the actual source/dependency copy.
+  const snapshotAt = src.indexOf('vh_run_step operator-source-snapshot snapshot_operator_source');
+  assert.ok(snapshotAt >= 0, 'the verifier must still create its source snapshot');
   assert.ok(call < snapshotAt);
   assert.ok(call < src.indexOf('WORK="$(mktemp -d'));
   assert.match(src, /shared_schema_readiness_preflight\(\) \{[\s\S]*?VERIFY_TAURI_ISOLATED_DB:-0[\s\S]*?return 0/);
@@ -160,6 +160,39 @@ function cliFixture(t) {
   fs.mkdirSync(path.join(fixture.root, 'apps', 'operator'), { recursive: true });
   return { ...fixture, receipt: path.join(fixture.root, 'receipt.json') };
 }
+
+test('module imports from stdin and non-file entrypoints do not launch a probe', (t) => {
+  const f = cliFixture(t);
+  const probeUrl = require('node:url').pathToFileURL(PROBE).href;
+  for (const entry of ['-', undefined, path.join(f.root, 'missing-entry.mjs')]) {
+    const input = `${entry && entry !== '-' ? `process.argv[1] = ${JSON.stringify(entry)};` : ''}
+      const { probeDevPg } = await import(${JSON.stringify(probeUrl)});
+      console.log(typeof probeDevPg);`;
+    const result = spawnSync(process.execPath, ['--input-type=module', ...(entry === '-' ? ['-'] : [])], {
+      cwd: f.root,
+      env: { ...process.env, TEST_PROBE_RECEIPT: f.receipt },
+      input, encoding: 'utf8', timeout: 10000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, 'function\n');
+    assert.equal(result.stderr, '');
+    assert.equal(fs.existsSync(f.receipt), false, 'importing must not query the database');
+  }
+});
+
+test('symlinked probe CLI still executes the read-only probe', (t) => {
+  const f = cliFixture(t);
+  const link = path.join(f.root, 'probe.mjs');
+  fs.symlinkSync(PROBE, link);
+  const result = spawnSync(process.execPath, [link, '--repo-root', f.root], {
+    env: { ...process.env, HARNESS_ADMIN_DATABASE_URL: 'postgresql://fixture:secret@selected/db',
+      TEST_PROBE_RECEIPT: f.receipt, TEST_PROBE_FAILURE: '' },
+    encoding: 'utf8', timeout: 10000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'reachable env:HARNESS_ADMIN_DATABASE_URL\n');
+  assert.equal(JSON.parse(fs.readFileSync(f.receipt)).query, 'SELECT 1');
+});
 
 function committedSchemaFixture(t) {
   const fixture = cliFixture(t);
