@@ -620,6 +620,34 @@ test('a readable serve.log with no bootstrap line names that file, and invents n
   assert.match(r.doc.restore.bootstrapLast, /^no \[papercusp-hive\] line in \S*\/\.papercusp\/logs\/serve\.log$/);
 });
 
+// 'seed restore: ...' is written only when the restore FINISHES; a restore still running
+// when the window closes has only its per-phase progress lines (recordSeedRestoreLog).
+// Before WI-6554700010018180 that read "no seed-restore line" — as if it never started.
+test('an unfinished seed restore records its last progress line, not "no seed-restore line"', opts, () => {
+  const fx = fixture();
+  serveLog(fx, [
+    'boot',
+    '[papercusp-hive] seed: corestore download running',
+    '[papercusp-hive] seed: git restore running',
+    '[papercusp-hive] some other bootstrap line',
+    '',
+  ].join('\n'));
+  const r = run(fx);
+  assert.equal(r.legs['offline-restore'].status, 'pass');
+  assert.match(
+    r.doc.restore.seedRestore,
+    /^unfinished \(no completion line in \S*\/\.papercusp\/logs\/serve\.log\); last progress: seed: git restore running$/,
+  );
+  assert.equal(r.doc.restore.bootstrapLast, 'some other bootstrap line');
+});
+
+test('a completed seed restore line wins over earlier progress lines', opts, () => {
+  const fx = fixture();
+  serveLog(fx, `[papercusp-hive] seed: corestore download running\n${SEED_LINE}\n`);
+  const r = run(fx);
+  assert.equal(r.doc.restore.seedRestore, 'seed restore: restored=[corestore] deferred=[git]');
+});
+
 test('marker-free first boot retains full active and rotated logs plus allowlisted state before restart', opts, () => {
   const fx = fixture();
   serveLog(fx, 'boot without hive marker\n');

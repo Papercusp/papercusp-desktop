@@ -689,6 +689,15 @@ if [ -n "$src" ]; then
   head -40 "$HIVE_OUT" | sed 's/^/PCOIJ-HIVE /'
   # The evidence is built from TSV rows: a tab in a log line must not split one.
   seed=$(grep -a '\[papercusp-hive\] seed restore' "$HIVE_OUT" | tail -1 | sed 's/.*\[papercusp-hive\] //' | tr '\t' ' ')
+  # 'seed restore: ...' is printed only when the restore FINISHES. While it is still
+  # running, the only lines are its per-phase progress ('[papercusp-hive] seed: <kind>
+  # <phase> <state>', recordSeedRestoreLog). Without this fallback a restore that was
+  # running when the window closed read "no seed-restore line", i.e. as if it never
+  # started (WI-6554700010018180).
+  if [ -z "$seed" ]; then
+    prog=$(grep -a '\[papercusp-hive\] seed: ' "$HIVE_OUT" | tail -1 | sed 's/.*\[papercusp-hive\] //' | tr '\t' ' ')
+    [ -n "$prog" ] && seed="unfinished (no completion line in $src); last progress: $prog"
+  fi
   last=$(tail -1 "$HIVE_OUT" | sed 's/.*\[papercusp-hive\] //' | tr '\t' ' ')
   echo "PCOIJ seedRestore=${seed:-no seed-restore line in $src}"
   echo "PCOIJ bootstrapLast=$last"
