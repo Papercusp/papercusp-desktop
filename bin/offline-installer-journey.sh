@@ -746,6 +746,7 @@ state="$diag/bootstrap-state.txt"
   if [ "$PLATFORM" = linux ] && [ -n "$pid" ] && [ -r "/proc/$pid/environ" ]; then
     for name in PAPERCUSP_BACKGROUND_WORKERS PAPERCUSP_HONO_PORT PAPERCUSP_DISABLE_DOGFOOD_HIVE PAPERCUSP_DESKTOP VITEST; do
       line=$(tr '\0' '\n' < "/proc/$pid/environ" | grep -am1 "^$name=" || true)
+      # assert-integrity-ok: this loop only snapshots allowlisted env into the evidence document; an absent variable is recorded as the diagnostic fact process.$name=unset, not treated as a passing check.
       if [ -z "$line" ]; then echo "process.$name=unset"; continue; fi
       value="${line#*=}"
       if [ "$name" = VITEST ]; then
