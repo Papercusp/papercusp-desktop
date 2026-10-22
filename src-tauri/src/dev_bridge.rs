@@ -17,7 +17,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 /// Bridge protocol version exposed via `GET /version`. Bumped whenever the
 /// HTTP surface changes shape so CLI clients can feature-detect.
-pub const BRIDGE_VERSION: &str = "0.8.1";
+pub const BRIDGE_VERSION: &str = "0.8.2";
 
 /// Reserved object key used by the injected callback to carry a thrown
 /// in-page exception back to the HTTP handler without making it look like a
@@ -572,8 +572,48 @@ pub fn spawn_sidecar_monitored(
 /// The HTTP handler thread waits on the Condvar; the Tauri command inserts
 /// the result and signals.
 pub struct PendingResults {
-    results: Mutex<HashMap<String, serde_json::Value>>,
+    // None is an active waiter; removing it ends custody of the result.
+    // A late callback must never recreate a timed-out request.
+    results: Mutex<HashMap<String, Option<serde_json::Value>>>,
     notify: Condvar,
+    logs: Arc<LogBuffer>,
+}
+
+impl PendingResults {
+    fn record(&self, id: &str, stage: &str) {
+        self.logs.push(LogEntry {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            level: "info".into(),
+            target: "dev_bridge::eval".into(),
+            message: format!("eval {id} {stage}"),
+            source: "rust".into(),
+        });
+    }
+
+    fn complete(&self, id: &str, value: serde_json::Value) -> bool {
+        let mut results = self.results.lock().unwrap_or_else(|p| p.into_inner());
+        let accepted = match results.get_mut(id) {
+            Some(slot) if slot.is_none() => {
+                *slot = Some(value);
+                self.notify.notify_all();
+                true
+            }
+            _ => false,
+        };
+        drop(results);
+        self.record(
+            id,
+            if accepted {
+                "acknowledged"
+            } else {
+                "late-or-duplicate-ack-discarded"
+            },
+        );
+        accepted
+    }
 }
 
 /// Tauri command invoked from injected JS to deliver eval results back to Rust.
@@ -584,15 +624,7 @@ pub fn __dev_bridge_result(
     value: serde_json::Value,
     state: tauri::State<'_, Arc<PendingResults>>,
 ) {
-    // Poison recovery (P-057): a panicking bridge thread poisons this mutex;
-    // the map itself can't be torn by a panic between insert/notify, so
-    // recover the guard instead of letting every later eval result die.
-    let mut results = state
-        .results
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    results.insert(id, value);
-    state.notify.notify_all();
+    state.complete(&id, value);
 }
 
 /// Start the development bridge HTTP server.
@@ -655,6 +687,7 @@ pub fn start_bridge(
     let pending = Arc::new(PendingResults {
         results: Mutex::new(HashMap::new()),
         notify: Condvar::new(),
+        logs: log_buffer.clone(),
     });
     app.manage(pending.clone());
 
@@ -986,8 +1019,26 @@ pub fn start_bridge(
 
                     let window_label = eval_req.window.as_deref().unwrap_or("main");
                     if let Some(window) = app_handle.get_webview_window(window_label) {
+                        pending
+                            .results
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .insert(request_id.clone(), None);
+                        pending.record(&request_id, "dispatch-requested");
                         let callback_js = build_eval_callback_js(&eval_req.js, &request_id);
-                        let _ = window.eval(&callback_js);
+                        if window.eval(&callback_js).is_err() {
+                            pending
+                                .results
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .remove(&request_id);
+                            pending.record(&request_id, "dispatch-failed");
+                            let _ = request.respond(
+                                Response::from_string("Eval dispatch failed").with_status_code(500),
+                            );
+                            continue;
+                        }
+                        pending.record(&request_id, "dispatch-accepted");
 
                         // Wait for the result with a 5-second timeout. Poison
                         // recovery on both the lock and the Condvar wait (P-057):
@@ -1001,7 +1052,8 @@ pub fn start_bridge(
                         let start = std::time::Instant::now();
 
                         loop {
-                            if let Some(value) = results.remove(&request_id) {
+                            if results.get(&request_id).is_some_and(Option::is_some) {
+                                let value = results.remove(&request_id).flatten().unwrap();
                                 let header =
                                     Header::from_bytes("Content-Type", "application/json").unwrap();
                                 if let Some(error) = eval_error_message(&value) {
@@ -1024,6 +1076,7 @@ pub fn start_bridge(
                             if elapsed >= deadline {
                                 // Timeout — clean up and respond with 504
                                 results.remove(&request_id);
+                                pending.record(&request_id, "ack-timeout");
                                 let _ = request.respond(
                                     Response::from_string("Eval timeout").with_status_code(504),
                                 );
@@ -1037,8 +1090,11 @@ pub fn start_bridge(
                                 .unwrap_or_else(|poisoned| poisoned.into_inner());
                             results = guard;
 
-                            if timeout_result.timed_out() && !results.contains_key(&request_id) {
+                            if timeout_result.timed_out()
+                                && !results.get(&request_id).is_some_and(Option::is_some)
+                            {
                                 results.remove(&request_id);
+                                pending.record(&request_id, "ack-timeout");
                                 let _ = request.respond(
                                     Response::from_string("Eval timeout").with_status_code(504),
                                 );
@@ -1160,6 +1216,12 @@ fn build_eval_callback_js(js: &str, request_id: &str) -> String {
     format!(
         r#"
         (async () => {{
+            // Page-local evidence survives a failed Tauri acknowledgement.
+            // Never retain the evaluated source, token, or returned value.
+            const __trace = window.__papercuspDevBridgeEvalTrace ??= [];
+            if (__trace.length >= 64) __trace.splice(0, __trace.length - 63);
+            const __receipt = {{ id: {id}, stage: "executing", at: Date.now() }};
+            __trace.push(__receipt);
             try {{
                 let __result = await eval({js});
                 if (typeof __result === "undefined") {{
@@ -1169,17 +1231,24 @@ fn build_eval_callback_js(js: &str, request_id: &str) -> String {
                 }} else if (typeof __result !== "string") {{
                     __result = String(__result);
                 }}
+                __receipt.stage = "evaluated";
                 await window.__TAURI__.core.invoke("__dev_bridge_result", {{
                     id: {id},
                     value: __result
                 }});
+                __receipt.stage = "acknowledged";
             }} catch(e) {{
+                __receipt.stage = __receipt.stage === "evaluated" ? "ack-failed" : "evaluation-failed";
+                const __failedStage = __receipt.stage;
+                try {{
                 await window.__TAURI__.core.invoke("__dev_bridge_result", {{
                     id: {id},
                     value: {{
                         {error_key}: "ERROR: " + String(e?.message ?? e)
                     }}
                 }});
+                __receipt.stage = __failedStage === "evaluation-failed" ? "error-acknowledged" : __failedStage;
+                }} catch (_) {{ __receipt.stage = "ack-failed"; }}
             }}
         }})();
         "#,
@@ -1207,8 +1276,8 @@ fn webview2_debugging_port(port: Option<&str>, arguments: Option<&str>) -> Optio
 }
 
 fn webview2_devtools_response(port: Option<&str>, arguments: Option<&str>) -> DevtoolsResponse {
-    let target = webview2_debugging_port(port, arguments)
-        .map(|port| format!("http://127.0.0.1:{port}"));
+    let target =
+        webview2_debugging_port(port, arguments).map(|port| format!("http://127.0.0.1:{port}"));
     // Configuration alone does not establish a debugger: WebView2 may ignore
     // the legacy environment variable, or fail to bind the configured port.
     // Reuse the bridge's existing HTTP client rather than trusting a TCP bind
@@ -1572,6 +1641,93 @@ mod tests {
     // ── /eval callback JS builder ───────────────────────────────────────────
 
     #[test]
+    fn eval_results_discard_late_and_duplicate_callbacks() {
+        let pending = PendingResults {
+            results: Mutex::new(HashMap::new()),
+            notify: Condvar::new(),
+            logs: Arc::new(LogBuffer::new()),
+        };
+        pending
+            .results
+            .lock()
+            .unwrap()
+            .insert("active".into(), None);
+        assert!(pending.complete("active", serde_json::json!("first")));
+        assert!(!pending.complete("active", serde_json::json!("duplicate")));
+        assert_eq!(
+            pending.results.lock().unwrap().remove("active").flatten(),
+            Some(serde_json::json!("first"))
+        );
+
+        pending
+            .results
+            .lock()
+            .unwrap()
+            .insert("expired".into(), None);
+        pending.results.lock().unwrap().remove("expired");
+        assert!(!pending.complete("expired", serde_json::json!("late")));
+        assert!(
+            pending.results.lock().unwrap().is_empty(),
+            "late acknowledgements leaked into the result map"
+        );
+        assert_eq!(pending.logs.drain().len(), 3);
+    }
+
+    #[test]
+    fn eval_execution_receipts_distinguish_evaluation_and_acknowledgement_failures() {
+        use std::io::Write;
+        let normal =
+            build_eval_callback_js("({secret: 'must not appear in the receipt'})", "normal");
+        let throws = build_eval_callback_js("throw new Error('expression failed')", "throws");
+        let rejected_ack = build_eval_callback_js("42", "rejected-ack");
+        let overflow = build_eval_callback_js("42", "overflow");
+        let script = format!(
+            r#"
+const assert = require('node:assert/strict');
+let rejectAck = false;
+global.window = {{ __TAURI__: {{core: {{invoke: async () => {{ if (rejectAck) throw Error('native ack unavailable'); }} }} }} }};
+(async () => {{
+  await eval({normal});
+  await eval({throws});
+  rejectAck = true;
+  await eval({rejected_ack});
+  const rows = window.__papercuspDevBridgeEvalTrace;
+  assert.deepEqual(rows.map(r => r.stage), ['acknowledged', 'error-acknowledged', 'ack-failed']);
+  assert.deepEqual(rows.map(r => r.id), ['normal', 'throws', 'rejected-ack']);
+  assert.ok(rows.every(r => Object.keys(r).sort().join(',') === 'at,id,stage'));
+  assert.ok(!JSON.stringify(rows).includes('secret'));
+  rejectAck = false;
+  for (let i = 0; i < 80; i++) await eval({overflow});
+  assert.equal(window.__papercuspDevBridgeEvalTrace.length, 64);
+}})().catch(e => {{ console.error(e); process.exitCode = 1; }});
+"#,
+            normal = serde_json::to_string(&normal).unwrap(),
+            throws = serde_json::to_string(&throws).unwrap(),
+            rejected_ack = serde_json::to_string(&rejected_ack).unwrap(),
+            overflow = serde_json::to_string(&overflow).unwrap(),
+        );
+        let mut child = Command::new("node")
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Node is required for the bridge callback contract test");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        let result = child.wait_with_output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[test]
     fn eval_callback_js_embeds_payload_as_json_literals() {
         let js = build_eval_callback_js("document.title", "req-1");
         assert!(js.contains(r#"await eval("document.title")"#));
@@ -1615,7 +1771,10 @@ mod tests {
     fn webview2_debugger_port_uses_the_browser_argument_and_rejects_invalid_ports() {
         assert_eq!(webview2_debugging_port(Some("9222"), None), Some(9222));
         assert_eq!(
-            webview2_debugging_port(Some("9222"), Some("--other-flag --remote-debugging-port=9333")),
+            webview2_debugging_port(
+                Some("9222"),
+                Some("--other-flag --remote-debugging-port=9333")
+            ),
             Some(9333)
         );
         for value in ["", "0", "65536", "9222/path", "localhost:9222"] {
@@ -1624,7 +1783,9 @@ mod tests {
         let response = webview2_devtools_response(None, None);
         assert!(!response.inspectable);
         assert!(response.url.is_none());
-        assert!(response.hint.contains("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"));
+        assert!(response
+            .hint
+            .contains("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"));
     }
 
     #[test]
@@ -1634,9 +1795,17 @@ mod tests {
         use std::time::Duration;
 
         for (status, body, expected) in [
-            ("200 OK", r#"{"Protocol-Version":"1.3","webSocketDebuggerUrl":"ws://127.0.0.1/devtools/browser/test"}"#, true),
+            (
+                "200 OK",
+                r#"{"Protocol-Version":"1.3","webSocketDebuggerUrl":"ws://127.0.0.1/devtools/browser/test"}"#,
+                true,
+            ),
             ("200 OK", r#"{"healthy":true}"#, false),
-            ("503 Service Unavailable", r#"{"Protocol-Version":"1.3","webSocketDebuggerUrl":"ws://127.0.0.1/devtools/browser/test"}"#, false),
+            (
+                "503 Service Unavailable",
+                r#"{"Protocol-Version":"1.3","webSocketDebuggerUrl":"ws://127.0.0.1/devtools/browser/test"}"#,
+                false,
+            ),
         ] {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
@@ -1646,7 +1815,9 @@ mod tests {
                 while Instant::now() < deadline {
                     match listener.accept() {
                         Ok((mut socket, _)) => {
-                            socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                            socket
+                                .set_read_timeout(Some(Duration::from_secs(1)))
+                                .unwrap();
                             let mut request = [0; 2048];
                             let length = socket.read(&mut request).unwrap();
                             socket.write_all(format!(
@@ -1665,7 +1836,10 @@ mod tests {
             });
             let arguments = format!("--remote-debugging-port={port}");
             let response = webview2_devtools_response(Some("1"), Some(&arguments));
-            assert!(server.join().unwrap().starts_with("GET /json/version HTTP/1.1"));
+            assert!(server
+                .join()
+                .unwrap()
+                .starts_with("GET /json/version HTTP/1.1"));
             assert_eq!(response.inspectable, expected);
             assert_eq!(response.url.is_some(), expected);
         }
