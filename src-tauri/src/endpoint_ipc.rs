@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -907,6 +907,11 @@ pub struct IpcStatus {
 /// `isIpcUnavailableMessage` in `libs/generic/desktop-ipc` matches on it.
 pub struct IpcClientHandle {
     client: Mutex<Option<Arc<IpcClient>>>,
+    /// Synchronous page-load callbacks must detach stale Channels even while
+    /// live()/cancel()/reset() owns the async connection mutex. Publish a weak
+    /// snapshot on connect; this lock protects only the pointer, never I/O or
+    /// an await, and does not extend a superseded connection's lifetime.
+    page_load_client: std::sync::Mutex<Weak<IpcClient>>,
     socket_source: Box<dyn Fn() -> SocketResolution + Send + Sync>,
     /// `Some` when IPC is switched OFF for this session. Every call then fails
     /// with an `ipc_disabled:`-prefixed error, which the webview treats as
@@ -927,6 +932,7 @@ impl IpcClientHandle {
     pub fn new(socket_source: impl Fn() -> SocketResolution + Send + Sync + 'static) -> Arc<Self> {
         Arc::new(Self {
             client: Mutex::new(None),
+            page_load_client: std::sync::Mutex::new(Weak::new()),
             socket_source: Box::new(socket_source),
             disabled_reason: None,
             stats: DialStats::default(),
@@ -952,6 +958,7 @@ impl IpcClientHandle {
         let reason = reason.into();
         Arc::new(Self {
             client: Mutex::new(None),
+            page_load_client: std::sync::Mutex::new(Weak::new()),
             socket_source: Box::new(|| {
                 SocketResolution::missing("endpoint-ipc is disabled for this session")
             }),
@@ -1083,6 +1090,10 @@ impl IpcClientHandle {
                     path.display(),
                     resolution.detail
                 ));
+                *self
+                    .page_load_client
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::downgrade(&c);
                 *guard = Some(c.clone());
                 Ok(c)
             }
@@ -1162,6 +1173,10 @@ impl IpcClientHandle {
         tauri::async_runtime::spawn(async move {
             let mut guard = this.client.lock().await;
             *guard = None;
+            *this
+                .page_load_client
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Weak::new();
         });
     }
 
@@ -1196,14 +1211,11 @@ impl IpcClientHandle {
     /// page's first invoke can't be swept up), then CANCEL server-side in the
     /// background so the operator stops streaming work nobody receives.
     pub fn flush_for_page_load(&self) {
-        let client = match self.client.try_lock() {
-            Ok(guard) => guard.as_ref().cloned(),
-            // The lock is only held across (re)connects and brief
-            // invoke/cancel forwarding; a client mid-(re)connect is brand
-            // new and owns no stale calls. Skipping is safe either way —
-            // worst case the flood resumes until the next reload.
-            Err(_) => None,
-        };
+        let client = self
+            .page_load_client
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .upgrade();
         let Some(c) = client else { return };
         let ids = c.detach_all();
         if ids.is_empty() {
@@ -1423,6 +1435,72 @@ mod tests {
         assert!(map.is_empty());
         // Idempotent on an empty map.
         assert!(drain_in_flight(&map).is_empty());
+    }
+
+    #[tokio::test]
+    async fn reload_flush_cancels_old_stream_while_connection_lock_is_held() {
+        use std::time::Duration;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("tcp://{}", listener.local_addr().unwrap());
+        let handle = IpcClientHandle::new(move || {
+            SocketResolution::found(endpoint.clone(), "reload cleanup regression")
+        });
+        let client = handle.live().await.unwrap();
+        let (mut peer, _) = listener.accept().await.unwrap();
+        let old_id = handle
+            .invoke(
+                "old-page-stream".into(),
+                serde_json::json!({}),
+                Channel::new(|_| Ok(())),
+            )
+            .await
+            .unwrap();
+        assert!(client.in_flight.contains_key(&old_id));
+
+        // A concurrent live()/cancel()/reset() may own this mutex at Started.
+        // Reload cleanup must still synchronously detach the old page's sink.
+        let connection_guard = handle.client.lock().await;
+        handle.flush_for_page_load();
+        assert!(
+            !client.in_flight.contains_key(&old_id),
+            "reload left a stale callback registered while the connection lock was busy"
+        );
+        drop(connection_guard);
+
+        let new_id = handle
+            .invoke(
+                "new-page-stream".into(),
+                serde_json::json!({}),
+                Channel::new(|_| Ok(())),
+            )
+            .await
+            .unwrap();
+        assert!(client.in_flight.contains_key(&new_id));
+
+        // Detaching alone would leak the server's stream. Verify the actual
+        // CANCEL frame, and that the new page's registration survives it.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut decoder = FrameDecoder::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let n = peer.read(&mut buffer).await.unwrap();
+                assert_ne!(n, 0, "connection closed before cancelling the old stream");
+                decoder.push(&buffer[..n]).unwrap();
+                for frame in decoder.drain() {
+                    if frame.frame_type == FrameType::Cancel {
+                        let body: serde_json::Value =
+                            serde_json::from_slice(&frame.payload).unwrap();
+                        assert_eq!(body["id"].as_u64(), Some(old_id));
+                        return;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("old page stream was not cancelled on the wire");
+        assert!(client.in_flight.contains_key(&new_id));
     }
 
     #[test]
