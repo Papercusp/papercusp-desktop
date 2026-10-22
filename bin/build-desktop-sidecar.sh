@@ -2749,6 +2749,27 @@ copy_pkg_closure() {
   done
 }
 
+# Explicit externals are runtime package roots even when they contain no native
+# addon. Reuse the bundler's list so a new boundary (for example OpenTelemetry)
+# cannot silently depend on the build checkout's ancestor node_modules.
+copy_host_external_closures() {
+  local external package
+  for external in "${HOST_COMMON_EXTERNALS[@]}"; do
+    package="${external#--external:}"
+    case "$package" in *\**|*\?*) continue ;; esac
+    if [[ "$package" == @*/* ]]; then
+      package="$(printf '%s' "$package" | cut -d/ -f1-2)"
+    else
+      package="${package%%/*}"
+    fi
+    # Platform-only optional externals may be absent from the source install.
+    # Required imports are still enforced by the final isolated boot probe.
+    if resolve_pkg_source "$package" "" >/dev/null 2>&1; then
+      copy_pkg_closure "$package" || return 1
+    fi
+  done
+}
+
 # Class-level backstop: inspect every actual package in the ASSEMBLED sidecar and
 # resolve every required dependency using only that tree. This does not replace
 # the clean-root boot gate (which exercises the real artifact); it catches the
@@ -2850,6 +2871,7 @@ assert_runtime_dependency_closure() {
 NODE
 }
 for np in "${NATIVE_PKGS[@]}"; do copy_pkg_closure "$np"; done
+copy_host_external_closures || exit 1
 echo "  copied $nat_copied package(s) ($nat_missing missing)"
 
 # rrule is loaded at runtime via `createRequire(import.meta.url)('rrule')` in
