@@ -1195,6 +1195,53 @@ fn eval_error_message(value: &serde_json::Value) -> Option<&str> {
         .and_then(serde_json::Value::as_str)
 }
 
+fn webview2_debugging_port(port: Option<&str>, arguments: Option<&str>) -> Option<u16> {
+    arguments
+        .and_then(|args| {
+            args.split_whitespace()
+                .find_map(|arg| arg.strip_prefix("--remote-debugging-port="))
+        })
+        .or(port)
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|value| *value != 0)
+}
+
+fn webview2_devtools_response(port: Option<&str>, arguments: Option<&str>) -> DevtoolsResponse {
+    let target = webview2_debugging_port(port, arguments)
+        .map(|port| format!("http://127.0.0.1:{port}"));
+    // Configuration alone does not establish a debugger: WebView2 may ignore
+    // the legacy environment variable, or fail to bind the configured port.
+    // Reuse the bridge's existing HTTP client rather than trusting a TCP bind
+    // which could belong to an unrelated local service.
+    let inspectable = target.as_ref().is_some_and(|url| {
+        reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_millis(300))
+            .build()
+            .ok()
+            .and_then(|client| client.get(format!("{url}/json/version")).send().ok())
+            .filter(|response| response.status().is_success())
+            .and_then(|response| response.text().ok())
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+            .is_some_and(|version| {
+                version["Protocol-Version"].is_string()
+                    && version["webSocketDebuggerUrl"]
+                        .as_str()
+                        .is_some_and(|url| url.starts_with("ws://") || url.starts_with("wss://"))
+            })
+    });
+    DevtoolsResponse {
+        platform: "webview2".to_string(),
+        inspectable,
+        url: target.filter(|_| inspectable),
+        hint: "Set WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222 \
+            before launching, then open http://127.0.0.1:9222 in Chrome/Edge. \
+            inspectable is true only when the configured local CDP endpoint responds."
+            .to_string(),
+    }
+}
+
 /// Build a `/devtools` response for the current platform. v1 emits useful
 /// hints rather than always producing a hot inspector URL — Safari attach on
 /// macOS requires UI activation, Windows WebView2 needs a launch-time arg.
@@ -1210,15 +1257,8 @@ fn devtools_response() -> DevtoolsResponse {
         }
     } else if cfg!(target_os = "windows") {
         let port = std::env::var("WEBVIEW2_REMOTE_DEBUGGING_PORT").ok();
-        let url = port.as_ref().map(|p| format!("http://127.0.0.1:{p}"));
-        DevtoolsResponse {
-            platform: "webview2".to_string(),
-            inspectable: url.is_some(),
-            url,
-            hint: "Set WEBVIEW2_REMOTE_DEBUGGING_PORT=9222 before launching, \
-                then open http://127.0.0.1:9222 in Chrome/Edge to inspect."
-                .to_string(),
-        }
+        let arguments = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").ok();
+        webview2_devtools_response(port.as_deref(), arguments.as_deref())
     } else {
         let inspector = std::env::var("WEBKIT_INSPECTOR_SERVER").ok();
         DevtoolsResponse {
@@ -1570,6 +1610,73 @@ mod tests {
     }
 
     // ── /devtools platform response ─────────────────────────────────────────
+
+    #[test]
+    fn webview2_debugger_port_uses_the_browser_argument_and_rejects_invalid_ports() {
+        assert_eq!(webview2_debugging_port(Some("9222"), None), Some(9222));
+        assert_eq!(
+            webview2_debugging_port(Some("9222"), Some("--other-flag --remote-debugging-port=9333")),
+            Some(9333)
+        );
+        for value in ["", "0", "65536", "9222/path", "localhost:9222"] {
+            assert_eq!(webview2_debugging_port(Some(value), None), None);
+        }
+        let response = webview2_devtools_response(None, None);
+        assert!(!response.inspectable);
+        assert!(response.url.is_none());
+        assert!(response.hint.contains("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"));
+    }
+
+    #[test]
+    fn webview2_devtools_requires_a_successful_cdp_response() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        for (status, body, expected) in [
+            ("200 OK", r#"{"Protocol-Version":"1.3","webSocketDebuggerUrl":"ws://127.0.0.1/devtools/browser/test"}"#, true),
+            ("200 OK", r#"{"healthy":true}"#, false),
+            ("503 Service Unavailable", r#"{"Protocol-Version":"1.3","webSocketDebuggerUrl":"ws://127.0.0.1/devtools/browser/test"}"#, false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            listener.set_nonblocking(true).unwrap();
+            let server = thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok((mut socket, _)) => {
+                            socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                            let mut request = [0; 2048];
+                            let length = socket.read(&mut request).unwrap();
+                            socket.write_all(format!(
+                                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            ).as_bytes()).unwrap();
+                            return String::from_utf8_lossy(&request[..length]).into_owned();
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("CDP test listener failed: {error}"),
+                    }
+                }
+                panic!("CDP probe never reached the configured endpoint");
+            });
+            let arguments = format!("--remote-debugging-port={port}");
+            let response = webview2_devtools_response(Some("1"), Some(&arguments));
+            assert!(server.join().unwrap().starts_with("GET /json/version HTTP/1.1"));
+            assert_eq!(response.inspectable, expected);
+            assert_eq!(response.url.is_some(), expected);
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        drop(listener);
+        let response = webview2_devtools_response(Some(&port), None);
+        assert!(!response.inspectable);
+        assert!(response.url.is_none());
+    }
 
     #[test]
     fn devtools_response_is_consistent_for_this_platform() {
