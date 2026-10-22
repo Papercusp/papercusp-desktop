@@ -2549,6 +2549,35 @@ pkg_dest_for_source() {
   return 1
 }
 
+# npm Arborist retires replaced packages to .<basename>-<8-character hash>
+# siblings. Parent copies can bring these abandoned versions into the bundle;
+# they are not Node-resolvable package names and have no maintained closure.
+# Prune only that npm shape directly under node_modules (including scopes),
+# leaving package assets, .bin and the dependency donor untouched.
+prune_npm_retired_packages() {
+  node - "$1" <<'NODE'
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const retired = /^\..+-[A-Za-z0-9]{8}$/;
+  let removed = 0;
+  function visit(nodeModulesDir, scope = false) {
+    if (!fs.existsSync(nodeModulesDir)) return;
+    for (const entry of fs.readdirSync(nodeModulesDir, { withFileTypes: true })) {
+      const entryPath = path.join(nodeModulesDir, entry.name);
+      if (retired.test(entry.name)) {
+        fs.rmSync(entryPath, { recursive: true, force: true });
+        removed++;
+      } else if (entry.isDirectory()) {
+        if (!scope && entry.name.startsWith('@')) visit(entryPath, true);
+        else visit(path.join(entryPath, 'node_modules'));
+      }
+    }
+  }
+  visit(path.join(process.argv[2], 'node_modules'));
+  if (removed) console.log(`  ✂ omitted ${removed} npm retirement sibling(s)`);
+NODE
+}
+
 # A queued row carries name + requesting source + optionality in parallel arrays.
 # For optionalDependencies, NOT FOUND is the expected, correct outcome — npm only
 # installs the packages matching THIS platform, so @img/sharp-darwin-arm64 is
@@ -2603,6 +2632,7 @@ copy_pkg_closure() {
       cp -aL "$src" "$dest"
       nat_copied=$((nat_copied+1))
     fi
+    prune_npm_retired_packages "$dest" || return 1
     # WI-5638 (2026-07-20, revised 2026-07-27): strip runtime model-download
     # scratch — but NOT the two embedding models the desktop app actually
     # needs at runtime. @huggingface/transformers' DEFAULT cacheDir resolves

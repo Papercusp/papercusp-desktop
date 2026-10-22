@@ -29,6 +29,7 @@ function extractFunction(name) {
 const RESOLVE_PKG_SOURCE = extractFunction('resolve_pkg_source');
 const PKG_DEST_FOR_SOURCE = extractFunction('pkg_dest_for_source');
 const COPY_PKG_CLOSURE = extractFunction('copy_pkg_closure');
+const PRUNE_NPM_RETIRED_PACKAGES = extractFunction('prune_npm_retired_packages');
 const PRUNE_UNUSED_ODIFF_PAYLOAD = extractFunction('prune_unused_odiff_payload');
 const ASSERT_RUNTIME_DEPENDENCY_CLOSURE = extractFunction(
   'assert_runtime_dependency_closure',
@@ -114,6 +115,7 @@ function shellPrelude() {
     RESOLVE_PKG_SOURCE,
     PKG_DEST_FOR_SOURCE,
     PRUNE_UNUSED_ODIFF_PAYLOAD,
+    PRUNE_NPM_RETIRED_PACKAGES,
   ].join('\n');
 }
 
@@ -266,6 +268,41 @@ test('assembled-tree guard fails closed and names a nested package missing its d
     assert.equal(guarded.status, 1, 'the guard must reject an unresolved required dependency');
     assert.match(guarded.stderr, /unresolved runtime dependencies/i);
     assert.match(guarded.stderr, /lost-pixel\/node_modules\/posthog-node@3\.5\.0 -> rusha/);
+  } finally {
+    fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test('closure drops npm retirement siblings without changing active packages or their donor', () => {
+  const fixture = makeFixture();
+  try {
+    const source = path.join(fixture.repoRoot, 'node_modules/lost-pixel');
+    const retired = ['node_modules/.serialize-error-GEVqaDCA',
+      'node_modules/@old/.yargs-u56b5csX'];
+    for (const rel of retired) {
+      writePackage(path.join(source, rel), { name: 'retired', version: '1.0.0',
+        dependencies: { 'only-the-retired-version-required-this': '1.0.0' } });
+    }
+    const keep = ['node_modules/.bin/tool', '.assets-ABCDEFGH/data',
+      'node_modules/.settings/config'];
+    for (const rel of keep) {
+      fs.mkdirSync(path.dirname(path.join(source, rel)), { recursive: true });
+      fs.writeFileSync(path.join(source, rel), 'keep');
+    }
+    const result = runBash([shellPrelude(), COPY_PKG_CLOSURE,
+      ASSERT_RUNTIME_DEPENDENCY_CLOSURE, 'copy_pkg_closure lost-pixel',
+      'assert_runtime_dependency_closure "$SIDECAR_DIR"'].join('\n'), fixture);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const copied = path.join(fixture.sidecarDir, 'node_modules/lost-pixel');
+    for (const rel of retired) {
+      assert.equal(fs.existsSync(path.join(copied, rel)), false, rel);
+      assert.equal(fs.existsSync(path.join(source, rel, 'package.json')), true,
+        'retired residue in the dependency donor must remain untouched');
+    }
+    for (const rel of keep) {
+      assert.equal(fs.readFileSync(path.join(copied, rel), 'utf8'), 'keep', rel);
+    }
+    assert.equal(readVersion(path.join(copied, 'node_modules/posthog-node')), '3.5.0');
   } finally {
     fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
   }
