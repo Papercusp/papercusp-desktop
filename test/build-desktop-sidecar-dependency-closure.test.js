@@ -313,4 +313,35 @@ test('the assembled-tree dependency guard is wired into every sidecar build', ()
     builder,
     /^assert_runtime_dependency_closure "\$SIDECAR_DIR" \|\| exit 1$/m,
   );
+  assert.match(builder, /^copy_host_external_closures \|\| exit 1$/m);
+});
+
+test('shared host externals ship their package roots and transitive dependencies', () => {
+  const fixture = makeFixture();
+  try {
+    const name = '@opentelemetry/context-async-hooks';
+    const source = path.join(fixture.repoRoot, 'node_modules', name);
+    writePackage(source, { name, version: '2.12.0', dependencies: { 'otel-runtime-dep': '1.0.0' } });
+    fs.writeFileSync(path.join(source, 'index.js'), "module.exports = require('otel-runtime-dep');\n");
+    writePackage(path.join(fixture.repoRoot, 'node_modules/otel-runtime-dep'), {
+      name: 'otel-runtime-dep', version: '1.0.0',
+    });
+    const result = runBash([
+      shellPrelude(), COPY_PKG_CLOSURE, extractFunction('copy_host_external_closures'),
+      'HOST_COMMON_EXTERNALS=(--external:@opentelemetry/context-async-hooks --external:@opentelemetry/context-async-hooks/subpath --external:fsevents "--external:@lydell/*")',
+      'copy_host_external_closures',
+      'printf "copied=%s missing=%s\\n" "$nat_copied" "$nat_missing"',
+    ].join('\n'), fixture);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /copied=2 missing=0/);
+    const { createRequire } = require('node:module');
+    const bundledRequire = createRequire(path.join(fixture.sidecarDir, 'serve.mjs'));
+    const entry = bundledRequire.resolve(name);
+    assert.ok(fs.realpathSync(entry).startsWith(fixture.sidecarDir + path.sep), entry);
+    const transitive = createRequire(entry).resolve('otel-runtime-dep');
+    assert.ok(fs.realpathSync(transitive).startsWith(fixture.sidecarDir + path.sep), transitive);
+    assert.equal(bundledRequire(name), true);
+  } finally {
+    fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
+  }
 });
