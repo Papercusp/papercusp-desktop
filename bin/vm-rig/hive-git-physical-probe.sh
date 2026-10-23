@@ -24,7 +24,7 @@ REPO_ROOT="${PAPERCUSP_REPO_DIR:-$(cd "$HERE/../../.." && pwd)}"
 # The local source exporter never contacts the rig. Remote source preflight
 # requires the same earlier same-subject receipts as a physical dispatch.
 if [ "${1:-}" != '--local-source-out' ]; then
-  "$REPO_ROOT/node_modules/.bin/tsx" "$REPO_ROOT/apps/operator/lib/release/run-p521-local-precheck.ts" \
+  node --import "$REPO_ROOT/node_modules/tsx/dist/esm/index.mjs" "$REPO_ROOT/apps/operator/lib/release/run-p521-local-precheck.mts" \
     --bundle "${P521_LOCAL_PRECHECKS_FILE:-}" \
     --journey discovery-join --journey git-consistency-signed-scope --journey github-bridge \
     --journey serving-identity-restart --journey protected-effect-fencing \

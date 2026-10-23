@@ -51,7 +51,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DESKTOP="$(cd "$HERE/../.." && pwd)"
 
-"$DESKTOP/../node_modules/.bin/tsx" "$DESKTOP/../apps/operator/lib/release/run-p521-local-precheck.ts" \
+node --import "$DESKTOP/../node_modules/tsx/dist/esm/index.mjs" "$DESKTOP/../apps/operator/lib/release/run-p521-local-precheck.mts" \
   --bundle "${P521_LOCAL_PRECHECKS_FILE:-}" --journey delegated-seat-lifecycle || exit 2
 
 VM="${PCUSP_VM_SSH:-aviweiss@172.31.44.2}"
