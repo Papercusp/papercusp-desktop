@@ -102,3 +102,30 @@ test('shared source recipe refuses unsupported target before network or source m
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stderr, /unsupported pinned Go CLI target windows\/amd64/);
 });
+
+test('Kopia compress security pin participates in build, embedded-version assertion and both cache manifests', () => {
+  assert.match(source, /PAPERCUSP_VM_KOPIA_COMPRESS_VERSION="v1\.18\.7"/);
+  assert.match(source, /PAPERCUSP_VM_TRUST_REVISION="2026-10-23-r1"/);
+  const build = helper('_pc_vm_build_go_tools');
+  assert.ok(build.includes('"github.com/klauspost/compress@$PAPERCUSP_VM_KOPIA_COMPRESS_VERSION"'));
+  assert.ok(build.includes('_pc_vm_assert_module "$go_bin" "$output/bin/kopia" github.com/klauspost/compress "$PAPERCUSP_VM_KOPIA_COMPRESS_VERSION"'));
+  assert.equal(source.split('"github.com/klauspost/compress": "$PAPERCUSP_VM_KOPIA_COMPRESS_VERSION"').length - 1, 2);
+});
+
+test('actual Go-module verifier rejects vulnerable and missing embedded compress metadata', () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-kopia-compress-'));
+  try {
+    const go = path.join(fixture, 'go');
+    const metadata = path.join(fixture, 'metadata');
+    fs.writeFileSync(go, '#!/bin/sh\ncat "$PC_GO_METADATA"\n'); fs.chmodSync(go, 0o755);
+    for (const version of ['v1.18.6', '', 'v1.18.7']) {
+      fs.writeFileSync(metadata, version ? `\tdep\tgithub.com/klauspost/compress\t${version}\th1:fixture\n` : '');
+      const result = spawnSync('bash', ['-c', [
+        'set -euo pipefail', helper('_pc_vm_assert_module'),
+        '_pc_vm_assert_module "$1" /fixture/kopia github.com/klauspost/compress v1.18.7',
+      ].join('\n'), 'fixture', go], { encoding: 'utf8', env: { ...process.env, PC_GO_METADATA: metadata } });
+      assert.equal(result.status, version === 'v1.18.7' ? 0 : 1, result.stdout + result.stderr);
+      if (version !== 'v1.18.7') assert.match(result.stderr, /does not embed github.com\/klauspost\/compress@v1\.18\.7/);
+    }
+  } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
+});

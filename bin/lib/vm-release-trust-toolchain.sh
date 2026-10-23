@@ -81,7 +81,8 @@
 # x/text v0.43.0 would pull x/tools v0.51.0 and widen the change for no fix.
 # gh now also asserts x/net against the built binary, because this gate's SBOM shows
 # it embedded there.
-PAPERCUSP_VM_TRUST_REVISION="2026-10-13-r1"
+# 2026-10-23-r1: GHSA-259r-337f-4rfw fixes klauspost/compress in Kopia.
+PAPERCUSP_VM_TRUST_REVISION="2026-10-23-r1"
 
 PAPERCUSP_VM_NODE_VERSION="v24.18.1"
 PAPERCUSP_VM_NODE_LINUX_X64_SHA256="d6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0"
@@ -106,6 +107,7 @@ PAPERCUSP_VM_GH_GRPC_VERSION="v1.83.2"
 PAPERCUSP_VM_KOPIA_VERSION="0.23.1"
 PAPERCUSP_VM_KOPIA_COMMIT="72ec08fd8edb86c67ed27099bf1b955e1f308ffa"
 PAPERCUSP_VM_KOPIA_SOURCE_SHA256="5c4267ff00cc09eded390e03b6ff33f59e7df1c8d9230ce001dc509e7cadf8f1"
+PAPERCUSP_VM_KOPIA_COMPRESS_VERSION="v1.18.7"
 PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION="v0.57.0"
 PAPERCUSP_VM_KOPIA_X_MOD_VERSION="v0.41.0"
 # CO-PIN, not an independent choice: x/crypto v0.56.0 REQUIRES x/net >= v0.57.0, so
@@ -250,6 +252,7 @@ _pc_vm_cache_valid() {
     "commit": "$PAPERCUSP_VM_KOPIA_COMMIT",
     "license": "Apache-2.0",
     "moduleOverrides": {
+      "github.com/klauspost/compress": "$PAPERCUSP_VM_KOPIA_COMPRESS_VERSION",
       "golang.org/x/crypto": "$PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION",
       "golang.org/x/mod": "$PAPERCUSP_VM_KOPIA_X_MOD_VERSION",
       "golang.org/x/net": "$PAPERCUSP_VM_KOPIA_X_NET_VERSION",
@@ -385,6 +388,7 @@ _pc_vm_build_go_tools() {
     export GOMODCACHE="$work/gomodcache-kopia"
     "$go_bin" mod edit -toolchain=none
     "$go_bin" get \
+      "github.com/klauspost/compress@$PAPERCUSP_VM_KOPIA_COMPRESS_VERSION" \
       "golang.org/x/crypto@$PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION" \
       "golang.org/x/mod@$PAPERCUSP_VM_KOPIA_X_MOD_VERSION" \
       "golang.org/x/net@$PAPERCUSP_VM_KOPIA_X_NET_VERSION" \
@@ -399,6 +403,7 @@ _pc_vm_build_go_tools() {
     "$output/bin/kopia" --version | head -1 | grep -Fq "${PAPERCUSP_VM_KOPIA_VERSION}-papercusp.1"
     "$output/bin/kopia" snapshot create --help >/dev/null
   fi
+  _pc_vm_assert_module "$go_bin" "$output/bin/kopia" github.com/klauspost/compress "$PAPERCUSP_VM_KOPIA_COMPRESS_VERSION"
   _pc_vm_assert_module "$go_bin" "$output/bin/kopia" golang.org/x/crypto "$PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION"
   _pc_vm_assert_module "$go_bin" "$output/bin/kopia" golang.org/x/mod "$PAPERCUSP_VM_KOPIA_X_MOD_VERSION"
   _pc_vm_assert_module "$go_bin" "$output/bin/kopia" golang.org/x/net "$PAPERCUSP_VM_KOPIA_X_NET_VERSION"
@@ -652,6 +657,7 @@ manifest = {
         "sourceSha256": "$PAPERCUSP_VM_KOPIA_SOURCE_SHA256",
         "binarySha256": digest("bin/kopia"),
         "moduleOverrides": {
+            "github.com/klauspost/compress": "$PAPERCUSP_VM_KOPIA_COMPRESS_VERSION",
             "golang.org/x/crypto": "$PAPERCUSP_VM_KOPIA_X_CRYPTO_VERSION",
             "golang.org/x/mod": "$PAPERCUSP_VM_KOPIA_X_MOD_VERSION",
             "golang.org/x/net": "$PAPERCUSP_VM_KOPIA_X_NET_VERSION",

@@ -9,6 +9,34 @@ const semver = require('semver');
 const root = path.resolve(__dirname, '../..');
 const floor = '0.35.5';
 
+// Extend the existing packaged dependency security guard for the redirect advisories.
+function verifyRedirects(pkg, lock) {
+  const range = pkg.overrides?.['follow-redirects'];
+  const minimum = typeof range === 'string' ? semver.minVersion(range) : null;
+  assert(minimum && semver.gte(minimum.version, '1.16.1'), 'follow-redirects override permits the vulnerable range');
+  const entries = Object.entries(lock.packages || {}).filter(([p]) => p.endsWith('/follow-redirects'));
+  assert(entries.length > 0, 'lock must bind follow-redirects');
+  for (const [p, entry] of entries) {
+    assert(semver.valid(entry.version) && semver.gte(entry.version, '1.16.1'), `${p} pins vulnerable follow-redirects`);
+    assert.match(entry.integrity || '', /^sha512-/, `${p} lacks registry integrity`);
+  }
+}
+
+test('redirect security override and committed lock exclude both affected advisory ranges', () => {
+  verifyRedirects(JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')),
+    JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8')));
+});
+
+test('redirect security guard rejects a vulnerable override or lock and missing package', () => {
+  const pkg = { overrides: { 'follow-redirects': '^1.16.1' } };
+  const lock = { packages: { 'node_modules/follow-redirects': { version: '1.16.1', integrity: 'sha512-fixture' } } };
+  verifyRedirects(pkg, lock);
+  assert.throws(() => verifyRedirects({ overrides: { 'follow-redirects': '^1.16.0' } }, lock), /vulnerable range/);
+  assert.throws(() => verifyRedirects(pkg, { packages: {} }), /must bind/);
+  lock.packages['node_modules/follow-redirects'].version = '1.16.0';
+  assert.throws(() => verifyRedirects(pkg, lock), /pins vulnerable/);
+});
+
 function verifyOverrides(pkg) {
   for (const range of [pkg.overrides?.sharp, pkg.overrides?.['@huggingface/transformers']?.sharp]) {
     assert.equal(typeof range, 'string', 'both existing Sharp override routes must be present');
