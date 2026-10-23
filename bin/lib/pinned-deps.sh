@@ -201,9 +201,8 @@ papercusp_pinned_deps_snapshot() (
   local _snap="${2:-}"
   local _copy_mode="${3:-hardlink}"
   local _population="${4:-}"
-  # Private handoff from snapshot_locked: its parent retains the physical copy
-  # lease while this child runs under the donor's install reader.
-  local _admitted_copy_holder="${5:-}"
+  # The locked wrapper must drop its donor reader if copy capacity races away.
+  local _copy_admission="${5:-wait}"
   local _rel _src _dst _tmp _old _n=0 _fail=0 _legacy _legacy_count _legacy_path
   case "$_copy_mode" in
     hardlink|copy) ;;
@@ -248,22 +247,14 @@ papercusp_pinned_deps_snapshot() (
     # Keep the host-wide lease through checksum reuse, staging and publication;
     # the subshell's EXIT trap also releases it on every refused/failed attempt.
     dependency_generation_record_reserve_fs "$_donor"
-    if [ -n "$_admitted_copy_holder" ]; then
-      local _actual_copy_holder _copy_lock
-      _copy_lock="$(dependency_generation_copy_lock_file)"
-      IFS= read -r _actual_copy_holder < "$_copy_lock.holder" 2>/dev/null || _actual_copy_holder=''
-      if [ "$_actual_copy_holder" != "$_admitted_copy_holder" ]; then
-        echo "ERROR: admitted copy holder changed; refusing dependency snapshot." >&2
-        return 76
-      fi
-      # Keep real copy-progress publication attached to the parent's holder.
-      # Only that parent owns/releases its flock; this child must not reacquire it.
-      DEPENDENCY_GENERATION_COPY_LOCK_DEPTH=1
-      DEPENDENCY_GENERATION_COPY_LOCK_HOLDER="$_admitted_copy_holder"
-    else
-      dependency_generation_acquire_copy_lock "pinned snapshot $_snap" || return $?
-      trap dependency_generation_release_copy_lock EXIT
-    fi
+    case "$_copy_admission" in
+      try)
+        DEPENDENCY_GENERATION_COPY_LOCK_TIMEOUT_SEC=0 DEPENDENCY_GENERATION_COPY_LOCK_MAX_SEC=0 \
+          dependency_generation_acquire_copy_lock "pinned snapshot $_snap" || return $? ;;
+      wait) dependency_generation_acquire_copy_lock "pinned snapshot $_snap" || return $? ;;
+      *) echo "ERROR: invalid copy admission mode; refusing dependency snapshot." >&2; return 76 ;;
+    esac
+    trap dependency_generation_release_copy_lock EXIT
   fi
 
   # Hardlinks cannot cross filesystems, and the failure mode without this check is a
@@ -528,8 +519,10 @@ for (const rel of source) {
 )
 
 # Usage: papercusp_pinned_deps_snapshot_locked <donor_root> <snapshot_root>
-# The supported entry point: admits a physical copy before taking the DONOR's
-# repo-keyed install reader. Queued copies must not block a dependency repair.
+# The supported entry point: waits for copy capacity outside the donor reader,
+# then releases that probe before entering the reader and tries copy admission.
+# A race drops the reader and retries. Never hold either lock while waiting for
+# the other: generation publishers also take an install reader before copying.
 #
 # It re-invokes this file as a script under `npm-install-safe.mjs --exec-under-lock`, which is
 # that script's own documented reader-side contract, rather than reimplementing the mkdir-lock
@@ -546,7 +539,7 @@ papercusp_pinned_deps_snapshot_locked() (
   local _copy_mode="${3:-hardlink}"
   local _population="${4:-}"
   local _self="${BASH_SOURCE[0]}"
-  local _wrapper _copy_holder=''
+  local _wrapper _attempt=0 _status
 
   if [ -z "$_donor" ] || [ -z "$_snap" ]; then
     echo "ERROR: papercusp_pinned_deps_snapshot_locked needs <donor_root> <snapshot_root>." >&2
@@ -564,13 +557,25 @@ papercusp_pinned_deps_snapshot_locked() (
   if [ "$_copy_mode" = copy ]; then
     source "$(dirname "${BASH_SOURCE[0]}")/../../../apps/operator/bin/release/dependency-generation.sh" || return 1
     dependency_generation_record_reserve_fs "$_donor"
-    dependency_generation_acquire_copy_lock "pinned snapshot $_snap" || return $?
     trap dependency_generation_release_copy_lock EXIT
-    _copy_holder="$DEPENDENCY_GENERATION_COPY_LOCK_HOLDER"
+    while [ "$_attempt" -lt 3 ]; do
+      _attempt=$((_attempt + 1))
+      dependency_generation_acquire_copy_lock "pinned snapshot $_snap" || return $?
+      dependency_generation_release_copy_lock
+      if node "$_wrapper" --repo-root "$_donor" --exec-under-lock -- \
+        bash "$_self" snapshot "$_donor" "$_snap" "$_copy_mode" "$_population" try; then
+        return 0
+      else
+        _status=$?
+      fi
+      [ "$_status" -eq 76 ] || return "$_status"
+      echo "Dependency copy admission raced; donor reader released (attempt $_attempt of 3)." >&2
+    done
+    return 76
   fi
 
   node "$_wrapper" --repo-root "$_donor" --exec-under-lock -- \
-    bash "$_self" snapshot "$_donor" "$_snap" "$_copy_mode" "$_population" "$_copy_holder"
+    bash "$_self" snapshot "$_donor" "$_snap" "$_copy_mode" "$_population"
 )
 
 # Usage: papercusp_assert_pinned_deps_decoupled <repo_root> [<allowed_root>] [<mountinfo>]
