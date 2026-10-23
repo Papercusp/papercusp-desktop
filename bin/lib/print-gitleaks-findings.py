@@ -2126,6 +2126,134 @@ def _uuid_open_row(row: dict[str, object], pot_id: str, keys: dict[str, object])
     return json.loads(output.raw[:length.value]), True
 
 
+def normalize_seed_plaintext(source: Path, rows: Path, prior_plaintext: Path,
+                             authentication: Path, output: Path, receipt: Path) -> dict[str, object]:
+    """Repair diagnostic streams that emitted both snapshot wrappers and their children.
+
+    Reuse hash-bound, previously authenticated rows rather than decrypting again.
+    SnapshotPayload.rows (log-snapshot.ts) is retained in place: each child must
+    match the next extracted row exactly before its duplicate is coalesced. This
+    is diagnostic representation coverage, never signed-log or release GO proof.
+    """
+    for path in (rows, prior_plaintext, authentication):
+        _private_file(path)
+    if source.is_symlink() or not source.is_file():
+        raise ValueError('regular seed source required')
+    for path in (output, receipt):
+        if (path.exists() or path.is_symlink() or path.parent.is_symlink()
+                or path.parent.stat().st_mode & 0o077):
+            raise ValueError('private create-only diagnostic output required')
+    if output.resolve() == receipt.resolve():
+        raise ValueError('distinct diagnostic outputs required')
+    inputs = (source, rows, prior_plaintext, authentication)
+    before = [_sha256(path) for path in inputs]
+    auth = json.loads(authentication.read_text())
+    if (auth.get('sourceSha256') != before[0] or auth.get('rowsSha256') != before[1]
+            or auth.get('plaintextSha256') != before[2]
+            or type(auth.get('parsedRows')) is not int or auth['parsedRows'] <= 0
+            or auth.get('rows') != auth['parsedRows']
+            or type(auth.get('ciphertextFields')) is not int
+            or auth['ciphertextFields'] != auth.get('authenticatedCiphertext')
+            or auth.get('negativeControls') != {'tamper_rejected': True, 'wrong_key_rejected': True}):
+        raise ValueError('diagnostic authentication binding incomplete')
+    counts = {'inputRowsConsumed': 0, 'topLevelRows': 0, 'snapshotWrappers': 0,
+              'snapshotChildrenCoalesced': 0, 'authenticatedRowsReused': 0,
+              'remainingStructuralEnvelopes': 0}
+
+    def canonical(value: object) -> str:
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+
+    def sealed(value: object) -> bool:
+        if isinstance(value, dict):
+            return '__rekey' in value or any(sealed(child) for child in value.values())
+        return isinstance(value, list) and any(sealed(child) for child in value)
+
+    temporary: list[str] = []
+    published: list[Path] = []
+    try:
+        fd, staging = tempfile.mkstemp(prefix='normalized-seed-', suffix='.partial', dir=output.parent)
+        temporary.append(staging)
+        with rows.open() as original_stream, prior_plaintext.open() as plain_stream, os.fdopen(fd, 'w') as out:
+            def take(expected: object = None, depth: int = 0) -> object:
+                if depth > 64:
+                    raise ValueError('snapshot diagnostic nesting exceeds bound')
+                raw, plain = original_stream.readline(), plain_stream.readline()
+                if not raw and not plain and expected is None:
+                    return None
+                if not raw or not plain:
+                    raise ValueError('snapshot diagnostic row stream incomplete')
+                original, opened = json.loads(raw), json.loads(plain)
+                if (not isinstance(original, dict) or not isinstance(opened, dict)
+                        or not {'table', 'hbKey', 'value'} <= original.keys()
+                        or not isinstance(original['table'], str) or not isinstance(original['hbKey'], str)
+                        or canonical({k: v for k, v in original.items() if k != 'value'})
+                        != canonical({k: v for k, v in opened.items() if k != 'value'})):
+                    raise ValueError('diagnostic row metadata changed')
+                if expected is not None and canonical(original) != canonical(expected):
+                    raise ValueError('snapshot child does not match extracted duplicate')
+                counts['inputRowsConsumed'] += 1
+                encrypted = isinstance(original['value'], dict) and '__rekey' in original['value']
+                if encrypted:
+                    if (set(original['value']) != {'__rekey'} or type(original.get('epoch')) is not int
+                            or not isinstance(original.get('author_pubkey'), str)):
+                        raise ValueError('diagnostic encrypted row metadata incomplete')
+                    counts['authenticatedRowsReused'] += 1
+                elif canonical(original['value']) != canonical(opened.get('value')):
+                    raise ValueError('unsealed diagnostic row changed')
+                if original['table'] == '__snapshot__':
+                    # An encrypted wrapper needs a new extraction of its decoded children.
+                    if encrypted or not isinstance(original['value'], dict) or not isinstance(original['value'].get('rows'), list):
+                        raise ValueError('unsupported snapshot diagnostic wrapper')
+                    counts['snapshotWrappers'] += 1
+                    children = []
+                    for child in original['value']['rows']:
+                        if not isinstance(child, dict):
+                            raise ValueError('invalid snapshot diagnostic child')
+                        children.append(take(child, depth + 1))
+                        counts['snapshotChildrenCoalesced'] += 1
+                    opened = {**opened, 'value': {**opened['value'], 'rows': children}}
+                if sealed(opened):
+                    raise ValueError('unopened envelope remains in diagnostic plaintext')
+                return opened
+
+            while True:
+                normalized = take()
+                if normalized is None:
+                    break
+                counts['topLevelRows'] += 1
+                out.write(json.dumps(normalized, ensure_ascii=False, separators=(',', ':')) + '\n')
+            out.flush()
+            os.fsync(out.fileno())
+        if (counts['inputRowsConsumed'] != auth['parsedRows']
+                or counts['authenticatedRowsReused'] != auth['authenticatedCiphertext']
+                or counts['topLevelRows'] + counts['snapshotChildrenCoalesced'] != counts['inputRowsConsumed']
+                or before != [_sha256(path) for path in inputs]):
+            raise ValueError('diagnostic input coverage or identity changed')
+        result = {'schema': 'papercusp-seed-normalized-diagnostic-v1',
+                  'scope': 'Previously authenticated physical JSON rows only; not signed-log completeness, credential clearance or release admission',
+                  'sourceSha256': before[0], 'rowsSha256': before[1],
+                  'priorPlaintextSha256': before[2], 'authenticationReceiptSha256': before[3],
+                  'normalizerSha256': _sha256(Path(__file__)),
+                  'outputSha256': _sha256(Path(staging)), 'counts': counts}
+        report_fd, report_staging = tempfile.mkstemp(prefix='normalized-seed-receipt-', suffix='.partial', dir=receipt.parent)
+        temporary.append(report_staging)
+        with os.fdopen(report_fd, 'w') as handle:
+            json.dump(result, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        for staged, destination in ((staging, output), (report_staging, receipt)):
+            os.link(staged, destination)
+            published.append(destination)
+        return result
+    except BaseException:
+        for path in published:
+            path.unlink()
+        raise
+    finally:
+        for path in temporary:
+            os.unlink(path)
+
+
 def _uuid_source_span(source: dict[str, object]) -> None:
     """D-174 exact declared ORIGINAL span. This validates shape/counts, not GO proof."""
     span = source.get('sourceInput')
@@ -3037,6 +3165,14 @@ def _safe_locator(raw_file: object, scan_root: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) == 8 and argv[1] == '--normalize-seed-plaintext':
+        try:
+            result = normalize_seed_plaintext(*(Path(value) for value in argv[2:]))
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+            print('Seed diagnostic normalization incomplete (values omitted).', file=sys.stderr)
+            return 2
+        print(json.dumps(result))
+        return 0
     if len(argv) == 7 and argv[1] == '--bind-uuid-source-documents':
         try:
             bind_uuid_source_documents(Path(argv[2]), argv[3], Path(argv[4]), Path(argv[5]), Path(argv[6]))
