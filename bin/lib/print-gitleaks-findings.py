@@ -62,6 +62,13 @@ _MECHANICAL_PLAIN_CLASSES = {
 _SEED_CLASSES |= _MECHANICAL_SEED_CLASSES
 _PLAIN_CLASSES |= _MECHANICAL_PLAIN_CLASSES
 _CREDENTIAL_FIELD = re.compile(r"token|secret|key|auth|password", re.IGNORECASE)
+# The generic scanner also recognizes access/api/credential/creds/passwd labels.
+# Keep this stricter policy local to the descriptive class; other classes carry
+# their own source-specific proofs.
+_DESCRIPTIVE_CREDENTIAL_FIELD = re.compile(
+    r"token|secret|key|auth|access|api|credential|creds|passw(?:or)?d", re.IGNORECASE)
+_DESCRIPTIVE_FIELD_PREFIX = re.compile(
+    r'''["']?([A-Za-z_][A-Za-z_0-9]*)["']?\s*:\s*["']?''')
 _ID_FIELDS = {"id", "issue_id", "msg_id", "condition_id", "operation_id", "request_id",
               "receipt_id", "event_id", "rubric_id", "rule_id", "task_id", "ref"}
 _FROZEN_TREES = {"superproject": "d740fc3802877d1c8c3b1068768681ee32ef0025",
@@ -295,6 +302,26 @@ def non_bearer_reference_valid(field: str, value: str, witness: dict[str, object
     return False
 
 
+def _descriptive_match_valid(match: str, value: str, field: str) -> bool:
+    """Prose is not evidence that an unparsed assignment is non-credential.
+
+    Only a complete, simple colon prefix matching the source field can
+    establish a benign label.
+    Other scanner operators, escaped labels and ambiguous capture boundaries
+    require a different source-bound proof, rather than a prose exemption.
+    """
+    if not value or match.count(value) != 1:
+        return False
+    prefix = match.partition(value)[0]
+    if "\\" in prefix:
+        return False
+    if not any(char in prefix for char in "=>:|?,"):
+        return True
+    parsed = _DESCRIPTIVE_FIELD_PREFIX.fullmatch(prefix)
+    return (parsed is not None and parsed.group(1) == field
+            and not _DESCRIPTIVE_CREDENTIAL_FIELD.search(parsed.group(1)))
+
+
 def mechanical_class_valid(entry: dict[str, object], finding: dict[str, object],
                            context: dict[str, object], *, seed: bool) -> bool:
     """D-147 predicates re-derived from exact private findings and bound inputs."""
@@ -361,10 +388,9 @@ def mechanical_class_valid(entry: dict[str, object], finding: dict[str, object],
     if kind == "public-cryptographic-key":
         return actual == value and _canonical_base64(value, 32) in context["publicKeys"]
     if kind == "reviewed-descriptive-source-text":
-        return (finding["RuleID"] == "generic-api-key" and not _CREDENTIAL_FIELD.search(field)
+        return (finding["RuleID"] == "generic-api-key" and not _DESCRIPTIVE_CREDENTIAL_FIELD.search(field)
                 and isinstance(actual, str) and match in actual and value in actual
-                and not _CREDENTIAL_FIELD.search((_MATCH_FIELD.match(match).group(1)
-                                                  if _MATCH_FIELD.match(match) else "")))
+                and _descriptive_match_valid(match, value, field))
     if kind == "public-generated-agent-identifier":
         if (actual != value or field not in _RESPAWN_FIELDS or finding["RuleID"] != "generic-api-key"
                 or entry.get("line") != finding["StartLine"]

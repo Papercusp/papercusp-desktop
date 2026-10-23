@@ -1662,6 +1662,60 @@ print(json.dumps({'positiveClasses':results,'negativeControls':True}))
   assert.equal(JSON.parse(result.stdout).negativeControls, true);
 });
 
+test('descriptive source classification refuses scanner assignments and ambiguous labels', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-descriptive-guard-'));
+  try {
+    const program = String.raw`
+import importlib.util,json,pathlib,subprocess,sys
+sys.dont_write_bytecode=True
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+base=pathlib.Path(sys.argv[2]);control='A9f3Kx7L'+'m2Qp8Rz4'+'V6nC1wH7'
+def check(match,field='body',**changes):
+ f={'RuleID':'generic-api-key','Secret':control,'Match':match,'StartLine':1}
+ e={'class':'reviewed-descriptive-source-text','rule':f['RuleID'],'digest':m.finding_digest(f),'fieldPath':[field]}
+ ctx={'plainRows':{1:{field:match}}}
+ if 'finding' in changes: f.update(changes['finding'])
+ if 'source' in changes: ctx['plainRows'][1][field]=changes['source']
+ return m.mechanical_class_valid(e,f,ctx,seed=False)
+operators=['=','>',':=', '::=', ':::=','||',':','=>','?=',',']
+labels=['apiKey','access','API','credential','creds','passwd','password','auth','token','secret','key','deployment-access-token']
+fixtures={}
+for i,label in enumerate(labels):
+ for j,op in enumerate(operators): fixtures[f'case-{i}-{j}.txt']=label+op+'"'+control+'"\n'
+fixtures['escaped.json']=json.dumps({'body':'apiKey='+control+' '})
+for name,text in fixtures.items(): (base/name).write_text(text)
+scan=subprocess.run([sys.argv[4],'dir',str(base),'--config',sys.argv[3],'--no-banner','--log-level=error','--redact=0','--report-format=json','--report-path=-'],capture_output=True,text=True)
+assert scan.returncode==1,scan.stderr
+findings=[f for f in json.loads(scan.stdout) if f['RuleID']=='generic-api-key']
+seen={pathlib.Path(f['File']).name for f in findings}
+assert seen==set(fixtures), 'scanner coverage changed: '+json.dumps({'missing':sorted(set(fixtures)-seen),'extra':sorted(seen-set(fixtures))})
+for f in findings:
+ e={'class':'reviewed-descriptive-source-text','rule':f['RuleID'],'digest':m.finding_digest(f),'fieldPath':['body']}
+ ctx={'plainRows':{int(f['StartLine']):{'body':(base/pathlib.Path(f['File']).name).read_text()}}}
+ assert not m.mechanical_class_valid(e,f,ctx,seed=False), 'scanner credential admitted'
+for op in operators:
+ assert not check('unknown'+op+'"'+control+'"'), 'unknown assignment admitted'
+for prefix in ['apiKey":"','"apiKey":"','apiKey\\":\\"','\\u0061piKey":"','apiKey\\u003d','body: apiKey=','body: "apiKey=','body:::','body:=','body: body:']:
+ assert not check(prefix+control+'"'), 'ambiguous/escaped assignment admitted'
+for match in ['ordinary prose '+control,'body":"'+control+'"','"body": "'+control+'"']:
+ assert check(match), 'benign control refused'
+ assert not check(match,finding={'Match':match+'changed'}), 'changed digest admitted'
+ assert not check(match,source='different source'), 'missing source admitted'
+ assert not check(match,field='credential'), 'credential container admitted'
+assert not check(control+' prose '+control), 'ambiguous capture admitted'
+print(json.dumps({'scannerFixtures':len(fixtures),'scannerFindings':len(findings),'operators':len(operators),'benignControls':3,'bindingsRefused':True}))
+`;
+    const result = spawnSync('python3', ['-B', '-c', program, reportFormatterPath, temp, configPath, gitleaksBin], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.scannerFixtures, 121);
+    assert.ok(summary.scannerFindings >= summary.scannerFixtures);
+    assert.equal(summary.operators, 10);
+    assert.equal(summary.benignControls, 3);
+    assert.equal(summary.bindingsRefused, true);
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test('D-147 envelope predicate rederives all 62 findings and the historical 33 recipients', () => {
   const program = String.raw`
 import importlib.util,json,sys,base64,hashlib
