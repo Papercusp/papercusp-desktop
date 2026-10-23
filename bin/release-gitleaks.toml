@@ -84,11 +84,12 @@ regexes = [
 # tied to a literal source marker on the line that produced the false positive;
 # the generic detector still scans every other line in every serve.mjs copy.
 [[rules.allowlists]]
-description = "Known generated third-party/runtime lines in the assembled serve.mjs"
+description = "Known generated third-party/runtime lines in the assembled host and spawner"
 condition = "AND"
 targetRules = ["generic-api-key"]
 paths = [
     '''(?:^|/)serve\.mjs$''',
+    '''(?:^|/)spawner-sidecar\.mjs$''',
 ]
 regexTarget = "line"
 regexes = [
@@ -118,6 +119,7 @@ condition = "AND"
 targetRules = ["generic-api-key"]
 paths = [
     '''(?:^|/)serve\.mjs$''',
+    '''(?:^|/)spawner-sidecar\.mjs$''',
 ]
 regexTarget = "match"
 regexes = [
@@ -135,6 +137,7 @@ condition = "AND"
 targetRules = ["generic-api-key"]
 paths = [
     '''(?:^|/)serve\.mjs$''',
+    '''(?:^|/)spawner-sidecar\.mjs$''',
 ]
 regexTarget = "match"
 regexes = [
@@ -155,6 +158,7 @@ condition = "AND"
 targetRules = ["generic-api-key"]
 paths = [
     '''(?:^|/)serve\.mjs$''',
+    '''(?:^|/)spawner-sidecar\.mjs$''',
 ]
 regexTarget = "match"
 regexes = [
@@ -173,6 +177,7 @@ condition = "AND"
 targetRules = ["generic-api-key"]
 paths = [
     '''(?:^|/)serve\.mjs$''',
+    '''(?:^|/)spawner-sidecar\.mjs$''',
 ]
 regexTarget = "match"
 regexes = [
@@ -188,6 +193,29 @@ regexes = [
     '''IOyekeyEsQ==''',
     '''jsonwebtoken IOCmhuCmnOCmvw==''',
     '''KeyXkA==''',
+]
+
+# These exact matches are public source data or JavaScript expressions, not
+# literal credentials. The two checksums come from the pinned Semgrep library
+# manifest; semgrep-taint-facade verifies the corresponding library bytes.
+# Rollup assigns a property map, the condition reader accesses a row field,
+# and the EC2 schema declaration is generated SDK code. Match the finding,
+# never its containing line, so a credential on that line remains detectable.
+[[rules.allowlists]]
+description = "Verified public library checksums and generated code expressions"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = [
+    '''(?:^|/)serve\.mjs$''',
+    '''(?:^|/)spawner-sidecar\.mjs$''',
+]
+regexTarget = "match"
+regexes = [
+    '''libgssapi_krb5\.so\.2\\?":\\?"9274e5961d72284cd39377fc9f2007a33bda4ca890b1c2dc7d268efea6c96b29\\?"''',
+    '''libkeyutils\.so\.1\\?":\\?"338049f8e2686318fdeb35ed5eaa6f4609d3712bb6e25b4bd4af72ab3fcc9f89\\?"''',
+    '''this\.propertiesAndGettersByKey=this\.propertiesAndSettersByKey=properties;''',
+    '''\bkey[0-9]+=[A-Za-z_$][A-Za-z0-9_$]*\.condition_key;''',
+    '''DescribeVpcBlockPublicAccessExclusionsRequest",_DVBPAEResc="''',
 ]
 
 # The privacy page is public documentation, and the same generated sentence is

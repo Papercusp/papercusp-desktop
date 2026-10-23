@@ -1055,7 +1055,7 @@ test('release gitleaks config keeps default detectors and uses conjunctive gener
   const config = fs.readFileSync(configPath, 'utf8');
   assert.match(config, /minVersion = "v8\.30\.1"/);
   assert.match(config, /\[extend\]\s+useDefault = true/);
-  assert.equal((config.match(/condition = "AND"/g) || []).length, 9);
+  assert.equal((config.match(/condition = "AND"/g) || []).length, 10);
   assert.match(config, /targetRules = \["gcp-api-key"\]/);
   assert.match(config, /targetRules = \["generic-api-key"\]/);
   assert.match(config, /regexTarget = "line"/);
@@ -1088,6 +1088,65 @@ test('known generated contexts pass only under their path-and-line allowlists', 
   const allowed = scan(fixtures);
   assert.equal(allowed.status, 0, 'known generated contexts must be suppressed by the release config');
   assert.deepEqual(allowed.report, []);
+});
+
+test('the spawner applies existing generated-code rules while retaining unrelated credentials', () => {
+  const generated = generatedFixtures()['serve.mjs'];
+  const fixtures = {
+    'spawner-sidecar.mjs': generated,
+    'env-sidecars/staging/spawner-sidecar.mjs': generated,
+  };
+  assert.equal(scan(fixtures, { config: false }).status, 1);
+  assert.equal(scan(fixtures).status, 0);
+  const canary = ['A9f3Kx7L', 'm2Qp8Rz4', 'V6nC1wH7'].join('');
+  const rejected = scan({
+    'spawner-sidecar.mjs': generated + '\nconst token = "' + canary + '";\n',
+    'other.mjs': generated,
+  });
+  assert.equal(rejected.status, 1);
+  assert.ok(rejected.report.some((finding) => finding.File.endsWith('/spawner-sidecar.mjs')));
+  assert.ok(rejected.report.some((finding) => finding.File.endsWith('/other.mjs')));
+});
+
+test('public checksum and code matches stay exact, path constrained and separate from credentials', () => {
+  const manifest = {
+    'libgssapi_krb5.so.2': '9274e5961d72284cd39377fc9f2007a33bda4ca890b1c2dc7d268efea6c96b29',
+    'libkeyutils.so.1': '338049f8e2686318fdeb35ed5eaa6f4609d3712bb6e25b4bd4af72ab3fcc9f89',
+  };
+  const lines = [
+    ...Object.entries(manifest).map(([file, digest]) =>
+      'const manifest=' + JSON.stringify({ [file]: digest }) + ';'),
+    'this.propertiesAndGettersByKey=this.propertiesAndSettersByKey=properties;',
+    'key16=e14.condition_key;',
+    '_DVBPAER="DescribeVpcBlockPublicAccessExclusionsRequest",_DVBPAEResc="DescribeVpcBlockPublicAccessExclusionsResult";',
+  ];
+  const generated = lines.join('\n') + '\n';
+  // Keep the release detector's regex active while disabling the path-specific
+  // exceptions. The published bundle contains ordinary JSON object entries.
+  const baseline = scan({ 'other.mjs': generated });
+  assert.equal(baseline.status, 1);
+  assert.ok(baseline.report.length >= 5, 'each public expression must exercise the detector');
+  for (const file of ['serve.mjs', 'spawner-sidecar.mjs', 'env-sidecars/staging/serve.mjs']) {
+    const allowed = scan({ [file]: generated });
+    assert.equal(allowed.status, 0, JSON.stringify(allowed.report));
+  }
+  const canary = ['A9f3Kx7L', 'm2Qp8Rz4', 'V6nC1wH7'].join('');
+  const nearMisses = [
+    lines[1].replace(manifest['libkeyutils.so.1'], '1'.repeat(64)),
+    'this.propertiesAndGettersByKey=this.propertiesAndSettersByKey=otherProperties;',
+    'key16=e14.other_key;',
+    '_DVBPAER="DescribeVpcBlockPublicAccessExclusionsRequest",_OtherResult="DescribeVpcBlockPublicAccessExclusionsResult";',
+  ];
+  const rejected = scan({
+    'serve.mjs': lines.map((line) => line + 'const api_key="' + canary + '";').join('\n'),
+    'spawner-sidecar.mjs': nearMisses.join('\n'),
+    'other.mjs': generated,
+  });
+  assert.equal(rejected.status, 1);
+  for (const file of ['serve.mjs', 'spawner-sidecar.mjs', 'other.mjs']) {
+    assert.ok(rejected.report.some((finding) => finding.File.endsWith('/' + file)),
+      'negative control disappeared for ' + file);
+  }
 });
 
 test('Monaco generated contexts cover both shipped directory layouts and environment copies', () => {
