@@ -16,6 +16,9 @@ const voiceE2e = fs.readFileSync(
 );
 const section = text => text.slice(text.indexOf('NODE_TARBALL='), text.indexOf('\n# The candidate stays'));
 const architecture = shipped.slice(shipped.indexOf('# Runtime architecture'), shipped.indexOf('\nNODE_VERSION='));
+const nodeIdentity = shipped.slice(shipped.indexOf('# Node archive identity'), shipped.indexOf('# The image producer'));
+const fixtureNodePins = (text, archive) => text.replace(/(?:expected=)[a-f0-9]{64}/g,
+  'expected=' + createHash('sha256').update(fs.readFileSync(archive)).digest('hex'));
 const overmind = shipped.slice(shipped.indexOf('# overmind is not'), shipped.indexOf('# kopia —'));
 const quote = s => `'${s.replaceAll("'", "'\\''")}'`;
 const run = (command, args, options = {}) => spawnSync(command, args, {
@@ -52,7 +55,7 @@ function fixture(t, { invalidNpm = false } = {}) {
   const script = path.join(dir, 'install.sh');
   const inputs = path.join(dir, 'inputs');
   fs.mkdirSync(inputs);
-  const body = section(shipped);
+  const body = fixtureNodePins(nodeIdentity + section(shipped), archive);
   assert.ok(body.includes('install_node_runtime /usr/local'), 'exercise the production invocation');
   fs.writeFileSync(script, 'set -euo pipefail\nNODE_VERSION=24.18.1\n' + architecture + body.replace('install_node_runtime /usr/local', 'install_node_runtime "$TEST_NODE_PREFIX"'));
   const env = { ...process.env, PATH: `${fakebin}:${process.env.PATH}`, NODE_FIXTURE_ARCHIVE: archive, TEST_NODE_PREFIX: prefix,
@@ -108,20 +111,30 @@ function offlineFixture(t, existing = true) {
   exe('id', existing ? 'exit 0\n' : 'test -f "$OFFLINE_TEST_USER"\n');
   exe('useradd', 'echo useradd >> "$OFFLINE_TEST_LOG"\ntouch "$OFFLINE_TEST_USER"\n');
   exe('chown', 'echo "chown $*" >> "$OFFLINE_TEST_LOG"\n');
-  exe('apt-get', 'echo "apt-get $*" >> "$OFFLINE_TEST_LOG"\nif [[ "$1" != clean ]]; then\n [[ " $* " == *" --no-download "* && " $* " == *" --no-remove "* ]] || exit 91\n [[ "${OFFLINE_TEST_APT_FAIL:-0}" != 1 ]] || exit 92\nfi\n');
+  exe('apt-get', [
+    'echo "apt-get $*" >> "$OFFLINE_TEST_LOG"',
+    'if [[ "$1" != clean ]]; then',
+    ' [[ " $* " == *" --no-download "* && " $* " == *" --no-remove "* ]] || exit 91',
+    ' [[ "${OFFLINE_TEST_APT_FAIL:-0}" != 1 ]] || exit 92',
+    ' if [[ " $* " != *" --simulate "* ]]; then',
+    '  [[ " $* " == *" Dir::Cache::archives=$OFFLINE_TEST_ARCHIVES/ "* ]] || { echo "offline apt must resolve packages from the shipped archive directory" >&2; exit 95; }',
+    ' fi',
+    'fi',
+    '',
+  ].join('\n'));
   exe('curl', 'echo UNEXPECTED_NETWORK >> "$OFFLINE_TEST_LOG"\nexit 93\n');
   exe('npm', 'echo "npm $*" >> "$OFFLINE_TEST_LOG"\nif [[ "$1" == install ]]; then [[ " $* " == *" --offline "* ]] || exit 94; fi\n');
   exe('pnpm', 'echo 9.15.0\n');
   exe('kopia', 'echo kopia fixture\n');
   exe('python3', 'echo "BUN_STAGING_STAND_IN $*" >> "$OFFLINE_TEST_LOG"\n');
-  let body = shipped;
+  let body = fixtureNodePins(shipped, f.archive);
   for (const absolute of ['/opt/papercup', '/usr/local', '/home/', '/etc/', '/usr/share/', '/root/', '/var/lib/apt/', '/tmp/node-compile-cache']) {
     body = body.replaceAll(absolute, sandbox + absolute);
   }
   const script = path.join(f.dir, 'offline-bootstrap.sh');
   fs.writeFileSync(script, body);
   const env = { ...process.env, PATH: `${tools}:${sandbox}/usr/local/bin:${process.env.PATH}`,
-    PAPERCUSP_ROOTFS_BUILD: '0', OFFLINE_TEST_LOG: log, OFFLINE_TEST_USER: path.join(f.dir, 'user-created') };
+    PAPERCUSP_ROOTFS_BUILD: '0', OFFLINE_TEST_LOG: log, OFFLINE_TEST_ARCHIVES: path.join(inputs, 'debs'), OFFLINE_TEST_USER: path.join(f.dir, 'user-created') };
   return { sandbox, inputs, log, seal, run: (args = [], extra = {}) => run('bash', [script, ...args], { env: { ...env, ...extra } }) };
 }
 
@@ -146,11 +159,14 @@ for (const existing of [false, true]) {
   });
 }
 
-for (const damage of ['missing', 'changed', 'unlisted', 'wrong-arch', 'wrong-os', 'symlink', 'resolver']) {
+for (const damage of ['missing', 'changed', 'node-identity', 'unlisted', 'wrong-arch', 'wrong-os', 'symlink', 'resolver']) {
   test(`offline ${damage} input refuses before distro configuration`, t => {
     const f = offlineFixture(t);
     if (damage === 'missing') fs.unlinkSync(path.join(f.inputs, 'node.tar.xz'));
     if (damage === 'changed') fs.appendFileSync(path.join(f.inputs, 'pnpm.tgz'), 'bad');
+    if (damage === 'node-identity') {
+      fs.appendFileSync(path.join(f.inputs, 'node.tar.xz'), 'wrong upstream bytes'); f.seal();
+    }
     if (damage === 'unlisted') fs.writeFileSync(path.join(f.inputs, 'unexpected'), 'bad');
     if (damage === 'wrong-arch') {
       fs.writeFileSync(path.join(f.inputs, 'manifest'), 'ubuntu=24.04\narch=arm64\nnode=24.18.1\npnpm=9.15.0\n'); f.seal();
@@ -434,7 +450,10 @@ test('a failed network-disabled full bootstrap prevents rootfs export and recipe
     PC_HEAVY_COALESCE: '0', PAPERCUSP_ROOTFS_OUT_DIR: output, PAPERCUSP_RUNTIME_PLATFORM: 'linux/amd64' } });
   assert.equal(result.status, 47, result.stderr);
   const log = fs.readFileSync(calls, 'utf8');
-  assert.match(log, /run --rm --network none --platform linux\/amd64 .*env -u PAPERCUSP_ROOTFS_BUILD bash \/opt\/papercup\/bootstrap/);
+  assert.match(log, /run --rm --network none --platform linux\/amd64 [\s\S]*env -u PAPERCUSP_ROOTFS_BUILD bash \/opt\/papercup\/bootstrap/);
+  assert.match(log, /dpkg --remove jq ripgrep tmux/);
+  assert.match(log, /rm -f \/usr\/local\/bin\/node \/usr\/local\/bin\/bun/);
+  assert.match(log, /ROOTFS_OFFLINE_REPAIR_PASS/);
   assert.doesNotMatch(log, /^export /m);
   assert.match(log, /^image rm -f papercup-runtime-offline-smoke:/m);
   assert.deepEqual(fs.readdirSync(output), ['papercup-rootfs-recipe']);

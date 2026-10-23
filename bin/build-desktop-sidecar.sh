@@ -5030,12 +5030,19 @@ case "$target_os" in
            esac ;;
   windows) node_archive="node-${NODE_VERSION}-win-x64.zip" ;;
 esac
+# Official v24.18.1 SHASUMS256.txt. The archive binds both the version and
+# target; a version-keyed extracted binary cache has no trustworthy identity.
+case "$NODE_VERSION:$target_os:$target_arch" in
+  v24.18.1:linux:x64) node_archive_sha256=d6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0 ;;
+  v24.18.1:linux:arm64) node_archive_sha256=7201e3a09dc825bac57867c81913e2b8f0ef87d04cb9082af4cda82f6ff3d88c ;;
+  v24.18.1:darwin:x64) node_archive_sha256=6fb20fceacbb157c2f95825b80df4a454a0f6d81cdcd7bb81eeae9147e0e76ec ;;
+  v24.18.1:darwin:arm64) node_archive_sha256=eb02f7fab96d3d67de40c5ec8566096fcb4c2026728787683ae5a97eb612b941 ;;
+  v24.18.1:windows:x64) node_archive_sha256=ec56b84a7551893ab2324ebdfdc4ab974a63b4781162600b68a1293cc3e53765 ;;
+  *) echo "ERROR: Node archive pin is unavailable for $NODE_VERSION $target_os-$target_arch" >&2; exit 1 ;;
+esac
 if [[ -n "${node_archive:-}" ]]; then
-  # EI-1869: cache slot keyed by version+platform (a version/arch bump ⇒ a new
-  # slot ⇒ correctly re-downloads; nothing else invalidates it).
   node_cache_bin="node"
   [[ "$target_os" == "windows" ]] && node_cache_bin="node.exe"
-  node_cache_dir="$SIDECAR_BIN_CACHE/node-${NODE_VERSION}-${target_os}-${target_arch}"
   if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
     [[ "$NODE_VERSION" == "$PAPERCUSP_VM_NODE_VERSION" ]] || {
       echo "ERROR: vm-release Node override $NODE_VERSION differs from pinned $PAPERCUSP_VM_NODE_VERSION" >&2
@@ -5053,46 +5060,57 @@ if [[ -n "${node_archive:-}" ]]; then
       exit 1
     }
     echo "  ✓ node $PAPERCUSP_VM_NODE_VERSION from checksum-pinned vm-release trust toolchain"
-  elif [[ -s "$node_cache_dir/$node_cache_bin" ]]; then
-    cp "$node_cache_dir/$node_cache_bin" "$OMP_DIR/$node_cache_bin"
-    chmod +x "$OMP_DIR/$node_cache_bin"
-    node_dst="$OMP_DIR/$node_cache_bin"
-    echo "  ✓ node $NODE_VERSION cached → $node_dst ($(du -h "$node_dst" | awk '{print $1}')) — skipped download"
   else
-    echo "→ downloading Node $NODE_VERSION → $node_archive"
-    node_tarball="/tmp/$node_archive"
-    if curl -fsSL "https://nodejs.org/dist/${NODE_VERSION}/${node_archive}" -o "$node_tarball"; then
-      tmp_node_dir=$(mktemp -d)
-      case "$node_archive" in
-        *.tar.xz) tar -xJf "$node_tarball" -C "$tmp_node_dir" --strip-components=1 ;;
-        *.tar.gz) tar -xzf "$node_tarball" -C "$tmp_node_dir" --strip-components=1 ;;
-        *.zip)    unzip -q "$node_tarball" -d "$tmp_node_dir" && \
-                   inner=$(find "$tmp_node_dir" -maxdepth 1 -mindepth 1 -type d | sed -n 1p) && \
-                   [[ -n "$inner" && -d "$inner" ]] && \
-                   mv "$inner"/* "$tmp_node_dir/" 2>/dev/null || true ;;
-      esac
-      if [[ -f "$tmp_node_dir/bin/node" ]]; then
-        cp "$tmp_node_dir/bin/node" "$OMP_DIR/node"
-        chmod +x "$OMP_DIR/node"
-        node_dst="$OMP_DIR/node"
-      elif [[ -f "$tmp_node_dir/node.exe" ]]; then
-        cp "$tmp_node_dir/node.exe" "$OMP_DIR/node.exe"
-        node_dst="$OMP_DIR/node.exe"
+    # Reuse the portable hasher on macOS as well as Linux. Its empty result
+    # fails the exact digest comparison below.
+    source "$HERE/lib/portable-sha256.sh"
+    stage_pinned_node() (
+      set -euo pipefail
+      node_archive_dir="$SIDECAR_BIN_CACHE/node-archives"
+      mkdir -p "$node_archive_dir" || exit 1
+      node_cached_archive="$node_archive_dir/$node_archive"
+      tmp_node_dir=$(mktemp -d "$node_archive_dir/.node-input.XXXXXX") || exit 1
+      tmp_node_bin=""
+      trap 'rm -rf "$tmp_node_dir"; [[ -z "$tmp_node_bin" ]] || rm -f "$tmp_node_bin"' EXIT
+      node_tarball="$tmp_node_dir/$node_archive"
+      if [[ -e "$node_cached_archive" || -L "$node_cached_archive" ]]; then
+        [[ -f "$node_cached_archive" && ! -L "$node_cached_archive" && -s "$node_cached_archive" ]] || {
+          echo "ERROR: Node archive cache must be a nonempty regular file" >&2; exit 1;
+        }
+        # Hash and extract the same private snapshot, even if another build
+        # atomically replaces the cache while this build is reading it.
+        cp "$node_cached_archive" "$node_tarball" || exit 1
+      elif ! curl -fsSL "https://nodejs.org/dist/${NODE_VERSION}/${node_archive}" -o "$node_tarball"; then
+        echo "ERROR: failed to download pinned Node runtime; refusing incomplete sidecar" >&2
+        exit 1
       fi
-      rm -rf "$tmp_node_dir" "$node_tarball"
-      if [[ -n "$node_dst" ]]; then
-        echo "  ✓ node at $node_dst ($(du -h "$node_dst" | awk '{print $1}'))"
-        # Seed the cache (best-effort; a seed failure never fails the build —
-        # the next build just re-downloads).
-        mkdir -p "$node_cache_dir" && cp "$node_dst" "$node_cache_dir/$node_cache_bin" 2>/dev/null || true
-      else
+      [[ "$(papercusp_portable_sha256 "$node_tarball")" == "$node_archive_sha256" ]] || {
+        echo "ERROR: Node archive checksum differs from the pinned target" >&2; exit 1;
+      }
+      tmp_node_bin=$(mktemp "$OMP_DIR/.node-runtime.XXXXXX") || exit 1
+      node_archive_root="${node_archive%.tar.xz}"
+      node_archive_root="${node_archive_root%.tar.gz}"
+      node_archive_root="${node_archive_root%.zip}"
+      case "$node_archive" in
+        *.tar.xz) tar -xJOf "$node_tarball" "$node_archive_root/bin/node" > "$tmp_node_bin" || exit 1 ;;
+        *.tar.gz) tar -xzOf "$node_tarball" "$node_archive_root/bin/node" > "$tmp_node_bin" || exit 1 ;;
+        *.zip) unzip -p "$node_tarball" "$node_archive_root/node.exe" > "$tmp_node_bin" || exit 1 ;;
+      esac
+      if [[ ! -s "$tmp_node_bin" ]]; then
         echo "ERROR: Node archive contains no runtime at the expected path; refusing incomplete sidecar" >&2
         exit 1
       fi
-    else
-      echo "ERROR: failed to download pinned Node runtime; refusing incomplete sidecar" >&2
+      chmod 755 "$tmp_node_bin" || exit 1
+      # Publish verified inputs and output only after successful extraction.
+      mv -f "$node_tarball" "$node_cached_archive" || exit 1
+      mv -f "$tmp_node_bin" "$OMP_DIR/$node_cache_bin" || exit 1
+    )
+    if ! stage_pinned_node; then
+      echo "ERROR: pinned Node runtime could not be packaged; refusing incomplete sidecar" >&2
       exit 1
     fi
+    node_dst="$OMP_DIR/$node_cache_bin"
+    echo "  ✓ checksum-pinned node $NODE_VERSION → $node_dst"
   fi
 fi
 if [[ -z "$node_dst" || ! -s "$node_dst" ]]; then

@@ -163,13 +163,27 @@ chmod +x /opt/papercup/bootstrap"
 
 docker cp "$BUN_HELPER_FILE" "$CONTAINER:/tmp/papercup-bun-runtime.py"
 docker start -a "$CONTAINER"
-# Do the complete installed bootstrap in an isolated clone with networking
-# disabled. A checksum manifest alone cannot prove the offline package closure
-# or npm input works. Never export/stamp a generation that fails this leg.
+# Exercise missing-package and runtime recovery in an isolated offline clone.
+# An intact image can pass without ever opening a .deb, hiding resolver defects.
+# Never export/stamp a generation that fails this leg.
 docker commit "$CONTAINER" "$SMOKE_IMAGE" >/dev/null
 SMOKE_CREATED=1
 docker run --rm --network none --platform "$RUNTIME_PLATFORM" "$SMOKE_IMAGE" \
-  env -u PAPERCUSP_ROOTFS_BUILD bash /opt/papercup/bootstrap
+  bash -ec '
+    mkdir -p /home/papercup/papercup/workspace /etc/papercusp
+    printf "workspace sentinel\n" > /home/papercup/papercup/workspace/offline-repair-sentinel
+    printf "config sentinel\n" > /etc/papercusp/offline-repair-sentinel
+    dpkg --remove jq ripgrep tmux
+    rm -f /usr/local/bin/node /usr/local/bin/bun /usr/local/bin/overmind /usr/local/bin/pnpm
+    rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/pnpm /root/.npm /var/cache/apt/archives
+    env -u PAPERCUSP_ROOTFS_BUILD bash /opt/papercup/bootstrap
+    test "$(node --version)" = "v$NODE_VERSION"
+    jq --version && rg --version && tmux -V
+    test "$(cat /home/papercup/papercup/workspace/offline-repair-sentinel)" = "workspace sentinel"
+    test "$(cat /etc/papercusp/offline-repair-sentinel)" = "config sentinel"
+    env -u PAPERCUSP_ROOTFS_BUILD bash /opt/papercup/bootstrap
+    echo ROOTFS_OFFLINE_REPAIR_PASS removed_packages=jq,ripgrep,tmux removed_runtimes=node,bun,overmind,pnpm sentinels=preserved repeated=pass
+  '
 # Retain the exact validated Linux input outside disposable /root caches.
 # The installed Server transfers it into old distros before their bootstrap.
 docker cp "$CONTAINER:/opt/papercup/papercup-bun-linux.zip" "$BUN_ARCHIVE_TMP"

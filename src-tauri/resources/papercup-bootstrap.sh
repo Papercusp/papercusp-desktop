@@ -14,6 +14,20 @@ NODE_VERSION="${NODE_VERSION#v}"
 PNPM_VERSION="${PNPM_VERSION:-9.15.0}"
 OFFLINE_INPUTS=/opt/papercup/offline-inputs
 
+# Node archive identity is checked before executing or installing its contents,
+# including when a complete offline inventory has been re-sealed incorrectly.
+verify_node_archive() {
+  local expected actual
+  case "$NODE_VERSION:$NODE_ARCH" in
+    24.18.1:x64) expected=d6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0 ;;
+    24.18.1:arm64) expected=7201e3a09dc825bac57867c81913e2b8f0ef87d04cb9082af4cda82f6ff3d88c ;;
+    *) echo "ERROR: Node archive pin is unavailable for $NODE_VERSION linux-$NODE_ARCH" >&2; return 2 ;;
+  esac
+  [[ -f "$1" && ! -L "$1" ]] || { echo "ERROR: Node archive must be a regular file" >&2; return 2; }
+  actual="$(sha256sum "$1")"
+  [[ "${actual%% *}" == "$expected" ]] || { echo "ERROR: Node archive checksum differs from the pinned target" >&2; return 2; }
+}
+
 # The image producer is the only online caller. First boot and upgrades use
 # the same complete inputs retained in the shipped rootfs, never apt mirrors
 # or an npm cache left by a previous installation.
@@ -38,6 +52,7 @@ verify_offline_inputs() (
   sha256sum --check --strict SHA256SUMS
   cmp manifest <(printf 'ubuntu=24.04\narch=%s\nnode=%s\npnpm=%s\n' "$(dpkg --print-architecture)" "$NODE_VERSION" "$PNPM_VERSION")
   test -s node.tar.xz && test -s overmind.gz && test -s pnpm.tgz
+  verify_node_archive "$PWD/node.tar.xz"
   local -a packages=("$PWD"/debs/*.deb)
   test -f "${packages[0]}"
   for member in "${packages[@]}"; do dpkg-deb --info "$member" >/dev/null; done
@@ -225,8 +240,11 @@ apt-get install -y --no-install-recommends \
   iproute2 \
   libasound2t64
 else
+  # With --no-download, apt resolves local package filenames through its
+  # archive cache even when install received absolute .deb paths.
   apt-get --no-download --no-remove -y -o Dpkg::Options::=--force-confold \
-    -o Dpkg::Use-Pty=0 install "$OFFLINE_INPUTS"/debs/*.deb
+    -o Dpkg::Use-Pty=0 -o Dir::Cache::archives="$OFFLINE_INPUTS/debs/" \
+    install "$OFFLINE_INPUTS"/debs/*.deb
 fi
 
 # overmind is not in the Ubuntu archive — fetch the release binary.
@@ -300,6 +318,7 @@ install_node_runtime() (
     curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" \
       -o "$OFFLINE_INPUTS/node.tar.xz"
   fi
+  verify_node_archive "$OFFLINE_INPUTS/node.tar.xz"
   tar -xJf "$OFFLINE_INPUTS/node.tar.xz" -C "$stage" --strip-components=1
   "$stage/bin/node" --version
   "$stage/bin/node" "$stage/lib/node_modules/npm/bin/npm-cli.js" --version

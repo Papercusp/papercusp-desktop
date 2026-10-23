@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { createHash } = require('node:crypto');
 
 const helper = path.resolve(__dirname, '../src-tauri/resources/papercup-bun-runtime.py');
 const fixture = String.raw`
@@ -363,7 +364,7 @@ for (const [target, failure] of [
       env: { ...process.env, PATH: tools + path.delimiter + process.env.PATH,
         target_os: target, target_arch: 'x64', DISTRIBUTION_PROFILE: 'dogfood',
         SIDECAR_BIN_CACHE: path.join(root, 'cache'), OMP_DIR: output,
-        NODE_VERSION: 'v24.18.1', TMPDIR: root, MOVE_MARKER: path.join(root, 'unsafe-move') },
+        NODE_VERSION: 'v24.18.1', HERE: path.resolve(__dirname, '../bin'), TMPDIR: root, MOVE_MARKER: path.join(root, 'unsafe-move') },
     });
     assert.equal(result.error, undefined, String(result.error));
     assert.notEqual(result.status, 0, result.stdout + result.stderr);
@@ -371,5 +372,93 @@ for (const [target, failure] of [
     assert.equal(fs.existsSync(path.join(root, 'unsafe-move')), false);
     assert.equal(fs.readFileSync(path.join(output, target === 'windows' ? 'node.exe' : 'node'), 'utf8'),
       'old runtime');
+  });
+}
+
+function nodeArchiveFixture(t, target, arch = 'x64', missingMember = false) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'node archive input '));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const assetRoot = `node-v24.18.1-${target === 'windows' ? 'win' : target}-${arch}`;
+  const extension = target === 'windows' ? '.zip' : target === 'linux' ? '.tar.xz' : '.tar.gz';
+  const asset = assetRoot + extension;
+  const archive = path.join(root, asset);
+  const member = assetRoot + (missingMember ? '/README' : target === 'windows' ? '/node.exe' : '/bin/node');
+  // Fixtures replace only the digest constants in the production section.
+  // Archive decoding, exact member selection, hashing and atomic publication
+  // use real tools. Executing any fixture runtime is an observable failure.
+  const payload = '#!/bin/sh\ntouch "$NODE_EXECUTION_MARKER"\nexit 99\n' + `# ${target}/${arch}\n`;
+  const packed = spawnSync('python3', ['-c', [
+    'import io,sys,tarfile,zipfile',
+    'archive,member,payload=sys.argv[1:]',
+    'data=payload.encode()',
+    'if archive.endswith(".zip"):',
+    ' with zipfile.ZipFile(archive,"w") as z: z.writestr(member,data)',
+    'else:',
+    ' with tarfile.open(archive,"w:xz" if archive.endswith(".xz") else "w:gz") as z:',
+    '  entry=tarfile.TarInfo(member); entry.size=len(data); entry.mode=0o755',
+    '  z.addfile(entry,io.BytesIO(data))',
+  ].join('\n'), archive, member, payload], { encoding: 'utf8', timeout: 15000 });
+  assert.equal(packed.status, 0, packed.stderr);
+  const digest = createHash('sha256').update(fs.readFileSync(archive)).digest('hex');
+  const tools = path.join(root, 'tools');
+  const output = path.join(root, 'output');
+  fs.mkdirSync(tools);
+  fs.mkdirSync(output);
+  fs.writeFileSync(path.join(tools, 'curl'), '#!/bin/bash\nset -eu\necho "$2" >> "$DOWNLOAD_LOG"\n[[ "${DOWNLOAD_FAIL:-0}" != 1 ]] || exit 22\nwhile [[ "$1" != -o ]]; do shift; done\ncp "$FIXTURE_ARCHIVE" "$2"\n', { mode: 0o755 });
+  const producer = fs.readFileSync(path.resolve(__dirname, '../bin/build-desktop-sidecar.sh'), 'utf8');
+  const start = producer.indexOf('NODE_VERSION=', producer.indexOf('# Node.js — vendor'));
+  const section = producer.slice(start, producer.indexOf('# Bun is a packaged candidate', start))
+    .replace(/node_archive_sha256=[a-f0-9]{64}/g, 'node_archive_sha256=' + digest);
+  const env = { ...process.env, PATH: tools + path.delimiter + process.env.PATH,
+    target_os: target, target_arch: arch, DISTRIBUTION_PROFILE: 'dogfood',
+    SIDECAR_BIN_CACHE: path.join(root, 'cache'), OMP_DIR: output,
+    NODE_VERSION: 'v24.18.1', HERE: path.resolve(__dirname, '../bin'),
+    FIXTURE_ARCHIVE: archive, DOWNLOAD_LOG: path.join(root, 'downloads'),
+    NODE_EXECUTION_MARKER: path.join(root, 'executed-runtime') };
+  return { root, payload, archive, asset, output: path.join(output, target === 'windows' ? 'node.exe' : 'node'),
+    cached: path.join(env.SIDECAR_BIN_CACHE, 'node-archives', asset),
+    run: extra => spawnSync('bash', ['-c', 'set -euo pipefail\n' + section], {
+      env: { ...env, ...extra }, encoding: 'utf8', timeout: 20000,
+    }),
+  };
+}
+
+for (const [target, arch] of [['linux', 'x64'], ['linux', 'arm64'], ['darwin', 'x64'], ['darwin', 'arm64'], ['windows', 'x64']]) {
+  test(`retained Node ${target}/${arch} verifies and reuses the raw archive without executing it`, t => {
+    const f = nodeArchiveFixture(t, target, arch);
+    const fresh = f.run();
+    assert.equal(fresh.status, 0, fresh.stderr);
+    assert.equal(fs.readFileSync(f.output, 'utf8'), f.payload);
+    assert.deepEqual(fs.readFileSync(f.cached), fs.readFileSync(f.archive));
+    fs.unlinkSync(f.output);
+    const cached = f.run({ DOWNLOAD_FAIL: '1' });
+    assert.equal(cached.status, 0, cached.stderr);
+    assert.equal(fs.readFileSync(f.output, 'utf8'), f.payload);
+    assert.equal(fs.readFileSync(path.join(f.root, 'downloads'), 'utf8').trim().split('\n').length, 1);
+    assert.equal(fs.existsSync(path.join(f.root, 'executed-runtime')), false);
+    assert.deepEqual(fs.readdirSync(path.dirname(f.cached)), [f.asset]);
+    assert.deepEqual(fs.readdirSync(path.dirname(f.output)), [path.basename(f.output)]);
+  });
+}
+
+for (const damage of ['download', 'cache', 'symlink', 'empty-member', 'version', 'target']) {
+  test(`retained Node refuses ${damage} and preserves the previous packaged output`, t => {
+    const f = nodeArchiveFixture(t, 'linux', 'x64', damage === 'empty-member');
+    fs.writeFileSync(f.output, 'previous generation');
+    const extra = {};
+    if (damage === 'download') fs.appendFileSync(f.archive, 'corrupt');
+    if (damage === 'cache' || damage === 'symlink') {
+      fs.mkdirSync(path.dirname(f.cached), { recursive: true });
+      if (damage === 'symlink') fs.symlinkSync(f.archive, f.cached);
+      else fs.writeFileSync(f.cached, 'corrupt cache');
+    }
+    if (damage === 'version') extra.NODE_VERSION = 'v24.18.2';
+    if (damage === 'target') extra.target_arch = 'ia32';
+    const result = f.run(extra);
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stderr, /ERROR:.*Node/);
+    assert.equal(fs.readFileSync(f.output, 'utf8'), 'previous generation');
+    assert.equal(fs.existsSync(path.join(f.root, 'executed-runtime')), false);
+    assert.deepEqual(fs.readdirSync(path.dirname(f.output)), [path.basename(f.output)]);
   });
 }
