@@ -713,7 +713,9 @@ mod gtk_interaction_tests {
 
     // Emit real GTK signals on the WebKit widget. A panic in either connected
     // C callback aborts this child, which the parent reports as a failed test.
-    let event = gdk::Event::new(gdk::EventType::ButtonPress);
+    let mut event = gdk::Event::new(gdk::EventType::ButtonPress);
+    let device = gdk::Display::default().unwrap().default_seat().unwrap().pointer().unwrap();
+    event.set_device(Some(&device));
     unsafe {
       let raw: *mut gdk::ffi::GdkEvent = event.to_glib_none().0;
       (*raw).button.button = 1;
@@ -722,13 +724,15 @@ mod gtk_interaction_tests {
     let count = button_count.clone();
     widget.connect_button_press_event(move |_, _| {
       count.set(count.get() + 1);
-      glib::Propagation::Proceed
+      // The runtime handler registered above already ran. Stop before WebKit's
+      // default class handler, which requires a full hardware event/window.
+      glib::Propagation::Stop
     });
     let touch_count = std::rc::Rc::new(std::cell::Cell::new(0));
     let count = touch_count.clone();
     widget.connect_touch_event(move |_, _| {
       count.set(count.get() + 1);
-      glib::Propagation::Proceed
+      glib::Propagation::Stop
     });
     let _ = widget.emit_by_name::<bool>("button-press-event", &[&event]);
     let touch = gdk::Event::new(gdk::EventType::TouchBegin);

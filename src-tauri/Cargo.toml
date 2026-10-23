@@ -186,14 +186,16 @@ windows = { version = "0.58", features = [
 incremental = true
 strip = "symbols"
 
-# tauri-runtime-wry 2.11.0 + one local fix: its undecorated-resizing hit-test
+# tauri-runtime-wry 2.11.4 + local GTK hit-test and URL-error safeguards:
+# its undecorated-resizing hit-test
 # does `webview.parent().parent()` and UNWRAPS a downcast to GtkWindow — any
 # embedder that reparents the webview (our native-terminal VTE embed nests it
 # in a GtkPaned) panics the main thread on the first click. The vendored copy
 # resolves the real toplevel instead (see the PAPERCUSP PATCH markers in
 # vendor/tauri-runtime-wry/src/undecorated_resizing.rs). Upstream dev branch
 # still carries the unwrap as of 2026-06-09 — drop this patch when a released
-# tauri-runtime-wry walks the ancestry safely.
+# tauri-runtime-wry walks the ancestry safely. The locked-graph regression in
+# test/cargo-patches.test.js ensures upgrades keep this path patch active.
 [patch.crates-io]
 # global-hotkey 0.8.0 queues X11 ungrabs without flushing: Off keeps swallowing
 # the key until another registration. Backport upstream PR #197; remove when a
