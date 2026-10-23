@@ -1774,6 +1774,21 @@ def _vulnerability_location(match):
     return "<unknown-path>"
 
 
+def _prepare_grype_cache(env):
+    """Recreate a removed cache target without replacing its offload symlink.
+
+    Grype's default is ~/.cache/grype/db; GRYPE_DB_CACHE_DIR overrides it.
+    mkdir on the unresolved path treats a dangling parent symlink as an existing
+    file. Resolve first, and refuse real file obstructions without deleting them.
+    This prepares storage only: DB validity and freshness still gate the verdict.
+    """
+    cache = os.path.expanduser(env.get("GRYPE_DB_CACHE_DIR") or "~/.cache/grype/db")
+    try:
+        os.makedirs(os.path.realpath(cache), exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(f"grype cache directory cannot be prepared: {exc}") from exc
+
+
 def _vulnerability_tool_metadata():
     """Shared fail-closed readiness contract for preflight and final scan."""
     syft = shutil.which("syft")
@@ -1785,6 +1800,7 @@ def _vulnerability_tool_metadata():
     metadata_env["SYFT_CHECK_FOR_APP_UPDATE"] = "false"
     metadata_env["GRYPE_CHECK_FOR_APP_UPDATE"] = "false"
     metadata_env["GRYPE_DB_AUTO_UPDATE"] = "false"
+    _prepare_grype_cache(metadata_env)
     syft_version = _parse_tool_json(
         [syft, "version", "-o", "json"], "syft version", metadata_env
     )
@@ -1814,6 +1830,11 @@ def preflight_vulnerabilities(args):
     if args not in ([], ["--refresh-db"]):
         print("AUDIT ERROR: --preflight-vulnerabilities accepts only --refresh-db",
               file=sys.stderr)
+        return 2
+    try:
+        _prepare_grype_cache(os.environ)
+    except RuntimeError as exc:
+        print(f"AUDIT ERROR: {exc}", file=sys.stderr)
         return 2
     if args:
         grype = shutil.which("grype")
