@@ -157,6 +157,67 @@ function tree(dir) {
 
 const underSeed = (name) => name === SEED_ROOT || name.startsWith(`${SEED_ROOT}/`);
 
+test('disk refusal preserves the input and signature before writing split archives', () => withTmp((tmp) => {
+  const deb = buildServerDeb(tmp);
+  const original = fs.readFileSync(deb);
+  fs.writeFileSync(`${deb}.sig`, 'original signature');
+  const out = path.join(tmp, 'out');
+  const bin = path.join(tmp, 'bin');
+  fs.mkdirSync(out);
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'df'), '#!/bin/sh\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 100 100 0 100%% /\\n"\n', { mode: 0o755 });
+  const res = split(deb, out, {
+    PATH: `${bin}:${process.env.PATH}`,
+    PAPERCUSP_DISK_RESERVATION_DIR: path.join(tmp, 'reservations'),
+  });
+  assert.equal(res.status, 28, res.stderr);
+  assert.match(res.stderr, /insufficient disk for Linux seed split/);
+  assert.deepEqual(fs.readdirSync(out), [], 'admission must precede even the temporary work directory');
+  assert.deepEqual(fs.readFileSync(deb), original);
+  assert.equal(fs.readFileSync(`${deb}.sig`, 'utf8'), 'original signature');
+}));
+
+test('split holds a live disk reservation while streaming and releases it on failure', () => withTmp((tmp) => {
+  const deb = buildServerDeb(tmp);
+  const out = path.join(tmp, 'out');
+  const ledger = path.join(tmp, 'reservations');
+  fs.mkdirSync(out);
+  const probe = String.raw`
+import importlib.util, os, pathlib, sys
+spec = importlib.util.spec_from_file_location('splitter', sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+def inspect(pkg, router):
+    claims = []
+    for p in pathlib.Path(os.environ['PAPERCUSP_DISK_RESERVATION_DIR']).rglob('*'):
+        if p.is_file():
+            fields = dict(line.split('=', 1) for line in p.read_text().splitlines() if '=' in line)
+            if fields.get('label') == 'Linux seed split':
+                os.kill(int(fields['pid']), 0)
+                assert int(fields['gb']) >= 1
+                claims.append(p)
+    assert len(claims) == 1, claims
+    raise m.SplitError(19, 'RESERVATION_OBSERVED')
+m.stream_data = inspect
+try:
+    m.split(sys.argv[2], sys.argv[3], False, m.DEFAULT_SEED_ROOT)
+except m.SplitError as e:
+    print(e, file=sys.stderr)
+    sys.exit(e.code)
+`;
+  const res = spawnSync('python3', ['-I', '-c', probe, splitter, deb, out], {
+    encoding: 'utf8', env: { ...process.env, PAPERCUSP_DISK_RESERVATION_DIR: ledger },
+  });
+  assert.equal(res.status, 19, res.stderr);
+  assert.match(res.stderr, /RESERVATION_OBSERVED/);
+  assert.deepEqual(fs.readdirSync(out), [], 'failed streaming must leave no partial output');
+  const claims = fs.readdirSync(ledger, { recursive: true }).filter((name) => {
+    const full = path.join(ledger, name);
+    return fs.statSync(full).isFile() && /label=Linux seed split/.test(fs.readFileSync(full, 'utf8'));
+  });
+  assert.deepEqual(claims, [], 'a finished split must release its reservation');
+}));
+
 test('the two outputs partition the original payload exactly', () => withTmp((tmp) => {
   const deb = buildServerDeb(tmp);
   const out = path.join(tmp, 'out');

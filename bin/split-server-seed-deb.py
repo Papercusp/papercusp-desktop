@@ -56,6 +56,7 @@ Exit status:
   15  the payload does not match the input's md5sums
   16  unsupported data or control compression
   17  the split-package control contract is invalid
+  28  the output filesystem cannot reserve the seed-split working space
 """
 from __future__ import annotations
 
@@ -630,6 +631,45 @@ def rewrite_server_control(server_path: str, seed_path: str, output_path: str) -
         os.link(staged, output_path)
 
 
+def reserve_split_disk(pkg: Package, out_dir: str) -> subprocess.Popen:
+    """Hold the shared build reservation until temporary archives are removed.
+
+    Both gzip streams coexist with their ar copies before publication. Installed-Size
+    budgets the expanded payload; the input length also covers compressed inputs with
+    incomplete size metadata. Include tar headers and a GiB for archive overhead.
+    The existing helper accounts for live peer reservations on this actual device.
+    """
+    installed = pkg.control.get('Installed-Size') or '0'
+    if not re.fullmatch(r'[0-9]+', installed):
+        raise SplitError(EXIT_USAGE, f'{pkg.path}: invalid Installed-Size {installed!r}')
+    gib = 1 << 30
+    payload = max(os.path.getsize(pkg.path), int(installed) * 1024)
+    required = 2 * (payload + len(pkg.md5sums()) * 1024) + gib
+    need_gb = (required + gib - 1) // gib
+    helper = os.path.join(HERE, 'lib', 'disk-preflight.sh')
+    script = ('source "$1"; '
+              'papercusp_require_disk_reservation "$2" "$3" "Linux seed split" >&2 || exit $?; '
+              'printf "SPLIT_DISK_RESERVED\\n"; '
+              'IFS= read -r token || :; papercusp_release_disk_reservation')
+    lease = subprocess.Popen(['bash', '-c', script, 'seed-split-disk', helper, out_dir, str(need_gb)],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    assert lease.stdout is not None
+    ready = lease.stdout.readline().strip()
+    lease.stdout.close()
+    if ready != 'SPLIT_DISK_RESERVED':
+        status = lease.wait()
+        if lease.stdin is not None:
+            lease.stdin.close()
+        raise SplitError(status or 28, f'{out_dir}: seed-split disk reservation refused before writing archives')
+    return lease
+
+
+def release_split_disk(lease: subprocess.Popen) -> None:
+    if lease.stdin is not None:
+        lease.stdin.close()
+    lease.wait()
+
+
 def split(path: str, out_dir: str, in_place: bool, seed_root: str) -> tuple[str, str]:
     cap = member_cap()
     pkg = Package(path)
@@ -641,9 +681,11 @@ def split(path: str, out_dir: str, in_place: bool, seed_root: str) -> tuple[str,
     if not in_place and os.path.realpath(server_out) == os.path.realpath(path):
         raise SplitError(EXIT_USAGE, f'--out-dir {out_dir} would overwrite the input; use --in-place for that')
 
-    work = tempfile.mkdtemp(prefix='.seed-split.', dir=out_dir)
+    lease = reserve_split_disk(pkg, out_dir)
+    work = None
     sinks: list[TarSink] = []
     try:
+        work = tempfile.mkdtemp(prefix='.seed-split.', dir=out_dir)
         server_sink = TarSink(os.path.join(work, 'server-data.tar.gz'))
         sinks.append(server_sink)
         seed_sink = TarSink(os.path.join(work, 'seed-data.tar.gz'))
@@ -690,7 +732,9 @@ def split(path: str, out_dir: str, in_place: bool, seed_root: str) -> tuple[str,
     finally:
         for sink in sinks:
             sink.kill()
-        shutil.rmtree(work, ignore_errors=True)
+        if work is not None:
+            shutil.rmtree(work, ignore_errors=True)
+        release_split_disk(lease)
 
 
 def main(argv: list[str]) -> int:
