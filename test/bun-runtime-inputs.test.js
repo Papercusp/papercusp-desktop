@@ -327,8 +327,10 @@ assert not list(shipped.parent.glob('.bun-archive-*'))
 for (const [target, failure] of [
   ['linux', 'download'], ['darwin', 'download'], ['windows', 'download'],
   ['linux', 'empty-extraction'], ['darwin', 'empty-extraction'],
+  ['windows', 'empty-extraction'], ['linux', 'empty-cache'],
+  ['linux', 'unverified-cache'], ['darwin', 'unverified-cache'], ['windows', 'unverified-cache'],
 ]) {
-  test(`retained Node producer refuses ${target} ${failure} without using host Node`, t => {
+  test(`retained Node producer handles ${target} ${failure} without using host Node`, t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'node-producer-failure-'));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     const tools = path.join(root, 'tools');
@@ -337,24 +339,37 @@ for (const [target, failure] of [
     fs.mkdirSync(output);
     // A previous output must not disguise failure to produce this generation.
     fs.writeFileSync(path.join(output, target === 'windows' ? 'node.exe' : 'node'), 'old runtime');
-    fs.writeFileSync(path.join(tools, 'curl'), failure === 'download'
+    const cache = path.join(root, `cache/node-v24.18.1-${target}-x64`);
+    if (failure === 'empty-cache' || failure === 'unverified-cache') {
+      fs.mkdirSync(cache, { recursive: true });
+      fs.writeFileSync(path.join(cache, target === 'windows' ? 'node.exe' : 'node'),
+        failure === 'empty-cache' ? '' : 'cached runtime fixture');
+    }
+    fs.writeFileSync(path.join(tools, 'curl'), failure !== 'empty-extraction'
       ? '#!/bin/sh\nexit 22\n'
       : '#!/bin/sh\nwhile [ "$1" != -o ]; do shift; done\nprintf fixture > "$2"\n', { mode: 0o755 });
     fs.writeFileSync(path.join(tools, 'tar'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    // An archive without a top-level directory must never expand an empty
+    // inner path into a host-root glob. The stub prevents any such move.
+    fs.writeFileSync(path.join(tools, 'unzip'), '#!/bin/sh\ntouch "$4/README"\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(tools, 'mv'), '#!/bin/sh\ntouch "$MOVE_MARKER"\nexit 97\n', { mode: 0o755 });
     const producer = fs.readFileSync(path.resolve(__dirname, '../bin/build-desktop-sidecar.sh'), 'utf8');
     const start = producer.indexOf('NODE_VERSION=', producer.indexOf('# Node.js — vendor'));
     const end = producer.indexOf('# Bun is a packaged candidate', start);
     assert.ok(start > 0 && end > start, 'maintained Node producer section exists');
-    const result = spawnSync('bash', ['-c', 'set -euo pipefail\n' + producer.slice(start, end)], {
+    const section = producer.slice(start, end).replace('node_tarball="/tmp/$node_archive"', 'node_tarball="$TMPDIR/$node_archive"');
+    const result = spawnSync('bash', ['-c', 'set -euo pipefail\n' + section], {
       encoding: 'utf8', timeout: 20_000,
       env: { ...process.env, PATH: tools + path.delimiter + process.env.PATH,
         target_os: target, target_arch: 'x64', DISTRIBUTION_PROFILE: 'dogfood',
         SIDECAR_BIN_CACHE: path.join(root, 'cache'), OMP_DIR: output,
-        NODE_VERSION: 'v24.18.1', TMPDIR: root },
+        NODE_VERSION: 'v24.18.1', TMPDIR: root, MOVE_MARKER: path.join(root, 'unsafe-move') },
     });
     assert.equal(result.error, undefined, String(result.error));
     assert.notEqual(result.status, 0, result.stdout + result.stderr);
     assert.match(result.stderr, /ERROR:.*Node/);
-    assert.equal(fs.readFileSync(path.join(output, target === 'windows' ? 'node.exe' : 'node'), 'utf8'), 'old runtime');
+    assert.equal(fs.existsSync(path.join(root, 'unsafe-move')), false);
+    assert.equal(fs.readFileSync(path.join(output, target === 'windows' ? 'node.exe' : 'node'), 'utf8'),
+      'old runtime');
   });
 }

@@ -5053,7 +5053,7 @@ if [[ -n "${node_archive:-}" ]]; then
       exit 1
     }
     echo "  ✓ node $PAPERCUSP_VM_NODE_VERSION from checksum-pinned vm-release trust toolchain"
-  elif [[ -f "$node_cache_dir/$node_cache_bin" ]]; then
+  elif [[ -s "$node_cache_dir/$node_cache_bin" ]]; then
     cp "$node_cache_dir/$node_cache_bin" "$OMP_DIR/$node_cache_bin"
     chmod +x "$OMP_DIR/$node_cache_bin"
     node_dst="$OMP_DIR/$node_cache_bin"
@@ -5068,6 +5068,7 @@ if [[ -n "${node_archive:-}" ]]; then
         *.tar.gz) tar -xzf "$node_tarball" -C "$tmp_node_dir" --strip-components=1 ;;
         *.zip)    unzip -q "$node_tarball" -d "$tmp_node_dir" && \
                    inner=$(find "$tmp_node_dir" -maxdepth 1 -mindepth 1 -type d | sed -n 1p) && \
+                   [[ -n "$inner" && -d "$inner" ]] && \
                    mv "$inner"/* "$tmp_node_dir/" 2>/dev/null || true ;;
       esac
       if [[ -f "$tmp_node_dir/bin/node" ]]; then
@@ -5085,12 +5086,18 @@ if [[ -n "${node_archive:-}" ]]; then
         # the next build just re-downloads).
         mkdir -p "$node_cache_dir" && cp "$node_dst" "$node_cache_dir/$node_cache_bin" 2>/dev/null || true
       else
-        echo "  ⚠ node tarball extracted but no node binary found at expected path; sidecar will fall back to system node"
+        echo "ERROR: Node archive contains no runtime at the expected path; refusing incomplete sidecar" >&2
+        exit 1
       fi
     else
-      echo "  ⚠ failed to download Node; sidecar will fall back to system node"
+      echo "ERROR: failed to download pinned Node runtime; refusing incomplete sidecar" >&2
+      exit 1
     fi
   fi
+fi
+if [[ -z "$node_dst" || ! -s "$node_dst" ]]; then
+  echo "ERROR: packaged Node runtime is missing or empty; refusing incomplete sidecar" >&2
+  exit 1
 fi
 
 # Bun is a packaged candidate; the runtime selector continues to default to Node.
