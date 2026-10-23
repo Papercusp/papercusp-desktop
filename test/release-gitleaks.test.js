@@ -1716,6 +1716,56 @@ print(json.dumps({'scannerFixtures':len(fixtures),'scannerFindings':len(findings
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
 
+test('scanner-positive reviewed prose uses the existing frozen public-source proof', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-public-prose-proof-'));
+  try {
+    const program = String.raw`
+import copy,importlib.util,json,pathlib,subprocess,sys
+from unittest.mock import patch
+sys.dont_write_bytecode=True
+s=importlib.util.spec_from_file_location('f',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+base=pathlib.Path(sys.argv[2]);control='A9f3Kx7L'+'m2Qp8Rz4'+'V6nC1wH7'
+text='API compatibility token: '+control+'\npublic access identifier: '+control+'\n'
+(base/'public.txt').write_text(text)
+scan=subprocess.run([sys.argv[4],'dir',str(base),'--config',sys.argv[3],'--no-banner','--log-level=error','--redact=0','--report-format=json','--report-path=-'],capture_output=True,text=True)
+assert scan.returncode==1,scan.stderr
+findings=[f for f in json.loads(scan.stdout) if f['RuleID']=='generic-api-key'];assert len(findings)==2
+sha=m._FROZEN_TREES['superproject'];blob='b'*40
+ctx={'plainRows':{1:{'body':text},2:{'body':text}},'trees':{'superproject':{'sha':sha,'path':'/fixture'}}}
+def git(args,**kwargs):
+ if args[-2:]==['rev-parse','HEAD']: out=(sha+'\n').encode()
+ elif 'rev-parse' in args: out=((blob if args[-1]==sha+':docs/public.md' else 'c'*40)+'\n').encode()
+ else: out=text.encode()
+ return subprocess.CompletedProcess(args,0,out)
+def check(e,f,c=ctx):
+ try: return m.mechanical_class_valid(e,f,c,seed=False)
+ except (ValueError,KeyError): return False
+with patch.object(m.subprocess,'run',side_effect=git):
+ for f in findings:
+  e={'class':'reviewed-public-source-literal','rule':f['RuleID'],'digest':m.finding_digest(f),'fieldPath':['body'],'sourceRef':{'tree':'superproject','path':'docs/public.md','blob':blob}}
+  assert check(e,f), 'reviewed immutable public prose refused'
+  assert not check({**e,'class':'reviewed-descriptive-source-text'},f), 'syntax alone admitted prose'
+  for change in [{'tree':'desktop'},{'path':'docs/other.md'},{'path':'../public.md'},{'blob':'c'*40}]:
+   bad=copy.deepcopy(e);bad['sourceRef'].update(change);assert not check(bad,f), 'changed source ref admitted'
+  stale=copy.deepcopy(ctx);stale['trees']['superproject']['sha']='d'*40;assert not check(e,f,stale), 'wrong tree admitted'
+  assert not check({**e,'digest':'e'*64},f), 'wrong digest admitted'
+  assert not check({**e,'rule':'other-rule'},f), 'wrong rule admitted'
+  for change in [{'Match':f['Match']+'changed'},{'Secret':'DifferentPlantedValue9'}]:
+   changed={**f,**change};assert not check(e,changed), 'changed finding admitted'
+   resealed={**e,'digest':m.finding_digest(changed)};assert not check(resealed,changed), 'missing literal admitted'
+danger={'RuleID':'generic-api-key','Match':'API access token: '+control,'Secret':control,'StartLine':1}
+e={'class':'reviewed-descriptive-source-text','rule':danger['RuleID'],'digest':m.finding_digest(danger),'fieldPath':['body']}
+assert not check(e,danger,{'plainRows':{1:{'body':danger['Match']}}}), 'credential-shaped prose admitted'
+print(json.dumps({'scannerPositiveProse':len(findings),'sourceBoundOnly':True,'bindingControlsRefused':True,'credentialProseRefused':True}))
+`;
+    const result = spawnSync('python3', ['-B', '-c', program, reportFormatterPath, temp, configPath, gitleaksBin], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      scannerPositiveProse: 2, sourceBoundOnly: true, bindingControlsRefused: true, credentialProseRefused: true,
+    });
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test('D-147 envelope predicate rederives all 62 findings and the historical 33 recipients', () => {
   const program = String.raw`
 import importlib.util,json,sys,base64,hashlib
