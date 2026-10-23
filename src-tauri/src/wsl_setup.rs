@@ -703,42 +703,42 @@ mod imp {
             ("/opt/papercup/papercup-bun-runtime.py", helper),
             ("/opt/papercup/bootstrap", script),
         ] {
-        let mut child = wsl_command()
-            .args([
-                "--distribution",
-                DISTRO_NAME,
-                "--user",
-                "root",
-                "--exec",
-                "bash",
-                "-c",
-                super::INSTALL_BOOTSTRAP_RESOURCE_SCRIPT,
-                "papercusp-install-bootstrap-resource",
-                destination,
-            ])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Install shipped WSL bootstrap: {e}"))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Err(e) = stdin.write_all(&bytes) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("Write shipped WSL bootstrap: {e}"));
+            let mut child = wsl_command()
+                .args([
+                    "--distribution",
+                    DISTRO_NAME,
+                    "--user",
+                    "root",
+                    "--exec",
+                    "bash",
+                    "-c",
+                    super::INSTALL_BOOTSTRAP_RESOURCE_SCRIPT,
+                    "papercusp-install-bootstrap-resource",
+                    destination,
+                ])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Install shipped WSL bootstrap: {e}"))?;
+            if let Some(mut stdin) = child.stdin.take() {
+                if let Err(e) = stdin.write_all(&bytes) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("Write shipped WSL bootstrap: {e}"));
+                }
             }
-        }
-        match child.wait_with_output() {
-            Ok(out) if out.status.success() => {
-                eprintln!("[wsl_setup] install_shipped_bootstrap: refreshed {destination} from the shipped resource");
+            match child.wait_with_output() {
+                Ok(out) if out.status.success() => {
+                    eprintln!("[wsl_setup] install_shipped_bootstrap: refreshed {destination} from the shipped resource");
+                }
+                Ok(out) => return Err(format!(
+                    "Install shipped WSL bootstrap: exit={:?} stderr={}",
+                    out.status.code(),
+                    super::decode_wsl_output(&out.stderr)
+                )),
+                Err(e) => return Err(format!("Wait for shipped WSL bootstrap install: {e}")),
             }
-            Ok(out) => return Err(format!(
-                "Install shipped WSL bootstrap: exit={:?} stderr={}",
-                out.status.code(),
-                super::decode_wsl_output(&out.stderr)
-            )),
-            Err(e) => return Err(format!("Wait for shipped WSL bootstrap install: {e}")),
-        }
         }
         Ok(())
     }
