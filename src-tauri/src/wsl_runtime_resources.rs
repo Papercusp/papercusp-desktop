@@ -79,6 +79,7 @@ mod tests {
         for name in [
             "papercup-rootfs-recipe",
             "papercup-bootstrap.sh",
+            "papercup-bun-runtime.py",
             "papercup-runtime.tar.gz",
         ] {
             let server = f.file(

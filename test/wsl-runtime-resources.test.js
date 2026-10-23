@@ -28,12 +28,40 @@ test('the production Server-owned WSL resolver passes its Rust filesystem contro
 test('detect, bootstrap installation and import consume the same runtime resolver', () => {
   assert.match(source, /runtime_resource\(app, super::ROOTFS_RECIPE_FILENAME\)\?/);
   assert.match(source, /runtime_resource\(app, super::ROOTFS_BOOTSTRAP_FILENAME\)\?/);
+  assert.match(source, /runtime_resource\(app, super::ROOTFS_BUN_HELPER_FILENAME\)\?/);
   assert.match(source, /imp::runtime_resource\(&_app, ROOTFS_FILENAME\)\?/);
   assert.match(source, /let shipped = match shipped_rootfs_recipe\(app\)/);
   assert.match(source, /state: WslState::Error \{ message \}/);
   assert.match(source, /let recipe = shipped_rootfs_recipe\(app\)\?;\s*install_shipped_bootstrap\(app\)\?;/);
   assert.match(source, /st\.rootfs_recipe = Some\(recipe\)/);
   assert.doesNotMatch(source, /running the distro's existing bootstrap/);
+});
+
+test('guest resource replacement is atomic, handles spaces, and refuses empty or failed input', t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'wsl resource install '));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const match = source.match(/const INSTALL_BOOTSTRAP_RESOURCE_SCRIPT: &str = r#"([\s\S]*?)"#;/);
+  assert.ok(match, 'exercise the exact shell used by WSL resource installation');
+  const destination = path.join(temp, 'space dir', 'bootstrap');
+  const install = (input, extraEnv = {}) => spawnSync('bash', ['-c', match[1], 'install-resource', destination], {
+    encoding: 'utf8', timeout: 15000, input, env: { ...process.env, ...extraEnv },
+  });
+  const first = install('first generation\n');
+  assert.equal(first.status, 0, first.stderr);
+  const fd = fs.openSync(destination, 'r');
+  t.after(() => fs.closeSync(fd));
+  assert.equal(install('new generation\n').status, 0);
+  assert.equal(fs.readFileSync(destination, 'utf8'), 'new generation\n');
+  assert.equal(fs.readFileSync(fd, 'utf8'), 'first generation\n', 'existing readers retain the previous inode');
+  assert.notEqual(install('').status, 0);
+  const tools = path.join(temp, 'tools');
+  fs.mkdirSync(tools);
+  fs.writeFileSync(path.join(tools, 'cat'), '#!/bin/sh\nprintf partial\nexit 32\n', { mode: 0o755 });
+  const failed = install('incomplete', { PATH: tools + ':' + process.env.PATH });
+  assert.equal(failed.status, 32, failed.stderr);
+  assert.equal(fs.readFileSync(destination, 'utf8'), 'new generation\n');
+  assert.deepEqual(fs.readdirSync(path.dirname(destination)), ['bootstrap']);
+  assert.equal(fs.statSync(destination).mode & 0o777, 0o755);
 });
 
 test('filesystem controls reject restoring the thin-GUI-own-resource mistake', () => {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Internal sidecar input: checksum-pinned Bun; never selects the active runtime.
+"""Shared sidecar/WSL input: checksum-pinned Bun; never selects the active runtime.
 
 Pins are the published oven-sh/bun bun-v1.3.14 release asset SHA-256 digests.
 Use baseline x64 binaries so packaging does not introduce an AVX2 requirement.

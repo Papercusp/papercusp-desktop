@@ -74,6 +74,23 @@ const ROOTFS_FILENAME: &str = "papercup-runtime.tar.gz";
 const ROOTFS_RECIPE_FILENAME: &str = "papercup-rootfs-recipe";
 #[cfg(target_os = "windows")]
 const ROOTFS_BOOTSTRAP_FILENAME: &str = "papercup-bootstrap.sh";
+#[cfg(target_os = "windows")]
+const ROOTFS_BUN_HELPER_FILENAME: &str = "papercup-bun-runtime.py";
+
+// Replace complete resources on the guest filesystem; a broken stdin producer
+// must leave the previous bootstrap/helper intact. Positional argv preserves
+// spaces without involving Windows-to-WSL path translation.
+#[cfg(any(target_os = "windows", test))]
+const INSTALL_BOOTSTRAP_RESOURCE_SCRIPT: &str = r#"set -euo pipefail
+destination="$1"
+mkdir -p "$(dirname "$destination")"
+temporary="$(mktemp "$destination.XXXXXX")"
+trap 'rm -f -- "$temporary"' EXIT
+cat > "$temporary"
+test -s "$temporary"
+chmod 755 "$temporary"
+mv -f -- "$temporary" "$destination"
+"#;
 
 /// Does the distro need re-provisioning before it can be trusted?
 ///
@@ -674,6 +691,18 @@ mod imp {
         if script.is_empty() {
             return Err(format!("Shipped WSL bootstrap {} is empty", path.display()));
         }
+        let helper_path = runtime_resource(app, super::ROOTFS_BUN_HELPER_FILENAME)?;
+        let helper = std::fs::read(&helper_path)
+            .map_err(|e| format!("Read shipped WSL Bun helper {}: {e}", helper_path.display()))?;
+        if helper.is_empty() {
+            return Err(format!("Shipped WSL Bun helper {} is empty", helper_path.display()));
+        }
+        // Read both inputs before mutating either, and install the helper first.
+        // A failed install never runs bootstrap or records a completed recipe.
+        for (destination, bytes) in [
+            ("/opt/papercup/papercup-bun-runtime.py", helper),
+            ("/opt/papercup/bootstrap", script),
+        ] {
         let mut child = wsl_command()
             .args([
                 "--distribution",
@@ -683,7 +712,9 @@ mod imp {
                 "--exec",
                 "bash",
                 "-c",
-                "mkdir -p /opt/papercup && cat > /opt/papercup/bootstrap && chmod +x /opt/papercup/bootstrap",
+                super::INSTALL_BOOTSTRAP_RESOURCE_SCRIPT,
+                "papercusp-install-bootstrap-resource",
+                destination,
             ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -691,7 +722,7 @@ mod imp {
             .spawn()
             .map_err(|e| format!("Install shipped WSL bootstrap: {e}"))?;
         if let Some(mut stdin) = child.stdin.take() {
-            if let Err(e) = stdin.write_all(&script) {
+            if let Err(e) = stdin.write_all(&bytes) {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!("Write shipped WSL bootstrap: {e}"));
@@ -699,16 +730,17 @@ mod imp {
         }
         match child.wait_with_output() {
             Ok(out) if out.status.success() => {
-                eprintln!("[wsl_setup] install_shipped_bootstrap: refreshed /opt/papercup/bootstrap from the shipped resource");
-                Ok(())
+                eprintln!("[wsl_setup] install_shipped_bootstrap: refreshed {destination} from the shipped resource");
             }
-            Ok(out) => Err(format!(
+            Ok(out) => return Err(format!(
                 "Install shipped WSL bootstrap: exit={:?} stderr={}",
                 out.status.code(),
                 super::decode_wsl_output(&out.stderr)
             )),
-            Err(e) => Err(format!("Wait for shipped WSL bootstrap install: {e}")),
+            Err(e) => return Err(format!("Wait for shipped WSL bootstrap install: {e}")),
         }
+        }
+        Ok(())
     }
 
     /// Read the Server-owned recipe, never treating absence as Ready.

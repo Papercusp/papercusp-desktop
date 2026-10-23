@@ -5097,7 +5097,7 @@ fi
 # Both fresh and cached archives must match the published per-target checksum.
 # The same Linux input is used by a Linux/WSL producer; never substitute bun.exe.
 echo "→ bundling checksum-pinned Bun candidate for $target_os-$target_arch"
-python3 "$HERE/lib/bun-runtime-inputs.py" stage \
+python3 "$HERE/../src-tauri/resources/papercup-bun-runtime.py" stage \
   --target-os "$target_os" --target-arch "$target_arch" \
   --cache-dir "$SIDECAR_BIN_CACHE" --output-dir "$OMP_DIR" || {
     echo "ERROR: pinned Bun candidate could not be packaged; refusing incomplete sidecar" >&2

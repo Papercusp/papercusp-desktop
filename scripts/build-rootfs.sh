@@ -55,6 +55,9 @@ CONTAINER="papercup-runtime-build-$$"
 BOOTSTRAP_FILE="${OUT_DIR}/papercup-bootstrap.sh"
 test -s "$BOOTSTRAP_FILE" || { echo "missing bootstrap: $BOOTSTRAP_FILE" >&2; exit 2; }
 BOOTSTRAP_SH="$(cat "$BOOTSTRAP_FILE")"
+BUN_HELPER_FILE="${OUT_DIR}/papercup-bun-runtime.py"
+test -s "$BUN_HELPER_FILE" || { echo "missing Bun input helper: $BUN_HELPER_FILE" >&2; exit 2; }
+BUN_HELPER_SH="$(cat "$BUN_HELPER_FILE")"
 
 # ── Recipe fingerprint (WI-4448) ─────────────────────────────────────
 # THE thing that determines what ends up inside the rootfs: the bootstrap we run
@@ -69,8 +72,8 @@ BOOTSTRAP_SH="$(cat "$BOOTSTRAP_FILE")"
 # apart. (Drift between two hand-maintained copies of the same knowledge is
 # precisely what let .papercusp/ into the release bundle — WI-4419.)
 recipe_fingerprint() {
-  printf '%s\n%s\n%s\n%s\n%s\n' \
-    "$UBUNTU_IMAGE" "$NODE_VERSION" "$PNPM_VERSION" "$BOOTSTRAP_SH" "$RUNTIME_PLATFORM" \
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$UBUNTU_IMAGE" "$NODE_VERSION" "$PNPM_VERSION" "$BOOTSTRAP_SH" "$RUNTIME_PLATFORM" "$BUN_HELPER_SH" \
   | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1
 }
 
@@ -134,11 +137,12 @@ docker create \
   -e NODE_VERSION="$NODE_VERSION" \
   -e PNPM_VERSION="$PNPM_VERSION" \
   "$UBUNTU_IMAGE" \
-  bash -c "$BOOTSTRAP_SH && mkdir -p /opt/papercup && cat > /opt/papercup/bootstrap << 'BS'
+  bash -c "mkdir -p /opt/papercup && mv /tmp/papercup-bun-runtime.py /opt/papercup/papercup-bun-runtime.py && $BOOTSTRAP_SH && cat > /opt/papercup/bootstrap << 'BS'
 $BOOTSTRAP_SH
 BS
 chmod +x /opt/papercup/bootstrap"
 
+docker cp "$BUN_HELPER_FILE" "$CONTAINER:/tmp/papercup-bun-runtime.py"
 docker start -a "$CONTAINER"
 
 # ── Export rootfs as a tarball ───────────────────────────────────────

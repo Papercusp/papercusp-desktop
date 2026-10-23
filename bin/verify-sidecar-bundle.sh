@@ -220,7 +220,7 @@ for t in $REQUIRED_TOOLS; do
     # that the application/native-module candidate has passed acceptance.
     _bun_probe_args=()
     [[ "$CROSS" == 1 ]] || _bun_probe_args+=(--execute)
-    if out="$(python3 "$(dirname "$0")/lib/bun-runtime-inputs.py" verify \
+    if out="$(python3 "$(dirname "$0")/../src-tauri/resources/papercup-bun-runtime.py" verify \
         --target-os "$TARGET_OS_N" --target-arch "$TARGET_ARCH_N" \
         --binary "$p" "${_bun_probe_args[@]}" 2>&1)"; then
       ok "bun ($out)"

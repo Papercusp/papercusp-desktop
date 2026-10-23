@@ -268,6 +268,19 @@ install_node_runtime() (
 install_node_runtime /usr/local
 node --version
 
+# The candidate stays alongside retained Node. Share the exact checksum pins
+# and architecture checks with the native sidecar producer, including upgrades
+# of an existing WSL distro. This never changes the active runtime selection.
+install_bun_runtime() (
+  set -euo pipefail
+  local helper="$1" prefix="$2" cache="$3"
+  python3 "$helper" stage --target-os linux --target-arch "$NODE_ARCH" \
+    --cache-dir "$cache" --output-dir "$prefix/bin"
+  python3 "$helper" verify --target-os linux --target-arch "$NODE_ARCH" \
+    --binary "$prefix/bin/bun" --execute
+)
+install_bun_runtime /opt/papercup/papercup-bun-runtime.py /usr/local /root/.cache/papercusp-bun
+
 # pnpm
 npm install -g "pnpm@${PNPM_VERSION:-9.15.0}"
 

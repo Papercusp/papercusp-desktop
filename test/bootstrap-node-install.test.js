@@ -9,11 +9,12 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const producer = fs.readFileSync(path.join(root, 'scripts/build-rootfs.sh'), 'utf8');
 const shipped = fs.readFileSync(path.join(root, 'src-tauri/resources/papercup-bootstrap.sh'), 'utf8');
+const bunHelper = fs.readFileSync(path.join(root, 'src-tauri/resources/papercup-bun-runtime.py'), 'utf8');
 const voiceE2e = fs.readFileSync(
   path.join(root, '..', 'apps/tui/scripts/live-operator-voice-e2e.mjs'),
   'utf8',
 );
-const section = text => text.slice(text.indexOf('NODE_TARBALL='), text.indexOf('\n# pnpm'));
+const section = text => text.slice(text.indexOf('NODE_TARBALL='), text.indexOf('\n# The candidate stays'));
 const architecture = shipped.slice(shipped.indexOf('# Runtime architecture'), shipped.indexOf('# ── network preflight'));
 const overmind = shipped.slice(shipped.indexOf('# overmind is not'), shipped.indexOf('# kopia —'));
 const quote = s => `'${s.replaceAll("'", "'\\''")}'`;
@@ -100,13 +101,15 @@ test('rootfs producer fingerprints the complete shipped bootstrap, including net
   fs.mkdirSync(path.join(dir, 'src-tauri/resources'), { recursive: true });
   const build = path.join(dir, 'scripts/build-rootfs.sh');
   const resource = path.join(dir, 'src-tauri/resources/papercup-bootstrap.sh');
+  const helperResource = path.join(dir, 'src-tauri/resources/papercup-bun-runtime.py');
   const artifact = path.join(dir, 'src-tauri/resources/papercup-runtime.tar.gz');
   fs.writeFileSync(build, producer);
   fs.writeFileSync(resource, shipped);
+  fs.writeFileSync(helperResource, bunHelper);
   fs.writeFileSync(artifact, 'existing rootfs must survive a read');
   const env = { ...process.env, UBUNTU_IMAGE: 'ubuntu:24.04', NODE_VERSION: '24.18.1', PNPM_VERSION: '9.15.0', PAPERCUSP_RUNTIME_PLATFORM: 'linux/amd64' };
   const fingerprint = () => run('bash', [build, '--print-recipe-fingerprint'], { env });
-  const expected = text => createHash('sha256').update(`ubuntu:24.04\n24.18.1\n9.15.0\n${text.replace(/\n+$/, '')}\nlinux/amd64\n`).digest('hex');
+  const expected = (text, helper = bunHelper) => createHash('sha256').update(`ubuntu:24.04\n24.18.1\n9.15.0\n${text.replace(/\n+$/, '')}\nlinux/amd64\n${helper.replace(/\n+$/, '')}\n`).digest('hex');
   assert.match(shipped, /preflight_unreachable/);
   const first = fingerprint();
   assert.equal(first.status, 0, first.stderr);
@@ -117,6 +120,16 @@ test('rootfs producer fingerprints the complete shipped bootstrap, including net
   assert.equal(second.status, 0, second.stderr);
   assert.equal(second.stdout.trim(), expected(changed));
   assert.notEqual(first.stdout, second.stdout);
+  const changedHelper = bunHelper.replace('VERSION = "1.3.14"', 'VERSION = "1.3.15"');
+  assert.notEqual(changedHelper, bunHelper);
+  fs.writeFileSync(helperResource, changedHelper);
+  const helperFingerprint = fingerprint();
+  assert.equal(helperFingerprint.status, 0, helperFingerprint.stderr);
+  assert.equal(helperFingerprint.stdout.trim(), expected(changed, changedHelper));
+  assert.notEqual(helperFingerprint.stdout, second.stdout, 'Bun input pin changes must force reprovisioning');
+  fs.unlinkSync(helperResource);
+  assert.notEqual(fingerprint().status, 0, 'missing Bun helper must fail closed');
+  fs.writeFileSync(helperResource, bunHelper);
   assert.equal(fs.readFileSync(artifact, 'utf8'), 'existing rootfs must survive a read');
   const arm = run('bash', [build, '--print-recipe-fingerprint'], {
     env: { ...env, PAPERCUSP_RUNTIME_PLATFORM: 'linux/arm64' },
@@ -159,17 +172,79 @@ test('an executable platform reaches bootstrap/export and writes an archive-boun
   const output = path.join(dir, 'output');
   const calls = path.join(dir, 'docker-calls');
   fs.mkdirSync(tools);
-  fs.writeFileSync(path.join(tools, 'docker'), '#!/bin/bash\nset -eu\nprintf "%s\\n" "$1" >> "$DOCKER_PREFLIGHT_LOG"\nif [ "$1" = export ]; then printf "runtime fixture"; fi\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(tools, 'docker'), '#!/bin/bash\nset -eu\nprintf "%s\\n" "$1" >> "$DOCKER_PREFLIGHT_LOG"\nif [ "$1" = cp ]; then cp "$2" "$ROOTFS_HELPER_COPY"; fi\nif [ "$1" = create ]; then printf "%s\\n" "$@" > "$ROOTFS_CREATE_ARGS"; fi\nif [ "$1" = export ]; then printf "runtime fixture"; fi\n', { mode: 0o755 });
   const result = run('bash', [path.join(root, 'scripts/build-rootfs.sh')], { env: { ...process.env,
     PATH: tools + ':' + process.env.PATH, DOCKER_PREFLIGHT_LOG: calls,
+    ROOTFS_HELPER_COPY: path.join(dir, 'copied-helper'), ROOTFS_CREATE_ARGS: path.join(dir, 'create-args'),
     PC_HEAVY_COALESCE: '0', PAPERCUSP_ROOTFS_OUT_DIR: output, PAPERCUSP_RUNTIME_PLATFORM: 'linux/arm64' } });
   assert.equal(result.status, 0, result.stderr);
   const commands = fs.readFileSync(calls, 'utf8').trim().split('\n');
-  assert.deepEqual(commands, ['pull', 'run', 'create', 'start', 'export', 'rm']);
+  assert.deepEqual(commands, ['pull', 'run', 'create', 'cp', 'start', 'export', 'rm']);
+  assert.equal(fs.readFileSync(path.join(dir, 'copied-helper'), 'utf8'), bunHelper);
+  assert.match(fs.readFileSync(path.join(dir, 'create-args'), 'utf8'), /mv \/tmp\/papercup-bun-runtime\.py \/opt\/papercup\/papercup-bun-runtime\.py &&/);
   const stamp = JSON.parse(fs.readFileSync(path.join(output, '.rootfs-build-stamp'), 'utf8'));
   assert.equal(stamp.platform, 'linux/arm64');
   assert.equal(stamp.rootfsSha256, createHash('sha256').update(fs.readFileSync(path.join(output, 'papercup-runtime.tar.gz'))).digest('hex'));
 });
+
+test('a failed Bun helper transfer cannot export or stamp a rootfs', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rootfs helper failure '));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const tools = path.join(dir, 'tools');
+  const output = path.join(dir, 'output');
+  const calls = path.join(dir, 'docker-calls');
+  fs.mkdirSync(tools);
+  fs.writeFileSync(path.join(tools, 'docker'), '#!/bin/bash\nset -eu\nprintf "%s\\n" "$1" >> "$DOCKER_PREFLIGHT_LOG"\nif [ "$1" = cp ]; then exit 45; fi\n', { mode: 0o755 });
+  const result = run('bash', [path.join(root, 'scripts/build-rootfs.sh')], { env: { ...process.env,
+    PATH: tools + ':' + process.env.PATH, DOCKER_PREFLIGHT_LOG: calls,
+    PC_HEAVY_COALESCE: '0', PAPERCUSP_ROOTFS_OUT_DIR: output, PAPERCUSP_RUNTIME_PLATFORM: 'linux/amd64' } });
+  assert.equal(result.status, 45, result.stderr);
+  assert.deepEqual(fs.readFileSync(calls, 'utf8').trim().split('\n'), ['pull', 'run', 'create', 'cp', 'rm']);
+  assert.deepEqual(fs.readdirSync(output), []);
+});
+
+for (const [guestArch, bunArch] of [['amd64', 'x64'], ['arm64', 'arm64']]) {
+  test(`WSL ${guestArch} stages and verifies a Linux Bun alongside retained Node`, t => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bootstrap bun '));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const helper = path.join(dir, 'helper.py');
+    const prefix = path.join(dir, 'prefix');
+    const cache = path.join(dir, 'cache');
+    const log = path.join(dir, 'calls');
+    fs.mkdirSync(path.join(prefix, 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(prefix, 'bin/node'), 'retained Node');
+    fs.writeFileSync(helper, `import json, os, pathlib, sys
+args = sys.argv[1:]
+with open(os.environ['BUN_FIXTURE_LOG'], 'a') as out: out.write(json.dumps(args) + '\\n')
+if args[0] == os.environ.get('BUN_FIXTURE_FAIL'): sys.exit(42)
+if args[0] == 'stage':
+    pathlib.Path(args[args.index('--output-dir') + 1], 'bun').write_text('Linux candidate')
+else:
+    assert pathlib.Path(args[args.index('--binary') + 1]).read_text() == 'Linux candidate'
+`);
+    const bunSection = shipped.slice(shipped.indexOf('install_bun_runtime()'), shipped.indexOf('\n# pnpm'));
+    const invocation = 'install_bun_runtime /opt/papercup/papercup-bun-runtime.py /usr/local /root/.cache/papercusp-bun';
+    assert.ok(bunSection.includes(invocation), 'exercise production invocation');
+    const script = 'set -euo pipefail\nNODE_ARCH=' + bunArch + '\n' + bunSection.replace(invocation,
+      `install_bun_runtime ${quote(helper)} ${quote(prefix)} ${quote(cache)}`);
+    const env = { ...process.env, BUN_FIXTURE_LOG: log };
+    const result = run('bash', ['-c', script], { env });
+    assert.equal(result.status, 0, result.stderr);
+    const calls = fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.deepEqual(calls, [
+      ['stage', '--target-os', 'linux', '--target-arch', bunArch, '--cache-dir', cache, '--output-dir', path.join(prefix, 'bin')],
+      ['verify', '--target-os', 'linux', '--target-arch', bunArch, '--binary', path.join(prefix, 'bin/bun'), '--execute'],
+    ]);
+    for (const failure of ['stage', 'verify']) {
+      fs.writeFileSync(log, '');
+      const rejected = run('bash', ['-c', script + '\nprintf unexpected-success'], { env: { ...env, BUN_FIXTURE_FAIL: failure } });
+      assert.equal(rejected.status, 42, rejected.stderr);
+      assert.doesNotMatch(rejected.stdout, /unexpected-success/);
+      assert.equal(fs.readFileSync(log, 'utf8').trim().split('\n').length, failure === 'stage' ? 1 : 2);
+    }
+    assert.equal(fs.readFileSync(path.join(prefix, 'bin/node'), 'utf8'), 'retained Node');
+  });
+}
 
 test('coalesced rootfs builds declare every environment input before Docker or output mutation', t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rootfs coalesce inputs '));

@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
-const helper = path.resolve(__dirname, '../bin/lib/bun-runtime-inputs.py');
+const helper = path.resolve(__dirname, '../src-tauri/resources/papercup-bun-runtime.py');
 const fixture = String.raw`
 import hashlib, importlib.util, io, json, os, pathlib, stat, struct, sys, zipfile
 from unittest.mock import patch
