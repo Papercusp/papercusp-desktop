@@ -2489,6 +2489,8 @@ prune_gyp_build_intermediates() {
 }
 # Walks a package's dependency closure and copies each package into the sidecar.
 #
+# It follows dependencies, optionalDependencies and runtime peerDependencies.
+# Optional peers may be absent, but installed peers need their own closure too.
 # ⚠ It follows BOTH `dependencies` AND `optionalDependencies`, and it must:
 # napi/node-gyp packages ship their PLATFORM BINARIES as optionalDependencies —
 # that is the convention, not an edge case. sharp is the worst offender:
@@ -2737,7 +2739,18 @@ copy_pkg_closure() {
     fi
 
     local deps
-    deps=$(node -e 'try { const p=require(process.argv[1]); const optional=new Set(Object.keys(p.optionalDependencies||{})); const required=Object.keys(p.dependencies||{}).filter((name)=>!optional.has(name)); const opt=[...optional].map((name)=>`?${name}`); process.stdout.write([...required,...opt].join(" ")); } catch {}' "$src/package.json" 2>/dev/null)
+    deps=$(node -e '
+      try {
+        const p = require(process.argv[1]);
+        const optional = new Set(Object.keys(p.optionalDependencies || {}));
+        const required = new Set(Object.keys(p.dependencies || {}).filter(name => !optional.has(name)));
+        for (const name of Object.keys(p.peerDependencies || {})) {
+          if (p.peerDependenciesMeta?.[name]?.optional === true && !required.has(name)) optional.add(name);
+          else if (!optional.has(name)) required.add(name);
+        }
+        process.stdout.write([...required, ...[...optional].map(name => `?${name}`)].join(" "));
+      } catch {}
+    ' "$src/package.json" 2>/dev/null)
     local d dep_optional
     for d in $deps; do
       dep_optional=0
@@ -2832,9 +2845,13 @@ assert_runtime_dependency_closure() {
     }
 
     const optional = new Set(Object.keys(manifest.optionalDependencies || {}));
-    const required = Object.keys(manifest.dependencies || {}).filter(
-      (dependency) => !optional.has(dependency) && !intentionallyOmitted.has(dependency),
-    );
+    const required = new Set(Object.keys(manifest.dependencies || {}).filter(
+      dependency => !optional.has(dependency) && !intentionallyOmitted.has(dependency),
+    ));
+    for (const dependency of Object.keys(manifest.peerDependencies || {})) {
+      if (!optional.has(dependency) && !intentionallyOmitted.has(dependency)
+          && manifest.peerDependenciesMeta?.[dependency]?.optional !== true) required.add(dependency);
+    }
     const label = `${path.relative(nodeModulesRoot, logicalDir)}@${manifest.version || 'unknown'}`;
     for (const dependency of required) {
       if (!dependencyDir(logicalDir, dependency)) failures.add(`${label} -> ${dependency}`);

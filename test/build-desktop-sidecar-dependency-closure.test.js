@@ -321,10 +321,19 @@ test('shared host externals ship their package roots and transitive dependencies
   try {
     const name = '@opentelemetry/context-async-hooks';
     const source = path.join(fixture.repoRoot, 'node_modules', name);
-    writePackage(source, { name, version: '2.12.0', dependencies: { 'otel-runtime-dep': '1.0.0' } });
-    fs.writeFileSync(path.join(source, 'index.js'), "module.exports = require('otel-runtime-dep');\n");
+    writePackage(source, { name, version: '2.12.0',
+      dependencies: { 'otel-runtime-dep': '1.0.0' },
+      peerDependencies: { '@opentelemetry/api': '^1.0.0', 'otel-optional-peer': '1.0.0' },
+      peerDependenciesMeta: { 'otel-optional-peer': { optional: true } },
+      devDependencies: { 'otel-dev-only': '1.0.0' },
+    });
+    fs.writeFileSync(path.join(source, 'index.js'),
+      "module.exports = require('otel-runtime-dep') && require('@opentelemetry/api');\n");
     writePackage(path.join(fixture.repoRoot, 'node_modules/otel-runtime-dep'), {
       name: 'otel-runtime-dep', version: '1.0.0',
+    });
+    writePackage(path.join(fixture.repoRoot, 'node_modules/@opentelemetry/api'), {
+      name: '@opentelemetry/api', version: '1.0.0',
     });
     const result = runBash([
       shellPrelude(), COPY_PKG_CLOSURE, extractFunction('copy_host_external_closures'),
@@ -333,14 +342,70 @@ test('shared host externals ship their package roots and transitive dependencies
       'printf "copied=%s missing=%s\\n" "$nat_copied" "$nat_missing"',
     ].join('\n'), fixture);
     assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.match(result.stdout, /copied=2 missing=0/);
+    assert.match(result.stdout, /copied=3 missing=0/);
     const { createRequire } = require('node:module');
     const bundledRequire = createRequire(path.join(fixture.sidecarDir, 'serve.mjs'));
     const entry = bundledRequire.resolve(name);
     assert.ok(fs.realpathSync(entry).startsWith(fixture.sidecarDir + path.sep), entry);
     const transitive = createRequire(entry).resolve('otel-runtime-dep');
     assert.ok(fs.realpathSync(transitive).startsWith(fixture.sidecarDir + path.sep), transitive);
+    const peer = createRequire(entry).resolve('@opentelemetry/api');
+    assert.ok(fs.realpathSync(peer).startsWith(fixture.sidecarDir + path.sep), peer);
     assert.equal(bundledRequire(name), true);
+  } finally {
+    fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test('assembled-tree guard rejects a missing required peer without requiring optional peers', () => {
+  const fixture = makeFixture();
+  try {
+    writePackage(path.join(fixture.sidecarDir, 'node_modules/peer-consumer'), {
+      name: 'peer-consumer', version: '1.0.0',
+      peerDependencies: { 'runtime-peer': '1.0.0', 'optional-peer': '1.0.0' },
+      peerDependenciesMeta: { 'optional-peer': { optional: true } },
+    });
+    const check = () => runBash([shellPrelude(), ASSERT_RUNTIME_DEPENDENCY_CLOSURE,
+      'assert_runtime_dependency_closure "$SIDECAR_DIR"'].join('\n'), fixture);
+    const missing = check();
+    assert.equal(missing.status, 1, missing.stdout + missing.stderr);
+    assert.match(missing.stderr, /peer-consumer@1\.0\.0 -> runtime-peer/);
+    assert.doesNotMatch(missing.stderr, /-> optional-peer/);
+    writePackage(path.join(fixture.sidecarDir, 'node_modules/runtime-peer'), {
+      name: 'runtime-peer', version: '1.0.0',
+    });
+    const complete = check();
+    assert.equal(complete.status, 0, complete.stdout + complete.stderr);
+  } finally {
+    fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test('closure follows installed optional peers and their own runtime dependencies', () => {
+  const fixture = makeFixture();
+  try {
+    const modules = path.join(fixture.repoRoot, 'node_modules');
+    writePackage(path.join(modules, 'peer-consumer'), {
+      name: 'peer-consumer', version: '1.0.0',
+      peerDependencies: { 'optional-peer': '1.0.0' },
+      peerDependenciesMeta: { 'optional-peer': { optional: true } },
+    });
+    writePackage(path.join(modules, 'optional-peer'), {
+      name: 'optional-peer', version: '1.0.0', dependencies: { 'peer-runtime-dep': '1.0.0' },
+    });
+    writePackage(path.join(modules, 'peer-runtime-dep'), {
+      name: 'peer-runtime-dep', version: '1.0.0',
+    });
+    fs.writeFileSync(path.join(modules, 'optional-peer/index.js'),
+      "module.exports = require('peer-runtime-dep');\n");
+    fs.writeFileSync(path.join(modules, 'peer-consumer/index.js'),
+      "module.exports = require('optional-peer');\n");
+    const result = runBash([shellPrelude(), COPY_PKG_CLOSURE,
+      'copy_pkg_closure peer-consumer'].join('\n'), fixture);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const { createRequire } = require('node:module');
+    const bundled = createRequire(path.join(fixture.sidecarDir, 'serve.mjs'));
+    assert.equal(bundled('peer-consumer'), true);
   } finally {
     fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
   }
