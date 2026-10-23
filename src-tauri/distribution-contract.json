@@ -80,6 +80,8 @@
       "sidecar/templates/",
       "sidecar/serve.mjs",
       "resources/papercup-bootstrap.sh",
+      "resources/papercup-bun-runtime.py",
+      "resources/papercup-bun-linux.zip",
       "resources/papercup-rootfs-recipe",
       "resources/papercup-runtime.tar.gz"
     ],
@@ -331,6 +333,8 @@
         ],
         "paths": [
           "resources/papercup-bootstrap.sh",
+          "resources/papercup-bun-runtime.py",
+          "resources/papercup-bun-linux.zip",
           "resources/papercup-rootfs-recipe",
           "resources/papercup-runtime.tar.gz"
         ]

@@ -80,6 +80,7 @@ mod tests {
             "papercup-rootfs-recipe",
             "papercup-bootstrap.sh",
             "papercup-bun-runtime.py",
+            "papercup-bun-linux.zip",
             "papercup-runtime.tar.gz",
         ] {
             let server = f.file(

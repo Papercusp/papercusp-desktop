@@ -131,8 +131,38 @@ def stage_archive(archive, output_dir, expected_sha256, member, target_os, targe
             temporary.unlink()
 
 
-def stage(target_os, target_arch, cache_dir, output_dir):
+def publish_archive(archive, destination, expected):
+    """Export the verified download for installed/offline WSL upgrades."""
+    archive, destination = Path(archive), Path(destination)
+    if archive.resolve() == destination.resolve():
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix=".bun-archive-", dir=destination.parent,
+                                         delete=False) as stream:
+            temporary = Path(stream.name)
+            with archive.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    stream.write(chunk)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if digest(temporary) != expected:
+            raise ValueError("Bun archive changed during export")
+        temporary.chmod(0o644)
+        os.replace(temporary, destination)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
+def stage(target_os, target_arch, cache_dir, output_dir, archive=None, archive_output=None):
     asset, expected = pin_for(target_os, target_arch)
+    member = asset + ("/bun.exe" if target_os == "windows" else "/bun")
+    # An explicit shipped input is authoritative: absent/corrupt/foreign bytes
+    # fail closed, without consulting the host cache or the network.
+    if archive is not None:
+        return stage_archive(archive, output_dir, expected, member, target_os, target_arch)
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     archive = cache_dir / ("bun-v" + VERSION + "-" + asset + ".zip")
@@ -155,8 +185,10 @@ def stage(target_os, target_arch, cache_dir, output_dir):
         finally:
             if temporary is not None and temporary.exists():
                 temporary.unlink()
-    member = asset + ("/bun.exe" if target_os == "windows" else "/bun")
-    return stage_archive(archive, output_dir, expected, member, target_os, target_arch)
+    receipt = stage_archive(archive, output_dir, expected, member, target_os, target_arch)
+    if archive_output is not None:
+        publish_archive(archive, archive_output, expected)
+    return receipt
 
 
 def main():
@@ -166,14 +198,19 @@ def main():
     parser.add_argument("--target-arch", required=True)
     parser.add_argument("--cache-dir")
     parser.add_argument("--output-dir")
+    parser.add_argument("--archive", help="required shipped ZIP; never downloads or uses a cache")
+    parser.add_argument("--archive-output", help="export the verified build input for offline installation")
     parser.add_argument("--binary")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
     try:
         if args.action == "stage":
-            if not args.cache_dir or not args.output_dir:
-                parser.error("stage requires --cache-dir and --output-dir")
-            result = stage(args.target_os, args.target_arch, args.cache_dir, args.output_dir)
+            if not args.output_dir or (not args.archive and not args.cache_dir):
+                parser.error("stage requires --output-dir and either --archive or --cache-dir")
+            if args.archive and args.archive_output:
+                parser.error("--archive and --archive-output are mutually exclusive")
+            result = stage(args.target_os, args.target_arch, args.cache_dir, args.output_dir,
+                           args.archive, args.archive_output)
         else:
             if not args.binary:
                 parser.error("verify requires --binary")

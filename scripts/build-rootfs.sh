@@ -118,11 +118,13 @@ fi
 mkdir -p "$OUTPUT_DIR"
 rm -f "$OUT_TARBALL"
 OUT_TMP="$(mktemp "${OUT_TARBALL}.tmp.XXXXXX")"
+BUN_ARCHIVE_TMP="$(mktemp "${OUTPUT_DIR}/.bun-linux.XXXXXX")"
 
 cleanup() {
   local status="$?"
   trap - EXIT
   [[ -z "$OUT_TMP" ]] || rm -f "$OUT_TMP"
+  [[ -z "$BUN_ARCHIVE_TMP" ]] || rm -f "$BUN_ARCHIVE_TMP"
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   exit "$status"
 }
@@ -136,6 +138,7 @@ docker create \
   --name "$CONTAINER" \
   -e NODE_VERSION="$NODE_VERSION" \
   -e PNPM_VERSION="$PNPM_VERSION" \
+  -e PAPERCUSP_ROOTFS_BUILD=1 \
   "$UBUNTU_IMAGE" \
   bash -c "mkdir -p /opt/papercup && mv /tmp/papercup-bun-runtime.py /opt/papercup/papercup-bun-runtime.py && $BOOTSTRAP_SH && cat > /opt/papercup/bootstrap << 'BS'
 $BOOTSTRAP_SH
@@ -144,11 +147,16 @@ chmod +x /opt/papercup/bootstrap"
 
 docker cp "$BUN_HELPER_FILE" "$CONTAINER:/tmp/papercup-bun-runtime.py"
 docker start -a "$CONTAINER"
+# Retain the exact validated Linux input outside disposable /root caches.
+# The installed Server transfers it into old distros before their bootstrap.
+docker cp "$CONTAINER:/opt/papercup/papercup-bun-linux.zip" "$BUN_ARCHIVE_TMP"
+test -s "$BUN_ARCHIVE_TMP"
 
 # ── Export rootfs as a tarball ───────────────────────────────────────
 echo "exporting rootfs to $OUT_TARBALL"
 docker export "$CONTAINER" | gzip -9 > "$OUT_TMP"
 mv -f "$OUT_TMP" "$OUT_TARBALL"
+mv -f "$BUN_ARCHIVE_TMP" "${OUTPUT_DIR}/papercup-bun-linux.zip"
 OUT_TMP=""
 
 ls -lh "$OUT_TARBALL"

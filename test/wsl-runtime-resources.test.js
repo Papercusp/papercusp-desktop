@@ -29,6 +29,7 @@ test('detect, bootstrap installation and import consume the same runtime resolve
   assert.match(source, /runtime_resource\(app, super::ROOTFS_RECIPE_FILENAME\)\?/);
   assert.match(source, /runtime_resource\(app, super::ROOTFS_BOOTSTRAP_FILENAME\)\?/);
   assert.match(source, /runtime_resource\(app, super::ROOTFS_BUN_HELPER_FILENAME\)\?/);
+  assert.match(source, /runtime_resource\(app, super::ROOTFS_BUN_ARCHIVE_FILENAME\)\?/);
   assert.match(source, /imp::runtime_resource\(&_app, ROOTFS_FILENAME\)\?/);
   assert.match(source, /let shipped = match shipped_rootfs_recipe\(app\)/);
   assert.match(source, /state: WslState::Error \{ message \}/);
@@ -62,6 +63,9 @@ test('guest resource replacement is atomic, handles spaces, and refuses empty or
   assert.equal(fs.readFileSync(destination, 'utf8'), 'new generation\n');
   assert.deepEqual(fs.readdirSync(path.dirname(destination)), ['bootstrap']);
   assert.equal(fs.statSync(destination).mode & 0o777, 0o755);
+  const zipBytes = Buffer.from([0x50, 0x4b, 3, 4, 0, 0xff, 0x80, 0x0a, 0]);
+  assert.equal(install(zipBytes).status, 0);
+  assert.deepEqual(fs.readFileSync(destination), zipBytes, 'the WSL stdin handoff preserves binary ZIP bytes');
 });
 
 test('filesystem controls reject restoring the thin-GUI-own-resource mistake', () => {

@@ -273,13 +273,19 @@ node --version
 # of an existing WSL distro. This never changes the active runtime selection.
 install_bun_runtime() (
   set -euo pipefail
-  local helper="$1" prefix="$2" cache="$3"
+  local helper="$1" prefix="$2" cache="$3" archive="$4"
+  local input_args=(--archive "$archive")
+  # Only the maintained image producer fetches an input. Installed distros
+  # consume the Server's ZIP and cannot fall back to a host download/cache.
+  if [[ "${PAPERCUSP_ROOTFS_BUILD:-0}" == 1 ]]; then
+    input_args=(--archive-output "$archive")
+  fi
   python3 "$helper" stage --target-os linux --target-arch "$NODE_ARCH" \
-    --cache-dir "$cache" --output-dir "$prefix/bin"
+    --cache-dir "$cache" --output-dir "$prefix/bin" "${input_args[@]}"
   python3 "$helper" verify --target-os linux --target-arch "$NODE_ARCH" \
     --binary "$prefix/bin/bun" --execute
 )
-install_bun_runtime /opt/papercup/papercup-bun-runtime.py /usr/local /root/.cache/papercusp-bun
+install_bun_runtime /opt/papercup/papercup-bun-runtime.py /usr/local /root/.cache/papercusp-bun /opt/papercup/papercup-bun-linux.zip
 
 # pnpm
 npm install -g "pnpm@${PNPM_VERSION:-9.15.0}"

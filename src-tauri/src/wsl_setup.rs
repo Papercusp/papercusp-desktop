@@ -76,6 +76,8 @@ const ROOTFS_RECIPE_FILENAME: &str = "papercup-rootfs-recipe";
 const ROOTFS_BOOTSTRAP_FILENAME: &str = "papercup-bootstrap.sh";
 #[cfg(target_os = "windows")]
 const ROOTFS_BUN_HELPER_FILENAME: &str = "papercup-bun-runtime.py";
+#[cfg(target_os = "windows")]
+const ROOTFS_BUN_ARCHIVE_FILENAME: &str = "papercup-bun-linux.zip";
 
 // Replace complete resources on the guest filesystem; a broken stdin producer
 // must leave the previous bootstrap/helper intact. Positional argv preserves
@@ -697,9 +699,16 @@ mod imp {
         if helper.is_empty() {
             return Err(format!("Shipped WSL Bun helper {} is empty", helper_path.display()));
         }
-        // Read both inputs before mutating either, and install the helper first.
+        let archive_path = runtime_resource(app, super::ROOTFS_BUN_ARCHIVE_FILENAME)?;
+        let archive = std::fs::read(&archive_path)
+            .map_err(|e| format!("Read shipped WSL Bun archive {}: {e}", archive_path.display()))?;
+        if archive.is_empty() {
+            return Err(format!("Shipped WSL Bun archive {} is empty", archive_path.display()));
+        }
+        // Read all inputs before mutating any, and install the archive/helper first.
         // A failed install never runs bootstrap or records a completed recipe.
         for (destination, bytes) in [
+            ("/opt/papercup/papercup-bun-linux.zip", archive),
             ("/opt/papercup/papercup-bun-runtime.py", helper),
             ("/opt/papercup/bootstrap", script),
         ] {

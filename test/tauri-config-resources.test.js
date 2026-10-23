@@ -384,6 +384,10 @@ test('Server distribution contract retains every backend runtime class before GU
   assert.deepEqual(packs.get('doc-vector-seed').paths, ['doc-vector-seed/**/*']);
   assert.deepEqual(packs.get('dev-source').paths, ['sidecar/source.tar.zst']);
   assert.deepEqual(packs.get('windows-wsl-runtime').platforms, ['windows']);
+  for (const input of ['resources/papercup-bun-runtime.py', 'resources/papercup-bun-linux.zip']) {
+    assert.ok(packs.get('windows-wsl-runtime').paths.includes(input), `${input} is required in the Server WSL pack`);
+    assert.ok(contract.gui.forbiddenResourcePrefixes.includes(input), `${input} must remain Server-owned`);
+  }
 
   assert.equal(contract.gui.connection.readinessProbe, '/api/health');
   assert.equal(contract.gui.connection.versionProbe, '/api/desktop/version');

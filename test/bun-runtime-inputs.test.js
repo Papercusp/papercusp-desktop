@@ -217,3 +217,55 @@ binary.symlink_to(out / 'actual')
 rejected(lambda: b.verify_binary(binary, 'linux', 'x64'), 'regular')
 `);
 });
+
+test('exports the validated build input and stages it with no cache or network', t => {
+  python(t, String.raw`
+asset, _ = b.pin_for('linux', 'x64')
+payload = header('linux', 'x64')
+source, sha = archive([(asset + '/bun', payload)])
+shipped = root / 'resources/papercup-bun-linux.zip'
+pins = dict(b.PINS)
+pins[('linux', 'x64')] = (asset, sha)
+with patch.object(b, 'PINS', pins):
+    with patch.object(b.urllib.request, 'urlopen', return_value=io.BytesIO(source.read_bytes())):
+        b.stage('linux', 'x64', root / 'build-cache', out, archive_output=shipped)
+    assert shipped.read_bytes() == source.read_bytes()
+    (out / 'bun').unlink()
+    with patch.object(b.urllib.request, 'urlopen', side_effect=AssertionError('offline install downloaded')):
+        receipt = b.stage('linux', 'x64', None, out, archive=shipped)
+    assert (out / 'bun').read_bytes() == payload
+    assert receipt['archiveSha256'] == sha
+    assert not list(shipped.parent.glob('.bun-archive-*'))
+    assert (out / 'node').read_bytes() == b'retained Node'
+`);
+});
+
+test('missing, corrupt, wrong-target or symlink shipped ZIP never downloads or replaces the runtime', t => {
+  python(t, String.raw`
+(out / 'bun').write_bytes(b'previous candidate')
+foreign, _ = archive([('bun-windows-x64-baseline/bun.exe', header('windows', 'x64'))])
+missing = root / 'missing.zip'
+link = root / 'link.zip'
+link.symlink_to(foreign)
+with patch.object(b.urllib.request, 'urlopen', side_effect=AssertionError('shipped failure downloaded')):
+    for source in [missing, foreign, link]:
+        rejected(lambda: b.stage('linux', 'x64', root / 'unused-cache', out, archive=source), 'checksum')
+        assert (out / 'bun').read_bytes() == b'previous candidate'
+    assert not (root / 'unused-cache').exists()
+`);
+});
+
+test('a corrupt download or export-time change preserves the previous shipped archive', t => {
+  python(t, String.raw`
+shipped = root / 'resources/papercup-bun-linux.zip'
+shipped.parent.mkdir()
+shipped.write_bytes(b'previous shipped archive')
+with patch.object(b.urllib.request, 'urlopen', return_value=io.BytesIO(b'bad download')):
+    rejected(lambda: b.stage('linux', 'x64', root / 'cache', out, archive_output=shipped), 'checksum')
+source = root / 'changed.zip'
+source.write_bytes(b'changed after validation')
+rejected(lambda: b.publish_archive(source, shipped, '0' * 64), 'changed during export')
+assert shipped.read_bytes() == b'previous shipped archive'
+assert not list(shipped.parent.glob('.bun-archive-*'))
+`);
+});
