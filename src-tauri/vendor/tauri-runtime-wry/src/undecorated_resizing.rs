@@ -638,6 +638,113 @@ mod gtk {
 }
 
 // PAPERCUSP_EI201_GUARD_SENTINEL — source scanned for the fix shape stops here.
+#[cfg(all(test, target_os = "linux"))]
+mod gtk_interaction_tests {
+  use std::{
+    io::{BufRead, BufReader},
+    process::{Child, Command, Stdio},
+    time::{Duration, Instant},
+  };
+
+  struct Display(Child);
+  impl Drop for Display {
+    fn drop(&mut self) {
+      let _ = self.0.kill();
+      let _ = self.0.wait();
+    }
+  }
+
+  #[test]
+  fn reparented_webview_handles_button_and_touch_events() {
+    // Use an independent process/display; never GTK-init on a shared test thread
+    // or send pointer events to the owner's real desktop.
+    let mut display = Display(Command::new("Xvfb")
+      .args(["-displayfd", "1", "-screen", "0", "640x480x24", "-nolisten", "tcp"])
+      .stdout(Stdio::piped()).spawn().expect("Xvfb is required"));
+    let mut number = String::new();
+    BufReader::new(display.0.stdout.take().unwrap()).read_line(&mut number).unwrap();
+    assert!(!number.trim().is_empty());
+    let mut child = Command::new(std::env::current_exe().unwrap())
+      .args(["--ignored", "--exact",
+        "undecorated_resizing::gtk_interaction_tests::gtk_event_child", "--nocapture"])
+      .env("DISPLAY", format!(":{}", number.trim()))
+      .env("GDK_BACKEND", "x11")
+      .env("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1")
+      .env("LIBGL_ALWAYS_SOFTWARE", "1")
+      .spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(40);
+    loop {
+      if let Some(status) = child.try_wait().unwrap() {
+        assert!(status.success(), "GTK event child failed: {status}");
+        break;
+      }
+      if Instant::now() > deadline {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("GTK event child timed out");
+      }
+      std::thread::sleep(Duration::from_millis(20));
+    }
+  }
+
+  #[test]
+  #[ignore = "run by parent on a private Xvfb display"]
+  fn gtk_event_child() {
+    use ::gtk::{gdk, glib::{self, translate::ToGlibPtr}, prelude::*};
+    use wry::{WebViewBuilderExtUnix, WebViewExtUnix};
+    ::gtk::init().unwrap();
+    let window = ::gtk::Window::new(::gtk::WindowType::Toplevel);
+    let container = ::gtk::Box::new(::gtk::Orientation::Vertical, 0);
+    window.add(&container);
+    let view = wry::WebViewBuilder::new().with_html("<p>GTK resize regression</p>")
+      .build_gtk(&container).unwrap();
+    super::gtk::attach_resize_handler(&view);
+    let widget = view.webview();
+    // Match native_terminal.rs: move the WebKit widget into a GtkPaned below
+    // the existing box. The old parent().parent() downcast must fail here.
+    container.remove(&widget);
+    let paned = ::gtk::Paned::new(::gtk::Orientation::Horizontal);
+    container.add(&paned);
+    paned.pack1(&widget, true, true);
+    window.show_all();
+    while ::gtk::events_pending() { ::gtk::main_iteration(); }
+    assert!(!widget.parent().unwrap().parent().unwrap().is::<::gtk::Window>());
+    assert!(widget.toplevel().unwrap().is::<::gtk::Window>());
+
+    // Emit real GTK signals on the WebKit widget. A panic in either connected
+    // C callback aborts this child, which the parent reports as a failed test.
+    let event = gdk::Event::new(gdk::EventType::ButtonPress);
+    unsafe {
+      let raw: *mut gdk::ffi::GdkEvent = event.to_glib_none().0;
+      (*raw).button.button = 1;
+    }
+    let button_count = std::rc::Rc::new(std::cell::Cell::new(0));
+    let count = button_count.clone();
+    widget.connect_button_press_event(move |_, _| {
+      count.set(count.get() + 1);
+      glib::Propagation::Proceed
+    });
+    let touch_count = std::rc::Rc::new(std::cell::Cell::new(0));
+    let count = touch_count.clone();
+    widget.connect_touch_event(move |_, _| {
+      count.set(count.get() + 1);
+      glib::Propagation::Proceed
+    });
+    let _ = widget.emit_by_name::<bool>("button-press-event", &[&event]);
+    let touch = gdk::Event::new(gdk::EventType::TouchBegin);
+    let _ = widget.emit_by_name::<bool>("touch-event", &[&touch]);
+    // Also cover the graceful no-window branch for a detached widget.
+    paned.remove(&widget);
+    let _ = widget.emit_by_name::<bool>("button-press-event", &[&event]);
+    let _ = widget.emit_by_name::<bool>("touch-event", &[&touch]);
+    assert_eq!(button_count.get(), 2);
+    assert_eq!(touch_count.get(), 2);
+    drop(view);
+    window.close();
+    let _ = glib::MainContext::default().iteration(false);
+  }
+}
+
 // ── PAPERCUSP REGRESSION GUARD (EI-201) ─────────────────────────────────────
 // The undecorated-resizing hit-test runs on EVERY button-1 press / touch, before
 // the is_decorated() check. Upstream walked `webview.parent().parent()` and
