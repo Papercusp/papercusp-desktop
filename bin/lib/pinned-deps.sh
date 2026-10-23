@@ -127,7 +127,9 @@ if (population) {
 }
 const fail = (reason, file) => { throw new Error(reason + ":" + path.relative(root, file)); };
 // Match dependency_generation_prune_ephemeral before traversing disposable outputs.
-const caches = new Set([".cache", ".astro", ".vite", ".vite-temp", ".verdict-data"]);
+// The Bun install cache includes absolute version-index links, not installed
+// package links. Exclude it with the same policy used when copying the tree.
+const caches = new Set([".cache", ".bun-cache", ".astro", ".vite", ".vite-temp", ".verdict-data"]);
 const exclusions = [];
 const visit = (file, tree) => {
   const stat = fs.lstatSync(file);
@@ -228,7 +230,7 @@ papercusp_pinned_deps_snapshot() (
   # Live tool caches can disappear even under the install mutex. Filter before
   # copying, using dependency-generation's policy; package failures remain fatal.
   local -a _cache_filters
-  _cache_filters=(--delete-excluded --exclude=.cache --exclude=.astro --exclude=.vite \
+  _cache_filters=(--delete-excluded --exclude=.cache --exclude=.bun-cache --exclude=.astro --exclude=.vite \
     --exclude=.vite-temp --exclude=.verdict-data)
   if ! command -v rsync >/dev/null 2>&1; then
     echo "ERROR: pinned dependency snapshots require rsync for cache-safe copying." >&2
