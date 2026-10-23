@@ -21,6 +21,15 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${PAPERCUSP_REPO_DIR:-$(cd "$HERE/../../.." && pwd)}"
+# The local source exporter never contacts the rig. Remote source preflight
+# requires the same earlier same-subject receipts as a physical dispatch.
+if [ "${1:-}" != '--local-source-out' ]; then
+  "$REPO_ROOT/node_modules/.bin/tsx" "$REPO_ROOT/apps/operator/lib/release/run-p521-local-precheck.ts" \
+    --bundle "${P521_LOCAL_PRECHECKS_FILE:-}" \
+    --journey discovery-join --journey git-consistency-signed-scope --journey github-bridge \
+    --journey serving-identity-restart --journey protected-effect-fencing \
+    --journey replicated-write-outage-replay || exit 2
+fi
 PRODUCER="$REPO_ROOT/packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts"
 SCENARIO="$HERE/hive-git-physical-scenario.sh"
 TSX="$REPO_ROOT/node_modules/.bin/tsx"

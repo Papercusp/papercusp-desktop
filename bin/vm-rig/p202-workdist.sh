@@ -51,6 +51,9 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DESKTOP="$(cd "$HERE/../.." && pwd)"
 
+"$DESKTOP/../node_modules/.bin/tsx" "$DESKTOP/../apps/operator/lib/release/run-p521-local-precheck.ts" \
+  --bundle "${P521_LOCAL_PRECHECKS_FILE:-}" --journey delegated-seat-lifecycle || exit 2
+
 VM="${PCUSP_VM_SSH:-aviweiss@172.31.44.2}"
 TOWER_DSN="${PCUSP_TOWER_DSN:-postgresql://harness_admin:harness_admin_pwd@127.0.0.1:5432/papercusp}"
 TOWER_MCP_PORT="${PCUSP_TOWER_MCP:-3070}"
