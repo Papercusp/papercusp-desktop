@@ -83,6 +83,46 @@ function devCommandLine() {
   return line;
 }
 
+for (const isolated of [true, false]) {
+  test(`isolated=${isolated}: IPC enablement survives production caller and dev env`, () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'operator IPC env '));
+    try {
+      fs.writeFileSync(path.join(dir, '.env.local'), 'NODE_ENV=production\nPAPERCUSP_IPC_ENABLE=0\n');
+      fs.writeFileSync(path.join(dir, 'consumer.cjs'),
+        'console.log(JSON.stringify({ipc:process.env.PAPERCUSP_IPC_ENABLE,nodeEnv:process.env.NODE_ENV}));\n');
+      const src = fs.readFileSync(SCRIPT, 'utf8');
+      const start = src.indexOf('DEV_BACKGROUND_WORKERS=0');
+      const end = src.indexOf('# An isolated verifier supplies', start);
+      assert.ok(start >= 0 && end > start, 'desktop verifier environment setup moved');
+      const result = spawnSync('bash', ['-c', [
+        'set -euo pipefail',
+        'printf -v DEV_OPERATOR_DIR_Q %q "$FIXTURE_ROOT"',
+        'printf -v DEV_ENV_FILE_Q %q "$FIXTURE_ROOT/.env.local"',
+        'printf -v DEV_HOST_SCRIPT_Q %q "$FIXTURE_ROOT/consumer.cjs"',
+        'DEV_HOST_COMMAND="node $DEV_HOST_SCRIPT_Q"',
+        'DEV_CALLER_OVERRIDES=""',
+        'PORT=33701',
+        'PTY_PORT=33705',
+        src.slice(start, end),
+        devCommandLine(),
+        'eval "$DEFAULT_DEV_CMD"',
+      ].join('\n')], {
+        encoding: 'utf8', timeout: 10000,
+        env: { ...process.env, FIXTURE_ROOT: dir,
+          PAPERCUSP_VERIFY_TAURI_ISOLATED: isolated ? '1' : '0',
+          PAPERCUSP_DEV_BACKGROUND_WORKERS: '0',
+          NODE_ENV: 'production', PAPERCUSP_IPC_ENABLE: '0' },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const observed = JSON.parse(result.stdout.trim().split('\n').at(-1));
+      assert.equal(observed.ipc, isolated ? '1' : '0');
+      assert.equal(observed.nodeEnv, 'production');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
 test('the desktop operator launcher enables the git spawn sidecar', () => {
   const line = devCommandLine();
   for (const v of REQUIRED_SPAWN_SIDECAR_VARS) {

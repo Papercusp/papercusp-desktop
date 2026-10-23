@@ -124,6 +124,15 @@ if [ "${PAPERCUSP_VERIFY_TAURI_ISOLATED:-}" = 1 ] && [ "${PAPERCUSP_DEV_BACKGROU
   DEV_BACKGROUND_WORKERS=1
   echo "[tauri] isolated verifier: background workers ON (PAPERCUSP_DEV_BACKGROUND_WORKERS=1)"
 fi
+# The isolated desktop requires its own endpoint IPC server. The host's dev
+# default depends on NODE_ENV, and a production caller or sourced .env.local
+# can otherwise disable it while HTTP still serves healthy pages. Apply this
+# after the env file through the existing caller-override seam; ordinary dev
+# launches keep their explicit IPC opt-out.
+if [ "${PAPERCUSP_VERIFY_TAURI_ISOLATED:-}" = 1 ]; then
+  DEV_CALLER_OVERRIDES+="PAPERCUSP_IPC_ENABLE=1 "
+  echo "[tauri] isolated verifier: endpoint IPC ON (required native API transport)"
+fi
 # An isolated verifier supplies PAPERCUSP_DEV_SOURCE_ROOT. Resolve it exactly
 # (marker check, no walk-up) and fail closed if it is incomplete: the verifier
 # must never silently fall back to the mutable shared checkout. With no
