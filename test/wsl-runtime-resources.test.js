@@ -92,3 +92,37 @@ test('filesystem controls reject restoring the thin-GUI-own-resource mistake', (
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
+
+test('WSL upgrades extract only offline inputs from the shipped rootfs and preserve the old set on failure', t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'wsl offline inputs '));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const match = source.match(/const INSTALL_BOOTSTRAP_INPUTS_SCRIPT: &str = r#"([\s\S]*?)"#;/);
+  assert.ok(match, 'execute the exact production WSL extraction script');
+  const destination = path.join(temp, 'guest/opt/papercup/offline-inputs');
+  fs.mkdirSync(destination, { recursive: true });
+  fs.writeFileSync(path.join(destination, 'old'), 'previous input set');
+  const home = path.join(temp, 'guest/home/papercup/workspace');
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, 'data'), 'user work');
+  const packed = path.join(temp, 'rootfs');
+  fs.mkdirSync(path.join(packed, 'opt/papercup/offline-inputs'), { recursive: true });
+  fs.writeFileSync(path.join(packed, 'opt/papercup/offline-inputs/SHA256SUMS'), 'input checksum fixture');
+  fs.mkdirSync(path.join(packed, 'home/papercup/workspace'), { recursive: true });
+  fs.writeFileSync(path.join(packed, 'home/papercup/workspace/data'), 'must never overlay user work');
+  const archive = spawnSync('tar', ['-czf', '-', '-C', packed, 'opt', 'home'], { encoding: null });
+  assert.equal(archive.status, 0, String(archive.stderr));
+  const install = input => spawnSync('bash', ['-c', match[1], 'install-inputs', destination], {
+    input, timeout: 15000, encoding: 'utf8',
+  });
+  assert.notEqual(install('invalid gzip').status, 0);
+  assert.equal(fs.readFileSync(path.join(destination, 'old'), 'utf8'), 'previous input set');
+  const good = install(archive.stdout);
+  assert.equal(good.status, 0, good.stderr);
+  assert.equal(fs.existsSync(path.join(destination, 'old')), false);
+  assert.equal(fs.readFileSync(path.join(destination, 'SHA256SUMS'), 'utf8'), 'input checksum fixture');
+  assert.equal(fs.readFileSync(path.join(home, 'data'), 'utf8'), 'user work');
+  assert.notEqual(install(archive.stdout.subarray(0, Math.floor(archive.stdout.length / 2))).status, 0);
+  assert.equal(fs.readFileSync(path.join(destination, 'SHA256SUMS'), 'utf8'), 'input checksum fixture');
+  assert.deepEqual(fs.readdirSync(path.dirname(destination)), ['offline-inputs']);
+  assert.equal(install(archive.stdout).status, 0, 'repeating the handoff is safe');
+});

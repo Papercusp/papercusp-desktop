@@ -15,7 +15,7 @@ const voiceE2e = fs.readFileSync(
   'utf8',
 );
 const section = text => text.slice(text.indexOf('NODE_TARBALL='), text.indexOf('\n# The candidate stays'));
-const architecture = shipped.slice(shipped.indexOf('# Runtime architecture'), shipped.indexOf('# ── network preflight'));
+const architecture = shipped.slice(shipped.indexOf('# Runtime architecture'), shipped.indexOf('\nNODE_VERSION='));
 const overmind = shipped.slice(shipped.indexOf('# overmind is not'), shipped.indexOf('# kopia —'));
 const quote = s => `'${s.replaceAll("'", "'\\''")}'`;
 const run = (command, args, options = {}) => spawnSync(command, args, {
@@ -48,16 +48,126 @@ function fixture(t, { invalidNpm = false } = {}) {
   assert.equal(packed.status, 0, packed.stderr);
   const fakebin = path.join(dir, 'tools');
   write(fakebin, 'dpkg', '#!/bin/sh\nprintf "%s\\n" "${TEST_RUNTIME_ARCH:-amd64}"\n', 0o755);
-  write(fakebin, 'curl', '#!/bin/sh\nif [ "${CURL_FAIL:-0}" = 1 ]; then exit 22; fi\nprintf "%s\\n" "$2" >> "$RUNTIME_DOWNLOAD_LOG"\ncat "$NODE_FIXTURE_ARCHIVE"\n', 0o755);
+  write(fakebin, 'curl', '#!/bin/sh\nif [ "${CURL_FAIL:-0}" = 1 ]; then exit 22; fi\nprintf "%s\\n" "$2" >> "$RUNTIME_DOWNLOAD_LOG"\nif [ "${3:-}" = -o ]; then cp "$NODE_FIXTURE_ARCHIVE" "$4"; else cat "$NODE_FIXTURE_ARCHIVE"; fi\n', 0o755);
   const script = path.join(dir, 'install.sh');
+  const inputs = path.join(dir, 'inputs');
+  fs.mkdirSync(inputs);
   const body = section(shipped);
   assert.ok(body.includes('install_node_runtime /usr/local'), 'exercise the production invocation');
   fs.writeFileSync(script, 'set -euo pipefail\nNODE_VERSION=24.18.1\n' + architecture + body.replace('install_node_runtime /usr/local', 'install_node_runtime "$TEST_NODE_PREFIX"'));
   const env = { ...process.env, PATH: `${fakebin}:${process.env.PATH}`, NODE_FIXTURE_ARCHIVE: archive, TEST_NODE_PREFIX: prefix,
+    PAPERCUSP_ROOTFS_BUILD: '1', OFFLINE_INPUTS: inputs,
     RUNTIME_DOWNLOAD_LOG: path.join(dir, 'downloads') };
   return { dir, prefix, archive, npm, env, install: extra => run('bash', [script], { env: { ...env, ...extra } }),
     probe: () => run(process.execPath, [path.join(prefix, npm, 'bin/npm-cli.js')]),
     stageDirs: () => fs.readdirSync(prefix).filter(n => n.startsWith('.papercusp-node.')) };
+}
+
+// Run the complete shipped script against a sandbox filesystem. Package
+// mutation and Bun staging are explicit stand-ins; shell/extraction/checksums,
+// Node/npm replacement and retained home files are real. Network commands fail.
+function offlineFixture(t, existing = true) {
+  const f = fixture(t);
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'bootstrap-offline-'));
+  t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+  const inputs = path.join(sandbox, 'opt/papercup/offline-inputs');
+  const tools = path.join(f.dir, 'offline-tools');
+  const log = path.join(f.dir, 'offline-calls');
+  const write = (relative, text, mode) => {
+    const p = path.join(sandbox, relative);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, text, { mode });
+  };
+  fs.mkdirSync(path.join(inputs, 'debs'), { recursive: true });
+  fs.mkdirSync(tools);
+  fs.mkdirSync(path.join(sandbox, 'usr/local'), { recursive: true });
+  fs.cpSync(f.prefix, path.join(sandbox, 'usr/local'), { recursive: true });
+  fs.copyFileSync(f.archive, path.join(inputs, 'node.tar.xz'));
+  const gz = run('gzip', ['-c'], { input: '#!/bin/sh\necho overmind fixture\n', encoding: null });
+  assert.equal(gz.status, 0, String(gz.stderr));
+  fs.writeFileSync(path.join(inputs, 'overmind.gz'), gz.stdout);
+  fs.writeFileSync(path.join(inputs, 'pnpm.tgz'), 'npm package fixture');
+  fs.writeFileSync(path.join(inputs, 'manifest'), 'ubuntu=24.04\narch=amd64\nnode=24.18.1\npnpm=9.15.0\n');
+  // A genuine Debian archive exercises dpkg-deb's pre-mutation validation.
+  const deb = path.join(f.dir, 'deb/DEBIAN');
+  fs.mkdirSync(deb, { recursive: true });
+  fs.writeFileSync(path.join(deb, 'control'), 'Package: offline-fixture\nVersion: 1.0\nArchitecture: all\nMaintainer: Test <test@example.invalid>\nDescription: Offline fixture\n');
+  const packed = run('dpkg-deb', ['--build', path.dirname(deb), path.join(inputs, 'debs/offline-fixture_1.0_all.deb')]);
+  assert.equal(packed.status, 0, packed.stderr);
+  const seal = () => {
+    const files = fs.readdirSync(inputs).filter(n => n !== 'SHA256SUMS' && n !== 'debs')
+      .concat(fs.readdirSync(path.join(inputs, 'debs')).map(n => 'debs/' + n)).sort();
+    fs.writeFileSync(path.join(inputs, 'SHA256SUMS'), files.map(n =>
+      createHash('sha256').update(fs.readFileSync(path.join(inputs, n))).digest('hex') + '  ' + n + '\n').join(''));
+  };
+  seal();
+  write('etc/os-release', 'ID=ubuntu\nVERSION_ID=24.04\n');
+  if (existing) write('home/papercup/papercup/workspace/data', 'user work must survive');
+  const exe = (name, body) => fs.writeFileSync(path.join(tools, name), '#!/bin/bash\nset -eu\n' + body, { mode: 0o755 });
+  exe('dpkg', 'echo amd64\n');
+  exe('id', existing ? 'exit 0\n' : 'test -f "$OFFLINE_TEST_USER"\n');
+  exe('useradd', 'echo useradd >> "$OFFLINE_TEST_LOG"\ntouch "$OFFLINE_TEST_USER"\n');
+  exe('chown', 'echo "chown $*" >> "$OFFLINE_TEST_LOG"\n');
+  exe('apt-get', 'echo "apt-get $*" >> "$OFFLINE_TEST_LOG"\nif [[ "$1" != clean ]]; then\n [[ " $* " == *" --no-download "* && " $* " == *" --no-remove "* ]] || exit 91\n [[ "${OFFLINE_TEST_APT_FAIL:-0}" != 1 ]] || exit 92\nfi\n');
+  exe('curl', 'echo UNEXPECTED_NETWORK >> "$OFFLINE_TEST_LOG"\nexit 93\n');
+  exe('npm', 'echo "npm $*" >> "$OFFLINE_TEST_LOG"\nif [[ "$1" == install ]]; then [[ " $* " == *" --offline "* ]] || exit 94; fi\n');
+  exe('pnpm', 'echo 9.15.0\n');
+  exe('kopia', 'echo kopia fixture\n');
+  exe('python3', 'echo "BUN_STAGING_STAND_IN $*" >> "$OFFLINE_TEST_LOG"\n');
+  let body = shipped;
+  for (const absolute of ['/opt/papercup', '/usr/local', '/home/', '/etc/', '/usr/share/', '/root/', '/var/lib/apt/', '/tmp/node-compile-cache']) {
+    body = body.replaceAll(absolute, sandbox + absolute);
+  }
+  const script = path.join(f.dir, 'offline-bootstrap.sh');
+  fs.writeFileSync(script, body);
+  const env = { ...process.env, PATH: `${tools}:${sandbox}/usr/local/bin:${process.env.PATH}`,
+    PAPERCUSP_ROOTFS_BUILD: '0', OFFLINE_TEST_LOG: log, OFFLINE_TEST_USER: path.join(f.dir, 'user-created') };
+  return { sandbox, inputs, log, seal, run: (args = [], extra = {}) => run('bash', [script, ...args], { env: { ...env, ...extra } }) };
+}
+
+for (const existing of [false, true]) {
+  test(`complete offline bootstrap ${existing ? 'upgrades an existing distro and retains workspace data' : 'configures a fresh distro'}`, t => {
+    const f = offlineFixture(t, existing);
+    const result = f.run();
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    assert.match(result.stdout, /papercup bootstrap complete/);
+    const log = fs.readFileSync(f.log, 'utf8');
+    assert.doesNotMatch(log, /UNEXPECTED_NETWORK|apt-get update|npm pack/);
+    assert.match(log, /apt-get --simulate --no-download --no-remove install .*offline-fixture_1.0_all.deb/);
+    assert.match(log, /apt-get --no-download --no-remove -y .*install /);
+    assert.match(log, /npm install --offline --ignore-scripts --no-audit --no-fund -g /);
+    assert.match(log, /BUN_STAGING_STAND_IN .*--archive .*papercup-bun-linux.zip/);
+    assert.doesNotMatch(log, /chown -R/);
+    assert.equal(fs.readFileSync(path.join(f.sandbox, 'usr/local/lib/node_modules/user-tool/keep.txt'), 'utf8'), 'user-owned');
+    assert.equal(fs.existsSync(path.join(f.sandbox, 'usr/local/lib/node_modules/npm/old-only.txt')), false);
+    if (existing) assert.equal(fs.readFileSync(path.join(f.sandbox, 'home/papercup/papercup/workspace/data'), 'utf8'), 'user work must survive');
+    const repeated = f.run();
+    assert.equal(repeated.status, 0, 'the full offline bootstrap is idempotent: ' + repeated.stderr);
+  });
+}
+
+for (const damage of ['missing', 'changed', 'unlisted', 'wrong-arch', 'wrong-os', 'symlink', 'resolver']) {
+  test(`offline ${damage} input refuses before distro configuration`, t => {
+    const f = offlineFixture(t);
+    if (damage === 'missing') fs.unlinkSync(path.join(f.inputs, 'node.tar.xz'));
+    if (damage === 'changed') fs.appendFileSync(path.join(f.inputs, 'pnpm.tgz'), 'bad');
+    if (damage === 'unlisted') fs.writeFileSync(path.join(f.inputs, 'unexpected'), 'bad');
+    if (damage === 'wrong-arch') {
+      fs.writeFileSync(path.join(f.inputs, 'manifest'), 'ubuntu=24.04\narch=arm64\nnode=24.18.1\npnpm=9.15.0\n'); f.seal();
+    }
+    if (damage === 'wrong-os') fs.writeFileSync(path.join(f.sandbox, 'etc/os-release'), 'ID=ubuntu\nVERSION_ID=22.04\n');
+    if (damage === 'symlink') {
+      fs.renameSync(path.join(f.inputs, 'pnpm.tgz'), path.join(f.sandbox, 'external'));
+      fs.symlinkSync(path.join(f.sandbox, 'external'), path.join(f.inputs, 'pnpm.tgz'));
+    }
+    const result = f.run([], damage === 'resolver' ? { OFFLINE_TEST_APT_FAIL: '1' } : {});
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    const log = fs.existsSync(f.log) ? fs.readFileSync(f.log, 'utf8') : '';
+    assert.doesNotMatch(log, /UNEXPECTED_NETWORK|useradd|chown|npm |BUN_STAGING|apt-get --no-download/);
+    assert.equal(fs.existsSync(path.join(f.sandbox, 'etc/wsl.conf')), false);
+    assert.equal(fs.readFileSync(path.join(f.sandbox, 'usr/local/bin/node'), 'utf8'), 'original runtime');
+    assert.equal(fs.readFileSync(path.join(f.sandbox, 'home/papercup/papercup/workspace/data'), 'utf8'), 'user work must survive');
+  });
 }
 
 for (const [guestArch, nodeArch] of [['amd64', 'x64'], ['arm64', 'arm64']]) {
@@ -75,7 +185,8 @@ for (const [guestArch, nodeArch] of [['amd64', 'x64'], ['arm64', 'arm64']]) {
     // Exercise the production URL and invocation with a local executable;
     // the caller's host architecture never participates in artifact selection.
     const result = run('bash', ['-c', 'set -euo pipefail\n' + architecture +
-      overmind.replaceAll('/usr/local/bin/overmind', quote(binary)).replace('\novermind --version', '\n' + quote(binary) + ' --version')],
+      overmind.replaceAll('/usr/local/bin/.overmind.XXXXXX', path.join(f.dir, '.overmind.XXXXXX'))
+        .replaceAll('/usr/local/bin/overmind', quote(binary)).replace('\novermind --version', '\n' + quote(binary) + ' --version')],
     { env: { ...env, NODE_FIXTURE_ARCHIVE: archive }, encoding: null });
     assert.equal(result.status, 0, String(result.stderr));
     assert.deepEqual(fs.readFileSync(env.RUNTIME_DOWNLOAD_LOG, 'utf8').trim().split('\n'), [
@@ -195,7 +306,7 @@ test('an executable platform reaches bootstrap/export and writes an archive-boun
   const result = run('bash', [script], { env });
   assert.equal(result.status, 0, result.stderr);
   const commands = fs.readFileSync(calls, 'utf8').trim().split('\n');
-  assert.deepEqual(commands, ['pull', 'run', 'create', 'cp', 'start', 'cp', 'export', 'rm']);
+  assert.deepEqual(commands, ['pull', 'run', 'create', 'cp', 'start', 'commit', 'run', 'cp', 'export', 'rm', 'image']);
   assert.equal(fs.readFileSync(path.join(dir, 'copied-helper'), 'utf8'), bunHelper.replace(
     'a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b', archiveSha));
   assert.match(fs.readFileSync(path.join(dir, 'create-args'), 'utf8'), /mv \/tmp\/papercup-bun-runtime\.py \/opt\/papercup\/papercup-bun-runtime\.py &&/);
@@ -303,9 +414,31 @@ test('a failed Linux archive transfer cannot export a rootfs or advance the ship
     PATH: tools + ':' + process.env.PATH, DOCKER_PREFLIGHT_LOG: calls,
     PC_HEAVY_COALESCE: '0', PAPERCUSP_ROOTFS_OUT_DIR: output, PAPERCUSP_RUNTIME_PLATFORM: 'linux/amd64' } });
   assert.equal(result.status, 46, result.stderr);
-  assert.deepEqual(fs.readFileSync(calls, 'utf8').trim().split('\n'), ['pull', 'run', 'create', 'cp', 'start', 'cp', 'rm']);
+  assert.deepEqual(fs.readFileSync(calls, 'utf8').trim().split('\n'), ['pull', 'run', 'create', 'cp', 'start', 'commit', 'run', 'cp', 'rm', 'image']);
   assert.deepEqual(fs.readdirSync(output), ['papercup-bun-linux.zip']);
   assert.equal(fs.readFileSync(path.join(output, 'papercup-bun-linux.zip'), 'utf8'), 'previous shipped input');
+});
+
+test('a failed network-disabled full bootstrap prevents rootfs export and recipe publication', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rootfs-offline-failure-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const tools = path.join(dir, 'tools');
+  const output = path.join(dir, 'output');
+  const calls = path.join(dir, 'calls');
+  fs.mkdirSync(tools);
+  fs.mkdirSync(output);
+  fs.writeFileSync(path.join(output, 'papercup-rootfs-recipe'), 'previous recipe');
+  fs.writeFileSync(path.join(tools, 'docker'), '#!/bin/bash\nset -eu\nif [[ "$1" == create ]]; then echo create >> "$DOCKER_PREFLIGHT_LOG"; else printf "%s\\n" "$*" >> "$DOCKER_PREFLIGHT_LOG"; fi\nif [[ " $* " == *" --network none "* ]]; then exit 47; fi\n', { mode: 0o755 });
+  const result = run('bash', [path.join(root, 'scripts/build-rootfs.sh')], { env: { ...process.env,
+    PATH: tools + ':' + process.env.PATH, DOCKER_PREFLIGHT_LOG: calls,
+    PC_HEAVY_COALESCE: '0', PAPERCUSP_ROOTFS_OUT_DIR: output, PAPERCUSP_RUNTIME_PLATFORM: 'linux/amd64' } });
+  assert.equal(result.status, 47, result.stderr);
+  const log = fs.readFileSync(calls, 'utf8');
+  assert.match(log, /run --rm --network none --platform linux\/amd64 .*env -u PAPERCUSP_ROOTFS_BUILD bash \/opt\/papercup\/bootstrap/);
+  assert.doesNotMatch(log, /^export /m);
+  assert.match(log, /^image rm -f papercup-runtime-offline-smoke:/m);
+  assert.deepEqual(fs.readdirSync(output), ['papercup-rootfs-recipe']);
+  assert.equal(fs.readFileSync(path.join(output, 'papercup-rootfs-recipe'), 'utf8'), 'previous recipe');
 });
 
 test('coalesced rootfs builds declare every environment input before Docker or output mutation', t => {

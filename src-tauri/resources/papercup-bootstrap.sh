@@ -9,9 +9,51 @@ case "$(dpkg --print-architecture)" in
   *) echo "ERROR: unsupported runtime architecture; expected amd64 or arm64" >&2; exit 2 ;;
 esac
 
+NODE_VERSION="${NODE_VERSION:-24.18.1}"
+NODE_VERSION="${NODE_VERSION#v}"
+PNPM_VERSION="${PNPM_VERSION:-9.15.0}"
+OFFLINE_INPUTS=/opt/papercup/offline-inputs
+
+# The image producer is the only online caller. First boot and upgrades use
+# the same complete inputs retained in the shipped rootfs, never apt mirrors
+# or an npm cache left by a previous installation.
+verify_offline_inputs() (
+  set -euo pipefail
+  local inputs="$1" checksum member
+  . /etc/os-release
+  [[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 ]] || {
+    echo "ERROR: offline runtime inputs require Ubuntu 24.04; distro data was retained" >&2; exit 2;
+  }
+  cd "$inputs"
+  test -s SHA256SUMS
+  test -s manifest
+  # Verify the exact inventory, not only the subset named by a damaged list.
+  while read -r checksum member; do
+    [[ "$checksum" =~ ^[0-9a-f]{64}$ && "$member" =~ ^(manifest|node\.tar\.xz|overmind\.gz|pnpm\.tgz|debs/[a-zA-Z0-9.+_:%~-]+\.deb)$ ]]
+    [[ -f "$member" && ! -L "$member" ]]
+  done < SHA256SUMS
+  test -z "$(find . -type l -print -quit)"
+  cmp <(awk '{print $2}' SHA256SUMS | LC_ALL=C sort) \
+    <(find . -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort)
+  sha256sum --check --strict SHA256SUMS
+  cmp manifest <(printf 'ubuntu=24.04\narch=%s\nnode=%s\npnpm=%s\n' "$(dpkg --print-architecture)" "$NODE_VERSION" "$PNPM_VERSION")
+  test -s node.tar.xz && test -s overmind.gz && test -s pnpm.tgz
+  local -a packages=("$PWD"/debs/*.deb)
+  test -f "${packages[0]}"
+  for member in "${packages[@]}"; do dpkg-deb --info "$member" >/dev/null; done
+  # Resolve the whole local package set before configuring users or runtimes.
+  # --no-remove preserves tools/packages added by the distro's user.
+  apt-get --simulate --no-download --no-remove install "${packages[@]}"
+)
+
+if [[ "${PAPERCUSP_ROOTFS_BUILD:-0}" != 1 || "${1:-}" == --verify-offline-inputs ]]; then
+  verify_offline_inputs "$OFFLINE_INPUTS"
+fi
+if [[ "${1:-}" == --verify-offline-inputs ]]; then exit 0; fi
+
 # ── network preflight (EI-20574262390154687) ─────────────────────────────────
 #
-# This script CANNOT complete without internet: it apt-installs base packages
+# Only image production needs internet: it apt-installs base packages
 # and then downloads three pinned artifacts (overmind from github.com, kopia
 # from kopia.io + packages.kopia.io, node from nodejs.org). That is a surprising
 # dependency for an installer that already ships ~3.4 GB, so make it EXPLICIT
@@ -86,7 +128,7 @@ preflight_reachable() { # host port -> 0 reachable, non-zero not
   timeout 6 bash -c "exec 3<>/dev/tcp/${1}/${2}" 2>/dev/null
 }
 
-if [ "${PAPERCUP_SKIP_NETWORK_PREFLIGHT:-0}" != "1" ]; then
+if [[ "${PAPERCUSP_ROOTFS_BUILD:-0}" == 1 && "${PAPERCUP_SKIP_NETWORK_PREFLIGHT:-0}" != 1 ]]; then
   preflight_unreachable=()
   while IFS='|' read -r hostport purpose; do
     [ -n "$hostport" ] || continue
@@ -155,7 +197,12 @@ WSLCONF
 # linker needs the .so present at exec time whether or not a sound device exists.
 # (Ubuntu 24.04 renamed libasound2 → libasound2t64 in the t64 transition.)
 export DEBIAN_FRONTEND=noninteractive
+if [[ "${PAPERCUSP_ROOTFS_BUILD:-0}" == 1 ]]; then
+mkdir -p "$OFFLINE_INPUTS"
 apt-get update
+# Refresh the base too: its exact installed packages must still be available
+# from the repositories when we capture the complete offline dependency set.
+apt-get -y --no-remove dist-upgrade
 # Live voice E2E host tools (EI-22457146314869603); the live script
 # preflights these commands before connecting to the operator voice host.
 apt-get install -y --no-install-recommends \
@@ -177,11 +224,22 @@ apt-get install -y --no-install-recommends \
   ripgrep \
   iproute2 \
   libasound2t64
+else
+  apt-get --no-download --no-remove -y -o Dpkg::Options::=--force-confold \
+    -o Dpkg::Use-Pty=0 install "$OFFLINE_INPUTS"/debs/*.deb
+fi
 
 # overmind is not in the Ubuntu archive — fetch the release binary.
 OVERMIND_VERSION="${OVERMIND_VERSION:-2.5.1}"
-curl -fsSL "https://github.com/DarthSim/overmind/releases/download/v${OVERMIND_VERSION}/overmind-v${OVERMIND_VERSION}-linux-${OVERMIND_ARCH}.gz" \
-  | gunzip > /usr/local/bin/overmind
+if [[ "${PAPERCUSP_ROOTFS_BUILD:-0}" == 1 ]]; then
+  curl -fsSL "https://github.com/DarthSim/overmind/releases/download/v${OVERMIND_VERSION}/overmind-v${OVERMIND_VERSION}-linux-${OVERMIND_ARCH}.gz" \
+    -o "$OFFLINE_INPUTS/overmind.gz"
+fi
+# Do not truncate a binary that a running operator may still have mapped.
+overmind_stage="$(mktemp /usr/local/bin/.overmind.XXXXXX)"
+gunzip -c "$OFFLINE_INPUTS/overmind.gz" > "$overmind_stage"
+chmod +x "$overmind_stage"
+mv -f "$overmind_stage" /usr/local/bin/overmind
 chmod +x /usr/local/bin/overmind
 overmind --version
 
@@ -193,12 +251,14 @@ overmind --version
 # and bare `gpg --dearmor` hangs forever on an interactive "Overwrite? (y/N)"
 # prompt (wedged the Windows first-run live, 2026-06-11). Every step in this
 # script must stay idempotent AND prompt-free.
+if [[ "${PAPERCUSP_ROOTFS_BUILD:-0}" == 1 ]]; then
 curl -fsSL https://kopia.io/signing-key \
   | gpg --batch --yes --dearmor -o /usr/share/keyrings/kopia-keyring.gpg
 echo "deb [signed-by=/usr/share/keyrings/kopia-keyring.gpg] http://packages.kopia.io/apt/ stable main" \
   > /etc/apt/sources.list.d/kopia.list
 apt-get update
 apt-get install -y --no-install-recommends kopia
+fi
 kopia --version
 
 # Node into /usr/local — it must be on the DEFAULT non-login PATH: the
@@ -236,8 +296,11 @@ install_node_runtime() (
   # Download/extract/validate before changing the installed runtime. Overlaying
   # npm preserves dependencies removed by a newer release; Node can then load
   # an obsolete nested module instead of the new hoisted one (minipass 3/7).
-  curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" \
-    | tar -xJ -C "$stage" --strip-components=1
+  if [[ "${PAPERCUSP_ROOTFS_BUILD:-0}" == 1 ]]; then
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}" \
+      -o "$OFFLINE_INPUTS/node.tar.xz"
+  fi
+  tar -xJf "$OFFLINE_INPUTS/node.tar.xz" -C "$stage" --strip-components=1
   "$stage/bin/node" --version
   "$stage/bin/node" "$stage/lib/node_modules/npm/bin/npm-cli.js" --version
   mkdir -p "$prefix/bin" "$prefix/lib/node_modules"
@@ -287,12 +350,36 @@ install_bun_runtime() (
 )
 install_bun_runtime /opt/papercup/papercup-bun-runtime.py /usr/local /root/.cache/papercusp-bun /opt/papercup/papercup-bun-linux.zip
 
-# pnpm
-npm install -g "pnpm@${PNPM_VERSION:-9.15.0}"
+# pnpm's published package is self-contained. Retain the input rather than
+# relying on the builder's npm cache (which is intentionally trimmed below).
+if [[ "${PAPERCUSP_ROOTFS_BUILD:-0}" == 1 ]]; then
+  npm pack "pnpm@$PNPM_VERSION" --pack-destination "$OFFLINE_INPUTS"
+  mv "$OFFLINE_INPUTS/pnpm-${PNPM_VERSION}.tgz" "$OFFLINE_INPUTS/pnpm.tgz"
+fi
+npm install --offline --ignore-scripts --no-audit --no-fund -g "$OFFLINE_INPUTS/pnpm.tgz"
+test "$(pnpm --version)" = "$PNPM_VERSION"
 
 # Papercup repo location convention.
 mkdir -p /home/$DEFAULT_USER/papercup
-chown -R "$DEFAULT_USER:$DEFAULT_USER" /home/$DEFAULT_USER
+chown "$DEFAULT_USER:$DEFAULT_USER" /home/$DEFAULT_USER /home/$DEFAULT_USER/papercup
+
+if [[ "${PAPERCUSP_ROOTFS_BUILD:-0}" == 1 ]]; then
+  # Capture every installed package, including the dependencies already in the
+  # base image. The set must repair an older supported distro with empty apt
+  # lists and caches. A missing exact version fails the producer, not setup.
+  mkdir -p "$OFFLINE_INPUTS/debs/partial"
+  mapfile -t offline_packages < <(dpkg-query -W -f='${db:Status-Status} ${binary:Package}=${Version}\n' | awk '$1 == "installed" {print $2}')
+  ((${#offline_packages[@]} > 0))
+  apt-get -y --no-remove --download-only --reinstall \
+    -o Dir::Cache::archives="$OFFLINE_INPUTS/debs" install "${offline_packages[@]}"
+  rm -rf "$OFFLINE_INPUTS/debs/partial"
+  rm -f "$OFFLINE_INPUTS/debs/lock"
+  printf 'ubuntu=24.04\narch=%s\nnode=%s\npnpm=%s\n' \
+    "$(dpkg --print-architecture)" "$NODE_VERSION" "$PNPM_VERSION" > "$OFFLINE_INPUTS/manifest"
+  (cd "$OFFLINE_INPUTS" && find . -type f ! -name SHA256SUMS -printf '%P\n' \
+    | LC_ALL=C sort | xargs -r sha256sum > SHA256SUMS)
+  verify_offline_inputs "$OFFLINE_INPUTS"
+fi
 
 # ── install-size trim (install-size-audit 2026-07-07, owner-directed) ────────
 # Drop content the RUNTIME never needs — package docs, man/info pages, and

@@ -65,7 +65,7 @@ pub fn detect_ready_cached() -> bool {
 // CI by running our bootstrap script inside an Ubuntu container then
 // `tar -czf papercup-runtime.tar.gz /`. See
 // `papercusp-desktop/scripts/build-rootfs.sh` (TODO).
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 const ROOTFS_FILENAME: &str = "papercup-runtime.tar.gz";
 
 // Written beside the tarball by scripts/build-rootfs.sh: the fingerprint of the
@@ -94,6 +94,30 @@ chmod 755 "$temporary"
 mv -f -- "$temporary" "$destination"
 "#;
 
+// The same rootfs supplies fresh installs and upgrades. Extract only generated
+// provisioning inputs; never overlay /home, /etc or the distro's package DB.
+// stdin is streamed so an upgrade does not buffer a multi-GB rootfs in memory.
+#[cfg(any(target_os = "windows", test))]
+const INSTALL_BOOTSTRAP_INPUTS_SCRIPT: &str = r#"set -euo pipefail
+destination="$1"
+mkdir -p "$(dirname "$destination")"
+stage="$(mktemp -d "$(dirname "$destination")/.offline-inputs.XXXXXX")"
+cleanup() {
+  status="$?"
+  trap - EXIT
+  if [[ -e "$stage/previous" && ! -e "$destination" ]]; then
+    mv "$stage/previous" "$destination" || exit 1
+  fi
+  rm -rf -- "$stage"
+  exit "$status"
+}
+trap cleanup EXIT
+tar -xzf - -C "$stage" opt/papercup/offline-inputs
+test -s "$stage/opt/papercup/offline-inputs/SHA256SUMS"
+if [[ -e "$destination" ]]; then mv "$destination" "$stage/previous"; fi
+mv "$stage/opt/papercup/offline-inputs" "$destination"
+"#;
+
 /// Does the distro need re-provisioning before it can be trusted?
 ///
 /// `shipped` is the recipe fingerprint of the rootfs in THIS build; `provisioned`
@@ -115,69 +139,6 @@ fn distro_needs_reprovision(shipped: Option<&str>, provisioned: Option<&str>) ->
         (Some(_), None) => true,
         (Some(want), Some(have)) => want.trim() != have.trim(),
     }
-}
-
-/// Hosts the shipped bootstrap MUST reach before it can provision anything
-/// (EI-20574262390154687).
-///
-/// Deliberately in lockstep with `resources/papercup-bootstrap.sh` — every host
-/// that script downloads from appears here, and a test below fails if the two
-/// ever drift apart.
-///
-/// `apt` mirrors are deliberately NOT listed. They are baked into the rootfs and
-/// are only knowable from INSIDE the distro, so the bootstrap's own preflight
-/// probes those against the image's real sources. Guessing a mirror here would
-/// let this check block an install that would otherwise have worked, and a false
-/// block is a worse regression than the confusing failure this replaces.
-#[cfg(any(target_os = "windows", test))]
-const BOOTSTRAP_NETWORK_HOSTS: &[(&str, u16, &str)] = &[
-    ("github.com", 443, "the overmind process supervisor"),
-    ("kopia.io", 443, "the kopia signing key"),
-    (
-        "packages.kopia.io",
-        80,
-        "the kopia apt repository (backup engine)",
-    ),
-    ("nodejs.org", 443, "the pinned Node runtime"),
-];
-
-/// Render the user-facing failure for a set of unreachable hosts, or `None` when
-/// everything is reachable and provisioning may proceed.
-///
-/// Kept pure and separate from the probe on purpose. The probe can only run on
-/// Windows, but this DECISION — including "empty means proceed" — is pinned from
-/// Linux by the tests below, exactly like `distro_needs_reprovision` above.
-///
-/// THE bug this addresses: the bootstrap apt-installs and then downloads three
-/// pinned binaries, so on a machine that is offline, behind a strict proxy, or
-/// on a network blocking any one of those hosts, provisioning failed PARTWAY
-/// THROUGH — after the Windows installer had already reported success and
-/// written its uninstall entry — surfacing a raw curl/apt error from inside a
-/// WSL distro. The user could not tell which host was unreachable, or that the
-/// network was the problem at all.
-#[cfg(any(target_os = "windows", test))]
-fn bootstrap_network_failure(unreachable: &[(&str, u16, &str)]) -> Option<String> {
-    if unreachable.is_empty() {
-        return None;
-    }
-    let mut msg = String::from(
-        "Papercup cannot finish setting up because the network is unreachable.\n\n\
-         Setting up the papercup runtime downloads system packages and three pinned \
-         binaries, so it cannot run offline. These are unreachable from this machine:\n",
-    );
-    for (host, _port, purpose) in unreachable {
-        msg.push_str(&format!("  - {host} — needed for {purpose}\n"));
-    }
-    msg.push_str(
-        "\nNothing has been installed yet: setup stopped before importing the runtime, \
-         so simply launch Papercup again once this is fixed.\n\n\
-         Fix: connect this machine to the internet, or allow the hosts above through \
-         your proxy or firewall, then relaunch.\n\n\
-         If you believe this check is wrong — for example an HTTP proxy that only \
-         accepts CONNECT, which a plain TCP probe cannot see — set \
-         PAPERCUP_SKIP_NETWORK_PREFLIGHT=1 to skip it.",
-    );
-    Some(msg)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -687,6 +648,10 @@ mod imp {
     /// Never run an old bootstrap and then record the new recipe as completed.
     fn install_shipped_bootstrap(app: &tauri::AppHandle) -> Result<(), String> {
         use std::io::Write;
+        // Resolve/open the complete input before changing any guest resource.
+        let rootfs_path = runtime_resource(app, super::ROOTFS_FILENAME)?;
+        let mut rootfs = std::fs::File::open(&rootfs_path)
+            .map_err(|e| format!("Open shipped WSL inputs {}: {e}", rootfs_path.display()))?;
         let path = runtime_resource(app, super::ROOTFS_BOOTSTRAP_FILENAME)?;
         let script = std::fs::read(&path)
             .map_err(|e| format!("Read shipped WSL bootstrap {}: {e}", path.display()))?;
@@ -704,6 +669,32 @@ mod imp {
             .map_err(|e| format!("Read shipped WSL Bun archive {}: {e}", archive_path.display()))?;
         if archive.is_empty() {
             return Err(format!("Shipped WSL Bun archive {} is empty", archive_path.display()));
+        }
+        let mut child = wsl_command()
+            .args([
+                "--distribution", DISTRO_NAME, "--user", "root", "--exec", "bash", "-c",
+                super::INSTALL_BOOTSTRAP_INPUTS_SCRIPT, "papercusp-install-offline-inputs",
+                "/opt/papercup/offline-inputs",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Install shipped WSL offline inputs: {e}"))?;
+        let transfer = match child.stdin.take() {
+            Some(mut stdin) => std::io::copy(&mut rootfs, &mut stdin),
+            None => Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "WSL stdin unavailable")),
+        };
+        if let Err(e) = transfer {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("Transfer shipped WSL offline inputs: {e}"));
+        }
+        let result = child.wait_with_output()
+            .map_err(|e| format!("Wait for shipped WSL offline inputs: {e}"))?;
+        if !result.status.success() {
+            return Err(format!("Install shipped WSL offline inputs: exit={:?} stderr={}",
+                result.status.code(), super::decode_wsl_output(&result.stderr)));
         }
         // Read all inputs before mutating any, and install the archive/helper first.
         // A failed install never runs bootstrap or records a completed recipe.
@@ -785,65 +776,14 @@ mod imp {
         let _ = wsl_command().args(["--set-default-version", "2"]).output();
     }
 
-    /// TCP-connect probe against one host. A DNS failure counts as unreachable:
-    /// if the name does not resolve, the download cannot happen either.
-    fn host_reachable(host: &str, port: u16, timeout: std::time::Duration) -> bool {
-        use std::net::ToSocketAddrs;
-        match (host, port).to_socket_addrs() {
-            Ok(addrs) => addrs
-                .into_iter()
-                .any(|addr| std::net::TcpStream::connect_timeout(&addr, timeout).is_ok()),
-            Err(_) => false,
-        }
-    }
-
-    /// Fail BEFORE the multi-GB `wsl --import` — and before any WSL mutation —
-    /// when the hosts the bootstrap downloads from cannot be reached
-    /// (EI-20574262390154687).
-    ///
-    /// This is the FAIL-FAST half of the preflight. The AUTHORITATIVE half lives
-    /// at the top of `resources/papercup-bootstrap.sh`, because only code running
-    /// inside the distro sees the network stack that will really do the
-    /// downloads: its resolver, its proxy environment, and its actual apt mirror.
-    /// Both exist on purpose — this one saves the user a multi-GB import they
-    /// were always going to lose, the in-distro one cannot be fooled.
-    ///
-    /// A plain TCP connect cannot see a Windows-only CONNECT proxy, so this CAN
-    /// misjudge a working setup. That is why the failure names an override rather
-    /// than being a dead end.
-    fn preflight_bootstrap_network() -> Result<(), String> {
-        if std::env::var("PAPERCUP_SKIP_NETWORK_PREFLIGHT").as_deref() == Ok("1") {
-            eprintln!(
-                "[wsl_setup] network preflight SKIPPED (PAPERCUP_SKIP_NETWORK_PREFLIGHT=1) — \
-                 provisioning may still fail later if a download host is blocked"
-            );
-            return Ok(());
-        }
-        let timeout = std::time::Duration::from_secs(6);
-        let unreachable: Vec<(&str, u16, &str)> = super::BOOTSTRAP_NETWORK_HOSTS
-            .iter()
-            .copied()
-            .filter(|(host, port, _)| !host_reachable(host, *port, timeout))
-            .collect();
-        for (host, _, _) in &unreachable {
-            eprintln!("[wsl_setup] network preflight: {host} unreachable");
-        }
-        match super::bootstrap_network_failure(&unreachable) {
-            Some(msg) => Err(msg),
-            None => Ok(()),
-        }
-    }
-
+    /// Import the prepared Server-owned image without fetching guest packages.
     pub fn import_rootfs(app: &tauri::AppHandle, tarball: &PathBuf) -> Result<(), String> {
         let install_dir = distro_install_dir(app)?;
         if !tarball.exists() {
             return Err(format!("rootfs tarball not found: {}", tarball.display()));
         }
-        // Before ANY mutation — the unregister below and `--set-default-version`
-        // both change machine state, and the import itself is multi-GB. If the
-        // bootstrap's downloads cannot succeed, stopping here leaves the machine
-        // exactly as it was and tells the user which host is blocked.
-        preflight_bootstrap_network()?;
+        // Provisioning uses the Server-owned rootfs inputs on disk. WSL itself
+        // must already be installed, but importing this distro needs no network.
         ensure_wsl2_default();
         // `wsl --import` fails if the name already exists. We only reach
         // import_rootfs when the distro is ABSENT or detected BROKEN (a husk
@@ -1582,133 +1522,6 @@ mod tests {
         // launch and never converge. Leave the distro alone.
         assert!(!distro_needs_reprovision(None, Some("whatever")));
         assert!(!distro_needs_reprovision(None, None));
-    }
-
-    // ── bootstrap network preflight (EI-20574262390154687) ──
-    //
-    // Same reason these live here as the re-provisioning tests above: the probe
-    // itself only ever runs on Windows, so what gets pinned from Linux is the
-    // DECISION — which hosts we predict, and what the user is told when one of
-    // them is unreachable.
-
-    #[test]
-    fn everything_reachable_means_provisioning_proceeds() {
-        // The "no news is good news" direction. If this ever returned Some(_),
-        // the preflight would block every install on every machine.
-        assert!(bootstrap_network_failure(&[]).is_none());
-    }
-
-    #[test]
-    fn an_unreachable_host_is_named_along_with_what_it_is_for() {
-        // The whole complaint being fixed is that the old failure was a raw
-        // curl/apt error that named neither. Both halves must survive.
-        let msg = bootstrap_network_failure(&[("nodejs.org", 443, "the pinned Node runtime")])
-            .expect("an unreachable host must stop provisioning");
-        assert!(msg.contains("nodejs.org"), "{msg}");
-        assert!(msg.contains("the pinned Node runtime"), "{msg}");
-    }
-
-    #[test]
-    fn every_unreachable_host_is_listed_not_just_the_first() {
-        // A user behind a firewall that blocks two of the three should get to fix
-        // both in one trip, not discover them one relaunch at a time.
-        let msg = bootstrap_network_failure(&[
-            ("github.com", 443, "the overmind process supervisor"),
-            ("nodejs.org", 443, "the pinned Node runtime"),
-        ])
-        .expect("unreachable hosts must stop provisioning");
-        assert!(msg.contains("github.com"), "{msg}");
-        assert!(msg.contains("nodejs.org"), "{msg}");
-    }
-
-    #[test]
-    fn the_failure_says_nothing_was_installed_and_names_the_override() {
-        // Two promises the message must keep. "Nothing installed" is the entire
-        // point of preflighting BEFORE `wsl --import` — the reported harm was a
-        // failure landing after the installer claimed success. And because a
-        // plain TCP probe cannot see a CONNECT-only proxy, a wrong verdict must
-        // never be a dead end for the user.
-        let msg = bootstrap_network_failure(&[("kopia.io", 443, "the kopia signing key")])
-            .expect("an unreachable host must stop provisioning");
-        assert!(msg.contains("Nothing has been installed yet"), "{msg}");
-        assert!(msg.contains("PAPERCUP_SKIP_NETWORK_PREFLIGHT=1"), "{msg}");
-    }
-
-    #[test]
-    fn the_preflight_list_does_not_drift_from_the_shipped_bootstrap_script() {
-        // The failure mode this guards: someone adds a fourth download to
-        // papercup-bootstrap.sh, the Windows preflight keeps passing, and the
-        // user is back to a mid-provisioning curl error against a host nobody
-        // checked. The script is the source of truth; this list predicts it.
-        let script = include_str!("../resources/papercup-bootstrap.sh");
-
-        for (host, _, _) in BOOTSTRAP_NETWORK_HOSTS {
-            assert!(
-                script.contains(host),
-                "{host} is preflighted but no longer appears in papercup-bootstrap.sh"
-            );
-        }
-
-        // …and the reverse direction, which is the one that actually catches
-        // drift: every host the script fetches from must be preflighted.
-        //
-        // TWO fetch shapes, because the script has two. Scanning only `curl`
-        // would leave this check blind to exactly the category that
-        // `packages.kopia.io` belongs to — an apt repository the SCRIPT ITSELF
-        // adds — so a second `deb` source could be added and never probed, in
-        // the one direction that is supposed to catch drift.
-        //
-        // Apt MIRRORS baked into the rootfs stay out of scope deliberately (see
-        // BOOTSTRAP_NETWORK_HOSTS): Windows cannot know them, so the bootstrap's
-        // own preflight reads them from the image instead. Only sources this
-        // script writes are statically knowable, and those are checked here.
-        let mut fetch_hosts: Vec<String> = Vec::new();
-        for line in script.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with('#') {
-                continue; // a URL in a comment is documentation, not a fetch
-            }
-            let is_curl = trimmed.starts_with("curl ");
-            let is_apt_source = trimmed.contains("deb [") || trimmed.contains("deb http");
-            if !is_curl && !is_apt_source {
-                continue;
-            }
-            let Some(scheme_end) = trimmed.find("://") else {
-                continue;
-            };
-            let host: String = trimmed[scheme_end + 3..]
-                .chars()
-                .take_while(|c| !matches!(c, '/' | '"' | '\'' | ' '))
-                .collect();
-            if !host.is_empty() {
-                fetch_hosts.push(host);
-            }
-        }
-
-        // Positive control: a scan that silently matched nothing would make every
-        // assertion below vacuous and read exactly like a clean pass.
-        assert!(
-            !fetch_hosts.is_empty(),
-            "parsed zero fetch hosts out of papercup-bootstrap.sh — the scan broke, \
-             so this test proves nothing"
-        );
-
-        // Per-leg positive control. The check above is satisfied by the curl leg
-        // alone, so without this the apt-source leg could silently stop matching
-        // and the gap it closes would reopen while the test still passed.
-        assert!(
-            fetch_hosts.iter().any(|h| h == "packages.kopia.io"),
-            "the apt-source leg matched nothing — it has regressed to curl-only, \
-             so a `deb` source could drift unprobed. Parsed: {fetch_hosts:?}"
-        );
-
-        for host in &fetch_hosts {
-            assert!(
-                BOOTSTRAP_NETWORK_HOSTS.iter().any(|(h, _, _)| h == host),
-                "papercup-bootstrap.sh fetches from {host}, but the Windows preflight \
-                 does not probe it — add it to BOOTSTRAP_NETWORK_HOSTS"
-            );
-        }
     }
 
     #[test]

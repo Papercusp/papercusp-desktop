@@ -49,6 +49,8 @@ case "$RUNTIME_PLATFORM" in
   *) echo "ERROR: unsupported runtime platform: $RUNTIME_PLATFORM" >&2; exit 2 ;;
 esac
 CONTAINER="papercup-runtime-build-$$"
+SMOKE_IMAGE="papercup-runtime-offline-smoke:$$"
+SMOKE_CREATED=0
 
 # The shipped bootstrap is the single recipe source. Keeping an embedded copy
 # here previously discarded fixes (including network preflight) on regeneration.
@@ -139,6 +141,7 @@ cleanup() {
   [[ -z "$OUT_TMP" ]] || rm -f "$OUT_TMP"
   [[ -z "$BUN_ARCHIVE_TMP" ]] || rm -f "$BUN_ARCHIVE_TMP"
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  if [[ "$SMOKE_CREATED" == 1 ]]; then docker image rm -f "$SMOKE_IMAGE" >/dev/null 2>&1 || true; fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -160,6 +163,13 @@ chmod +x /opt/papercup/bootstrap"
 
 docker cp "$BUN_HELPER_FILE" "$CONTAINER:/tmp/papercup-bun-runtime.py"
 docker start -a "$CONTAINER"
+# Do the complete installed bootstrap in an isolated clone with networking
+# disabled. A checksum manifest alone cannot prove the offline package closure
+# or npm input works. Never export/stamp a generation that fails this leg.
+docker commit "$CONTAINER" "$SMOKE_IMAGE" >/dev/null
+SMOKE_CREATED=1
+docker run --rm --network none --platform "$RUNTIME_PLATFORM" "$SMOKE_IMAGE" \
+  env -u PAPERCUSP_ROOTFS_BUILD bash /opt/papercup/bootstrap
 # Retain the exact validated Linux input outside disposable /root caches.
 # The installed Server transfers it into old distros before their bootstrap.
 docker cp "$CONTAINER:/opt/papercup/papercup-bun-linux.zip" "$BUN_ARCHIVE_TMP"
