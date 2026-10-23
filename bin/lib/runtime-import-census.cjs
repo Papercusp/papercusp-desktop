@@ -14,9 +14,11 @@ const ts = require('typescript');
 
 const hash = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
 
-function collectImports(file) {
+function collectImports(file, sourceBytes) {
   file = path.resolve(file);
-  const bytes = fs.readFileSync(file);
+  // Pinned Git inventories supply immutable bytes. The filename selects the
+  // parser dialect; no working-tree module is loaded or executed.
+  const bytes = sourceBytes === undefined ? fs.readFileSync(file) : Buffer.from(sourceBytes);
   const text = bytes.toString('utf8');
   if (!Buffer.from(text, 'utf8').equals(bytes)) throw new Error('non-UTF8 module refused');
   const tree = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.getScriptKindFromFileName(file));
