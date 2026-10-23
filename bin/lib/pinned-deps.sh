@@ -457,6 +457,20 @@ EOF
     return "$_fail"
   fi
 
+  papercusp_pinned_deps_workspace_outputs "$_donor" "$_snap" "$_copy_mode" || return $?
+  {
+    echo "donor=$_donor"
+    echo "mode=$_copy_mode"
+    echo "trees=$_n"
+    echo "takenAtUtc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  } > "$_snap/.papercusp-pinned-deps" || return 1
+  echo "snapshotted $_n dependency tree(s) from $_donor into $_snap"
+)
+
+# Shared output closure; caller holds the donor's maintained install reader.
+# Generated workspace executables are absent from dependency generations.
+papercusp_pinned_deps_workspace_outputs() (
+  local _donor="$1" _snap="$2" _copy_mode="$3"
   # Complete verifier trees need the output reached by workspace .bin shims;
   # Git export omits it. Dependency-only overlay floors have no source receipt.
   # Freeze declared output under the same donor mutex, never replacing source.
@@ -506,18 +520,59 @@ for (const rel of source) {
     papercusp_pinned_deps_preflight "$_snap" || return 1
   fi
 
-  # The stamp is what a later reader (and the gate below) can point at to say WHICH donor and
-  # WHEN. It is written last, so an interrupted snapshot leaves no stamp rather than a stamp
-  # describing a tree that was never finished.
+)
+
+# Consume the existing full generation selector and independent materializer.
+# No publication or fallback donor copy is allowed on this verifier path.
+papercusp_pinned_deps_snapshot_generation_locked() (
+  local _donor="$1" _snap="$2" _self="${BASH_SOURCE[0]}"
+  local _store _identity _token _input _rel _fingerprint _extra _src _dst _source_device _dest_device _n=0
+  _donor="$(cd "$_donor" && pwd -P)" || return 1
+  _snap="$(cd "$_snap" && pwd -P)" || return 1
+  rm -f -- "$_snap/.papercusp-pinned-deps" || return 1
+  source "$(dirname "$_self")/../../../apps/operator/bin/release/dependency-generation.sh" || return 1
+  _store="$(dependency_generation_resolve_root "$_donor" '' 1)" || return $?
+  dependency_generation_select_inputs "$_snap" "$_store" || return $?
+  _identity="$DEPENDENCY_GENERATION_ID"
+  _token="$DEPENDENCY_GENERATION_TOKEN"
+  _input="$DEPENDENCY_GENERATION_INPUT_FINGERPRINT"
+  dependency_generation_acquire_selector_lease "$_store" "$_identity" "${BASHPID:-$$}" "$_token" || return $?
+  trap 'dependency_generation_release_copy_lock; dependency_generation_release_selector_lease' EXIT
+  dependency_generation_select_prevalidated "$_store" "$_identity" "$_token" || return $?
+  _source_device="$(dependency_generation_device "$DEPENDENCY_GENERATION_TREE")" || return 1
+  _dest_device="$(dependency_generation_device "$_snap")" || return 1
+  if [ "$_source_device" != "$_dest_device" ]; then
+    echo "ERROR: verifier dependency generation must be on the snapshot filesystem; refusing another cross-device copy." >&2
+    return 74
+  fi
+  # Even ambient release hardlink opt-ins must not couple verifier bytes.
+  DEPENDENCY_GENERATION_ALLOW_HARDLINK=0
+  DEPENDENCY_GENERATION_FORCE_COPY=1
+  dependency_generation_record_reserve_fs "$_donor"
+  while IFS=$'\t' read -r _rel _fingerprint _extra; do
+    [ -n "$_rel" ] || continue
+    _src="$DEPENDENCY_GENERATION_TREE/$_rel"
+    _dst="$_snap/$_rel"
+    mkdir -p -- "$(dirname "$_dst")" || return 1
+    [ "$(cd "$(dirname "$_dst")" && pwd -P)" = "$(dirname "$_dst")" ] && [ ! -L "$_dst" ] || return 74
+    dependency_generation_materialize_tree "$_src" "$_dst" || return $?
+    # Directories are private inodes; permit disposable runtime caches without
+    # changing any immutable-generation inode or making package files writable.
+    find "$_dst" -type d -exec chmod u+w {} + || return 1
+    _n=$((_n + 1))
+    echo "snapshot progress: completed=$_n tree=$_rel"
+  done < "$DEPENDENCY_GENERATION_PATH/.tree-manifest"
+  [ "$_n" -gt 0 ] || return 74
+  # Only the small generated workspace output closure reads the mutable donor.
+  node "$_donor/scripts/npm-install-safe.mjs" --repo-root "$_donor" --exec-under-lock -- \
+    bash "$_self" verifier-workspace-outputs "$_donor" "$_snap" copy || return $?
+  papercusp_pinned_deps_preflight "$_snap" || return $?
+  dependency_generation_select_prevalidated "$_store" "$_identity" "$_token" || return $?
+  [ "$(dependency_generation_input_fingerprint "$_snap")" = "$_input" ] || return 74
   {
-    echo "donor=$_donor"
-    echo "mode=$_copy_mode"
-    echo "trees=$_n"
+    printf 'donor=%s\nmode=generation-copy\ntrees=%s\ngeneration=%s\ninput=%s\ntoken=%s\n' "$_donor" "$_n" "$_identity" "$_input" "$_token"
     echo "takenAtUtc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   } > "$_snap/.papercusp-pinned-deps" || return 1
-
-  echo "snapshotted $_n dependency tree(s) from $_donor into $_snap"
-  return 0
 )
 
 # Usage: papercusp_pinned_deps_snapshot_locked <donor_root> <snapshot_root>
@@ -719,11 +774,13 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   case "${1:-}" in
     snapshot) shift; papercusp_pinned_deps_snapshot "$@" ;;
     snapshot-locked) shift; papercusp_pinned_deps_snapshot_locked "$@" ;;
+    snapshot-generation-locked) shift; papercusp_pinned_deps_snapshot_generation_locked "$@" ;;
+    verifier-workspace-outputs) shift; papercusp_pinned_deps_workspace_outputs "$@" ;;
     trees) shift; papercusp_pinned_deps_trees "$@" ;;
     preflight) shift; papercusp_pinned_deps_preflight "$@" ;;
     assert) shift; papercusp_assert_pinned_deps_decoupled "$@" ;;
     *)
-      echo "usage: $0 {snapshot|snapshot-locked|trees|preflight|assert} <args...>" >&2
+      echo "usage: $0 {snapshot|snapshot-locked|snapshot-generation-locked|verifier-workspace-outputs|trees|preflight|assert} <args...>" >&2
       exit 2
       ;;
   esac
