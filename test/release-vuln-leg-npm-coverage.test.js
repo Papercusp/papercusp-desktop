@@ -39,8 +39,10 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { spawnSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
 // Overridable ONLY so falsifiability can be proved against a COPY outside the tree
@@ -52,6 +54,60 @@ const root = path.resolve(__dirname, '..');
 const SCRIPT =
   process.env.PROBE_AUDIT_RELEASE_BUNDLE || path.join(root, 'bin', 'audit-release-bundle.py');
 const src = () => fs.readFileSync(SCRIPT, 'utf8');
+
+function cachePreflight(t, { explicit = false, obstruction = false } = {}) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'grype-cache-preflight-'));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const bin = path.join(tmp, 'bin');
+  const cacheHome = path.join(tmp, '.cache');
+  const cacheLink = path.join(cacheHome, explicit ? 'custom-grype' : 'grype');
+  const target = path.join(tmp, 'removed-offload', 'grype');
+  fs.mkdirSync(bin);
+  fs.mkdirSync(cacheHome);
+  fs.symlinkSync(target, cacheLink, 'dir');
+  if (obstruction) {
+    fs.mkdirSync(path.dirname(target));
+    fs.writeFileSync(target, 'keep this file');
+  }
+  const calls = path.join(tmp, 'calls');
+  fs.writeFileSync(path.join(bin, 'syft'), '#!/bin/sh\nprintf \'{"version":"test"}\\n\'\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(bin, 'grype'), [
+    '#!/bin/sh',
+    'cache="${GRYPE_DB_CACHE_DIR:-$HOME/.cache/grype/db}"',
+    'case "$1:$2" in',
+    '  db:update) test -d "$cache" || exit 13; echo update >> "$CACHE_TEST_CALLS" ;;',
+    '  db:status) test -d "$cache" || exit 14; echo status >> "$CACHE_TEST_CALLS"; printf \'{"valid":true,"built":"%s"}\\n\' "$CACHE_TEST_NOW" ;;',
+    '  version:-o) printf \'{"version":"test"}\\n\' ;;',
+    '  *) exit 15 ;;',
+    'esac',
+    '',
+  ].join('\n'), { mode: 0o755 });
+  const env = { ...process.env, HOME: tmp, PATH: `${bin}:${process.env.PATH}`, XDG_CACHE_HOME: cacheHome,
+    CACHE_TEST_CALLS: calls, CACHE_TEST_NOW: new Date().toISOString() };
+  delete env.GRYPE_DB_CACHE_DIR;
+  if (explicit) env.GRYPE_DB_CACHE_DIR = path.join(cacheLink, 'db');
+  const result = spawnSync('python3', [SCRIPT, '--preflight-vulnerabilities', '--refresh-db'],
+    { env, encoding: 'utf8', timeout: 15_000 });
+  return { result, target, calls };
+}
+
+test('vulnerability preflight restores a removed symlink target before refreshing the DB', (t) => {
+  for (const explicit of [false, true]) {
+    const { result, target, calls } = cachePreflight(t, { explicit });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(fs.statSync(path.join(target, 'db')).isDirectory());
+    assert.equal(fs.readFileSync(calls, 'utf8'), 'update\nstatus\n');
+    assert.match(result.stdout, /VULNERABILITY TOOLS READY/);
+  }
+});
+
+test('vulnerability preflight refuses an obstructing file without deleting it or invoking Grype', (t) => {
+  const { result, target, calls } = cachePreflight(t, { obstruction: true });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /AUDIT ERROR: grype cache directory/);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'keep this file');
+  assert.equal(fs.existsSync(calls), false);
+});
 
 /** 1-based line index of the first line matching `re`, or -1. */
 function firstLine(text, re) {
