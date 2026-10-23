@@ -172,21 +172,56 @@ test('an executable platform reaches bootstrap/export and writes an archive-boun
   const output = path.join(dir, 'output');
   const calls = path.join(dir, 'docker-calls');
   fs.mkdirSync(tools);
-  fs.writeFileSync(path.join(tools, 'docker'), '#!/bin/bash\nset -eu\nprintf "%s\\n" "$1" >> "$DOCKER_PREFLIGHT_LOG"\nif [ "$1" = cp ]; then\n  if [[ "$2" == *:* ]]; then printf "verified Linux ZIP fixture" > "$3"; else cp "$2" "$ROOTFS_HELPER_COPY"; fi\nfi\nif [ "$1" = create ]; then printf "%s\\n" "$@" > "$ROOTFS_CREATE_ARGS"; fi\nif [ "$1" = export ]; then printf "runtime fixture"; fi\n', { mode: 0o755 });
-  const result = run('bash', [path.join(root, 'scripts/build-rootfs.sh')], { env: { ...process.env,
+  // Only the published checksum is substituted. Run the real producer and
+  // helper against deterministic input bytes without Docker or network access.
+  const archive = 'verified Linux ZIP fixture';
+  const archiveSha = createHash('sha256').update(archive).digest('hex');
+  const resources = path.join(dir, 'src-tauri/resources');
+  const script = path.join(dir, 'scripts/build-rootfs.sh');
+  fs.mkdirSync(resources, { recursive: true });
+  fs.mkdirSync(path.dirname(script));
+  fs.mkdirSync(path.join(dir, 'bin/lib'), { recursive: true });
+  fs.copyFileSync(path.join(root, 'bin/lib/portable-sha256.sh'), path.join(dir, 'bin/lib/portable-sha256.sh'));
+  fs.writeFileSync(script, producer);
+  fs.writeFileSync(path.join(resources, 'papercup-bootstrap.sh'), shipped);
+  fs.writeFileSync(path.join(resources, 'papercup-bun-runtime.py'), bunHelper.replace(
+    'a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b', archiveSha));
+  fs.writeFileSync(path.join(tools, 'docker'), '#!/bin/bash\nset -eu\nprintf "%s\\n" "$1" >> "$DOCKER_PREFLIGHT_LOG"\nif [ "$1" = cp ]; then\n  if [[ "$2" == *:* ]]; then printf "%s" "$ROOTFS_TEST_ARCHIVE" > "$3"; else cp "$2" "$ROOTFS_HELPER_COPY"; fi\nfi\nif [ "$1" = create ]; then printf "%s\\n" "$@" > "$ROOTFS_CREATE_ARGS"; fi\nif [ "$1" = export ]; then printf "runtime fixture"; fi\n', { mode: 0o755 });
+  const env = { ...process.env,
     PATH: tools + ':' + process.env.PATH, DOCKER_PREFLIGHT_LOG: calls,
     ROOTFS_HELPER_COPY: path.join(dir, 'copied-helper'), ROOTFS_CREATE_ARGS: path.join(dir, 'create-args'),
-    PC_HEAVY_COALESCE: '0', PAPERCUSP_ROOTFS_OUT_DIR: output, PAPERCUSP_RUNTIME_PLATFORM: 'linux/arm64' } });
+    ROOTFS_TEST_ARCHIVE: archive,
+    PC_HEAVY_COALESCE: '0', PAPERCUSP_ROOTFS_OUT_DIR: output, PAPERCUSP_RUNTIME_PLATFORM: 'linux/arm64' };
+  const result = run('bash', [script], { env });
   assert.equal(result.status, 0, result.stderr);
   const commands = fs.readFileSync(calls, 'utf8').trim().split('\n');
   assert.deepEqual(commands, ['pull', 'run', 'create', 'cp', 'start', 'cp', 'export', 'rm']);
-  assert.equal(fs.readFileSync(path.join(dir, 'copied-helper'), 'utf8'), bunHelper);
+  assert.equal(fs.readFileSync(path.join(dir, 'copied-helper'), 'utf8'), bunHelper.replace(
+    'a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b', archiveSha));
   assert.match(fs.readFileSync(path.join(dir, 'create-args'), 'utf8'), /mv \/tmp\/papercup-bun-runtime\.py \/opt\/papercup\/papercup-bun-runtime\.py &&/);
   assert.match(fs.readFileSync(path.join(dir, 'create-args'), 'utf8'), /PAPERCUSP_ROOTFS_BUILD=1/);
   assert.equal(fs.readFileSync(path.join(output, 'papercup-bun-linux.zip'), 'utf8'), 'verified Linux ZIP fixture');
   const stamp = JSON.parse(fs.readFileSync(path.join(output, '.rootfs-build-stamp'), 'utf8'));
   assert.equal(stamp.platform, 'linux/arm64');
   assert.equal(stamp.rootfsSha256, createHash('sha256').update(fs.readFileSync(path.join(output, 'papercup-runtime.tar.gz'))).digest('hex'));
+  assert.equal(stamp.bunArchiveSha256, archiveSha);
+  const before = fs.readFileSync(calls, 'utf8');
+  const verified = run('bash', [script, '--verify-artifacts'], { env });
+  assert.equal(verified.status, 0, verified.stderr);
+  assert.equal(JSON.parse(verified.stdout).bunArchiveSha256, archiveSha);
+  assert.equal(fs.readFileSync(calls, 'utf8'), before, 'read-only verification never calls Docker');
+  const zip = path.join(output, 'papercup-bun-linux.zip');
+  fs.writeFileSync(zip, 'changed input');
+  const rejected = run('bash', [script, '--verify-artifacts'], { env });
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /checksum/);
+  fs.writeFileSync(zip, archive);
+  const failedBuild = run('bash', [script], { env: { ...env, ROOTFS_TEST_ARCHIVE: 'changed input' } });
+  assert.notEqual(failedBuild.status, 0);
+  assert.match(failedBuild.stderr, /checksum/);
+  assert.equal(fs.readFileSync(zip, 'utf8'), archive, 'a changed Docker export never replaces the previous shipped input');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(output, '.rootfs-build-stamp'), 'utf8')), stamp);
+  assert.equal(fs.existsSync(path.join(output, 'papercup-runtime.tar.gz')), false, 'a failed generation cannot leave an accepted rootfs');
 });
 
 test('a failed Bun helper transfer cannot export or stamp a rootfs', t => {

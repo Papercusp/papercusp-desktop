@@ -60,6 +60,60 @@ function python(t, body, args = []) {
   assert.equal(result.status, 0, result.stdout + result.stderr);
 }
 
+test('rootfs receipt binds the offline Bun archive to current pins, recipe and target without mutation', t => {
+  python(t, String.raw`
+recipe = 'a' * 64
+image = root / 'papercup-runtime.tar.gz'
+image.write_bytes(b'prepared rootfs fixture')
+zip_input, sha = archive([('release/bun', header('linux', 'x64'))], 'papercup-bun-linux.zip')
+stamp_path = root / '.rootfs-build-stamp'
+recipe_path = root / 'papercup-rootfs-recipe'
+recipe_path.write_text(recipe + '\n')
+stamp = {'platform': 'linux/amd64', 'recipeSha256': recipe, 'rootfsSha256': b.digest(image), 'bunArchiveSha256': sha}
+def save():
+    stamp_path.write_text(json.dumps(stamp))
+save()
+with patch.dict(b.PINS, {('linux', 'x64'): ('release', sha)}), patch.object(b.urllib.request, 'urlopen', side_effect=AssertionError('network forbidden')), patch.object(b.subprocess, 'run', side_effect=AssertionError('execution forbidden')):
+    before = {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
+    result = b.verify_rootfs(root, 'x64', recipe)
+    assert result['bunArchiveSha256'] == sha and result['rootfsSha256'] == b.digest(image)
+    assert before == {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
+    rejected(lambda: b.verify_rootfs(root, 'arm64', recipe), 'platform')
+    rejected(lambda: b.verify_rootfs(root, 'x64', 'b' * 64), 'recipe')
+    for key in ('rootfsSha256', 'bunArchiveSha256', 'recipeSha256'):
+        original = stamp.pop(key)
+        save()
+        rejected(lambda: b.verify_rootfs(root, 'x64', recipe), key)
+        stamp[key] = original
+        save()
+    original_zip = zip_input.read_bytes()
+    zip_input.write_bytes(b'changed archive')
+    rejected(lambda: b.verify_rootfs(root, 'x64', recipe), 'checksum')
+    stamp['bunArchiveSha256'] = b.digest(zip_input)
+    save()
+    rejected(lambda: b.verify_rootfs(root, 'x64', recipe), 'pin')
+    stamp['bunArchiveSha256'] = sha
+    zip_input.write_bytes(original_zip)
+    save()
+    image.write_bytes(b'changed rootfs')
+    rejected(lambda: b.verify_rootfs(root, 'x64', recipe), 'rootfs')
+    image.write_bytes(b'prepared rootfs fixture')
+    recipe_path.write_text('b' * 64)
+    rejected(lambda: b.verify_rootfs(root, 'x64', recipe), 'recipe')
+    recipe_path.write_text(recipe)
+    for source in (zip_input, image, recipe_path, stamp_path):
+        stored = source.read_bytes()
+        source.unlink()
+        rejected(lambda: b.verify_rootfs(root, 'x64', recipe), 'regular')
+        actual = root / ('actual-' + source.name)
+        actual.write_bytes(stored)
+        source.symlink_to(actual)
+        rejected(lambda: b.verify_rootfs(root, 'x64', recipe), 'regular')
+        source.unlink()
+        actual.rename(source)
+`);
+});
+
 for (const [target, arch] of [
   ['linux', 'x64'], ['linux', 'arm64'], ['darwin', 'x64'], ['darwin', 'arm64'], ['windows', 'x64'],
 ]) {

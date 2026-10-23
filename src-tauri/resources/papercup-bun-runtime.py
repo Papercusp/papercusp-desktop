@@ -46,6 +46,47 @@ def pin_for(target_os, target_arch):
         raise ValueError("unsupported Bun target: " + target_os + "-" + target_arch) from error
 
 
+def verify_archive(archive, target_os, target_arch):
+    _, expected = pin_for(target_os, target_arch)
+    archive = Path(archive)
+    if archive.is_symlink() or not archive.is_file() or digest(archive) != expected:
+        raise ValueError("Bun archive checksum mismatch or nonregular input")
+    return {"version": VERSION, "target": target_os + "-" + target_arch,
+            "archiveSha256": expected}
+
+
+def verify_rootfs(resource_dir, target_arch, recipe_sha256):
+    """Read-only package gate: one rootfs, recipe and pinned Linux input."""
+    resource_dir = Path(resource_dir)
+    paths = {name: resource_dir / name for name in (
+        ".rootfs-build-stamp", "papercup-rootfs-recipe",
+        "papercup-runtime.tar.gz", "papercup-bun-linux.zip")}
+    for name, path in paths.items():
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("rootfs input must be a regular file: " + name)
+    stamp = json.loads(paths[".rootfs-build-stamp"].read_text())
+    if not isinstance(stamp, dict):
+        raise ValueError("rootfs receipt must be an object")
+    platform_name = {"x64": "linux/amd64", "arm64": "linux/arm64"}.get(target_arch)
+    if platform_name is None or stamp.get("platform") != platform_name:
+        raise ValueError("rootfs platform differs from the requested target")
+    for key in ("recipeSha256", "rootfsSha256", "bunArchiveSha256"):
+        value = stamp.get(key)
+        if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+            raise ValueError("rootfs receipt lacks a valid " + key)
+    if (stamp["recipeSha256"] != recipe_sha256 or
+            paths["papercup-rootfs-recipe"].read_text().strip() != recipe_sha256):
+        raise ValueError("rootfs recipe is stale")
+    _, expected = pin_for("linux", target_arch)
+    if stamp["bunArchiveSha256"] != expected:
+        raise ValueError("rootfs Bun archive receipt differs from the current pin")
+    verify_archive(paths["papercup-bun-linux.zip"], "linux", target_arch)
+    if digest(paths["papercup-runtime.tar.gz"]) != stamp["rootfsSha256"]:
+        raise ValueError("rootfs archive checksum differs from its receipt")
+    return {key: stamp[key] for key in (
+        "platform", "recipeSha256", "rootfsSha256", "bunArchiveSha256")}
+
+
 def verify_binary(binary, target_os, target_arch, execute=False):
     pin_for(target_os, target_arch)
     binary = Path(binary)
@@ -193,7 +234,7 @@ def stage(target_os, target_arch, cache_dir, output_dir, archive=None, archive_o
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("stage", "verify"))
+    parser.add_argument("action", choices=("stage", "verify", "verify-archive", "verify-rootfs"))
     parser.add_argument("--target-os", required=True)
     parser.add_argument("--target-arch", required=True)
     parser.add_argument("--cache-dir")
@@ -201,6 +242,8 @@ def main():
     parser.add_argument("--archive", help="required shipped ZIP; never downloads or uses a cache")
     parser.add_argument("--archive-output", help="export the verified build input for offline installation")
     parser.add_argument("--binary")
+    parser.add_argument("--resource-dir")
+    parser.add_argument("--recipe-sha256")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
     try:
@@ -211,6 +254,14 @@ def main():
                 parser.error("--archive and --archive-output are mutually exclusive")
             result = stage(args.target_os, args.target_arch, args.cache_dir, args.output_dir,
                            args.archive, args.archive_output)
+        elif args.action == "verify-archive":
+            if not args.archive:
+                parser.error("verify-archive requires --archive")
+            result = verify_archive(args.archive, args.target_os, args.target_arch)
+        elif args.action == "verify-rootfs":
+            if args.target_os != "linux" or not args.resource_dir or not args.recipe_sha256:
+                parser.error("verify-rootfs requires Linux --resource-dir and --recipe-sha256")
+            result = verify_rootfs(args.resource_dir, args.target_arch, args.recipe_sha256)
         else:
             if not args.binary:
                 parser.error("verify requires --binary")

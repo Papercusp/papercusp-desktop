@@ -82,6 +82,19 @@ if [[ "${1:-}" == "--print-recipe-fingerprint" ]]; then
   exit 0
 fi
 
+case "$RUNTIME_PLATFORM" in
+  linux/amd64) BUN_ARCH=x64 ;;
+  linux/arm64) BUN_ARCH=arm64 ;;
+esac
+
+# Packaging is read-only: a receipt for the rootfs alone cannot vouch for the
+# separate Linux ZIP that existing distros consume during upgrades.
+if [[ "${1:-}" == "--verify-artifacts" ]]; then
+  python3 "$BUN_HELPER_FILE" verify-rootfs --target-os linux --target-arch "$BUN_ARCH" \
+    --resource-dir "$OUTPUT_DIR" --recipe-sha256 "$(recipe_fingerprint)"
+  exit 0
+fi
+
 # pc-heavy keys environment inputs only when the caller declares them BEFORE
 # its wrapper starts. Catch a missing declaration in the leader, before any
 # Docker work or output mutation, so a follower cannot inherit a false success.
@@ -151,6 +164,8 @@ docker start -a "$CONTAINER"
 # The installed Server transfers it into old distros before their bootstrap.
 docker cp "$CONTAINER:/opt/papercup/papercup-bun-linux.zip" "$BUN_ARCHIVE_TMP"
 test -s "$BUN_ARCHIVE_TMP"
+python3 "$BUN_HELPER_FILE" verify-archive --target-os linux --target-arch "$BUN_ARCH" \
+  --archive "$BUN_ARCHIVE_TMP"
 
 # ── Export rootfs as a tarball ───────────────────────────────────────
 echo "exporting rootfs to $OUT_TARBALL"
@@ -178,10 +193,12 @@ ls -lh "$OUT_TARBALL"
 source "$(cd "$(dirname "$0")/.." && pwd)/bin/lib/portable-sha256.sh"
 _recipe_sha="$(recipe_fingerprint)"
 _rootfs_sha="$(papercusp_portable_sha256 "$OUT_TARBALL")"
+_bun_archive_sha="$(papercusp_portable_sha256 "${OUTPUT_DIR}/papercup-bun-linux.zip")"
 {
   printf '{\n'
   printf '  "recipeSha256": "%s",\n' "${_recipe_sha:-}"
   printf '  "rootfsSha256": "%s",\n' "${_rootfs_sha:-}"
+  printf '  "bunArchiveSha256": "%s",\n' "${_bun_archive_sha:-}"
   printf '  "platform": "%s",\n'    "$RUNTIME_PLATFORM"
   printf '  "nodeVersion": "%s",\n' "$NODE_VERSION"
   printf '  "pnpmVersion": "%s",\n' "$PNPM_VERSION"

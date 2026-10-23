@@ -79,6 +79,36 @@ function extractBashFunction(source, name) {
   return sourceLines.slice(start, end + 1).join('\n');
 }
 
+test('Windows Server packaging rejects a failed WSL input gate before continuing the build', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'windows-wsl-input-gate-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, 'bin'));
+  fs.mkdirSync(path.join(dir, 'scripts'));
+  fs.mkdirSync(path.join(dir, 'src-tauri/sidecar/apps'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'src-tauri/resources'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'src-tauri/resources/papercup-runtime.tar.gz'), 'present');
+  fs.writeFileSync(path.join(dir, 'bin/check-sidecar-freshness.js'), '');
+  fs.writeFileSync(path.join(dir, 'scripts/build-rootfs.sh'),
+    '#!/bin/bash\nset -eu\n[ "$1" = --verify-artifacts ]\n[ "$PAPERCUSP_RUNTIME_PLATFORM" = linux/amd64 ]\nexit "${ROOTFS_GATE_EXIT:-0}"\n');
+  const start = script.indexOf('# ── Payload presence, scoped');
+  const end = script.indexOf('[[ -f "$SRC_TAURI/icons/icon.ico" ]]', start);
+  assert.ok(start >= 0 && end > start, 'execute the production payload preflight block');
+  const harness = 'set -euo pipefail\nROOT="$TEST_ROOT"\nSRC_TAURI="$ROOT/src-tauri"\nROLES=server\nfail() { echo "$*" >&2; exit 1; }\n' +
+    script.slice(start, end) + '\nprintf reached-compiler';
+  for (const status of [0, 47]) {
+    const result = spawnSync('bash', ['-c', harness], { encoding: 'utf8',
+      env: { ...process.env, TEST_ROOT: dir, ROOTFS_GATE_EXIT: String(status) } });
+    if (status === 0) {
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /reached-compiler/);
+    } else {
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /WSL runtime inputs are stale or corrupt/);
+      assert.doesNotMatch(result.stdout, /reached-compiler/);
+    }
+  }
+});
+
 function runIsccHarness(compilerExit) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'win-iscc-status-'));
   const stage = path.join(dir, 'stage');

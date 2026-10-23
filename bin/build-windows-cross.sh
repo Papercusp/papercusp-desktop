@@ -296,6 +296,8 @@ if [[ " $ROLES " == *" server "* ]]; then
     || fail "Server sidecar freshness check refused this build (see above)"
   [[ -f "$SRC_TAURI/resources/papercup-runtime.tar.gz" ]] \
     || fail "WSL rootfs missing — run scripts/build-rootfs.sh first"
+  PAPERCUSP_RUNTIME_PLATFORM=linux/amd64 bash "$ROOT/scripts/build-rootfs.sh" --verify-artifacts \
+    || fail "WSL runtime inputs are stale or corrupt — run scripts/build-rootfs.sh first"
 fi
 [[ -f "$SRC_TAURI/icons/icon.ico" ]] || fail "src-tauri/icons/icon.ico missing (papercusp.iss SetupIconFile)"
 
