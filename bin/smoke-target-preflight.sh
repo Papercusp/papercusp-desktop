@@ -91,6 +91,21 @@ if [[ "$PLATFORM" == mac ]]; then
   [[ "$pre_out" == *PAPERCUSP_NATIVE_MAC_PREFLIGHT_OK* ]] || blocker "console-not-ready: ${pre_out:0:400}"
 fi
 
+# An expired evaluation still answers SSH and health until Windows' licensing
+# service shuts the guest down. Detect that before admitting a long build.
+if [[ "$PLATFORM" == windows ]]; then
+  LICENSE_CMD="$(cat <<'PS'
+powershell.exe -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; $licenses=@(Get-CimInstance SoftwareLicensingProduct | Where-Object { $_.ApplicationID -eq '55c92734-d682-4d71-983e-d6ec3f16059f' -and $_.PartialProductKey }); $usable=@($licenses | Where-Object { $_.LicenseStatus -eq 1 -or ($_.LicenseStatus -in @(2,3,6) -and $_.GracePeriodRemaining -gt 0) }); if($usable.Count -lt 1){ throw 'Windows native preflight: no usable Windows OS license; evaluation grace may be expired' }; Write-Output 'PAPERCUSP_NATIVE_WINDOWS_PREFLIGHT_OK'"
+PS
+)"
+  license_rc=0
+  license_out="$(timeout 30 "${SSH[@]}" "$LICENSE_CMD" 2>&1 | tr -d '\r\0')" || license_rc=$?
+  if [[ "$license_rc" -ne 0 || "$license_out" != *PAPERCUSP_NATIVE_WINDOWS_PREFLIGHT_OK* ]]; then
+    blocker "license-not-ready: ${license_out:0:400}"
+    finish 2 not-ready
+  fi
+fi
+
 # ── 3. installed baseline — an installed-UPGRADE needs an older install ──────
 if [[ "$PLATFORM" == mac ]]; then
   BASE_CMD='for a in "Papercusp GUI" "Papercusp Server"; do p="/Applications/$a.app/Contents/Info.plist"; [ -f "$p" ] && printf "%s=%s\n" "$a" "$(defaults read "${p%.plist}" CFBundleShortVersionString 2>/dev/null)"; done; true'

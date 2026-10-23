@@ -30,6 +30,13 @@ case "$cmd" in
   *"echo VM-OK"*) [ "$TEST_REACH" = up ] && echo VM-OK || { echo "ssh: connect to host 127.0.0.1 port 2223: Connection refused" >&2; exit 255; } ;;
   *PAPERCUSP_NATIVE_MAC_PREFLIGHT*)
     [ "$TEST_CONSOLE" = ok ] && echo PAPERCUSP_NATIVE_MAC_PREFLIGHT_OK || { echo "macOS native preflight: SSH user must own the logged-in GUI console" >&2; exit 2; } ;;
+  *PAPERCUSP_NATIVE_WINDOWS_PREFLIGHT*)
+    case "$TEST_LICENSE" in
+      ok) echo PAPERCUSP_NATIVE_WINDOWS_PREFLIGHT_OK ;;
+      expired) echo "Windows evaluation grace expired" >&2; exit 2 ;;
+      failed-with-marker) echo PAPERCUSP_NATIVE_WINDOWS_PREFLIGHT_OK; exit 1 ;;
+      *) echo "Windows licensing state unavailable" >&2 ;;
+    esac ;;
   *Uninstall*|*CFBundleShortVersionString*) printf '%b' "$TEST_BASELINE" ;;
   *) exit 99 ;;
 esac
@@ -53,7 +60,7 @@ function run(platform, env) {
         ...process.env,
         PC_SSH: executable(root, 'ssh', SSH_SHIM),
         PC_SYSTEMCTL: executable(root, 'systemctl', SYSTEMCTL_SHIM),
-        TEST_REACH: 'up', TEST_CONSOLE: 'ok', TEST_UNIT: 'inactive',
+        TEST_REACH: 'up', TEST_CONSOLE: 'ok', TEST_UNIT: 'inactive', TEST_LICENSE: 'ok',
         TEST_BASELINE: 'Papercusp GUI=0.0.23\\nPapercusp Server=0.0.23\\n',
         ...env,
       },
@@ -91,6 +98,21 @@ test('mac console at loginwindow is named as a blocker (the 0.0.26 refusal)', ()
   const r = run('mac', { TEST_CONSOLE: 'loginwindow' });
   assert.equal(r.status, 2, r.out);
   assert.match(r.out, /SMOKE_TARGET_BLOCKER mac console-not-ready: macOS native preflight: SSH user must own the logged-in GUI console/);
+});
+
+test('expired Windows evaluation blocks an otherwise reachable installed target', () => {
+  const r = run('windows', { TEST_LICENSE: 'expired' });
+  assert.equal(r.status, 2, r.out);
+  assert.match(r.out, /SMOKE_TARGET_BLOCKER windows license-not-ready: .*evaluation grace expired/);
+  assert.doesNotMatch(r.out, /status=ready/);
+});
+
+test('unknown or failed Windows licensing probes cannot admit a target', () => {
+  for (const state of ['unknown', 'failed-with-marker']) {
+    const r = run('windows', { TEST_LICENSE: state });
+    assert.equal(r.status, 2, r.out);
+    assert.match(r.out, /SMOKE_TARGET_BLOCKER windows license-not-ready:/);
+  }
 });
 
 test('missing installed baseline is named per role', () => {
