@@ -5093,6 +5093,17 @@ if [[ -n "${node_archive:-}" ]]; then
   fi
 fi
 
+# Bun is a packaged candidate; the runtime selector continues to default to Node.
+# Both fresh and cached archives must match the published per-target checksum.
+# The same Linux input is used by a Linux/WSL producer; never substitute bun.exe.
+echo "→ bundling checksum-pinned Bun candidate for $target_os-$target_arch"
+python3 "$HERE/lib/bun-runtime-inputs.py" stage \
+  --target-os "$target_os" --target-arch "$target_arch" \
+  --cache-dir "$SIDECAR_BIN_CACHE" --output-dir "$OMP_DIR" || {
+    echo "ERROR: pinned Bun candidate could not be packaged; refusing incomplete sidecar" >&2
+    exit 1
+  }
+
 # gh (GitHub CLI) — single Go binary, used by harness flows that
 # create/comment on GitHub PRs. cli/cli releases ship per-platform
 # tarballs; we extract just `bin/gh[.exe]` into our sidecar/bin/.
@@ -6192,7 +6203,8 @@ if [[ -x "$HERE/emit-build-provenance.sh" ]]; then
       "${PAPERCUSP_BUILD_SHA:-}" \
       false \
       "$SIDECAR_DIR/serve.mjs" \
-      "$SIDECAR_DIR/bin/node" \
+      "$SIDECAR_DIR/bin/$node_cache_bin" \
+      "$SIDECAR_DIR/bin/$( [[ "$TARGET_OS" == windows ]] && echo bun.exe || echo bun )" \
       >/dev/null \
     || echo "→ WARN: sidecar provenance emit failed (non-fatal; consumers will report 'cannot judge')"
   # Explicit `if`, not `[[ ... ]] && echo` — a trailing AND-list leaves the block's

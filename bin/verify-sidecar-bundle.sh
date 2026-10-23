@@ -197,7 +197,7 @@ if [[ "${PAPERCUSP_DISTRIBUTION_PROFILE:-}" == "vm-release" \
    || -f "$SIDECAR/apps/operator/runtime/vm-release-threat-boundary.json" ]]; then
   WORKSPACE_HOST_TOOLS="papercusp-install papercusp-rollback papercusp-migrate papercusp-server papercusp-health papercusp-content-bootstrap psu claude codex omp"
 fi
-REQUIRED_TOOLS="pg_dump psql pg_dumpall pg_restore kopia node gh zellij pui papercup $WORKSPACE_HOST_TOOLS papercusp-remote-initializer papercusp-deliver-material"
+REQUIRED_TOOLS="pg_dump psql pg_dumpall pg_restore kopia node bun gh zellij pui papercup $WORKSPACE_HOST_TOOLS papercusp-remote-initializer papercusp-deliver-material"
 # Probe args per tool; blank = existence/exec check only (TUIs and agent CLIs
 # whose flags we don't control are not executed).
 probe_args() {
@@ -214,6 +214,21 @@ for t in $REQUIRED_TOOLS; do
   [[ -f "$p" || -f "$p.exe" ]] || { fail "$t: MISSING from sidecar/bin — the runtime spawns it by bare name"; continue; }
   [[ -f "$p.exe" && ! -f "$p" ]] && p="$p.exe"
   [[ -x "$p" ]] || { fail "$t: present but not executable"; continue; }
+  if [[ "$t" == bun ]]; then
+    # Format AND architecture are mandatory even on cross builds. Executing an
+    # as-installed --version probe is additional native evidence, never a claim
+    # that the application/native-module candidate has passed acceptance.
+    _bun_probe_args=()
+    [[ "$CROSS" == 1 ]] || _bun_probe_args+=(--execute)
+    if out="$(python3 "$(dirname "$0")/lib/bun-runtime-inputs.py" verify \
+        --target-os "$TARGET_OS_N" --target-arch "$TARGET_ARCH_N" \
+        --binary "$p" "${_bun_probe_args[@]}" 2>&1)"; then
+      ok "bun ($out)"
+    else
+      fail "bun: pinned target verification failed: $out"
+    fi
+    continue
+  fi
   if [[ "$CROSS" == "1" ]]; then
     # Can't exec a foreign-platform binary on this host — assert the shipped file
     # is the RIGHT FORMAT for the target (proves we shipped the TARGET's binary,
