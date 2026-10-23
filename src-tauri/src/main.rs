@@ -1935,6 +1935,40 @@ mod tests {
 
 #[cfg(test)]
 mod serve_log_tests {
+    #[cfg(unix)]
+    #[test]
+    fn live_log_keeps_both_streams_attached_across_rotation() {
+        use std::fs;
+        let home = std::env::temp_dir().join(format!("pcusp-live-log-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        let cap = 128;
+        let (out, err, sink) = super::rotating_log_stdio_with_limit(&home, "serve.log", cap).unwrap();
+        // More than the entire ring in one child write, then stderr on the same
+        // still-running child. A stale inherited descriptor loses this tail.
+        let stdout = "stdout-data-".repeat(100);
+        let stderr = "latest-stderr-after-rotation";
+        let status = std::process::Command::new("sh")
+            .args(["-c", "printf '%s' \"$1\"; printf '%s' \"$2\" >&2", "log-test", &stdout, stderr])
+            .stdout(out)
+            .stderr(err)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        sink.join().unwrap().unwrap();
+        let logs = home.join(".papercusp").join("logs");
+        let mut retained = Vec::new();
+        for name in (1..=5).rev().map(|n| format!("serve.log.{n}")).chain(std::iter::once("serve.log".to_owned())) {
+            let bytes = fs::read(logs.join(name)).unwrap();
+            assert!(bytes.len() <= cap as usize, "each generation stays bounded");
+            retained.extend(bytes);
+        }
+        assert!(retained.len() <= 6 * cap as usize);
+        let expected = format!("{stdout}{stderr}").into_bytes();
+        assert_eq!(retained, expected[expected.len() - retained.len()..]);
+        assert!(retained.ends_with(stderr.as_bytes()));
+        fs::remove_dir_all(&home).unwrap();
+    }
+
     // WI-1707: the packaged app has no console, so the sidecar's stdout/stderr
     // must land in a rotated <home>/.papercusp/logs/serve.log. This guards both
     // that the log is created AND that each spawn shifts the ring correctly
@@ -7293,9 +7327,77 @@ fn rotate_and_open_log(workspace_home: &std::path::Path, basename: &str) -> Opti
 }
 
 fn rotating_log_stdio(workspace_home: &std::path::Path, basename: &str) -> Option<(Stdio, Stdio)> {
+    // Cap each generation while the child lives, not only on its next boot.
+    rotating_log_stdio_with_limit(workspace_home, basename, 10 * 1024 * 1024)
+        .map(|(out, err, _sink)| (out, err))
+}
+
+fn rotating_log_stdio_with_limit(
+    workspace_home: &std::path::Path,
+    basename: &str,
+    max_bytes: u64,
+) -> Option<(Stdio, Stdio, std::thread::JoinHandle<std::io::Result<()>>)> {
+    if max_bytes == 0 {
+        return None;
+    }
     let file = rotate_and_open_log(workspace_home, basename)?;
-    let file2 = file.try_clone().ok()?;
-    Some((Stdio::from(file), Stdio::from(file2)))
+    // A single pipe keeps stdout and stderr attached across every file rotation.
+    let (mut reader, writer) = os_pipe::pipe().ok()?;
+    let writer2 = writer.try_clone().ok()?;
+    let home = workspace_home.to_path_buf();
+    let basename = basename.to_owned();
+    let sink = std::thread::Builder::new()
+        .name("sidecar-log".to_owned())
+        .spawn(move || {
+            let result = copy_rotating_log(&mut reader, file, &home, &basename, max_bytes);
+            if let Err(ref error) = result {
+                eprintln!("[sidecar-log] {basename}: {error}");
+                // A failed disk must not crash the child with EPIPE or leave
+                // it blocked on a full, unread pipe.
+                let _ = std::io::copy(&mut reader, &mut std::io::sink());
+            }
+            result
+        })
+        .ok()?;
+    Some((Stdio::from(writer), Stdio::from(writer2), sink))
+}
+
+fn copy_rotating_log(
+    reader: &mut impl std::io::Read,
+    mut file: std::fs::File,
+    workspace_home: &std::path::Path,
+    basename: &str,
+    max_bytes: u64,
+) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind, Write};
+    let mut written = file.metadata()?.len();
+    let mut buffer = [0; 8192];
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if count == 0 {
+            return Ok(());
+        }
+        let mut remaining = &buffer[..count];
+        while !remaining.is_empty() {
+            if written >= max_bytes {
+                drop(file);
+                file = rotate_and_open_log(workspace_home, basename)
+                    .ok_or_else(|| Error::new(ErrorKind::Other, "cannot rotate active log"))?;
+                written = file.metadata()?.len();
+                if written >= max_bytes {
+                    return Err(Error::new(ErrorKind::Other, "active log rotation did not advance"));
+                }
+            }
+            // Split oversized writes at the boundary; keep each generation capped.
+            let take = remaining.len().min((max_bytes - written) as usize);
+            file.write_all(&remaining[..take])?;
+            written += take as u64;
+            remaining = &remaining[take..];
+        }
+    }
 }
 
 /// Redirect THIS process's OWN stdout+stderr (fd 1 & 2) to a rotated on-disk log
