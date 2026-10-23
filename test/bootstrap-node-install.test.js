@@ -185,7 +185,7 @@ for (const [guestArch, nodeArch] of [['amd64', 'x64'], ['arm64', 'arm64']]) {
     // Exercise the production URL and invocation with a local executable;
     // the caller's host architecture never participates in artifact selection.
     const result = run('bash', ['-c', 'set -euo pipefail\n' + architecture +
-      overmind.replaceAll('/usr/local/bin/.overmind.XXXXXX', path.join(f.dir, '.overmind.XXXXXX'))
+      overmind.replaceAll('/usr/local/bin/.overmind.XXXXXX', quote(path.join(f.dir, '.overmind.XXXXXX')))
         .replaceAll('/usr/local/bin/overmind', quote(binary)).replace('\novermind --version', '\n' + quote(binary) + ' --version')],
     { env: { ...env, NODE_FIXTURE_ARCHIVE: archive }, encoding: null });
     assert.equal(result.status, 0, String(result.stderr));
