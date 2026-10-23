@@ -87,6 +87,8 @@ thiserror = "1"
 
 # Sidecar lifecycle
 portpicker = "0.1"
+# Already used by portable-pty; share one live rotating sink for both streams.
+os_pipe = "=1.2.3"
 
 # Phase 4 (custom_protocol.rs): forward `papercusp://` page/asset requests to
 # the operator's loopback HTTP base. http-only loopback → no TLS backend

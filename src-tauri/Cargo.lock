@@ -2964,6 +2964,7 @@ dependencies = [
  "libc",
  "libloading 0.8.9",
  "once_cell",
+ "os_pipe",
  "portable-pty",
  "portpicker",
  "rand 0.8.6",
