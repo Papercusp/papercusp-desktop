@@ -11,7 +11,8 @@ const root = path.resolve(__dirname, '..');
 // checkout — git-sync sweeps every few minutes and would happily commit a mutant
 // that a trap cannot save you from (see the mutation-probe doctrine in CLAUDE.md).
 const builderPath = process.env.PROBE_SCRIPT || path.join(root, 'bin/build-desktop-sidecar.sh');
-const builder = fs.readFileSync(builderPath, 'utf8');
+const builder = fs.readFileSync(builderPath, 'utf8') + '\n'
+  + fs.readFileSync(process.env.PROBE_CLOSURE_SCRIPT || path.join(root, 'bin/lib/host-runtime-closure.sh'), 'utf8');
 
 // WI-38682. onnxruntime-node ships ONNX Runtime's GPU execution providers inside the
 // platform/arch dir the foreign-platform prune KEEPS, and on linux/x64

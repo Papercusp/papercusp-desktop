@@ -14,7 +14,7 @@ const desktopRoot = path.resolve(__dirname, '..');
 const builder = fs.readFileSync(
   process.env.BUILD_DESKTOP_SIDECAR_PATH ?? path.join(desktopRoot, 'bin/build-desktop-sidecar.sh'),
   'utf8',
-);
+) + '\n' + fs.readFileSync(path.join(desktopRoot, 'bin/lib/host-runtime-closure.sh'), 'utf8');
 const verifier = fs.readFileSync(
   process.env.VERIFY_SIDECAR_BUNDLE_PATH ?? path.join(desktopRoot, 'bin/verify-sidecar-bundle.sh'),
   'utf8',
@@ -672,7 +672,7 @@ test('Darwin runtime esbuild replaces all three host-binary paths while preservi
     assert.equal(result.status, 0, result.stdout + result.stderr);
   }
   const call = builder.indexOf('align_darwin_esbuild_runtime_closures "$SIDECAR_DIR" || exit 1');
-  assert(call > builder.indexOf('copy_pkg_closure lost-pixel'));
+  assert(call > builder.indexOf('copy_host_runtime_require_closures || exit 1'));
   assert(call < builder.indexOf('assert_runtime_dependency_closure "$SIDECAR_DIR" || exit 1'));
 });
 

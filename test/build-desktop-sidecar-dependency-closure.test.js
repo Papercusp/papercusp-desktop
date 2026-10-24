@@ -14,7 +14,8 @@ const test = require('node:test');
 const desktopRoot = path.resolve(__dirname, '..');
 const builderPath = process.env.PROBE_SCRIPT
   || path.join(desktopRoot, 'bin/build-desktop-sidecar.sh');
-const builder = fs.readFileSync(builderPath, 'utf8');
+const builder = fs.readFileSync(builderPath, 'utf8') + '\n'
+  + fs.readFileSync(process.env.PROBE_CLOSURE_SCRIPT || path.join(desktopRoot, 'bin/lib/host-runtime-closure.sh'), 'utf8');
 
 /** Slice one top-level shell helper from the real builder. */
 function extractFunction(name) {

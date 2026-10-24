@@ -48,7 +48,8 @@ const test = require('node:test');
 
 const root = path.resolve(__dirname, '..');
 const scriptPath = path.resolve(__dirname, '../bin/build-desktop-sidecar.sh');
-const builder = fs.readFileSync(scriptPath, 'utf8');
+const builder = fs.readFileSync(scriptPath, 'utf8') + '\n'
+  + fs.readFileSync(path.join(root, 'bin/lib/host-runtime-closure.sh'), 'utf8');
 
 /** Pull a top-level shell function verbatim out of the real build script. */
 function extractFunction(name) {
