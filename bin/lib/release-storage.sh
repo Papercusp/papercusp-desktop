@@ -18,7 +18,7 @@ release_storage_init() {
 release_storage_uri() {
   local key="$1"
   [[ -n "$key" && "$key" != /* && "$key" != *'?'* && "$key" != *'#'* &&
-    "$key" != *'['* && "$key" != *']'* && "$key" != *'*'* && "$key" != *'\\'* &&
+    "$key" != *'['* && "$key" != *']'* && "$key" != *'*'* && "$key" != *'\'* &&
     "$key" != *$'\n'* && "$key" != *$'\r'* ]] || return 2
   case "/$key/" in */../*|*/./*|*//*) return 2 ;; esac
   printf 'gs://%s/%s\n' "$PAPERCUSP_RELEASE_GCS_BUCKET" "$key"
@@ -33,7 +33,7 @@ release_storage_describe() {
     rm -f "$err"; return 0
   else
     rc=1
-    if rg -q 'HTTPError 404\b|not found: 404\.' "$err"; then rc=44; fi
+    if grep -Eq 'HTTPError 404([^0-9]|$)|not found: 404\.' "$err"; then rc=44; fi
     rm -f "$err"; return "$rc"
   fi
 }
@@ -48,7 +48,16 @@ if value is not None: print(value)
 PY
 }
 
-release_storage_sha256() { sha256sum "$1" | cut -d' ' -f1; }
+release_storage_sha256() {
+  python3 - "$1" <<'PY'
+import hashlib, sys
+digest = hashlib.sha256()
+with open(sys.argv[1], 'rb') as source:
+    for chunk in iter(lambda: source.read(1024 * 1024), b''):
+        digest.update(chunk)
+print(digest.hexdigest())
+PY
+}
 
 release_storage_get() {
   local key="$1" out="$2" metadata rc generation uri part
