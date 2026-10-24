@@ -629,11 +629,11 @@ const [root, run] = process.argv.slice(2);
 const ts = require(path.join(root, 'node_modules/typescript'));
 const rows = new Map(), edges = [], parsed = new Map();
 const packageName = value => value.startsWith('@') ? value.split('/').slice(0,2).join('/') : value.split('/')[0];
-const bare = imp => imp.external && !isBuiltin(imp.path) && !imp.path.startsWith('.') && !imp.path.startsWith('/');
+const bare = imp => imp.external && imp.path !== '<runtime>' && !isBuiltin(imp.path) && !imp.path.startsWith('.') && !imp.path.startsWith('/');
 const traceFile = path.join(run, 'trace-context.json');
 const trace = fs.existsSync(traceFile) ? JSON.parse(fs.readFileSync(traceFile)) : null;
 function optional(source, imp) {
-  if (imp.kind !== 'require-call') return false;
+  if (!['require-call','dynamic-import'].includes(imp.kind)) return false;
   let dir = path.dirname(source);
   while (dir !== root && dir !== path.dirname(dir)) {
     const manifestFile = path.join(dir, 'package.json');
@@ -646,7 +646,7 @@ function optional(source, imp) {
     dir = path.dirname(dir);
   }
   const sdk = path.join(root, 'node_modules/@dbos-inc/dbos-sdk/dist/src/telemetry') + path.sep;
-  if (!source.startsWith(sdk) || !imp.path.startsWith('@opentelemetry/')) return false;
+  if (imp.kind !== 'require-call' || !source.startsWith(sdk) || !imp.path.startsWith('@opentelemetry/')) return false;
   if (!parsed.has(source)) parsed.set(source, ts.createSourceFile(source, fs.readFileSync(source, 'utf8'), ts.ScriptTarget.Latest, true));
   const file = parsed.get(source), calls = [];
   function visit(node) {

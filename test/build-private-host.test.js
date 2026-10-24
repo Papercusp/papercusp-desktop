@@ -140,10 +140,11 @@ test('graph census preserves optional peers but refuses an absent required wildc
   pkg(path.join(f.donor,'node_modules/client'),{name:'client',version:'1.0.0',
     peerDependencies:{acceleration:'*'},peerDependenciesMeta:{acceleration:{optional:true}}},
     "try { require('acceleration'); } catch {} require('@vendor/missing');");
-  const r=graph(f,{'node_modules/client/index.js':{imports:[edge('acceleration'),edge('@vendor/missing')]}});
+  const r=graph(f,{'node_modules/client/index.js':{imports:[edge('acceleration','dynamic-import'),edge('@vendor/missing'),edge('<runtime>','import-statement')]}});
   assert.equal(r.status,0,r.stdout+r.stderr);
   assert.match(r.stdout,/^optional\tacceleration$/m);
   assert.match(r.stdout,/^required\t@vendor\/missing$/m);
+  assert.doesNotMatch(r.stdout,/<runtime>/);
   const refused=shell(f,'copy_pkg_closure @vendor/missing\n(( nat_missing == 0 ))');
   assert.notEqual(refused.status,0);
   assert.match(refused.stdout+refused.stderr,/@vendor\/missing/);
