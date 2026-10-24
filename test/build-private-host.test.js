@@ -167,13 +167,18 @@ test('unknown dynamic imports remain required instead of being silently omitted'
 });
 test('DBOS lazy graph edges require the measured context and the actual OTLP early-return guard',t=>{
   const f=graphFixture(t),sdk=path.join(f.donor,'node_modules/@dbos-inc/dbos-sdk/dist/src/telemetry');
-  fs.mkdirSync(sdk,{recursive:true});
+  // Committed donor shadows link installed third-party packages to their
+  // canonical read-only install; esbuild records those real paths in inputs.
+  const installed=path.join(f.root,'installed-sdk');
+  fs.mkdirSync(path.join(installed,'dist/src/telemetry'),{recursive:true});
+  fs.mkdirSync(path.dirname(path.join(f.donor,'node_modules/@dbos-inc/dbos-sdk')),{recursive:true});
+  fs.symlinkSync(installed,path.join(f.donor,'node_modules/@dbos-inc/dbos-sdk'),'dir');
   const traces="function installTraceContextManager() { require('@opentelemetry/sdk-trace-base'); }";
   const logs="class Logger { constructor() { if (!utils_1.globalParams.enableOTLP) { return; } class Transport { constructor() { require('@opentelemetry/sdk-logs'); } } } }";
   fs.writeFileSync(path.join(sdk,'traces.js'),traces);fs.writeFileSync(path.join(sdk,'logs.js'),logs);
   const inputs={
-    'node_modules/@dbos-inc/dbos-sdk/dist/src/telemetry/traces.js':{imports:[edge('@opentelemetry/sdk-trace-base')]},
-    'node_modules/@dbos-inc/dbos-sdk/dist/src/telemetry/logs.js':{imports:[edge('@opentelemetry/sdk-logs')]},
+    [fs.realpathSync(path.join(sdk,'traces.js'))]:{imports:[edge('@opentelemetry/sdk-trace-base')]},
+    [fs.realpathSync(path.join(sdk,'logs.js'))]:{imports:[edge('@opentelemetry/sdk-logs')]},
   };
   let r=graph(f,inputs);
   assert.equal(r.status,0,r.stdout+r.stderr);

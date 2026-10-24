@@ -645,8 +645,9 @@ function optional(source, imp) {
     }
     dir = path.dirname(dir);
   }
-  const sdk = path.join(root, 'node_modules/@dbos-inc/dbos-sdk/dist/src/telemetry') + path.sep;
-  if (imp.kind !== 'require-call' || !source.startsWith(sdk) || !imp.path.startsWith('@opentelemetry/')) return false;
+  const logicalSdk = path.join(root, 'node_modules/@dbos-inc/dbos-sdk/dist/src/telemetry');
+  const sdk = fs.existsSync(logicalSdk) ? fs.realpathSync(logicalSdk) + path.sep : null;
+  if (imp.kind !== 'require-call' || !sdk || !fs.realpathSync(source).startsWith(sdk) || !imp.path.startsWith('@opentelemetry/')) return false;
   if (!parsed.has(source)) parsed.set(source, ts.createSourceFile(source, fs.readFileSync(source, 'utf8'), ts.ScriptTarget.Latest, true));
   const file = parsed.get(source), calls = [];
   function visit(node) {
