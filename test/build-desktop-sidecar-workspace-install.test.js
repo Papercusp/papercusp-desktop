@@ -207,13 +207,30 @@ test('clean-source native transformer validation follows dependency hydration an
 
 test('every sidecar esbuild package runner holds the host package-cache lease', () => {
   const runners = builder.split('\n').filter(line => line.includes('npx --yes esbuild@0.25.0'));
-  assert.ok(runners.length >= 8, 'all sidecar bundle phases must be covered');
+  const shared = fs.readFileSync(path.join(repoRoot, 'apps/operator/bin/bundle-host-common.sh'), 'utf8');
+  const delegated = ['bundle_host_primary', 'bundle_host_launcher'];
+  for (const name of delegated) {
+    assert.match(builder, new RegExp('^\\s*' + name + ' "\\$REPO_ROOT"', 'm'));
+    assert.match(sharedBundleFunction(shared, name), /bundle_host_esbuild "\$repo_root"/);
+  }
+  assert.ok(runners.length + delegated.length >= 8, 'inline and delegated sidecar bundle phases must be covered');
   for (const runner of runners) {
     assert.ok(runner.includes('run_sidecar_cached_package npx'), runner);
   }
   assert.match(extractFunction('run_sidecar_cached_package'), /helper\.withPackageCacheReadLease\(/);
+  assert.match(sharedBundleFunction(shared, 'bundle_host_esbuild'), /bundle_host_cached_package "\$repo_root"/);
+  assert.match(sharedBundleFunction(shared, 'bundle_host_cached_package'), /run_sidecar_cached_package "\$@"/);
   assert.doesNotMatch(builder, /--exec-under-cache-lock -- npx/);
 });
+
+function sharedBundleFunction(source, name) {
+  const lines = source.split('\n');
+  const start = lines.findIndex(line => line.startsWith(`${name}() {`));
+  assert.ok(start >= 0, `shared compiler recipe missing: ${name}`);
+  const end = lines.findIndex((line, i) => i > start && line === '}');
+  assert.ok(end > start, `unterminated shared compiler recipe: ${name}`);
+  return lines.slice(start, end + 1).join('\n');
+}
 
 const CACHE_PACKAGE_RUNNER = extractFunction('run_sidecar_cached_package');
 const VITE_NATIVE_PREPARE = extractFunction('prepare_vite_native_toolchain');
@@ -1764,7 +1781,16 @@ test('every ESM esbuild bundle in the builder carries the createRequire banner o
     invocations.push({ start: i + 1, end: end + 1, text });
   }
   const esm = invocations.filter((inv) => /--format=esm/.test(inv.text));
-  assert.ok(esm.length >= 7, `expected the builder's ESM bundles, found ${esm.length}`);
+  const shared = fs.readFileSync(path.join(repoRoot, 'apps/operator/bin/bundle-host-common.sh'), 'utf8');
+  const delegated = ['bundle_host_primary', 'bundle_host_launcher'];
+  for (const name of delegated) {
+    assert.match(builder, new RegExp('^\\s*' + name + ' "\\$REPO_ROOT"', 'm'));
+    const recipe = sharedBundleFunction(shared, name);
+    assert.match(recipe, /--format=esm/);
+    assert.match(recipe, /--banner:js="\$HOST_BANNER"/);
+  }
+  assert.ok(esm.length + delegated.length >= 7,
+    `expected inline and delegated ESM bundles, found ${esm.length} + ${delegated.length}`);
   const unguarded = esm.filter(
     (inv) =>
       !/--banner:js="\$HOST_BANNER"/.test(inv.text) &&
