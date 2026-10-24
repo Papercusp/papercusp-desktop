@@ -350,25 +350,35 @@ function readdirOrEmpty(dir) {
   }
 }
 
-// Disk blocks, each inode counted once, never following a symlink.
-function diskBytes(target) {
-  const seen = new Set();
+// Reuse one bounded, no-follow census for total and exact pinned allocation.
+// A shared inode can be encountered outside its pinned scope first; its pinned
+// contribution therefore has its own set, independent of total-walk ordering.
+function diskAllocation(target, coversPath = () => false) {
+  const seen = new Map();
+  const pinned = new Set();
   let budget = 100000;
   const deadline = Date.now() + 30000;
   let total = 0;
+  let pinnedBytes = 0;
   const walk = file => {
     if (--budget < 0 || Date.now() >= deadline) throw new Error('failed stage byte census budget exceeded');
     const stat = lstatOrNull(file);
     if (!stat) return;
     const id = `${stat.dev}:${stat.ino}`;
+    const bytes = stat.blocks * 512;
+    if (seen.has(id) && seen.get(id) !== bytes) throw new Error('failed stage allocation changed during census');
     if (!seen.has(id)) {
-      seen.add(id);
-      total += stat.blocks * 512;
+      seen.set(id, bytes);
+      total += bytes;
+    }
+    if (coversPath(file) && !pinned.has(id)) {
+      pinned.add(id);
+      pinnedBytes += bytes;
     }
     if (stat.isDirectory()) for (const name of readdirOrEmpty(file)) walk(path.join(file, name));
   };
   walk(target);
-  return total;
+  return { bytes: total, pinnedBytes };
 }
 
 function isResumableReceipt(receipt) {
@@ -457,6 +467,7 @@ async function pruneFailedStages(options = {}, env = process.env) {
 // predicate comes from the protection read inside that lock.
 function pruneFailedStagesWithProtection(options = {}, env = process.env, isPinned) {
   if (typeof isPinned !== 'function') throw new Error('retention protection is required');
+  if (typeof isPinned.coversPath !== 'function') throw new Error('pin allocation coverage is required');
   const now = options.now ?? Date.now();
   const ttlMs = nonNegativeNumber(options.ttlHours ?? (env.PAPERCUSP_SIDECAR_FAILED_STAGE_TTL_HOURS || 24),
     'PAPERCUSP_SIDECAR_FAILED_STAGE_TTL_HOURS') * 3600e3;
@@ -495,9 +506,7 @@ function pruneFailedStagesWithProtection(options = {}, env = process.env, isPinn
   }
   // One ceiling for the whole bank, rather than one per output identity. Unknown
   // entries count toward usage but are never turned into deletion candidates.
-  const beforeBytes = diskBytes(parent);
-  const pinnedBytes = decisions.filter(d => d.paths.some(isPinned))
-    .reduce((total, d) => total + d.paths.reduce((sum, file) => sum + diskBytes(file), 0), 0);
+  const { bytes: beforeBytes, pinnedBytes } = diskAllocation(parent, isPinned.coversPath);
   const cap = receipt.cap = { root: parent, maxBytes, beforeBytes, afterBytes: beforeBytes,
     pinnedBytes, overByBytes: Math.max(0, beforeBytes - maxBytes), pinnedOverageBytes: Math.max(0, pinnedBytes - maxBytes) };
   if (beforeBytes > maxBytes) decisions.sort((a, b) => a.time - b.time || a.paths[0].localeCompare(b.paths[0]));
@@ -516,7 +525,7 @@ function pruneFailedStagesWithProtection(options = {}, env = process.env, isPinn
       // The receipt goes first: a half-deleted stage must never look resumable.
       for (const file of [...decision.paths].reverse()) {
         try {
-          const bytes = diskBytes(file);
+          const bytes = diskAllocation(file).bytes;
           if (!options.dryRun) fs.rmSync(file, { recursive: true, force: true });
           receipt.deleted.push({ path: file, reason: capVictim ? 'size-cap' : decision.reason, ageHours: decision.ageHours, diskBytes: bytes });
           receipt.freedBytes += bytes;
@@ -525,6 +534,14 @@ function pruneFailedStagesWithProtection(options = {}, env = process.env, isPinn
           receipt.errors.push({ path: file, error: error.message });
         }
       }
+  }
+  if (!options.dryRun) {
+    // Per-entry subtraction can double-count a link shared with a retained
+    // stage. The final verdict uses actual remaining bank allocation.
+    const after = diskAllocation(parent, isPinned.coversPath);
+    cap.afterBytes = after.bytes;
+    cap.pinnedBytes = after.pinnedBytes;
+    cap.pinnedOverageBytes = Math.max(0, after.pinnedBytes - maxBytes);
   }
   cap.overByBytes = Math.max(0, cap.afterBytes - maxBytes);
   if (cap.overByBytes > cap.pinnedOverageBytes) receipt.errors.push({ path: parent, error: `failed stage size cap remains exceeded:${cap.overByBytes}` });
