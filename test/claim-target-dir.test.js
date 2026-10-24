@@ -17,6 +17,7 @@ const {
   rmSync,
   existsSync,
   lstatSync,
+  linkSync,
   readlinkSync,
   symlinkSync,
   writeFileSync,
@@ -735,6 +736,114 @@ test('private slot cap reports leased overage and dry-run leaves roots intact', 
   assert.strictEqual(cap.overByBytes, cap.afterBytes - 1);
   assert.ok(cap.pinnedPaths.includes(pinned));
   assert.ok(cap.retainedPaths.includes(pinned));
+  assert.strictEqual(cap.pinnedBytes, cap.afterBytes);
+  assert.strictEqual(cap.pinnedOverageBytes, cap.overByBytes);
+  assert.strictEqual(cap.pinCoverageComplete, true);
+});
+
+test('private slot cap distinguishes live-pin allowance from retained recent excess', () => {
+  const pinned = makePrivateRoot('pid99999999');
+  const recent = makePrivateRoot('pid99999998', { ageSec: 60 });
+  writeRetentionLease('agent-pin-fixture', pinned);
+  const script = join(__dirname, '..', 'bin', 'reap-private-target-slots.sh');
+  let failure;
+  try {
+    execFileSync('bash', [script], {
+      cwd: home, env: isolatedEnv(reapEnv({ ROOT: home, PAPERCUSP_DESKTOP_PRIVATE_SLOT_MAX_BYTES: '1' })),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (error) { failure = error; }
+  assert.ok(failure, 'retained non-pin excess must fail cap compliance');
+  assert.strictEqual(failure.status, 2);
+  const line = failure.stderr.toString().split('\n').find(line => line.startsWith('private-slot-cap '));
+  const cap = JSON.parse(line.slice(17));
+  assert.ok(cap.pinnedBytes > 1);
+  assert.strictEqual(cap.pinnedOverageBytes, cap.pinnedBytes - 1);
+  assert.ok(cap.overByBytes > cap.pinnedOverageBytes);
+  assert.deepStrictEqual(cap.pinnedPaths, [pinned]);
+  assert.ok(existsSync(pinned));
+  assert.ok(existsSync(recent), 'cap diagnostics must preserve the grace-period guard');
+  assert.deepStrictEqual(auditLines(), []);
+});
+
+test('private slot cap does not treat other retention leases as live pins', () => {
+  const retained = makePrivateRoot('pid99999999');
+  writeRetentionLease('release-window-fixture', retained);
+  const script = join(__dirname, '..', 'bin', 'reap-private-target-slots.sh');
+  assert.throws(() => execFileSync('bash', [script], {
+    cwd: home, env: isolatedEnv(reapEnv({ ROOT: home, PAPERCUSP_DESKTOP_PRIVATE_SLOT_MAX_BYTES: '1' })),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }), error => {
+    const line = error.stderr.toString().split('\n').find(line => line.startsWith('private-slot-cap '));
+    const cap = JSON.parse(line.slice(17));
+    assert.strictEqual(error.status, 2);
+    assert.deepStrictEqual(cap.pinnedPaths, []);
+    assert.strictEqual(cap.pinnedBytes, 0);
+    assert.strictEqual(cap.pinnedOverageBytes, 0);
+    assert.ok(cap.overByBytes > 0);
+    return true;
+  });
+  assert.ok(existsSync(retained));
+  assert.deepStrictEqual(auditLines(), []);
+});
+
+test('private slot cap charges shared allocations to pins first in a dry run', () => {
+  const ordinary = makePrivateRoot('pid99999998');
+  const pinned = makePrivateRoot('pid99999999');
+  writeFileSync(join(pinned, 'shared-allocation'), Buffer.alloc(65536, 7));
+  linkSync(join(pinned, 'shared-allocation'), join(ordinary, 'shared-allocation'));
+  writeRetentionLease('agent-pin-fixture', pinned);
+  const output = execFileSync('bash', ['-c', 'exec bash "$1" --dry-run 2>&1', 'reap',
+    join(__dirname, '..', 'bin', 'reap-private-target-slots.sh')], {
+    cwd: home, env: isolatedEnv(reapEnv({ ROOT: home, PAPERCUSP_DESKTOP_PRIVATE_SLOT_MAX_BYTES: '1' })), encoding: 'utf8',
+  });
+  const cap = JSON.parse(output.split('\n').find(line => line.startsWith('private-slot-cap ')).slice(17));
+  assert.ok(cap.pinnedBytes >= 65536, 'the live pin must own its shared blocks');
+  assert.ok(cap.afterBytes - cap.pinnedBytes < 65536, 'the other root must not charge those blocks again');
+  assert.strictEqual(cap.pinnedOverageBytes, cap.pinnedBytes - 1);
+  assert.ok(existsSync(ordinary));
+  assert.ok(existsSync(pinned));
+});
+
+test('a pin on one Cargo file does not exempt its whole retained root', () => {
+  const root = makePrivateRoot('pid99999999');
+  const file = join(root, 'debug', 'marker');
+  writeFileSync(join(root, 'unpinned-allocation'), Buffer.alloc(65536, 9));
+  writeRetentionLease('agent-pin-child', file);
+  const script = join(__dirname, '..', 'bin', 'reap-private-target-slots.sh');
+  assert.throws(() => execFileSync('bash', [script], {
+    cwd: home, env: isolatedEnv(reapEnv({ ROOT: home, PAPERCUSP_DESKTOP_PRIVATE_SLOT_MAX_BYTES: '1' })),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }), error => {
+    const cap = JSON.parse(error.stderr.toString().split('\n').find(line => line.startsWith('private-slot-cap ')).slice(17));
+    assert.strictEqual(error.status, 2);
+    assert.strictEqual(cap.pinnedBytes, statSync(file).blocks * 512);
+    assert.ok(cap.afterBytes > cap.pinnedBytes);
+    assert.ok(cap.overByBytes > cap.pinnedOverageBytes);
+    return true;
+  });
+  assert.ok(existsSync(root));
+  assert.deepStrictEqual(auditLines(), []);
+});
+
+test('an unreadable Cargo pin keeps cap coverage unknown and the root intact', () => {
+  const root = makePrivateRoot('pid99999999');
+  const retention = writeRetentionLease('agent-pin-invalid', root);
+  writeFileSync(join(retention, 'lease-agent-pin-invalid.tsv'), 'malformed\n');
+  const script = join(__dirname, '..', 'bin', 'reap-private-target-slots.sh');
+  assert.throws(() => execFileSync('bash', [script], {
+    cwd: home, env: isolatedEnv(reapEnv({ ROOT: home, PAPERCUSP_DESKTOP_PRIVATE_SLOT_MAX_BYTES: '1' })),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }), error => {
+    const cap = JSON.parse(error.stderr.toString().split('\n').find(line => line.startsWith('private-slot-cap ')).slice(17));
+    assert.strictEqual(error.status, 2);
+    assert.strictEqual(cap.pinCoverageComplete, false);
+    assert.strictEqual(cap.pinnedBytes, null);
+    assert.strictEqual(cap.pinnedOverageBytes, null);
+    return true;
+  });
+  assert.ok(existsSync(root));
+  assert.deepStrictEqual(auditLines(), []);
 });
 
 test('an invalid private slot cap refuses before deleting any root', () => {

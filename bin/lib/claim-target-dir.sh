@@ -501,22 +501,78 @@ __pc_private_slot_delete_renamed() {
 # the absolute paths its build scripts wrote (WI-10004841), so a root that an
 # older reaper already moved is reaped, never adopted.
 # Count the same private population, including interrupted/background deletions.
+# Return total and live-pin allocation unions, measured within one deadline.
+# Pins are measured separately: a child pin must not exempt its whole root,
+# and shared blocks must remain charged to pins even across sibling roots.
 # A failed bounded measurement refuses this pass rather than reporting zero.
 __pc_private_slot_bytes() {
-  local shared="$1" dir name usage bytes total=0
+  local shared="$1" dir name usage bytes section total=0 pinned=0
+  shift
   local -a roots=()
   while IFS=$'\t' read -r dir name; do roots+=("$dir"); done < <(__pc_private_slot_candidates "$shared")
   for dir in "${shared%/*}/.${shared##*/}-reaping-"* "${shared}/.papercusp-target-slots"/.reaping-*; do
     [[ -d "$dir" && ! -L "$dir" ]] && roots+=("$dir")
   done
-  if ((${#roots[@]} == 0)); then printf '0\n'; return 0; fi
+  if ((${#roots[@]} == 0)); then printf '0\t0\n'; return 0; fi
   # One deadline covers the whole population, including a large backlog.
-  usage="$(timeout --signal=KILL 10s du -sx -B1 -- "${roots[@]}" 2>/dev/null)" || return 2
-  while read -r bytes dir; do
+  usage="$(timeout --signal=KILL 10s bash -c '
+    count="$1"; shift
+    roots=("${@:1:count}"); shift "$count"
+    printf "total\n"
+    du -sx -B1 -- "${roots[@]}" || exit 2
+    printf "pins\n"
+    if (($#)); then du -sx -B1 -- "$@" || exit 2; fi
+  ' private-slot-usage "${#roots[@]}" "${roots[@]}" "$@" 2>/dev/null)" || return 2
+  section=total
+  while IFS=$'\t' read -r bytes dir; do
+    if [[ "$bytes" == total || "$bytes" == pins ]]; then section="$bytes"; continue; fi
     [[ "$bytes" =~ ^[0-9]+$ ]] || return 2
-    total=$((total + bytes))
+    if [[ "$section" == pins ]]; then pinned=$((pinned + bytes)); else total=$((total + bytes)); fi
   done <<< "$usage"
-  printf '%s\n' "$total"
+  printf '%s\t%s\n' "$total" "$pinned"
+}
+
+# Snapshot only validated, unexpired agent pins intersecting this population.
+# Other retention leases still protect deletion, but are not pin allowances.
+__pc_private_slot_cap_pins() {
+  local shared="$1" retention lease paths status pin dir name normalized other covered
+  local -a roots=() pins=()
+  local -A seen=()
+  while IFS=$'\t' read -r dir name; do
+    normalized="$(release_artifacts_normalize_path "$dir")" || return 2
+    roots+=("$normalized")
+  done < <(__pc_private_slot_candidates "$shared")
+  ((${#roots[@]} > 0)) || return 0
+  retention="$(release_artifacts_retention_root)"
+  for lease in "$retention"/lease-agent-pin-*.tsv; do
+    [[ -f "$lease" ]] || continue
+    status=0
+    paths="$(release_artifacts_retention_lease_read_paths "$lease")" || status=$?
+    if ((status == 1)); then continue; fi
+    ((status == 0)) || return 2
+    while IFS= read -r pin; do
+      [[ -n "$pin" ]] || continue
+      pin="$(release_artifacts_normalize_path "$pin")" || return 2
+      for dir in "${roots[@]}"; do
+        if [[ "$dir" == "$pin" || "$dir" == "$pin/"* ]]; then normalized="$dir"
+        elif [[ "$pin" == "$dir/"* ]]; then normalized="$pin"
+        else continue
+        fi
+        # A missing/unreadable pinned child cannot establish allocated coverage.
+        [[ -e "$normalized" ]] || return 2
+        if [[ -z "${seen["$normalized"]:-}" ]]; then
+          pins+=("$normalized"); seen["$normalized"]=1
+        fi
+      done
+    done <<< "$paths"
+  done
+  for pin in "${pins[@]}"; do
+    covered=0
+    for other in "${pins[@]}"; do
+      if [[ "$pin" == "$other/"* ]]; then covered=1; break; fi
+    done
+    if ((covered == 0)); then printf '%s\n' "$pin"; fi
+  done
 }
 
 __pc_reap_private_target_slots() {
@@ -549,9 +605,9 @@ __pc_reap_private_target_slots() {
     return 0
   fi
 
-  local now dir name last lease_status reap_lease_tags before_bytes after_bytes max_bytes
+  local now dir name last lease_status reap_lease_tags before_bytes after_bytes max_bytes usage pinned_bytes
   local -a eligible=()
-  local -a leased_paths=() retained_paths=()
+  local -a pinned_paths=() retained_paths=()
   max_bytes="${PAPERCUSP_DESKTOP_PRIVATE_SLOT_MAX_BYTES:-21474836480}"
   if [[ ! "$max_bytes" =~ ^[0-9]{1,15}$ ]]; then
     echo 'private target-slot cap requires positive safe-integer bytes' >&2
@@ -565,12 +621,13 @@ __pc_reap_private_target_slots() {
     release_artifacts_retention_mutex_release "$mutex_input" "$mutex_pid"
     return 2
   fi
-  if ! before_bytes="$(__pc_private_slot_bytes "$shared")"; then
+  if ! usage="$(__pc_private_slot_bytes "$shared")"; then
     echo 'private target-slot cap measurement failed; keeping all roots' >&2
     exec {reap_fd}>&-
     release_artifacts_retention_mutex_release "$mutex_input" "$mutex_pid"
     return 2
   fi
+  IFS=$'\t' read -r before_bytes pinned_bytes <<< "$usage"
   now="$(date +%s)"
   while IFS=$'\t' read -r dir name; do
     [[ -n "$dir" ]] || continue
@@ -580,7 +637,7 @@ __pc_reap_private_target_slots() {
     # selftest forbids for every caller in this file.
     lease_status=0
     reap_lease_tags="$(release_artifacts_retention_path_is_leased "$dir" 2>/dev/null)" || lease_status=$?
-    if (( lease_status != 1 )); then leased_paths+=("$dir"); continue; fi
+    if (( lease_status != 1 )); then continue; fi
     __pc_private_slot_unclaimed "$name" || continue
     last="$(__pc_private_slot_last_active "$dir")"
     (( now - last >= grace )) || continue
@@ -670,19 +727,42 @@ $(while IFS= read -r row; do [[ "$row" == "$adopt_row" ]] || printf '%s\n' "$row
   exec {reap_fd}>&-
   release_artifacts_retention_mutex_release "$mutex_input" "$mutex_pid"
   __pc_private_slot_delete_renamed "$shared"
-  if ! after_bytes="$(__pc_private_slot_bytes "$shared")"; then
+  # Reacquire after guarded debris deletion. Never label an earlier lease
+  # snapshot as current pin coverage after giving a pin writer its turn.
+  mutex_input=''; mutex_pid=''
+  has_candidates=0
+  while IFS= read -r candidate; do has_candidates=1; break; done < <(__pc_private_slot_candidates "$shared")
+  if ((has_candidates)); then
+    release_artifacts_retention_mutex_acquire mutex_input mutex_pid || return $?
+  fi
+  local pins_before pins_after pin_coverage=1
+  pins_before="$(__pc_private_slot_cap_pins "$shared")" || pin_coverage=0
+  while IFS= read -r dir; do [[ -z "$dir" ]] || pinned_paths+=("$dir"); done <<< "$pins_before"
+  if ! usage="$(__pc_private_slot_bytes "$shared" "${pinned_paths[@]}")"; then
     echo 'private target-slot cap post-measurement failed' >&2
+    release_artifacts_retention_mutex_release "$mutex_input" "$mutex_pid"
     return 2
   fi
+  IFS=$'\t' read -r after_bytes pinned_bytes <<< "$usage"
+  pins_after="$(__pc_private_slot_cap_pins "$shared")" || pin_coverage=0
+  [[ "$pins_before" == "$pins_after" ]] || pin_coverage=0
   while IFS=$'\t' read -r dir name; do retained_paths+=("$dir"); done < <(__pc_private_slot_candidates "$shared")
-  node -e 'const [root, max, before, after, dry, leased, ...retainedPaths] = process.argv.slice(1);
-    const pinnedPaths = leased ? leased.split("\n") : [];
+  release_artifacts_retention_mutex_release "$mutex_input" "$mutex_pid"
+  node -e 'const [root, max, before, after, dry, coverage, pinned, pins, ...retainedPaths] = process.argv.slice(1);
+    const pinCoverageComplete = coverage === "1" && Number.isSafeInteger(Number(pinned)) && Number(pinned) <= Number(after);
+    const pinnedBytes = pinCoverageComplete ? Number(pinned) : null;
+    const pinnedOverageBytes = pinnedBytes === null ? null : Math.max(0, pinnedBytes - Number(max));
+    const overByBytes = Math.max(0, Number(after) - Number(max));
+    const pinnedPaths = pins ? pins.split("\n") : [];
     process.stderr.write("private-slot-cap " + JSON.stringify({root, maxBytes: Number(max),
       beforeBytes: Number(before), afterBytes: Number(after), dryRun: dry === "1",
-      overByBytes: Math.max(0, Number(after) - Number(max)), pinnedPaths,
-      retainedPaths}) + "\n");' "$shared/.papercusp-target-slots" "$max_bytes" "$before_bytes" "$after_bytes" \
-    "${PAPERCUSP_DESKTOP_PRIVATE_SLOT_REAP_DRY_RUN:-0}" "$(printf '%s\n' "${leased_paths[@]}")" "${retained_paths[@]}"
-  return 0
+      overByBytes, pinnedBytes, pinnedOverageBytes, pinCoverageComplete, pinnedPaths,
+      retainedPaths}) + "\n");
+    if (!pinCoverageComplete || (dry !== "1" && overByBytes > pinnedOverageBytes)) {
+      process.stderr.write(pinCoverageComplete ? "private target-slot cap retains non-pin excess\n" : "private target-slot pin coverage unavailable\n");
+      process.exitCode = 2;
+    }' "$shared/.papercusp-target-slots" "$max_bytes" "$before_bytes" "$after_bytes" \
+    "${PAPERCUSP_DESKTOP_PRIVATE_SLOT_REAP_DRY_RUN:-0}" "$pin_coverage" "$pinned_bytes" "$pins_before" "${retained_paths[@]}"
 }
 
 # True when the root slot <index> WOULD build into already holds a debug Cargo
