@@ -675,7 +675,7 @@ function optional(source, imp) {
 function add(source, imp) {
   if (!bare(imp) || packageName(imp.path) === 'onnxruntime-web') return;
   const name = packageName(imp.path);
-  const required = !['dynamic-import', 'require-resolve'].includes(imp.kind) && !optional(source, imp);
+  const required = !optional(source, imp);
   rows.set(name, rows.get(name) === true || required);
   edges.push({source:path.relative(root,source),specifier:imp.path,kind:imp.kind,required});
 }
@@ -870,5 +870,10 @@ copy_host_runtime_require_closures() {
   copy_pkg_closure google-auth-library || return 1
   copy_pkg_closure jose || return 1
   echo "  google-auth-library/jose closures copied ($nat_copied total package(s), $nat_missing missing)"
+
+  # Equity compilation uses an opaque createRequire and require.resolve to read
+  # the pinned compiler and Solidity dependency sources at runtime.
+  copy_pkg_closure solc || return 1
+  copy_pkg_closure @openzeppelin/contracts || return 1
   
 }

@@ -157,6 +157,13 @@ test('a mandatory graph occurrence overrides another requester optional peer dec
   assert.equal(r.status,0,r.stdout+r.stderr);
   assert.match(r.stdout,/^required\tmaybe$/m);
 });
+test('unknown dynamic imports remain required instead of being silently omitted',t=>{
+  const f=graphFixture(t);
+  fs.writeFileSync(path.join(f.donor,'entry.js'),"import('@vendor/dynamic');");
+  const r=graph(f,{'entry.js':{imports:[edge('@vendor/dynamic','dynamic-import')]}});
+  assert.equal(r.status,0,r.stdout+r.stderr);
+  assert.match(r.stdout,/^required\t@vendor\/dynamic$/m);
+});
 test('DBOS lazy graph edges require the measured context and the actual OTLP early-return guard',t=>{
   const f=graphFixture(t),sdk=path.join(f.donor,'node_modules/@dbos-inc/dbos-sdk/dist/src/telemetry');
   fs.mkdirSync(sdk,{recursive:true});
