@@ -480,10 +480,14 @@ case "${PAPERCUSP_REUSE_SIDECAR:-0}" in
 
     if [[ "$DISTRIBUTION_PROFILE" == "dogfood" ]]; then
       echo "==> [2/5] staging env-sidecars (stage-env-sidecars.sh)"
-      bash "$HERE/stage-env-sidecars.sh"
+      PAPERCUSP_DESKTOP_TARGET_ROOT="$ROOT" bash "$HERE/stage-env-sidecars.sh"
 
       echo "==> [3/5] staging source tree / all-5-buttons bundle (stage-source-tree.sh)"
-      bash "$HERE/stage-source-tree.sh"
+      # Tooling may live outside the frozen product. Bind both archive inputs
+      # and publication to that product, just like the sidecar builder above.
+      PAPERCUSP_STAGE_SOURCE_ROOT="$ROOT/.." \
+      PAPERCUSP_STAGE_SOURCE_SIDECAR="$ROOT/src-tauri/sidecar" \
+        bash "$HERE/stage-source-tree.sh"
       hold_sidecar_read_lock
     else
       echo "==> [2-3/5] vm-release — skipping env-sidecars and editable source staging"

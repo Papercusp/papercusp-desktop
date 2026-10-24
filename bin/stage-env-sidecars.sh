@@ -27,7 +27,7 @@
 # filesystem, ~0 extra disk; tauri copies real bytes into the bundle at pack time.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
+ROOT="$(cd "${PAPERCUSP_DESKTOP_TARGET_ROOT:-$HERE/..}" && pwd)"
 SIDECAR="$ROOT/src-tauri/sidecar"
 
 if [[ ! -f "$SIDECAR/serve.mjs" ]]; then

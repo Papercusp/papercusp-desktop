@@ -87,6 +87,45 @@ test('Linux help and invalid arguments exit before snapshot or build side effect
   }
 });
 
+test('Linux fresh staging binds source and environment sidecars to the selected product', () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-linux-stage-source-'));
+  try {
+    const tooling = path.join(fixture, 'tooling');
+    const product = path.join(fixture, 'product');
+    const freshStart = linuxScript.indexOf('case "${PAPERCUSP_REUSE_SIDECAR:-0}"');
+    const reuseStart = linuxScript.indexOf('\n  1)', freshStart);
+    assert.ok(freshStart >= 0 && reuseStart > freshStart);
+    const freshBranch = `${linuxScript.slice(freshStart, reuseStart)}\nesac\n`;
+    fs.mkdirSync(path.join(tooling, 'bin'), { recursive: true });
+    fs.copyFileSync(path.join(root, 'bin/stage-env-sidecars.sh'), path.join(tooling, 'bin/stage-env-sidecars.sh'));
+    fs.writeFileSync(path.join(tooling, 'bin/build-desktop-sidecar.sh'), 'exit 0\n');
+    fs.writeFileSync(path.join(tooling, 'bin/stage-source-tree.sh'),
+      'printf "source=%s\\nsidecar=%s\\n" "${PAPERCUSP_STAGE_SOURCE_ROOT:-unset}" "${PAPERCUSP_STAGE_SOURCE_SIDECAR:-unset}"\n');
+    for (const selected of [tooling, product]) {
+      const sidecar = path.join(selected, 'src-tauri/sidecar');
+      fs.mkdirSync(path.join(sidecar, 'spa'), { recursive: true });
+      fs.mkdirSync(path.join(sidecar, 'db-sql'), { recursive: true });
+      fs.writeFileSync(path.join(sidecar, 'serve.mjs'), `// ${selected}\n`);
+      const result = spawnSync('bash', ['-c', [
+        'set -euo pipefail',
+        'ROOT="$1"; HERE="$2"; BUILD_SHA=fixture; VERSION=0.0.0; DISTRIBUTION_PROFILE=dogfood',
+        'hold_sidecar_read_lock() { :; }',
+        freshBranch,
+      ].join('\n'), 'stage-fixture', selected, path.join(tooling, 'bin')], {
+        encoding: 'utf8', env: { ...process.env, PAPERCUSP_REUSE_SIDECAR: '0',
+          PAPERCUSP_DESKTOP_TARGET_ROOT: selected,
+          PAPERCUSP_STAGE_SOURCE_ROOT: '/stale/source', PAPERCUSP_STAGE_SOURCE_SIDECAR: '/stale/sidecar' },
+      });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.ok(result.stdout.includes(`source=${selected}/..\nsidecar=${sidecar}\n`), result.stdout);
+      assert.equal(fs.readFileSync(path.join(sidecar, 'env-sidecars/staging/serve.mjs'), 'utf8'),
+        `// ${selected}\n`);
+    }
+    assert.equal(fs.readFileSync(path.join(tooling, 'src-tauri/sidecar/env-sidecars/staging/serve.mjs'), 'utf8'),
+      `// ${tooling}\n`, 'staging the other product must preserve the tooling sidecar');
+  } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
+});
+
 test('Linux reuse qualification runs the maintained tooling verifier and audit', () => {
   const reuse = linuxScript.slice(linuxScript.indexOf('case "${PAPERCUSP_REUSE_SIDECAR:-0}"'), linuxScript.indexOf('echo "==> [4/5]'));
   assert.match(reuse, /bash "\$HERE\/verify-provenance.sh"/);
