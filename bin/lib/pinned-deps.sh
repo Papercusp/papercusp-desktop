@@ -414,6 +414,21 @@ EOF
       # forces callers to repeat the whole expensive snapshot to investigate.
       mkdir -p "$_tmp" || _copy_rc=$?
       if [ "$_copy_rc" -eq 0 ]; then
+        # st_dev/df identify the backing filesystem, not the mount boundary.
+        # Linux rejects link() between two bind mounts of that same device.
+        # Probe the actual tree before rsync can emit thousands of EXDEVs
+        # (or silently copy ordinary files after its link attempt fails).
+        local _link_source _link_probe
+        _link_source="$(find "$_src" \( -type f -o -type l \) -print -quit)" || return 1
+        if [ -n "$_link_source" ]; then
+          _link_probe="$(mktemp -d "$_tmp/.pinned-deps-link.XXXXXX")" || return 1
+          if ! ln "$_link_source" "$_link_probe/entry"; then
+            echo "ERROR: hardlink admission failed; donor=$_src snapshot=$_tmp must share one mount." >&2
+            rm -rf "$_tmp"
+            return 1
+          fi
+          rm -rf "$_link_probe" || return 1
+        fi
         rsync -aH --link-dest="$_src" "${_tree_filters[@]}" "$_src/" "$_tmp/" || _copy_rc=$?
       fi
     fi
