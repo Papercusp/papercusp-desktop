@@ -576,6 +576,135 @@ copy_host_external_closures() {
   done
 }
 
+# Exercise the production tracing composition without starting PRIMARY, DBOS,
+# a listener, a database or an exporter. DBOS's legacy provider is a fallback
+# only when this context probe fails. Keep this proof separate from boot proof.
+assert_host_default_trace_context() {
+  local run="$1" entry="$1/build-state/trace-context-entry.mjs"
+  [[ "${DBOS__CLOUD:-}" != true ]] || {
+    echo 'ERROR: private default-host assembly does not qualify DBOS Cloud/OTLP' >&2; return 1;
+  }
+  node - "$REPO_ROOT" "$entry" <<'NODE' || return 1
+const fs = require('node:fs'), path = require('node:path');
+const [root, entry] = process.argv.slice(2);
+const host = fs.readFileSync(path.join(root, 'apps/operator/bin/host-bootstrap.ts'), 'utf8');
+const before = host.indexOf('initializeRuntimeObservability();');
+if (before < 0 || host.indexOf('await startDbos();') <= before)
+  throw new Error('unqualified host tracing/DBOS startup order');
+const sdk = path.join(root, 'node_modules/@dbos-inc/dbos-sdk/dist/src');
+const launch = fs.readFileSync(path.join(sdk, 'dbos.js'), 'utf8');
+if (!/if\s*\(!\(0,\s*traces_1\.isTraceContextWorking\)\(\)\)\s*\(0,\s*traces_1\.installTraceContextManager\)/.test(launch))
+  throw new Error('unqualified DBOS legacy-provider fallback');
+const bootstrap = fs.readFileSync(path.join(root, 'packages/operator-core/lib/dbos/bootstrap.ts'), 'utf8');
+if (/enableOTLP\s*:/.test(bootstrap)) throw new Error('explicit DBOS OTLP needs separate closure qualification');
+fs.writeFileSync(entry, `import { createTracing } from ${JSON.stringify(path.join(root, 'packages/operator-core/lib/observability/tracing.ts'))};
+import { globalParams } from ${JSON.stringify(path.join(sdk, 'utils.js'))};
+import { isTraceContextWorking } from ${JSON.stringify(path.join(sdk, 'telemetry/traces.js'))};
+const runtime = createTracing();
+const registration = runtime.register();
+globalParams.tracingEnabled = true;
+const contextWorking = isTraceContextWorking();
+registration.disable();
+await runtime.provider.shutdown();
+if (!registration.registered || !contextWorking) throw new Error('production tracing context unavailable');
+console.log(JSON.stringify({schemaVersion:'private-default-trace-context-v1',contextWorking,registered:registration.registered,otlp:false,primaryStarted:false}));
+`);
+NODE
+  bundle_host_run_step trace-context-compile bundle_host_esbuild "$REPO_ROOT" "$entry" \
+    --bundle --platform=node --format=esm --target=node22 --banner:js="$HOST_BANNER" \
+    "${HOST_BANNER_DEFINES[@]}" "${HOST_EXTERNALS[@]}" \
+    --outfile="$SIDECAR_DIR/.assembly-trace-context.mjs" || return 1
+  node "$SIDECAR_DIR/.assembly-trace-context.mjs" > "$run/trace-context.json" || return 1
+  rm "$SIDECAR_DIR/.assembly-trace-context.mjs"
+}
+
+# Use INPUT edges, not just output import kinds: esbuild represents both an
+# optional CommonJS loader and a mandatory require as require-call. Optional
+# manifest peers and the measured default DBOS composition remain optional;
+# any other occurrence of the same package keeps the union mandatory.
+write_host_graph_dependency_census() {
+  node - "$REPO_ROOT" "$1" <<'NODE'
+const fs = require('node:fs'), path = require('node:path'), {isBuiltin} = require('node:module');
+const [root, run] = process.argv.slice(2);
+const ts = require(path.join(root, 'node_modules/typescript'));
+const rows = new Map(), edges = [], parsed = new Map();
+const packageName = value => value.startsWith('@') ? value.split('/').slice(0,2).join('/') : value.split('/')[0];
+const bare = imp => imp.external && !isBuiltin(imp.path) && !imp.path.startsWith('.') && !imp.path.startsWith('/');
+const traceFile = path.join(run, 'trace-context.json');
+const trace = fs.existsSync(traceFile) ? JSON.parse(fs.readFileSync(traceFile)) : null;
+function optional(source, imp) {
+  if (imp.kind !== 'require-call') return false;
+  let dir = path.dirname(source);
+  while (dir !== root && dir !== path.dirname(dir)) {
+    const manifestFile = path.join(dir, 'package.json');
+    if (fs.existsSync(manifestFile)) {
+      const p = JSON.parse(fs.readFileSync(manifestFile));
+      if (p.optionalDependencies?.[packageName(imp.path)] || p.peerDependenciesMeta?.[packageName(imp.path)]?.optional === true)
+        return true;
+      break;
+    }
+    dir = path.dirname(dir);
+  }
+  const sdk = path.join(root, 'node_modules/@dbos-inc/dbos-sdk/dist/src/telemetry') + path.sep;
+  if (!source.startsWith(sdk) || !imp.path.startsWith('@opentelemetry/')) return false;
+  if (!parsed.has(source)) parsed.set(source, ts.createSourceFile(source, fs.readFileSync(source, 'utf8'), ts.ScriptTarget.Latest, true));
+  const file = parsed.get(source), calls = [];
+  function visit(node) {
+    if (ts.isCallExpression(node) && node.expression.getText(file) === 'require'
+        && node.arguments.length === 1 && ts.isStringLiteral(node.arguments[0]) && node.arguments[0].text === imp.path) calls.push(node);
+    ts.forEachChild(node, visit);
+  }
+  visit(file);
+  return calls.length > 0 && calls.every(call => {
+    for (let node = call; node.parent; node = node.parent) {
+      if (imp.path === '@opentelemetry/sdk-trace-base' && ts.isFunctionDeclaration(node)
+          && node.name?.text === 'installTraceContextManager' && trace?.schemaVersion === 'private-default-trace-context-v1'
+          && trace.registered === true && trace.contextWorking === true && trace.otlp === false) return true;
+      if (ts.isBlock(node.parent)) {
+        for (const statement of node.parent.statements) {
+          if (statement.pos >= node.pos) break;
+          if (!ts.isIfStatement(statement) || statement.expression.getText(file).replace(/\s/g, '') !== '!utils_1.globalParams.enableOTLP') continue;
+          const body = statement.thenStatement;
+          if (trace?.otlp === false && (ts.isReturnStatement(body) || ts.isBlock(body) && ts.isReturnStatement(body.statements.at(-1)))) return true;
+        }
+      }
+    }
+    return false;
+  });
+}
+function add(source, imp) {
+  if (!bare(imp) || packageName(imp.path) === 'onnxruntime-web') return;
+  const name = packageName(imp.path);
+  const required = !['dynamic-import', 'require-resolve'].includes(imp.kind) && !optional(source, imp);
+  rows.set(name, rows.get(name) === true || required);
+  edges.push({source:path.relative(root,source),specifier:imp.path,kind:imp.kind,required});
+}
+function visit(dir) {
+  if (!fs.existsSync(dir)) return;
+  for (const entry of fs.readdirSync(dir,{withFileTypes:true})) {
+    const file = path.join(dir,entry.name);
+    if (entry.isDirectory()) { if(entry.name !== 'node_modules') visit(file); }
+    else if (entry.name.endsWith('.meta.json')) {
+      const data = JSON.parse(fs.readFileSync(file)), inputEdges = new Set();
+      for (const [input, info] of Object.entries(data.inputs || {})) {
+        const source = [path.resolve(root,input),path.resolve(root,'apps/operator',input)].find(p => fs.existsSync(p));
+        if (!source) throw new Error('missing metafile input: ' + input);
+        for (const imp of info.imports || []) {
+          if (bare(imp)) { add(source,imp); inputEdges.add(imp.path + ':' + imp.kind); }
+        }
+      }
+      for (const output of Object.values(data.outputs || {})) for (const imp of output.imports || [])
+        if (bare(imp) && !inputEdges.has(imp.path + ':' + imp.kind)) add(file,imp);
+    }
+  }
+}
+visit(path.join(run,'artifact')); visit(path.join(run,'build-meta'));
+if (!rows.size) throw new Error('empty external dependency census');
+fs.writeFileSync(path.join(run,'graph-imports.json'),JSON.stringify(edges)+'\n');
+for (const [name,required] of [...rows].sort()) console.log((required?'required':'optional')+'\t'+name);
+NODE
+}
+
 # Class-level backstop: inspect every actual package in the ASSEMBLED sidecar and
 # resolve every required dependency using only that tree. This does not replace
 # the clean-root boot gate (which exercises the real artifact); it catches the
@@ -702,7 +831,7 @@ copy_host_runtime_require_closures() {
   # (EMBEDDED_PG_FAILED). Copy rrule + its dep closure (tslib) so the runtime
   # createRequire('rrule') from sidecar/serve.mjs resolves.
   echo "→ copying createRequire runtime dep rrule (+ closure) into the sidecar"
-  copy_pkg_closure rrule
+  copy_pkg_closure rrule || return 1
   echo "  rrule closure copied ($nat_copied total package(s), $nat_missing missing)"
   
   # luxon — IDENTICAL createRequire gotcha as rrule above. schedule-next.ts loads
@@ -714,7 +843,7 @@ copy_host_runtime_require_closures() {
   # i.e. the .deb did not boot at all. Copy luxon so the runtime createRequire('luxon')
   # from sidecar/serve.mjs resolves. (shared-pot-release-testing Lane A, A-001.)
   echo "→ copying createRequire runtime dep luxon (+ closure) into the sidecar"
-  copy_pkg_closure luxon
+  copy_pkg_closure luxon || return 1
   echo "  luxon closure copied ($nat_copied total package(s), $nat_missing missing)"
   
   # Design comparison loads these packages through createRequire so the same
@@ -722,9 +851,9 @@ copy_host_runtime_require_closures() {
   # esbuild cannot see those runtime calls; copy the three package roots (a root
   # copy also covers lost-pixel/package.json and lost-pixel/dist/* subpaths).
   echo "→ copying createRequire runtime deps lost-pixel, pixelmatch, pngjs (+ closures) into the sidecar"
-  copy_pkg_closure lost-pixel
-  copy_pkg_closure pixelmatch
-  copy_pkg_closure pngjs
+  copy_pkg_closure lost-pixel || return 1
+  copy_pkg_closure pixelmatch || return 1
+  copy_pkg_closure pngjs || return 1
   echo "  design-compare closures copied ($nat_copied total package(s), $nat_missing missing)"
   
   # EI-19981394187273902 (2026-08-09) — IDENTICAL createRequire gotcha as rrule/luxon
@@ -738,8 +867,8 @@ copy_host_runtime_require_closures() {
   # 'jose') the first time a push dispatch actually ran. Copy both (+ closures) so
   # the runtime createRequire(...) calls from sidecar/serve.mjs resolve.
   echo "→ copying createRequire runtime deps google-auth-library, jose (+ closures) into the sidecar"
-  copy_pkg_closure google-auth-library
-  copy_pkg_closure jose
+  copy_pkg_closure google-auth-library || return 1
+  copy_pkg_closure jose || return 1
   echo "  google-auth-library/jose closures copied ($nat_copied total package(s), $nat_missing missing)"
   
 }

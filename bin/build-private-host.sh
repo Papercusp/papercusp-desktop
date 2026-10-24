@@ -112,30 +112,10 @@ for np in "${NATIVE_PKGS[@]}" @lydell/node-pty @papercusp/embedded-postgres-serv
 done
 copy_host_external_closures
 copy_host_runtime_require_closures
-# Metafiles name the actual wildcard-selected imports in each emitted graph.
-node - "$run" <<'NODE' > "$run/graph-packages.tsv"
-const fs=require('node:fs'), path=require('node:path'), {isBuiltin}=require('node:module');
-const rows=new Map();
-function visit(dir) {
-  for(const e of fs.readdirSync(dir,{withFileTypes:true})) {
-    const file=path.join(dir,e.name);
-    if(e.isDirectory()) {if(e.name!=='node_modules') visit(file);}
-    else if(e.name.endsWith('.meta.json')) {
-      for(const output of Object.values(JSON.parse(fs.readFileSync(file)).outputs)) {
-        for(const imp of output.imports||[]) {
-          if(!imp.external||isBuiltin(imp.path)||imp.path.startsWith('.')||imp.path.startsWith('/')) continue;
-          const name=imp.path.startsWith('@')?imp.path.split('/').slice(0,2).join('/'):imp.path.split('/')[0];
-          if(name==='onnxruntime-web') continue; // maintained Node-only omission
-          rows.set(name, rows.get(name)||imp.kind==='import-statement'||imp.kind==='require-call');
-        }
-      }
-    }
-  }
-}
-visit(process.argv[2]+'/artifact');visit(process.argv[2]+'/build-meta');
-if(!rows.size) throw new Error('empty external dependency census');
-for(const [name,required] of [...rows].sort()) console.log((required?'required':'optional')+'\t'+name);
-NODE
+# Classify optional loader branches only after exercising the real production
+# provider/context composition. This is a package probe, never PRIMARY startup.
+assert_host_default_trace_context "$run"
+write_host_graph_dependency_census "$run" > "$run/graph-packages.tsv"
 while IFS=$'\t' read -r dependency_kind dependency_name; do
   if [[ "$dependency_kind" == required ]] || resolve_pkg_source "$dependency_name" '' >/dev/null 2>&1; then
     copy_pkg_closure "$dependency_name"
