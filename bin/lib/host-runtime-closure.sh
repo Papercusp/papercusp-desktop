@@ -641,7 +641,9 @@ function optional(source, imp) {
       const p = JSON.parse(fs.readFileSync(manifestFile));
       if (p.optionalDependencies?.[packageName(imp.path)] || p.peerDependenciesMeta?.[packageName(imp.path)]?.optional === true)
         return true;
-      break;
+      // ESM/CJS format markers inside dist/ do not own package dependencies.
+      // Stop at the actual package, including one with no declared imports.
+      if (p.name || p.version || p.dependencies || p.optionalDependencies || p.peerDependencies) break;
     }
     dir = path.dirname(dir);
   }

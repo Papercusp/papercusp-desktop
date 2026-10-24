@@ -158,6 +158,23 @@ test('a mandatory graph occurrence overrides another requester optional peer dec
   assert.equal(r.status,0,r.stdout+r.stderr);
   assert.match(r.stdout,/^required\tmaybe$/m);
 });
+test('graph optionality crosses module-format markers but stops at a package boundary',t=>{
+  const f=graphFixture(t),client=path.join(f.donor,'node_modules/client');
+  pkg(client,{name:'client',version:'1.0.0',optionalDependencies:{fsevents:'*'}},'');
+  const nested=path.join(client,'dist/es');
+  fs.mkdirSync(nested,{recursive:true});
+  fs.writeFileSync(path.join(nested,'package.json'),JSON.stringify({type:'module'}));
+  fs.writeFileSync(path.join(nested,'index.js'),"import('fsevents');");
+  const inputs={'node_modules/client/dist/es/index.js':{imports:[edge('fsevents','dynamic-import')]}};
+  let r=graph(f,inputs);
+  assert.equal(r.status,0,r.stdout+r.stderr);
+  assert.match(r.stdout,/^optional\tfsevents$/m);
+  // A real nested package owns its imports even with no dependency declaration.
+  fs.writeFileSync(path.join(nested,'package.json'),JSON.stringify({name:'nested',type:'module'}));
+  r=graph(f,inputs);
+  assert.equal(r.status,0,r.stdout+r.stderr);
+  assert.match(r.stdout,/^required\tfsevents$/m);
+});
 test('unknown dynamic imports remain required instead of being silently omitted',t=>{
   const f=graphFixture(t);
   fs.writeFileSync(path.join(f.donor,'entry.js'),"import('@vendor/dynamic');");
