@@ -275,11 +275,22 @@ unset _cargo_home
 # shellcheck source=lib/release-host.sh
 source "$HERE/lib/release-host.sh"
 load_release_host
-# EI-20551860898590077: release-local.sh exports PAPERCUSP_RELEASE_TAG for its
-# child legs. A direct release-leg caller can provide the same tag explicitly;
-# without it, the later incremental/upload path fails closed on a missing stamp.
 # shellcheck source=lib/release-artifacts.sh
 source "$HERE/lib/release-artifacts.sh"
+
+# Direct signed installer builds need custody after the allocator's process
+# lock closes too. Without a tag, the final retention call is a no-op and the
+# idle-slot reaper can delete a successful build before acceptance consumes it.
+# Keep explicit release-cut identity and policy; standalone outputs get a
+# private, bounded lease through the same retention store.
+if [[ -z "${PAPERCUSP_RELEASE_TAG:-}" ]]; then
+  export PAPERCUSP_RELEASE_TAG="local-linux-$(date -u +%Y%m%dT%H%M%S)-$$"
+  export PAPERCUSP_RELEASE_RETENTION_TTL_SEC="${PAPERCUSP_RELEASE_RETENTION_TTL_SEC:-604800}"
+  if [[ ! "$PAPERCUSP_RELEASE_RETENTION_TTL_SEC" =~ ^[1-9][0-9]*$ ]]; then
+    echo 'ERROR: standalone Linux installer retention requires a positive TTL in seconds.' >&2
+    exit 2
+  fi
+fi
 
 # WI-5083: RUSTC_WRAPPER=sccache backed by a persistent ~/.cache/sccache, so
 # even this "local" build reuses crates compiled by a prior run/checkout

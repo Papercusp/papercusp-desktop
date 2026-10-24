@@ -16,6 +16,46 @@ const vmConfig = JSON.parse(
   fs.readFileSync(path.join(root, 'src-tauri/tauri.vm-release.conf.json'), 'utf8'),
 );
 
+test('standalone Linux installers survive guarded cleanup under a bounded lease', () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-linux-installer-retention-'));
+  try {
+    const start = linuxScript.indexOf('if [[ -z "${PAPERCUSP_RELEASE_TAG:-}" ]]; then');
+    const end = linuxScript.indexOf('# WI-5083:', start);
+    assert.ok(start >= 0 && end > start, 'retention must be configured before claiming a Cargo slot');
+    assert.ok(end < linuxScript.indexOf('source "$HERE/lib/claim-target-dir.sh"'));
+    const setup = linuxScript.slice(start, end);
+    for (const [name, tag, ttl] of [['standalone', '', ''], ['cut', 'explicit-cut', '3600']]) {
+      const artifacts = path.join(fixture, name);
+      const retention = path.join(fixture, `${name}-leases`);
+      fs.mkdirSync(artifacts);
+      fs.writeFileSync(path.join(artifacts, 'installer.deb'), 'finished installer');
+      const result = spawnSync('bash', ['-c', [
+        'set -euo pipefail',
+        'source "$1"',
+        setup,
+        'tag="$PAPERCUSP_RELEASE_TAG"',
+        'papercusp_retain_release_paths "$2"',
+        'cat "$(release_artifacts_retention_lease_path "$tag")"',
+        'unset PAPERCUSP_RELEASE_TAG',
+        'if release_artifacts_guarded_delete "$2"; then exit 70; fi',
+        'test -f "$2/installer.deb"',
+      ].join('\n'), 'retention-fixture', path.join(root, 'bin/lib/release-artifacts.sh'), artifacts], {
+        encoding: 'utf8', env: { ...process.env,
+          PAPERCUSP_RELEASE_TAG: tag, PAPERCUSP_RELEASE_RETENTION_TTL_SEC: ttl,
+          PAPERCUSP_RELEASE_RETENTION_ROOT: retention,
+          PAPERCUSP_RELEASE_DELETION_AUDIT_PATH: path.join(retention, 'audit.tsv'),
+        },
+      });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.match(result.stdout, name === 'cut' ? /tag=explicit-cut\n/ : /tag=local-linux-[\w-]+\n/);
+      const created = BigInt(result.stdout.match(/^created_ns=(\d+)$/m)[1]);
+      const expiry = BigInt(result.stdout.match(/^expires_ns=(\d+)$/m)[1]);
+      assert.equal(expiry - created, BigInt(ttl || 604800) * 1_000_000_000n, result.stdout);
+      assert.ok(fs.existsSync(path.join(artifacts, 'installer.deb')));
+    }
+  } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
+});
+
 test('Linux self-snapshot keeps current helpers while selecting a frozen product root', () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-linux-source-seam-'));
   try {
