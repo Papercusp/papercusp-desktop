@@ -215,18 +215,8 @@ fi
 
 # ── Credentials ──────────────────────────────────────────────────────────────
 # Loaded before the delta plan: the publish manifest is keyed to the bucket + prefix.
-R2_ENV="${HOME}/.papercusp/r2.env"
-if [[ ! -f "$R2_ENV" ]]; then
-  echo "ERROR: $R2_ENV not found — R2 credentials are owner-provisioned." >&2
-  exit 1
-fi
-# shellcheck source=/dev/null
-set -a; . "$R2_ENV"; set +a
-: "${R2_ACCOUNT_ID:?set R2_ACCOUNT_ID in $R2_ENV}"
-: "${R2_BUCKET:?set R2_BUCKET in $R2_ENV}"
-: "${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID in $R2_ENV}"
-: "${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY in $R2_ENV}"
-ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+. "$HERE/lib/release-storage.sh"
+release_storage_init
 
 # ── What changed since the last VERIFIED publish (WI-10003694) ───────────────
 FULL="${FULL:-0}"
@@ -238,7 +228,7 @@ WORK_DIR="$(mktemp -d "${SITE_DIR%/}.publish-XXXXXX")"
 TMP_PAGE="$(mktemp -d)"
 TMP_HISTORY="$(mktemp)"
 trap 'rm -rf "$WORK_DIR" "$TMP_PAGE"; rm -f "$TMP_HISTORY"' EXIT
-DELTA_ARGS=(plan "$SITE_DIR" --manifest "$MANIFEST" --bucket "$R2_BUCKET"
+DELTA_ARGS=(plan "$SITE_DIR" --manifest "$MANIFEST" --bucket "gcs:$PAPERCUSP_RELEASE_GCS_BUCKET"
   --out "$WORK_DIR/plan.json" --gate-list "$WORK_DIR/gate.list"
   --remove-list "$WORK_DIR/remove.list" --stage "$WORK_DIR/stage")
 if [[ -n "$ONLY" ]]; then
@@ -302,12 +292,6 @@ elif [[ $_gate_rc -ne 0 ]]; then
   exit 1
 fi
 
-command -v aws >/dev/null 2>&1 || { echo "ERROR: aws CLI not on PATH." >&2; exit 1; }
-
-# R2 rejects the trailing-checksum headers newer aws-cli v2 sends by default.
-export AWS_REQUEST_CHECKSUM_CALCULATION="${AWS_REQUEST_CHECKSUM_CALCULATION:-when_required}"
-export AWS_RESPONSE_CHECKSUM_VALIDATION="${AWS_RESPONSE_CHECKSUM_VALIDATION:-when_required}"
-
 PAGES="$(find "$SITE_DIR" -name '*.html' | wc -l)"
 echo
 echo "==> release host : ${BASE%/*}/<secret>"
@@ -319,7 +303,7 @@ echo "==> release host : ${BASE%/*}/<secret>"
 # line still leaked the raw prefix even after that fix landed — the "pipe it
 # through a mask-sed" guidance was never reliable here either, since KEY_PREFIX
 # is derived from PAPERCUSP_UPDATE_BASE_URL, not a grep-able env var).
-echo "==> bucket       : s3://${R2_BUCKET}/<secret>/"
+echo "==> bucket       : gs://${PAPERCUSP_RELEASE_GCS_BUCKET}/<secret>/"
 echo "==> pages        : $PAGES"
 echo "==> publish mode : $DELTA_MODE ($(wc -l < "$WORK_DIR/upload.list" | tr -d ' ') file(s) to upload, $(wc -l < "$WORK_DIR/remove.list" | tr -d ' ') to remove)"
 
@@ -334,26 +318,17 @@ fi
 if [[ "$DELTA_MODE" == "full" ]]; then
   echo
   echo "==> uploading plan pages"
-  aws s3 sync "$SITE_DIR/plans" "s3://${R2_BUCKET}/${KEY_PREFIX}/plans" \
-    --endpoint-url "$ENDPOINT" \
-    --content-type 'text/html; charset=utf-8' \
-    --cache-control 'no-cache, max-age=0' \
-    --delete --only-show-errors
+  release_storage_tree "$SITE_DIR/plans" "${KEY_PREFIX}/plans" 'text/html; charset=utf-8'
 
   echo "==> uploading work-item pages"
-  aws s3 sync "$SITE_DIR/work-items" "s3://${R2_BUCKET}/${KEY_PREFIX}/work-items" \
-    --endpoint-url "$ENDPOINT" \
-    --content-type 'text/html; charset=utf-8' \
-    --cache-control 'no-cache, max-age=0' \
-    --delete --only-show-errors
+  release_storage_tree "$SITE_DIR/work-items" "${KEY_PREFIX}/work-items" 'text/html; charset=utf-8'
 
   # Shared History documents and their self-hosted renderer must be available
   # before the release index advertises its new change-history links.
   for directory in assets changes; do
     if [[ -d "$SITE_DIR/$directory" ]]; then
       echo "==> uploading shared Project History $directory"
-      aws s3 sync "$SITE_DIR/$directory" "s3://${R2_BUCKET}/${KEY_PREFIX}/$directory" \
-        --endpoint-url "$ENDPOINT" --cache-control 'no-cache, max-age=0' --only-show-errors
+      release_storage_tree "$SITE_DIR/$directory" "${KEY_PREFIX}/$directory" ''
     fi
   done
   UPLOAD_FROM="$SITE_DIR"
@@ -367,17 +342,13 @@ else
   for directory in plans work-items; do
     if [[ -d "$STAGE/$directory" ]]; then
       echo "==> uploading changed $directory pages"
-      aws s3 cp --recursive "$STAGE/$directory" "s3://${R2_BUCKET}/${KEY_PREFIX}/$directory" \
-        --endpoint-url "$ENDPOINT" \
-        --content-type 'text/html; charset=utf-8' \
-        --cache-control 'no-cache, max-age=0' --only-show-errors
+      release_storage_tree "$STAGE/$directory" "${KEY_PREFIX}/$directory" 'text/html; charset=utf-8'
     fi
   done
   for directory in assets changes; do
     if [[ -d "$STAGE/$directory" ]]; then
       echo "==> uploading changed shared Project History $directory"
-      aws s3 cp --recursive "$STAGE/$directory" "s3://${R2_BUCKET}/${KEY_PREFIX}/$directory" \
-        --endpoint-url "$ENDPOINT" --cache-control 'no-cache, max-age=0' --only-show-errors
+      release_storage_tree "$STAGE/$directory" "${KEY_PREFIX}/$directory" ''
     fi
   done
   UPLOAD_FROM="$STAGE"
@@ -387,10 +358,7 @@ fi
 # latest.json). It is not optional: without it every user's update history is empty.
 if [[ -f "$UPLOAD_FROM/history.json" ]]; then
   echo "==> uploading history.json (the in-app Update Center reads this)"
-  aws s3 cp "$UPLOAD_FROM/history.json" "s3://${R2_BUCKET}/${KEY_PREFIX}/history.json" \
-    --endpoint-url "$ENDPOINT" \
-    --content-type 'application/json' \
-    --cache-control 'no-cache, max-age=0' --only-show-errors
+  release_storage_put "$UPLOAD_FROM/history.json" "${KEY_PREFIX}/history.json" 'application/json'
 fi
 
 if [[ -f "$UPLOAD_FROM/index.html" ]]; then
@@ -410,10 +378,7 @@ if [[ -f "$UPLOAD_FROM/index.html" ]]; then
     echo "  ⚠ links not checked (the public host did not answer); the read-path check below decides." >&2
   fi
   echo "==> uploading index.html (LAST — this is the page we share)"
-  aws s3 cp "$UPLOAD_FROM/index.html" "s3://${R2_BUCKET}/${KEY_PREFIX}/index.html" \
-    --endpoint-url "$ENDPOINT" \
-    --content-type 'text/html; charset=utf-8' \
-    --cache-control 'no-cache, max-age=0' --only-show-errors
+  release_storage_put "$UPLOAD_FROM/index.html" "${KEY_PREFIX}/index.html" 'text/html; charset=utf-8'
 fi
 
 # Pages that disappeared from a MIRRORED directory (plans/, work-items/) are removed AFTER
@@ -422,7 +387,7 @@ if [[ -s "$WORK_DIR/remove.list" ]]; then
   echo "==> removing $(wc -l < "$WORK_DIR/remove.list" | tr -d ' ') page(s) no longer in the site"
   while IFS= read -r key; do
     [[ -n "$key" ]] || continue
-    aws s3 rm "s3://${R2_BUCKET}/${KEY_PREFIX}/$key" --endpoint-url "$ENDPOINT" --only-show-errors
+    release_storage_delete "${KEY_PREFIX}/$key"
   done < "$WORK_DIR/remove.list"
 fi
 

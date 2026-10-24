@@ -1,181 +1,108 @@
 #!/usr/bin/env bash
-# remote-object-state.selftest.sh — recurrence guard for the stale-artifact bug
-# in upload-release.sh's remote_state() (EI-23963309971611146).
-#
-# THE BUG THIS EXISTS TO CATCH. Above 8 MiB (`SMALL_ARTIFACT_BYTES`, the aws
-# multipart threshold) an S3 ETag is "<md5-of-part-md5s>-<n>", which is not
-# comparable to any local hash. remote_state() therefore fell back to SIZE for
-# exactly the multi-GB artifacts that matter, and both call sites accepted that:
-# the upload loop SKIPPED them and the verifier printed a green tick reading
-# "✓ <name> (N GB, size only — multipart object)".
-#
-# A rebuilt artifact is routinely byte-different at an IDENTICAL size (same
-# inputs, same compression settings), so on 0.0.21 the release host kept
-# YESTERDAY's AppImage — 224,090,616 bytes both sides — while its few-hundred-byte
-# .sig took the re-upload branch and was refreshed. The result was a fresh, valid
-# signature over stale bytes: anyone doing the right thing (download the artifact,
-# verify it against the published signature) sees a mismatch indistinguishable
-# from tampering, and the upload script reported success throughout.
-#
-# The fix records the content hash as S3 user METADATA at upload time, which
-# survives multipart chunking untouched, and adds a mtime rail for legacy objects
-# that predate it.
-#
-#   bash bin/lib/remote-object-state.selftest.sh     # exit 0 = PASS, 1 = FAIL
-#
-# Hermetic: a mock `aws` on PATH backed by a fixture file, synthetic files in a
-# temp dir. No network, no credentials, no real bucket. ~1s.
-#
-# Why a bash self-test and not Vitest: the unit under test is bash. This follows
-# the sibling convention (release-artifacts.selftest.sh, federation-asserts.selftest.sh);
-# the four canonical TS/Cargo/LLM frameworks don't host shell units and this
-# submodule is not in the operator's hoisted vitest workspace.
-set -uo pipefail
+# Hermetic provider-contract tests; no account, network, or release data is used.
+set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Overridable so falsifiability can be proven against a MUTATED COPY outside the
-# tree (scripts/mutation-probe.sh tier 2). Never mutate the real script in place:
-# git-sync sweeps the whole working tree every few minutes and would commit the
-# mutant even if nothing goes wrong and no handler fails.
-UPLOAD_SH="${REMOTE_OBJECT_STATE_SUBJECT:-$DIR/../upload-release.sh}"
-
-FAILED=0
-pass() { printf '  ok   %s\n' "$1"; }
-fail() { printf '  FAIL %s\n    expected: %s\n    actual:   %s\n' "$1" "$2" "$3" >&2; FAILED=1; }
-check() { [[ "$2" == "$3" ]] && pass "$1" || fail "$1" "$2" "$3"; }
-
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
-
-# ── Load the REAL implementation ─────────────────────────────────────────────
-# upload-release.sh is an executable script with top-level side effects (env
-# checks, credential loading), so it cannot simply be sourced. Extract the pure
-# object-state block between two stable anchors and source THAT, so this test
-# exercises the shipped code rather than a copy of it that can silently drift.
-awk '/^s3api_head\(\) \{/,/^# ── What to upload/' "$UPLOAD_SH" > "$TMP/extracted.sh"
-
-# POSITIVE CONTROL for the extraction itself. Without this, a refactor that moves
-# or renames these functions would yield an empty extraction, every assertion
-# below would run against nothing, and the suite would PASS VACUOUSLY — which is
-# the failure mode that makes a guard worse than no guard.
-# shellcheck source=/dev/null
-ENDPOINT="https://mock.invalid" R2_BUCKET="mock-bucket" . "$TMP/extracted.sh" 2>/dev/null
-for fn in s3api_head s3api_head_etag s3api_head_sha256 s3api_head_mtime_epoch local_sha256 remote_state; do
-  if ! declare -F "$fn" >/dev/null; then
-    echo "FAIL: extraction control — '$fn' was not defined by the block pulled from upload-release.sh." >&2
-    echo "      The anchors in this test no longer match the script; fix the extraction rather than" >&2
-    echo "      deleting this check, or every assertion below silently tests nothing." >&2
-    exit 1
-  fi
+. "$DIR/release-storage.sh"
+TEST_ROOT="$(mktemp -d)"
+trap 'rm -rf "$TEST_ROOT"' EXIT
+mkdir "$TEST_ROOT/bin" "$TEST_ROOT/objects"
+export RELEASE_STORAGE_FIXTURE_ROOT="$TEST_ROOT/objects"
+export PAPERCUSP_RELEASE_GCS_BUCKET=test-release-bucket
+export PAPERCUSP_RELEASE_STORAGE_ENV="$TEST_ROOT/absent-config"
+export PATH="$TEST_ROOT/bin:$PATH"
+cat > "$TEST_ROOT/bin/gcloud" <<'PY'
+#!/usr/bin/env python3
+import hashlib, json, os, pathlib, sys
+root = pathlib.Path(os.environ['RELEASE_STORAGE_FIXTURE_ROOT'])
+args = sys.argv[1:]
+def fail(message):
+    print(message, file=sys.stderr); sys.exit(1)
+def paths(uri):
+    uri = uri.split('#')[0]
+    key = hashlib.sha256(uri.encode()).hexdigest()
+    return root / (key + '.json'), root / (key + '.data')
+def load(uri):
+    meta, data = paths(uri)
+    if not meta.exists(): fail('HTTPError 404: object absent')
+    return json.loads(meta.read_text()), data
+def flag(name):
+    return next((x.split('=', 1)[1] for x in args if x.startswith(name + '=')), None)
+def write(uri, body, generation, sha=None):
+    meta, data = paths(uri)
+    data.write_bytes(body)
+    meta.write_text(json.dumps({'generation': str(generation), 'size': str(len(body)),
+        'metadata': {'sha256': sha} if sha else {},
+        'contentType': flag('--content-type'), 'cacheControl': flag('--cache-control')}))
+if os.environ.get('FAKE_DENY') == '1': fail('HTTPError 403: permission denied')
+if args[:3] == ['storage', 'objects', 'describe']:
+    metadata, _ = load(args[3]); print(json.dumps(metadata))
+elif args[:2] == ['storage', 'cat']:
+    uri = args[2]; metadata, data = load(uri)
+    if uri.rsplit('#', 1)[-1] != metadata['generation']: fail('HTTPError 404: generation absent')
+    body = data.read_bytes()
+    sys.stdout.buffer.write(body)
+elif args[:2] == ['storage', 'cp']:
+    source, uri = args[2:4]; meta, _ = paths(uri)
+    current = json.loads(meta.read_text()) if meta.exists() else {'generation': '0'}
+    if os.environ.get('FAKE_RACE') == '1':
+        write(uri, b'peer', int(current['generation']) + 1, hashlib.sha256(b'peer').hexdigest())
+        fail('HTTPError 412: generation changed')
+    if flag('--if-generation-match') != current['generation']: fail('HTTPError 412: condition required')
+    body = pathlib.Path(source).read_bytes()
+    sha = flag('--custom-metadata').removeprefix('sha256=')
+    if sha != hashlib.sha256(body).hexdigest(): fail('wrong digest metadata')
+    write(uri, body, int(current['generation']) + 1, sha)
+    with (root / 'writes').open('a') as log: log.write(uri + '\n')
+    if os.environ.get('FAKE_LOST_RESPONSE') == '1': fail('response lost after commit')
+elif args[:2] == ['storage', 'rm']:
+    uri = args[2]; metadata, data = load(uri)
+    if flag('--if-generation-match') != metadata['generation']: fail('HTTPError 412: condition required')
+    paths(uri)[0].unlink(); data.unlink()
+else: fail('unexpected gcloud call')
+PY
+chmod +x "$TEST_ROOT/bin/gcloud"
+release_storage_init
+printf good > "$TEST_ROOT/local"
+printf evil > "$TEST_ROOT/other"
+checks=0
+expect() {
+  [[ "$1" == "$2" ]] || { echo "FAIL: $3: expected $2, got $1" >&2; exit 1; }
+  checks=$((checks + 1))
+}
+expect "$(release_storage_state release/file "$TEST_ROOT/local")" absent 'confirmed 404'
+expect "$(FAKE_DENY=1 release_storage_state release/file "$TEST_ROOT/local")" metadata-unavailable '403 is unknown'
+if FAKE_DENY=1 release_storage_put "$TEST_ROOT/local" release/file; then exit 1; fi
+expect "$(test -f "$TEST_ROOT/objects/writes" && cat "$TEST_ROOT/objects/writes" || true)" '' 'unknown state does not upload'
+release_storage_put "$TEST_ROOT/local" release/file application/octet-stream 'public, max-age=31536000, immutable' immutable
+expect "$(release_storage_state release/file "$TEST_ROOT/local")" identical 'create verified'
+release_storage_put "$TEST_ROOT/local" release/file '' '' immutable
+expect "$(wc -l < "$TEST_ROOT/objects/writes" | tr -d ' ')" 1 'replay does not write'
+if release_storage_put "$TEST_ROOT/other" release/file '' '' immutable; then exit 1; fi
+expect "$(release_storage_state release/file "$TEST_ROOT/other")" differs 'same-size signature collision'
+release_storage_get release/file "$TEST_ROOT/readback"
+expect "$(cat "$TEST_ROOT/readback")" good 'occupied bytes retained'
+python3 - "$TEST_ROOT/objects" <<'PY'
+import json, pathlib, sys
+for file in pathlib.Path(sys.argv[1]).glob('*.json'):
+    value = json.loads(file.read_text()); value['metadata'] = {}; file.write_text(json.dumps(value))
+PY
+expect "$(release_storage_state release/file "$TEST_ROOT/local")" identical 'legacy exact byte comparison'
+expect "$(release_storage_state release/file "$TEST_ROOT/other")" differs 'legacy equal size is not equal content'
+FAKE_LOST_RESPONSE=1 release_storage_put "$TEST_ROOT/local" release/lost '' '' immutable
+expect "$(release_storage_state release/lost "$TEST_ROOT/local")" identical 'lost response reconciles original object'
+expect "$(wc -l < "$TEST_ROOT/objects/writes" | tr -d ' ')" 2 'lost response did not retry'
+if FAKE_RACE=1 release_storage_put "$TEST_ROOT/local" release/race; then exit 1; fi
+release_storage_get release/race "$TEST_ROOT/peer"
+expect "$(cat "$TEST_ROOT/peer")" peer 'generation race preserves winner'
+mkdir "$TEST_ROOT/tree"
+printf '<p>page</p>' > "$TEST_ROOT/tree/page with spaces.html"
+release_storage_tree "$TEST_ROOT/tree" release/history 'text/html; charset=utf-8'
+release_storage_get 'release/history/page with spaces.html' "$TEST_ROOT/page"
+expect "$(cat "$TEST_ROOT/page")" '<p>page</p>' 'tree preserves names and bytes'
+release_storage_delete release/file
+expect "$(release_storage_state release/file "$TEST_ROOT/local")" absent 'generation-fenced deletion'
+for key in '../escape' 'release/../escape' 'release/*' 'release/file#1' '/absolute'; do
+  if release_storage_uri "$key"; then echo 'unsafe key accepted' >&2; exit 1; fi
+  checks=$((checks + 1))
 done
-if [[ -z "${SMALL_ARTIFACT_BYTES:-}" ]]; then
-  echo "FAIL: extraction control — SMALL_ARTIFACT_BYTES not set by the extracted block." >&2
-  exit 1
-fi
-
-ENDPOINT="https://mock.invalid"
-R2_BUCKET="mock-bucket"
-
-# ── Mock aws ─────────────────────────────────────────────────────────────────
-# Answers head-object --query {ContentLength,ETag,Metadata.sha256,LastModified}
-# from $TMP/fixture: one "field=value" per line. An absent field exits non-zero,
-# which is how the real CLI signals it, so the metadata-unavailable path is real.
-mkdir -p "$TMP/bin"
-cat > "$TMP/bin/aws" <<'MOCK'
-#!/usr/bin/env bash
-q=""
-while [[ $# -gt 0 ]]; do
-  case "$1" in --query) q="$2"; shift 2 ;; *) shift ;; esac
-done
-key=""
-case "$q" in
-  ContentLength)    key=size ;;
-  ETag)             key=etag ;;
-  Metadata.sha256)  key=sha256 ;;
-  LastModified)     key=lastmodified ;;
-  *) exit 1 ;;
-esac
-line="$(grep "^${key}=" "$FIXTURE" 2>/dev/null | head -1)"
-[[ -n "$line" ]] || exit 1
-printf '%s\n' "${line#*=}"
-MOCK
-chmod +x "$TMP/bin/aws"
-export PATH="$TMP/bin:$PATH"
-export FIXTURE="$TMP/fixture"
-
-BIG=$((SMALL_ARTIFACT_BYTES + 4096))
-ART="$TMP/Papercusp_GUI_0.0.22_amd64.AppImage"
-head -c "$BIG" /dev/urandom > "$ART"
-ART_SHA="$(sha256sum "$ART" | cut -d' ' -f1)"
-ART_SIZE="$(stat -c%s "$ART")"
-MULTIPART_ETAG="d41d8cd98f00b204e9800998ecf8427e-7"
-
-echo "remote-object-state self-test"
-
-# 1. absent
-printf 'x=1\n' > "$FIXTURE"
-check "absent when nothing is published" "absent" "$(remote_state some/key "$ART")"
-
-# 2. size differs -> proven different
-printf 'size=%s\n' "$((ART_SIZE - 1))" > "$FIXTURE"
-check "differs when the published size differs" "differs" "$(remote_state some/key "$ART")"
-
-# 3. recorded sha256 MATCHES -> identical, even though the ETag is multipart
-{ printf 'size=%s\n' "$ART_SIZE"; printf 'etag=%s\n' "$MULTIPART_ETAG"; printf 'sha256=%s\n' "$ART_SHA"; } > "$FIXTURE"
-check "identical when the recorded sha256 matches (multipart ETag ignored)" \
-  "identical" "$(remote_state some/key "$ART")"
-
-# 4. ★ THE REGRESSION CASE ★ — same size, multipart ETag, recorded sha256 DIFFERS.
-#    This is precisely the 0.0.21 AppImage: identical byte count, different bytes.
-#    Before the fix this returned size-only-match and the artifact was SKIPPED.
-{ printf 'size=%s\n' "$ART_SIZE"; printf 'etag=%s\n' "$MULTIPART_ETAG"
-  printf 'sha256=%s\n' "0000000000000000000000000000000000000000000000000000000000000000"; } > "$FIXTURE"
-check "differs when a large same-size object's recorded sha256 mismatches (the stale-artifact bug)" \
-  "differs" "$(remote_state some/key "$ART")"
-
-# 5. legacy object, no recorded sha256, LOCAL IS NEWER -> local-newer (re-upload)
-touch -d '2020-01-01 00:00:00 UTC' "$TMP/oldref"
-{ printf 'size=%s\n' "$ART_SIZE"; printf 'etag=%s\n' "$MULTIPART_ETAG"
-  printf 'lastmodified=%s\n' "2020-01-01T00:00:00+00:00"; } > "$FIXTURE"
-check "local-newer when a legacy same-size object predates the local file" \
-  "local-newer" "$(remote_state some/key "$ART")"
-
-# 6. legacy object, no recorded sha256, remote is NEWER -> size-only-match
-{ printf 'size=%s\n' "$ART_SIZE"; printf 'etag=%s\n' "$MULTIPART_ETAG"
-  printf 'lastmodified=%s\n' "2099-01-01T00:00:00+00:00"; } > "$FIXTURE"
-check "size-only-match when a legacy same-size object is newer than the local file" \
-  "size-only-match" "$(remote_state some/key "$ART")"
-
-# 7. a real MD5 ETag still settles identity outright (small-file path preserved)
-SMALL="$TMP/small.sig"
-printf 'signature-bytes' > "$SMALL"
-{ printf 'size=%s\n' "$(stat -c%s "$SMALL")"; printf 'etag=%s\n' "$(md5sum "$SMALL" | cut -d' ' -f1)"; } > "$FIXTURE"
-check "identical when a real MD5 ETag matches" "identical" "$(remote_state some/key "$SMALL")"
-
-# 8. ETag unreadable -> metadata-unavailable, NEVER a silent pass
-printf 'size=%s\n' "$ART_SIZE" > "$FIXTURE"
-check "metadata-unavailable when the ETag cannot be read" \
-  "metadata-unavailable" "$(remote_state some/key "$ART")"
-
-# 9. the VERIFIER must not print a green tick for an unverifiable large object.
-#    "I could not check" and "I checked and it was fine" must not share a symbol.
-if grep -qE '✓.*size only' "$UPLOAD_SH"; then
-  fail "verifier emits no ✓ for a size-only (unverifiable) artifact" \
-       "no '✓ ... size only' in upload-release.sh" "found one"
-else
-  pass "verifier emits no ✓ for a size-only (unverifiable) artifact"
-fi
-
-# 10. uploads must record the content hash, or every future comparison degrades
-#     back to the size guess this whole fix removes.
-if grep -q -- '--metadata "sha256=' "$UPLOAD_SH"; then
-  pass "uploads record sha256 as object metadata"
-else
-  fail "uploads record sha256 as object metadata" "--metadata \"sha256=...\" present" "absent"
-fi
-
-if [[ "$FAILED" == "0" ]]; then
-  echo "remote-object-state self-test: ALL PASS"
-  exit 0
-fi
-echo "remote-object-state self-test: FAILURES" >&2
-exit 1
+echo "release-storage self-test: $checks PASS"

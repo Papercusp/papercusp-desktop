@@ -93,28 +93,10 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 # ── Credentials + upload ─────────────────────────────────────────────────────
-R2_ENV="${HOME}/.papercusp/r2.env"
-if [[ ! -f "$R2_ENV" ]]; then
-  echo "ERROR: $R2_ENV not found — R2 credentials are owner-provisioned." >&2
-  exit 1
-fi
-# shellcheck source=/dev/null
-set -a; . "$R2_ENV"; set +a
-: "${R2_ACCOUNT_ID:?set R2_ACCOUNT_ID in $R2_ENV}"
-: "${R2_BUCKET:?set R2_BUCKET in $R2_ENV}"
-: "${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID in $R2_ENV}"
-: "${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY in $R2_ENV}"
-ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-command -v aws >/dev/null 2>&1 || { echo "ERROR: aws CLI not on PATH." >&2; exit 1; }
-# R2 rejects the trailing-checksum headers newer aws-cli v2 sends by default.
-export AWS_REQUEST_CHECKSUM_CALCULATION="${AWS_REQUEST_CHECKSUM_CALCULATION:-when_required}"
-export AWS_RESPONSE_CHECKSUM_VALIDATION="${AWS_RESPONSE_CHECKSUM_VALIDATION:-when_required}"
-
+. "$HERE/lib/release-storage.sh"
+release_storage_init
 echo "==> uploading $PAGE"
-aws s3 cp "$OUT_DIR/$PAGE" "s3://${R2_BUCKET}/${KEY_PREFIX}/$PAGE" \
-  --endpoint-url "$ENDPOINT" \
-  --content-type 'text/html; charset=utf-8' \
-  --cache-control 'no-cache, max-age=0' --only-show-errors
+release_storage_put "$OUT_DIR/$PAGE" "${KEY_PREFIX}/$PAGE" 'text/html; charset=utf-8'
 
 # ── Verify what the public path actually serves ──────────────────────────────
 echo

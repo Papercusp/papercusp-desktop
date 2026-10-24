@@ -31,11 +31,8 @@
 # ~/.papercusp/release-host.env and is PERMANENT (D-003): every shipped app has
 # <base>/latest.json baked in, so changing it silently strands every install.
 #
-# Credentials live in ~/.papercusp/r2.env (never in git):
-#   R2_ACCOUNT_ID=...
-#   R2_BUCKET=...
-#   AWS_ACCESS_KEY_ID=...          # an R2 API token's access key
-#   AWS_SECRET_ACCESS_KEY=...
+# Private GCS bucket selection lives in ~/.papercusp/release-storage.env.
+# gcloud credentials stay outside the repository.
 #
 set -euo pipefail
 
@@ -78,192 +75,10 @@ if [[ -z "$KEY_PREFIX" ]]; then
   exit 1
 fi
 
-# ── Credentials ──────────────────────────────────────────────────────────────
-R2_ENV="${HOME}/.papercusp/r2.env"
-if [[ ! -f "$R2_ENV" ]]; then
-  echo "ERROR: $R2_ENV not found — R2 credentials are owner-provisioned (P-002)." >&2
-  echo "       Expected: R2_ACCOUNT_ID, R2_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY" >&2
-  exit 1
-fi
-# shellcheck source=/dev/null
-set -a; . "$R2_ENV"; set +a
-: "${R2_ACCOUNT_ID:?set R2_ACCOUNT_ID in $R2_ENV}"
-: "${R2_BUCKET:?set R2_BUCKET in $R2_ENV}"
-: "${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID in $R2_ENV}"
-: "${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY in $R2_ENV}"
-ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-
-command -v aws >/dev/null 2>&1 || { echo "ERROR: aws CLI not on PATH (R2 is S3-compatible)." >&2; exit 1; }
-
-# R2 does not implement the trailing-checksum headers newer aws-cli v2 sends by
-# default; without these it rejects the upload with an opaque 501/400.
-export AWS_REQUEST_CHECKSUM_CALCULATION="${AWS_REQUEST_CHECKSUM_CALCULATION:-when_required}"
-export AWS_RESPONSE_CHECKSUM_VALIDATION="${AWS_RESPONSE_CHECKSUM_VALIDATION:-when_required}"
-
-s3() { aws s3 --endpoint-url "$ENDPOINT" "$@"; }
-
-# Size of an object in the bucket, or empty if it is not there. Used to prove the
-# bytes landed without depending on the public hostname being bound yet.
-s3api_head() {
-  aws s3api head-object --endpoint-url "$ENDPOINT" \
-    --bucket "$R2_BUCKET" --key "$1" \
-    --query 'ContentLength' --output text 2>/dev/null || true
-}
-
-# ETag of an object in the bucket (quotes stripped), or empty if it is not there.
-#
-# For a NON-multipart upload the ETag IS the MD5 of the object's content, so it
-# settles byte-identity outright. A MULTIPART upload instead yields
-# "<md5-of-the-part-md5s>-<partcount>" — the `-N` suffix is how you tell them
-# apart, and such a value is NOT comparable to any local hash. `aws s3 cp` goes
-# multipart above 8 MiB, so in practice: every small companion file (.sig,
-# .json, .txt) gets a real content check, and only the multi-GB artifacts fall
-# back to size.
-s3api_head_etag() {
-  local etag
-  # Do not turn an unavailable authenticated metadata read into an empty,
-  # apparently-valid value. `remote_state` must distinguish a real multipart
-  # ETag from a transport/auth/provider failure; otherwise a failed lookup
-  # falls through to the size-only path and can skip a stale large artifact.
-  etag="$(aws s3api head-object --endpoint-url "$ENDPOINT" \
-    --bucket "$R2_BUCKET" --key "$1" \
-    --query 'ETag' --output text 2>/dev/null)" || return 1
-  etag="${etag//\"/}"
-  [[ -n "$etag" && "$etag" != "None" ]] || return 1
-  printf '%s\n' "$etag"
-}
-
-# The sha256 WE recorded on the object at upload time, or empty.
-#
-# This is the fix for the one gap the ETag cannot close. Above 8 MiB an ETag is
-# "<md5-of-part-md5s>-<n>", which is not comparable to any local hash, so a
-# multi-GB artifact had no content proof at all and fell back to SIZE. A rebuilt
-# artifact is very often byte-different at an IDENTICAL size (same inputs, same
-# compression settings), so that fallback skipped real changes — see the verdict
-# table below. User metadata sidesteps multipart entirely: we put the hash there
-# ourselves, so it stays comparable no matter how the object was chunked.
-s3api_head_sha256() {
-  local v
-  v="$(aws s3api head-object --endpoint-url "$ENDPOINT" \
-    --bucket "$R2_BUCKET" --key "$1" \
-    --query 'Metadata.sha256' --output text 2>/dev/null)" || return 1
-  [[ -n "$v" && "$v" != "None" ]] || return 1
-  printf '%s\n' "$v"
-}
-
-# LastModified of the published object as a unix epoch, or empty.
-#
-# Only used for objects predating the sha256 metadata above: for those there is
-# still no content proof, but "the local file was rebuilt AFTER this object was
-# published" is a strong, cheap staleness signal, and it fails in the safe
-# direction (an unnecessary re-upload, never a skipped stale artifact).
-s3api_head_mtime_epoch() {
-  local v
-  v="$(aws s3api head-object --endpoint-url "$ENDPOINT" \
-    --bucket "$R2_BUCKET" --key "$1" \
-    --query 'LastModified' --output text 2>/dev/null)" || return 1
-  [[ -n "$v" && "$v" != "None" ]] || return 1
-  date -u -d "$v" +%s 2>/dev/null || return 1
-}
-
-# The local content hash, in the exact form recorded as object metadata.
-local_sha256() { sha256sum "$1" | cut -d' ' -f1; }
-
-# Anything at or below this is never worth a size-only guess: re-pushing it
-# costs nothing, and the skip exists solely to avoid re-pushing GIGABYTES.
-# Matches the aws multipart threshold, i.e. exactly the boundary at which an
-# ETag stops being a usable content hash.
-SMALL_ARTIFACT_BYTES=$((8 * 1024 * 1024))
-
-# Compare a local file against the published object and say what is ACTUALLY
-# known about them. Echoes exactly one of:
-#
-#   absent          — nothing published at that key
-#   identical       — content PROVEN equal (recorded sha256 matched, or the
-#                            ETag was a real MD5 and matched)
-#   differs         — content PROVEN different (size differs, or a recorded
-#                            sha256 / real-MD5 ETag mismatched)
-#   local-newer     — sizes agree, NO content proof is available (a legacy
-#                            object with no recorded sha256), and the local file
-#                            was modified AFTER the object was published. Not
-#                            proof of difference, but the exact shape of a stale
-#                            upload: re-push rather than guess.
-#   size-only-match       — sizes agree and a valid multipart ETag is present,
-#                            but its content hash is not comparable AND the
-#                            object is at least as new as the local file
-#   metadata-unavailable  — the remote object exists at this size, but its
-#                            authenticated ETag metadata could not be read;
-#                            this is NEVER evidence of byte identity
-#
-# The last verdict is the whole point of this function. `upload-release.sh` used
-# to treat "same size" as "same file" for every artifact, and its own comment
-# justified that with "a re-cut with the same version but different bytes is a
-# size change in practice". That is FALSE for exactly the files whose entire job
-# is byte-identity: a minisign signature is FIXED-LENGTH (428 B here), so a
-# re-cut produces a genuinely different .sig at an identical size, the skip
-# fires, and the NEW artifact ends up published beside the OLD artifact's
-# signature. Anyone who then does the right thing — download the artifact,
-# verify it against the published signature — gets a MISMATCH on a clean
-# release, which is indistinguishable from tampering. Measured live on the
-# 0.0.17 Windows GUI re-publish (EI-20592319474283246).
-remote_state() {
-  local key="$1" file="$2" local_size remote_size etag
-  local_size="$(stat -c%s "$file")"
-  remote_size="$(s3api_head "$key")"
-  if [[ -z "$remote_size" || "$remote_size" == "None" ]]; then
-    echo absent; return
-  fi
-  if [[ "$remote_size" != "$local_size" ]]; then
-    echo differs; return
-  fi
-  # The sha256 WE recorded beats every other signal, because it is the only one
-  # that stays comparable across multipart chunking. Checked BEFORE the ETag so a
-  # multi-GB artifact gets a real content verdict instead of the size guess that
-  # let a stale AppImage ship under a fresh signature (EI-23963309971611146).
-  local recorded_sha
-  if recorded_sha="$(s3api_head_sha256 "$key")"; then
-    if [[ "$recorded_sha" == "$(local_sha256 "$file")" ]]; then
-      echo identical
-    else
-      echo differs
-    fi
-    return
-  fi
-
-  if ! etag="$(s3api_head_etag "$key")"; then
-    echo metadata-unavailable
-    return
-  fi
-  if [[ "$etag" =~ ^[0-9a-f]{32}$ ]]; then
-    if [[ "$etag" == "$(md5sum "$file" | cut -d' ' -f1)" ]]; then
-      echo identical
-    else
-      echo differs
-    fi
-    return
-  fi
-  # Only the documented multipart shape earns the size-only fallback. An
-  # opaque/malformed ETag (or a provider-specific response) is unknown, not
-  # proof that the same-size bytes are safe to skip.
-  if [[ "$etag" =~ ^[0-9a-fA-F]{32}-[0-9]+$ ]]; then
-    # A legacy multipart object with no recorded sha256: still no content proof.
-    # Before falling back to the size guess, ask the one cheap question that
-    # actually distinguishes the stale case — was the local file rebuilt AFTER
-    # this object was published? If so it is very likely the object is stale, and
-    # the safe direction is an unnecessary re-upload rather than a skipped one.
-    local remote_epoch local_epoch
-    if remote_epoch="$(s3api_head_mtime_epoch "$key")" \
-       && local_epoch="$(stat -c%Y "$file" 2>/dev/null)" \
-       && [[ -n "$remote_epoch" && -n "$local_epoch" ]] \
-       && (( local_epoch > remote_epoch )); then
-      echo local-newer
-      return
-    fi
-    echo size-only-match
-  else
-    echo metadata-unavailable
-  fi
-}
+# ── Private GCS storage ─────────────────────────────────────────────────────
+. "$HERE/lib/release-storage.sh"
+release_storage_init
+remote_state() { release_storage_state "$@"; }
 
 # ── What to upload ───────────────────────────────────────────────────────────
 # NOTE: there is deliberately no $BUNDLE here. Since EI-12913 this script consumes
@@ -378,7 +193,7 @@ echo "==> release host : ${BASE%/*}/<secret>"
 # line 161 masks the host path. (An agent's mask-sed around DRY_RUN output missed
 # it here on 2026-07-17 because there is no KEY_PREFIX env var to grep — it is
 # derived from PAPERCUSP_UPDATE_BASE_URL — so the preview must self-mask.)
-echo "==> bucket       : s3://${R2_BUCKET}/<secret>/"
+echo "==> bucket       : gs://${PAPERCUSP_RELEASE_GCS_BUCKET}/<secret>/"
 echo "==> tag          : $TAG"
 echo "==> artifacts    : ${#ARTIFACTS[@]}"
 for f in "${ARTIFACTS[@]}"; do
@@ -604,10 +419,8 @@ fi
 # complete the HTTPS verification after the custom domain was bound — re-pushing
 # 11 GB to re-learn what we already know is pure waste.
 #
-# The skip is decided by `remote_state`, which compares CONTENT wherever content
-# can be compared and only falls back to size for genuinely multipart (i.e.
-# multi-GB) objects. It deliberately does NOT trust size for small files: see the
-# fixed-length-signature failure documented on `remote_state` above.
+# Skip only exact content matches. Unknown state refuses publication; versioned
+# payloads are create-only and cannot replace another signed cut.
 for f in "${ARTIFACTS[@]}"; do
   name="$(basename "$f")"
   local_size="$(stat -c%s "$f")"
@@ -616,40 +429,17 @@ for f in "${ARTIFACTS[@]}"; do
       echo "==> already uploaded, content verified identical — skipping $name"
       continue
       ;;
-    local-newer)
-      # Same size, no content proof, but the local file is NEWER than the
-      # published object. That is the exact fingerprint of the stale-artifact
-      # bug: a rebuilt artifact is routinely byte-different at an identical size,
-      # so a size match here is worth nothing. Re-push (EI-23963309971611146).
-      echo "==> re-uploading $name (same size, but the local file is NEWER than the published object — size is not evidence)"
-      ;;
-    size-only-match)
-      # Sizes agree and nothing proved the bytes do. This is now reachable ONLY
-      # for a legacy object with no recorded sha256 that is also at least as new
-      # as the local file. Every object this script uploads from now on carries a
-      # sha256, so this branch shrinks to nothing as old releases age out.
-      if (( local_size > SMALL_ARTIFACT_BYTES )); then
-        echo "==> $name: size matches but content is NOT verifiable (legacy multipart object, no recorded sha256) — skipping" >&2
-        echo "    If this artifact was rebuilt, re-run with PAPERCUSP_FORCE_REUPLOAD=1; size alone cannot tell." >&2
-        if [[ "${PAPERCUSP_FORCE_REUPLOAD:-0}" == "1" ]]; then
-          echo "==> PAPERCUSP_FORCE_REUPLOAD=1 — uploading $name anyway"
-        else
-          continue
-        fi
-      else
-        echo "==> re-uploading $name (same size, but content could not be verified and it is small)"
-      fi
-      ;;
     metadata-unavailable)
-      echo "==> remote content metadata unavailable — uploading $name instead of trusting its size"
+      echo "==> remote state unknown — refusing to publish $name" >&2
+      exit 1
       ;;
   esac
   echo "==> uploading $name"
   # Record the content hash AS OBJECT METADATA. This is what makes the next run's
   # comparison exact: an ETag stops being a content hash above 8 MiB, but this
   # value is ours and survives multipart chunking untouched.
-  s3 cp "$f" "s3://${R2_BUCKET}/${KEY_PREFIX}/${TAG}/${name}" --only-show-errors \
-    --metadata "sha256=$(local_sha256 "$f")"
+  release_storage_put "$f" "${KEY_PREFIX}/${TAG}/${name}" "" \
+    "public, max-age=31536000, immutable" immutable
 done
 
 # The manifest goes to EVERY feed path this channel publishes:
@@ -671,8 +461,7 @@ upload_manifest() {
     else
       echo "==> uploading ${label} to the ${CHANNEL} channel feed (${path})"
     fi
-    s3 cp "$src" "s3://${R2_BUCKET}/${KEY_PREFIX}/${path}" \
-      --content-type application/json --cache-control 'no-cache, max-age=0' --only-show-errors
+    release_storage_put "$src" "${KEY_PREFIX}/${path}" application/json
   done < <(desktop_channel_feed_paths "$CHANNEL" "$manifest_name")
 }
 
@@ -689,14 +478,14 @@ fi
 # Two INDEPENDENT checks, because they can fail for very different reasons and
 # collapsing them hides which one broke:
 #
-#   1. STORAGE (S3 endpoint, authenticated) — did the bytes land, intact?
+#   1. STORAGE (GCS, authenticated) — did the bytes land, intact?
 #      Always available; a failure here means the upload is genuinely broken.
 #   2. PUBLIC READ PATH (https://<host>/…) — can an installed app actually
 #      fetch them? This additionally requires the custom domain to be bound to
 #      the bucket, which is a one-time Cloudflare setup, NOT a property of this
 #      upload. An unbound domain is an expected pre-launch state, not corruption.
 echo
-echo "==> verifying storage (S3, authenticated)"
+echo "==> verifying storage (GCS, authenticated)"
 # This leg used to read ONLY ContentLength — the same measurement the skip above
 # used to make its decision. That is why it could never catch a stale companion
 # file: the skip and its verifier shared one derivation, so they agreed because
@@ -711,31 +500,8 @@ for f in "${ARTIFACTS[@]}"; do
     identical)
       printf '  ✓ %s (%.2f GB, content verified)\n' "$name" "$(echo "scale=4; $local_size/1000000000" | bc)"
       ;;
-    local-newer)
-      echo "  ✗ $name — published object is OLDER than the local file at the same size." >&2
-      echo "    That is the stale-artifact fingerprint: a rebuilt artifact is routinely" >&2
-      echo "    byte-different at an identical size. (EI-23963309971611146)" >&2
-      STORAGE_BAD=1
-      ;;
-    size-only-match)
-      # This used to print a green tick for any artifact over 8 MiB, which is how
-      # a STALE AppImage was reported as "verified" on 0.0.21: the check could not
-      # see content, so it reported the only thing it could see — the size — and
-      # rendered that as success. A verification step that cannot verify must not
-      # emit a ✓; "I could not check" and "I checked and it was fine" are
-      # different facts and must never share a symbol. (EI-23963309971611146)
-      echo "  ✗ $name — published at the right size but its content could NOT be verified." >&2
-      if (( local_size > SMALL_ARTIFACT_BYTES )); then
-        echo "    Multipart object with no recorded sha256 metadata. Every upload this script" >&2
-        echo "    performs now records one, so this means the object predates that or was" >&2
-        echo "    written by something else. Size is not evidence of identity." >&2
-      else
-        echo "    It is small enough that there is no excuse for not knowing." >&2
-      fi
-      STORAGE_BAD=1
-      ;;
     metadata-unavailable)
-      echo "  ✗ $name — authenticated remote ETag metadata was unavailable; cannot verify stored bytes." >&2
+      echo "  ✗ $name — authenticated remote content verification was unavailable; cannot verify stored bytes." >&2
       STORAGE_BAD=1
       ;;
     absent)
@@ -778,9 +544,9 @@ verify_public_manifest_identity() {
   if [[ -z "$http_code" || "$http_code" == "000" ]]; then
     hostname_only="$(printf '%s' "$BASE" | sed -E 's#^https?://([^/]+).*#\1#')"
     echo "  ⚠ ${hostname_only} is not reachable — the artifacts ARE uploaded and intact," >&2
-    echo "    but the R2 bucket is not yet published at this hostname, so installed apps" >&2
+    echo "    but the release delivery Worker is not serving this hostname, so installed apps" >&2
     echo "    cannot download them. One-time setup, in Cloudflare:" >&2
-    echo "      R2 → ${R2_BUCKET} → Settings → Custom Domains → Connect Domain → ${hostname_only}" >&2
+    echo "      delivery Worker → release namespace → ${hostname_only}" >&2
     echo "    Re-run this script afterwards to complete the verification." >&2
     return 2
   fi
