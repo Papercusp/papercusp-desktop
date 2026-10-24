@@ -26,6 +26,32 @@ const devOperatorSource = fs.readFileSync(DEV_OPERATOR_SCRIPT, 'utf8');
 const dreamSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-dream-native.sh'), 'utf8');
 const voiceSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-voice-settings.sh'), 'utf8');
 
+test('pinned dependency preflight rejects a retained source shadow before allocating a native rig', () => {
+  const preflight = source.match(/^install_in_flight_preflight\(\) \{[\s\S]*?(?=\ninstall_in_flight_preflight \|\| exit)/m)?.[0];
+  assert.ok(preflight);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'native-donor-preflight-'));
+  try {
+    // A shadow has a real root directory but links its package contents. The
+    // old -L node_modules check admitted this maintained materializer shape.
+    fs.mkdirSync(path.join(root, 'node_modules'));
+    fs.mkdirSync(path.join(root, '.git'));
+    const marker = path.join(root, '.git', 'lint-as-committed-owner.json');
+    for (const retained of [false, true]) {
+      if (retained) fs.writeFileSync(marker, '{}');
+      const result = spawnSync('bash', ['-c',
+        'node() { printf "INSTALL_PEEK_REACHED\\n"; }\n' + preflight + '\n' +
+        'install_in_flight_preflight || exit $?\nprintf "RIG_ALLOCATION_REACHED\\n"\n'],
+      { encoding: 'utf8', env: { ...process.env, REPO_DIR: root, VERIFY_TAURI_SOURCE_REF: 'a'.repeat(40) } });
+      assert.equal(result.status, retained ? 2 : 0, result.stderr);
+      if (retained) {
+        assert.match(result.stderr, /VERIFY_TAURI_DEPENDENCY_DONOR_INVALID/);
+        assert.match(result.stderr, /Set PAPERCUSP_REPO_DIR/);
+        assert.doesNotMatch(result.stdout, /INSTALL_PEEK_REACHED|RIG_ALLOCATION_REACHED/);
+      } else assert.match(result.stdout, /INSTALL_PEEK_REACHED\nRIG_ALLOCATION_REACHED/);
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 function nativeCargoPreflightFixture({ freeGb, warm = false, prepareOnly = false, claimSlot = false, handoff = false, backgroundHandoff = false, peerReceipt = false, afterFreeGb = 12, aggregate = false, sourceDevice = 101, bulkDevice = 101, bulkFreeGb = freeGb, preAdmissionGb = 0, preparationAgeSec = 0, compileAgeSec = 0, cargoStage = false, targetOnRoot = false }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-native-capacity-'));
   const target = path.join(dir, 'cargo');
