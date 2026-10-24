@@ -535,44 +535,41 @@ __pc_private_slot_bytes() {
 # Snapshot only validated, unexpired agent pins intersecting this population.
 # Other retention leases still protect deletion, but are not pin allowances.
 __pc_private_slot_cap_pins() {
-  local shared="$1" retention lease paths status pin dir name normalized other covered
-  local -a roots=() pins=()
-  local -A seen=()
+  local shared="$1" dir name normalized
+  local -a roots=()
   while IFS=$'\t' read -r dir name; do
     normalized="$(release_artifacts_normalize_path "$dir")" || return 2
     roots+=("$normalized")
   done < <(__pc_private_slot_candidates "$shared")
   ((${#roots[@]} > 0)) || return 0
-  retention="$(release_artifacts_retention_root)"
-  for lease in "$retention"/lease-agent-pin-*.tsv; do
-    [[ -f "$lease" ]] || continue
-    status=0
-    paths="$(release_artifacts_retention_lease_read_paths "$lease")" || status=$?
-    if ((status == 1)); then continue; fi
-    ((status == 0)) || return 2
-    while IFS= read -r pin; do
-      [[ -n "$pin" ]] || continue
-      pin="$(release_artifacts_normalize_path "$pin")" || return 2
-      for dir in "${roots[@]}"; do
-        if [[ "$dir" == "$pin" || "$dir" == "$pin/"* ]]; then normalized="$dir"
-        elif [[ "$pin" == "$dir/"* ]]; then normalized="$pin"
-        else continue
-        fi
-        # A missing/unreadable pinned child cannot establish allocated coverage.
-        [[ -e "$normalized" ]] || return 2
-        if [[ -z "${seen["$normalized"]:-}" ]]; then
-          pins+=("$normalized"); seen["$normalized"]=1
-        fi
-      done
-    done <<< "$paths"
-  done
-  for pin in "${pins[@]}"; do
-    covered=0
-    for other in "${pins[@]}"; do
-      if [[ "$pin" == "$other/"* ]]; then covered=1; break; fi
-    done
-    if ((covered == 0)); then printf '%s\n' "$pin"; fi
-  done
+  # Reuse the platform's metadata/owner/reason/finite-expiry validation. A
+  # lease filename alone is never proof that the protected bytes are pinned.
+  node --input-type=module - "$__pc_claim_dir/../../../scripts/lib/retention-pins.mjs" \
+    "$(release_artifacts_retention_root)" "${roots[@]}" <<'JS'
+import { lstatSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const [modulePath, dir, ...roots] = process.argv.slice(2);
+const { readRetentionPins } = await import(pathToFileURL(modulePath).href);
+const read = readRetentionPins({ dir });
+if (read.errors.length) process.exit(2);
+const selected = new Set();
+for (const pin of read.pins) for (const value of pin.paths) {
+  const p = resolve(value);
+  for (const root of roots) {
+    if (root === p || root.startsWith(p + sep)) selected.add(root);
+    else if (p.startsWith(root + sep)) {
+      // Unknown pinned-child allocation must never exempt the entire parent.
+      try { lstatSync(p); } catch { process.exit(2); }
+      selected.add(p);
+    }
+  }
+}
+const paths = [...selected].sort();
+for (const p of paths) if (!paths.some(other => other !== p && p.startsWith(other + sep))) {
+  process.stdout.write(p + '\n');
+}
+JS
 }
 
 __pc_reap_private_target_slots() {

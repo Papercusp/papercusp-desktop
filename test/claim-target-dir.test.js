@@ -85,11 +85,15 @@ function claim(env = {}) {
 function writeRetentionLease(tag, targetPath) {
   const retentionRoot = join(home, 'retention');
   mkdirSync(retentionRoot, { recursive: true });
+  const pin = tag.startsWith('agent-pin-');
+  const metadata = pin ? 'agent-pin-' + Buffer.from(JSON.stringify({ version: 1,
+    id: require('node:crypto').randomUUID(), owner: 'slot-test', reason: 'fixture evidence',
+    createdAt: new Date().toISOString() })).toString('base64url') : tag;
   writeFileSync(join(retentionRoot, `lease-${tag}.tsv`), [
     'schema=papercusp-release-retention/v1',
-    `tag=${tag}`,
+    `tag=${metadata}`,
     'created_ns=1',
-    'expires_ns=0',
+    `expires_ns=${pin ? BigInt(Date.now() + 86400000) * 1000000n : 0}`,
     `path=${targetPath}`,
     '',
   ].join('\n'));
@@ -844,6 +848,41 @@ test('an unreadable Cargo pin keeps cap coverage unknown and the root intact', (
   });
   assert.ok(existsSync(root));
   assert.deepStrictEqual(auditLines(), []);
+});
+
+test('a pin-shaped Cargo marker without pin metadata cannot grant a cap allowance', () => {
+  const root = makePrivateRoot('pid99999999');
+  const retention = writeRetentionLease('agent-pin-invalid', root);
+  const marker = join(retention, 'lease-agent-pin-invalid.tsv');
+  writeFileSync(marker, readFileSync(marker, 'utf8').replace(/^tag=.*$/m, 'tag=release-window-fixture'));
+  assert.throws(() => execFileSync('bash', [join(__dirname, '..', 'bin', 'reap-private-target-slots.sh')], {
+    cwd: home, env: isolatedEnv(reapEnv({ ROOT: home, PAPERCUSP_DESKTOP_PRIVATE_SLOT_MAX_BYTES: '1' })),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }), error => {
+    const cap = JSON.parse(error.stderr.toString().split('\n').find(line => line.startsWith('private-slot-cap ')).slice(17));
+    assert.strictEqual(error.status, 2);
+    assert.strictEqual(cap.pinCoverageComplete, false);
+    assert.strictEqual(cap.pinnedBytes, null);
+    return true;
+  });
+  assert.ok(existsSync(root));
+  assert.deepStrictEqual(auditLines(), []);
+});
+
+test('an expired Cargo pin releases its root and supplies no cap allowance', () => {
+  const root = makePrivateRoot('pid99999999');
+  const retention = writeRetentionLease('agent-pin-expired', root);
+  const marker = join(retention, 'lease-agent-pin-expired.tsv');
+  writeFileSync(marker, readFileSync(marker, 'utf8').replace(/^expires_ns=.*$/m, 'expires_ns=1'));
+  const output = execFileSync('bash', ['-c', 'exec bash "$1" 2>&1', 'reap',
+    join(__dirname, '..', 'bin', 'reap-private-target-slots.sh')], {
+    cwd: home, env: isolatedEnv(reapEnv({ ROOT: home, PAPERCUSP_DESKTOP_PRIVATE_SLOT_MAX_BYTES: '1' })), encoding: 'utf8',
+  });
+  const cap = JSON.parse(output.split('\n').find(line => line.startsWith('private-slot-cap ')).slice(17));
+  assert.strictEqual(cap.pinnedBytes, 0);
+  assert.strictEqual(cap.overByBytes, 0);
+  assert.strictEqual(cap.pinCoverageComplete, true);
+  assert.ok(!existsSync(root));
 });
 
 test('an invalid private slot cap refuses before deleting any root', () => {
