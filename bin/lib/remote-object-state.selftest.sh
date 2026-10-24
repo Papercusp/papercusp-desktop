@@ -101,7 +101,7 @@ release_storage_get 'release/history/page with spaces.html' "$TEST_ROOT/page"
 expect "$(cat "$TEST_ROOT/page")" '<p>page</p>' 'tree preserves names and bytes'
 release_storage_delete release/file
 expect "$(release_storage_state release/file "$TEST_ROOT/local")" absent 'generation-fenced deletion'
-for key in '../escape' 'release/../escape' 'release/*' 'release/file#1' '/absolute'; do
+for key in '../escape' 'release/../escape' 'release/*' 'release/file#1' '/absolute' 'release\bad'; do
   if release_storage_uri "$key"; then echo 'unsafe key accepted' >&2; exit 1; fi
   checks=$((checks + 1))
 done

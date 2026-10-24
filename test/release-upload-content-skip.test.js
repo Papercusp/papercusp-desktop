@@ -148,74 +148,45 @@ verify_public_manifest_feeds "$LOCAL_MANIFEST" "$MANIFEST_NAME" "$MANIFEST_NAME"
   }
 }
 
-// Run `remote_state` from the real script against a stubbed `aws`.
-//
-// The helpers are EXTRACTED and evaluated rather than the script being sourced: the
-// script is a top-to-bottom release publisher and sourcing it would try to publish.
-// Extraction is bounded by two structural markers that exist for other reasons.
-function remoteState({
-  fileBody,
-  remoteBody = fileBody,
-  remoteSize,
-  remoteEtag,
-  etagFailure = false,
-  getFailure = false,
-  scriptPath = UPLOAD,
-}) {
+// Run each publisher's REAL decision wrapper through the shared GCS helper.
+// Only the Google CLI transport is replaced. Generation-pinned reads execute.
+function remoteState({ fileBody, remoteBody = fileBody, remoteSize, etagFailure = false,
+  getFailure = false, scriptPath = UPLOAD }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-upload-skip-'));
   try {
     const file = path.join(dir, 'artifact.sig');
     fs.writeFileSync(file, fileBody);
-
-    const bin = path.join(dir, 'bin');
-    fs.mkdirSync(bin);
-    // Stub aws: answers head-object for whichever --query is asked, from the env.
-    // An absent object is a non-zero exit, which is how the real helper sees a 404.
-    fs.writeFileSync(
-      path.join(bin, 'aws'),
-      [
-        '#!/bin/bash',
-        'q=""',
-        'for ((i=1;i<=$#;i++)); do',
-        '  if [[ "${!i}" == "--query" ]]; then j=$((i+1)); q="${!j}"; fi',
-        'done',
-        'if [[ "$*" == *"get-object"* ]]; then [[ "${FAKE_GET_MODE:-value}" == error ]] && exit 1; printf "%s" "${FAKE_REMOTE_BODY:-}" > "${!#}"; echo "{}"; exit 0; fi',
-        '[[ -z "${FAKE_SIZE:-}" ]] && exit 1',
-        'case "$q" in',
-        '  ContentLength) echo "$FAKE_SIZE" ;;',
-        '  ETag) [[ "${FAKE_ETAG_MODE:-value}" == error ]] && exit 1; [[ "${FAKE_ETAG_MODE:-value}" == none ]] && { echo None; exit 0; }; [[ -z "${FAKE_ETAG:-}" ]] && exit 1; echo "\\"$FAKE_ETAG\\"" ;;',
-        'esac',
-        'exit 0',
-      ].join('\n'),
-      { mode: 0o755 },
-    );
-
+    const bin = path.join(dir, 'bin'); fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'gcloud'), [
+      '#!/usr/bin/env node',
+      'const args = process.argv.slice(2);',
+      'const fail = message => { console.error(message); process.exit(1); };',
+      'if (process.env.FAKE_HEAD_MODE === "error") fail("HTTPError 403: unavailable");',
+      'if (args[1] === "objects") {',
+      '  if (!process.env.FAKE_SIZE) fail("HTTPError 404: absent");',
+      '  console.log(JSON.stringify({size:process.env.FAKE_SIZE,generation:"42",metadata:{}}));',
+      '} else if (args[1] === "cat") {',
+      '  if (process.env.FAKE_GET_MODE === "error") fail("HTTPError 403");',
+      '  if (!args[2].endsWith("#42")) fail("generation was not pinned");',
+      '  process.stdout.write(process.env.FAKE_REMOTE_BODY);',
+      '} else fail("unexpected write during content comparison");',
+    ].join('\n'), { mode: 0o755 });
     const harness = `
 set -euo pipefail
-eval "$(awk '/^s3api_head\\(\\) \\{/{f=1} /^# ── What to upload/{f=0} f{print}' "$UPLOAD_SCRIPT")"
-ENDPOINT=https://example.invalid
-R2_BUCKET=bucket
+. "$STORAGE_HELPER"
+eval "$(sed -n '/^remote_state()/p' "$UPLOAD_SCRIPT")"
+PAPERCUSP_RELEASE_GCS_BUCKET=test-release-bucket
 remote_state "some/key" "$TARGET_FILE"
 `;
-    const res = spawnSync('bash', ['-c', harness], {
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        PATH: `${bin}:${process.env.PATH}`,
-        UPLOAD_SCRIPT: scriptPath,
-        TARGET_FILE: file,
-        FAKE_SIZE: remoteSize === null ? '' : String(remoteSize),
-        FAKE_ETAG: remoteEtag === null ? '' : remoteEtag,
-        FAKE_REMOTE_BODY: remoteBody,
-        FAKE_GET_MODE: getFailure ? 'error' : 'value',
-        FAKE_ETAG_MODE: etagFailure ? 'error' : remoteEtag === 'None' ? 'none' : 'value',
-      },
-    });
+    const res = spawnSync('bash', ['-c', harness], { encoding: 'utf8', env: {
+      ...process.env, PATH: `${bin}:${process.env.PATH}`, UPLOAD_SCRIPT: scriptPath,
+      STORAGE_HELPER: path.join(__dirname, '../bin/lib/release-storage.sh'), TARGET_FILE: file,
+      FAKE_SIZE: remoteSize === null ? '' : String(remoteSize), FAKE_REMOTE_BODY: remoteBody,
+      FAKE_GET_MODE: getFailure ? 'error' : 'value', FAKE_HEAD_MODE: etagFailure ? 'error' : 'value',
+    } });
     assert.equal(res.status, 0, `harness failed: ${res.stderr}`);
     return res.stdout.trim();
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 
 const md5 = (s) => crypto.createHash('md5').update(s).digest('hex');
@@ -232,6 +203,7 @@ test('THE DEFECT: a re-cut signature — same size, different bytes — is repor
 
   const verdict = remoteState({
     fileBody: SIG_A,
+    remoteBody: SIG_B,
     remoteSize: SIG_B.length, // identical size — the old test skipped right here
     remoteEtag: md5(SIG_B), // but the published bytes are the OLD signature
   });
@@ -262,16 +234,15 @@ test('an unpublished object reads as absent, not as a match', () => {
   assert.equal(verdict, 'absent');
 });
 
-test('a multipart ETag cannot be compared to a local hash, and says so instead of guessing', () => {
+test('legacy multipart objects are compared by exact bytes rather than ETag or size', () => {
   // Multi-GB artifacts upload multipart, whose ETag is "<md5-of-part-md5s>-<partcount>".
-  // That is NOT a content hash. The honest verdict is "size is all I know" — which the
-  // caller is then free to accept for a 4 GB artifact and refuse for a 428 B one.
+  // That is not a content hash. The GCS port reads the exact generation instead.
   const verdict = remoteState({
     fileBody: SIG_A,
     remoteSize: SIG_A.length,
     remoteEtag: `${md5(SIG_A)}-3`,
   });
-  assert.equal(verdict, 'size-only-match');
+  assert.equal(verdict, 'identical');
 });
 
 test('an ETag lookup failure is unknown, never a verified multipart size match', () => {
@@ -289,13 +260,13 @@ test('an ETag lookup failure is unknown, never a verified multipart size match',
   );
 });
 
-test('an opaque non-multipart ETag is unknown, not size-only evidence', () => {
+test('an opaque provider ETag does not prevent generation-pinned byte verification', () => {
   const verdict = remoteState({
     fileBody: SIG_A,
     remoteSize: SIG_A.length,
     remoteEtag: 'opaque-provider-etag',
   });
-  assert.equal(verdict, 'metadata-unavailable');
+  assert.equal(verdict, 'identical');
 });
 
 test('BOTH the upload skip and the storage verifier decide via remote_state', () => {
@@ -346,8 +317,8 @@ test('mobile upload skip and storage verification are content-aware too', () => 
     uses >= 2,
     'expected mobile upload and verify loops to consult remote_state, found ' + uses,
   );
-  assert.match(src, /s3api_head_etag\(\)/);
-  assert.match(src, /s3api_get_object\(\)/);
+  assert.match(src, /release-storage\.sh/);
+  assert.match(src, /remote_state\(\) \{ release_storage_state/);
   assert.equal(
     src.includes('if [[ "$(s3api_head "${KEY_PREFIX}/${TAG}/${name}")" == "$local_size" ]]'),
     false,
@@ -366,6 +337,7 @@ test('mobile remote_state catches a stale same-size APK signature', () => {
   const verdict = remoteState({
     scriptPath: MOBILE_UPLOAD,
     fileBody: SIG_A,
+    remoteBody: SIG_B,
     remoteSize: SIG_B.length,
     remoteEtag: md5(SIG_B),
   });
