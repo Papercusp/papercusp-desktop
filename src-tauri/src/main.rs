@@ -9296,7 +9296,9 @@ fn workspaces_open_window(app: AppHandle, id: String) -> Result<(), String> {
         .ok_or_else(|| {
             "could not resolve app origin (no main window URL, no sidecar port)".to_string()
         })?;
-    let url = format!("{}/harness?ws={}", base, url_encode(&id));
+    // Native workspace commands resolve this computer's registry. Pin that
+    // machine in the new window so its selector cannot choose a remote default.
+    let url = format!("{}/harness?ws={}&desktopHost=local", base, url_encode(&id));
     let parsed = url
         .parse()
         .map_err(|e| format!("bad window url {}: {}", url, e))?;
