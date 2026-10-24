@@ -508,7 +508,7 @@ real supervision duties. Those remain legitimate when their durable role, action
 transition, named stop condition, and bounded budget satisfy the contract above.
 
 <!-- OBSERVATION-PRACTICE:TURN_END_OBSERVATION:BEGIN -->
-## Turn-end observation pass
+**Turn-end observation pass**
 
 Before you end or yield a turn, take ONE quick pass over what happened THIS turn. If it surfaced
 something a FUTURE agent would benefit from — recurring friction, a workaround, a tool/doc/process/
@@ -526,7 +526,7 @@ tool/file/WI/step; for an observation do NOT dedup or search history (handled do
 <!-- OBSERVATION-PRACTICE:TURN_END_OBSERVATION:END -->
 
 <!-- OBSERVATION-PRACTICE:FRICTION_TRIPWIRE:BEGIN -->
-## Bug + friction trip-wire (self-learning loop)
+**Bug + friction trip-wire (self-learning loop)**
 
 FILING IS NOT A JUDGMENT CALL. The moment you believe you saw a bug, FILE it — the only
 judgment call is fix-it-now vs leave-it-filed; deciding not to fix it yourself NEVER licenses
@@ -555,7 +555,7 @@ Don't reflect every turn; just trip on real friction.
 <!-- OBSERVATION-PRACTICE:FRICTION_TRIPWIRE:END -->
 
 <!-- OBSERVATION-PRACTICE:OBSERVATION_RUBRIC_NUDGE:BEGIN -->
-## Filing an observation? Grade it against a rubric if one fits
+**Filing an observation? Grade it against a rubric if one fits**
 
 When you file a turn-end observation (`improvements:capture { lane: "observation" }`), FIRST
 check `rubrics:list` for an ACTIVE rubric covering the characteristic you observed
