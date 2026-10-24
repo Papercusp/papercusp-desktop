@@ -240,11 +240,20 @@ apt-get install -y --no-install-recommends \
   iproute2 \
   libasound2t64
 else
+(
   # With --no-download, apt resolves local package filenames through its
-  # archive cache even when install received absolute .deb paths.
+  # archive cache even when install received absolute .deb paths. Its lock
+  # and partial downloads must never change the sealed input inventory.
+  apt_cache="$(mktemp -d /tmp/papercup-apt.XXXXXX)"
+  trap 'rm -rf "$apt_cache"' EXIT
+  chmod 0755 "$apt_cache"
+  for package in "$OFFLINE_INPUTS"/debs/*.deb; do
+    ln -s "$package" "$apt_cache/${package##*/}"
+  done
   apt-get --no-download --no-remove -y -o Dpkg::Options::=--force-confold \
-    -o Dpkg::Use-Pty=0 -o Dir::Cache::archives="$OFFLINE_INPUTS/debs/" \
+    -o Dpkg::Use-Pty=0 -o Dir::Cache::archives="$apt_cache/" \
     install "$OFFLINE_INPUTS"/debs/*.deb
+)
 fi
 
 # overmind is not in the Ubuntu archive — fetch the release binary.

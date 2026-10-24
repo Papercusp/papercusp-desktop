@@ -82,6 +82,7 @@ function offlineFixture(t, existing = true) {
     fs.writeFileSync(p, text, { mode });
   };
   fs.mkdirSync(path.join(inputs, 'debs'), { recursive: true });
+  fs.mkdirSync(path.join(sandbox, 'tmp'), { recursive: true });
   fs.mkdirSync(tools);
   fs.mkdirSync(path.join(sandbox, 'usr/local'), { recursive: true });
   fs.cpSync(f.prefix, path.join(sandbox, 'usr/local'), { recursive: true });
@@ -120,6 +121,7 @@ function offlineFixture(t, existing = true) {
     '  cache=""; for arg in "$@"; do case "$arg" in Dir::Cache::archives=*) cache="${arg#*=}" ;; esac; done',
     '  [[ -d "$cache" && -f "$cache/offline-fixture_1.0_all.deb" ]] || { echo "offline apt must resolve the verified archive from its cache" >&2; exit 95; }',
     '  mkdir -p "$cache/partial"; touch "$cache/lock"',
+    '  echo "OFFLINE_APT_CACHE $cache" >> "$OFFLINE_TEST_LOG"',
     '  [[ "${OFFLINE_TEST_APT_INSTALL_FAIL:-0}" != 1 ]] || exit 96',
     ' fi',
     'fi',
@@ -131,19 +133,28 @@ function offlineFixture(t, existing = true) {
   exe('kopia', 'echo kopia fixture\n');
   exe('python3', 'echo "BUN_STAGING_STAND_IN $*" >> "$OFFLINE_TEST_LOG"\n');
   let body = fixtureNodePins(shipped, f.archive);
-  for (const absolute of ['/opt/papercup', '/usr/local', '/home/', '/etc/', '/usr/share/', '/root/', '/var/lib/apt/', '/tmp/node-compile-cache']) {
+  for (const absolute of ['/opt/papercup', '/usr/local', '/home/', '/etc/', '/usr/share/', '/root/', '/var/lib/apt/', '/tmp/node-compile-cache', '/tmp/papercup-apt.']) {
     body = body.replaceAll(absolute, sandbox + absolute);
   }
   const script = path.join(f.dir, 'offline-bootstrap.sh');
   fs.writeFileSync(script, body);
   const env = { ...process.env, PATH: `${tools}:${sandbox}/usr/local/bin:${process.env.PATH}`,
     PAPERCUSP_ROOTFS_BUILD: '0', OFFLINE_TEST_LOG: log, OFFLINE_TEST_ARCHIVES: path.join(inputs, 'debs'), OFFLINE_TEST_USER: path.join(f.dir, 'user-created') };
-  return { sandbox, inputs, log, seal, run: (args = [], extra = {}) => run('bash', [script, ...args], { env: { ...env, ...extra } }) };
+  const inventory = () => fs.readdirSync(inputs, { recursive: true }).sort().map(name => {
+    const p = path.join(inputs, name);
+    const stat = fs.lstatSync(p);
+    return [name, stat.isDirectory() ? 'directory' : stat.isSymbolicLink() ? 'symlink:' + fs.readlinkSync(p)
+      : createHash('sha256').update(fs.readFileSync(p)).digest('hex')];
+  });
+  const cacheDirs = () => fs.readdirSync(path.join(sandbox, 'tmp')).filter(name => name.startsWith('papercup-apt.'));
+  return { sandbox, inputs, log, seal, inventory, cacheDirs,
+    run: (args = [], extra = {}) => run('bash', [script, ...args], { env: { ...env, ...extra } }) };
 }
 
 for (const existing of [false, true]) {
   test(`complete offline bootstrap ${existing ? 'upgrades an existing distro and retains workspace data' : 'configures a fresh distro'}`, t => {
     const f = offlineFixture(t, existing);
+    const before = f.inventory();
     const result = f.run();
     assert.equal(result.status, 0, result.stderr + result.stdout);
     assert.match(result.stdout, /papercup bootstrap complete/);
@@ -151,6 +162,8 @@ for (const existing of [false, true]) {
     assert.doesNotMatch(log, /UNEXPECTED_NETWORK|apt-get update|npm pack/);
     assert.match(log, /apt-get --simulate --no-download --no-remove install .*offline-fixture_1.0_all.deb/);
     assert.match(log, /apt-get --no-download --no-remove -y .*install /);
+    assert.deepEqual(f.inventory(), before, 'apt must preserve the sealed inputs');
+    assert.deepEqual(f.cacheDirs(), [], 'successful install removes its writable cache');
     assert.match(log, /npm install --offline --ignore-scripts --no-audit --no-fund -g /);
     assert.match(log, /BUN_STAGING_STAND_IN .*--archive .*papercup-bun-linux.zip/);
     assert.doesNotMatch(log, /chown -R/);
@@ -159,8 +172,21 @@ for (const existing of [false, true]) {
     if (existing) assert.equal(fs.readFileSync(path.join(f.sandbox, 'home/papercup/papercup/workspace/data'), 'utf8'), 'user work must survive');
     const repeated = f.run();
     assert.equal(repeated.status, 0, 'the full offline bootstrap is idempotent: ' + repeated.stderr);
+    assert.deepEqual(f.inventory(), before, 'repeated bootstrap preserves the sealed inputs');
+    assert.deepEqual(f.cacheDirs(), []);
   });
 }
+
+test('failed offline package installation cleans its writable cache and preserves sealed inputs', t => {
+  const f = offlineFixture(t);
+  const before = f.inventory();
+  const result = f.run([], { OFFLINE_TEST_APT_INSTALL_FAIL: '1' });
+  assert.equal(result.status, 96, result.stdout + result.stderr);
+  assert.match(fs.readFileSync(f.log, 'utf8'), /OFFLINE_APT_CACHE .*papercup-apt\./);
+  assert.deepEqual(f.inventory(), before);
+  assert.deepEqual(f.cacheDirs(), [], 'failed install removes its cache and lock');
+  assert.equal(fs.readFileSync(path.join(f.sandbox, 'home/papercup/papercup/workspace/data'), 'utf8'), 'user work must survive');
+});
 
 for (const damage of ['missing', 'changed', 'node-identity', 'unlisted', 'wrong-arch', 'wrong-os', 'symlink', 'resolver']) {
   test(`offline ${damage} input refuses before distro configuration`, t => {
