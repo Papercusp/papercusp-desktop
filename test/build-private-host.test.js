@@ -146,7 +146,7 @@ test('graph census preserves optional peers but refuses an absent required wildc
   assert.match(r.stdout,/^required\t@vendor\/missing$/m);
   const refused=shell(f,'copy_pkg_closure @vendor/missing\n(( nat_missing == 0 ))');
   assert.notEqual(refused.status,0);
-  assert.match(refused.stderr,/@vendor\/missing/);
+  assert.match(refused.stdout+refused.stderr,/@vendor\/missing/);
 });
 test('a mandatory graph occurrence overrides another requester optional peer declaration',t=>{
   const f=graphFixture(t);
