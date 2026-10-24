@@ -112,3 +112,80 @@ test('shared PRIMARY and launcher recipes retain real entry and CLI boundary',t=
   assert.match(production,/^bundle_host_primary "\$REPO_ROOT" "\$SIDECAR_DIR"/m);
   assert.match(production,/^  bundle_host_launcher "\$REPO_ROOT"/m);
 });
+
+test('runtime require-root copying stops on failure even when caller tests its status',t=>{
+  const f=fixture(t);
+  const r=shell(f,'copy_pkg_closure() { echo "$1"; return 37; }\n'
+    +'if copy_host_runtime_require_closures; then exit 99; fi');
+  assert.equal(r.status,0,r.stdout+r.stderr);
+  assert.match(r.stdout,/^rrule$/m);
+  assert.doesNotMatch(r.stdout,/^luxon$/m);
+});
+
+function graphFixture(t) {
+  const f=fixture(t),run=path.join(f.root,'run');
+  fs.mkdirSync(path.join(run,'artifact'),{recursive:true});
+  fs.mkdirSync(path.join(f.donor,'node_modules'),{recursive:true});
+  fs.symlinkSync(path.resolve(desktop,'../node_modules/typescript'),path.join(f.donor,'node_modules/typescript'),'dir');
+  return {...f,run};
+}
+function graph(f,inputs) {
+  const imports=Object.values(inputs).flatMap(v=>v.imports);
+  fs.writeFileSync(path.join(f.run,'artifact/serve.mjs.meta.json'),JSON.stringify({inputs,outputs:{'serve.mjs':{imports}}}));
+  return shell(f,`write_host_graph_dependency_census ${JSON.stringify(f.run)}`);
+}
+const edge=(name,kind='require-call')=>({path:name,external:true,kind});
+test('graph census preserves optional peers but refuses an absent required wildcard dependency',t=>{
+  const f=graphFixture(t);
+  pkg(path.join(f.donor,'node_modules/client'),{name:'client',version:'1.0.0',
+    peerDependencies:{acceleration:'*'},peerDependenciesMeta:{acceleration:{optional:true}}},
+    "try { require('acceleration'); } catch {} require('@vendor/missing');");
+  const r=graph(f,{'node_modules/client/index.js':{imports:[edge('acceleration'),edge('@vendor/missing')]}});
+  assert.equal(r.status,0,r.stdout+r.stderr);
+  assert.match(r.stdout,/^optional\tacceleration$/m);
+  assert.match(r.stdout,/^required\t@vendor\/missing$/m);
+  const refused=shell(f,'copy_pkg_closure @vendor/missing\n(( nat_missing == 0 ))');
+  assert.notEqual(refused.status,0);
+  assert.match(refused.stderr,/@vendor\/missing/);
+});
+test('a mandatory graph occurrence overrides another requester optional peer declaration',t=>{
+  const f=graphFixture(t);
+  pkg(path.join(f.donor,'node_modules/client'),{name:'client',version:'1.0.0',
+    peerDependencies:{maybe:'*'},peerDependenciesMeta:{maybe:{optional:true}}},"require('maybe');");
+  fs.writeFileSync(path.join(f.donor,'entry.js'),"require('maybe');");
+  const r=graph(f,{'node_modules/client/index.js':{imports:[edge('maybe')]},'entry.js':{imports:[edge('maybe')]}});
+  assert.equal(r.status,0,r.stdout+r.stderr);
+  assert.match(r.stdout,/^required\tmaybe$/m);
+});
+test('DBOS lazy graph edges require the measured context and the actual OTLP early-return guard',t=>{
+  const f=graphFixture(t),sdk=path.join(f.donor,'node_modules/@dbos-inc/dbos-sdk/dist/src/telemetry');
+  fs.mkdirSync(sdk,{recursive:true});
+  const traces="function installTraceContextManager() { require('@opentelemetry/sdk-trace-base'); }";
+  const logs="class Logger { constructor() { if (!utils_1.globalParams.enableOTLP) { return; } class Transport { constructor() { require('@opentelemetry/sdk-logs'); } } } }";
+  fs.writeFileSync(path.join(sdk,'traces.js'),traces);fs.writeFileSync(path.join(sdk,'logs.js'),logs);
+  const inputs={
+    'node_modules/@dbos-inc/dbos-sdk/dist/src/telemetry/traces.js':{imports:[edge('@opentelemetry/sdk-trace-base')]},
+    'node_modules/@dbos-inc/dbos-sdk/dist/src/telemetry/logs.js':{imports:[edge('@opentelemetry/sdk-logs')]},
+  };
+  let r=graph(f,inputs);
+  assert.equal(r.status,0,r.stdout+r.stderr);
+  assert.match(r.stdout,/^required\t@opentelemetry\/sdk-trace-base$/m);
+  assert.match(r.stdout,/^required\t@opentelemetry\/sdk-logs$/m);
+  fs.writeFileSync(path.join(f.run,'trace-context.json'),JSON.stringify({schemaVersion:'private-default-trace-context-v1',registered:true,contextWorking:true,otlp:false}));
+  r=graph(f,inputs);assert.equal(r.status,0,r.stdout+r.stderr);
+  assert.match(r.stdout,/^optional\t@opentelemetry\/sdk-trace-base$/m);
+  assert.match(r.stdout,/^optional\t@opentelemetry\/sdk-logs$/m);
+  fs.writeFileSync(path.join(sdk,'logs.js'),logs.replace('if (!utils_1.globalParams.enableOTLP) { return; }',''));
+  fs.appendFileSync(path.join(sdk,'traces.js'),"\nrequire('@opentelemetry/sdk-trace-base');");
+  r=graph(f,inputs);assert.equal(r.status,0,r.stdout+r.stderr);
+  assert.match(r.stdout,/^required\t@opentelemetry\/sdk-trace-base$/m);
+  assert.match(r.stdout,/^required\t@opentelemetry\/sdk-logs$/m);
+});
+test('default trace composition refuses an unqualified startup order before compiling',t=>{
+  const f=fixture(t),host=path.join(f.donor,'apps/operator/bin');
+  fs.mkdirSync(host,{recursive:true});
+  fs.writeFileSync(path.join(host,'host-bootstrap.ts'),'await startDbos(); initializeRuntimeObservability();');
+  const r=shell(f,`assert_host_default_trace_context ${JSON.stringify(f.output)}`);
+  assert.notEqual(r.status,0);
+  assert.match(r.stderr,/unqualified host tracing\/DBOS startup order/);
+});
