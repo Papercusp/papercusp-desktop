@@ -10,7 +10,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { makeDesktopTestScratchDirSync } = require('./test-scratch.cjs');
-const { failureEvidenceRoot, parsePruneArgs, pruneFailedStages, recordFailure } =
+const { failureEvidenceRoot, parsePruneArgs, pruneFailedStages, pruneFailedStagesWithProtection, recordFailure } =
   require('../bin/lib/sidecar-stage-state.js');
 
 const bin = path.resolve(__dirname, '../bin');
@@ -99,20 +99,82 @@ test('bank byte cap evicts oldest outputs across key dirs and can evict newest r
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test('bank cap reports exempt pins and continues past an older pinned output', async () => {
+test('bank cap counts only the pinned child while retaining its atomic stage', async () => {
   const f = scratch();
   try {
     const old = stage(f.keyDir, '100', { ageHours: 4 });
     const secondKey = path.join(f.parent, 'b'.repeat(24));
     fs.mkdirSync(secondKey);
     const newer = stage(secondKey, '200', { ageHours: 2 });
-    pin(path.join(old, 'serve.mjs'));
+    const child = path.join(old, 'serve.mjs');
+    pin(child);
     const receipt = await pruneFailedStages({ all: true, parent: f.parent, maxBytes: 1 }, {});
     assert.equal(exists(old), true);
     assert.equal(exists(newer), false);
-    assert.ok(receipt.cap.pinnedBytes >= 64 * 1024);
+    assert.equal(receipt.cap.pinnedBytes, fs.lstatSync(child).blocks * 512);
     assert.ok(receipt.cap.pinnedOverageBytes > 0);
+    assert.ok(receipt.cap.overByBytes > receipt.cap.pinnedOverageBytes);
+    assert.ok(receipt.errors.some(row => /size cap remains exceeded/.test(row.error)),
+      'unpinned sibling bulk is still a cap failure even though deletion is protected');
     assert.ok(receipt.kept.some(row => row.reason === 'retention-pin'));
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('pin allocation deduplicates overlapping records and shared pinned inodes', async () => {
+  const f = scratch();
+  try {
+    const target = stage(f.keyDir, '100', { ageHours: 4 });
+    const child = path.join(target, 'serve.mjs');
+    const link = path.join(target, 'review-copy');
+    fs.linkSync(child, link);
+    pin(child); pin(child); pin(link);
+    const receipt = await pruneFailedStages({ all: true, parent: f.parent, maxBytes: 1 }, {});
+    assert.ok(exists(target));
+    assert.equal(receipt.cap.pinnedBytes, fs.lstatSync(child).blocks * 512);
+    assert.ok(receipt.errors.some(row => /size cap remains exceeded/.test(row.error)));
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('a pin through a stage alias protects the physical stage and counts only its child', async () => {
+  const f = scratch();
+  try {
+    const target = stage(f.keyDir, '100', { ageHours: 4 });
+    const alias = path.join(f.root, 'review-alias');
+    fs.symlinkSync(target, alias);
+    const child = path.join(target, 'serve.mjs');
+    pin(path.join(alias, 'serve.mjs'));
+    const receipt = await pruneFailedStages({ all: true, parent: f.parent, maxBytes: 1 }, {});
+    assert.ok(exists(target) && exists(`${target}.resume.json`));
+    assert.equal(receipt.cap.pinnedBytes, fs.lstatSync(child).blocks * 512);
+    assert.ok(receipt.errors.some(row => /size cap remains exceeded/.test(row.error)));
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('a pinned bank covers its unrecognized entries without following symlink targets', async () => {
+  const f = scratch();
+  try {
+    stage(f.keyDir, '100', { ageHours: 4 });
+    const outside = path.join(f.root, 'outside');
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'bulk'), crypto.randomBytes(256 * 1024));
+    fs.symlinkSync(outside, path.join(f.parent, 'unrecognized-link'));
+    fs.writeFileSync(path.join(f.parent, 'unrecognized-file'), 'retained evidence');
+    pin(f.parent);
+    const receipt = await pruneFailedStages({ all: true, parent: f.parent, maxBytes: 1 }, {});
+    assert.equal(receipt.cap.pinnedBytes, receipt.cap.beforeBytes);
+    assert.ok(receipt.cap.pinnedBytes < 256 * 1024, 'outside target allocation is not in the bank');
+    assert.deepEqual(receipt.errors, []);
+    assert.ok(exists(path.join(outside, 'bulk')));
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('a bare deletion predicate cannot manufacture a pinned byte allowance', () => {
+  const f = scratch();
+  try {
+    const target = stage(f.keyDir, '100', { ageHours: 4 });
+    assert.throws(() => pruneFailedStagesWithProtection(
+      { all: true, parent: f.parent, maxBytes: 1 }, {}, () => true), /pin allocation coverage is required/);
+    assert.ok(exists(target) && exists(`${target}.resume.json`));
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
