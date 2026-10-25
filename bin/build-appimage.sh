@@ -844,16 +844,16 @@ fi
 
 # 4. Locate appimagetool (tauri downloads the linuxdeploy appimage plugin, which
 #    embeds it) and package the AppDir. No ELF scan → no crash.
+echo "==> sharing byte-identical immutable AppDir payloads (preserving every runtime path)"
+python3 "$ORCHESTRATOR_HERE/lib/deduplicate-appdir.py" "$APPDIR" || exit 1
 PLUGIN="$(ls "$HOME/.cache/tauri/"*plugin-appimage*.AppImage 2>/dev/null | sed -n 1p)"
 [ -n "$PLUGIN" ] || { echo "FATAL: linuxdeploy-plugin-appimage not found in ~/.cache/tauri (did the tauri step run?)" >&2; exit 1; }
 
-# APPIMAGE_EXTRACT_AND_RUN makes the type-2 runtime unpack the plugin under
-# "$TMPDIR/appimage_extracted_<hash>". TMPDIR is normally shared by every build
-# on the host, so two concurrent package steps otherwise select the same runtime
-# directory and one process can observe the other's half-extracted tree (the
-# asymmetric 127/0 failure in EI-21829997763481272). Give this invocation an
-# owned parent directory; the subshell trap removes only that directory after
-# appimagetool exits, including failure paths.
+# Extract the plugin into an owned directory, then call its bundled appimagetool
+# directly so the compression block/level and worker count are explicit. The
+# plugin's defaults do not expose these settings and exceeded the GUI budget.
+# Keep zstd: the retained type-2 runtime rejects xz images. Private extraction
+# also preserves the concurrent-runtime isolation from EI-21829997763481272.
 run_appimage_tool_isolated() (
   set -u
   local plugin="${1:?appimagetool plugin path required}"
@@ -867,8 +867,16 @@ run_appimage_tool_isolated() (
   }
   trap '_status=$?; rm -rf -- "$runtime_tmp"; if [ "$_status" -ne 0 ]; then rm -f -- "$output"; fi; exit "$_status"' EXIT
   echo "   AppImage runtime extraction dir: $runtime_tmp"
+  (cd "$runtime_tmp" && TMPDIR="$runtime_tmp" "$plugin" --appimage-extract >/dev/null) || exit 1
+  local packer="$runtime_tmp/squashfs-root/usr/bin/appimagetool"
+  [ -x "$packer" ] || { echo "FATAL: extracted plugin has no executable appimagetool" >&2; exit 1; }
+  local -a runtime_args=()
+  if [ -n "${LDAI_RUNTIME_FILE:-}" ]; then runtime_args+=(--runtime-file "$LDAI_RUNTIME_FILE"); fi
   ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 TMPDIR="$runtime_tmp" LDAI_OUTPUT="$output" \
-    "$plugin" --appdir "$appdir"
+    "$packer" --comp zstd --mksquashfs-opt -b --mksquashfs-opt 1048576 \
+      --mksquashfs-opt -Xcompression-level --mksquashfs-opt 19 \
+      --mksquashfs-opt -processors --mksquashfs-opt 4 \
+      "${runtime_args[@]}" "$appdir" "$output"
 )
 
 echo "==> packaging with appimagetool → $OUT"
@@ -877,6 +885,13 @@ run_appimage_tool_isolated "$PLUGIN" "$OUT" "$APPDIR" || {
   exit 1
 }
 [ -f "$OUT" ] || { echo "FATAL: appimagetool did not produce $OUT" >&2; exit 1; }
+
+# Compression defaults can change across appimagetool versions. Judge final
+# bytes with the existing size/resource contract before creating a signature.
+if ! python3 "$AUDIT_PY" --distribution-census gui linux "$OUT"; then
+  echo "FATAL: final AppImage violates the GUI distribution contract; refusing to sign or retain it" >&2
+  exit 1
+fi
 
 # 5. Sign for the Tauri updater (minisign .sig). Best-effort — the AppImage itself
 #    runs unsigned; the .sig only gates auto-update verification.
