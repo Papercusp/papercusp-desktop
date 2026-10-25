@@ -83,8 +83,12 @@ function devCommandLine() {
   return line;
 }
 
-for (const isolated of [true, false]) {
-  test(`isolated=${isolated}: IPC enablement survives production caller and dev env`, () => {
+for (const { name, isolated, verifierUrl, expectedIpc } of [
+  { name: 'isolated verifier', isolated: true, verifierUrl: '', expectedIpc: '1' },
+  { name: 'shared database verifier', isolated: false, verifierUrl: 'http://127.0.0.1:33701/', expectedIpc: '1' },
+  { name: 'ordinary desktop', isolated: false, verifierUrl: '', expectedIpc: '0' },
+]) {
+  test(`${name}: IPC enablement survives production caller and dev env`, () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'operator IPC env '));
     try {
       fs.writeFileSync(path.join(dir, '.env.local'), 'NODE_ENV=production\nPAPERCUSP_IPC_ENABLE=0\n');
@@ -110,12 +114,13 @@ for (const isolated of [true, false]) {
         encoding: 'utf8', timeout: 10000,
         env: { ...process.env, FIXTURE_ROOT: dir,
           PAPERCUSP_VERIFY_TAURI_ISOLATED: isolated ? '1' : '0',
+          PAPERCUSP_VERIFY_TAURI_DEV_URL: verifierUrl,
           PAPERCUSP_DEV_BACKGROUND_WORKERS: '0',
           NODE_ENV: 'production', PAPERCUSP_IPC_ENABLE: '0' },
       });
       assert.equal(result.status, 0, result.stderr);
       const observed = JSON.parse(result.stdout.trim().split('\n').at(-1));
-      assert.equal(observed.ipc, isolated ? '1' : '0');
+      assert.equal(observed.ipc, expectedIpc);
       assert.equal(observed.nodeEnv, 'production');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
