@@ -175,3 +175,59 @@ test('each converted mac-vm verdict script fails on a synthetic failure', () => 
     assert.match(output, /VERDICT: FAIL/, `${name} must print a failing verdict`);
   }
 });
+
+test('GUI-only launch keeps AppRun utilities while excluding co-located host launchers', () => {
+  const source = fs.readFileSync(path.join(BIN, 'linux-fresh-install-e2e.sh'), 'utf8');
+  const helper = source.match(/prepare_gui_launch_path\(\) \{\n[\s\S]*?\n\}/)?.[0];
+  assert.ok(helper, 'the real launch PATH constructor must be exercised');
+  const appRun = fs.readFileSync(path.join(BIN, 'build-appimage.sh'), 'utf8')
+    .match(/cat > "\$APPDIR\/AppRun" <<'APPRUN'\n([\s\S]*?)\nAPPRUN/)?.[1];
+  assert.ok(appRun, 'exercise the real producer AppRun, not a substitute');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gui-launch-path-'));
+  try {
+    const host = path.join(root, 'host-bin');
+    const appdir = path.join(root, 'bundle');
+    const isolated = path.join(root, 'launch-bin');
+    fs.mkdirSync(host);
+    fs.mkdirSync(path.join(appdir, 'usr/bin'), { recursive: true });
+    fs.writeFileSync(path.join(appdir, 'AppRun'), appRun, { mode: 0o755 });
+    fs.writeFileSync(path.join(appdir, 'usr/bin/papercusp-desktop'),
+      '#!/bin/bash\nprintf "BUNDLED:%s\\n" "$APPDIR"\n', { mode: 0o755 });
+    for (const tool of ['dirname', 'readlink', 'realpath', 'ls', 'sed', 'grep', 'gsettings']) {
+      const resolved = spawnSync('/bin/bash', ['-c', 'command -v "$1"', 'resolve-tool', tool], { encoding: 'utf8' });
+      assert.equal(resolved.status, 0, `fixture requires ${tool}`);
+      fs.symlinkSync(resolved.stdout.trim(), path.join(host, tool));
+    }
+    for (const tool of ['node', 'npm', 'gtk-launch', 'papercusp-server', 'papercusp-desktop']) {
+      fs.writeFileSync(path.join(host, tool), '#!/bin/bash\necho HOST_LAUNCHER >&2\nexit 91\n', { mode: 0o755 });
+    }
+    const result = spawnSync('/bin/bash', ['-c', [
+      helper, 'prepare_gui_launch_path "$1" || exit 90',
+      'for tool in node npm gtk-launch papercusp-server papercusp-desktop; do',
+      '  if PATH="$1" command -v "$tool" >/dev/null; then exit 92; fi', 'done',
+      'export PATH="$1"', 'exec "$2/AppRun"',
+    ].join('\n'), 'isolated-launch', isolated, appdir], {
+      encoding: 'utf8', env: { ...process.env, PATH: host + ':' + process.env.PATH, APPDIR: '' },
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(result.stdout.trim(), 'BUNDLED:' + appdir);
+    assert.doesNotMatch(result.stderr, /command not found|HOST_LAUNCHER/);
+    assert.deepEqual(fs.readdirSync(isolated).sort(), ['dirname', 'grep', 'gsettings', 'ls', 'readlink', 'realpath', 'sed']);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('GUI-only launch refuses a missing AppRun utility before launching', () => {
+  const source = fs.readFileSync(path.join(BIN, 'linux-fresh-install-e2e.sh'), 'utf8');
+  const helper = source.match(/prepare_gui_launch_path\(\) \{\n[\s\S]*?\n\}/)?.[0];
+  assert.ok(helper);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gui-launch-missing-tool-'));
+  try {
+    const result = spawnSync('/bin/bash', ['-c', [
+      helper, 'command() { if [[ "$2" = readlink ]]; then return 1; fi; builtin command "$@"; }',
+      'prepare_gui_launch_path "$1" || exit 90', 'echo LAUNCH_ALLOWED',
+    ].join('\n'), 'missing-utility', path.join(root, 'launch-bin')], { encoding: 'utf8' });
+    assert.equal(result.status, 90, result.stdout + result.stderr);
+    assert.match(result.stderr, /required AppRun utility missing: readlink/);
+    assert.doesNotMatch(result.stdout, /LAUNCH_ALLOWED/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

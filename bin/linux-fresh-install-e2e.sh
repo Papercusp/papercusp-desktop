@@ -287,27 +287,44 @@ else
   pass "thin GUI contains no bundled node or serve.mjs"
 fi
 
-# Prevent this GUI-only run from launching a host-installed sibling Server. The
-# missing launcher is the deliberate condition that exercises the explicit
-# install/start guidance path while HOME keeps discovery empty.
-SCRUBBED_PATH=""
-IFS=':' read -ra PATH_DIRS <<< "$PATH"
-for dir in "${PATH_DIRS[@]}"; do
-  [ -n "$dir" ] || continue
-  if [ -x "$dir/node" ] || [ -x "$dir/npm" ] || [ -x "$dir/gtk-launch" ] || [ -x "$dir/papercusp-server" ]; then
-    continue
-  fi
-  SCRUBBED_PATH="${SCRUBBED_PATH:+$SCRUBBED_PATH:}$dir"
-done
+# AppRun and its GTK hook need native utilities even when /usr/bin also contains
+# Node. Removing that whole directory made readlink/dirname disappear, let HERE
+# become empty, and launched the host's /usr/bin/papercusp-desktop instead.
+# Expose exact utility paths without exposing any sibling application launcher.
+prepare_gui_launch_path() {
+  local target="$1" tool source
+  mkdir -p -- "$target" || return 1
+  for tool in dirname readlink realpath ls sed grep gsettings; do
+    source=$(command -v "$tool") || {
+      printf 'required AppRun utility missing: %s\n' "$tool" >&2
+      return 1
+    }
+    [[ "$source" = /* && -x "$source" ]] || return 1
+    ln -s -- "$source" "$target/$tool" || return 1
+  done
+}
+SCRUBBED_PATH="$RUN_DIR/launch-bin"
+if ! prepare_gui_launch_path "$SCRUBBED_PATH"; then
+  void "could not prepare the isolated native utility PATH"
+  emit_verdict
+fi
 PATH_ISOLATED=1
-for forbidden_command in node npm gtk-launch papercusp-server; do
+for forbidden_command in node npm gtk-launch papercusp-server papercusp-desktop; do
   if PATH="$SCRUBBED_PATH" command -v "$forbidden_command" >/dev/null 2>&1; then
     void "$forbidden_command remains resolvable under the isolated launch PATH"
     PATH_ISOLATED=0
   fi
 done
-[ "$PATH_ISOLATED" = "1" ] \
-  && pass "launch PATH cannot supply Node or start an installed Papercusp Server"
+if [ "$PATH_ISOLATED" != "1" ]; then
+  emit_verdict
+fi
+# Check the helpers under the exact child environment before an expensive launch.
+if [ "$(PATH="$SCRUBBED_PATH" readlink -f "$APPRUN")" != "$EXTRACT_ROOT/AppRun" ] \
+  || [ "$(PATH="$SCRUBBED_PATH" dirname "$APPRUN")" != "$EXTRACT_ROOT" ]; then
+  void "isolated AppRun path utilities do not resolve this extracted artifact"
+  emit_verdict
+fi
+pass "launch PATH cannot supply Node or start an installed Papercusp Server"
 
 SCRATCH_HOME="$RUN_DIR/home"
 mkdir -p "$SCRATCH_HOME/xdg"
