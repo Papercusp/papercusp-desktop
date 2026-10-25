@@ -77,7 +77,6 @@ fi
 
 # ── Private GCS storage ─────────────────────────────────────────────────────
 . "$HERE/lib/release-storage.sh"
-release_storage_init
 remote_state() { release_storage_state "$@"; }
 
 # ── What to upload ───────────────────────────────────────────────────────────
@@ -139,6 +138,10 @@ fi
 # The caller's selection is insufficient: inspect the exact artifact records.
 # This precedes installer/signature and permanent/channel manifest uploads.
 node "$HERE/lib/spa-freshness.js" "${ARTIFACTS[@]}" || exit $?
+
+# Candidate artifact identity must be rejected before provider prerequisites,
+# even when the caller's environment selects the legacy interface.
+release_storage_init
 
 # EI-20551860898590077: the artifact manifest is tag-scoped, but a failed cut
 # can leave a correctly named/signed artifact from an earlier attempt in that
