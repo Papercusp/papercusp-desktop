@@ -1055,7 +1055,7 @@ test('release gitleaks config keeps default detectors and uses conjunctive gener
   const config = fs.readFileSync(configPath, 'utf8');
   assert.match(config, /minVersion = "v8\.30\.1"/);
   assert.match(config, /\[extend\]\s+useDefault = true/);
-  assert.equal((config.match(/condition = "AND"/g) || []).length, 10);
+  assert.equal((config.match(/condition = "AND"/g) || []).length, 11);
   assert.match(config, /targetRules = \["gcp-api-key"\]/);
   assert.match(config, /targetRules = \["generic-api-key"\]/);
   assert.match(config, /regexTarget = "line"/);
@@ -1253,6 +1253,44 @@ test('session-port estimator marker is allowed only in generated serve.mjs', () 
   const nearMiss = scan({ 'serve.mjs': 'SESSION_PORT_TOKEN_ESTIMATOR="utf8-byte-upper-bound-v2"\n' });
   assert.equal(nearMiss.status, 1, 'a changed estimator value must remain a finding');
   assert.ok(nearMiss.report.some((finding) => finding.RuleID === 'generic-api-key'));
+});
+
+test('public V3 Git pins suppress only exact Sourcegraph matches in assembled hosts', () => {
+  const fixture = JSON.parse(fs.readFileSync(path.join(root, '..',
+    'packages/operator-core/lib/llm-testing/fixtures/tool-delivery-clean-source-v3-20261024.json'), 'utf8'));
+  const pins = [fixture.sourcePins.head, ...Object.values(fixture.sourcePins.submodules),
+    ...Object.values(fixture.measurementAmendment.addedSubmodules)];
+  assert.equal(pins.length, 4, 'update the reviewed pin census when the fixture changes');
+  const generated = 'const sourceGraphQualification=true; const pins=' + JSON.stringify(pins) + ';\n';
+  const files = ['serve.mjs', 'spawner-sidecar.mjs', 'env-sidecars/staging/serve.mjs'];
+  const entries = Object.fromEntries(files.map(file => [file, generated]));
+  const baseline = scan({ 'serve.mjs': generated }, { config: false });
+  assert.equal(baseline.status, 1);
+  assert.equal(baseline.report.filter(f => f.RuleID === 'sourcegraph-access-token').length, pins.length,
+    'every public pin must exercise the upstream detector');
+  const allowed = scan(entries);
+  assert.equal(allowed.status, 0, JSON.stringify(allowed.report));
+  assert.deepEqual(allowed.report, []);
+
+  const changedPin = (pins[0][0] === '0' ? '1' : '0') + pins[0].slice(1);
+  const rawToken = ['A9f3Kx7L', 'm2Qp8Rz4', 'V6nC1wH7'].join('');
+  for (const file of files) {
+    for (const [label, payload, rule] of [
+      ['changed pin', 'const pin="' + changedPin + '";', 'sourcegraph-access-token'],
+      ['prefixed credential', 'const pin="sgp_' + pins[0] + '";', 'sourcegraph-access-token'],
+      ['generic credential', 'const api_key="' + rawToken + '";', 'generic-api-key'],
+    ]) {
+      // Place the credential on the SAME line as every allowed pin.
+      const result = scan({ [file]: generated.trimEnd() + payload + '\n' });
+      assert.equal(result.status, 1, label + ' passed in ' + file);
+      assert.ok(result.report.some(f => f.RuleID === rule), label + ' detector was suppressed in ' + file);
+    }
+  }
+  for (const file of ['other.mjs', 'first-party-callers.worker.mjs']) {
+    const wrongPath = scan({ [file]: generated });
+    assert.equal(wrongPath.status, 1, 'public pin exception escaped to ' + file);
+    assert.equal(wrongPath.report.filter(f => f.RuleID === 'sourcegraph-access-token').length, pins.length);
+  }
 });
 
 test('an unrelated raw token remains a release-gate finding', () => {

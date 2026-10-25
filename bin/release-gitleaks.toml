@@ -234,3 +234,25 @@ regexTarget = "line"
 regexes = [
     '''(?i)same-key restore succeeds,''',
 ]
+
+# The V3 tool-delivery fixture records these four public Git commits at
+# sourcePins.head, sourcePins.submodules and measurementAmendment.addedSubmodules
+# (packages/operator-core/lib/llm-testing/fixtures/tool-delivery-clean-source-v3-20261024.json).
+# The upstream Sourcegraph detector accepts bare 40-hex values when any part of
+# its input fragment contains "sourcegraph". The fixture's sourceGraphQualification
+# field activates it for these pins in bundled host/spawner code. Keep the full
+# upstream rule and exempt only each complete observed match, including its JSON
+# quote. A prefixed sgp_ token, changed pin, other path or neighboring credential
+# remains detectable; no source line or worker bundle is exempted.
+[[allowlists]]
+description = "Exact public V3 tool-delivery Git pins in assembled hosts"
+condition = "AND"
+targetRules = ["sourcegraph-access-token"]
+paths = [
+    '''(?:^|/)serve\.mjs$''',
+    '''(?:^|/)spawner-sidecar\.mjs$''',
+]
+regexTarget = "match"
+regexes = [
+    '''^(?:038caf5ae096cef14015342c64dc713e0b803eb1|d89c3dc763e5d80ae14d6f955e3e0014a81ac358|cfd6651a5bf799267d60128244acc77571170b0a|b2f9ff3e7b0966c1d9e376492160801880b1a87e)"$''',
+]
