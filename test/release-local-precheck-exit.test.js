@@ -44,6 +44,31 @@ const root = path.resolve(__dirname, '..');
 const SCRIPT = process.env.PROBE_RELEASE_LOCAL || path.join(root, 'bin', 'release-local.sh');
 const src = () => fs.readFileSync(SCRIPT, 'utf8');
 
+test('scanner and collector preflight runs both real suites and stops on either failure before costly work', () => {
+  const text = src();
+  const definition = text.match(/^release_verify_contract_regressions\(\) \{\n[\s\S]*?^\}/m)?.[0];
+  assert(definition, 'release contract preflight is missing');
+  const call = text.indexOf('\nrelease_verify_contract_regressions || {');
+  assert(call > 0 && call < text.indexOf('# Migration-safety gate'), 'contract checks must precede migration replay');
+  assert(call < text.indexOf('if [[ "${PAPERCUSP_RELEASE_PRECHECK_ONLY:-0}" == "1" ]]'), 'precheck-only must run contract checks');
+  assert.match(definition, /node --test --test-global-setup=test\/monorepo-host-preflight\.mjs/);
+  assert.match(definition, /test\/release-gitleaks\.test\.js test\/release-local-linux-reuse\.test\.js/);
+  assert.match(definition, /npm run test:file --[\s\S]*packages\/operator-core\/lib\/code-intelligence\/reuse-source-population\.test\.ts/);
+  for (const [failed, expected] of [['none', 0], ['node', 1], ['npm', 1]]) {
+    const command = [
+      'set -euo pipefail', 'ROOT=' + JSON.stringify(root),
+      'node() { echo NODE_CHECK; [[ "$FAIL_CHECK" != node ]]; }',
+      'npm() { echo WORKER_CHECK; [[ "$FAIL_CHECK" != npm ]]; }',
+      definition, 'release_verify_contract_regressions || exit 1', 'echo CONTRACTS_PASSED',
+    ].join('\n');
+    const result = spawnSync('bash', ['-c', command], { encoding: 'utf8', env: { ...process.env, FAIL_CHECK: failed } });
+    assert.equal(result.status, expected, result.stderr || result.stdout);
+    assert.match(result.stdout, /NODE_CHECK/);
+    assert.equal(result.stdout.includes('WORKER_CHECK'), failed !== 'node');
+    assert.equal(result.stdout.includes('CONTRACTS_PASSED'), failed === 'none');
+  }
+});
+
 test('release launcher resolves Cargo under a minimal systemd PATH before build preflight', (t) => {
   const text = src();
   const definition = text.match(/^ensure_release_cargo_path\(\) \{\n[\s\S]*?^\}/m)?.[0];

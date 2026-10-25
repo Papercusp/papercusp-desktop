@@ -1086,12 +1086,57 @@ release_task_leg_start() { # <leg>
   esac
 }
 
+# Print the one optional D-236 companion's count. Both the retry classifier and
+# strict collector use this contract: a seed is not an extra role, nor may it
+# stand in for a missing Server. Read controls only; never unpack the payload.
+release_linux_seed_companion_count() { # <bundle-dir>
+  local bundle="$1" seed artifact package server='' servers=0 recommends needs_seed=0
+  seed="$bundle/deb/papercusp-server-seed_${VERSION}_all.deb"
+  for artifact in "$bundle"/deb/*_"$VERSION"_*.deb; do
+    [[ -f "$artifact" ]] || continue
+    package="$(dpkg-deb -f "$artifact" Package 2>/dev/null || true)"
+    if [[ "$package" == papercusp-server-seed || "${artifact##*/}" == papercusp-server-seed_* ]]; then
+      if [[ "$artifact" != "$seed" ]]; then
+        echo "ERROR: unexpected Linux seed companion: $artifact" >&2
+        return 1
+      fi
+    fi
+    if [[ "$package" == papercusp-server ]]; then
+      servers=$((servers + 1)); server="$artifact"
+      recommends="$(dpkg-deb -f "$artifact" Recommends 2>/dev/null || true)"
+      [[ "$recommends" != *papercusp-server-seed* ]] || needs_seed=1
+    fi
+  done
+  if [[ ! -e "$seed" && ! -L "$seed" && ! -e "$seed.sig" && ! -L "$seed.sig" && "$needs_seed" == 0 ]]; then
+    echo 0
+    return 0
+  fi
+  if [[ " $PAPERCUSP_BUILD_ROLES " != *" server "* || "$servers" != 1 \
+        || ! -f "$seed" || ! -f "$seed.sig" || -L "$seed" || -L "$seed.sig" ]]; then
+    echo "ERROR: Linux seed companion requires the server role, exactly one Server, and its exact package/signature pair: $seed" >&2
+    return 1
+  fi
+  if [[ "$(dpkg-deb -f "$server" Version 2>/dev/null)" != "$VERSION" ]]; then
+    echo "ERROR: Linux seed companion Server control version does not match $VERSION: $server" >&2
+    return 1
+  fi
+  # Reuse the producer's Package/Version/all-architecture, unversioned
+  # Recommends, Replaces and no reverse-dependency checks rather than a second
+  # interpretation of its Debian relationship contract.
+  python3 -I "$ORCHESTRATOR_HERE/split-server-seed-deb.py" verify-control "$server" "$seed" >/dev/null || return 1
+  echo 1
+}
+
 release_task_linux_outputs_absent() { # <bundle-dir>
-  local bundle="$1" expected_appimages=0 expected_debs=0 appimages appimage_sigs debs deb_sigs role
+  local bundle="$1" expected_appimages=0 expected_debs=0 appimages appimage_sigs debs deb_sigs role seed_companions
   [[ " $PAPERCUSP_BUILD_ROLES " == *" gui "* ]] && expected_appimages=1
   for role in $PAPERCUSP_BUILD_ROLES; do
     case "$role" in gui|server) expected_debs=$((expected_debs + 1)) ;; esac
   done
+  # Invalid/orphan companions are contamination and must reach strict
+  # verification even without provenance; they are never retryable absence.
+  seed_companions="$(release_linux_seed_companion_count "$bundle")" || return 1
+  expected_debs=$((expected_debs + seed_companions))
   appimages="$(find "$bundle/appimage" -maxdepth 1 -type f -name "*_${VERSION}_*.AppImage" -printf x 2>/dev/null | wc -c | tr -d ' ')"
   appimage_sigs="$(find "$bundle/appimage" -maxdepth 1 -type f -name "*_${VERSION}_*.AppImage.sig" -printf x 2>/dev/null | wc -c | tr -d ' ')"
   debs="$(find "$bundle/deb" -maxdepth 1 -type f -name "*_${VERSION}_*.deb" -printf x 2>/dev/null | wc -c | tr -d ' ')"
@@ -1829,6 +1874,23 @@ if [[ "$WITH_ANDROID" == "1" ]]; then
   fi
   echo "==> Android versionName verified to derive from PAPERCUP_RELEASE_VERSION ($android_vn_env/$android_vn_total assignment(s))"
 fi
+
+# The prior P003 cuts failed on two independent contract defects only after a
+# full build: scanner input/config drift and the deliberate D-236 seed package
+# counted as surplus. Run their maintained regressions before costly replay or
+# compilation, including the emitted worker through its public API. These tests
+# use private fixtures; the final signed-artifact gates below remain necessary.
+release_verify_contract_regressions() {
+  echo "==> checking release scanner and Linux collector contracts"
+  ( cd "$ROOT" && node --test --test-global-setup=test/monorepo-host-preflight.mjs \
+      test/release-gitleaks.test.js test/release-local-linux-reuse.test.js ) || return $?
+  ( cd "$ROOT/.." && npm run test:file -- \
+      packages/operator-core/lib/code-intelligence/reuse-source-population.test.ts ) || return $?
+}
+release_verify_contract_regressions || {
+  echo "ERROR: release contract regressions failed — fix the scanner/collector before starting an expensive cut." >&2
+  exit 1
+}
 
 # Migration-safety gate — fail FAST (before the ~35-min build) if a migration would
 # crash the packaged operator on FIRST BOOT. Catches the migration-631 class (an
@@ -2942,12 +3004,14 @@ assert_reused_provenance() {  # $1 = artifact dir, $2 = leg label
 
 assert_linux_artifact_cardinality() {  # $1 = Linux bundle dir
   local dir="$1"
-  local expected_appimages=0 expected_debs=0 appimages appimage_sigs debs deb_sigs role artifact
+  local expected_appimages=0 expected_debs=0 appimages appimage_sigs debs deb_sigs role artifact seed_companions
   local -a artifacts=()
   [[ " $PAPERCUSP_BUILD_ROLES " == *" gui "* ]] && expected_appimages=1
   for role in $PAPERCUSP_BUILD_ROLES; do
     case "$role" in gui|server) expected_debs=$((expected_debs + 1)) ;; esac
   done
+  seed_companions="$(release_linux_seed_companion_count "$dir")" || return 1
+  expected_debs=$((expected_debs + seed_companions))
   appimages="$(find "$dir/appimage" -maxdepth 1 -type f -name "*_${VERSION}_*.AppImage" -printf x 2>/dev/null | wc -c | tr -d ' ')"
   appimage_sigs="$(find "$dir/appimage" -maxdepth 1 -type f -name "*_${VERSION}_*.AppImage.sig" -printf x 2>/dev/null | wc -c | tr -d ' ')"
   debs="$(find "$dir/deb" -maxdepth 1 -type f -name "*_${VERSION}_*.deb" -printf x 2>/dev/null | wc -c | tr -d ' ')"
