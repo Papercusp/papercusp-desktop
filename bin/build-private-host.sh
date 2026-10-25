@@ -57,6 +57,9 @@ TARGET_OS="$(node -p process.platform)" TARGET_ARCH="$(node -p process.arch)"
 [[ "$TARGET_OS" == linux ]] || { echo 'private PRIMARY assembly currently requires Linux' >&2; exit 78; }
 _bare_node_platform="$TARGET_OS" _bare_node_arch="$TARGET_ARCH"
 source "$WEB_DIR/bin/bundle-host-common.sh"
+SOURCE_SHA="$(bundle_host_source_sha "$REPO_ROOT")" || exit $?
+[[ "$SOURCE_SHA" =~ ^[a-f0-9]{7,40}$ ]] || { echo 'private PRIMARY requires a verified source SHA' >&2; exit 78; }
+BUNDLED_SOURCE_SHA_DEFINE=("--define:__PAPERCUSP_BUNDLED_SOURCE_SHA__=\"${SOURCE_SHA}\"")
 source "$HERE/lib/transformers-models.sh"
 source "$HERE/lib/host-runtime-closure.sh"
 HOST_EXTERNALS=("${HOST_COMMON_EXTERNALS[@]}")
@@ -96,10 +99,10 @@ bundle_host_run_step source-census-before source_census > "$run/source-before.js
 bundle_host_run_step primary-probe-wait node "$REPO_ROOT/scripts/mutation-probe-window-gate.mjs" wait \
   --root "$REPO_ROOT" --stamp-file "$run/probe-stamp.json"
 bundle_host_primary "$REPO_ROOT" "$SIDECAR_DIR" "${HOST_RELEASE_COMPACTION_ARGS[@]}" \
-  --define:__PAPERCUSP_BUNDLED_SIDECAR__=true "${HOST_EXTERNALS[@]}"
+  --define:__PAPERCUSP_BUNDLED_SIDECAR__=true "${BUNDLED_SOURCE_SHA_DEFINE[@]}" "${HOST_EXTERNALS[@]}"
 bundle_host_workers "$REPO_ROOT" "$SIDECAR_DIR"
 bundle_host_runtime_siblings "$REPO_ROOT" "$SIDECAR_DIR"
-bundle_host_spawner "$REPO_ROOT" "$SIDECAR_DIR" "${HOST_RELEASE_COMPACTION_ARGS[@]}" "${HOST_EXTERNALS[@]}"
+bundle_host_spawner "$REPO_ROOT" "$SIDECAR_DIR" "${HOST_RELEASE_COMPACTION_ARGS[@]}" "${BUNDLED_SOURCE_SHA_DEFINE[@]}" "${HOST_EXTERNALS[@]}"
 bundle_host_launcher "$REPO_ROOT" "$SIDECAR_DIR/scripts/psu.mjs" psu-launcher "${HOST_RELEASE_COMPACTION_ARGS[@]}"
 bundle_host_launcher "$REPO_ROOT" "$SIDECAR_DIR/scripts/ptool.mjs" ptool "${HOST_RELEASE_COMPACTION_ARGS[@]}"
 node "$HERE/check-ptool-sdk-bundle.mjs" "$SIDECAR_DIR/scripts/ptool.mjs"
@@ -131,11 +134,11 @@ bundle_host_run_step primary-probe-verify node "$REPO_ROOT/scripts/mutation-prob
 bundle_host_run_step source-census-after source_census > "$run/source-after.json"
 cmp "$run/source-before.json" "$run/source-after.json" || { echo 'source changed during private assembly' >&2; exit 1; }
 # A receipt is emitted only after the assembled tree and inputs are qualified.
-node - "$run" "$REPO_ROOT" "$nat_copied" <<'NODE'
+node - "$run" "$REPO_ROOT" "$nat_copied" "$SOURCE_SHA" <<'NODE'
 const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
-const [run, donor, copied] = process.argv.slice(2), artifact = path.join(run, 'artifact');
+const [run, donor, copied, sourceSha] = process.argv.slice(2), artifact = path.join(run, 'artifact');
 const receipt = {schemaVersion:'private-primary-assembly-v1', donor, artifact,
-  source:JSON.parse(fs.readFileSync(path.join(run,'source-after.json'))), packages:Number(copied),
+  sourceSha, source:JSON.parse(fs.readFileSync(path.join(run,'source-after.json'))), packages:Number(copied),
   primarySha256:crypto.createHash('sha256').update(fs.readFileSync(path.join(artifact,'serve.mjs'))).digest('hex'),
   controlStatus:'not-run', physicalStatus:'not-qualified'};
 fs.writeFileSync(path.join(run,'assembly.json'), JSON.stringify(receipt) + '\n', {mode:0o600});

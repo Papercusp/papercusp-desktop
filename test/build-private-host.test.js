@@ -122,6 +122,52 @@ test('runtime require-root copying stops on failure even when caller tests its s
   assert.doesNotMatch(r.stdout,/^luxon$/m);
 });
 
+test('source SHA resolver uses the actual checkout and refuses a borrowed parent identity',t=>{
+  const f=fixture(t),repo=path.resolve(desktop,'..');
+  const expected=spawnSync('git',['-C',repo,'rev-parse','--short','HEAD'],{encoding:'utf8'});
+  assert.equal(expected.status,0,expected.stderr);
+  const resolveSha=(root,extra={})=>spawnSync('bash',['-c',
+    'source "$COMMON"; bundle_host_source_sha "$SOURCE_ROOT"'],{
+    encoding:'utf8',timeout:15000,env:{...process.env,NODE_OPTIONS:'',NODE_PATH:'',
+      VERIFY_TAURI_SOURCE_RECEIPT:'',COMMON:common,SOURCE_ROOT:root,...extra}});
+  const actual=resolveSha(repo);
+  assert.equal(actual.status,0,actual.stderr);
+  assert.equal(actual.stdout.trim(),expected.stdout.trim());
+  const nested=resolveSha(path.join(repo,'apps/operator'));
+  assert.equal(nested.status,0,nested.stderr);
+  assert.equal(nested.stdout,'');
+  const pinned=resolveSha(repo,{VERIFY_TAURI_SOURCE_RECEIPT:path.join(f.root,'absent.json')});
+  assert.equal(pinned.status,78,pinned.stderr);
+  assert.match(pinned.stderr,/pinned source receipt requires its archive marker/);
+});
+
+test('private source SHA setup produces a real bundled identity without a runtime override',t=>{
+  const f=fixture(t),repo=path.resolve(desktop,'..');
+  const builder=fs.readFileSync(script,'utf8');
+  const start=builder.indexOf('SOURCE_SHA="$(bundle_host_source_sha');
+  const end=builder.indexOf('source "$HERE/lib/transformers-models.sh"',start);
+  assert.ok(start>=0&&end>start,'private builder must run the shared source resolver');
+  assert.match(builder,/bundle_host_primary[^\n]*\n[^\n]*BUNDLED_SOURCE_SHA_DEFINE/);
+  assert.match(builder,/bundle_host_spawner[^\n]*BUNDLED_SOURCE_SHA_DEFINE/);
+  const source=path.join(f.donor,'apps/operator/bin/serve.ts');
+  fs.mkdirSync(path.dirname(source),{recursive:true});
+  fs.writeFileSync(source,'import {resolveBuildInfo} from '+JSON.stringify(path.join(repo,'packages/operator-core/lib/build-info.ts'))+';\n'
+    +'console.log(JSON.stringify(resolveBuildInfo({env:{},gitSha:()=>{throw new Error("runtime git identity forbidden");}})));\n');
+  fs.copyFileSync(path.join(repo,'apps/operator/bin/ascii-escape-bundle.mjs'),path.join(f.donor,'apps/operator/bin/ascii-escape-bundle.mjs'));
+  const command='set -euo pipefail\nsource "$COMMON"\nREPO_ROOT="$SOURCE_ROOT"\n'
+    +builder.slice(start,end)+'\n'
+    +'bundle_host_esbuild() { "$ESBUILD" "${@:2}"; }\n'
+    +'bundle_host_primary "$DONOR" "$OUTPUT" --define:__PAPERCUSP_BUNDLED_SIDECAR__=true "${BUNDLED_SOURCE_SHA_DEFINE[@]}"\n'
+    +'node "$OUTPUT/serve.mjs"';
+  const r=spawnSync('bash',['-c',command],{encoding:'utf8',timeout:15000,
+    env:{...process.env,NODE_OPTIONS:'',NODE_PATH:'',PAPERCUSP_BUILD_SHA:'',VERIFY_TAURI_SOURCE_RECEIPT:'',
+      COMMON:common,SOURCE_ROOT:repo,DONOR:f.donor,OUTPUT:f.output,
+      ESBUILD:path.join(path.dirname(require.resolve('esbuild/package.json')),'bin/esbuild')}});
+  assert.equal(r.status,0,r.stdout+r.stderr);
+  const expected=spawnSync('git',['-C',repo,'rev-parse','--short','HEAD'],{encoding:'utf8'});
+  assert.equal(JSON.parse(r.stdout.trim().split('\n').at(-1)).sha,expected.stdout.trim());
+});
+
 function graphFixture(t) {
   const f=fixture(t),run=path.join(f.root,'run');
   fs.mkdirSync(path.join(run,'artifact'),{recursive:true});
