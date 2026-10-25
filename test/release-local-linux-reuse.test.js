@@ -130,7 +130,8 @@ test('tag-deferred builds leave both repositories and canonical manifests untouc
 // independent Android branch. This is deliberately not a rewritten model of
 // the shell logic: if the production branch changes, the behavior under test
 // changes with it.
-const linuxReuseHarness = sliceBetween('_prov_version()', '# ── Mobile');
+const linuxReuseHarness = sliceBetween('release_linux_seed_companion_count() {', 'release_task_linux_outputs_absent() {')
+  + sliceBetween('_prov_version()', '# ── Mobile');
 const linuxReusePreflightHarness = sliceBetween(
   '# EI-24514809679788531: a non-Linux run-leg always skips the Linux build',
   'require_release_host',
@@ -1380,6 +1381,103 @@ test('partial Linux output is retryable, while complete or surplus shape reaches
     'present',
     'missing provenance cannot make a surplus same-version set retryable',
   );
+});
+
+// Tiny real Debian controls exercise the producer's D-236 verifier; the package
+// payloads and signatures are fixtures because this gate checks shape/control.
+// The journal byte-gate tests above retain the separate cryptographic checks.
+function runLinuxSeedCompanion({ roles = 'gui server', seedFields = {}, recommends = 'papercusp-server-seed',
+  seedName = 'papercusp-server-seed_0.0.18_all.deb', omitSeed = false, omitSig = false,
+  duplicate = false, omitServer = false, stale = false, provenance = true } = {}) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-linux-seed-contract-'));
+  const bundle = path.join(temp, 'bundle');
+  const debDir = path.join(bundle, 'deb');
+  const tag = path.basename(temp);
+  const cutStart = `/tmp/papercusp-cut-start-${tag}.txt`;
+  fs.mkdirSync(debDir, { recursive: true });
+  fs.mkdirSync(path.join(bundle, 'appimage'));
+  function deb(name, fields) {
+    const staging = path.join(temp, `pkg-${name}`);
+    fs.mkdirSync(path.join(staging, 'DEBIAN'), { recursive: true });
+    fs.writeFileSync(path.join(staging, 'DEBIAN', 'control'), Object.entries({
+      Package: 'papercusp-server', Version: '0.0.18', Architecture: 'amd64',
+      Maintainer: 'Release test <test@example.invalid>', Description: 'Release control fixture', ...fields,
+    }).filter(([, value]) => value).map(([key, value]) => `${key}: ${value}\n`).join(''));
+    const result = spawnSync('dpkg-deb', ['--root-owner-group', '-Zgzip', '--build', staging, path.join(debDir, name)], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    fs.writeFileSync(path.join(debDir, `${name}.sig`), 'signature fixture');
+  }
+  try {
+    if (roles.includes('gui')) {
+      fs.writeFileSync(path.join(debDir, 'Papercusp_GUI_0.0.18_amd64.deb'), 'GUI fixture');
+      fs.writeFileSync(path.join(debDir, 'Papercusp_GUI_0.0.18_amd64.deb.sig'), 'signature fixture');
+      for (const suffix of ['', '.sig']) fs.writeFileSync(path.join(bundle, 'appimage', `Papercusp_GUI_0.0.18_amd64.AppImage${suffix}`), 'GUI fixture');
+    }
+    if (!omitServer) deb('Papercusp_Server_0.0.18_amd64.deb', { Recommends: recommends });
+    if (!omitSeed) deb(seedName, { Package: 'papercusp-server-seed', Architecture: 'all', Replaces: 'papercusp-server (<= 0.0.18)', ...seedFields });
+    if (omitSig && !omitSeed) fs.rmSync(path.join(debDir, `${seedName}.sig`));
+    if (duplicate) {
+      fs.copyFileSync(path.join(debDir, seedName), path.join(debDir, 'papercusp-server-seed_0.0.18_amd64.deb'));
+      fs.writeFileSync(path.join(debDir, 'papercusp-server-seed_0.0.18_amd64.deb.sig'), 'signature fixture');
+    }
+    if (stale) for (const suffix of ['', '.sig']) fs.utimesSync(path.join(debDir, `${seedName}${suffix}`), 0, 0);
+    if (provenance) fs.writeFileSync(path.join(bundle, 'build-provenance.json'), '{}');
+    fs.writeFileSync(cutStart, '1\n');
+    const command = [
+      'set -euo pipefail', `ORCHESTRATOR_HERE=${JSON.stringify(path.join(root, 'bin'))}`,
+      'MONOREPO=/unused', 'VERSION=0.0.18', 'CHANNEL=alpha', `TAG=${JSON.stringify(tag)}`,
+      `PAPERCUSP_BUILD_ROLES=${JSON.stringify(roles)}`, 'RELEASE_TASK_JOURNAL_ENABLED=0',
+      `source ${JSON.stringify(path.join(root, 'bin', 'lib', 'release-artifacts.sh'))}`,
+      releaseTaskJournalHarness,
+      sliceBetween('assert_linux_artifact_cardinality() {', '# The Windows sibling'),
+      `if release_task_linux_outputs_absent ${JSON.stringify(bundle)}; then echo SHAPE=absent; else echo SHAPE=present; fi`,
+      `assert_linux_artifact_cardinality ${JSON.stringify(bundle)}`,
+    ].join('\n');
+    return spawnSync('bash', ['-c', command], { encoding: 'utf8', timeout: 10000 });
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+    fs.rmSync(cutStart, { force: true });
+  }
+}
+
+test('Linux collector accepts the exact signed D-236 seed companion for server and combined roles', () => {
+  for (const roles of ['server', 'gui server']) {
+    const result = runLinuxSeedCompanion({ roles });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /SHAPE=present/);
+  }
+  const noProvenance = runLinuxSeedCompanion({ provenance: false });
+  assert.equal(noProvenance.status, 0, noProvenance.stderr || noProvenance.stdout);
+  assert.match(noProvenance.stdout, /SHAPE=absent/, 'valid companion must not turn missing provenance into surplus contamination');
+});
+
+test('Linux seed companion does not relax the seedless server contract', () => {
+  const result = runLinuxSeedCompanion({ omitSeed: true, recommends: '' });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /SHAPE=present/);
+});
+
+test('Linux collector and absence classifier reject malformed or orphan seed companions', () => {
+  const cases = [
+    { roles: 'gui', omitServer: true }, { omitServer: true }, { omitSig: true }, { omitSeed: true },
+    { recommends: '' }, { recommends: 'papercusp-server-seed (= 0.0.18)' },
+    { seedFields: { Package: 'unrelated-seed' } }, { seedFields: { Version: '0.0.17' } },
+    { seedFields: { Architecture: 'amd64' } }, { seedFields: { Replaces: 'unrelated (<= 0.0.18)' } },
+    { seedFields: { Depends: 'papercusp-server' } }, { duplicate: true },
+    { seedName: 'papercusp-server-seed_0.0.18_amd64.deb' },
+  ];
+  for (const options of cases) {
+    const result = runLinuxSeedCompanion({ ...options, provenance: false });
+    assert.notEqual(result.status, 0, `accepted ${JSON.stringify(options)}: ${result.stdout}`);
+    assert.match(result.stdout, /SHAPE=present/, `contamination became retryable: ${JSON.stringify(options)}`);
+  }
+});
+
+test('Linux collector still rejects stale seed companion bytes and signatures', () => {
+  const result = runLinuxSeedCompanion({ stale: true });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr + result.stdout, /freshness check FAILED/);
+  assert.match(result.stderr, /papercusp-server-seed_0\.0\.18_all\.deb/);
 });
 
 function journalWindowsOutputShape(files, roles) {
