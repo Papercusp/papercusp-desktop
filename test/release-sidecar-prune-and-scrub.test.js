@@ -435,7 +435,7 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
     '"linuxX64": ["x86_64-unknown-linux-gnu"]',
     '"macOS": ["x86_64-apple-darwin", "aarch64-apple-darwin"]',
     '"windowsX64": ["x86_64-pc-windows-msvc"]',
-    'PAPERCUSP_VM_TRUST_REVISION="2026-10-13-r1"',
+    'PAPERCUSP_VM_TRUST_REVISION="2026-10-23-r1"',
     'PAPERCUSP_VM_NODE_VERSION="v24.18.1"',
     'license": "MIT"',
     'd6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0',
@@ -454,6 +454,7 @@ test('vm-release trust toolchain pins every upstream input and the measured clea
     'PAPERCUSP_VM_GH_X_MOD_VERSION="v0.41.0"',
     'PAPERCUSP_VM_GH_X_NET_VERSION="v0.60.0"',
     'PAPERCUSP_VM_KOPIA_VERSION="0.23.1"',
+    'PAPERCUSP_VM_KOPIA_COMPRESS_VERSION="v1.18.7"',
     '72ec08fd8edb86c67ed27099bf1b955e1f308ffa',
     'license": "Apache-2.0"',
     // These move TOGETHER (2026-10-13-r1): x/net v0.60.0 fixes GO-2026-6603/6610/

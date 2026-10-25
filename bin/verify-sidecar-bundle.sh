@@ -872,13 +872,17 @@ fi
 # A bounded node child replaces GNU timeout (not available on the Mac builder).
 check_boot_import_closure() {
   local side="$1"
-  "$side/bin/node" --input-type=module - "$side" "$REQUIRED_NATIVE_MODULES" <<'NODE'
+  local phase="${2:-boot}"
+  "$side/bin/node" --input-type=module - "$side" "$REQUIRED_NATIVE_MODULES" "$phase" <<'NODE'
 import { spawnSync } from 'node:child_process';
 import { closeSync, fstatSync, mkdtempSync, openSync, readSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
 const side = realpathSync(process.argv[2]);
+const promptPhase = process.argv[4] === 'prompts';
+const flag = promptPhase ? '--verify-role-prompts' : '--verify-boot-imports';
+const receiptPrefix = promptPhase ? 'PAPERCUSP_ROLE_PROMPT_ASSETS ' : 'PAPERCUSP_BOOT_IMPORTS_OK';
 const home = mkdtempSync(join(tmpdir(), 'papercusp-boot-imports-'));
 try {
   // Reuse the native contract above before paying for the complete import graph.
@@ -908,6 +912,7 @@ const { realpathSync } = require('node:fs');
 const { isAbsolute, relative, sep } = require('node:path');
 const { fileURLToPath } = require('node:url');
 const root = ${JSON.stringify(side)};
+const promptPhase = ${JSON.stringify(promptPhase)};
 // HOME/URL sanitization does not disable the DB library's native localhost
 // fallback. Import qualification owns no runtime services: stop Node socket
 // connections and subprocess escapes before the graph runs. Keep the failed
@@ -926,6 +931,59 @@ Object.defineProperty(net.Socket.prototype, 'connect', {
 });
 for (const operation of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) {
   childProcess[operation] = () => refuseIO('child_process.' + operation);
+}
+if (promptPhase) {
+  const fs = require('node:fs');
+  const dgram = require('node:dgram');
+  const dns = require('node:dns');
+  for (const operation of ['send', 'connect', 'bind']) {
+    dgram.Socket.prototype[operation] = () => refuseIO('prompt.dgram.' + operation);
+  }
+  for (const operation of Object.keys(dns)) {
+    if (/^(lookup|resolve|reverse)/.test(operation) && typeof dns[operation] === 'function') {
+      dns[operation] = () => refuseIO('prompt.dns.' + operation);
+      if (typeof dns.promises[operation] === 'function') dns.promises[operation] = dns[operation];
+    }
+  }
+  const confinedRead = original => function(file, ...args) {
+    const suffix = relative(root, realpathSync(file));
+    if (isAbsolute(suffix) || suffix === '..' || suffix.startsWith('..' + sep)) {
+      return refuseIO('prompt.read.outside-bundle');
+    }
+    return original.call(this, file, ...args);
+  };
+  fs.readFileSync = confinedRead(fs.readFileSync);
+  fs.readFile = confinedRead(fs.readFile);
+  fs.promises.readFile = confinedRead(fs.promises.readFile);
+  fs.createReadStream = confinedRead(fs.createReadStream);
+  fs.createWriteStream = () => refuseIO('prompt.fs.createWriteStream');
+  const readonlyOpen = original => function(file, flags = 'r', ...args) {
+    const writes = fs.constants.O_WRONLY | fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_APPEND;
+    if (typeof flags === 'string' ? !['r', 'rs', 'sr'].includes(flags) : typeof flags !== 'number' || (flags & writes) !== 0) {
+      return refuseIO('prompt.fs.open-write');
+    }
+    return confinedRead(original).call(this, file, flags, ...args);
+  };
+  fs.open = readonlyOpen(fs.open);
+  fs.openSync = readonlyOpen(fs.openSync);
+  fs.promises.open = readonlyOpen(fs.promises.open);
+  // stdout/stderr are observer-owned pipes, not image mutations. Node itself
+  // writes permission warnings there; retain those diagnostics without letting
+  // imported code write another inherited or newly opened file descriptor.
+  for (const operation of ['write', 'writeSync', 'writev', 'writevSync']) {
+    const original = fs[operation];
+    fs[operation] = function(fd, ...args) {
+      if (fd !== 1 && fd !== 2) return refuseIO('prompt.fs.' + operation);
+      return original.call(this, fd, ...args);
+    };
+  }
+  for (const operation of ['writeFile', 'appendFile', 'mkdir', 'rm', 'unlink', 'rename', 'truncate', 'ftruncate',
+      'chmod', 'fchmod', 'chown', 'fchown', 'lchown', 'utimes', 'futimes', 'lutimes',
+      'link', 'symlink', 'copyFile', 'cp', 'mkdtemp', 'rmdir']) {
+    if (typeof fs[operation] === 'function') fs[operation] = () => refuseIO('prompt.fs.' + operation);
+    if (typeof fs[operation + 'Sync'] === 'function') fs[operation + 'Sync'] = () => refuseIO('prompt.fs.' + operation);
+    if (typeof fs.promises[operation] === 'function') fs.promises[operation] = () => refuseIO('prompt.fs.' + operation);
+  }
 }
 syncBuiltinESMExports();
 process.on('exit', () => {
@@ -962,7 +1020,7 @@ registerHooks({ resolve(specifier, context, nextResolve) {
   if (process.platform === 'linux' && !env.MALLOC_ARENA_MAX
       && !env.GLIBC_TUNABLES?.includes('glibc.malloc.arena_max')) env.MALLOC_ARENA_MAX = '2';
   for (const key of Object.keys(env)) {
-    if (/DATABASE_URL|PG_DATA_DIR|PG_SQL_DIR|ENV_SIDECAR|OVERRIDE.*STORE/.test(key)) delete env[key];
+    if (/DATABASE_URL|PG_DATA_DIR|PG_SQL_DIR|ENV_SIDECAR|OVERRIDE.*STORE|PAPERCUSP_PROMPT_ROOT/.test(key)) delete env[key];
   }
   const executable = join(side, 'bin/node');
   const startedAt = Date.now();
@@ -972,7 +1030,10 @@ registerHooks({ resolve(specifier, context, nextResolve) {
   const stderrFd = openSync(join(home, 'boot-imports.stderr.log'), 'wx+', 0o600);
   let result, stderrTail;
   try {
-    result = spawnSync(executable, ['--require', guard, join(side, 'serve.mjs'), '--verify-boot-imports'],
+    // Confine loader/internal filesystem calls too; this phase grants no writes.
+    // Addons remain the separately checked trusted native contract.
+    const permissions = promptPhase ? ['--permission', '--allow-fs-read=' + side, '--allow-fs-read=' + guard, '--allow-addons'] : [];
+    result = spawnSync(executable, [...permissions, '--require', guard, join(side, 'serve.mjs'), flag],
       { cwd: side, env, encoding: 'utf8', timeout: 60000, maxBuffer: 1024 * 1024,
         stdio: ['ignore', 'pipe', stderrFd] });
     const size = fstatSync(stderrFd).size;
@@ -980,17 +1041,47 @@ registerHooks({ resolve(specifier, context, nextResolve) {
     const bytes = readSync(stderrFd, tail, 0, tail.length, size - tail.length);
     stderrTail = tail.subarray(0, bytes).toString('utf8');
   } finally { closeSync(stderrFd); }
-  if (result.error || result.status !== 0 || !result.stdout?.includes('PAPERCUSP_BOOT_IMPORTS_OK')) {
+  if (result.error || result.status !== 0 || !result.stdout?.includes(receiptPrefix)) {
     const diagnostic = { executable, cwd: side, elapsedMs: Date.now() - startedAt,
       pid: result.pid, status: result.status, signal: result.signal,
       errorCode: result.error?.code, allocatorCap: env.MALLOC_ARENA_MAX,
       home, xdgStateHome: env.XDG_STATE_HOME,
-      receiptObserved: result.stdout?.includes('PAPERCUSP_BOOT_IMPORTS_OK') === true };
+      receiptObserved: result.stdout?.includes(receiptPrefix) === true };
     process.stderr.write(`boot import closure FAILED: ${result.error?.message ?? result.status}\n` +
       JSON.stringify(diagnostic) + '\n[child stdout tail]\n' +
       String(result.stdout ?? '').slice(-4096) + '\n[child stderr tail]\n' +
       String(result.stderr ?? stderrTail).slice(-4096) + '\n');
     process.exitCode = 1;
+  } else if (promptPhase) {
+    const lines = result.stdout.split('\n').filter(line => line.startsWith(receiptPrefix));
+    const invalid = () => { throw Error('PROMPT_ASSET_CONTRACT_INVALID: malformed final-image disposition'); };
+    if (lines.length !== 1) invalid();
+    const receipt = JSON.parse(lines[0].slice(receiptPrefix.length));
+    if (receipt.schemaVersion !== 'role-prompt-assets/v1' || receipt.installedUseVerified !== false
+        || receipt.candidateAccepted !== false || !Array.isArray(receipt.documents) || !receipt.documents.length
+        || !Array.isArray(receipt.roles) || !receipt.roles.length
+        || receipt.roles.some(role => typeof role !== 'string' || !/^[a-z][a-z0-9-]*$/.test(role))
+        || new Set(receipt.roles).size !== receipt.roles.length
+        || Object.keys(receipt).some(key => !['schemaVersion', 'roles', 'documents', 'installedUseVerified', 'candidateAccepted'].includes(key))) invalid();
+    const roles = new Map();
+    for (const doc of receipt.documents) {
+      if (!doc || typeof doc.role !== 'string' || !/^[a-z][a-z0-9-]*$/.test(doc.role)
+          || !['persona', 'converse', 'tools'].includes(doc.document)
+          || doc.required !== (doc.document !== 'tools')
+          || Object.keys(doc).sort().join(',') !== 'disposition,document,refusalVerified,required,role,sha256') invalid();
+      const kinds = roles.get(doc.role) ?? new Set();
+      if (kinds.has(doc.document)) invalid();
+      kinds.add(doc.document); roles.set(doc.role, kinds);
+      if (doc.disposition === 'available') {
+        if (typeof doc.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(doc.sha256) || doc.refusalVerified !== false) invalid();
+      } else if (doc.disposition === 'unavailable') {
+        if (!doc.required || doc.sha256 !== null || doc.refusalVerified !== true) invalid();
+      } else if (doc.disposition === 'optional-absent') {
+        if (doc.required || doc.sha256 !== null || doc.refusalVerified !== false) invalid();
+      } else invalid();
+    }
+    if (roles.size !== receipt.roles.length || receipt.roles.some(role => roles.get(role)?.size !== 3)) invalid();
+    process.stdout.write(receiptPrefix + JSON.stringify(receipt) + '\n');
   }
 } finally { rmSync(home, { recursive: true, force: true }); }
 NODE
@@ -998,7 +1089,10 @@ NODE
 if [[ "$CROSS" == "0" ]]; then
   echo "[boot] final packaged tool registry import closure"
   check_boot_import_closure "$SIDECAR" || exit 1
+  echo "[prompts] final packaged prompt dispositions (source contract only)"
+  check_boot_import_closure "$SIDECAR" prompts || exit 1
 else
   echo "[boot] cross image: executable import closure MUST be qualified on target before acceptance"
+  echo "[prompts] cross image: prompt dispositions MUST be qualified on target before acceptance"
 fi
 echo "verify-sidecar-bundle: OK"
