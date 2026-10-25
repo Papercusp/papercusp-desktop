@@ -951,6 +951,11 @@ registerHooks({ resolve(specifier, context, nextResolve) {
     PAPERCUSP_PROMPTS_DIR: join(side, 'prompts'), PAPERCUSP_HARNESS_DIR: join(side, 'harness'),
     PAPERCUSP_WORKSPACES_DIR: join(home, 'workspaces'), PAPERCUSP_DISABLE_BACKGROUND_TASKS: '1',
     PAPERCUSP_DBOS_ROUTINES: '0', PAPERCUSP_INTEGRATION_ROOT: '' };
+  // Host test loaders and resolution overlays are not packaged dependencies.
+  // Keep them on this observer, but start the final-image child with only the
+  // explicit closure guard below. Never admit an outside loader to the bundle.
+  delete env.NODE_OPTIONS;
+  delete env.NODE_PATH;
   // Match the host launch contract before module loading. Its fallback reexec
   // otherwise repeats the entire import graph inside this probe's deadline.
   // Preserve explicit allocator choices, as malloc-arena-reexec.ts does.

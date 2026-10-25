@@ -530,6 +530,22 @@ test('packaged import closure qualifies isolated final-image imports, not build-
     console.log('PAPERCUSP_BOOT_IMPORTS_OK');`);
   assert.equal(result.status, 0, result.stderr);
 });
+test('packaged import closure excludes inherited Node preload and resolution hooks', () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'boot-host-loader-'));
+  try {
+    for (const [option, extension] of [['--require', 'cjs'], ['--import', 'mjs']]) {
+      const preload = path.join(fixture, 'host-preload.' + extension);
+      fs.writeFileSync(preload, `if (process.argv.includes('--verify-boot-imports')) throw Error('HOST_PRELOAD_LEAKED');`);
+      const result = runBootCheck(`
+        if (process.env.NODE_OPTIONS || process.env.NODE_PATH) throw Error('HOST_NODE_ENV_LEAKED');
+        console.log('PAPERCUSP_BOOT_IMPORTS_OK');`, {
+        NODE_OPTIONS: option + '=' + preload,
+        NODE_PATH: path.join(fixture, 'host-node-modules'),
+      });
+      assert.equal(result.status, 0, result.stderr);
+    }
+  } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
+});
 test('packaged imports cannot connect to an ambient PostgreSQL endpoint, even when the error is caught', async () => {
   const net = require('node:net');
   let contacts = 0;
