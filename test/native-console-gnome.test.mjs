@@ -39,17 +39,17 @@ function ownedProcessSnapshot(pid, rows = [], seen = new Set()) {
   return rows;
 }
 
-async function runFixtureCommand(command, args, { env = process.env, timeout, stage }) {
+async function runFixtureCommand(command, args, {
+  env = process.env, timeout, stage, timeoutAfterOutput, signal,
+}) {
+  if (timeoutAfterOutput && !signal) {
+    throw new Error('A readiness-gated fixture requires a caller AbortSignal to bound startup');
+  }
   const started = performance.now();
   const child = spawn(command, args, { env, detached: process.platform !== 'win32',
     stdio: ['ignore', 'pipe', 'pipe'] });
-  let stdout = '', stderr = '', error, processesBeforeTimeout;
-  child.stdout.on('data', chunk => { stdout = (stdout + chunk).slice(-64 * 1024); });
-  child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-64 * 1024); });
-  child.on('error', cause => { error = cause; });
-  const timer = setTimeout(() => {
-    processesBeforeTimeout = ownedProcessSnapshot(child.pid);
-    error = Object.assign(new Error(`${command} exceeded ${timeout}ms`), { code: 'ETIMEDOUT' });
+  let stdout = '', stderr = '', error, processesBeforeTimeout, timer;
+  const terminate = () => {
     // The command owns a fresh process group. Kill its compiler/test children as
     // well, so inherited pipes cannot keep a timed-out fixture alive indefinitely.
     try {
@@ -58,10 +58,33 @@ async function runFixtureCommand(command, args, { env = process.env, timeout, st
     } catch (cause) {
       if (cause.code !== 'ESRCH') error.message += `; cleanup: ${cause.message}`;
     }
-  }, timeout);
-  return new Promise(resolve => child.once('close', (status, signal) => {
+  };
+  const armTimeout = () => {
+    timer = setTimeout(() => {
+      processesBeforeTimeout = ownedProcessSnapshot(child.pid);
+      error = Object.assign(new Error(`${command} exceeded ${timeout}ms`), { code: 'ETIMEDOUT' });
+      terminate();
+    }, timeout);
+  };
+  const abort = () => {
+    error = Object.assign(new Error(`${command} fixture cancelled by caller`), { code: 'ABORT_ERR' });
+    terminate();
+  };
+  child.stdout.on('data', chunk => {
+    stdout = (stdout + chunk).slice(-64 * 1024);
+    if (timeoutAfterOutput && !timer && timeoutAfterOutput.test(stdout)) armTimeout();
+  });
+  child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-64 * 1024); });
+  child.on('error', cause => { error = cause; });
+  // Timeout diagnostics need a live descendant to measure. Startup is bounded by
+  // the caller's test deadline; Cargo commands keep their immediate wall timer.
+  if (!timeoutAfterOutput) armTimeout();
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
+  return new Promise(resolve => child.once('close', (status, exitSignal) => {
     clearTimeout(timer);
-    resolve({ status, signal, stdout, stderr, error, stage, command, args, pid: child.pid,
+    signal?.removeEventListener('abort', abort);
+    resolve({ status, signal: exitSignal, stdout, stderr, error, stage, command, args, pid: child.pid,
       elapsedMs: Math.round(performance.now() - started), timeoutMs: timeout, processesBeforeTimeout });
   }));
 }
@@ -91,7 +114,7 @@ test('Cargo failure diagnostics retain stdout and stderr tails', () => {
 });
 
 test('Cargo fixture timeout captures the live owned process tree before cleanup',
-  { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
+  { skip: process.platform !== 'linux', timeout: 10000 }, async (context) => {
     // Inherited pipes make this hang if cleanup kills only the immediate child.
     const driver = `const { spawn } = require('node:child_process');
       const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'],
@@ -99,7 +122,8 @@ test('Cargo fixture timeout captures the live owned process tree before cleanup'
       console.log('DESCENDANT_PID=' + child.pid);
       setInterval(() => {}, 1000);`;
     const result = await runFixtureCommand(process.execPath, ['-e', driver],
-      { timeout: 2000, stage: 'timeout-regression' });
+      { timeout: 50, stage: 'timeout-regression',
+        timeoutAfterOutput: /DESCENDANT_PID=\d+/, signal: context.signal });
     assert.equal(result.error?.code, 'ETIMEDOUT');
     assert.equal(result.signal, 'SIGKILL');
     assert.ok(result.processesBeforeTimeout.some(row => row.pid === result.pid && row.state &&
@@ -112,24 +136,27 @@ test('Cargo fixture timeout captures the live owned process tree before cleanup'
     const message = cargoFailureMessage(result);
     assert.match(message, /stage: timeout-regression/);
     assert.match(message, /owned processes before timeout:/);
-    assert.match(message, /timeout: 2000ms/);
+    assert.match(message, /timeout: 50ms/);
   });
 
 test('Cargo fixture timeout captures children spawned by a worker thread',
-  { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
+  { skip: process.platform !== 'linux', timeout: 10000 }, async (context) => {
     const driver = `const { Worker } = require('node:worker_threads');
-      const worker = new Worker(\`
+      setTimeout(() => {
+        const worker = new Worker(\`
         const { spawn } = require('node:child_process');
         const { parentPort } = require('node:worker_threads');
         const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'],
           { stdio: ['ignore', 'inherit', 'inherit'] });
         parentPort.postMessage(child.pid);
         setInterval(() => {}, 1000);
-      \`, { eval: true });
-      worker.once('message', pid => console.log('WORKER_DESCENDANT_PID=' + pid));
+        \`, { eval: true });
+        worker.once('message', pid => console.log('WORKER_DESCENDANT_PID=' + pid));
+      }, 100);
       setInterval(() => {}, 1000);`;
     const result = await runFixtureCommand(process.execPath, ['-e', driver],
-      { timeout: 2000, stage: 'worker-thread-timeout-regression' });
+      { timeout: 50, stage: 'worker-thread-timeout-regression',
+        timeoutAfterOutput: /WORKER_DESCENDANT_PID=\d+/, signal: context.signal });
     assert.equal(result.error?.code, 'ETIMEDOUT');
     assert.equal(result.signal, 'SIGKILL');
     const descendantPid = Number(result.stdout.match(/WORKER_DESCENDANT_PID=(\d+)/)?.[1]);
@@ -137,6 +164,23 @@ test('Cargo fixture timeout captures children spawned by a worker thread',
     assert.ok(result.processesBeforeTimeout.some(row => row.pid === descendantPid && row.state),
       JSON.stringify(result.processesBeforeTimeout));
     assert.equal(fs.existsSync(`/proc/${result.pid}`), false, 'timed-out command must be reaped');
+  });
+
+test('Cargo fixture readiness is bounded by caller cancellation',
+  { skip: process.platform !== 'linux', timeout: 10000 }, async () => {
+    const controller = new AbortController();
+    const cancel = setTimeout(() => controller.abort(), 50);
+    try {
+      const result = await runFixtureCommand(process.execPath, ['-e', 'setInterval(() => {}, 1000)'],
+        { timeout: 50, stage: 'readiness-cancellation-regression',
+          timeoutAfterOutput: /NEVER_READY/, signal: controller.signal });
+      assert.equal(result.error?.code, 'ABORT_ERR');
+      assert.equal(result.signal, 'SIGKILL');
+      assert.equal(result.processesBeforeTimeout, undefined, 'startup cancellation is not a timeout measurement');
+      assert.equal(fs.existsSync(`/proc/${result.pid}`), false, 'cancelled startup must be reaped');
+    } finally {
+      clearTimeout(cancel);
+    }
   });
 
 const root = path.resolve(import.meta.dirname, '..');
