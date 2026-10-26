@@ -100,12 +100,21 @@ pub const PRESET_SHORTCUTS: &[&str] = &[
 // Persistence (~/.papercusp/docs-search-shortcut.json)
 // ---------------------------------------------------------------------------
 
+fn shortcut_path(config_home: Option<&std::ffi::OsStr>, home: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    // Match the existing PAPERCUSP_HOME override used by the rest of the
+    // desktop runtime. An isolated verifier must never read or rebind the
+    // real user's shortcut just because HOME itself is intentionally shared.
+    let root = match config_home.filter(|path| !path.is_empty()) {
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(home?).join(".papercusp"),
+    };
+    Some(root.join("docs-search-shortcut.json"))
+}
+
 fn persisted_shortcut_path() -> Option<PathBuf> {
-    // HOME on macOS/Linux, USERPROFILE on native Windows. Only needs to be a
-    // stable per-user path (the same process reads it at startup and writes it
-    // on rebind) — it need not match the WSL sidecar home on Windows.
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(PathBuf::from(home).join(".papercusp/docs-search-shortcut.json"))
+    let config_home = std::env::var_os("PAPERCUSP_HOME");
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    shortcut_path(config_home.as_deref(), home.as_deref())
 }
 
 /// Serialize the persisted payload. `None` (disabled) persists as an explicit
@@ -629,6 +638,28 @@ pub fn set_shortcut(app: &AppHandle, new: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcut_configuration_respects_the_private_papercusp_home() {
+        use std::ffi::OsStr;
+        assert_eq!(
+            shortcut_path(Some(OsStr::new("/private/papercusp-home")), Some(OsStr::new("/owner"))),
+            Some(PathBuf::from("/private/papercusp-home/docs-search-shortcut.json"))
+        );
+        assert_eq!(
+            shortcut_path(Some(OsStr::new("/private/papercusp-home")), None),
+            Some(PathBuf::from("/private/papercusp-home/docs-search-shortcut.json"))
+        );
+    }
+
+    #[test]
+    fn shortcut_configuration_keeps_the_existing_home_default() {
+        use std::ffi::OsStr;
+        let expected = Some(PathBuf::from("/owner/.papercusp/docs-search-shortcut.json"));
+        assert_eq!(shortcut_path(None, Some(OsStr::new("/owner"))), expected);
+        assert_eq!(shortcut_path(Some(OsStr::new("")), Some(OsStr::new("/owner"))), expected);
+        assert_eq!(shortcut_path(None, None), None);
+    }
 
     #[test]
     fn rejected_rebind_preserves_the_working_registration() {
