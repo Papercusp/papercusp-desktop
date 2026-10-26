@@ -484,7 +484,12 @@ html_json=base/'html-json';html_json.mkdir();write(html_json/'payload.json','{"i
 refused(lambda:m.census_uuid_artifacts(cfg,[html_json]))
 print(json.dumps({'originalOccurrences':scan['occurrenceCount'],'redactedDocuments':report['redactedDocuments'],'outputRawClassHits':0,'archivesExpanded':len(arch['inventory'])-1,'sourceUnchanged':True,'refusalControls':refusals}))
 `;
-    const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8', timeout: 30_000 });
+    // Hang guard, not a speed budget: this census does ~28-30s of real work on the
+    // release box, so a 30s kill timer SIGKILLed it (status null) whenever a sibling
+    // suite ran beside it, e.g. inside every release:cut contract step
+    // (WI-6554700010029592: 30185ms/30275ms kills; 35s wall isolated and green).
+    const result = spawnSync('python3', ['-c', program, reportFormatterPath, temp], { encoding: 'utf8', timeout: 180_000 });
+    assert.equal(result.signal, null, `census killed by ${result.signal} (hang guard)`);
     assert.equal(result.status, 0, result.stderr);
     const proof = JSON.parse(result.stdout);
     assert.equal(proof.originalOccurrences, 8);
