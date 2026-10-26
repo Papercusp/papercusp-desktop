@@ -2006,3 +2006,53 @@ test('an arm64 leg that produced nothing fails the cut instead of publishing wit
   assert.equal(present.status, 0, present.stderr || present.stdout);
   assert.match(present.stdout, /COLLECTED=2/);
 });
+
+// WI-6554700010029592: a managed release:cut exports its LIVE task/operation identity to
+// release-local.sh, and the contract suites it runs slice and execute that script's own
+// functions in child shells that inherit the environment. Under release:cut that made
+// release_task_journal_configure activate inside fixtures (46/84 red, 84/84 by hand).
+// The real contract step must hand its suites an environment without that identity.
+test('contract regressions run with the managed-release identity removed', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-contract-env-'));
+  try {
+    const bin = path.join(tmp, 'bin');
+    fs.mkdirSync(bin);
+    const seen = path.join(tmp, 'seen');
+    for (const tool of ['node', 'npm']) {
+      fs.writeFileSync(
+        path.join(bin, tool),
+        `#!/bin/bash\necho "${tool} task=\${PAPERCUSP_RELEASE_TASK_ID-unset} op=\${PAPERCUSP_RELEASE_OPERATION_ID-unset} cli=\${PAPERCUSP_RELEASE_TASK_JOURNAL_CLI-unset}" >> ${JSON.stringify(seen)}\n`,
+        { mode: 0o755 },
+      );
+    }
+    const env = {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      PAPERCUSP_RELEASE_TASK_ID: 'live-task',
+      PAPERCUSP_RELEASE_OPERATION_ID: 'live-op',
+      PAPERCUSP_RELEASE_TASK_JOURNAL_CLI: '/live/cli.mts',
+    };
+
+    // 0-CONTROL: the stubs really observe an inherited identity, so the assertion below
+    // cannot pass merely because the stubs never see the environment at all.
+    const control = spawnSync('bash', ['-c', 'node'], { encoding: 'utf8', env });
+    assert.equal(control.status, 0, control.stderr);
+    assert.equal(fs.readFileSync(seen, 'utf8').trim(), 'node task=live-task op=live-op cli=/live/cli.mts');
+    fs.rmSync(seen);
+
+    const command = [
+      'set -euo pipefail',
+      `ROOT=${JSON.stringify(tmp)}`,
+      sliceBetween('RELEASE_MANAGED_IDENTITY_ENV=(', '\nrelease_verify_contract_regressions || {'),
+      'release_verify_contract_regressions',
+    ].join('\n');
+    const result = spawnSync('bash', ['-c', command], { encoding: 'utf8', env });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.deepEqual(fs.readFileSync(seen, 'utf8').trim().split('\n'), [
+      'node task=unset op=unset cli=unset',
+      'npm task=unset op=unset cli=unset',
+    ]);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

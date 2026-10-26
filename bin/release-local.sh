@@ -1880,11 +1880,31 @@ fi
 # counted as surplus. Run their maintained regressions before costly replay or
 # compilation, including the emitted worker through its public API. These tests
 # use private fixtures; the final signed-artifact gates below remain necessary.
+#
+# Managed-release identity that release:cut exports to THIS script (cut.ts
+# cutRuntimeEnv). It must never reach a fixture: the suites below slice and EXECUTE
+# this script's own functions in child shells that inherit our environment, so with
+# these set release_task_journal_configure activates inside a fixture against the LIVE
+# operation (WI-6554700010029592: 46/84 failed under release:cut, 84/84 by hand).
+RELEASE_MANAGED_IDENTITY_ENV=(
+  PAPERCUSP_RELEASE_TASK_ID
+  PAPERCUSP_RELEASE_OPERATION_ID
+  PAPERCUSP_RELEASE_TASK_JOURNAL_CLI
+  PAPERCUSP_RELEASE_TASK_JOURNAL_RUNNER
+  PAPERCUSP_RELEASE_CREDENTIAL_EXPIRES_AT
+  PAPERCUSP_RELEASE_ENQUEUED_AT_MS
+)
+release_run_unmanaged() { # <cmd...> — run cmd with the managed-release identity removed
+  local -a unset_args=()
+  local name
+  for name in "${RELEASE_MANAGED_IDENTITY_ENV[@]}"; do unset_args+=(-u "$name"); done
+  env "${unset_args[@]}" "$@"
+}
 release_verify_contract_regressions() {
   echo "==> checking release scanner and Linux collector contracts"
-  ( cd "$ROOT" && node --test --test-global-setup=test/monorepo-host-preflight.mjs \
+  ( cd "$ROOT" && release_run_unmanaged node --test --test-global-setup=test/monorepo-host-preflight.mjs \
       test/release-gitleaks.test.js test/release-local-linux-reuse.test.js ) || return $?
-  ( cd "$ROOT/.." && npm run test:file -- \
+  ( cd "$ROOT/.." && release_run_unmanaged npm run test:file -- \
       packages/operator-core/lib/code-intelligence/reuse-source-population.test.ts ) || return $?
 }
 release_verify_contract_regressions || {
