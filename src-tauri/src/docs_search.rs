@@ -430,8 +430,8 @@ pub fn open_palette(app: &AppHandle) {
         WINDOW_LABEL,
         tauri::WebviewUrl::External(parsed.clone()),
     )
-    .title("Quick Panel")
-    .inner_size(760.0, 540.0)
+    .title("Quick Access")
+    .inner_size(1000.0, 665.0)
     .min_inner_size(480.0, 360.0)
     .center()
     .always_on_top(true)
@@ -449,8 +449,8 @@ pub fn open_palette(app: &AppHandle) {
                     WINDOW_LABEL,
                     tauri::WebviewUrl::External(parsed),
                 )
-                .title("Quick Panel")
-                .inner_size(760.0, 540.0)
+                .title("Quick Access")
+                .inner_size(1000.0, 665.0)
                 .min_inner_size(480.0, 360.0)
                 .center()
                 .always_on_top(true)
