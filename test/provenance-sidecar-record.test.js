@@ -40,6 +40,71 @@ function tmp() {
   return makeDesktopTestScratchDirSync('prov-sidecar-');
 }
 
+test('Tauri signature verifier authenticates minisign trusted comments', async (t) => {
+  const dir = tmp();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const artifact = path.join(dir, 'artifact');
+  const sigfile = `${artifact}.sig`;
+  const bytes = Buffer.from('signed release artifact');
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const keyId = Buffer.from('0102030405060708', 'hex');
+  const publicBlock = Buffer.concat([
+    Buffer.from('Ed'), keyId,
+    publicKey.export({ type: 'spki', format: 'der' }).subarray(-32),
+  ]);
+  const key = publicBlock.toString('base64');
+  const comment = 'timestamp:123456 file:artifact';
+  const run = (algo, change = () => {}) => {
+    fs.writeFileSync(artifact, bytes);
+    const message = algo === 'ED'
+      ? crypto.createHash('blake2b512').update(bytes).digest() : bytes;
+    const signature = crypto.sign(null, message, privateKey);
+    const block = Buffer.concat([Buffer.from(algo), keyId, signature]);
+    const globalSignature = crypto.sign(null,
+      Buffer.concat([signature, Buffer.from(comment)]), privateKey);
+    const lines = ['untrusted comment: fixture', block.toString('base64'),
+      `trusted comment: ${comment}`, globalSignature.toString('base64')];
+    change(lines);
+    fs.writeFileSync(sigfile, Buffer.from(`${lines.join('\n')}\n`).toString('base64'));
+    const result = spawnSync(process.execPath,
+      [path.join(BIN, 'verify-tauri-signature.mjs'), key, artifact, sigfile, '--json'],
+      { encoding: 'utf8', timeout: 10_000 });
+    assert.equal(result.error, undefined);
+    return { ...result, verification: JSON.parse(result.stdout) };
+  };
+  for (const algo of ['ED', 'Ed']) {
+    await t.test(`valid ${algo} artifact and global signature`, () => {
+      const result = run(algo);
+      assert.equal(result.status, 0, result.stdout);
+      assert.equal(result.verification.valid, true);
+    });
+  }
+  for (const [name, change] of [
+    ['altered trusted comment', lines => { lines[2] += ' changed'; }],
+    ['trailing whitespace in trusted comment', lines => { lines[2] += ' '; }],
+    ['altered global signature', lines => {
+      const global = Buffer.from(lines[3], 'base64');
+      global[0] ^= 1;
+      lines[3] = global.toString('base64');
+    }],
+    ['missing global signature', lines => { lines.pop(); }],
+    ['malformed global signature', lines => { lines[3] = 'AA=='; }],
+    ['unexpected comment prefix', lines => { lines[2] = `untrusted comment: ${comment}`; }],
+    ['altered artifact bytes', () => { fs.writeFileSync(artifact, 'corrupted release artifact'); }],
+  ]) {
+    await t.test(`rejects ${name}`, () => {
+      const result = run('ED', change);
+      assert.notEqual(result.status, 0, result.stdout);
+      assert.equal(result.verification.valid, false);
+    });
+  }
+  await t.test('retains two-line legacy artifact-signature compatibility', () => {
+    const result = run('Ed', lines => { lines.splice(2); });
+    assert.equal(result.status, 0, result.stdout);
+    assert.equal(result.verification.valid, true);
+  });
+});
+
 function startHealthFixtureServer() {
   const source = String.raw`
     const http = require('node:http');

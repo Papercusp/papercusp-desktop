@@ -66,13 +66,29 @@ function keyLineFrom(arg) {
   return lines[lines.length - 1] || '';
 }
 
-let keyBytes, sigBytes, sigFileText;
+let keyBytes, sigBytes, sigFileText, trustedComment, globalSignature;
 try {
   keyBytes = Buffer.from(keyLineFrom(pubArg), 'base64');
   // The .sig file on disk is base64 of the whole minisign sig file.
   sigFileText = Buffer.from(readFileSync(sigPath, 'utf8').trim(), 'base64').toString('utf8');
-  const sigLines = sigFileText.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  // Comment bytes are signed: trimming them would accept altered metadata.
+  const sigLines = sigFileText.split(/\r?\n/);
+  while (sigLines.at(-1) === '') sigLines.pop();
+  if (sigLines.length !== 2 && sigLines.length !== 4) {
+    finish(2, { valid: false, error: 'expected an artifact signature or a complete trusted-comment signature' });
+  }
   sigBytes = Buffer.from(sigLines[1] || '', 'base64');
+  if (sigLines.length === 4) {
+    const prefix = 'trusted comment: ';
+    if (!sigLines[2].startsWith(prefix)) {
+      finish(2, { valid: false, error: 'missing trusted comment prefix' });
+    }
+    trustedComment = sigLines[2].slice(prefix.length);
+    globalSignature = Buffer.from(sigLines[3], 'base64');
+    if (globalSignature.length !== 64) {
+      finish(2, { valid: false, error: 'global signature must contain 64 bytes' });
+    }
+  }
 } catch (e) {
   finish(2, { valid: false, error: `parse error: ${e.message}` });
 }
@@ -112,6 +128,10 @@ async function main() {
   try {
     const keyObj = createPublicKey({ key: spki, format: 'der', type: 'spki' });
     ok = edVerify(null, message, keyObj, sig);
+    if (ok && globalSignature && !edVerify(null,
+      Buffer.concat([sig, Buffer.from(trustedComment, 'utf8')]), keyObj, globalSignature)) {
+      finish(1, { valid: false, reason: 'global signature does not verify against the trusted comment', algo: sigAlgo, keyId: keyIdHex });
+    }
   } catch (e) {
     finish(1, { valid: false, reason: `verify error: ${e.message}`, algo: sigAlgo, keyId: keyIdHex });
   }
