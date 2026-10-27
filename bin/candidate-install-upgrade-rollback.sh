@@ -156,9 +156,31 @@ printf '%s' "$TRUSTED_PUBKEY" >"$RUN_DIR/trusted-pubkey"
 : >"$RUN_DIR/user-data-checks.tsv"
 VM_STARTED=0
 PHASE=vm-start
+# On failure, capture the guest's package and service state BEFORE the VM is
+# powered down: the verifier keeps only 400 bytes of relaunch output, and the
+# guest journal that names the cause dies with the disposable VM. Bounded, and
+# never allowed to mask the original failure.
+collect_guest_diagnostics() {
+  timeout --kill-after=10 "${PAPERCUSP_CANDIDATE_DIAG_TIMEOUT:-90}" \
+    bash "$VMCTL" ssh "$VM" 'bash -s' >"$RUN_DIR/guest-diagnostics.log" 2>&1 <<'DIAG'
+echo "## PAPERCUSP_GUEST_DIAGNOSTICS $(date -u +%FT%TZ)"
+echo "## packages"; dpkg-query -W -f='${Package} ${Version} ${db:Status-Abbrev}\n' 'papercusp-*' 2>&1
+echo "## systemctl --user status"; systemctl --user status papercusp-server.service --no-pager -l 2>&1 | head -80
+echo "## user journal"; journalctl --user -u papercusp-server.service -b --no-pager -o short-iso 2>&1 | tail -400
+echo "## system journal (user unit)"; sudo -n journalctl _SYSTEMD_USER_UNIT=papercusp-server.service -b --no-pager -o short-iso 2>&1 | tail -400
+echo "## papercusp home"; ls -la "$HOME/.papercusp" 2>&1 | head -80
+for f in "$HOME"/.papercusp/logs/*.log "$HOME/papercusp-relaunch.log"; do
+  [[ -f "$f" ]] || continue; echo "## tail $f"; tail -n 120 "$f" 2>&1
+done
+DIAG
+}
 cleanup() {
   local status=$?
   trap - EXIT
+  if [[ "$status" -ne 0 && "$VM_STARTED" == 1 ]]; then
+    collect_guest_diagnostics \
+      || echo "candidate-install-upgrade-rollback: WARNING — guest diagnostics incomplete (see $RUN_DIR/guest-diagnostics.log)" >&2
+  fi
   if [[ "$VM_STARTED" == 1 ]]; then
     if ! timeout --kill-after=30 "${PAPERCUSP_CANDIDATE_VM_DOWN_TIMEOUT:-180}" bash "$VMCTL" down "$VM"; then
       echo "candidate-install-upgrade-rollback: WARNING — failed to power down $VM" >&2

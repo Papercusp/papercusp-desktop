@@ -131,6 +131,9 @@ case "$1" in
       printf 'GUEST CHECK %s\\n' "$phase" >>"$MOCK_LOG"
       pg=1; [[ "$phase" == "$MOCK_LOSE_DATA_AFTER" ]] && pg=0
       printf 'PAPERCUSP_USER_DATA_CHECK phase=%s pg=%s file=present key=%s agent=a-fixture\\n' "$phase" "$pg" "$MOCK_CHECK_KEY"
+    elif grep -q PAPERCUSP_GUEST_DIAGNOSTICS <<<"$script"; then
+      printf 'GUEST DIAGNOSTICS\\n' >>"$MOCK_LOG"
+      printf 'fixture guest journal: papercusp-server.service failed\\n'
     else
       printf '%s\\n' "$script" >"$MOCK_VM_SCRIPT"
     fi
@@ -233,6 +236,7 @@ test("candidate upgrade and exact baseline rollback produce a content-bound rece
     // the leg opts in, and the upgrade leg must stay strict.
     assert.deepEqual(lines.filter((line) => line.startsWith("ALLOW_DOWNGRADE ")), ["ALLOW_DOWNGRADE 0", "ALLOW_DOWNGRADE 1"]);
     assert.equal(lines.at(-1), "VMCTL down clean");
+    assert.equal(lines.includes("GUEST DIAGNOSTICS"), false, "a passing journey collects no failure diagnostics");
     assert.match(fs.readFileSync(f.vmScript, "utf8"), /systemctl --user enable --now papercusp-server\.service/);
     const evidence = JSON.parse(fs.readFileSync(f.receipt, "utf8"));
     assert.equal(evidence.verdict, "PASS");
@@ -374,6 +378,9 @@ test("a failed candidate verifier powers down and emits no passing receipt", () 
     const diagnostics = path.join(path.dirname(f.receipt), diagnosticDirs[0]);
     assert.match(fs.readFileSync(path.join(diagnostics, "candidate-upgrade.json"), "utf8"), /fixture causal diagnostic/);
     assert.match(fs.readFileSync(path.join(diagnostics, "candidate-upgrade.stderr.log"), "utf8"), /fixture verifier stderr/);
+    // The guest journal is captured before the disposable VM is powered down.
+    assert.deepEqual(lines.slice(-2), ["GUEST DIAGNOSTICS", "VMCTL down clean"]);
+    assert.match(fs.readFileSync(path.join(diagnostics, "guest-diagnostics.log"), "utf8"), /fixture guest journal/);
     const failed = JSON.parse(fs.readFileSync(path.join(diagnostics, "failure.json"), "utf8"));
     assert.equal(failed.verdict, "FAIL");
     assert.equal(failed.phase, "candidate-upgrade");
