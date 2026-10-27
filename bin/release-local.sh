@@ -2866,6 +2866,14 @@ for _gitleaks_root in "src-tauri/sidecar" "src-tauri/resources" "src-tauri/seed"
       --config "$ORCHESTRATOR_HERE/release-gitleaks.toml" \
       --no-banner --log-level=error --redact="$_gitleaks_redact" \
       --report-format=json --report-path="$_gitleaks_report_path" ) >/dev/null 2>&1 || _gitleaks_rc=$?
+  if [[ "$_gitleaks_rc" == "1" ]]; then
+    # gitleaks can end a fragment mid-identifier in a multi-megabyte minified line,
+    # and a `$`-terminated detector then matches the cut. Re-ask each finding over
+    # the true bytes; only findings that reproduce stay (WI-6554700010030306).
+    _gitleaks_rc=0
+    ( cd "$ROOT" && python3 "$ORCHESTRATOR_HERE/lib/gitleaks-fragment-recheck.py" \
+        "$_gitleaks_report_path" "$ORCHESTRATOR_HERE/release-gitleaks.toml" ) || _gitleaks_rc=$?
+  fi
   if [[ "$_gitleaks_redact" == "0" && ( "$_gitleaks_rc" == "0" || "$_gitleaks_rc" == "1" ) ]]; then
     _gitleaks_rc=0
     ( cd "$ROOT" && python3 "$ORCHESTRATOR_HERE/lib/print-gitleaks-findings.py" \

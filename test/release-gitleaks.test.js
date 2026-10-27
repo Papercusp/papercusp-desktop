@@ -1145,6 +1145,121 @@ test('a fragment-truncated ThrottledCancellationToken constructor passes only in
   }
 });
 
+// WI-6554700010030306: the class fix for fragment-boundary false positives.
+const recheckPath = path.join(root, 'bin', 'lib', 'gitleaks-fragment-recheck.py');
+// gitleaks 8.30 ends the first fragment of a file with no safe boundary at
+// 125,000 bytes (a 100KB read plus a 25KB peek). Every fixture below places a
+// token across that byte, so a detector's `$` terminator matches the cut.
+const FRAGMENT_END = 125_000;
+const fragmentCanary = ['A9f3Kx7L', 'm2Qp8Rz4', 'V6nC1wH7'].join('');
+
+function acrossFragmentEnd(head, tail) {
+  return ';'.repeat(FRAGMENT_END - head.length) + head + tail + ';'.repeat(2000) + '\n';
+}
+
+function scanAndRecheck(entries, report = null) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-gitleaks-fragment-'));
+  try {
+    for (const [relative, contents] of Object.entries(entries)) {
+      const file = path.join(temp, 'src', relative);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, contents);
+    }
+    const reportPath = path.join(temp, 'report.json');
+    let scanStatus = null;
+    if (report) {
+      fs.writeFileSync(reportPath, report);
+    } else {
+      const scanned = spawnSync(gitleaksBin, ['dir', 'src', '--config', configPath, '--no-banner',
+        '--log-level=error', '--redact=100', '--report-format=json', '--report-path', reportPath],
+      { cwd: temp, encoding: 'utf8' });
+      assert.equal(scanned.error, undefined, 'gitleaks could not run');
+      scanStatus = scanned.status;
+    }
+    const before = fs.readFileSync(reportPath, 'utf8');
+    const result = spawnSync('python3', ['-I', recheckPath, reportPath, configPath],
+      { cwd: temp, encoding: 'utf8', env: { ...process.env, GITLEAKS_BIN: gitleaksBin }, timeout: 120_000 });
+    const auditPath = reportPath + '.fragment-artifacts.json';
+    return {
+      scanStatus,
+      before: before.trim() ? JSON.parse(before) : [],
+      status: result.status,
+      stderr: result.stderr,
+      rawAfter: fs.readFileSync(reportPath, 'utf8'),
+      audit: fs.existsSync(auditPath) ? JSON.parse(fs.readFileSync(auditPath, 'utf8')) : null,
+    };
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+}
+
+test('fragment recheck drops an identifier cut by a gitleaks fragment end and keeps real keys there', () => {
+  // A generic identifier, not the 0.0.32 instance: the class fix needs no allowlist.
+  const artifact = scanAndRecheck({
+    'bundle.mjs': acrossFragmentEnd('var f=function(accessToken,retryDelayMilliseconds=', '250){};'),
+  });
+  assert.equal(artifact.scanStatus, 1,
+    'gitleaks no longer reports the cut identifier; re-derive FRAGMENT_END for this gitleaks version');
+  assert.ok(artifact.before.some((finding) => finding.RuleID === 'generic-api-key'));
+  assert.equal(artifact.status, 0, artifact.stderr);
+  assert.deepEqual(JSON.parse(artifact.rawAfter), []);
+  assert.deepEqual(artifact.audit.map((entry) => [entry.decision, entry.reason]),
+    [['dropped', 'fragment-artifact']]);
+  assert.match(artifact.stderr, /fragment artifact dropped: src\/bundle\.mjs generic-api-key/);
+
+  // Negative controls: a real key cut by the same fragment end, and a real key
+  // whose true terminator sits exactly at it, both reproduce over the true bytes.
+  const cutKey = scanAndRecheck({
+    'cut.mjs': acrossFragmentEnd(';api_key="' + fragmentCanary.slice(0, 14), fragmentCanary.slice(14) + '";'),
+  });
+  const edgeKey = scanAndRecheck({ 'edge.mjs': acrossFragmentEnd(';api_key="' + fragmentCanary, '";') });
+  for (const [name, result] of [['cut', cutKey], ['edge', edgeKey]]) {
+    assert.equal(result.scanStatus, 1, name + ': the planted key was not detected');
+    assert.equal(result.status, 1, name + ': a real key must survive the recheck: ' + result.stderr);
+    assert.equal(JSON.parse(result.rawAfter).length, 1, name);
+    assert.deepEqual(result.audit.map((entry) => entry.reason), ['reproduced-in-true-bytes'], name);
+    for (const text of [result.stderr, result.rawAfter, JSON.stringify(result.audit)]) {
+      assert.ok(!text.includes(fragmentCanary.slice(0, 10)), name + ': the recheck leaked key bytes');
+    }
+  }
+
+  // Mixed: only the artifact is dropped.
+  const mixed = scanAndRecheck({
+    'bundle.mjs': acrossFragmentEnd('var f=function(accessToken,retryDelayMilliseconds=', '250){};'),
+    'keys.mjs': 'const api_key="' + fragmentCanary + '";\n',
+  });
+  assert.equal(mixed.status, 1);
+  assert.deepEqual(JSON.parse(mixed.rawAfter).map((finding) => finding.File), ['src/keys.mjs']);
+});
+
+test('fragment recheck fails closed on findings it cannot re-verify', () => {
+  // A finding whose file is gone stays, and so does one the file rescan cannot pair.
+  const finding = { RuleID: 'generic-api-key', File: 'src/missing.mjs', StartLine: 1, EndLine: 1,
+    StartColumn: 1, EndColumn: 20, Match: 'REDACTED', Secret: 'REDACTED' };
+  const unpaired = { ...finding, File: 'src/present.mjs', StartColumn: 3 };
+  const kept = scanAndRecheck({ 'present.mjs': 'const x = 1;\n' }, JSON.stringify([finding, unpaired]));
+  assert.equal(kept.status, 1, kept.stderr);
+  assert.equal(JSON.parse(kept.rawAfter).length, 2);
+  assert.deepEqual(kept.audit.map((entry) => entry.reason), ['file-not-found', 'not-reproduced-by-file-rescan']);
+
+  // An unreadable report is left untouched and reported as a recheck failure.
+  const broken = scanAndRecheck({ 'present.mjs': 'x\n' }, '{"not": "a list"}');
+  assert.equal(broken.status, 2);
+  assert.equal(broken.rawAfter, '{"not": "a list"}');
+  assert.equal(broken.audit, null);
+});
+
+test('release-local re-verifies gitleaks findings over true bytes before the seed filter and failure accounting', () => {
+  const source = fs.readFileSync(scriptPath, 'utf8');
+  const scan = source.indexOf('( cd "$ROOT" && gitleaks dir "$_gitleaks_root"');
+  const recheck = source.indexOf('"$ORCHESTRATOR_HERE/lib/gitleaks-fragment-recheck.py"');
+  const seedFilter = source.indexOf('--filter-seed "$_gitleaks_report_path"');
+  const failure = source.indexOf('_GITLEAKS_FAILED_ROOTS+=("$_gitleaks_root")');
+  assert.ok(scan >= 0 && recheck > scan && recheck < seedFilter && seedFilter < failure,
+    'the fragment recheck must run after the scan and before the seed filter and failure accounting');
+  assert.match(source, /if \[\[ "\$_gitleaks_rc" == "1" \]\]; then\n(?:\s*#.*\n)*\s*_gitleaks_rc=0\n\s*\( cd "\$ROOT" && python3 "\$ORCHESTRATOR_HERE\/lib\/gitleaks-fragment-recheck\.py" \\\n\s*"\$_gitleaks_report_path" "\$ORCHESTRATOR_HERE\/release-gitleaks\.toml" \) \|\| _gitleaks_rc=\$\?/);
+});
+
 test('public checksum and code matches stay exact, path constrained and separate from credentials', () => {
   const manifest = {
     'libgssapi_krb5.so.2': '9274e5961d72284cd39377fc9f2007a33bda4ca890b1c2dc7d268efea6c96b29',
