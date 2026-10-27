@@ -8,9 +8,30 @@
 # the guard. Removing one (by fixing the site) is the intended direction of travel.
 #
 # Identity is file::function::var, deliberately line-INDEPENDENT.
+b9-attestation.sh::_scn_attestation_unattested_device_core::reasons_before
+b9-attestation.sh::_scn_attestation_unattested_device_core::ws
+b9-attestation.sh::scn_attestation_membership::a_gh_id
+b9-attestation.sh::scn_attestation_membership::ws
+claim-target-dir.sh::__pc_lock_target_root::key
+claim-target-dir.sh::__pc_private_slot_bytes::usage
+claim-target-dir.sh::__pc_reap_private_target_slots::before_bytes
+claim-target-dir.sh::__pc_reap_private_target_slots::max_bytes
+claim-target-dir.sh::__pc_target_retention_allows::tags
 deb-hetzner-rig.sh::rig_ban_member::ws
+disk-preflight.sh::papercusp_require_disk_reservation::requested_at
+disk-preflight.sh::papercusp_require_disk_reservation::required_until
+fed-reap.sh::scn_fed_reap::bws
+fed-reap.sh::scn_fed_reap::fleet
+host-runtime-closure.sh::copy_pkg_closure::source_before
+membership-churn.sh::scn_membership_churn::backfill
+membership-churn.sh::scn_membership_churn::upstream
 release-artifacts.sh::release_artifacts_assert_baked_host_from_bytes::expected_fp
 release-artifacts.sh::release_artifacts_assert_fresh::stamp
+release-artifacts.sh::release_artifacts_retention_mutex_acquire::module
+release-storage.sh::release_storage_describe::uri
+release-storage.sh::release_storage_get::uri
+release-storage.sh::release_storage_put::generation
+release-storage.sh::release_storage_put::uri
 scenario-coord-p008-custody.sh::scenario_coord_p008_custody::ws_a
 scenario-coord-p008-custody.sh::scenario_coord_p008_custody::ws_b
 scenario-coord-p008-remainder.sh::scenario_coord_p008_remainder::stamp
