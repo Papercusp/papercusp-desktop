@@ -56,6 +56,16 @@ CT="$(papercusp_cargo_target_root "$DESK/src-tauri")" || exit $?
   echo "FATAL: cannot source bin/lib/release-artifacts.sh — refusing to build without release-retention guards" >&2
   exit 1
 }
+# EI-27096956663669253: the AppImage type-2 runtime is pinned and vendored.
+# Resolve and verify it before any build work, so an unreviewed runtime fails
+# the cut in seconds instead of after the full Tauri build.
+# shellcheck source=lib/appimage-runtime.sh
+. "$ORCHESTRATOR_HERE/lib/appimage-runtime.sh" || {
+  echo "FATAL: cannot source bin/lib/appimage-runtime.sh — refusing to build with an unpinned AppImage runtime" >&2
+  exit 1
+}
+APPIMAGE_RUNTIME="$(papercusp_appimage_runtime_path)" || exit 1
+echo "==> AppImage runtime pinned: $PAPERCUSP_APPIMAGE_RUNTIME_SHA256 ($PAPERCUSP_APPIMAGE_RUNTIME_UPSTREAM)"
 APPIMG_DIR="$CT/release/bundle/appimage"
 VERSION="$(python3 -c 'import json;print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
 OUT="$APPIMG_DIR/Papercusp_GUI_${VERSION}_amd64.AppImage"
@@ -854,11 +864,15 @@ PLUGIN="$(ls "$HOME/.cache/tauri/"*plugin-appimage*.AppImage 2>/dev/null | sed -
 # plugin's defaults do not expose these settings and exceeded the GUI budget.
 # Keep zstd: the retained type-2 runtime rejects xz images. Private extraction
 # also preserves the concurrent-runtime isolation from EI-21829997763481272.
+# The runtime is a REQUIRED argument and is always passed with --runtime-file.
+# Without that flag appimagetool downloads the moving 'continuous' runtime
+# (EI-27096956663669253).
 run_appimage_tool_isolated() (
   set -u
   local plugin="${1:?appimagetool plugin path required}"
   local output="${2:?AppImage output path required}"
   local appdir="${3:?AppDir path required}"
+  local runtime_file="${4:?pinned AppImage runtime path required}"
   local runtime_tmp
 
   runtime_tmp="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-appimage-runtime.XXXXXX")" || {
@@ -870,21 +884,29 @@ run_appimage_tool_isolated() (
   (cd "$runtime_tmp" && TMPDIR="$runtime_tmp" "$plugin" --appimage-extract >/dev/null) || exit 1
   local packer="$runtime_tmp/squashfs-root/usr/bin/appimagetool"
   [ -x "$packer" ] || { echo "FATAL: extracted plugin has no executable appimagetool" >&2; exit 1; }
-  local -a runtime_args=()
-  if [ -n "${LDAI_RUNTIME_FILE:-}" ]; then runtime_args+=(--runtime-file "$LDAI_RUNTIME_FILE"); fi
+  [ -f "$runtime_file" ] || { echo "FATAL: pinned AppImage runtime $runtime_file is missing" >&2; exit 1; }
   ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 TMPDIR="$runtime_tmp" LDAI_OUTPUT="$output" \
     "$packer" --comp zstd --mksquashfs-opt -b --mksquashfs-opt 1048576 \
       --mksquashfs-opt -Xcompression-level --mksquashfs-opt 19 \
       --mksquashfs-opt -processors --mksquashfs-opt 4 \
-      "${runtime_args[@]}" "$appdir" "$output"
+      --runtime-file "$runtime_file" "$appdir" "$output"
 )
 
 echo "==> packaging with appimagetool → $OUT"
-run_appimage_tool_isolated "$PLUGIN" "$OUT" "$APPDIR" || {
+run_appimage_tool_isolated "$PLUGIN" "$OUT" "$APPDIR" "$APPIMAGE_RUNTIME" || {
   echo "FATAL: appimagetool failed to package $APPDIR" >&2
   exit 1
 }
 [ -f "$OUT" ] || { echo "FATAL: appimagetool did not produce $OUT" >&2; exit 1; }
+
+# EI-27096956663669253: judge the packaged bytes, not just the argument. The
+# check fails if the packer ignored --runtime-file or fetched a runtime anyway.
+echo "==> verifying $OUT embeds the pinned AppImage runtime"
+if ! python3 "$ORCHESTRATOR_HERE/lib/appimage-runtime-embedded.py" \
+    --expected-sha256 "$PAPERCUSP_APPIMAGE_RUNTIME_SHA256" "$APPIMAGE_RUNTIME" "$OUT"; then
+  echo "FATAL: $OUT does not embed the pinned AppImage runtime; refusing to sign or retain it (EI-27096956663669253)" >&2
+  exit 1
+fi
 
 # Compression defaults can change across appimagetool versions. Judge final
 # bytes with the existing size/resource contract before creating a signature.

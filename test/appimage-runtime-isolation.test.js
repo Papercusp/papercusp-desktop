@@ -28,6 +28,10 @@ function makeFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'appimage-runtime-isolation-'));
   const plugin = path.join(root, 'fake-plugin.sh');
   const report = path.join(root, 'report');
+  // EI-27096956663669253: the wrapper must hand the pinned runtime to the
+  // packer. The fake packer exits 92 unless --runtime-file names this file.
+  const runtime = path.join(root, 'pinned-runtime');
+  fs.writeFileSync(runtime, 'runtime-fixture\n');
   fs.writeFileSync(
     plugin,
     [
@@ -39,6 +43,7 @@ function makeFixture() {
       '#!/usr/bin/env bash',
       'set -euo pipefail',
       '[[ "$*" == *"--comp zstd"* && "$*" == *"--mksquashfs-opt 1048576"* && "$*" == *"--mksquashfs-opt 19"* && "$*" == *"--mksquashfs-opt 4"* ]] || exit 91',
+      '[[ "$*" == *"--runtime-file $APPIMAGE_TEST_RUNTIME "* ]] || exit 92',
       'printf "%s|%s|%s\\n" "$TMPDIR" "$APPIMAGE_EXTRACT_AND_RUN" "$LDAI_OUTPUT" >> "$APPIMAGE_TEST_REPORT"',
       'mkdir "$TMPDIR/appimage_extracted_fixture"',
       'sleep 0.1',
@@ -50,7 +55,7 @@ function makeFixture() {
     ].join('\n'),
     { mode: 0o755 },
   );
-  return { root, plugin, report };
+  return { root, plugin, report, runtime };
 }
 
 function runConcurrentFixture(fixture) {
@@ -63,10 +68,11 @@ function runConcurrentFixture(fixture) {
     'set -uo pipefail',
     `TMPDIR=${JSON.stringify(fixture.root)}`,
     `export APPIMAGE_TEST_REPORT=${JSON.stringify(fixture.report)}`,
+    `export APPIMAGE_TEST_RUNTIME=${JSON.stringify(fixture.runtime)}`,
     functionText,
-    `run_appimage_tool_isolated ${JSON.stringify(fixture.plugin)} ${JSON.stringify(outputA)} ${JSON.stringify(appdir)} &`,
+    `run_appimage_tool_isolated ${JSON.stringify(fixture.plugin)} ${JSON.stringify(outputA)} ${JSON.stringify(appdir)} ${JSON.stringify(fixture.runtime)} &`,
     'pid_a=$!',
-    `run_appimage_tool_isolated ${JSON.stringify(fixture.plugin)} ${JSON.stringify(outputB)} ${JSON.stringify(appdir)} &`,
+    `run_appimage_tool_isolated ${JSON.stringify(fixture.plugin)} ${JSON.stringify(outputB)} ${JSON.stringify(appdir)} ${JSON.stringify(fixture.runtime)} &`,
     'pid_b=$!',
     'wait "$pid_a"',
     'status_a=$?',
@@ -84,17 +90,19 @@ function runConcurrentFixture(fixture) {
   };
 }
 
-function runSingleFixture(fixture, exitCode) {
+function runSingleFixture(fixture, exitCode, runtimeArg = fixture.runtime) {
   const functionText = extractIsolationFunction();
   const output = path.join(fixture.root, 'failed.AppImage');
   const appdir = path.join(fixture.root, 'fixture.AppDir');
   fs.mkdirSync(appdir);
+  const runtimeWord = runtimeArg === null ? '' : ` ${JSON.stringify(runtimeArg)}`;
   const script = [
     'set -uo pipefail',
     `TMPDIR=${JSON.stringify(fixture.root)}`,
     `export APPIMAGE_TEST_REPORT=${JSON.stringify(fixture.report)}`,
+    `export APPIMAGE_TEST_RUNTIME=${JSON.stringify(fixture.runtime)}`,
     functionText,
-    `APPIMAGE_TEST_EXIT=${exitCode} run_appimage_tool_isolated ${JSON.stringify(fixture.plugin)} ${JSON.stringify(output)} ${JSON.stringify(appdir)}`,
+    `APPIMAGE_TEST_EXIT=${exitCode} run_appimage_tool_isolated ${JSON.stringify(fixture.plugin)} ${JSON.stringify(output)} ${JSON.stringify(appdir)}${runtimeWord}`,
     'status=$?',
     'printf "status=%s\\n" "$status"',
   ].join('\n');
@@ -157,8 +165,23 @@ test('a failed AppImage tool still cleans its private runtime directory', () => 
   }
 });
 
+test('the wrapper refuses to package without the pinned runtime (EI-27096956663669253)', () => {
+  for (const runtimeArg of [null, '/nonexistent/pinned-runtime']) {
+    const fixture = makeFixture();
+    try {
+      const { output, result } = runSingleFixture(fixture, 0, runtimeArg);
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.doesNotMatch(result.stdout, /status=0/, `runtime ${runtimeArg} must fail the wrapper`);
+      assert.equal(fs.existsSync(fixture.report), false, 'the packer must never run without the pinned runtime');
+      assert.equal(fs.existsSync(output), false, 'no AppImage may be produced without the pinned runtime');
+    } finally {
+      fs.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
 test('the build invokes the isolated wrapper instead of the raw plugin command', () => {
-  const callAt = SRC.indexOf('run_appimage_tool_isolated "$PLUGIN" "$OUT" "$APPDIR"');
+  const callAt = SRC.indexOf('run_appimage_tool_isolated "$PLUGIN" "$OUT" "$APPDIR" "$APPIMAGE_RUNTIME"');
   const rawAt = SRC.indexOf('ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 LDAI_OUTPUT="$OUT" "$PLUGIN"');
   assert.ok(callAt >= 0, 'build-appimage.sh must invoke the isolation wrapper');
   assert.equal(rawAt, -1, 'the raw shared-TMPDIR plugin invocation must not return');
