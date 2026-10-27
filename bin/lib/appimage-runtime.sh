@@ -31,7 +31,9 @@ PAPERCUSP_APPIMAGE_RUNTIME_UPSTREAM='AppImage/type2-runtime@fedfad5 continuous/r
 # papercusp_appimage_runtime_default_file — the vendored runtime in this tree.
 papercusp_appimage_runtime_default_file() {
   local lib_dir
-  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 1
+  # Resolve symlinks: a symlinked copy of this library (test fixtures and
+  # assembled trees) still names the vendored bytes of the tree that owns the pin.
+  lib_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" || return 1
   printf '%s\n' "$lib_dir/../../vendor/appimage-runtime/runtime-x86_64"
 }
 

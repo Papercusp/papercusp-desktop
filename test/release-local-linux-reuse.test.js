@@ -209,6 +209,12 @@ function runFreshWithFailedSibling({ emitterFails = false } = {}) {
     path.join(root, 'bin', 'lib', 'sidecar-lock-yield.sh'),
     path.join(bin, 'lib', 'sidecar-lock-yield.sh'),
   );
+  // emit_linux_build_provenance records the AppImage's embedded-runtime verdict
+  // (EI-27096956663669253). The stub AppImage below is not a real AppImage, so
+  // the verdict is recorded as embeddedMatchesPin:false; the receipt is still emitted.
+  for (const lib of ['appimage-runtime.sh', 'appimage-runtime-embedded.py']) {
+    fs.symlinkSync(path.join(root, 'bin', 'lib', lib), path.join(bin, 'lib', lib));
+  }
   fs.writeFileSync(path.join(bin, 'repack-deb-xz.sh'), [
     '#!/usr/bin/env bash',
     'set -euo pipefail',
