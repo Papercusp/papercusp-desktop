@@ -3118,8 +3118,24 @@ emit_linux_build_provenance() {
   fi
   tc_rustc="$(rustc --version 2>/dev/null | awk '{print $2}')"
   tc_node="$(node --version 2>/dev/null)"
+  # EI-27096956663669253: record the runtime the AppImage actually embeds, judged
+  # against this tree's pinned runtime. A reused pre-pin AppImage is recorded as
+  # embeddedMatchesPin:false instead of failing the reuse. build-appimage.sh has
+  # already refused any fresh AppImage that does not match.
+  local appimage_runtime="" appimage
+  # shellcheck source=lib/appimage-runtime.sh
+  . "$ROOT/bin/lib/appimage-runtime.sh" || return 1
+  for appimage in "$bundle"/appimage/*_"$VERSION"_*.AppImage; do
+    [[ -f "$appimage" ]] || continue
+    appimage_runtime="$(python3 -I "$ROOT/bin/lib/appimage-runtime-embedded.py" \
+      --expected-sha256 "$PAPERCUSP_APPIMAGE_RUNTIME_SHA256" \
+      "$(papercusp_appimage_runtime_default_file)" "$appimage")" || true
+    [[ "$appimage_runtime" == \{*\} ]] \
+      || appimage_runtime='{ "embeddedMatchesPin": null, "reason": "appimage-runtime-embedded.py produced no verdict" }'
+  done
   # Host == Linux builder. Hash primary installers only; .sig presence is
   # recorded per artifact, after repacking and final updater signing.
+  PROVENANCE_APPIMAGE_RUNTIME="$appimage_runtime" \
   PROVENANCE_TOOLCHAIN="$(printf '{ "rustc": "%s", "node": "%s", "tauriCli": "%s" }' "${tc_rustc:-unknown}" "${tc_node:-unknown}" "$TAURI_CLI_VERSION")" \
   PROVENANCE_SIDECAR_DIR="$ROOT/src-tauri/sidecar" \
   PROVENANCE_SOURCE_GIT_HEAD="$head" \

@@ -702,6 +702,13 @@ trap 'rm -f "$_prov_tmp"; [[ -z "$_dirty_source_tmp" ]] || rm -f "$_dirty_source
   if [[ -n "${PROVENANCE_TOOLCHAIN:-}" ]]; then
     printf '  "toolchain": %s,\n' "$PROVENANCE_TOOLCHAIN"
   fi
+  # EI-27096956663669253: the Linux leg passes the JSON verdict of
+  # bin/lib/appimage-runtime-embedded.py. It records the pinned runtime sha256 and
+  # whether the AppImage's embedded runtime matches it. Emitted only when set, so
+  # mac/win output is byte-unchanged.
+  if [[ -n "${PROVENANCE_APPIMAGE_RUNTIME:-}" ]]; then
+    printf '  "appimageRuntime": %s,\n' "$PROVENANCE_APPIMAGE_RUNTIME"
+  fi
   # WI-37746: always present (null when no host was baked), so a MISSING key
   # unambiguously means "a pre-WI-37746 emitter produced this" rather than
   # "nothing was baked" — upload-release.sh treats those two cases differently.
