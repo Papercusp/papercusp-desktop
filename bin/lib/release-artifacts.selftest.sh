@@ -810,6 +810,79 @@ else
   bad "automatic Windows smoke selected the wrong GUI/Server inputs"
 fi
 
+# WI-6554700010030528: a Server cut also ships the papercusp-server-seed
+# companion deb, whose filename contains "server". The Linux smoke must still
+# pick the papercusp-server installer, whatever order the ledger lists them in.
+LNX_DIR="$WORK/linux-smoke-inputs"; mkdir -p "$LNX_DIR"
+LNX_GUI="$LNX_DIR/Papercusp GUI_${VER}_amd64.deb"
+LNX_SRV="$LNX_DIR/Papercusp Server_${VER}_amd64.deb"
+LNX_SEED="$LNX_DIR/papercusp-server-seed_${VER}_all.deb"
+for f in "$LNX_GUI" "$LNX_SRV" "$LNX_SEED"; do : > "$f"; : > "$f.sig"; done
+: > "$LNX_DIR/Papercusp GUI_${VER}_amd64.AppImage"
+__lnx_order_ok=1
+for __lnx_order in seed-last seed-first; do
+  if [[ "$__lnx_order" == seed-last ]]; then
+    __lnx_set=( "$LNX_GUI" "$LNX_GUI.sig" "$LNX_SRV" "$LNX_SRV.sig" "$LNX_SEED" "$LNX_SEED.sig" )
+  else
+    __lnx_set=( "$LNX_SEED" "$LNX_SEED.sig" "$LNX_SRV" "$LNX_GUI" "$LNX_DIR/Papercusp GUI_${VER}_amd64.AppImage" )
+  fi
+  mapfile -t LNX_SMOKE_INPUTS < <(release_artifacts_smoke_inputs linux "${__lnx_set[@]}")
+  [[ "${LNX_SMOKE_INPUTS[0]:-}" == "$LNX_GUI" && "${LNX_SMOKE_INPUTS[1]:-}" == "$LNX_SRV" ]] \
+    || { __lnx_order_ok=0; echo "    order=$__lnx_order got GUI='${LNX_SMOKE_INPUTS[0]:-}' Server='${LNX_SMOKE_INPUTS[1]:-}'"; }
+done
+if [[ "$__lnx_order_ok" == 1 ]]; then
+  ok "automatic Linux smoke picks the Server installer, never the server-seed companion (either ledger order)"
+else
+  bad "automatic Linux smoke selected the server-seed companion (or wrong GUI) as an installer"
+fi
+LNX_SRV2="$LNX_DIR/papercusp-server_${VER}_amd64.deb"; : > "$LNX_SRV2"
+if release_artifacts_smoke_inputs linux "$LNX_GUI" "$LNX_SRV" "$LNX_SRV2" >/dev/null 2>&1; then
+  bad "automatic Linux smoke silently chose between two Server installers"
+else
+  ok "automatic Linux smoke refuses two Server installers instead of letting order decide"
+fi
+rm -f "$LNX_SRV2"
+# Package identity outranks the filename: a seed with a Server-looking name is
+# still a companion, and a Server with no "server" in its name is still the Server.
+if command -v dpkg-deb >/dev/null 2>&1; then
+  __mkdeb() { # <pkg> <out>
+    local root="$WORK/mkdeb-$1"; mkdir -p "$root/DEBIAN"
+    printf 'Package: %s\nVersion: %s\nArchitecture: all\nMaintainer: selftest <selftest@example.invalid>\nDescription: selftest\n' "$1" "$VER" > "$root/DEBIAN/control"
+    dpkg-deb --build --root-owner-group "$root" "$2" >/dev/null 2>&1
+  }
+  LNX_ID_DIR="$WORK/linux-smoke-identity"; mkdir -p "$LNX_ID_DIR"
+  LNX_ID_SEED="$LNX_ID_DIR/Papercusp Server Data_${VER}_all.deb"
+  LNX_ID_SRV="$LNX_ID_DIR/pc-headless_${VER}_amd64.deb"
+  if __mkdeb papercusp-server-seed "$LNX_ID_SEED" && __mkdeb papercusp-server "$LNX_ID_SRV"; then
+    mapfile -t LNX_ID_INPUTS < <(release_artifacts_smoke_inputs linux "$LNX_GUI" "$LNX_ID_SRV" "$LNX_ID_SEED")
+    if [[ "${LNX_ID_INPUTS[1]:-}" == "$LNX_ID_SRV" ]] \
+       && [[ "$(release_artifacts_linux_deb_role "$LNX_ID_SEED")" == companion ]]; then
+      ok "Linux deb role follows the package identity, not the filename"
+    else
+      bad "Linux deb role followed the filename over the package identity (Server='${LNX_ID_INPUTS[1]:-}')"
+    fi
+  else
+    bad "control FAILED: could not build the identity fixture debs with dpkg-deb, so the identity case measured nothing"
+  fi
+else
+  echo "  - skip: dpkg-deb unavailable; Linux deb identity case not run (filename fallback cases above still ran)"
+fi
+# The previous-release baseline directory may hold the seed companion too.
+LNX_BASE_DIR="$WORK/linux-smoke-baseline"; mkdir -p "$LNX_BASE_DIR"
+: > "$LNX_BASE_DIR/Papercusp GUI_9.9.8_amd64.deb"
+: > "$LNX_BASE_DIR/Papercusp Server_9.9.8_amd64.deb"
+: > "$LNX_BASE_DIR/papercusp-server-seed_9.9.8_all.deb"
+mapfile -t LNX_BASE < <(
+  PAPERCUSP_LINUX_SMOKE_BASELINE_GUI='' PAPERCUSP_LINUX_SMOKE_BASELINE_SERVER='' \
+  PAPERCUSP_LINUX_SMOKE_BASELINE_DIR="$LNX_BASE_DIR" release_artifacts_linux_smoke_baseline "$VER" 2>/dev/null
+)
+if [[ "${LNX_BASE[0]:-}" == "$LNX_BASE_DIR/Papercusp GUI_9.9.8_amd64.deb" \
+      && "${LNX_BASE[1]:-}" == "$LNX_BASE_DIR/Papercusp Server_9.9.8_amd64.deb" ]]; then
+  ok "Linux smoke baseline directory ignores the server-seed companion"
+else
+  bad "Linux smoke baseline directory mis-classified the server-seed companion (GUI='${LNX_BASE[0]:-}' Server='${LNX_BASE[1]:-}')"
+fi
+
 # ── reachability leg (incremental publish) ───────────────────────────────────
 # An artifact absent from THIS upload set but already live on the release host is
 # covered: that is exactly what publish-platform-incremental.sh produces when it

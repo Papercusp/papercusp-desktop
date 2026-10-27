@@ -712,18 +712,51 @@ release_artifacts_find_provenance() {
 # substituted for an installer.  A Windows normalized Server zip is similarly
 # resolved back to its raw setup.exe sibling, which is what the VM actually
 # installs; the zip's member bytes are checked by the receipt assertion.
+# release_artifacts_linux_deb_role <deb> -> gui | server | companion
+# Classify a Linux .deb by its PACKAGE identity, not a filename substring. A
+# Server cut also ships the papercusp-server-seed companion (a Recommends: of
+# papercusp-server) whose filename contains "server" too; a substring match let
+# that seed stand in for the Server installer, so the platform smoke installed a
+# package that never replaces the running operator (WI-6554700010030528).
+release_artifacts_linux_deb_role() {
+  local f="${1:-}" name pkg=""
+  name="$(basename "$f")"
+  if [[ -f "$f" ]] && command -v dpkg-deb >/dev/null 2>&1; then
+    pkg="$(dpkg-deb -f "$f" Package 2>/dev/null || true)"
+  fi
+  case "$pkg" in
+    papercusp-server) echo server; return 0 ;;
+    papercusp-gui) echo gui; return 0 ;;
+    *-seed) echo companion; return 0 ;;
+  esac
+  # No readable package identity (unreadable control member, no dpkg-deb, or an
+  # unrecognised name): fall back to the filename, still excluding seed companions.
+  if [[ "$name" == *-seed_* || "$name" == *-seed.deb ]]; then echo companion
+  elif [[ "$name" == *[Ss]erver* ]]; then echo server
+  else echo gui
+  fi
+}
+
 release_artifacts_smoke_inputs() {
-  local platform="${1:-}" f name dir gui="" server=""
+  local platform="${1:-}" f name dir gui="" server="" role server_count=0
   shift 2>/dev/null || return 2
   case "$platform" in
     linux)
       for f in "$@"; do
         name="$(basename "$f")"
-        [[ "$name" == *.sig || "$name" == *.AppImage ]] && continue
-        if [[ "$name" == *.deb ]]; then
-          if [[ "$name" == *[Ss]erver* ]]; then server="$f"; elif [[ -z "$gui" ]]; then gui="$f"; fi
+        [[ "$name" == *.deb ]] || continue
+        role="$(release_artifacts_linux_deb_role "$f")"
+        if [[ "$role" == server ]]; then
+          server="$f"; server_count=$((server_count + 1))
+        elif [[ "$role" == gui && -z "$gui" ]]; then
+          gui="$f"
         fi
       done
+      # Never let ledger order pick between two Server installers.
+      (( server_count <= 1 )) || {
+        echo "release-artifacts: linux smoke found $server_count Server installers; expected exactly one papercusp-server .deb." >&2
+        return 1
+      }
       ;;
     mac)
       for f in "$@"; do
@@ -802,8 +835,10 @@ release_artifacts_linux_smoke_baseline() {
     local -a guis=() servers=()
     shopt -s nullglob
     for f in "$dir"/*.deb; do
-      name="$(basename "$f")"
-      if [[ "$name" == *[Ss]erver* ]]; then servers+=("$f"); else guis+=("$f"); fi
+      case "$(release_artifacts_linux_deb_role "$f")" in
+        server) servers+=("$f") ;;
+        gui) guis+=("$f") ;;
+      esac
     done
     shopt -u nullglob
     (( ${#guis[@]} == 1 && ${#servers[@]} == 1 )) || {
