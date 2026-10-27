@@ -180,11 +180,27 @@ function fileIdentity(file) {
   return { bytes: size, sha256: hash.digest('hex') };
 }
 
-/** Bind the interface record to the exact installer bytes being published. */
+/**
+ * Bind the interface record to the exact installer bytes being published.
+ *
+ * The publish manifest carries each installer's detached `.sig` next to it, and
+ * build-provenance records installers only. A `.sig` is admitted solely as the
+ * signature of an installer that is in this SAME set (and is therefore itself
+ * checked below); a stray `.sig`, or any other unrecorded file, still fails
+ * closed (EI-27172959645138151).
+ */
 function assertPublicDesktopArtifacts(artifacts, env = process.env) {
   assertPublicDesktopInterface(undefined, env);
   const identities = [];
+  const resolvedSet = new Set(artifacts.map((artifact) => path.resolve(artifact)));
   for (const artifact of artifacts) {
+    const resolved = path.resolve(artifact);
+    if (resolved.endsWith('.sig')) {
+      if (!resolvedSet.has(resolved.slice(0, -'.sig'.length))) {
+        throw new Error('PUBLIC DESKTOP INTERFACE HOLD: signature has no installer in this publish set.');
+      }
+      continue;
+    }
     let directory = path.dirname(path.resolve(artifact));
     let found = false;
     for (let depth = 0; depth < 5; depth++, directory = path.dirname(directory)) {

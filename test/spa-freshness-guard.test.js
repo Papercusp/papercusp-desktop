@@ -210,6 +210,38 @@ test('public artifact guard binds interface provenance to bytes, including neste
   }
 });
 
+test('public artifact guard admits an installer .sig only beside its checked installer (EI-27172959645138151)', () => {
+  const fs = require('node:fs');
+  const crypto = require('node:crypto');
+  const { makeDesktopTestScratchDirSync } = require('./test-scratch.cjs');
+  const root = makeDesktopTestScratchDirSync('desktop-interface-sig-');
+  try {
+    fs.mkdirSync(path.join(root, 'deb'));
+    const file = path.join(root, 'deb', 'legacy.deb');
+    const bytes = Buffer.from('measured installer bytes');
+    fs.writeFileSync(file, bytes);
+    fs.writeFileSync(`${file}.sig`, 'detached signature');
+    const stray = path.join(root, 'deb', 'unrecorded.deb');
+    fs.writeFileSync(stray, 'unrecorded bytes');
+    fs.writeFileSync(`${stray}.sig`, 'detached signature');
+    const identity = desktopInterfaceIdentity(html('index-AAAAAAAA.js').replace('</head>', '<meta name="papercusp-desktop-interface" content="legacy"></head>'));
+    const record = { desktopInterface: identity, artifacts: [{ name: 'deb/legacy.deb', bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') }] };
+    fs.writeFileSync(path.join(root, 'build-provenance.json'), JSON.stringify(record));
+    // The real publish manifest shape: installer + its .sig, in either order.
+    assert.doesNotThrow(() => assertPublicDesktopArtifacts([file, `${file}.sig`], {}));
+    assert.doesNotThrow(() => assertPublicDesktopArtifacts([`${file}.sig`, file], {}));
+    // A .sig whose installer is not in the set is not admitted on its own.
+    assert.throws(() => assertPublicDesktopArtifacts([`${file}.sig`], {}), /signature has no installer/);
+    // A .sig does not launder an installer that has no provenance record.
+    assert.throws(() => assertPublicDesktopArtifacts([file, `${file}.sig`, stray, `${stray}.sig`], {}), /no matching build-provenance record/);
+    // The installer beside its .sig is still byte-checked.
+    fs.writeFileSync(file, 'other installer bytes');
+    assert.throws(() => assertPublicDesktopArtifacts([file, `${file}.sig`], {}), /bytes differ/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('retained public history refuses candidate metadata with a legacy caller', () => {
   const fs = require('node:fs');
   const { makeDesktopTestScratchDirSync } = require('./test-scratch.cjs');
