@@ -37,17 +37,24 @@ case "${DPKG_MAINTSCRIPT_PACKAGE:-}" in
     ;;
 esac
 
-# A package removal must tell systemd that this is an intentional stop BEFORE
-# the binary disappears or the fallback PID cleanup runs.  Otherwise the
-# package-owned unit's Restart=on-failure policy races prerm: systemd observes
-# the killed Server as a crash, retries every five seconds, and keeps retrying
-# the now-missing executable after dpkg removes it.  Use Debian's user-service
-# helper so every live user manager is addressed; preserve the existing upgrade
-# behavior, where the running unit is allowed to restart onto the replacement
-# binary during the package transaction.
+# A package removal OR upgrade must tell systemd that this is an intentional
+# stop BEFORE the binary disappears or is replaced, and before the fallback PID
+# cleanup runs.  Otherwise the package-owned unit's Restart=on-failure policy
+# races prerm: systemd observes the killed Server as a crash and retries every
+# five seconds.  On removal it keeps retrying the now-missing executable.  On
+# upgrade the retries land mid-unpack, where the half-unpacked serve.mjs
+# refuses to start beside *.dpkg-new files, so the unit exhausts
+# StartLimitBurst and is left dead after the upgrade (EI-27105381385516766).
+# postinst restarts the enabled unit once configure completes; the new
+# package's preinst covers upgrades from releases whose prerm predates this.
+# Use Debian's user-service helper so every live user manager is addressed.
 SERVER_USER_UNIT=papercusp-server.service
+case "${1:-}" in
+  remove|upgrade|failed-upgrade|deconfigure) SERVER_STOP_UNIT=1 ;;
+  *) SERVER_STOP_UNIT=0 ;;
+esac
 if [ "$OWNS_OPERATOR" = 1 ] \
-  && [ "${1:-}" = "remove" ] \
+  && [ "$SERVER_STOP_UNIT" = 1 ] \
   && [ -z "${DPKG_ROOT:-}" ] \
   && command -v deb-systemd-invoke >/dev/null 2>&1; then
   deb-systemd-invoke --user stop "$SERVER_USER_UNIT" >/dev/null || true

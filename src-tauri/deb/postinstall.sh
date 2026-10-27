@@ -12,8 +12,14 @@
 # Everything is guarded so it can NEVER fail the package install.
 set -e
 
-# Only on a real install/upgrade configure.
-[ "$1" = "configure" ] || exit 0
+# configure is the real install/upgrade path. abort-* is dpkg unwinding a
+# failed upgrade or removal back onto THIS version after prerm stopped the
+# Server's user unit (EI-27105381385516766); only the unit restart below runs
+# for it.
+case "${1:-}" in
+  configure|abort-upgrade|abort-remove|abort-deconfigure) ;;
+  *) exit 0 ;;
+esac
 
 # This script is inherited by both Tauri products, but every side effect below
 # belongs to the Server package: its user unit, bundled psu/ptool launchers,
@@ -51,6 +57,43 @@ server_user_link_is_package_owned() {
   [ -L "$1" ] \
     && [ "$(readlink -f -- "$1" 2>/dev/null || true)" = "$SERVER_USER_PATH" ]
 }
+
+# Live user managers, addressed exactly as deb-systemd-invoke addresses them
+# (`systemctl --user --machine <uid>@`, systemd >= 249). deb-systemd-invoke has
+# no reset-failed action of its own.
+server_user_manager_uids() {
+  systemctl --no-legend --quiet list-units 'user@*' 2>/dev/null \
+    | sed -n 's/.*user@\([0-9][0-9]*\)\.service.*/\1/p'
+}
+
+# Start the Server again on every live user manager where its unit is enabled
+# (EI-27105381385516766). preinst (upgrade) or prerm stopped it for this
+# transaction. A unit that crash-looped against a half-unpacked tree before
+# that stop existed is parked at start-limit-hit, which `restart` alone cannot
+# clear, so reset-failed comes first. deb-systemd-invoke only (re)starts a unit
+# that is enabled or already running, so an administrator's disable is kept.
+server_user_unit_restart_enabled() {
+  [ -z "${DPKG_ROOT:-}" ] || return 0
+  command -v deb-systemd-invoke >/dev/null 2>&1 || return 0
+  deb-systemd-invoke --user daemon-reload >/dev/null 2>&1 || true
+  if command -v systemctl >/dev/null 2>&1; then
+    for uid in $(server_user_manager_uids); do
+      systemctl --quiet --user --machine "$uid@" reset-failed "$SERVER_USER_UNIT" \
+        >/dev/null 2>&1 || true
+    done
+  fi
+  if ! deb-systemd-invoke --user restart "$SERVER_USER_UNIT" >/dev/null; then
+    echo "WARN: could not restart $SERVER_USER_UNIT; as its user run: systemctl --user reset-failed $SERVER_USER_UNIT && systemctl --user restart $SERVER_USER_UNIT" >&2
+  fi
+  return 0
+}
+
+case "$1" in
+  abort-*)
+    server_user_unit_restart_enabled
+    exit 0
+    ;;
+esac
 
 if [ -f "$SERVER_USER_PATH" ] \
   && [ -z "${DPKG_ROOT:-}" ] \
@@ -233,6 +276,14 @@ PROFILE
 if [ -z "${DPKG_ROOT:-}" ]; then
   papercusp_install_bwrap_userns_profile /etc/apparmor.d \
     /proc/sys/kernel/apparmor_restrict_unprivileged_userns /usr/bin/bwrap || true
+fi
+
+# ── Restart the Server onto the new version (EI-27105381385516766) ──────────
+# Only an upgrade or reinstall ($2 = the previously configured version)
+# restarts: a first install keeps its start-at-login behavior. This runs after
+# every provisioning step the Server depends on (launchers, bwrap userns grant).
+if [ -n "${2:-}" ]; then
+  server_user_unit_restart_enabled
 fi
 
 # ── (2) ghostty — deferred, best-effort ─────────────────────────────────────

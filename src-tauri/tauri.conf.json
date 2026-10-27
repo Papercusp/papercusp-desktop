@@ -66,6 +66,7 @@
     "linux": {
       "deb": {
         "depends": [],
+        "preInstallScript": "deb/preinstall.sh",
         "preRemoveScript": "deb/preremove.sh",
         "postInstallScript": "deb/postinstall.sh",
         "postRemoveScript": "deb/postremove.sh"

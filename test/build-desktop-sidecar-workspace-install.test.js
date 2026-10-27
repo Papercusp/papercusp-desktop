@@ -792,7 +792,7 @@ test('Debian removal tears down only verified Papercusp process ownership', () =
   assert.match(preRemove, /if \[ "\$OWNS_OPERATOR" = 1 \]; then[\s\S]*signal_operator_group/);
 });
 
-test('Debian Server removal stops the user unit without changing GUI removal or upgrade behavior', () => {
+test('Debian Server removal and upgrade stop the user unit; GUI removal leaves it alone', () => {
   const preRemovePath = path.join(desktopRoot, 'src-tauri/deb/preremove.sh');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-prerm-systemd-'));
   const procRoot = path.join(root, 'proc');
@@ -830,12 +830,170 @@ test('Debian Server removal stops the user unit without changing GUI removal or 
     assert.equal(guiRemove.status, 0, `${guiRemove.stdout}${guiRemove.stderr}`);
     assert.equal(fs.existsSync(invokeLog), false, 'GUI removal must not stop the Server unit');
 
+    // EI-27105381385516766: letting the unit restart onto the replacement
+    // during the transaction crash-looped it against the half-unpacked tree
+    // until start-limit-hit. Upgrade now stops it; postinst restarts it.
     const serverUpgrade = run('papercusp-server', 'upgrade');
     assert.equal(serverUpgrade.status, 0, `${serverUpgrade.stdout}${serverUpgrade.stderr}`);
-    assert.equal(fs.existsSync(invokeLog), false, 'upgrade keeps the existing restart-on-replacement behavior');
+    assert.equal(fs.readFileSync(invokeLog, 'utf8').trim(), '--user stop papercusp-server.service');
+
+    fs.rmSync(invokeLog);
+    const guiUpgrade = run('papercusp-gui', 'upgrade');
+    assert.equal(guiUpgrade.status, 0, `${guiUpgrade.stdout}${guiUpgrade.stderr}`);
+    assert.equal(fs.existsSync(invokeLog), false, 'GUI upgrade must not stop the Server unit');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+// A PATH of logging shims for the Debian systemd helpers, so the maintainer
+// scripts' real control flow runs without touching a real systemd. Every call
+// lands in ONE log, in order, prefixed with the shim's name.
+function debSystemdShims({ restartExit = 0 } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-systemd-'));
+  const bin = path.join(root, 'bin');
+  const log = path.join(root, 'calls.log');
+  fs.mkdirSync(bin);
+  const shim = (name, body = '') => {
+    const file = path.join(bin, name);
+    fs.writeFileSync(
+      file,
+      ['#!/bin/sh', `printf '%s\\n' "${name} $*" >> "$PAPERCUSP_SHIM_LOG"`, body, 'exit 0', ''].join('\n'),
+    );
+    fs.chmodSync(file, 0o755);
+  };
+  shim('deb-systemd-invoke', `[ "$2" = restart ] && exit ${restartExit}`);
+  shim('deb-systemd-helper');
+  // Two live user managers, in systemctl's list-units row shape.
+  shim('systemctl', [
+    'case "$*" in',
+    '  *list-units*)',
+    "    echo '  user@1000.service loaded active running User Manager for UID 1000'",
+    "    echo '  user@1001.service loaded active running User Manager for UID 1001'",
+    '    ;;',
+    'esac',
+  ].join('\n'));
+  const calls = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : []);
+  const reset = () => fs.rmSync(log, { force: true });
+  const env = (extra = {}) => ({
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    PAPERCUSP_SHIM_LOG: log,
+    ...extra,
+  });
+  return { root, calls, reset, env };
+}
+
+test('Debian Server preinst stops the user unit before an upgrade unpacks (EI-27105381385516766)', () => {
+  const baseConfig = require(path.join(desktopRoot, 'src-tauri/tauri.conf.json'));
+  const serverConfig = require(path.join(desktopRoot, 'src-tauri/tauri.server.conf.json'));
+  // dpkg runs the OLD package's prerm on upgrade, so only the NEW package's
+  // preinst can stop the unit for an upgrade from an already-shipped release.
+  assert.equal(baseConfig.bundle.linux.deb.preInstallScript, 'deb/preinstall.sh');
+  assert.equal(serverConfig.bundle.linux.deb.preInstallScript, undefined);
+  const preinstPath = process.env.PAPERCUSP_PREINSTALL_UNDER_TEST
+    || path.join(desktopRoot, 'src-tauri/deb/preinstall.sh');
+  assert.equal(childProcess.spawnSync('sh', ['-n', preinstPath]).status, 0);
+  assert.ok(fs.statSync(preinstPath).mode & 0o111, 'the maintainer script must be executable');
+
+  const h = debSystemdShims();
+  try {
+    const run = (packageName, args, extra = {}) => childProcess.spawnSync('sh', [preinstPath, ...args], {
+      encoding: 'utf8',
+      env: h.env({ DPKG_MAINTSCRIPT_PACKAGE: packageName, ...extra }),
+    });
+
+    const upgrade = run('papercusp-server', ['upgrade', '0.0.26']);
+    assert.equal(upgrade.status, 0, `${upgrade.stdout}${upgrade.stderr}`);
+    assert.deepEqual(h.calls(), ['deb-systemd-invoke --user stop papercusp-server.service']);
+
+    for (const [packageName, args, extra, why] of [
+      ['papercusp-server', ['install'], {}, 'a first install has no running unit to stop'],
+      ['papercusp-server', ['abort-upgrade', '0.0.33'], {}, 'an unwind must not stop the restored unit'],
+      ['papercusp-gui', ['upgrade', '0.0.26'], {}, 'GUI upgrade must not stop the Server unit'],
+      ['papercusp-server', ['upgrade', '0.0.26'], { DPKG_ROOT: '/chroot' }, 'never address the host from a DPKG_ROOT install'],
+    ]) {
+      h.reset();
+      const result = run(packageName, args, extra);
+      assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+      assert.deepEqual(h.calls(), [], why);
+    }
+  } finally {
+    fs.rmSync(h.root, { recursive: true, force: true });
+  }
+});
+
+test('Debian Server postinst resets and restarts the enabled unit after upgrade and on abort unwind (EI-27105381385516766)', () => {
+  const postinstPath = process.env.PAPERCUSP_POSTINSTALL_UNDER_TEST
+    || path.join(desktopRoot, 'src-tauri/deb/postinstall.sh');
+  const postinstall = fs.readFileSync(postinstPath, 'utf8');
+  const expectedRestart = [
+    'deb-systemd-invoke --user daemon-reload',
+    'systemctl --no-legend --quiet list-units user@*',
+    'systemctl --quiet --user --machine 1000@ reset-failed papercusp-server.service',
+    'systemctl --quiet --user --machine 1001@ reset-failed papercusp-server.service',
+    'deb-systemd-invoke --user restart papercusp-server.service',
+  ];
+
+  // The abort-* unwind exits right after the restart, so the real script runs
+  // end to end here without reaching any configure-only side effect.
+  const h = debSystemdShims();
+  try {
+    const run = (packageName, args) => childProcess.spawnSync('sh', [postinstPath, ...args], {
+      encoding: 'utf8',
+      env: h.env({ DPKG_MAINTSCRIPT_PACKAGE: packageName }),
+    });
+    for (const action of ['abort-upgrade', 'abort-remove', 'abort-deconfigure']) {
+      h.reset();
+      const unwind = run('papercusp-server', [action, '0.0.33']);
+      assert.equal(unwind.status, 0, `${action}: ${unwind.stdout}${unwind.stderr}`);
+      assert.deepEqual(h.calls(), expectedRestart, `${action} must restart the unit prerm stopped`);
+    }
+
+    h.reset();
+    const gui = run('papercusp-gui', ['abort-upgrade', '0.0.33']);
+    assert.equal(gui.status, 0, `${gui.stdout}${gui.stderr}`);
+    assert.deepEqual(h.calls(), [], 'GUI postinst must not touch the Server unit');
+
+    h.reset();
+    const other = run('papercusp-server', ['triggered', 'x']);
+    assert.equal(other.status, 0, `${other.stdout}${other.stderr}`);
+    assert.deepEqual(h.calls(), [], 'only configure and abort-* reach the unit');
+  } finally {
+    fs.rmSync(h.root, { recursive: true, force: true });
+  }
+
+  // A restart that systemd refuses must warn, never fail dpkg.
+  const failing = debSystemdShims({ restartExit: 1 });
+  try {
+    const result = childProcess.spawnSync('sh', [postinstPath, 'abort-upgrade', '0.0.33'], {
+      encoding: 'utf8',
+      env: failing.env({ DPKG_MAINTSCRIPT_PACKAGE: 'papercusp-server' }),
+    });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, /WARN: could not restart papercusp-server\.service/);
+  } finally {
+    fs.rmSync(failing.root, { recursive: true, force: true });
+  }
+
+  // configure cannot run here (it writes /usr/bin), so pin its call site: the
+  // restart is upgrade-only, after the enablement repair and every provisioning
+  // step the Server needs, and before the detached ghostty worker.
+  const restartCall = postinstall.indexOf('if [ -n "${2:-}" ]; then\n  server_user_unit_restart_enabled\nfi');
+  assert.ok(restartCall >= 0, 'configure restarts the unit only when a previous version was configured');
+  assert.ok(
+    postinstall.indexOf('deb-systemd-helper --user reenable "$SERVER_USER_UNIT"') < restartCall,
+    'restart must follow the enablement repair',
+  );
+  assert.ok(
+    postinstall.indexOf('papercusp_install_bwrap_userns_profile /etc/apparmor.d') < restartCall,
+    'restart must follow the bwrap userns grant the Server depends on',
+  );
+  assert.ok(restartCall < postinstall.indexOf('# ── (2) ghostty'), 'restart must not wait behind ghostty');
+  assert.ok(
+    postinstall.indexOf('abort-*)') < postinstall.indexOf('deb-systemd-helper --user unmask'),
+    'the abort-* unwind must exit before any configure-only side effect',
+  );
 });
 
 test('Debian removal stays quiet when the packaged desktop exits during the TERM wait', () => {
