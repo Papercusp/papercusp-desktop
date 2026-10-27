@@ -188,6 +188,14 @@ if [[ "$TARGET_OS" == "linux" \
   echo "       Run this producer in a target-platform builder; setting TARGET_ARCH alone cannot cross-build pui, PostgreSQL and native addons." >&2
   exit 2
 fi
+# The transformers identity check reads only package.json + the lock, so it runs
+# BEFORE the vulnerability-DB refresh below: an incompatible source input must be
+# refused before any network or expensive work (pinned by
+# packages/operator-core/lib/sidecar-transformers-model-source.test.ts).
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" || "${PAPERCUSP_TRANSFORMERS_VERIFY_PINNED:-0}" == "1" ]]; then
+  papercusp_verify_transformers_dependencies "$REPO_ROOT" 0 || exit 1
+fi
+
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
   # shellcheck source=lib/vm-release-trust-toolchain.sh
   source "$HERE/lib/vm-release-trust-toolchain.sh"
@@ -196,10 +204,6 @@ if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
   # source capture, installs or compilation. A ready scanner is not a green
   # artifact: the finished tree still receives its SBOM and vulnerability gate.
   python3 "$HERE/audit-release-bundle.py" --preflight-vulnerabilities --refresh-db
-fi
-
-if [[ "$DISTRIBUTION_PROFILE" == "vm-release" || "${PAPERCUSP_TRANSFORMERS_VERIFY_PINNED:-0}" == "1" ]]; then
-  papercusp_verify_transformers_dependencies "$REPO_ROOT" 0 || exit 1
 fi
 
 # Direct sidecar builds are release producers too. Preserve the source state at
