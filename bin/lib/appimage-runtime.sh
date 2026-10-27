@@ -56,3 +56,84 @@ papercusp_appimage_runtime_path() {
   fi
   printf '%s\n' "$file"
 }
+
+# ── papercusp_appimage_packer_* — the packer is PINNED too (EI-27158244411414674)
+#
+# THE DEFECT. build-appimage.sh packed with `ls ~/.cache/tauri/*plugin-appimage*
+# .AppImage | sed -n 1p`: whichever linuxdeploy-plugin-appimage the Tauri CLI had
+# cached, or whichever sorted first. Its bundled appimagetool and mksquashfs
+# write every byte of the signed GUI AppImage after the runtime. Nothing pinned
+# or recorded it, and that cache is mutable: the linuxdeploy-x86_64.AppImage
+# beside it was rewritten at 2026-10-27T16:45Z (mtime) by an unrecorded writer.
+#
+# THE FIX. The packer is pinned by sha256 and resolved from a content-addressed
+# store outside the tree. It is a 16 MB AppImage, too large to vendor. The store
+# is seeded from the Tauri cache only with a file that hashes to the pin, and
+# the stored file is hashed again on every resolution, just before use.
+#
+# THE PINNED BYTES packed every cut up to and including 0.0.32. They bundle
+# appimagetool continuous build 295 (git 8c8c91f, built 2025-12-04). Upstream's
+# 'continuous' asset moved on 2026-06-07, and no dated release has these bytes,
+# so they can no longer be downloaded. Do not delete the store.
+#
+# BUMPING: choose an upstream asset that GitHub publishes with a sha256 `digest`
+# (a dated release, or a reviewed 'continuous'). Download it and check the digest.
+# Place it at "<store>/sha256/<sha256>/linuxdeploy-plugin-appimage.AppImage".
+# Update the two constants below. Then cut a candidate and re-run the VM journey
+# before publishing.
+
+PAPERCUSP_APPIMAGE_PACKER_SHA256=b42404a077ba7e10db708a2fa334768e34cc3807eab562f8fb8e02be2aa24f49
+PAPERCUSP_APPIMAGE_PACKER_UPSTREAM='linuxdeploy/linuxdeploy-plugin-appimage continuous (appimagetool build 295, git 8c8c91f, 2025-12-04; 16484856 bytes)'
+
+# papercusp_appimage_packer_store_file — where the pinned packer lives.
+# PAPERCUSP_RELEASE_TOOLS_DIR relocates the store. The sha256 path component
+# keeps every pin in its own directory, so a bump never overwrites old bytes.
+papercusp_appimage_packer_store_file() {
+  printf '%s/sha256/%s/linuxdeploy-plugin-appimage.AppImage\n' \
+    "${PAPERCUSP_RELEASE_TOOLS_DIR:-$HOME/.local/share/papercusp/release-tools}" \
+    "$PAPERCUSP_APPIMAGE_PACKER_SHA256"
+}
+
+_papercusp_appimage_sha256_of() {
+  sha256sum -- "$1" 2>/dev/null | cut -d' ' -f1
+}
+
+# papercusp_appimage_packer_verify FILE — fail unless FILE hashes to the pin.
+papercusp_appimage_packer_verify() {
+  local file="${1:?AppImage packer path required}" actual=""
+  [ -f "$file" ] && actual="$(_papercusp_appimage_sha256_of "$file")"
+  if [ "$actual" != "$PAPERCUSP_APPIMAGE_PACKER_SHA256" ]; then
+    echo "FATAL: AppImage packer $file has sha256 '${actual:-unavailable}', pinned $PAPERCUSP_APPIMAGE_PACKER_SHA256 — refusing to pack with an unreviewed appimagetool (EI-27158244411414674)" >&2
+    return 1
+  fi
+}
+
+# papercusp_appimage_packer_path — print the verified packer path, or fail.
+# PAPERCUSP_TAURI_TOOLS_DIR relocates the Tauri cache that seeding reads.
+papercusp_appimage_packer_path() {
+  local store dir candidate tmp
+  store="$(papercusp_appimage_packer_store_file)" || return 1
+  dir="$(dirname "$store")"
+  if [ ! -f "$store" ]; then
+    for candidate in "${PAPERCUSP_TAURI_TOOLS_DIR:-$HOME/.cache/tauri}"/*plugin-appimage*.AppImage; do
+      [ -f "$candidate" ] || continue
+      [ "$(_papercusp_appimage_sha256_of "$candidate")" = "$PAPERCUSP_APPIMAGE_PACKER_SHA256" ] || continue
+      mkdir -p -- "$dir" || return 1
+      tmp="$(mktemp "$dir/.seed.XXXXXX")" || return 1
+      # Hash the copy, not the source: the cache can change under us.
+      if cp -- "$candidate" "$tmp" && chmod 0555 -- "$tmp" \
+          && [ "$(_papercusp_appimage_sha256_of "$tmp")" = "$PAPERCUSP_APPIMAGE_PACKER_SHA256" ] \
+          && mv -f -- "$tmp" "$store"; then
+        echo "   seeded the pinned AppImage packer from $candidate" >&2
+        break
+      fi
+      rm -f -- "$tmp"
+    done
+  fi
+  if [ ! -f "$store" ]; then
+    echo "FATAL: pinned AppImage packer not found at $store, and no cached *plugin-appimage*.AppImage hashes to $PAPERCUSP_APPIMAGE_PACKER_SHA256 (EI-27158244411414674). See BUMPING in bin/lib/appimage-runtime.sh." >&2
+    return 1
+  fi
+  papercusp_appimage_packer_verify "$store" || return 1
+  printf '%s\n' "$store"
+}

@@ -852,12 +852,14 @@ if [ "${PAPERCUSP_RELEASE_AUDIT:-1}" = "1" ]; then
   fi
 fi
 
-# 4. Locate appimagetool (tauri downloads the linuxdeploy appimage plugin, which
-#    embeds it) and package the AppDir. No ELF scan → no crash.
+# 4. Resolve the PINNED appimagetool (the linuxdeploy appimage plugin embeds it)
+#    and package the AppDir. No ELF scan → no crash. EI-27158244411414674: never
+#    take whatever plugin the Tauri cache holds. The resolver hashes the stored
+#    plugin against the pin right here, immediately before extraction.
 echo "==> sharing byte-identical immutable AppDir payloads (preserving every runtime path)"
 python3 "$ORCHESTRATOR_HERE/lib/deduplicate-appdir.py" "$APPDIR" || exit 1
-PLUGIN="$(ls "$HOME/.cache/tauri/"*plugin-appimage*.AppImage 2>/dev/null | sed -n 1p)"
-[ -n "$PLUGIN" ] || { echo "FATAL: linuxdeploy-plugin-appimage not found in ~/.cache/tauri (did the tauri step run?)" >&2; exit 1; }
+PLUGIN="$(papercusp_appimage_packer_path)" || exit 1
+echo "==> AppImage packer pinned: $PAPERCUSP_APPIMAGE_PACKER_SHA256 ($PAPERCUSP_APPIMAGE_PACKER_UPSTREAM)"
 
 # Extract the plugin into an owned directory, then call its bundled appimagetool
 # directly so the compression block/level and worker count are explicit. The

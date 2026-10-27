@@ -3133,6 +3133,22 @@ emit_linux_build_provenance() {
     [[ "$appimage_runtime" == \{*\} ]] \
       || appimage_runtime='{ "embeddedMatchesPin": null, "reason": "appimage-runtime-embedded.py produced no verdict" }'
   done
+  # EI-27158244411414674: record the packer pin beside the runtime verdict.
+  # build-appimage.sh refuses any other packer, so a fresh AppImage was packed by
+  # exactly these bytes. A reused AppImage carries no record of its packer, so
+  # it is recorded as unknown rather than credited to the current pin.
+  if [[ -n "$appimage_runtime" ]]; then
+    appimage_runtime="$(python3 -I -c '
+import json, sys
+verdict, reused, sha, upstream = sys.argv[1:5]
+record = json.loads(verdict)
+record["packer"] = (
+    {"sha256": None, "reason": "reused AppImage: its packer was not recorded"}
+    if reused == "true" else {"sha256": sha, "upstream": upstream}
+)
+print(json.dumps(record))
+' "$appimage_runtime" "$reused" "$PAPERCUSP_APPIMAGE_PACKER_SHA256" "$PAPERCUSP_APPIMAGE_PACKER_UPSTREAM")" || return 1
+  fi
   # Host == Linux builder. Hash primary installers only; .sig presence is
   # recorded per artifact, after repacking and final updater signing.
   PROVENANCE_APPIMAGE_RUNTIME="$appimage_runtime" \
