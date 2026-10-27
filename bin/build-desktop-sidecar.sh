@@ -5545,7 +5545,7 @@ if [[ -x "$HERE/emit-build-provenance.sh" ]]; then
       "${PAPERCUSP_BUILD_SHA:-}" \
       false \
       "$SIDECAR_DIR/serve.mjs" \
-      "$SIDECAR_DIR/bin/$node_cache_bin" \
+      "$SIDECAR_DIR/bin/$( [[ "$TARGET_OS" == windows ]] && echo node.exe || echo node )" \
       "$SIDECAR_DIR/bin/$( [[ "$TARGET_OS" == windows ]] && echo bun.exe || echo bun )" \
       >/dev/null \
     || echo "→ WARN: sidecar provenance emit failed (non-fatal; consumers will report 'cannot judge')"
