@@ -275,6 +275,11 @@ if [[ "$*" == *"apt-get install --yes"* ]]; then
     printf 'E: stale package indexes; refresh apt lists before installing\\n' >&2
     exit 100
   fi
+  # Real apt refuses to replace a newer installed package under --yes.
+  if [[ "$MOCK_INSTALLED_NEWER" == 1 && "$*" != *"--allow-downgrades"* ]]; then
+    printf 'E: Packages were downgraded and -y was used without --allow-downgrades.\\n' >&2
+    exit 100
+  fi
   : > "$MOCK_CONFIGURED"
 fi
   case "$*" in
@@ -805,6 +810,58 @@ test('Linux resolves missing WebKit dependencies before relaunching the installe
     assert.ok(packageCheck > serverInstall, 'package configuration must be checked after both installations');
     assert.ok(relaunch > packageCheck, 'Linux must not relaunch before package configuration is confirmed');
     assert.ok(lines[relaunch].includes('papercusp-server.service'), 'Linux must restart the Server-owned runtime before the GUI');
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('Linux installs an older package over a newer one only when the leg opts into --allow-downgrade', () => {
+  // The exact-rollback leg of candidate-install-upgrade-rollback.sh: 0.0.31 is
+  // installed and the leg reinstalls 0.0.26. apt refused this live under --yes.
+  const strict = linuxFixture();
+  try {
+    const result = runVerify(strict, [], 'linux', strict.deb, { MOCK_INSTALLED_NEWER: '1' });
+    assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.ok, false);
+    assert.equal(verdict.downgradeAllowed, false);
+    assert.match(JSON.stringify(verdict.failures), /without --allow-downgrades/);
+    assert.equal(readFileSync(strict.log, 'utf8').includes('--allow-downgrades'), false,
+      'an upgrade leg must never silently permit a downgrade');
+  } finally {
+    rmSync(strict.root, { recursive: true, force: true });
+  }
+
+  const rollback = linuxFixture();
+  try {
+    const result = runVerify(rollback, ['--allow-downgrade'], 'linux', rollback.deb, { MOCK_INSTALLED_NEWER: '1' });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.flipped, true);
+    assert.equal(verdict.downgradeAllowed, true);
+    const installs = readFileSync(rollback.log, 'utf8').trim().split('\n')
+      .filter((line) => line.startsWith('SSH ') && line.includes('apt-get install --yes'));
+    assert.equal(installs.length, 2, 'both the GUI and the Server install must run');
+    for (const line of installs) assert.ok(line.includes('--allow-downgrades'), line);
+  } finally {
+    rmSync(rollback.root, { recursive: true, force: true });
+  }
+});
+
+test('the downgrade opt-in is refused wherever it would be silently ignored', () => {
+  const f = linuxFixture();
+  try {
+    for (const [args, platform] of [
+      [['--allow-downgrade'], 'windows'],
+      [['--allow-downgrade', '--install-cmd', 'custom __ARTIFACT__'], 'linux'],
+      [['--allow-downgrade', '--server-install-cmd', 'custom __SERVER_ARTIFACT__'], 'linux'],
+    ]) {
+      const result = runVerify(f, args, platform, f.deb);
+      assert.equal(result.status, 2, `${platform} ${args.join(' ')}: ${result.stdout}\n${result.stderr}`);
+      assert.match(result.stderr, /--allow-downgrade requires --platform linux and the default apt-get install commands/);
+    }
+    assert.equal(existsSync(f.log) && readFileSync(f.log, 'utf8').includes('SCP '), false, 'refused before any push');
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

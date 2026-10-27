@@ -7,6 +7,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/release-artifacts.sh
 source "$HERE/lib/release-artifacts.sh"
+# shellcheck source=lib/legacy-client-recovery.sh
+source "$HERE/lib/legacy-client-recovery.sh"
 
 VM=clean
 CANDIDATE_GUI=""
@@ -14,6 +16,10 @@ CANDIDATE_SERVER=""
 BASELINE_GUI=""
 BASELINE_SERVER=""
 EVIDENCE_OUT=""
+LEGACY_HOST_UNAVAILABLE=0
+# The baseline's own source commit holds the updater key that installed client
+# enforces. Default: this desktop repository, where release build SHAs live.
+KEY_REPO="${PAPERCUSP_LEGACY_TRUSTED_KEY_REPO:-$(cd "$HERE/.." && pwd)}"
 VMCTL="${PAPERCUSP_LINUX_VMCTL:-$(cd "$HERE/../scripts/linux-test-vm" && pwd)/vmctl}"
 VERIFIER="${PAPERCUSP_CANDIDATE_INSTALL_VERIFIER:-$HERE/install-and-relaunch-verify.sh}"
 
@@ -21,12 +27,22 @@ usage() {
   cat <<'USAGE'
 Usage: candidate-install-upgrade-rollback.sh \
   --candidate-gui PATH --candidate-server PATH \
-  --baseline-gui PATH --baseline-server PATH --evidence-out PATH [--vm NAME]
+  --baseline-gui PATH --baseline-server PATH --evidence-out PATH [--vm NAME] \
+  [--legacy-host-unavailable]
 
 Build provenance beside each GUI .deb must identify a distinct build SHA;
-the matching Server .deb must carry the same SHA and package version. The
-route resets only the named disposable Linux test VM, installs the baseline,
-verifies candidate upgrade, then verifies rollback to that exact baseline.
+the matching Server .deb must carry the same SHA and package version. Before
+touching the VM, both candidate packages must verify under the updater key the
+baseline build trusts (read from the baseline's own source commit in
+PAPERCUSP_LEGACY_TRUSTED_KEY_REPO, default this repository). The route resets
+only the named disposable Linux test VM, installs the baseline, records the
+old client's update-check answer, seeds user data, verifies candidate upgrade,
+then verifies rollback to that exact baseline, requiring the user data after
+each flip.
+
+--legacy-host-unavailable asserts that the release host baked into the
+baseline no longer serves it; an old client that then answers "up to date"
+(rather than "could not check") fails the journey instead of being recorded.
 USAGE
 }
 
@@ -39,6 +55,7 @@ while [[ $# -gt 0 ]]; do
     --baseline-server) BASELINE_SERVER="${2:-}"; shift 2 ;;
     --evidence-out) EVIDENCE_OUT="${2:-}"; shift 2 ;;
     --vm) VM="${2:-}"; shift 2 ;;
+    --legacy-host-unavailable) LEGACY_HOST_UNAVAILABLE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
@@ -49,7 +66,7 @@ done
 [[ "$VM" =~ ^[A-Za-z0-9_-]+$ ]] || die "unsafe VM name: $VM"
 [[ -x "$VMCTL" ]] || die "Linux VM controller is not executable: $VMCTL"
 [[ -x "$VERIFIER" ]] || die "canonical installer verifier is not executable: $VERIFIER"
-for cmd in dpkg-deb flock python3 sha256sum stat timeout; do
+for cmd in dpkg-deb flock git node python3 sha256sum stat timeout; do
   command -v "$cmd" >/dev/null 2>&1 || die "missing required local tool: $cmd"
 done
 
@@ -102,6 +119,15 @@ baseline_server_prov="$(release_artifacts_find_provenance "$BASELINE_SERVER")" \
 [[ "$(read_build_field "$baseline_server_prov" buildSha)" == "$BASELINE_SHA" ]] \
   || die "baseline Server provenance does not match the GUI build SHA"
 
+# An installed client only accepts an update signed by the key IT trusts. A
+# candidate signed by any other key strands every old client at manual
+# recovery, so prove the signatures under the baseline's key before the VM
+# is touched. Never falls back to the candidate's or the working tree's key.
+TRUSTED_PUBKEY="$(legacy_client_recovery_trusted_pubkey "$KEY_REPO" "$BASELINE_SHA")" \
+  || die "cannot read the updater key baseline $BASELINE_SHA trusts from $KEY_REPO"
+signature_rows="$(legacy_client_recovery_verify_signatures "$TRUSTED_PUBKEY" "$CANDIDATE_GUI" "$CANDIDATE_SERVER")" \
+  || die "candidate packages do not verify under the updater key baseline $BASELINE_SHA trusts: $signature_rows"
+
 # Resolve the endpoint before starting the VM. A reset clean-room VM rotates its
 # host key, so the verifier receives the release route's explicit transport policy.
 endpoint="$(bash "$VMCTL" endpoint "$VM")" || die "cannot read the $VM VM endpoint"
@@ -125,6 +151,9 @@ fi
 
 mkdir -p "$(dirname "$EVIDENCE_OUT")"
 RUN_DIR="$(mktemp -d "$EVIDENCE_OUT.diagnostics.XXXXXX")"
+printf '%s\n' "$signature_rows" >"$RUN_DIR/signatures.tsv"
+printf '%s' "$TRUSTED_PUBKEY" >"$RUN_DIR/trusted-pubkey"
+: >"$RUN_DIR/user-data-checks.tsv"
 VM_STARTED=0
 PHASE=vm-start
 cleanup() {
@@ -174,9 +203,63 @@ printf '%s\n' "$baseline_script" \
   | timeout --kill-after=30 "$(( ${PAPERCUSP_CANDIDATE_BASELINE_START_TIMEOUT:-900} + 360 ))" \
       bash "$VMCTL" ssh "$VM" 'bash -s'
 
+# Run one guest script (stdin) and print its output. The caller decides from
+# the reported line, never from the guest's exit status alone.
+guest() {
+  timeout --kill-after=30 "${PAPERCUSP_CANDIDATE_GUEST_PROBE_TIMEOUT:-300}" \
+    bash "$VMCTL" ssh "$VM" 'bash -s'
+}
+
+# The OLD client, before anything replaces it: what does its updater tell the
+# user when the release host baked into it no longer serves it?
+PHASE=old-client-update-check
+probe_status=0
+probe_output="$(legacy_client_recovery_update_probe_script "$BASELINE_VERSION" | guest)" || probe_status=$?
+printf '%s\n' "$probe_output" >"$RUN_DIR/old-client-update-check.out"
+UPDATE_VERDICT="$(legacy_client_recovery_update_verdict "$probe_output")" || true
+case "$UPDATE_VERDICT" in
+  not-silent) ;;
+  missing-report)
+    echo "candidate-install-upgrade-rollback: the old client's update check reported nothing for both products (guest exit $probe_status): $probe_output" >&2
+    exit 1 ;;
+  *)
+    if [[ "$LEGACY_HOST_UNAVAILABLE" == 1 ]]; then
+      echo "candidate-install-upgrade-rollback: old client update check: $UPDATE_VERDICT while its release host is asserted unavailable: $probe_output" >&2
+      exit 1
+    fi
+    echo "candidate-install-upgrade-rollback: WARNING — old client update check: $UPDATE_VERDICT (recorded; its release host was not asserted unavailable)" >&2 ;;
+esac
+
+# User data both flips must keep: seeded on the old client, checked after each.
+PHASE=user-data-seed
+NONCE="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+seed_status=0
+seed_output="$(legacy_client_recovery_seed_script "$NONCE" | guest)" || seed_status=$?
+SEED_LINE="$(grep -E '^PAPERCUSP_USER_DATA_SEEDED ' <<<"$seed_output" | tail -1 || true)"
+[[ "$SEED_LINE" == "PAPERCUSP_USER_DATA_SEEDED nonce=$NONCE "* ]] || {
+  echo "candidate-install-upgrade-rollback: user data could not be seeded on the old client (guest exit $seed_status): $seed_output" >&2
+  exit 1
+}
+printf '%s\n' "$SEED_LINE" >"$RUN_DIR/user-data-seed.line"
+
+check_user_data() {
+  local leg="$1" output status=0 line verdict
+  PHASE="user-data-$leg"
+  output="$(legacy_client_recovery_check_script "$NONCE" "$leg" | guest)" || status=$?
+  line="$(grep -E '^PAPERCUSP_USER_DATA_CHECK ' <<<"$output" | tail -1 || true)"
+  verdict="$(legacy_client_recovery_data_verdict "$SEED_LINE" "$line")" || true
+  printf '%s\t%s\t%s\n' "$leg" "$verdict" "$line" >>"$RUN_DIR/user-data-checks.tsv"
+  if [[ "$verdict" != preserved ]]; then
+    echo "candidate-install-upgrade-rollback: user data not preserved after $leg: $verdict (guest exit $status): ${line:-$output}" >&2
+    return 1
+  fi
+}
+
+# run_leg <name> <gui> <server> <sha> <version> [extra verifier args...]
 run_leg() {
   local name="$1"
   local gui="$2" server="$3" sha="$4" version="$5"
+  shift 5
   local output="$RUN_DIR/$name.json"
   local stderr_output="$RUN_DIR/$name.stderr.log" verifier_status=0
   PHASE="$name"
@@ -189,7 +272,7 @@ run_leg() {
     --ssh-option StrictHostKeyChecking=no \
     --ssh-option UserKnownHostsFile=/dev/null \
     --scp-option StrictHostKeyChecking=no \
-    --scp-option UserKnownHostsFile=/dev/null --json >"$output" 2>"$stderr_output"; then
+    --scp-option UserKnownHostsFile=/dev/null "$@" --json >"$output" 2>"$stderr_output"; then
     :
   else
     verifier_status=$?
@@ -218,7 +301,11 @@ PY
 
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 run_leg candidate-upgrade "$CANDIDATE_GUI" "$CANDIDATE_SERVER" "$CANDIDATE_SHA" "$CANDIDATE_VERSION"
-run_leg exact-baseline-rollback "$BASELINE_GUI" "$BASELINE_SERVER" "$BASELINE_SHA" "$BASELINE_VERSION"
+check_user_data candidate-upgrade
+# The rollback reinstalls an OLDER package over the candidate; only this leg
+# opts the verifier into a downgrade, so a mis-versioned upgrade still fails.
+run_leg exact-baseline-rollback "$BASELINE_GUI" "$BASELINE_SERVER" "$BASELINE_SHA" "$BASELINE_VERSION" --allow-downgrade
+check_user_data exact-baseline-rollback
 
 # Emit evidence only after both flips pass and the VM powers down cleanly.
 PHASE=vm-shutdown
@@ -229,19 +316,57 @@ mkdir -p "$(dirname "$EVIDENCE_OUT")"
 python3 - "$EVIDENCE_OUT" "$started_at" "$VM" "$SSH_HOST" "$SSH_PORT" \
   "$CANDIDATE_GUI" "$CANDIDATE_SERVER" "$CANDIDATE_SHA" "$CANDIDATE_VERSION" \
   "$BASELINE_GUI" "$BASELINE_SERVER" "$BASELINE_SHA" "$BASELINE_VERSION" \
-  "$RUN_DIR/candidate-upgrade.json" "$RUN_DIR/exact-baseline-rollback.json" <<'PY'
+  "$RUN_DIR/candidate-upgrade.json" "$RUN_DIR/exact-baseline-rollback.json" \
+  "$RUN_DIR" "$UPDATE_VERDICT" "$LEGACY_HOST_UNAVAILABLE" "$NONCE" <<'PY'
 import datetime, hashlib, json, os, pathlib, sys
 (out, started, vm, host, port, candidate_gui, candidate_server, candidate_sha,
  candidate_version, baseline_gui, baseline_server, baseline_sha, baseline_version,
- candidate_result, rollback_result) = sys.argv[1:]
+ candidate_result, rollback_result, run_dir, update_verdict, host_unavailable,
+ nonce) = sys.argv[1:]
+run = pathlib.Path(run_dir)
 def artifact(path):
     p = pathlib.Path(path).resolve()
     data = p.read_bytes()
     return {"path": str(p), "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
 def read_json(path):
     return json.loads(pathlib.Path(path).read_text())
+def fields(line):
+    return dict(part.split("=", 1) for part in line.split()[1:] if "=" in part)
+def signature(row):
+    name, exit_code, raw = row.split("\t", 2)
+    try:
+        verdict = json.loads(raw)
+    except ValueError:
+        verdict = {"valid": False, "error": raw}
+    return {"artifact": name, "valid": verdict.get("valid") is True,
+            "keyId": verdict.get("keyId"), "exitCode": int(exit_code)}
+def report(line):
+    row = fields(line)
+    status = row.get("status", "")
+    return {"product": row.get("product"), "status": int(status) if status.isdigit() else status,
+            "check": row.get("check"), "reason": row.get("reason")}
+def data_check(row):
+    phase, verdict, line = row.split("\t", 2)
+    return {"phase": phase, "verdict": verdict, "line": line}
+lines = lambda name: [l for l in (run / name).read_text().splitlines() if l.strip()]
+legacy = {
+    "baselineSourceSha": baseline_sha,
+    "trustedKeySha256": hashlib.sha256((run / "trusted-pubkey").read_bytes()).hexdigest(),
+    "signatures": [signature(row) for row in lines("signatures.tsv")],
+    "updateCheck": {
+        "verdict": update_verdict,
+        "hostUnavailableAsserted": host_unavailable == "1",
+        "reports": [report(l) for l in lines("old-client-update-check.out")
+                    if l.startswith("PAPERCUSP_LEGACY_UPDATE_CHECK ")],
+    },
+    "userData": {
+        "nonce": nonce,
+        "seed": lines("user-data-seed.line")[0],
+        "checks": [data_check(row) for row in lines("user-data-checks.tsv")],
+    },
+}
 doc = {
-    "schemaVersion": 1,
+    "schemaVersion": 2,
     "kind": "candidate-install-upgrade-rollback-evidence",
     "verdict": "PASS",
     "platform": "linux",
@@ -257,6 +382,7 @@ doc = {
         "gui": artifact(baseline_gui), "server": artifact(baseline_server),
         "rollback": read_json(rollback_result),
     },
+    "legacyClient": legacy,
     "window": {
         "startedAt": started,
         "finishedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),

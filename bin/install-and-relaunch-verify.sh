@@ -66,6 +66,11 @@
 #   --install-cmd CMD              installer command; `__ARTIFACT__` -> remote path
 #   --server-install-cmd CMD       Server installer command;
 #                                  `__SERVER_ARTIFACT__` -> remote stub path
+#   --allow-downgrade              Linux only, default apt-get commands only: let
+#                                  the install replace a NEWER installed version
+#                                  (an exact-rollback leg). Without it apt refuses
+#                                  a downgrade, so an "upgrade" leg whose artifact
+#                                  is older than the installed one fails loudly.
 #   --verify-installed-mac         resume a prior completed DMG install: require
 #                                  exact mounted-DMG/installed tree equality and
 #                                  strict codesign for BOTH roles, then relaunch.
@@ -125,6 +130,7 @@ JSON=0
 SMOKE_RECEIPT_TAG="${PAPERCUSP_SMOKE_RECEIPT_TAG:-}"
 SMOKE_PROVENANCE=""
 VERIFY_INSTALLED_MAC=0
+ALLOW_DOWNGRADE=0
 MANAGED_POLICY_CHANNEL=""
 MANAGED_POLICY_BEFORE=null
 MANAGED_POLICY_AFTER=null
@@ -153,6 +159,7 @@ while [[ $# -gt 0 ]]; do
     --install-cmd) INSTALL_CMD="${2:-}"; shift 2 ;;
     --server-install-cmd) SERVER_INSTALL_CMD="${2:-}"; shift 2 ;;
     --verify-installed-mac) VERIFY_INSTALLED_MAC=1; shift ;;
+    --allow-downgrade) ALLOW_DOWNGRADE=1; shift ;;
     --verify-managed-policy)
       [[ "${2:-}" =~ ^(alpha|beta|stable)$ ]] || { echo "--verify-managed-policy needs alpha|beta|stable" >&2; exit 2; }
       MANAGED_POLICY_CHANNEL="$2"; shift 2 ;;
@@ -171,6 +178,11 @@ done
 
 if [[ -n "$MANAGED_POLICY_CHANNEL" && "$PLATFORM" != linux ]]; then
   echo "--verify-managed-policy requires --platform linux" >&2
+  exit 2
+fi
+# A custom install command would silently ignore the flag, so refuse instead.
+if [[ "$ALLOW_DOWNGRADE" == 1 && ( "$PLATFORM" != linux || -n "$INSTALL_CMD" || -n "$SERVER_INSTALL_CMD" ) ]]; then
+  echo "--allow-downgrade requires --platform linux and the default apt-get install commands" >&2
   exit 2
 fi
 [[ -n "$ARTIFACT" ]] || { echo "need --artifact PATH (the new installer to push+install)" >&2; exit 2; }
@@ -354,8 +366,12 @@ case "$PLATFORM" in
     # mirrors have already retired and fails with 404s. Refresh the indexes in
     # the same remote command before apt's local-file install resolves and
     # configures the dependency closure.
-    INSTALL_CMD="${INSTALL_CMD:-sudo apt-get update -qq && sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes __ARTIFACT__}"
-    SERVER_INSTALL_CMD="${SERVER_INSTALL_CMD:-sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes __SERVER_ARTIFACT__}"
+    # An exact-rollback leg installs an OLDER package over a newer one; apt
+    # refuses that under --yes unless the caller opts in explicitly.
+    APT_DOWNGRADE=""
+    [[ "$ALLOW_DOWNGRADE" == 1 ]] && APT_DOWNGRADE=" --allow-downgrades"
+    INSTALL_CMD="${INSTALL_CMD:-sudo apt-get update -qq && sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes${APT_DOWNGRADE} __ARTIFACT__}"
+    SERVER_INSTALL_CMD="${SERVER_INSTALL_CMD:-sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes${APT_DOWNGRADE} __SERVER_ARTIFACT__}"
     # Linux now follows the same thin-GUI / Server-owned runtime contract as the
     # other platforms. Restart the packaged user service first; only then close
     # and reopen the GUI shell. A GUI-only relaunch cannot prove the Server
@@ -1121,6 +1137,7 @@ if [[ "$JSON" == "1" ]]; then
   printf '  "expectedSha": %s,\n' "$(jstr "$EXPECTED_SHA")"
   printf '  "expectedVersion": %s,\n' "$(jstr "$EXPECTED_VERSION")"
   printf '  "installationMode": %s,\n' "$(jstr "$([[ "$VERIFY_INSTALLED_MAC" == 1 ]] && echo verify-existing-dmg || echo install)")"
+  printf '  "downgradeAllowed": %s,\n' "$([[ "$ALLOW_DOWNGRADE" == 1 ]] && echo true || echo false)"
   printf '  "serverArtifact": %s,\n' "$(jstr "${SERVER_ARTIFACTS[0]:-}")"
   printf '  "serverCompanionCount": %s,\n' "$(( ${#SERVER_ARTIFACTS[@]} > 0 ? ${#SERVER_ARTIFACTS[@]} - 1 : 0 ))"
   printf '  "shaBefore": %s,\n' "$(jstr "$SHA_BEFORE")"

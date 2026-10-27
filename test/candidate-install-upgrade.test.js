@@ -64,6 +64,7 @@ function baselineKeyRepo(root, pubkey) {
 function fixture({
   running = false, failVerifier = "", sameSha = false, wrongKey = false,
   updateCheck = "cannot_check", loseDataAfter = "",
+  seedKey = "k-fixture", checkKey = "k-fixture",
 } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "candidate-install-rollback-"));
   const shims = path.join(root, "bin");
@@ -124,12 +125,12 @@ case "$1" in
     elif grep -q PAPERCUSP_USER_DATA_SEEDED <<<"$script"; then
       printf 'GUEST SEED\\n' >>"$MOCK_LOG"
       nonce="$(sed -n "s/^NONCE='\\(.*\\)'$/\\1/p" <<<"$script")"
-      printf 'PAPERCUSP_USER_DATA_SEEDED nonce=%s key=k-fixture agent=a-fixture\\n' "$nonce"
+      printf 'PAPERCUSP_USER_DATA_SEEDED nonce=%s key=%s agent=a-fixture\\n' "$nonce" "$MOCK_SEED_KEY"
     elif grep -q PAPERCUSP_USER_DATA_CHECK <<<"$script"; then
       phase="$(sed -n "s/^PHASE='\\(.*\\)'$/\\1/p" <<<"$script")"
       printf 'GUEST CHECK %s\\n' "$phase" >>"$MOCK_LOG"
       pg=1; [[ "$phase" == "$MOCK_LOSE_DATA_AFTER" ]] && pg=0
-      printf 'PAPERCUSP_USER_DATA_CHECK phase=%s pg=%s file=present key=k-fixture agent=a-fixture\\n' "$phase" "$pg"
+      printf 'PAPERCUSP_USER_DATA_CHECK phase=%s pg=%s file=present key=%s agent=a-fixture\\n' "$phase" "$pg" "$MOCK_CHECK_KEY"
     else
       printf '%s\\n' "$script" >"$MOCK_VM_SCRIPT"
     fi
@@ -147,18 +148,20 @@ case "$3:$name" in
   *) exit 3 ;;
 esac`);
   const verifier = path.join(root, "verifier");
-  executable(verifier, `artifact=""; expected_sha=""; expected_version=""; install_timeout=""
+  executable(verifier, `artifact=""; expected_sha=""; expected_version=""; install_timeout=""; allow_downgrade=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --artifact) artifact="$2"; shift 2 ;;
     --expected-sha) expected_sha="$2"; shift 2 ;;
     --expected-version) expected_version="$2"; shift 2 ;;
     --install-timeout) install_timeout="$2"; shift 2 ;;
+    --allow-downgrade) allow_downgrade=1; shift ;;
     *) shift ;;
   esac
 done
 printf 'VERIFY %s %s\\n' "$artifact" "$expected_sha" >>"$MOCK_LOG"
 printf 'INSTALL_TIMEOUT %s\\n' "$install_timeout" >>"$MOCK_LOG"
+printf 'ALLOW_DOWNGRADE %s\\n' "$allow_downgrade" >>"$MOCK_LOG"
 if [[ "$(basename -- "$artifact")" == "$MOCK_FAIL_VERIFIER" ]]; then
   printf '{"ok":false,"failures":["Server install failed: fixture causal diagnostic"]}\\n'
   printf 'fixture verifier stderr\\n' >&2
@@ -181,6 +184,8 @@ printf '{"ok":true,"flipped":true,"portHeld":true,"shaAfter":"%s","versionAfter"
       MOCK_FAIL_VM_AT: "",
       MOCK_UPDATE_CHECK: updateCheck,
       MOCK_LOSE_DATA_AFTER: loseDataAfter,
+      MOCK_SEED_KEY: seedKey,
+      MOCK_CHECK_KEY: checkKey,
       PAPERCUSP_LINUX_VMCTL: vmctl,
       PAPERCUSP_CANDIDATE_INSTALL_VERIFIER: verifier,
       PAPERCUSP_LEGACY_TRUSTED_KEY_REPO: keyRepo.repo,
@@ -224,6 +229,9 @@ test("candidate upgrade and exact baseline rollback produce a content-bound rece
     assert.ok(lines.indexOf(`VMCTL install clean ${f.baselineGui}`) < lines.findIndex((line) => line.startsWith("VERIFY ")));
     assert.deepEqual(lines.filter((line) => line.startsWith("VERIFY ")).map((line) => line.split(" ").at(-1)), [f.candidateSha, f.baselineSha]);
     assert.deepEqual(lines.filter((line) => line.startsWith("INSTALL_TIMEOUT ")), ["INSTALL_TIMEOUT 2400", "INSTALL_TIMEOUT 2400"]);
+    // Only the rollback reinstalls an older package; apt refuses that unless
+    // the leg opts in, and the upgrade leg must stay strict.
+    assert.deepEqual(lines.filter((line) => line.startsWith("ALLOW_DOWNGRADE ")), ["ALLOW_DOWNGRADE 0", "ALLOW_DOWNGRADE 1"]);
     assert.equal(lines.at(-1), "VMCTL down clean");
     assert.match(fs.readFileSync(f.vmScript, "utf8"), /systemctl --user enable --now papercusp-server\.service/);
     const evidence = JSON.parse(fs.readFileSync(f.receipt, "utf8"));
@@ -293,6 +301,24 @@ test("user data lost by the candidate upgrade fails the journey before rollback"
     const lines = calls(f);
     assert.equal(lines.filter((line) => line.startsWith("VERIFY ")).length, 1);
     assert.equal(lines.at(-1), "VMCTL down clean");
+    assert.equal(fs.existsSync(f.receipt), false);
+    assert.equal(failure(f).phase, "user-data-candidate-upgrade");
+  });
+});
+
+test("an encryption key created after the seed is kept, but one that existed and changed fails", () => {
+  // The key file is created lazily on first use: a fresh baseline may have
+  // none, and nothing can be orphaned by a key that never existed.
+  withFixture({ seedKey: "absent", checkKey: "k-created-later" }, (f) => {
+    const result = run(f);
+    assert.equal(result.status, 0, `${result.stdout}\\n${result.stderr}`);
+    const legacy = JSON.parse(fs.readFileSync(f.receipt, "utf8")).legacyClient;
+    assert.deepEqual(legacy.userData.checks.map((row) => row.verdict), ["preserved", "preserved"]);
+  });
+  withFixture({ checkKey: "k-replaced" }, (f) => {
+    const result = run(f);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /user data not preserved after candidate-upgrade: encryption-key-changed/);
     assert.equal(fs.existsSync(f.receipt), false);
     assert.equal(failure(f).phase, "user-data-candidate-upgrade");
   });

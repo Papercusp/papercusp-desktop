@@ -167,16 +167,20 @@ legacy_client_recovery_update_verdict() {
 }
 
 # legacy_client_recovery_data_verdict <seed-line> <check-line>
-# PASS only when the row and file are present and both fingerprints are
-# unchanged from the seed.
+# PASS only when the row and file are present and every fingerprint that
+# EXISTED at seed time is unchanged. The encryption key is created lazily on
+# first use, so a fresh baseline can legitimately have none yet: with no key
+# nothing was encrypted, so a key that appears later orphans nothing. A key
+# (or agent identity) that existed and then changed or vanished does.
 legacy_client_recovery_data_verdict() {
   local seed="${1:-}" check="${2:-}" key agent
   [[ "$seed" == PAPERCUSP_USER_DATA_SEEDED* && "$check" == PAPERCUSP_USER_DATA_CHECK* ]] || { echo "missing-report"; return 1; }
   key="$(sed -n 's/.* key=\([^ ]*\).*/\1/p' <<<"$seed")"
   agent="$(sed -n 's/.* agent=\([^ ]*\).*/\1/p' <<<"$seed")"
+  [[ -n "$key" && -n "$agent" ]] || { echo "missing-report"; return 1; }
   [[ "$check" == *" pg=1 "* ]] || { echo "database-row-lost"; return 1; }
   [[ "$check" == *" file=present "* ]] || { echo "file-lost"; return 1; }
-  [[ "$key" != absent && "$check" == *" key=$key "* ]] || { echo "encryption-key-changed"; return 1; }
-  [[ "$agent" != absent && "$check" == *" agent=$agent" ]] || { echo "agent-identity-changed"; return 1; }
+  [[ "$key" == absent || "$check" == *" key=$key "* ]] || { echo "encryption-key-changed"; return 1; }
+  [[ "$agent" == absent || "$check" == *" agent=$agent" ]] || { echo "agent-identity-changed"; return 1; }
   echo "preserved"
 }
