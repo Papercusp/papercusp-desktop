@@ -1060,7 +1060,7 @@ test('release gitleaks config keeps default detectors and uses conjunctive gener
   const config = fs.readFileSync(configPath, 'utf8');
   assert.match(config, /minVersion = "v8\.30\.1"/);
   assert.match(config, /\[extend\]\s+useDefault = true/);
-  assert.equal((config.match(/condition = "AND"/g) || []).length, 11);
+  assert.equal((config.match(/condition = "AND"/g) || []).length, 12);
   assert.match(config, /targetRules = \["gcp-api-key"\]/);
   assert.match(config, /targetRules = \["generic-api-key"\]/);
   assert.match(config, /regexTarget = "line"/);
@@ -1111,6 +1111,38 @@ test('the spawner applies existing generated-code rules while retaining unrelate
   assert.equal(rejected.status, 1);
   assert.ok(rejected.report.some((finding) => finding.File.endsWith('/spawner-sidecar.mjs')));
   assert.ok(rejected.report.some((finding) => finding.File.endsWith('/other.mjs')));
+});
+
+test('a fragment-truncated ThrottledCancellationToken constructor passes only in assembled hosts', () => {
+  // gitleaks ends a fragment mid-line in multi-megabyte minified bundles, so the
+  // detector's `$` terminator matches at the cut. Ending the file at the same
+  // byte reproduces that fragment end deterministically.
+  const prefix = 'function ThrottledCancellationToken(hostCancellationToken,throttleWaitMilliseconds=';
+  const truncated = 'var x=1;\n' + prefix;
+  const baseline = scan({ 'other.mjs': truncated }, { config: false });
+  assert.equal(baseline.status, 1, 'the truncated constructor no longer exercises generic-api-key');
+  assert.ok(baseline.report.some((finding) => finding.RuleID === 'generic-api-key'));
+
+  for (const file of ['serve.mjs', 'spawner-sidecar.mjs', 'env-sidecars/staging/serve.mjs']) {
+    const allowed = scan({ [file]: truncated });
+    assert.equal(allowed.status, 0, file + ': ' + JSON.stringify(allowed.report));
+  }
+
+  const untruncated = scan({ 'other.mjs': prefix + '20){this.hostCancellationToken=hostCancellationToken}\n' },
+    { config: false });
+  assert.equal(untruncated.status, 0, 'the complete expression must not need the exception');
+
+  const canary = ['A9f3Kx7L', 'm2Qp8Rz4', 'V6nC1wH7'].join('');
+  const rejected = scan({
+    'serve.mjs': 'const api_key="' + canary + '";\n' + truncated,
+    'spawner-sidecar.mjs': 'var x=1;\nfunction f(hostCancellationToken,' + canary,
+    'other.mjs': truncated,
+  });
+  assert.equal(rejected.status, 1);
+  for (const file of ['serve.mjs', 'spawner-sidecar.mjs', 'other.mjs']) {
+    assert.ok(rejected.report.some((finding) => finding.File.endsWith('/' + file)),
+      'negative control disappeared for ' + file);
+  }
 });
 
 test('public checksum and code matches stay exact, path constrained and separate from credentials', () => {
