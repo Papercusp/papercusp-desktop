@@ -225,6 +225,8 @@ test('pinned verifier teardown distinguishes retained failing verdicts from lost
         'release_verifier_disk_reservations() { touch "$WORK/reservations-released"; }',
         'cleanup_assertion_script_snapshot() { :; }',
         'cleanup_verifier_source_snapshot() { :; }',
+        'cleanup_verifier_spa_snapshot() { :; }',
+        'vh_step() { :; }',
         maintainedShellFunction('teardown'),
         `(exit ${assertionExit})`,
         'teardown',
@@ -233,8 +235,15 @@ test('pinned verifier teardown distinguishes retained failing verdicts from lost
         env: { ...process.env, WORK: root, SIGNAL_EXIT_CODE: '0', ISOLATED_PG_PID: '',
           VERIFY_TAURI_SOURCE_REF: 'a'.repeat(40), OPERATOR_SOURCE_ROOT: path.join(root, 'source') } });
       assert.equal(result.status, assertionExit || (retentionFailed ? 1 : 0), result.stderr);
-      assert.equal(fs.existsSync(path.join(root, 'source-cleaned')), !retentionFailed);
-      assert.equal(fs.existsSync(path.join(root, 'reservations-released')), retentionFailed);
+      // When teardown finalizes (vh_exit) BEFORE source cleanup, a lost completion proof
+      // preserves the frozen source. When it finalizes AFTER cleanup (a terminal PASS
+      // includes teardown, so finalizing first could report a false green), the source is
+      // already cleaned by then; the run still fails and reports the lost proof below.
+      const teardownBody = maintainedShellFunction('teardown');
+      const finalizesFirst = teardownBody.indexOf('vh_exit "$ec"')
+        < teardownBody.indexOf('cleanup_operator_source_snapshot ||');
+      assert.equal(fs.existsSync(path.join(root, 'source-cleaned')), finalizesFirst ? !retentionFailed : true);
+      assert.equal(fs.existsSync(path.join(root, 'reservations-released')), finalizesFirst && retentionFailed);
       if (retentionFailed) assert.match(result.stdout, /completion evidence was not retained/);
       else assert.doesNotMatch(result.stdout, /completion evidence was not retained/);
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
@@ -1042,16 +1051,19 @@ test('cleans bridge credentials from the runtime temp directory used for discove
 
 test('pins the operator source graph before Tauri launch and cleans it on both exits', () => {
   const snapshot = source.indexOf('snapshot_operator_source()');
-  const snapshotCall = source.indexOf(
-    'snapshot_operator_source || { cleanup_operator_source_snapshot; exit 1; }',
+  // The failure branch may preserve the helper's own exit status
+  // (`snapshot_rc=$?; ... exit "$snapshot_rc"`) or exit 1; either way it must clean up.
+  const snapshotCall = source.search(
+    /snapshot_operator_source \|\| \{ (?:snapshot_rc=\$\?; )?cleanup_operator_source_snapshot; exit (?:1|"\$snapshot_rc"); \}/,
   );
   const work = source.indexOf('WORK="$(mktemp -d');
   const launch = source.indexOf('cat > "$WORK/launch.sh" <<LAUNCH');
   const sourceEnv = source.indexOf('$OPERATOR_SOURCE_ENV_LINE', launch);
   const teardown = source.indexOf('teardown() {');
-  const stop = source.indexOf(
-    '[ -n "$OPERATOR_SOURCE_WORK" ] && rm -rf -- "$OPERATOR_SOURCE_WORK"',
-  );
+  // The generated boot-only stop.sh removes the frozen source only after its survivor
+  // reaper passes, and reports a failed rm instead of ignoring it.
+  const stopBlock = source.indexOf('# Boot-only stop.sh owns the per-run source/dependency snapshot.');
+  const stop = stopBlock < 0 ? -1 : source.indexOf('rm -rf -- "$OPERATOR_SOURCE_WORK"', stopBlock);
 
   assert.ok(snapshot > work, 'the operator snapshot must live under the per-run WORK dir');
   assert.ok(snapshotCall > snapshot, 'the operator source snapshot helper must run with failure cleanup');

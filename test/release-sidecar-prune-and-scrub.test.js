@@ -1618,6 +1618,11 @@ test('build-mac-cross resolves Cargo-installed tools from CARGO_HOME under a min
         PAPERCUSP_RELEASE_HOST: 'updates.invalid.test',
         PAPERCUSP_BUILD_SHA: 'deadbeef',
         PAPERCUSP_BUILD_VERSION: '0.0.0-test',
+        // src-tauri/seed/ is gitignored: a clean checkout (the gate's) never has one, so
+        // without an explicit opt-out the release seed guard stops this preflight before
+        // it reaches Cargo. The fixture builds no installer.
+        PAPERCUSP_ALLOW_SEEDLESS_RELEASE: '1',
+        PAPERCUSP_ALLOW_SEEDLESS_REASON: 'test fixture: CARGO_HOME preflight only, no installer is produced (WI-10006055)',
       },
     });
     const output = `${r.stdout}${r.stderr}`;
