@@ -37,17 +37,21 @@ function fakeHostInstall(scratch) {
   const lib = path.join(scratch, 'lib');
   const extension = path.join(scratch, 'extension');
   const doc = path.join(scratch, 'doc');
-  for (const d of [lib, extension, doc]) fs.mkdirSync(d, { recursive: true });
+  const tsearchData = path.join(scratch, 'tsearch_data');
+  for (const d of [lib, extension, doc, tsearchData]) fs.mkdirSync(d, { recursive: true });
   const files = {
     so: path.join(lib, 'pg_textsearch.so'),
+    dictSnowball: path.join(lib, 'dict_snowball.so'),
     control: path.join(extension, 'pg_textsearch.control'),
     sql: path.join(extension, 'pg_textsearch--1.5.1.sql'),
     licence: path.join(doc, 'copyright'),
+    englishStop: path.join(tsearchData, 'english.stop'),
   };
   const reset = () => Object.values(files).forEach((f) => fs.writeFileSync(f, `fixture ${path.basename(f)}`));
   const rewrite = (text) => text
     .replaceAll('/usr/lib/postgresql/18/lib', lib)
     .replaceAll('/usr/share/postgresql/18/extension', extension)
+    .replaceAll('/usr/share/postgresql/18/tsearch_data', tsearchData)
     .replaceAll('/usr/share/doc/postgresql-18-pg-textsearch', doc);
   return { files, reset, rewrite };
 }
@@ -80,7 +84,35 @@ test('Linux preflight fails early for each missing or empty pg_textsearch input'
   } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
 });
 
-// The bundle block calls pg_textsearch_abi_gaps (its own marked block, exercised against
+test('Linux preflight requires dict_snowball and english.stop before building', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-snowball-preflight-'));
+  try {
+    const host = fakeHostInstall(scratch);
+    const pre = host.rewrite(block('LINUX_PG_SNOWBALL_PREFLIGHT_BEGIN', 'LINUX_PG_SNOWBALL_PREFLIGHT_END'));
+    const run = (target, profile) => spawnSync('bash', ['-euo', 'pipefail', '-c',
+      '_missing_host_tools=();\n' + pre +
+      '\nif (( ${#_missing_host_tools[@]} )); then printf "%s\\n" "${_missing_host_tools[@]}"; exit 1; fi'], {
+      encoding: 'utf8', env: { ...process.env, TARGET_OS: target, DISTRIBUTION_PROFILE: profile },
+    });
+    host.reset();
+    assert.equal(run('linux', 'dogfood').status, 0);
+    for (const file of [host.files.dictSnowball, host.files.englishStop]) {
+      for (const state of ['missing', 'empty']) {
+        host.reset();
+        if (state === 'missing') fs.unlinkSync(file); else fs.writeFileSync(file, '');
+        const r = run('linux', 'dogfood');
+        assert.equal(r.status, 1, `${file} ${state}: ${r.stderr}`);
+        assert.match(r.stdout, /dict_snowball library and english\.stop data/);
+        assert.match(r.stdout, /apt install postgresql-18/);
+        assert.equal(run('linux', 'vm-release').status, 0, 'vm-release builds its own PostgreSQL closure');
+        assert.equal(run('darwin', 'dogfood').status, 0);
+        assert.equal(run('windows', 'dogfood').status, 0);
+      }
+    }
+  } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
+});
+
+// The bundle block calls pg_library_abi_gaps (its own marked block, exercised against
 // real ELF files in the last test). The fixtures here are text files, so the copy tests
 // stub it: '' reports a loadable library, a symbol list reports what the server lacks.
 function runBundle(scratch, host, target, profile = 'dogfood', gaps = '') {
@@ -94,7 +126,7 @@ function runBundle(scratch, host, target, profile = 'dogfood', gaps = '') {
   fs.mkdirSync(path.join(relocatable, 'share/extension'), { recursive: true });
   fs.writeFileSync(path.join(relocatable, 'lib/pgcrypto.so'), 'x');
   assert.ok(!gaps.includes("'"), 'stub gaps must not contain a single quote');
-  const body = `pg_textsearch_abi_gaps() { printf '%s' '${gaps}'; }\n` +
+  const body = `pg_library_abi_gaps() { printf '%s' '${gaps}'; }\n` +
     host.rewrite(block('PG_TEXTSEARCH_BUNDLE_BEGIN', 'PG_TEXTSEARCH_BUNDLE_END'));
   const r = spawnSync('bash', ['-euo', 'pipefail', '-c', body], {
     encoding: 'utf8',
@@ -102,6 +134,54 @@ function runBundle(scratch, host, target, profile = 'dogfood', gaps = '') {
   });
   return { r, debian, relocatable };
 }
+
+function runSnowballBundle(scratch, host, profile = 'dogfood', gaps = '') {
+  const dst = path.join(scratch, 'snowball-pgdst');
+  fs.rmSync(dst, { recursive: true, force: true });
+  const debian = path.join(dst, 'node_modules/@embedded-postgres/linux-x64/native');
+  const relocatable = path.join(dst, 'node_modules/@embedded-postgres/linux-arm64/native');
+  fs.mkdirSync(path.join(debian, 'lib/postgresql'), { recursive: true });
+  fs.mkdirSync(path.join(debian, 'share/postgresql/tsearch_data'), { recursive: true });
+  fs.mkdirSync(path.join(debian, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(debian, 'bin/postgres'), 'postgres fixture');
+  fs.mkdirSync(path.join(relocatable, 'lib'), { recursive: true });
+  fs.mkdirSync(path.join(relocatable, 'share/extension'), { recursive: true });
+  fs.mkdirSync(path.join(relocatable, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(relocatable, 'lib/pgcrypto.so'), 'x');
+  fs.writeFileSync(path.join(relocatable, 'bin/postgres'), 'postgres fixture');
+  assert.ok(!gaps.includes("'"), 'stub gaps must not contain a single quote');
+  const body = `pg_library_abi_gaps() { printf '%s' '${gaps}'; }\n` +
+    host.rewrite(block('PG_SNOWBALL_BUNDLE_BEGIN', 'PG_SNOWBALL_BUNDLE_END'));
+  const r = spawnSync('bash', ['-euo', 'pipefail', '-c', body], {
+    encoding: 'utf8',
+    env: { ...process.env, TARGET_OS: 'linux', DISTRIBUTION_PROFILE: profile, EMBEDDED_PG_DST: dst },
+  });
+  return { r, debian, relocatable };
+}
+
+test('snowball bundle repairs both runtime layouts and refuses an ABI-incompatible module', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-snowball-bundle-'));
+  try {
+    const host = fakeHostInstall(scratch);
+    host.reset();
+    let { r, debian, relocatable } = runSnowballBundle(scratch, host);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /dict_snowball and english\.stop verified in 2 embedded-postgres tree\(s\)/);
+    for (const [libDir, dataDir] of [
+      [path.join(debian, 'lib/postgresql'), path.join(debian, 'share/postgresql/tsearch_data')],
+      [path.join(relocatable, 'lib'), path.join(relocatable, 'share/tsearch_data')],
+    ]) {
+      assert.equal(fs.readFileSync(path.join(libDir, 'dict_snowball.so'), 'utf8'), 'fixture dict_snowball.so');
+      assert.equal(fs.readFileSync(path.join(dataDir, 'english.stop'), 'utf8'), 'fixture english.stop');
+    }
+
+    host.reset();
+    ({ r, debian } = runSnowballBundle(scratch, host, 'dogfood', 'palloc_mul'));
+    assert.equal(r.status, 1, 'a Linux bundle must not ship a dictionary module its server cannot load');
+    assert.match(r.stdout, /cannot load in the embedded server .*missing: palloc_mul/);
+    assert.ok(!fs.existsSync(path.join(debian, 'lib/postgresql/dict_snowball.so')), 'incompatible source is not copied');
+  } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
+});
 
 test('bundle block copies library, control, SQL and licence into both runtime layouts', () => {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-pgts-bundle-'));
@@ -209,7 +289,7 @@ test('ABI gate measures the extension\'s imports against the server and the libr
     }
     const gate = block('PG_TEXTSEARCH_ABI_GATE_BEGIN', 'PG_TEXTSEARCH_ABI_GATE_END');
     const gaps = (lib, bin) => {
-      const r = spawnSync('bash', ['-euo', 'pipefail', '-c', `${gate}\npg_textsearch_abi_gaps "$1" "$2"`, 'gate', lib, bin], {
+      const r = spawnSync('bash', ['-euo', 'pipefail', '-c', `${gate}\npg_library_abi_gaps "$1" "$2"`, 'gate', lib, bin], {
         encoding: 'utf8', cwd: scratch,
       });
       assert.equal(r.status, 0, r.stderr);
