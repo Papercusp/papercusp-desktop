@@ -3509,7 +3509,12 @@ leg_heartbeat_line() {  # per-leg verdict: liveness + whether the leg's log is s
       done)   out+=" ${LEG_NAMES[$i]}=done" ;;
       failed) out+=" ${LEG_NAMES[$i]}=FAILED(rc=${LEG_RC[$i]})" ;;
       *)      mt="$(stat -c %Y "${LEG_LOGS[$i]}" 2>/dev/null || true)"
-              if [[ -n "$mt" ]]; then
+              # EI-27240958541199446: "alive" is a CLAIM about the pid, so measure it. A
+              # leg whose process is gone but not yet reaped printed alive(log+3823s) for
+              # over an hour on the 0.0.32 cut.
+              if ! kill -0 "${LEG_PIDS[$i]}" 2>/dev/null; then
+                out+=" ${LEG_NAMES[$i]}=EXITED(unreaped)"
+              elif [[ -n "$mt" ]]; then
                 age=$(( now - mt ))
                 out+=" ${LEG_NAMES[$i]}=alive(log+${age}s)"
               else
@@ -3520,8 +3525,27 @@ leg_heartbeat_line() {  # per-leg verdict: liveness + whether the leg's log is s
   echo "==> [legs]${out}"
 }
 
+# Probe the tracked legs; reap the first one whose process is gone. Sets REAPED_PID and
+# REAPED_RC and returns 0 when it found one, 1 when every leg is still running. It must
+# run in the supervising shell (not a $(…) subshell): only the parent can `wait` a child.
+# A leg whose exit status bash already consumed answers `wait` with 127; that leg is
+# graded FAILED(rc=127), because an unverifiable leg must never read as a success.
+REAPED_PID=''; REAPED_RC=''
+reap_first_dead_leg() {  # $@ = pids of the legs still believed alive
+  local p
+  REAPED_PID=''; REAPED_RC=''
+  for p in "$@"; do
+    if ! kill -0 "$p" 2>/dev/null; then
+      REAPED_PID="$p"
+      if wait "$p" 2>/dev/null; then REAPED_RC=0; else REAPED_RC=$?; fi
+      return 0
+    fi
+  done
+  return 1
+}
+
 supervise_legs() {
-  local alive=() kept=() i p rc finished collected idx name first_failed='' grace_expired=0
+  local alive=() kept=() i p rc finished collected idx name first_failed='' grace_expired=0 via_probe=''
   for i in "${!LEG_PIDS[@]}"; do alive+=("${LEG_PIDS[$i]}"); done
   (( ${#alive[@]} > 0 )) || return 0
   echo "==> supervising ${#alive[@]} parallel leg(s) CONCURRENTLY: ${LEG_NAMES[*]} — the FIRST death fails the cut immediately; healthy siblings are left to finish (salvage)"
@@ -3555,14 +3579,9 @@ supervise_legs() {
     # exit status still reaches the normal leg-accounting path. Without this,
     # the stale PID stays in alive forever and the loop prints "no such job"
     # every five seconds.
+    via_probe=''
     if [[ -z "$collected" && $rc -eq 127 ]]; then
-      for p in "${alive[@]}"; do
-        if ! kill -0 "$p" 2>/dev/null; then
-          collected="$p"
-          if wait "$p" 2>/dev/null; then rc=0; else rc=$?; fi
-          break
-        fi
-      done
+      if reap_first_dead_leg "${alive[@]}"; then collected="$REAPED_PID"; rc="$REAPED_RC"; via_probe=1; fi
     fi
     if [[ -z "$collected" ]]; then
       (( rc == 127 )) && sleep 5   # non-child rc: poll instead of hot-spinning
@@ -3571,8 +3590,18 @@ supervise_legs() {
 
     if [[ -n "$LEG_TICK_PID" && "$collected" == "$LEG_TICK_PID" ]]; then
       LEG_TICK_PID=''
-      leg_heartbeat_line
-      continue
+      # EI-27240958541199446: the 127 probe above only runs when `wait -n` collected
+      # NOTHING. With the heartbeat tick in the wait set it always collects the tick, so a
+      # leg that `wait -n` skips ("no such job") was never probed: on the 0.0.32 cut the
+      # win leg died at ~15:07Z and was still reported alive an hour later, and the cut
+      # could not exit. Probe on every tick; a dead leg goes through the normal
+      # accounting below instead of another heartbeat.
+      if reap_first_dead_leg "${alive[@]}"; then
+        collected="$REAPED_PID"; rc="$REAPED_RC"; via_probe=1
+      else
+        leg_heartbeat_line
+        continue
+      fi
     fi
     if [[ -n "$LEG_GRACE_PID" && "$collected" == "$LEG_GRACE_PID" ]]; then
       LEG_GRACE_PID=''; grace_expired=1
@@ -3585,6 +3614,12 @@ supervise_legs() {
     [[ -n "$idx" ]] || continue   # not a leg we track
 
     name="${LEG_NAMES[$idx]}"
+    if [[ -n "$via_probe" ]]; then
+      echo "==> $name leg (pid $collected) exited without wait -n reporting it; found by the liveness probe (rc=$rc)"
+      if (( rc == 127 )); then
+        echo "    rc=127: bash had already consumed this leg's exit status, so it is graded FAILED (unverifiable)."
+      fi
+    fi
     kept=(); for p in "${alive[@]}"; do [[ "$p" == "$collected" ]] || kept+=("$p"); done
     alive=("${kept[@]}")
 
