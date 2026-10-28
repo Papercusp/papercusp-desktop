@@ -35,6 +35,22 @@ const PRUNE_UNUSED_ODIFF_PAYLOAD = extractFunction('prune_unused_odiff_payload')
 const ASSERT_RUNTIME_DEPENDENCY_CLOSURE = extractFunction(
   'assert_runtime_dependency_closure',
 );
+const COPY_HOST_RUNTIME_REQUIRE_CLOSURES = extractFunction(
+  'copy_host_runtime_require_closures',
+);
+
+function findPackageRoot(entry, name) {
+  let dir = path.dirname(entry);
+  while (true) {
+    const manifest = path.join(dir, 'package.json');
+    if (fs.existsSync(manifest) && JSON.parse(fs.readFileSync(manifest, 'utf8')).name === name) {
+      return dir;
+    }
+    const parent = path.dirname(dir);
+    assert.notEqual(parent, dir, `${name} package root was not found above ${entry}`);
+    dir = parent;
+  }
+}
 
 function writePackage(dir, manifest) {
   fs.mkdirSync(dir, { recursive: true });
@@ -178,6 +194,84 @@ test('closure preserves nested package identity and follows its hoisted dependen
       false,
       'the browser-only package must be removed even when a parent copy brought it across',
     );
+  } finally {
+    fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test('packaged PSU Codex resume resolves the actual TOML parser without checkout node_modules', () => {
+  const fixture = makeFixture();
+  try {
+    const papercuspRoot = path.resolve(desktopRoot, '..');
+    const ptyHostSource = path.join(papercuspRoot, 'apps/operator/scripts/psu-pty-host.mjs');
+    const tomlEntry = require.resolve('@iarna/toml');
+    const tomlRoot = findPackageRoot(tomlEntry, '@iarna/toml');
+    const tomlDonor = path.join(fixture.repoRoot, 'node_modules/@iarna/toml');
+
+    const bundledHost = path.join(fixture.sidecarDir, 'scripts/psu-pty-host.mjs');
+    fs.mkdirSync(path.dirname(bundledHost), { recursive: true });
+    require('esbuild').buildSync({
+      entryPoints: [ptyHostSource],
+      bundle: true,
+      platform: 'node',
+      format: 'esm',
+      target: 'node22',
+      external: ['@iarna/toml', '@lydell/*'],
+      outfile: bundledHost,
+      logLevel: 'silent',
+    });
+
+    const codexHome = path.join(fixture.fixtureRoot, 'codex-home');
+    const runProbe = () => spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import assert from 'node:assert/strict';
+      import path from 'node:path';
+      import { createRequire } from 'node:module';
+      import { pathToFileURL } from 'node:url';
+      const [entry, codexHome, cwd, sidecarModules] = process.argv.slice(1);
+      const host = await import(pathToFileURL(entry));
+      const stateHome = host.prepareCodexSqliteHome({
+        env: { PAPERCUSP_AGENT: 'codex', CODEX_HOME: codexHome },
+        cwd,
+      });
+      assert.equal(stateHome, path.resolve(cwd, codexHome));
+      const resolvedParser = createRequire(entry).resolve('@iarna/toml');
+      assert.ok(resolvedParser.startsWith(sidecarModules + path.sep), resolvedParser);
+      console.log('isolated Codex TOML resume preflight passed');
+    `, bundledHost, codexHome, fixture.fixtureRoot, path.join(fixture.sidecarDir, 'node_modules')], {
+      cwd: fixture.fixtureRoot,
+      encoding: 'utf8',
+      env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' },
+    });
+    const withoutClosure = runProbe();
+    assert.notEqual(withoutClosure.status, 0, withoutClosure.stdout);
+    assert.match(withoutClosure.stderr, /Cannot find module '@iarna\/toml'/);
+
+    // Run the production closure list, while keeping unrelated runtime roots
+    // inert. The @iarna/toml entry still goes through the actual package copier.
+    fs.cpSync(tomlRoot, tomlDonor, { recursive: true });
+    const realCopier = COPY_PKG_CLOSURE.replace(
+      /^copy_pkg_closure\(\) \{/,
+      'copy_pkg_closure_real() {',
+    );
+    assert.notEqual(realCopier, COPY_PKG_CLOSURE, 'the real copier was renamed for the focused closure probe');
+    const copied = runBash([
+      shellPrelude(),
+      realCopier,
+      'copy_pkg_closure() { [[ "$1" == "@iarna/toml" ]] && copy_pkg_closure_real "$1" || [[ "$1" != "@iarna/toml" ]]; }',
+      COPY_HOST_RUNTIME_REQUIRE_CLOSURES,
+      'copy_host_runtime_require_closures',
+      ASSERT_RUNTIME_DEPENDENCY_CLOSURE,
+      'assert_runtime_dependency_closure "$SIDECAR_DIR"',
+    ].join('\n'), fixture);
+    assert.equal(copied.status, 0, copied.stdout + copied.stderr);
+    assert.equal(
+      fs.existsSync(path.join(fixture.sidecarDir, 'node_modules/@iarna/toml/package.json')),
+      true,
+      copied.stdout + copied.stderr,
+    );
+    const probe = runProbe();
+    assert.equal(probe.status, 0, probe.stdout + probe.stderr);
+    assert.match(probe.stdout, /isolated Codex TOML resume preflight passed/);
   } finally {
     fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
   }

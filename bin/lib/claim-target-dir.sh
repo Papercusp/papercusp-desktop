@@ -506,7 +506,7 @@ __pc_private_slot_delete_renamed() {
 # and shared blocks must remain charged to pins even across sibling roots.
 # A failed bounded measurement refuses this pass rather than reporting zero.
 __pc_private_slot_bytes() {
-  local shared="$1" dir name usage bytes section total=0 pinned=0
+  local shared="$1" dir name usage bytes section usage_status=0 total=0 pinned=0
   shift
   local -a roots=()
   while IFS=$'\t' read -r dir name; do roots+=("$dir"); done < <(__pc_private_slot_candidates "$shared")
@@ -519,10 +519,19 @@ __pc_private_slot_bytes() {
     count="$1"; shift
     roots=("${@:1:count}"); shift "$count"
     printf "total\n"
-    du -sx -B1 -- "${roots[@]}" || exit 2
+    du -sx -B1 -- "${roots[@]}" || exit "$?"
     printf "pins\n"
-    if (($#)); then du -sx -B1 -- "$@" || exit 2; fi
-  ' private-slot-usage "${#roots[@]}" "${roots[@]}" "$@" 2>/dev/null)" || return 2
+    if (($#)); then du -sx -B1 -- "$@" || exit "$?"; fi
+  ' private-slot-usage "${#roots[@]}" "${roots[@]}" "$@" 2>&1)" || usage_status=$?
+  if ((usage_status)); then
+    # Preserve the measuring command's evidence before the caller returns its
+    # fail-closed status. A signal/timeout and an unreadable path must remain
+    # distinguishable; neither proves any allocation or authorizes deletion.
+    if ((${#usage} > 4096)); then usage="${usage:0:2048}"$'\n...\n'"${usage: -2048}"; fi
+    printf 'private target-slot allocation measurement failed: exit=%s; budget=10s\n%s\n' \
+      "$usage_status" "$usage" >&2
+    return 2
+  fi
   section=total
   while IFS=$'\t' read -r bytes dir; do
     if [[ "$bytes" == total || "$bytes" == pins ]]; then section="$bytes"; continue; fi

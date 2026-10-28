@@ -702,6 +702,27 @@ test('the scheduled reaper reuses its enclosing pin mutex and lock timeouts keep
   }
 });
 
+for (const code of [23, 137]) test(`private slot cap preserves allocation failure exit ${code} and its diagnostic`, () => {
+  const root = makePrivateRoot('pid99999999');
+  const bin = join(home, 'failing-allocation-bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'du'), `#!/bin/sh\nprintf 'fixture-allocation-failure-${code}\\n' >&2\nexit ${code}\n`);
+  chmodSync(join(bin, 'du'), 0o755);
+  const script = join(__dirname, '..', 'bin', 'reap-private-target-slots.sh');
+  assert.throws(() => execFileSync('bash', [script], {
+    cwd: home, env: isolatedEnv(reapEnv({ ROOT: home, PATH: `${bin}:${process.env.PATH}` })),
+    encoding: 'utf8', stdio: 'pipe',
+  }), error => {
+    assert.strictEqual(error.status, 2);
+    assert.match(error.stderr, new RegExp(`allocation measurement failed: exit=${code}; budget=10s`));
+    assert.match(error.stderr, new RegExp(`fixture-allocation-failure-${code}`));
+    assert.match(error.stderr, /keeping all roots/);
+    return true;
+  });
+  assert.ok(existsSync(root));
+  assert.strictEqual(auditLines().filter(line => line.includes('decision=reap')).length, 0);
+});
+
 test('private slot eviction removes the oldest root first and reports a finite cap', () => {
   const newer = makePrivateRoot('pid99999999', { ageSec: 7200 });
   const older = makePrivateRoot('pid99999998', { ageSec: 10800 });

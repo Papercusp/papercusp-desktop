@@ -106,6 +106,7 @@ test('shared PRIMARY and launcher recipes retain real entry and CLI boundary',t=
   assert.ok(primary.includes('--define:__PAPERCUSP_BUNDLED_SIDECAR__=true'));
   assert.ok(launcher.includes('/apps/operator/scripts/psu-launcher.mjs'));
   assert.ok(launcher.includes('--external:@lydell/*'));
+  assert.ok(launcher.includes('--external:@iarna/toml'));
   assert.ok(!launcher.includes('--define:__PAPERCUSP_BUNDLED_SIDECAR__=true'));
   const production=fs.readFileSync(path.join(desktop,'bin/build-desktop-sidecar.sh'),'utf8');
   assert.match(production,/^source "\$HERE\/lib\/host-runtime-closure.sh"$/m);
@@ -118,8 +119,8 @@ test('runtime require-root copying stops on failure even when caller tests its s
   const r=shell(f,'copy_pkg_closure() { echo "$1"; return 37; }\n'
     +'if copy_host_runtime_require_closures; then exit 99; fi');
   assert.equal(r.status,0,r.stdout+r.stderr);
-  assert.match(r.stdout,/^rrule$/m);
-  assert.doesNotMatch(r.stdout,/^luxon$/m);
+  assert.match(r.stdout,/^@iarna\/toml$/m);
+  assert.doesNotMatch(r.stdout,/^rrule$/m);
 });
 
 test('source SHA resolver uses the actual checkout and refuses a borrowed parent identity',t=>{
