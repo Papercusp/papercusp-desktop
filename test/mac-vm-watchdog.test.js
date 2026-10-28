@@ -855,6 +855,65 @@ for (const scenario of ['preserved', 'live', 'orphan', 'capacity', 'source-chang
   });
 }
 
+// WI-6554700010030831: a host reboot leaves qemu.pid/qmp.sock behind with
+// nothing alive behind them, and the launcher refused to start forever.
+const staleControlFixture = String.raw`
+import importlib.util, json, os, socket, subprocess, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('launch', sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+runtime = Path(sys.argv[2]); case = sys.argv[3]
+pidfile, sock = runtime / 'qemu.pid', runtime / 'qmp.sock'
+def unix_socket(listen):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.bind(str(sock))
+    if listen: s.listen(1)
+    return s
+def refused():
+    try: m.clear_stale_control_files(runtime)
+    except RuntimeError as e: return str(e)
+    raise AssertionError('expected refusal')
+if case == 'stale-socket-only':
+    unix_socket(False).close()
+    assert m.clear_stale_control_files(runtime) == ['qmp.sock']
+elif case == 'stale-both':
+    dead = subprocess.Popen(['true']); dead.wait()
+    pidfile.write_text(str(dead.pid)); unix_socket(False).close()
+    assert m.clear_stale_control_files(runtime) == ['qemu.pid', 'qmp.sock']
+elif case == 'none':
+    assert m.clear_stale_control_files(runtime) == []
+elif case == 'listening-socket':
+    held = unix_socket(True)
+    assert 'listener' in refused(); held.close()
+    assert sock.exists()
+elif case == 'live-qemu-pid':
+    pidfile.write_text('4242')
+    real = m.Path
+    class FakeProc(type(Path())):
+        def read_text(self, *a, **k):
+            return 'qemu-system-x86\n' if str(self) == '/proc/4242/comm' else real.read_text(self, *a, **k)
+    m.Path = FakeProc
+    try: assert 'live QEMU' in refused()
+    finally: m.Path = real
+    assert pidfile.exists()
+assert not (case in ('stale-socket-only', 'stale-both') and (pidfile.exists() or sock.exists()))
+print(json.dumps({'ok': True, 'case': case}))
+`;
+
+for (const scenario of ['stale-socket-only', 'stale-both', 'none', 'listening-socket', 'live-qemu-pid']) {
+  test('mac VM launcher control files: ' + scenario, async () => {
+    const dir = await tempDir();
+    const helper = new URL('../bin/mac-vm-launch.py', import.meta.url).pathname;
+    const result = await new Promise((resolve) => {
+      execFile('python3', ['-c', staleControlFixture, helper, dir, scenario],
+        { timeout: 30_000 }, (error, stdout, stderr) => {
+          resolve({ code: error ? error.code : 0, stdout, stderr });
+        });
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout.trim().split('\n').at(-1)), { ok: true, case: scenario });
+  });
+}
+
 // Exercise the real destination checks before generation reads, QEMU or writes.
 const storagePlacementFixture = String.raw`
 import importlib.util, json, stat, sys

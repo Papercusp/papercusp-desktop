@@ -85,6 +85,54 @@ def verified_shutdown(unit, runtime, ssh_host, ssh_port, ssh_key, timeout=240, s
             'unitInactive': True, 'result': 'success', 'noRestartWindowSec': settle}
 
 
+def qmp_socket_listening(sock):
+    """True when something accepts on the QMP socket; ambiguous probes count as live."""
+    import socket
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(2)
+    try:
+        probe.connect(str(sock))
+        return True
+    except (ConnectionRefusedError, FileNotFoundError):
+        return False
+    except OSError:
+        return True
+    finally:
+        probe.close()
+
+
+def clear_stale_control_files(runtime):
+    """Remove qemu.pid/qmp.sock only when nothing is alive behind them.
+
+    A host reboot or a hard QEMU death leaves these files behind. Refusing on
+    their bare existence kept the VM down for good after every reboot
+    (WI-6554700010030831). Still refuse when the pidfile names a live QEMU or
+    the socket accepts a connection: that is the EI-10029 orphan class.
+    """
+    pidfile, sock = runtime / 'qemu.pid', runtime / 'qmp.sock'
+    if pidfile.exists():
+        try:
+            pid = int(pidfile.read_text().strip())
+        except ValueError:
+            pid = None
+        if pid is not None and pid > 1:
+            try:
+                comm = (Path('/proc') / str(pid) / 'comm').read_text()
+            except (FileNotFoundError, ProcessLookupError):
+                comm = ''
+            require(not comm.startswith('qemu-system'),
+                    'control files still exist: pidfile names a live QEMU')
+    if sock.exists() or sock.is_symlink():
+        require(not qmp_socket_listening(sock),
+                'control files still exist: QMP socket has a listener')
+    removed = []
+    for path in (pidfile, sock):
+        if path.exists() or path.is_symlink():
+            path.unlink()
+            removed.append(path.name)
+    return removed
+
+
 def stopped(unit, images, starting=False):
     values = unit_state(unit)
     require(values.get('MainPID') == '0' and values.get('ActiveState') in (('inactive', 'activating') if starting else ('inactive',)),
@@ -415,7 +463,10 @@ def main():
     _, originals = generation(options.backup, options.runtime)
     stopped(options.unit, list(files.values()) + list(originals.values()), starting=True)
     pidfile = options.runtime / 'qemu.pid'
-    require(not pidfile.exists() and not (options.runtime / 'qmp.sock').exists(), 'control files still exist')
+    removed = clear_stale_control_files(options.runtime)
+    if removed:
+        print('recovered-vm: removed stale control files: ' + ', '.join(removed),
+              file=__import__('sys').stderr)
     for name in ('./OpenCore/OpenCore.qcow2', './mac_hdd_ng.img', './builddata-20260820-160g.qcow2'):
         check(files[name])
     os.chdir(options.runtime)
