@@ -44,6 +44,10 @@ async function boundedJson(result) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
+/**
+ * @param {{ baseUrl?: string, platform: string, outputDir: string, product?: string,
+ *   fetchImpl?: (input: string | URL, init?: any) => Promise<Response>, configPath?: string }} options
+ */
 export async function recoverRelease({ baseUrl, platform, outputDir, product = 'desktop', fetchImpl = fetch,
   configPath = join(here, '../src-tauri/tauri.conf.json') }) {
   const base = releaseBase(baseUrl);
