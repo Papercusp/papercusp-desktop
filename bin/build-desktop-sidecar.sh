@@ -554,6 +554,18 @@ if [[ "$TARGET_OS" == "linux" && "$DISTRIBUTION_PROFILE" != "vm-release" ]]; the
   unset _pgts_sql
 fi
 # LINUX_PG_TEXTSEARCH_PREFLIGHT_END
+# LINUX_PG_SNOWBALL_PREFLIGHT_BEGIN
+# PostgreSQL's built-in `english` text-search configuration loads dict_snowball
+# and reads english.stop on first use. Fresh schema migrations materialize
+# `to_tsvector('english', ...)`, so both runtime inputs must be available before
+# a Linux sidecar build begins.
+if [[ "$TARGET_OS" == "linux" && "$DISTRIBUTION_PROFILE" != "vm-release" ]]; then
+  if [[ ! -s /usr/lib/postgresql/18/lib/dict_snowball.so \
+     || ! -s /usr/share/postgresql/18/tsearch_data/english.stop ]]; then
+    _missing_host_tools+=("PostgreSQL 18 dict_snowball library and english.stop data (apt install postgresql-18)")
+  fi
+fi
+# LINUX_PG_SNOWBALL_PREFLIGHT_END
 # Embedding models: the sidecar's fail-closed models guard (WI-5638 / D-178) needs the
 # two contract-pinned transformers models, which `npm ci` never downloads. A host tree
 # carries them only because live use filled the package's `.cache`; a fresh clone
@@ -3454,8 +3466,8 @@ fi
 fi # qualified native inputs / ordinary pgvector preparation
 
 # PG_TEXTSEARCH_ABI_GATE_BEGIN
-# pg_textsearch_abi_gaps <extension.so> <postgres binary>
-# Prints each symbol the extension imports that the target server cannot provide, or
+# pg_library_abi_gaps <module.so> <postgres binary>
+# Prints each symbol a PostgreSQL module imports that the target server cannot provide, or
 # "<unmeasured>" when either side could not be read. Empty output means loadable.
 # Why (plan bm25-lexical-search-evoke-adoption-2026-10-10, D-014; measured 2026-10-11): a
 # pgdg extension package is compiled against the host's server minor and can import
@@ -3466,7 +3478,7 @@ fi # qualified native inputs / ordinary pgvector preparation
 # degrading to legacy ranking. "Provided" is the binary's dynamic exports plus those of
 # every library it links (libm supplies `log`, for instance). Versioned imports
 # (memcpy@GLIBC_…) are always resolved by system libraries and are not checked.
-pg_textsearch_abi_gaps() {
+pg_library_abi_gaps() {
   local lib="$1" bin="$2" need have dep
   need="$(nm -D --undefined-only "$lib" 2>/dev/null | awk '$1 == "U" && $2 !~ /@/ { print $2 }' | LC_ALL=C sort -u || true)"
   have="$( {
@@ -3485,6 +3497,89 @@ pg_textsearch_abi_gaps() {
   LC_ALL=C comm -23 <(printf '%s\n' "$need") <(printf '%s\n' "$have")
 }
 # PG_TEXTSEARCH_ABI_GATE_END
+
+# PG_SNOWBALL_BUNDLE_BEGIN
+# Preserve PostgreSQL's built-in English text-search runtime in every bundled
+# server tree. Upstream npm binaries include it, but private/source-built trees
+# can omit it; the first generated `to_tsvector('english', ...)` then fails with
+# 58P01 while building the org migration template. Linux can repair a missing or
+# ABI-incompatible module from the PGDG host install. Other target platforms must
+# carry their native module and stop list in the upstream runtime package.
+echo "→ verifying dict_snowball and english.stop in embedded-postgres"
+_snowball_module=""
+_snowball_source_lib=""
+_snowball_source_stop=""
+case "$TARGET_OS" in
+  linux)
+    _snowball_module="dict_snowball.so"
+    _snowball_source_lib="/usr/lib/postgresql/18/lib/dict_snowball.so"
+    _snowball_source_stop="/usr/share/postgresql/18/tsearch_data/english.stop"
+    ;;
+  darwin) _snowball_module="dict_snowball.dylib" ;;
+  windows) _snowball_module="dict_snowball.dll" ;;
+esac
+_snowball_ready=0
+if [[ -n "$_snowball_module" ]]; then
+  for plat_dir in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/*/native; do
+    [[ -d "$plat_dir" ]] || continue
+    if [[ -f "$plat_dir/lib/pgcrypto.so" && -d "$plat_dir/share/extension" ]]; then
+      _snowball_runtime_lib_dir="$plat_dir/lib"
+      _snowball_runtime_share_dir="$plat_dir/share"
+    else
+      _snowball_runtime_lib_dir="$plat_dir/lib/postgresql"
+      _snowball_runtime_share_dir="$plat_dir/share/postgresql"
+    fi
+    _snowball_runtime_lib="$_snowball_runtime_lib_dir/$_snowball_module"
+    _snowball_runtime_stop="$_snowball_runtime_share_dir/tsearch_data/english.stop"
+
+    if [[ "$TARGET_OS" == "linux" ]]; then
+      _snowball_check_lib="$_snowball_runtime_lib"
+      if [[ ! -s "$_snowball_check_lib" ]]; then
+        _snowball_check_lib="$_snowball_source_lib"
+      else
+        _snowball_gaps="$(pg_library_abi_gaps "$_snowball_check_lib" "$plat_dir/bin/postgres")"
+        if [[ -n "$_snowball_gaps" ]]; then
+          _snowball_check_lib="$_snowball_source_lib"
+        fi
+      fi
+      if [[ ! -s "$_snowball_check_lib" ]]; then
+        echo "ERROR: dict_snowball is missing from $plat_dir and the Linux host module is unavailable."
+        exit 1
+      fi
+      _snowball_gaps="$(pg_library_abi_gaps "$_snowball_check_lib" "$plat_dir/bin/postgres")"
+      if [[ -n "$_snowball_gaps" ]]; then
+        _snowball_gaps="${_snowball_gaps//$'\n'/ }"
+        echo "ERROR: $_snowball_check_lib cannot load in the embedded server at $plat_dir (missing: $_snowball_gaps)."
+        exit 1
+      fi
+      if [[ "$_snowball_check_lib" != "$_snowball_runtime_lib" ]]; then
+        mkdir -p "$_snowball_runtime_lib_dir"
+        cp -f "$_snowball_check_lib" "$_snowball_runtime_lib"
+      fi
+      if [[ ! -s "$_snowball_runtime_stop" ]]; then
+        if [[ ! -s "$_snowball_source_stop" ]]; then
+          echo "ERROR: PostgreSQL english.stop data is missing for $plat_dir."
+          exit 1
+        fi
+        mkdir -p "$_snowball_runtime_share_dir/tsearch_data"
+        cp -f "$_snowball_source_stop" "$_snowball_runtime_stop"
+      fi
+    elif [[ ! -s "$_snowball_runtime_lib" || ! -s "$_snowball_runtime_stop" ]]; then
+      echo "ERROR: $TARGET_OS embedded PostgreSQL tree $plat_dir lacks $_snowball_module or english.stop."
+      exit 1
+    fi
+    _snowball_ready=$((_snowball_ready + 1))
+  done
+  if [[ "$_snowball_ready" -eq 0 ]]; then
+    echo "ERROR: no embedded PostgreSQL native tree is available for $TARGET_OS."
+    exit 1
+  fi
+  echo "  ✓ dict_snowball and english.stop verified in $_snowball_ready embedded-postgres tree(s)"
+fi
+unset _snowball_module _snowball_source_lib _snowball_source_stop _snowball_ready \
+  _snowball_runtime_lib_dir _snowball_runtime_share_dir _snowball_runtime_lib \
+  _snowball_runtime_stop _snowball_check_lib _snowball_gaps
+# PG_SNOWBALL_BUNDLE_END
 
 # PG_TEXTSEARCH_BUNDLE_BEGIN
 # Bundle pg_textsearch (BM25 lexical ranking — plan bm25-lexical-search-evoke-adoption-
@@ -3523,7 +3618,7 @@ if [[ -n "$_pgts_lib_src" ]]; then
         _pgts_runtime_ext_dir="$plat_dir/share/postgresql/extension"
       fi
       # Refuse a library this tree's server cannot load (D-014; see the ABI gate above).
-      _pgts_gaps="$(pg_textsearch_abi_gaps "$_pgts_lib_src" "$plat_dir/bin/postgres")"
+      _pgts_gaps="$(pg_library_abi_gaps "$_pgts_lib_src" "$plat_dir/bin/postgres")"
       if [[ -n "$_pgts_gaps" ]]; then
         _pgts_gaps="${_pgts_gaps//$'\n'/ }"
         if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
