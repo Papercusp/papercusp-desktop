@@ -13,7 +13,10 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const exec = promisify(execFile);
+// Promisified lazily on first call, never at module scope (EI-10161): an eager
+// promisify(execFile) throws at import time under a narrow node:child_process test mock.
+let cachedExec;
+const exec = (...args) => (cachedExec ??= promisify(execFile))(...args);
 
 function releaseBase(value) {
   const base = new URL(value);
