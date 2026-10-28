@@ -85,6 +85,7 @@ if [[ "${PAPERCUSP_TAURI_INTERNAL_RUNNER:-}" == "cargo" ]]; then
       kill -USR2 "$PAPERCUSP_TAURI_LAUNCHER_PID" 2>/dev/null || true
     fi
   }
+  __pc_cargo_wait_interrupted=0
 
   __pc_target="$(rustc -vV | sed -n 's/^host: //p')"
   for ((__pc_i = 1; __pc_i <= $#; __pc_i++)); do
@@ -111,14 +112,22 @@ if [[ "${PAPERCUSP_TAURI_INTERNAL_RUNNER:-}" == "cargo" ]]; then
   fi
   export "$__pc_runner_env=$__here/tauri-guarded"
   export PAPERCUSP_TAURI_INTERNAL_RUNNER=app PAPERCUSP_TAURI_CARGO_WRAPPER_PID="$$"
-  trap '__pc_release_compile_claim' USR2 EXIT
+  trap '__pc_release_compile_claim; __pc_cargo_wait_interrupted=1' USR2
+  trap '__pc_release_compile_claim' EXIT
   trap 'kill -TERM "$__pc_cargo_pid" 2>/dev/null || true; __pc_release_compile_claim; exit 143' INT TERM HUP
   cargo "$@" &
   __pc_cargo_pid=$!
   while :; do
+    __pc_cargo_wait_interrupted=0
     if wait "$__pc_cargo_pid"; then __pc_status=0; break; else __pc_status=$?; fi
     # SIGUSR2 interrupts wait when Cargo's app runner starts. Keep waiting
     # for the app so Tauri retains its ordinary watcher/restart semantics.
+    # Bash may reap Cargo while the trap releases its reservation, so kill -0
+    # can already fail even though wait returned only the signal status. Retry
+    # wait on that explicit interrupted-wait signal to recover Cargo's status.
+    if [[ "$__pc_cargo_wait_interrupted" == 1 && "$__pc_status" == 140 ]]; then
+      continue
+    fi
     if kill -0 "$__pc_cargo_pid" 2>/dev/null; then continue; fi
     break
   done

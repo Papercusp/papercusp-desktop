@@ -188,7 +188,7 @@ test('dev refuses a full explicit Cargo mount before invoking Tauri', () => {
   }
 });
 
-test('native dev releases each compile claim before the app runs and re-admits a rebuild', () => {
+test('native dev releases compile claims and preserves Cargo exit across SIGUSR2 wait interruption', () => {
   const root = mkdtempSync(join(tmpdir(), 'ei25948716-tauri-reservation-'));
   const bin = join(root, 'bin');
   const target = join(root, 'target');
@@ -221,6 +221,22 @@ test('native dev releases each compile claim before the app runs and re-admits a
       { mode: 0o755 });
     writeFileSync(join(bin, 'df'),
       '#!/usr/bin/env bash\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 209715200 0 104857600 0%% /fixture\\n"\n',
+      { mode: 0o755 });
+    const realRm = spawnSync('bash', ['-c', 'command -v rm'], { encoding: 'utf8' }).stdout.trim();
+    assert.ok(realRm, 'the SIGUSR2 race fixture needs rm(1)');
+    // Deleting the receipt releases the app; the delay keeps the wrapper's
+    // USR2 trap active until the simulated Cargo child has exited.
+    writeFileSync(join(bin, 'rm'),
+      '#!/usr/bin/env bash\n' +
+      'set -u\n' +
+      'if ' + JSON.stringify(realRm) + ' "$@"; then status=0; else status=$?; fi\n' +
+      'for candidate in "$@"; do\n' +
+      '  if [[ "$candidate" == "$PAPERCUSP_DISK_RESERVATION_FILE" ]]; then\n' +
+      '    sleep 0.1\n' +
+      '    break\n' +
+      '  fi\n' +
+      'done\n' +
+      'exit "$status"\n',
       { mode: 0o755 });
     writeFileSync(join(root, 'app.sh'),
       '#!/usr/bin/env bash\n' +
