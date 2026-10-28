@@ -57,6 +57,11 @@ src-tauri/resources/libPapercuspTermShim.dylib
 # release; bundled as a Tauri resource — never committed)
 src-tauri/resources/papercup-runtime.tar.gz
 src-tauri/resources/papercup-runtime.tar.gz.tmp.*
+# Pinned Linux Bun archive the same script retains beside the tarball (~40 MB),
+# and its mktemp staging file. Both are build outputs verified against
+# .rootfs-build-stamp's bunArchiveSha256; git-sync must never sweep them.
+src-tauri/resources/papercup-bun-linux.zip
+src-tauri/resources/.bun-linux.*
 
 # Seed corestore (~1.9GB of machine-generated corestore DB blobs, 50–195MB
 # each; bundled into the .deb at build time from disk — NEVER committed.

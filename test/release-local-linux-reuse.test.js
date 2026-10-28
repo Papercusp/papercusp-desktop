@@ -229,22 +229,32 @@ test('leg heartbeat reports an exited leg instead of alive', () => {
 // the supervisor's fast-child wait -n issue (EI-22609421740403514).
 function runFreshWithFailedSibling({ emitterFails = false } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-linux-salvage-'));
+  // A salvage cut runs the CURRENT script against a FROZEN target tree
+  // (EI-21078401508503033). `orchestrator` stands in for this script revision's
+  // bin ($ORCHESTRATOR_HERE): libraries plus the producers it owns. `bin` is the
+  // frozen target's $ROOT/bin and holds ONLY target-owned producers. Keep the
+  // two roots separate: when they were the same directory, a helper sourced
+  // from the wrong root passed here and failed the real 0.0.32 cut
+  // (WI-6554700010042517).
+  const orchestrator = path.join(temp, 'orchestrator-bin');
   const bin = path.join(temp, 'bin');
   const bundle = path.join(temp, 'target', 'release', 'bundle');
   const tag = path.basename(temp);
   const linuxLog = `/tmp/papercusp-linuxleg-${tag}.log`;
   const cutStartPath = `/tmp/papercusp-cut-start-${tag}.txt`;
+  fs.mkdirSync(path.join(orchestrator, 'lib'), { recursive: true });
   fs.mkdirSync(path.join(bin, 'lib'), { recursive: true });
   fs.mkdirSync(path.join(temp, 'src-tauri'), { recursive: true });
   fs.symlinkSync(
     path.join(root, 'bin', 'lib', 'sidecar-lock-yield.sh'),
-    path.join(bin, 'lib', 'sidecar-lock-yield.sh'),
+    path.join(orchestrator, 'lib', 'sidecar-lock-yield.sh'),
   );
   // emit_linux_build_provenance records the AppImage's embedded-runtime verdict
   // (EI-27096956663669253). The stub AppImage below is not a real AppImage, so
   // the verdict is recorded as embeddedMatchesPin:false; the receipt is still emitted.
+  // These helpers exist ONLY in the orchestrator: the frozen target predates them.
   for (const lib of ['appimage-runtime.sh', 'appimage-runtime-embedded.py']) {
-    fs.symlinkSync(path.join(root, 'bin', 'lib', lib), path.join(bin, 'lib', lib));
+    fs.symlinkSync(path.join(root, 'bin', 'lib', lib), path.join(orchestrator, 'lib', lib));
   }
   fs.writeFileSync(path.join(bin, 'repack-deb-xz.sh'), [
     '#!/usr/bin/env bash',
@@ -252,7 +262,7 @@ function runFreshWithFailedSibling({ emitterFails = false } = {}) {
     'printf ":repacked" >> "$1"',
     'printf "final-deb-signature" > "$1.sig"',
   ].join('\n'));
-  fs.writeFileSync(path.join(bin, 'build-appimage.sh'), [
+  fs.writeFileSync(path.join(orchestrator, 'build-appimage.sh'), [
     '#!/usr/bin/env bash',
     'set -euo pipefail',
     `mkdir -p ${JSON.stringify(path.join(bundle, 'appimage'))}`,
@@ -285,7 +295,7 @@ function runFreshWithFailedSibling({ emitterFails = false } = {}) {
       // D-236: the Linux leg repacks through papercusp_repack_linux_deb, defined outside the slice.
       `source ${JSON.stringify(path.join(root, 'bin', 'lib', 'repack-linux-deb.sh'))}`,
       `ROOT=${JSON.stringify(temp)}`,
-      `ORCHESTRATOR_HERE=${JSON.stringify(bin)}`,
+      `ORCHESTRATOR_HERE=${JSON.stringify(orchestrator)}`,
       `CARGO_TARGET_ROOT=${JSON.stringify(path.join(temp, 'target'))}`,
       `TAG=${JSON.stringify(tag)}`,
       'VERSION=0.0.18',
