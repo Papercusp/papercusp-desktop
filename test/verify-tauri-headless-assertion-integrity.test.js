@@ -57,6 +57,43 @@ test('desktop Tauri CLI is checked before verifier preparation', () => {
   }
 });
 
+test('frozen desktop CLI must execute before SPA and host preparation', () => {
+  const preflight = source.match(/^verify_frozen_native_cli\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(preflight, 'frozen desktop CLI preflight missing');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-frozen-cli-'));
+  const desktop = path.join(root, 'papercusp-desktop');
+  const cli = path.join(desktop, 'node_modules', '.bin', 'tauri');
+  const command = preflight + '\nverify_frozen_native_cli || exit $?\nprintf "PREPARATION_REACHED\\n"\n';
+  const run = () => spawnSync('/bin/bash', ['-c', command], {
+    encoding: 'utf8', env: { ...process.env, DESKTOP_DIR: desktop },
+  });
+  try {
+    const missing = run();
+    assert.equal(missing.status, 74, missing.stderr);
+    assert.match(missing.stderr, /VERIFY_TAURI_NATIVE_CLI_MISSING/);
+    assert.doesNotMatch(missing.stdout, /PREPARATION_REACHED/);
+
+    fs.mkdirSync(path.dirname(cli), { recursive: true });
+    fs.writeFileSync(cli, '#!/bin/sh\nexit 37\n', { mode: 0o755 });
+    const unusable = run();
+    assert.equal(unusable.status, 37, unusable.stderr);
+    assert.match(unusable.stderr, /VERIFY_TAURI_NATIVE_CLI_UNUSABLE.*exit=37/);
+    assert.doesNotMatch(unusable.stdout, /PREPARATION_REACHED/);
+
+    fs.writeFileSync(cli, '#!/bin/sh\n[ "$1" = "--version" ] || exit 38\nprintf "tauri-cli fixture\\n"\n');
+    const usable = run();
+    assert.equal(usable.status, 0, usable.stderr);
+    assert.match(usable.stdout, /tauri-cli fixture/);
+    assert.match(usable.stdout, /PREPARATION_REACHED/);
+
+    const call = source.indexOf('verifier_run_step verifier-native-cli verify_frozen_native_cli');
+    assert.ok(call > source.indexOf('verifier_run_step operator-source-snapshot snapshot_operator_source'));
+    assert.ok(call < source.indexOf('verifier_run_step verifier-spa-build'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('hardlink snapshot scratch is moved onto the dependency donor filesystem', () => {
   const selector = source.match(/^select_verifier_snapshot_root\(\) \{[\s\S]*?(?=\n# Run in this shell)/m)?.[0];
   assert.ok(selector, 'same-device verifier snapshot selection missing');
