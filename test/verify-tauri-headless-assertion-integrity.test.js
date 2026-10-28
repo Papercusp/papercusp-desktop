@@ -26,6 +26,75 @@ const devOperatorSource = fs.readFileSync(DEV_OPERATOR_SCRIPT, 'utf8');
 const dreamSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-dream-native.sh'), 'utf8');
 const voiceSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-voice-settings.sh'), 'utf8');
 
+test('desktop Tauri CLI is checked before verifier preparation', () => {
+  const preflight = source.match(/^preflight_desktop_tauri_cli\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(preflight, 'desktop CLI preflight missing');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-desktop-cli-preflight-'));
+  const desktop = path.join(root, 'papercusp-desktop');
+  const emptyPath = path.join(root, 'empty-bin');
+  const command = preflight + '\npreflight_desktop_tauri_cli || exit $?\nprintf "PREPARATION_REACHED\\n"\n';
+  const env = { ...process.env, DESKTOP_DIR: desktop, PATH: emptyPath };
+  try {
+    fs.mkdirSync(emptyPath, { recursive: true });
+    const missing = spawnSync('/bin/bash', ['-c', command], { encoding: 'utf8', env });
+    assert.equal(missing.status, 127, missing.stderr);
+    assert.match(missing.stderr, /VERIFY_TAURI_DESKTOP_CLI_MISSING/);
+    assert.match(missing.stderr, /npm run install:safe -- --repo-root papercusp-desktop/);
+    assert.doesNotMatch(missing.stdout, /PREPARATION_REACHED/);
+
+    const cli = path.join(desktop, 'node_modules', '.bin', 'tauri');
+    fs.mkdirSync(path.dirname(cli), { recursive: true });
+    fs.writeFileSync(cli, '#!/usr/bin/env sh\nexit 0\n', { mode: 0o755 });
+    const installed = spawnSync('/bin/bash', ['-c', command], { encoding: 'utf8', env });
+    assert.equal(installed.status, 0, installed.stderr);
+    assert.match(installed.stdout, /PREPARATION_REACHED/);
+
+    const call = source.indexOf('preflight_desktop_tauri_cli || exit $?');
+    assert.ok(call < source.indexOf('verifier_run_step native-cargo-capacity'));
+    assert.ok(call < source.indexOf('WORK="$(mktemp -d'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('hardlink snapshot scratch is moved onto the dependency donor filesystem', () => {
+  const selector = source.match(/^select_verifier_snapshot_root\(\) \{[\s\S]*?(?=\n# Run in this shell)/m)?.[0];
+  assert.ok(selector, 'same-device verifier snapshot selection missing');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-snapshot-device-'));
+  const donor = path.join(root, 'donor');
+  const wrongScratch = path.join(root, 'wrong-scratch');
+  try {
+    fs.mkdirSync(donor);
+    fs.mkdirSync(wrongScratch);
+    const fakeStat = [
+      'stat() {',
+      '  if [ "$1" = "-c" ] && [ "$2" = "%d" ]; then',
+      '    case "$4" in',
+      '      "$REPO_DIR") printf "101\\n" ;;',
+      '      "$TMPDIR") printf "202\\n" ;;',
+      '      "$REPO_DIR/.papercusp/scratch") printf "101\\n" ;;',
+      '      /) printf "1\\n" ;;',
+      '      *) /usr/bin/stat "$@" ;;',
+      '    esac',
+      '  else /usr/bin/stat "$@"; fi',
+      '}',
+      'uname() { printf "Linux\\n"; }',
+      selector,
+      'select_verifier_snapshot_root',
+    ].join('\n');
+    const result = spawnSync('/bin/bash', ['-c', fakeStat], {
+      encoding: 'utf8',
+      env: { ...process.env, REPO_DIR: donor, TMPDIR: wrongScratch, VERIFY_TAURI_DEPENDENCY_SNAPSHOT_MODE: 'hardlink' },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const selected = path.join(donor, '.papercusp', 'scratch');
+    assert.equal(result.stdout.trim(), selected);
+    assert.equal(fs.statSync(selected).dev, fs.statSync(donor).dev);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('pinned dependency preflight rejects a retained source shadow before allocating a native rig', () => {
   const preflight = source.match(/^install_in_flight_preflight\(\) \{[\s\S]*?(?=\ninstall_in_flight_preflight \|\| exit)/m)?.[0];
   assert.ok(preflight);
@@ -1062,8 +1131,9 @@ test('pins the operator source graph before Tauri launch and cleans it on both e
   const teardown = source.indexOf('teardown() {');
   // The generated boot-only stop.sh removes the frozen source only after its survivor
   // reaper passes, and reports a failed rm instead of ignoring it.
-  const stopBlock = source.indexOf('# Boot-only stop.sh owns the per-run source/dependency snapshot.');
-  const stop = stopBlock < 0 ? -1 : source.indexOf('rm -rf -- "$OPERATOR_SOURCE_WORK"', stopBlock);
+  const stopBlock = source.indexOf('cat > "$WORK/stop.sh" <<STOP');
+  const stopEnd = stopBlock < 0 ? -1 : source.indexOf('\nSTOP', stopBlock);
+  const stop = stopEnd < 0 ? '' : source.slice(stopBlock, stopEnd);
 
   assert.ok(snapshot > work, 'the operator snapshot must live under the per-run WORK dir');
   assert.ok(snapshotCall > snapshot, 'the operator source snapshot helper must run with failure cleanup');
@@ -1079,7 +1149,13 @@ test('pins the operator source graph before Tauri launch and cleans it on both e
       `${name} must delegate its dependency snapshot to the shared helper`);
   }
   assert.ok(source.indexOf('cleanup_operator_source_snapshot', teardown) > teardown);
-  assert.ok(stop > 0, 'boot-only stop.sh must clean the operator source root');
+  assert.ok(stopBlock > 0, 'boot-only stop.sh must be generated');
+  const reaper = stop.indexOf('reap_frozen_source_survivors "$OPERATOR_SOURCE_ROOT"');
+  const sourceCleanup = stop.indexOf('rm -rf -- "$WORK/spa" "$WORK/verifier-spa" "$OPERATOR_SOURCE_WORK"');
+  assert.ok(reaper >= 0, 'boot-only stop.sh must reap source survivors before cleanup');
+  assert.ok(sourceCleanup > reaper, 'boot-only stop.sh must remove the source root after the survivor reaper');
+  assert.ok(stop.includes('FATAL: could not remove frozen operator source work directory: $OPERATOR_SOURCE_WORK'),
+    'boot-only stop.sh must report a failed source cleanup');
   for (const excluded of [
     "--exclude='node_modules'",
     "--exclude='papercusp-desktop'",

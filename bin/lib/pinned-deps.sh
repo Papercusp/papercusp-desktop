@@ -537,8 +537,30 @@ for (const rel of source) {
 
 )
 
-# Consume the existing full generation selector and independent materializer.
-# No publication or fallback donor copy is allowed on this verifier path.
+# A full generation contains the installs present when it was published. Its
+# lock audit permits an uninstalled standalone package. Complete the desktop
+# install under its OWN reader, only with the selected source's exact lock.
+papercusp_pinned_deps_verifier_desktop() (
+  local donor="$1" snap="$2" desktop="papercusp-desktop"
+  [ -f "$snap/$desktop/package.json" ] || return 0
+  if [ ! -d "$snap/$desktop/node_modules" ]; then
+    cmp -s "$donor/$desktop/package-lock.json" "$snap/$desktop/package-lock.json" || {
+      echo 'ERROR: verifier desktop dependency donor lock differs from selected source.' >&2
+      return 74
+    }
+    # Release generation copy admission before the standalone reader/copy.
+    dependency_generation_release_copy_lock
+    papercusp_pinned_deps_snapshot_locked "$donor/$desktop" "$snap/$desktop" copy '' "$donor" || return $?
+    dependency_generation_audit_lock_tree "$snap/$desktop" "$snap/$desktop" || return $?
+  fi
+  [ -x "$snap/$desktop/node_modules/.bin/tauri" ] || {
+    echo 'ERROR: frozen verifier desktop dependency snapshot has no executable Tauri CLI.' >&2
+    return 74
+  }
+)
+
+# Consume the full generation and complete the standalone desktop runtime.
+# Never publish a generation or recopy the whole live donor.
 papercusp_pinned_deps_snapshot_generation_locked() (
   local _donor="$1" _snap="$2" _self="${BASH_SOURCE[0]}"
   local _store _identity _token _input _rel _fingerprint _extra _src _dst _source_device _dest_device _n=0
@@ -578,6 +600,7 @@ papercusp_pinned_deps_snapshot_generation_locked() (
     echo "snapshot progress: completed=$_n tree=$_rel"
   done < "$DEPENDENCY_GENERATION_PATH/.tree-manifest"
   [ "$_n" -gt 0 ] || return 74
+  papercusp_pinned_deps_verifier_desktop "$_donor" "$_snap" || return $?
   # Only the small generated workspace output closure reads the mutable donor.
   node "$_donor/scripts/npm-install-safe.mjs" --repo-root "$_donor" --exec-under-lock -- \
     bash "$_self" verifier-workspace-outputs "$_donor" "$_snap" copy || return $?
@@ -610,6 +633,8 @@ papercusp_pinned_deps_snapshot_locked() (
   local _snap="${2:-}"
   local _copy_mode="${3:-hardlink}"
   local _population="${4:-}"
+  # Standalone submodules use their own mutex and the parent's wrapper.
+  local _wrapper_root="${5:-$_donor}"
   local _self="${BASH_SOURCE[0]}"
   local _wrapper _attempt=0 _status
 
@@ -618,7 +643,7 @@ papercusp_pinned_deps_snapshot_locked() (
     return 2
   fi
 
-  _wrapper="$_donor/scripts/npm-install-safe.mjs"
+  _wrapper="$_wrapper_root/scripts/npm-install-safe.mjs"
   if [ ! -f "$_wrapper" ]; then
     echo "ERROR: cannot take the donor's install mutex — $_wrapper is missing." >&2
     echo "       Refusing to snapshot dependencies unlocked: a snapshot taken while an install" >&2
