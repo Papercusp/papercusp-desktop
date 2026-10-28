@@ -1715,50 +1715,16 @@ fi
 # its sha256 equals that stamp — so a stale or wrong-recipe rootfs can never be silently
 # packed into an installer. No matching donor ⇒ we fail HERE, with the fix, instead of
 # 10 minutes later taking two other legs down with us.
+#
+# The gate is the Windows leg's OWN check, not a weaker copy of it (WI-6554700010042513).
+# A sha-only compare passed the 0.0.32 cut while the tracked stamp carried a stale recipe
+# and no Bun archive receipt, and the leg's `build-rootfs.sh --verify-artifacts` then failed.
+# The helper hydrates BOTH gitignored inputs (rootfs tarball and Bun archive) and runs that
+# exact check against the target. It is sourced from $ORCHESTRATOR_HERE because a frozen
+# salvage target predates it (WI-6554700010042517).
 if [[ "$WITH_WINDOWS" == "1" && "${PAPERCUSP_REUSE_WIN:-0}" != "1" ]]; then
-  rootfs_tarball="$ROOT/src-tauri/resources/papercup-runtime.tar.gz"
-  rootfs_stamp="$ROOT/src-tauri/resources/.rootfs-build-stamp"
-  if [[ ! -f "$rootfs_tarball" ]]; then
-    echo "==> WSL rootfs absent (gitignored ⇒ a fresh worktree never has one) — attempting VERIFIED hydration"
-    [[ -f "$rootfs_stamp" ]] || {
-      echo "ERROR: WITH_WINDOWS=1 but neither the rootfs tarball nor its tracked stamp exists." >&2
-      echo "       Expected stamp: $rootfs_stamp" >&2
-      echo "       Run scripts/build-rootfs.sh (~250-400MB output), or cut with WITH_WINDOWS=0." >&2
-      exit 1; }
-    rootfs_want_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("rootfsSha256",""))' "$rootfs_stamp" 2>/dev/null || true)"
-    [[ -n "$rootfs_want_sha" ]] || { echo "ERROR: $rootfs_stamp has no rootfsSha256 — cannot verify a donor. Run scripts/build-rootfs.sh." >&2; exit 1; }
-    # Bounded one-level scan of sibling checkouts in the workspace root (never a deep find).
-    rootfs_donor=""
-    for cand in "${PAPERCUSP_ROOTFS_DONOR:-}" \
-                "$(cd "$ROOT/../.." 2>/dev/null && pwd)"/*/papercusp-desktop/src-tauri/resources/papercup-runtime.tar.gz \
-                "$(cd "$ROOT/../.." 2>/dev/null && pwd)"/papercusp-desktop/src-tauri/resources/papercup-runtime.tar.gz; do
-      [[ -n "$cand" && -f "$cand" ]] || continue
-      [[ "$cand" -ef "$rootfs_tarball" ]] && continue
-      if [[ "$(sha256sum "$cand" | cut -d' ' -f1)" == "$rootfs_want_sha" ]]; then rootfs_donor="$cand"; break; fi
-      echo "    (donor rejected — sha256 != tracked stamp: $cand)"
-    done
-    [[ -n "$rootfs_donor" ]] || {
-      echo "ERROR: WITH_WINDOWS=1 but no rootfs tarball matching the TRACKED stamp was found." >&2
-      echo "       want sha256: $rootfs_want_sha" >&2
-      echo "       Run scripts/build-rootfs.sh, set PAPERCUSP_ROOTFS_DONOR=/path/to/papercup-runtime.tar.gz," >&2
-      echo "       or cut with WITH_WINDOWS=0. (Failing here costs seconds; failing in the win leg aborts the whole cut.)" >&2
-      exit 1; }
-    cp "$rootfs_donor" "$rootfs_tarball.tmp.$$" && mv "$rootfs_tarball.tmp.$$" "$rootfs_tarball"
-    echo "==> WSL rootfs hydrated from $rootfs_donor (sha256 verified against tracked stamp)"
-  fi
-  # Whether pre-existing or just hydrated, the bytes we are about to pack must match the stamp.
-  if [[ -f "$rootfs_stamp" ]]; then
-    rootfs_want_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("rootfsSha256",""))' "$rootfs_stamp" 2>/dev/null || true)"
-    rootfs_have_sha="$(sha256sum "$rootfs_tarball" | cut -d' ' -f1)"
-    if [[ -n "$rootfs_want_sha" && "$rootfs_have_sha" != "$rootfs_want_sha" ]]; then
-      echo "ERROR: WSL rootfs does not match the tracked .rootfs-build-stamp — refusing to pack it." >&2
-      echo "       want $rootfs_want_sha" >&2
-      echo "       have $rootfs_have_sha  ($rootfs_tarball)" >&2
-      echo "       Re-run scripts/build-rootfs.sh to regenerate it for this commit." >&2
-      exit 1
-    fi
-    echo "==> WSL rootfs verified against tracked stamp ($rootfs_have_sha)"
-  fi
+  source "$ORCHESTRATOR_HERE/lib/wsl-rootfs-preflight.sh"
+  papercusp_wsl_rootfs_preflight "$ROOT" || exit 1
 fi
 
 # Windows TOOLCHAIN preflight (WI-39339) — the third instance of the same pattern, and the
