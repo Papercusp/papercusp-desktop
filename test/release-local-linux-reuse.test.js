@@ -883,36 +883,23 @@ function runSeedFallbackProbe(script) {
   return spawnSync('bash', ['-c', [seedFallbackHarness, script].join('\n')], { encoding: 'utf8' });
 }
 
-function runCutSeedQuiesceProbe({ marker = false, unitState = 'enabled', snapshot = null, env = {} } = {}) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-cut-seed-quiesce-'));
+function runCutSeedProbe({ snapshot = null, env = {} } = {}) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-cut-seed-'));
   const rootDir = path.join(temp, 'root');
   const monorepo = path.join(temp, 'monorepo');
-  const runtimeDir = path.join(temp, 'runtime');
   const bin = path.join(temp, 'bin');
   const npxLog = path.join(temp, 'npx-called.log');
   fs.mkdirSync(path.join(rootDir, 'src-tauri'), { recursive: true });
   fs.mkdirSync(path.join(monorepo, 'apps', 'operator'), { recursive: true });
   fs.mkdirSync(path.join(monorepo, 'papercusp-desktop', 'bin'), { recursive: true });
-  fs.mkdirSync(runtimeDir, { recursive: true });
   fs.mkdirSync(bin, { recursive: true });
   fs.writeFileSync(path.join(monorepo, 'apps', 'operator', '.env.local'), '');
-  if (marker) fs.writeFileSync(path.join(runtimeDir, 'papercusp-seed-cut.quiesce'), '{}\n');
   fs.writeFileSync(path.join(bin, 'npx'), [
     '#!/usr/bin/env bash',
     'printf "called %s\\n" "$*" >> "$PROBE_NPX_LOG"',
     'exit 0',
   ].join('\n'));
-  fs.writeFileSync(path.join(bin, 'systemctl'), [
-    '#!/usr/bin/env bash',
-    'if [[ "$*" == *"is-enabled"* ]]; then',
-    '  printf "%s\n" "$PROBE_SYSTEMD_STATE"',
-    '  [[ "$PROBE_SYSTEMD_STATE" == "masked" || "$PROBE_SYSTEMD_STATE" == "masked-runtime" ]] && exit 1',
-    '  exit 0',
-    'fi',
-    'exit 0',
-  ].join('\n'));
   fs.chmodSync(path.join(bin, 'npx'), 0o755);
-  fs.chmodSync(path.join(bin, 'systemctl'), 0o755);
   // Keep the probe hermetic on a box whose real snapshot store is populated.
   let snapshotDir = '';
   if (snapshot) {
@@ -940,9 +927,7 @@ function runCutSeedQuiesceProbe({ marker = false, unitState = 'enabled', snapsho
         MONOREPO: monorepo,
         // cut_release_seed resolves the cutter as $ORCHESTRATOR_HERE/../../apps/operator.
         ORCHESTRATOR_HERE: path.join(monorepo, 'papercusp-desktop', 'bin'),
-        XDG_RUNTIME_DIR: runtimeDir,
         PROBE_NPX_LOG: npxLog,
-        PROBE_SYSTEMD_STATE: unitState,
         PAPERCUSP_SKIP_SEED_CUT: '0',
         PAPERCUSP_SEED_REUSE_CORESTORE: 'auto',
         PAPERCUSP_SEED_CORESTORE: '1',
@@ -963,62 +948,52 @@ function runCutSeedQuiesceProbe({ marker = false, unitState = 'enabled', snapsho
   }
 }
 
-test('fresh release seed refuses before the snapshot unless quiescence is attested', () => {
-  const unquiesced = runCutSeedQuiesceProbe({ unitState: 'enabled' });
-  assert.notEqual(unquiesced.result.status, 0, 'an unquiesced fresh cut must fail');
-  assert.equal(unquiesced.npxCalled, false, 'the snapshot child must not run before quiescence');
-  assert.match(
-    unquiesced.result.stdout + '\n' + unquiesced.result.stderr,
-    /requires a quiesced operator.*cut-seed-quiesced/i,
-  );
+test('a fresh release seed passes through to cut-seed-cli without quiescence', () => {
+  const absent = runCutSeedProbe();
+  assert.equal(absent.result.status, 0, absent.result.stderr || absent.result.stdout);
+  assert.equal(absent.npxCalled, true, 'a missing snapshot must reach cut-seed-cli');
+  assert.match(absent.result.stdout, /cutting FRESH from the live store \(live-operator-safe path\)/);
+  assert.match(absent.npxArgs, /cut-seed-cli\.ts/);
+  assert.doesNotMatch(absent.npxArgs, /--reuse-corestore/);
 
-  for (const allowed of [
-    { marker: true, unitState: 'enabled' },
-    { marker: false, unitState: 'masked-runtime' },
-  ]) {
-    const quiesced = runCutSeedQuiesceProbe(allowed);
-    assert.equal(quiesced.result.status, 0, quiesced.result.stderr || quiesced.result.stdout);
-    assert.equal(quiesced.npxCalled, true, 'an attested quiesce must permit the fresh cut');
-  }
+  // A dangling/incomplete retained snapshot takes the same safe fresh path.
+  const partial = runCutSeedProbe({ snapshot: { corestore: true, manifest: false } });
+  assert.equal(partial.result.status, 0, partial.result.stderr || partial.result.stdout);
+  assert.equal(partial.hydrated, false);
+  assert.equal(partial.npxCalled, true, 'an incomplete snapshot must not require an outage');
+  assert.doesNotMatch(partial.npxArgs, /--reuse-corestore/);
 });
 
 test('an isolated cut root hydrates its seed from the snapshot store and needs no quiesce (WI-10003231)', () => {
-  const hydrated = runCutSeedQuiesceProbe({ unitState: 'enabled', snapshot: { corestore: true, manifest: true } });
+  const hydrated = runCutSeedProbe({ snapshot: { corestore: true, manifest: true } });
   assert.equal(hydrated.result.status, 0, hydrated.result.stderr || hydrated.result.stdout);
   assert.equal(hydrated.hydrated, true, 'the snapshot must land in src-tauri/seed');
   assert.match(hydrated.result.stdout, /hydrating .* from snapshot store/);
   assert.match(hydrated.npxArgs, /--reuse-corestore/, 'a hydrated seed must take the reuse path, not a fresh cut');
-
-  // A store without a manifest is not a usable snapshot: behave exactly as before.
-  const partial = runCutSeedQuiesceProbe({ unitState: 'enabled', snapshot: { corestore: true, manifest: false } });
-  assert.notEqual(partial.result.status, 0, 'an incomplete store must not bypass the quiesce guard');
-  assert.equal(partial.hydrated, false);
-  assert.equal(partial.npxCalled, false);
-  assert.match(partial.result.stdout + '\n' + partial.result.stderr, /requires a quiesced operator/i);
 });
 
 test('a stale reused corestore is refused before the cut, not shipped as-cut (WI-10004429)', () => {
   // 0.0.26 shipped release-seeds/current cut 8 days earlier, before the P-530
   // receipt filter existed, so every joiner folded ~887k dead governor receipts.
   const eightDaysAgo = Date.now() - 8 * 24 * 3_600_000;
-  const stale = runCutSeedQuiesceProbe({ snapshot: { corestore: true, manifest: true, cutTs: eightDaysAgo } });
+  const stale = runCutSeedProbe({ snapshot: { corestore: true, manifest: true, cutTs: eightDaysAgo } });
   assert.notEqual(stale.result.status, 0, 'a stale reused corestore must fail the cut');
   assert.equal(stale.npxCalled, false, 'the cut must not run on a stale corestore');
   assert.match(stale.result.stderr, /cut 19\dh ago .*PAPERCUSP_SEED_REUSE_MAX_AGE_HOURS=72/);
 
-  const noCutTs = runCutSeedQuiesceProbe({ snapshot: { corestore: true, manifest: true, cutTs: null } });
+  const noCutTs = runCutSeedProbe({ snapshot: { corestore: true, manifest: true, cutTs: null } });
   assert.notEqual(noCutTs.result.status, 0, 'an unknown age must not pass as fresh');
   assert.equal(noCutTs.npxCalled, false);
   assert.match(noCutTs.result.stderr, /no readable cutTs/);
 
-  const overridden = runCutSeedQuiesceProbe({
+  const overridden = runCutSeedProbe({
     snapshot: { corestore: true, manifest: true, cutTs: eightDaysAgo },
     env: { PAPERCUSP_SEED_REUSE_MAX_AGE_HOURS: '0' },
   });
   assert.equal(overridden.result.status, 0, overridden.result.stderr || overridden.result.stdout);
   assert.match(overridden.npxArgs, /--reuse-corestore/, 'an explicit override ships the reuse');
 
-  const fresh = runCutSeedQuiesceProbe({ snapshot: { corestore: true, manifest: true } });
+  const fresh = runCutSeedProbe({ snapshot: { corestore: true, manifest: true } });
   assert.equal(fresh.result.status, 0, fresh.result.stderr || fresh.result.stdout);
   assert.match(fresh.result.stdout, /reused corestore age 0h \(max 72h\)/);
 });

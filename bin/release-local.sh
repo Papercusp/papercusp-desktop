@@ -2347,15 +2347,6 @@ release_seed_fallback_args() { # <cut-log> — prints the extra args, or nothing
   return 0
 }
 
-release_seed_cut_is_quiesced() {
-  local runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-  [[ -f "$runtime_dir/papercusp-seed-cut.quiesce" ]] && return 0
-  local unit="${SEED_CUT_BG_HOST_UNIT:-papercusp-bg-host.service}"
-  local state
-  state="$(systemctl --user is-enabled "$unit" 2>/dev/null || true)"
-  [[ "$state" == "masked" || "$state" == "masked-runtime" ]]
-}
-
 cut_release_seed() {
   seed_uuid_row_drop_prepare || return 1
   if [[ "${PAPERCUSP_SKIP_SEED_CUT:-0}" == "1" ]]; then
@@ -2401,8 +2392,9 @@ cut_release_seed() {
   # (safe, non-mutating, never fd-locks/waits on the live operator) and only
   # attempt a fresh from-live-store snapshot when there's nothing committed to
   # reuse yet. A deliberate up-to-date FULL refresh (current hive state baked
-  # in) is still available — force it with PAPERCUSP_SEED_REUSE_CORESTORE=0 on
-  # a quiesced box.
+  # in) is still available — force it with PAPERCUSP_SEED_REUSE_CORESTORE=0.
+  # cut-seed-cli coordinates refresh/drain and uses a read-only source snapshot
+  # when the live operator owns the Corestore, so a fresh cut needs no outage.
   local seed_reuse="${PAPERCUSP_SEED_REUSE_CORESTORE:-auto}"
   # WI-10003231: src-tauri/seed is gitignored and setup-release-checkout.sh
   # re-extracts this submodule from git on every fire, so an isolated cut root
@@ -2432,7 +2424,7 @@ cut_release_seed() {
       echo "==> seed: corestore auto-reuse (committed snapshot present) — refreshing git+epoch-keys only; avoids the live-operator fd-lock/outbox-drain hard-fail on a busy box (EI-17143)"
     else
       seed_reuse=0
-      echo "==> seed: no committed corestore to reuse — cutting FRESH from the live store (requires a quiesced operator)"
+      echo "==> seed: no committed corestore to reuse — cutting FRESH from the live store (live-operator-safe path)"
     fi
   fi
   # WI-10004429: reuse ships the committed corestore AS-CUT, of ANY age. 0.0.26
@@ -2450,12 +2442,6 @@ cut_release_seed() {
   if [[ "$seed_reuse" == "1" ]]; then
     core_args+=(--reuse-corestore "$seed_out")
     [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]] && echo "WARN: PAPERCUSP_SEED_STORE_DIR ignored under seed-reuse (PAPERCUSP_SEED_REUSE_CORESTORE=$seed_reuse)" >&2
-  fi
-  if [[ "${PAPERCUSP_SEED_CORESTORE:-1}" == "1" && "$seed_reuse" != "1" ]] \
-      && [[ "$SEED_UUID_ROW_DROP_ACTIVE" != "1" ]] \
-      && ! release_seed_cut_is_quiesced; then
-    echo "ERROR: fresh release seed cut requires a quiesced operator; run bin/cut-seed-quiesced.sh." >&2
-    return 1
   fi
   # Offline dogfood restores need the bundled epoch keys too. Keep parity with
   # mac-vm-build.sh; opt out only for diagnostic cuts.
