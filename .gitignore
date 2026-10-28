@@ -62,6 +62,10 @@ src-tauri/resources/papercup-runtime.tar.gz.tmp.*
 # .rootfs-build-stamp's bunArchiveSha256; git-sync must never sweep them.
 src-tauri/resources/papercup-bun-linux.zip
 src-tauri/resources/.bun-linux.*
+# The release preflight's hydration copies a verified donor in via <name>.tmp.<pid>
+# (bin/lib/wsl-rootfs-preflight.sh). test/wsl-rootfs-preflight.test.js derives
+# every path written here and fails if one is neither tracked nor ignored.
+src-tauri/resources/papercup-bun-linux.zip.tmp.*
 
 # Seed corestore (~1.9GB of machine-generated corestore DB blobs, 50–195MB
 # each; bundled into the .deb at build time from disk — NEVER committed.

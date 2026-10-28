@@ -44,28 +44,58 @@ const root = path.resolve(__dirname, '..');
 const SCRIPT = process.env.PROBE_RELEASE_LOCAL || path.join(root, 'bin', 'release-local.sh');
 const src = () => fs.readFileSync(SCRIPT, 'utf8');
 
-test('scanner and collector preflight runs both real suites and stops on either failure before costly work', () => {
+test('scanner and collector preflight runs both real suites and stops on either failure before costly work', (t) => {
   const text = src();
   const definition = text.match(/^release_verify_contract_regressions\(\) \{\n[\s\S]*?^\}/m)?.[0];
   assert(definition, 'release contract preflight is missing');
+  // The suites are launched through release_run_unmanaged (`env -u … "$@"`), so the
+  // slice needs the wrapper and the identity list it strips. `env` execs a BINARY from
+  // PATH, which bypasses bash-function stubs entirely, so the stubs below are
+  // executables on PATH. Stubbing `node`/`npm` as functions used to make the slice die
+  // with `release_run_unmanaged: command not found` (WI-6554700010042531).
+  const identityList = text.match(/^RELEASE_MANAGED_IDENTITY_ENV=\(\n[\s\S]*?^\)/m)?.[0];
+  const wrapper = text.match(/^release_run_unmanaged\(\) \{[^\n]*\n[\s\S]*?^\}/m)?.[0];
+  assert(identityList, 'the managed-release identity list (RELEASE_MANAGED_IDENTITY_ENV) is missing');
+  assert(wrapper, 'release_run_unmanaged is missing');
+  const identity = identityList.split('\n').slice(1, -1).map((l) => l.trim()).filter(Boolean);
+  assert(identity.length > 0 && identity.every((n) => /^[A-Z][A-Z0-9_]*$/.test(n)), `unparseable identity list: ${identity}`);
   const call = text.indexOf('\nrelease_verify_contract_regressions || {');
   assert(call > 0 && call < text.indexOf('# Migration-safety gate'), 'contract checks must precede migration replay');
   assert(call < text.indexOf('if [[ "${PAPERCUSP_RELEASE_PRECHECK_ONLY:-0}" == "1" ]]'), 'precheck-only must run contract checks');
   assert.match(definition, /node --test --test-global-setup=test\/monorepo-host-preflight\.mjs/);
   assert.match(definition, /test\/release-gitleaks\.test\.js test\/release-local-linux-reuse\.test\.js/);
   assert.match(definition, /npm run test:file --[\s\S]*packages\/operator-core\/lib\/code-intelligence\/reuse-source-population\.test\.ts/);
+
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'release-contract-stubs-'));
+  t.after(() => fs.rmSync(bin, { recursive: true, force: true }));
+  for (const [name, label] of [['node', 'NODE_CHECK'], ['npm', 'WORKER_CHECK']]) {
+    fs.writeFileSync(path.join(bin, name), [
+      '#!/bin/sh',
+      `echo ${label}`,
+      `for n in ${identity.join(' ')}; do printenv "$n" >/dev/null && echo "LEAK:$n"; done`,
+      `[ "$FAIL_CHECK" != ${name} ]`,
+      '',
+    ].join('\n'), { mode: 0o755 });
+  }
+  // A cut exports the live operation's identity to release-local.sh. The child suites
+  // must never see it, or their fixtures journal into the LIVE operation
+  // (WI-6554700010029592), so every identity variable is set here and must not leak.
+  const liveIdentity = Object.fromEntries(identity.map((n) => [n, 'live-operation']));
   for (const [failed, expected] of [['none', 0], ['node', 1], ['npm', 1]]) {
     const command = [
       'set -euo pipefail', 'ROOT=' + JSON.stringify(root),
-      'node() { echo NODE_CHECK; [[ "$FAIL_CHECK" != node ]]; }',
-      'npm() { echo WORKER_CHECK; [[ "$FAIL_CHECK" != npm ]]; }',
-      definition, 'release_verify_contract_regressions || exit 1', 'echo CONTRACTS_PASSED',
+      identityList, wrapper, definition,
+      'release_verify_contract_regressions || exit 1', 'echo CONTRACTS_PASSED',
     ].join('\n');
-    const result = spawnSync('bash', ['-c', command], { encoding: 'utf8', env: { ...process.env, FAIL_CHECK: failed } });
+    const result = spawnSync('bash', ['-c', command], {
+      encoding: 'utf8',
+      env: { ...process.env, ...liveIdentity, PATH: `${bin}:${process.env.PATH}`, FAIL_CHECK: failed },
+    });
     assert.equal(result.status, expected, result.stderr || result.stdout);
     assert.match(result.stdout, /NODE_CHECK/);
     assert.equal(result.stdout.includes('WORKER_CHECK'), failed !== 'node');
     assert.equal(result.stdout.includes('CONTRACTS_PASSED'), failed === 'none');
+    assert.doesNotMatch(result.stdout, /LEAK:/, 'the managed-release identity reached a child suite');
   }
 });
 
