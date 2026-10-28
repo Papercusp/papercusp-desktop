@@ -161,10 +161,10 @@ const supervisorHarness = sliceBetween(
   'supervise_legs\n\n# Android',
 );
 
-function runSupervisorWithFastFailedSibling() {
+function runSupervisorWithFastFailedSibling({ heartbeatS = 0, timeout = 2000 } = {}) {
   const command = [
     'set -euo pipefail',
-    'LEG_HEARTBEAT_S=0',
+    `LEG_HEARTBEAT_S=${heartbeatS}`,
     'LEG_GRACE_PID=',
     'LEG_TICK_PID=',
     'RELEASE_SALVAGE_GRACE_S=0',
@@ -181,7 +181,7 @@ function runSupervisorWithFastFailedSibling() {
     supervisorHarness,
     'supervise_legs',
   ].join('\n');
-  return spawnSync('bash', ['-c', command], { encoding: 'utf8', timeout: 2000 });
+  return spawnSync('bash', ['-c', command], { encoding: 'utf8', timeout });
 }
 
 test('supervisor reaps a fast failed child left behind by wait -n', () => {
@@ -190,6 +190,37 @@ test('supervisor reaps a fast failed child left behind by wait -n', () => {
   assert.equal(result.error, undefined, 'stale child must not leave the supervisor sleeping until timeout');
   assert.match(result.stdout, /fast leg FAILED \(rc=7\)/);
   assert.doesNotMatch(result.stdout, /SALVAGE GRACE .*EXPIRED/);
+});
+
+// EI-27240958541199446 (0.0.32 cut): with the heartbeat ON, the tick sits in the wait set
+// and is always collected, so the 127 probe never runs and a stale leg reads alive
+// forever. A real cut runs with the heartbeat on (60s); the test above ran it off.
+test('supervisor reaps a stale failed leg on a heartbeat tick', () => {
+  const result = runSupervisorWithFastFailedSibling({ heartbeatS: 1, timeout: 6000 });
+  assert.equal(result.error, undefined, 'the tick must not keep a dead leg alive until timeout');
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stdout, /fast leg FAILED \(rc=7\)/);
+  // The leg is named when the probe (not wait -n) found it (EI-27239082119179843).
+  assert.match(result.stdout, /fast leg \(pid \d+\) exited without wait -n reporting it/);
+});
+
+test('leg heartbeat reports an exited leg instead of alive', () => {
+  const command = [
+    'set -euo pipefail',
+    'LEG_NAMES=(gone)',
+    'LEG_STATE=(alive)',
+    'LEG_RC=( "" )',
+    'LEG_LOGS=(/dev/null)',
+    '(exit 3) & gone_pid=$!',
+    'wait "$gone_pid" || true',
+    'LEG_PIDS=("$gone_pid")',
+    supervisorHarness,
+    'leg_heartbeat_line',
+  ].join('\n');
+  const result = spawnSync('bash', ['-c', command], { encoding: 'utf8', timeout: 2000 });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /gone=EXITED\(unreaped\)/);
+  assert.doesNotMatch(result.stdout, /gone=alive/);
 });
 
 // Stub the expensive builders, not the Linux producer or provenance emitter.
