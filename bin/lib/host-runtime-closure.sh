@@ -824,6 +824,14 @@ NODE
 }
 
 copy_host_runtime_require_closures() {
+  # The installed Codex resume path runs inside the packaged PSU sidecar.
+  # psu-pty-host.mjs loads @iarna/toml through createRequire(import.meta.url),
+  # so the launcher keeps it external and this copier must place its real
+  # package closure beside the sidecar entrypoints.
+  echo "→ copying createRequire runtime dep @iarna/toml (+ closure) into the sidecar"
+  copy_pkg_closure @iarna/toml || return 1
+  echo "  @iarna/toml closure copied ($nat_copied total package(s), $nat_missing missing)"
+
   # rrule is loaded at runtime via `createRequire(import.meta.url)('rrule')` in
   # operator-core/lib/harness/routines/schedule-next.ts (rrule's CJS build sets
   # __esModule:true with NO `default`, so every static-import form diverges between
