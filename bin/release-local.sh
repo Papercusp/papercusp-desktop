@@ -3108,12 +3108,16 @@ emit_linux_build_provenance() {
   # against this tree's pinned runtime. A reused pre-pin AppImage is recorded as
   # embeddedMatchesPin:false instead of failing the reuse. build-appimage.sh has
   # already refused any fresh AppImage that does not match.
+  # These helpers belong to THIS script revision, so they follow
+  # $ORCHESTRATOR_HERE, not the target $ROOT. A frozen salvage target predates
+  # them (WI-6554700010042517; contract EI-21078401508503033). The pin is the
+  # one build-appimage.sh enforced, since it also runs from $ORCHESTRATOR_HERE.
   local appimage_runtime="" appimage
   # shellcheck source=lib/appimage-runtime.sh
-  . "$ROOT/bin/lib/appimage-runtime.sh" || return 1
+  . "$ORCHESTRATOR_HERE/lib/appimage-runtime.sh" || return 1
   for appimage in "$bundle"/appimage/*_"$VERSION"_*.AppImage; do
     [[ -f "$appimage" ]] || continue
-    appimage_runtime="$(python3 -I "$ROOT/bin/lib/appimage-runtime-embedded.py" \
+    appimage_runtime="$(python3 -I "$ORCHESTRATOR_HERE/lib/appimage-runtime-embedded.py" \
       --expected-sha256 "$PAPERCUSP_APPIMAGE_RUNTIME_SHA256" \
       "$(papercusp_appimage_runtime_default_file)" "$appimage")" || true
     [[ "$appimage_runtime" == \{*\} ]] \
