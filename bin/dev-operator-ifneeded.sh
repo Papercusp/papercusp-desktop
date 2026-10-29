@@ -227,7 +227,9 @@ if [ -n "$DEV_HOST_ENTRY" ]; then
   if [ -n "${PAPERCUSP_DEV_HOST_DIAGNOSTIC_DIR:-}" ]; then
     mkdir -p -- "$PAPERCUSP_DEV_HOST_DIAGNOSTIC_DIR"
     printf -v DEV_HOST_DIAGNOSTIC_DIR_Q '%q' "$PAPERCUSP_DEV_HOST_DIAGNOSTIC_DIR"
-    DEV_HOST_RUN="echo \$\$ > $DEV_HOST_DIAGNOSTIC_DIR_Q/node.pid; exec node --report-on-signal --report-signal=SIGUSR2 --report-exclude-env --report-exclude-network --report-directory=$DEV_HOST_DIAGNOSTIC_DIR_Q $DEV_HOST_ENTRY_Q"
+    # SIGUSR2 belongs to desktop-dev restart. SIGWINCH is ignored by default,
+    # so a missing diagnostic handler cannot kill a slow-starting host.
+    DEV_HOST_RUN="echo \$\$ > $DEV_HOST_DIAGNOSTIC_DIR_Q/node.pid; exec node --report-on-signal --report-signal=SIGWINCH --report-exclude-env --report-exclude-network --report-directory=$DEV_HOST_DIAGNOSTIC_DIR_Q $DEV_HOST_ENTRY_Q"
     printf -v DEV_HOST_RUN_Q '%q' "$DEV_HOST_RUN"
     DEV_HOST_COMMAND="bash -c $DEV_HOST_RUN_Q"
   fi

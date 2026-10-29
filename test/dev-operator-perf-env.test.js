@@ -50,7 +50,7 @@ test('frozen host diagnostics preserve the actual exec PID and exclude credentia
     assert.equal(result.status, 0, result.stderr);
     const observed = JSON.parse(result.stdout.trim().split('\n').at(-1));
     assert.equal(Number(fs.readFileSync(path.join(diagnosticDir, 'node.pid'), 'utf8')), observed.pid);
-    for (const arg of ['--report-on-signal', '--report-signal=SIGUSR2', '--report-exclude-env', '--report-exclude-network']) {
+    for (const arg of ['--report-on-signal', '--report-signal=SIGWINCH', '--report-exclude-env', '--report-exclude-network']) {
       assert.ok(observed.args.includes(arg), `missing ${arg}`);
     }
     assert.ok(observed.args.includes(`--report-directory=${diagnosticDir}`));
