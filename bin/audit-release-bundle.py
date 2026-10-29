@@ -677,7 +677,7 @@ def redaction_key(key):
 GENERIC_ACCOUNTS = frozenset({
     "root", "runner", "build", "ubuntu", "node", "vscode", "codespace", "ci", "agent",
     "linuxbrew", "dev", "user", "shared", "Shared", "pcusp", "papercusp", "papercup",
-    "tester", "test", "admin", "builder", "vagrant",
+    "tester", "test", "admin", "builder", "builduser", "vagrant",
 })
 
 

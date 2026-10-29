@@ -146,6 +146,8 @@ function literalsForLogin(script, login) {
 test('a generic login (tester) is not hunted; a personal login still is', () => {
   assert.equal(literalsForLogin(AUDIT, 'tester')['build-user-name'], undefined,
     'a generic login must not become an identity literal');
+  assert.equal(literalsForLogin(AUDIT, 'builduser')['build-user-name'], undefined,
+    'the public-cut builduser redaction token must not become a build identity');
   assert.equal(literalsForLogin(AUDIT, 'zzpersonallogin')['build-user-name'], 'zzpersonallogin',
     'a personal login is still hunted');
 });
