@@ -41,6 +41,68 @@ after(() => {
 function exe(file, source) { writeFileSync(file, source); chmodSync(file, 0o755); }
 function sha(file) { return createHash('sha256').update(readFileSync(file)).digest('hex'); }
 
+// Exercise only the mac journey's configuration phase, before any target access.
+function macReleaseSetup(env = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'pc-mac-release-source-'));
+  roots.push(root);
+  const hostFile = join(root, 'release-host.env');
+  writeFileSync(hostFile, 'PAPERCUSP_RELEASE_HOST=https://updates.example.test/private\nPAPERCUSP_UPDATE_BASE_URL=https://artifacts.example.test/downloads/\n');
+  const source = readFileSync(process.env.PCOIJ_MAC_SCRIPT || join(__dirname, '..', 'bin', 'mac-vm-fresh-install-e2e.sh'), 'utf8');
+  const setup = source.slice(source.indexOf('\nMAC_E2E_SOURCE='), source.indexOf('\nFAILURES=0'))
+    .replace(/^SCRIPT_DIR=.*$/m, 'SCRIPT_DIR="$TEST_RELEASE_BIN"');
+  return spawnSync('bash', ['-c', `${setup}\nprintf 'ARTIFACT_BASE=%s\\n' "$ARTIFACT_BASE"`], {
+    encoding: 'utf8',
+    env: { ...process.env, HOME: root, TEST_RELEASE_BIN: join(__dirname, '..', 'bin'),
+      PAPERCUSP_RELEASE_HOST: '', PAPERCUSP_UPDATE_BASE_URL: '',
+      PAPERCUSP_RELEASE_HOST_ENV: hostFile, MAC_E2E_SOURCE: 'published',
+      MAC_E2E_VERSION: '0.0.32', MAC_E2E_ARTIFACT_BASE: '', MAC_E2E_BUNDLE_BASE: '',
+      __PAPERCUSP_RELEASE_HOST_LIB: '', ...env },
+  });
+}
+
+test('mac published journey resolves its artifact base from release configuration', () => {
+  const r = macReleaseSetup();
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^ARTIFACT_BASE=https:\/\/artifacts\.example\.test\/downloads\/desktop-v0\.0\.32-alpha$/m);
+});
+
+test('mac published journey preserves explicit artifact and exported host overrides', () => {
+  const explicit = macReleaseSetup({ MAC_E2E_ARTIFACT_BASE: 'https://qualified.example.test/exact-cut' });
+  assert.equal(explicit.status, 0, explicit.stderr);
+  assert.match(explicit.stdout, /^ARTIFACT_BASE=https:\/\/qualified\.example\.test\/exact-cut$/m);
+  const exported = macReleaseSetup({ PAPERCUSP_RELEASE_HOST: 'https://exported.example.test/channel', PAPERCUSP_UPDATE_BASE_URL: 'https://exported.example.test/artifacts' });
+  assert.equal(exported.status, 0, exported.stderr);
+  assert.match(exported.stdout, /^ARTIFACT_BASE=https:\/\/exported\.example\.test\/artifacts\/desktop-v0\.0\.32-alpha$/m);
+});
+
+test('mac published journey refuses an unconfigured base while local build needs none', () => {
+  const env = { PAPERCUSP_RELEASE_HOST_ENV: '/nonexistent/papercusp-release-host.env' };
+  const missing = macReleaseSetup(env);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /no artifact download base configured/);
+  const local = macReleaseSetup({ ...env, MAC_E2E_BUNDLE_BASE: '/local/candidate/bundle' });
+  assert.equal(local.status, 0, local.stderr);
+});
+
+test('offline journey detects GCS egress and still refuses a fully blocked network', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pc-gcs-egress-'));
+  roots.push(root);
+  const calls = join(root, 'calls');
+  const probe = readFileSync(SCRIPT, 'utf8').match(/^EGRESS_PROBE='(.*)'$/m)?.[1];
+  assert.ok(probe, 'journey must expose the remote egress function');
+  const script = `curl() { for url; do :; done; printf '%s\\n' "$url" >> "$EGRESS_CALLS"; [ "$url" = "$REACHABLE_URL" ]; }\n${probe}\negress`;
+  const run = (reachable) => spawnSync('bash', ['-c', script], { encoding: 'utf8', env: { ...process.env, EGRESS_CALLS: calls, REACHABLE_URL: reachable } });
+  const gcs = run('https://storage.googleapis.com/');
+  assert.equal(gcs.status, 0, gcs.stderr);
+  assert.equal(gcs.stdout.trim(), 'reachable:https://storage.googleapis.com/');
+  assert.deepEqual(readFileSync(calls, 'utf8').trim().split('\n'), ['https://archive.ubuntu.com/', 'https://storage.googleapis.com/']);
+  writeFileSync(calls, '');
+  const denied = run('');
+  assert.equal(denied.status, 1);
+  assert.equal(denied.stdout.trim(), 'denied');
+  assert.deepEqual(readFileSync(calls, 'utf8').trim().split('\n'), ['https://archive.ubuntu.com/', 'https://storage.googleapis.com/', 'https://github.com/']);
+});
+
 // The fake operator: python run by the installed "bin/node" (a copy of the
 // python interpreter), so /proc/<pid>/exe resolves INSIDE the installed tree.
 const SERVE = `

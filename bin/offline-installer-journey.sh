@@ -465,7 +465,7 @@ if [ -f "$OPJSON" ]; then
 else echo "PCOIJ priorOperator=none"; fi
 SH
 
-EGRESS_PROBE='egress() { for u in https://archive.ubuntu.com/ https://pub-cb5359a346e94c0c88562bd41db9295a.r2.dev/ https://github.com/; do if curl -s -o /dev/null -m 6 "$u"; then echo "reachable:$u"; return 0; fi; done; echo denied; return 1; }'
+EGRESS_PROBE='egress() { for u in https://archive.ubuntu.com/ https://storage.googleapis.com/ https://github.com/; do if curl -s -o /dev/null -m 6 "$u"; then echo "reachable:$u"; return 0; fi; done; echo denied; return 1; }'
 read -r -d '' OFFLINE_UP <<SH
 $EGRESS_PROBE
 echo "PCOIJ egressBefore=\$(egress)"

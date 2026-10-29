@@ -58,12 +58,25 @@
 MAC_E2E_SOURCE="${MAC_E2E_SOURCE:-published}"
 MAC_E2E_VERSION="${MAC_E2E_VERSION:-0.0.15}"
 MAC_E2E_QUARANTINE="${MAC_E2E_QUARANTINE:-honest}"
-ARTIFACT_BASE="${MAC_E2E_ARTIFACT_BASE:-https://pub-cb5359a346e94c0c88562bd41db9295a.r2.dev/HK70BNWvxXWRRRkMgl3PXqgdZyWYLsCG/desktop-v${MAC_E2E_VERSION}-alpha}"
+ARTIFACT_BASE="${MAC_E2E_ARTIFACT_BASE:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/mac-vm-fresh-state.sh
 source "$SCRIPT_DIR/lib/mac-vm-fresh-state.sh"
 [ -n "$MAC_E2E_BUNDLE_BASE" ] && MAC_E2E_SOURCE=build
+
+if [ "$MAC_E2E_SOURCE" = published ] && [ -z "$ARTIFACT_BASE" ]; then
+  # Share the producer's configured download base, including an exported override.
+  # A missing config must not silently send this journey to the retired R2 host.
+  # shellcheck source=lib/release-host.sh
+  source "$SCRIPT_DIR/lib/release-host.sh"
+  load_release_host
+  if [ -z "$PAPERCUSP_UPDATE_BASE_URL" ]; then
+    echo "no artifact download base configured; set MAC_E2E_ARTIFACT_BASE or the release-host configuration" >&2
+    exit 1
+  fi
+  ARTIFACT_BASE="${PAPERCUSP_UPDATE_BASE_URL%/}/desktop-v${MAC_E2E_VERSION}-alpha"
+fi
 
 FAILURES=0
 VOIDS=0
