@@ -15,6 +15,7 @@ const { setTimeout: delay } = require('node:timers/promises');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 
 const VERIFY_SCRIPT = path.resolve(__dirname, '../../scripts/verify-tauri-headless.sh');
 const source = fs.readFileSync(VERIFY_SCRIPT, 'utf8');
@@ -116,6 +117,52 @@ test('hardlink snapshot scratch is moved onto the dependency donor filesystem', 
       '  else /usr/bin/stat "$@"; fi',
       '}',
       'uname() { printf "Linux\\n"; }',
+      selector,
+      'select_verifier_snapshot_root',
+    ].join('\n');
+    const result = spawnSync('/bin/bash', ['-c', fakeStat], {
+      encoding: 'utf8',
+      env: { ...process.env, REPO_DIR: donor, TMPDIR: wrongScratch, VERIFY_TAURI_DEPENDENCY_SNAPSHOT_MODE: 'hardlink' },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const selected = path.join(donor, '.papercusp', 'scratch');
+    assert.equal(result.stdout.trim(), selected);
+    assert.equal(fs.statSync(selected).dev, fs.statSync(donor).dev);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('hardlink snapshot scratch avoids a same-device bind-mount alias', () => {
+  const selector = source.match(/^select_verifier_snapshot_root\(\) \{[\s\S]*?(?=\n# Run in this shell)/m)?.[0];
+  assert.ok(selector, 'same-mount verifier snapshot selection missing');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-snapshot-bind-mount-'));
+  const donor = path.join(root, 'donor');
+  const wrongScratch = path.join(root, 'wrong-scratch');
+  try {
+    fs.mkdirSync(donor);
+    fs.mkdirSync(wrongScratch);
+    const fakeStat = [
+      'stat() {',
+      '  if [ "$1" = "-c" ] && [ "$2" = "%d" ]; then',
+      '    case "$4" in',
+      '      "$REPO_DIR"|"$TMPDIR") printf "101\\\\n" ;;',
+      '      "$REPO_DIR/.papercusp/scratch") printf "101\\\\n" ;;',
+      '      /) printf "1\\\\n" ;;',
+      '      *) /usr/bin/stat "$@" ;;',
+      '    esac',
+      '  else /usr/bin/stat "$@"; fi',
+      '}',
+      'findmnt() {',
+      '  local target="${@: -1}"',
+      '  case "$target" in',
+      '    "$REPO_DIR") printf "103\\\\n" ;;',
+      '    "$TMPDIR") printf "117\\\\n" ;;',
+      '    "$REPO_DIR/.papercusp/scratch") printf "103\\\\n" ;;',
+      '    *) return 1 ;;',
+      '  esac',
+      '}',
+      'uname() { printf "Linux\\\\n"; }',
       selector,
       'select_verifier_snapshot_root',
     ].join('\n');
@@ -1017,11 +1064,15 @@ test('retains startup reports per attempt and captures before the frontend deadl
   assert.match(source, /grep -Fxq -- "\$OPERATOR_HOST_BUNDLE"/);
 });
 
-test('collects one real credential-free report from the exact owned Node entry', async () => {
+test('collects one real credential-free report after host startup without terminating the owned Node entry', { timeout: 30_000 }, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-owned-startup-'));
   const entry = path.join(dir, 'host.mjs');
-  fs.writeFileSync(entry, 'console.log("ready"); setInterval(() => {}, 1000);\n');
-  const child = spawn(process.execPath, ['--report-on-signal', '--report-signal=SIGUSR2',
+  const fatalDiagnostics = pathToFileURL(path.resolve(__dirname,
+    '../../packages/operator-core/lib/process-supervision/fatal-diagnostics.ts')).href;
+  fs.writeFileSync(entry, `import { installFatalDiagnostics } from ${JSON.stringify(fatalDiagnostics)};
+    installFatalDiagnostics({ log() {} });
+    console.log("ready"); setInterval(() => {}, 1000);\n`);
+  const child = spawn(process.execPath, ['--import', 'tsx', '--report-on-signal', '--report-signal=SIGWINCH',
     '--report-exclude-env', '--report-exclude-network', `--report-directory=${dir}`, entry], {
     stdio: ['ignore', 'pipe', 'ignore'],
     env: { ...process.env, STARTUP_DIAGNOSTIC_TEST_SECRET: 'must-never-be-retained' },
@@ -1058,11 +1109,14 @@ test('collects one real credential-free report from the exact owned Node entry',
     assert.equal(reports.length, 1, 'Node must actually write the retained report');
     assert.ok(report, 'Node must finish writing a valid report before evidence is read');
     assert.equal(report.header.processId, child.pid);
+    assert.equal(child.exitCode, null, 'collecting diagnostics must leave the host alive');
+    assert.equal(child.signalCode, null, 'collecting diagnostics must not terminate the host with a signal');
     assert.equal(report.environmentVariables, undefined);
     assert.ok(!reportText.includes('must-never-be-retained'));
   } finally {
     child.kill('SIGTERM');
-    await new Promise(resolve => child.exitCode !== null ? resolve() : child.once('exit', resolve));
+    await new Promise(resolve => child.exitCode !== null || child.signalCode !== null
+      ? resolve() : child.once('exit', resolve));
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
