@@ -276,7 +276,7 @@ test('rootfs producer fingerprints the complete shipped bootstrap, including net
   assert.equal(second.status, 0, second.stderr);
   assert.equal(second.stdout.trim(), expected(changed));
   assert.notEqual(first.stdout, second.stdout);
-  const changedHelper = bunHelper.replace('VERSION = "1.3.14"', 'VERSION = "1.3.15"');
+  const changedHelper = bunHelper.replace(/^VERSION = "[^"]+"$/m, 'VERSION = "0.0.0-test"');
   assert.notEqual(changedHelper, bunHelper);
   fs.writeFileSync(helperResource, changedHelper);
   const helperFingerprint = fingerprint();
@@ -332,6 +332,10 @@ test('an executable platform reaches bootstrap/export and writes an archive-boun
   // helper against deterministic input bytes without Docker or network access.
   const archive = 'verified Linux ZIP fixture';
   const archiveSha = createHash('sha256').update(archive).digest('hex');
+  const fixtureHelper = bunHelper.replace(
+    /(\("linux", "arm64"\): \("bun-linux-aarch64", ")[a-f0-9]{64}("\))/,
+    (_match, before, after) => before + archiveSha + after);
+  assert.notEqual(fixtureHelper, bunHelper, 'the fixture must replace the current Linux arm64 pin');
   const resources = path.join(dir, 'src-tauri/resources');
   const script = path.join(dir, 'scripts/build-rootfs.sh');
   fs.mkdirSync(resources, { recursive: true });
@@ -340,8 +344,7 @@ test('an executable platform reaches bootstrap/export and writes an archive-boun
   fs.copyFileSync(path.join(root, 'bin/lib/portable-sha256.sh'), path.join(dir, 'bin/lib/portable-sha256.sh'));
   fs.writeFileSync(script, producer);
   fs.writeFileSync(path.join(resources, 'papercup-bootstrap.sh'), shipped);
-  fs.writeFileSync(path.join(resources, 'papercup-bun-runtime.py'), bunHelper.replace(
-    'a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b', archiveSha));
+  fs.writeFileSync(path.join(resources, 'papercup-bun-runtime.py'), fixtureHelper);
   fs.writeFileSync(path.join(tools, 'docker'), '#!/bin/bash\nset -eu\nprintf "%s\\n" "$1" >> "$DOCKER_PREFLIGHT_LOG"\nif [ "$1" = cp ]; then\n  if [[ "$2" == *:* ]]; then printf "%s" "$ROOTFS_TEST_ARCHIVE" > "$3"; else cp "$2" "$ROOTFS_HELPER_COPY"; fi\nfi\nif [ "$1" = create ]; then printf "%s\\n" "$@" > "$ROOTFS_CREATE_ARGS"; fi\nif [ "$1" = export ]; then printf "runtime fixture"; fi\n', { mode: 0o755 });
   const env = { ...process.env,
     PATH: tools + ':' + process.env.PATH, DOCKER_PREFLIGHT_LOG: calls,
@@ -352,8 +355,7 @@ test('an executable platform reaches bootstrap/export and writes an archive-boun
   assert.equal(result.status, 0, result.stderr);
   const commands = fs.readFileSync(calls, 'utf8').trim().split('\n');
   assert.deepEqual(commands, ['pull', 'run', 'create', 'cp', 'start', 'commit', 'run', 'cp', 'export', 'rm', 'image']);
-  assert.equal(fs.readFileSync(path.join(dir, 'copied-helper'), 'utf8'), bunHelper.replace(
-    'a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b', archiveSha));
+  assert.equal(fs.readFileSync(path.join(dir, 'copied-helper'), 'utf8'), fixtureHelper);
   assert.match(fs.readFileSync(path.join(dir, 'create-args'), 'utf8'), /mv \/tmp\/papercup-bun-runtime\.py \/opt\/papercup\/papercup-bun-runtime\.py &&/);
   assert.match(fs.readFileSync(path.join(dir, 'create-args'), 'utf8'), /PAPERCUSP_ROOTFS_BUILD=1/);
   assert.equal(fs.readFileSync(path.join(output, 'papercup-bun-linux.zip'), 'utf8'), 'verified Linux ZIP fixture');
