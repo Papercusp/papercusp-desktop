@@ -488,6 +488,7 @@ pub fn open_palette(app: &AppHandle) {
             let has_focused_once = Arc::new(AtomicBool::new(false));
             win.on_window_event(move |event| match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
+                    eprintln!("[docs-search] palette close-requested -> hide");
                     // Dismiss = HIDE, not close. The palette is the Server's
                     // ONLY window; closing/destroying it would exit the app
                     // (last-window ExitRequested) and tear down the sole GTK
@@ -499,10 +500,13 @@ pub fn open_palette(app: &AppHandle) {
                     let _ = hide_target.hide();
                 }
                 tauri::WindowEvent::Focused(true) => {
+                    eprintln!("[docs-search] palette focused=true");
                     has_focused_once.store(true, Ordering::Relaxed);
                 }
                 tauri::WindowEvent::Focused(false) => {
-                    if has_focused_once.load(Ordering::Relaxed) {
+                    let dismiss = has_focused_once.load(Ordering::Relaxed);
+                    eprintln!("[docs-search] palette focused=false dismiss={dismiss}");
+                    if dismiss {
                         let _ = hide_target.hide();
                     }
                 }
