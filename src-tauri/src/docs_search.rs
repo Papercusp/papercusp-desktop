@@ -348,6 +348,54 @@ fn dismiss_unavailable_window(app: &AppHandle) {
     }
 }
 
+/// GTK reports focus-out for an X11 passive keyboard grab as well as a real
+/// departure. GetInputFocus keeps the actual input window during that grab.
+/// Use the exact native handle (never PID/title) and include WebKit's children.
+#[cfg(target_os = "linux")]
+struct PaletteX11Focus {
+    conn: x11rb::rust_connection::RustConnection,
+    window: u32,
+}
+
+#[cfg(target_os = "linux")]
+impl PaletteX11Focus {
+    fn for_window(window: &tauri::WebviewWindow) -> Option<Self> {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let window = match window.window_handle().ok()?.as_raw() {
+            RawWindowHandle::Xlib(handle) => u32::try_from(handle.window).ok()?,
+            RawWindowHandle::Xcb(handle) => handle.window.get(),
+            // In particular, don't query an unrelated DISPLAY on Wayland.
+            _ => return None,
+        };
+        let (conn, _) = x11rb::connect(None).ok()?;
+        Some(Self { conn, window })
+    }
+
+    fn contains_input_focus(&self) -> Option<bool> {
+        use x11rb::protocol::xproto::ConnectionExt;
+        let mut focused = self.conn.get_input_focus().ok()?.reply().ok()?.focus;
+        loop {
+            if focused == self.window {
+                return Some(true);
+            }
+            // None and PointerRoot aren't descendants of the palette.
+            if focused <= 1 {
+                return Some(false);
+            }
+            let tree = self.conn.query_tree(focused).ok()?.reply().ok()?;
+            if tree.parent == 0 || tree.parent == focused {
+                return Some(false);
+            }
+            focused = tree.parent;
+        }
+    }
+}
+
+fn dismiss_on_blur(has_focused_once: bool, input_still_inside: Option<bool>) -> bool {
+    // Other backends, or a failed X11 query, retain the native blur behavior.
+    has_focused_once && input_still_inside != Some(true)
+}
+
 /// Open the docs-search palette, or focus it if already open. Exposed as a
 /// Tauri command too (`#[tauri::command]` below) so a future in-webview menu
 /// item / button can trigger the identical path the global shortcut uses.
@@ -474,6 +522,8 @@ pub fn open_palette(app: &AppHandle) {
         Ok(win) => {
             // A real palette is up — retire any stale "can't open" window.
             dismiss_unavailable_window(app);
+            #[cfg(target_os = "linux")]
+            let x11_focus = PaletteX11Focus::for_window(&win);
             // Bring it to the front — on the Server process (a windowless
             // background app) the WM does not auto-raise the new window.
             let _ = win.set_focus();
@@ -504,8 +554,15 @@ pub fn open_palette(app: &AppHandle) {
                     has_focused_once.store(true, Ordering::Relaxed);
                 }
                 tauri::WindowEvent::Focused(false) => {
-                    let dismiss = has_focused_once.load(Ordering::Relaxed);
-                    eprintln!("[docs-search] palette focused=false dismiss={dismiss}");
+                    #[cfg(target_os = "linux")]
+                    let input_still_inside = x11_focus.as_ref().and_then(|focus| focus.contains_input_focus());
+                    #[cfg(not(target_os = "linux"))]
+                    let input_still_inside = None;
+                    let dismiss = dismiss_on_blur(
+                        has_focused_once.load(Ordering::Relaxed),
+                        input_still_inside,
+                    );
+                    eprintln!("[docs-search] palette focused=false input_still_inside={input_still_inside:?} dismiss={dismiss}");
                     if dismiss {
                         let _ = hide_target.hide();
                     }
@@ -642,6 +699,94 @@ pub fn set_shortcut(app: &AppHandle, new: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blur_only_dismisses_after_focus_really_leaves_the_palette() {
+        assert!(!dismiss_on_blur(false, None), "initial mapping blur");
+        assert!(!dismiss_on_blur(false, Some(false)), "never focused");
+        assert!(!dismiss_on_blur(true, Some(true)), "passive grab / child focus");
+        assert!(dismiss_on_blur(true, Some(false)), "real click-away");
+        assert!(dismiss_on_blur(true, None), "other backends and failed queries");
+    }
+
+    /// Runs against its own X server, including a real passive key grab. No
+    /// owner's shortcut, display, GTK singleton or window manager is touched.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn x11_passive_shortcut_grab_preserves_focus_but_departure_dismisses() {
+        const CHILD: &str = "PAPERCUSP_TEST_PALETTE_X11_FOCUS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new("timeout")
+                .args(["20s", "xvfb-run", "-a"])
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", "docs_search::tests::x11_passive_shortcut_grab_preserves_focus_but_departure_dismisses", "--nocapture"])
+                .env(CHILD, "1")
+                .status()
+                .expect("private Xvfb focus regression requires xvfb-run and timeout");
+            assert!(status.success(), "private X11 focus regression: {status}");
+            return;
+        }
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::{
+            ConnectionExt, CreateWindowAux, EventMask, GrabMode, InputFocus,
+            ModMask, NotifyMode, WindowClass,
+        };
+        use x11rb::protocol::Event;
+        let (conn, screen) = x11rb::connect(None).unwrap();
+        let root = conn.setup().roots[screen].root;
+        let palette = conn.generate_id().unwrap();
+        let child = conn.generate_id().unwrap();
+        let other = conn.generate_id().unwrap();
+        for (window, parent) in [(palette, root), (child, palette), (other, root)] {
+            conn.create_window(x11rb::COPY_DEPTH_FROM_PARENT, window, parent,
+                0, 0, 100, 100, 0, WindowClass::INPUT_OUTPUT, 0,
+                &CreateWindowAux::new().event_mask(EventMask::FOCUS_CHANGE))
+                .unwrap().check().unwrap();
+            conn.map_window(window).unwrap().check().unwrap();
+        }
+        conn.set_input_focus(InputFocus::PARENT, child, x11rb::CURRENT_TIME)
+            .unwrap().check().unwrap();
+        let focus = PaletteX11Focus { conn, window: palette };
+        assert_eq!(focus.contains_input_focus(), Some(true), "WebKit child belongs to palette");
+        // Resolve K from the server's keyboard map, as the shortcut registrar
+        // does; a hard-coded keycode depends on the private server's layout.
+        let setup = focus.conn.setup();
+        let mapping = focus.conn.get_keyboard_mapping(setup.min_keycode,
+            setup.max_keycode - setup.min_keycode + 1).unwrap().reply().unwrap();
+        let keycode = mapping.keysyms.chunks(mapping.keysyms_per_keycode as usize)
+            .position(|keys| keys.contains(&0x6b)).unwrap() as u8 + setup.min_keycode;
+        focus.conn.grab_key(false, root, ModMask::CONTROL | ModMask::SHIFT,
+            keycode, GrabMode::ASYNC, GrabMode::ASYNC).unwrap().check().unwrap();
+        while focus.conn.poll_for_event().unwrap().is_some() {}
+        let status = std::process::Command::new("xdotool")
+            .args(["keydown", "ctrl", "keydown", "shift", "keydown", "k"])
+            .status().expect("private X11 focus regression requires xdotool");
+        assert!(status.success());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut saw_grab_blur = false;
+        while std::time::Instant::now() < deadline {
+            if let Some(Event::FocusOut(event)) = focus.conn.poll_for_event().unwrap() {
+                if event.mode == NotifyMode::GRAB { saw_grab_blur = true; break; }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let inside_during_grab = focus.contains_input_focus();
+        assert!(std::process::Command::new("xdotool")
+            .args(["keyup", "k", "keyup", "shift", "keyup", "ctrl"])
+            .status().unwrap().success());
+        assert!(saw_grab_blur, "the OS shortcut must actually produce NotifyGrab focus-out");
+        assert_eq!(inside_during_grab, Some(true));
+        assert!(!dismiss_on_blur(true, inside_during_grab));
+        focus.conn.set_input_focus(InputFocus::PARENT, other, x11rb::CURRENT_TIME)
+            .unwrap().check().unwrap();
+        assert_eq!(focus.contains_input_focus(), Some(false), "same-process wrong window");
+        assert!(dismiss_on_blur(true, focus.contains_input_focus()));
+        focus.conn.set_input_focus(InputFocus::NONE, 0u32, x11rb::CURRENT_TIME)
+            .unwrap().check().unwrap();
+        assert!(dismiss_on_blur(true, focus.contains_input_focus()), "desktop / no focus");
+        focus.conn.destroy_window(palette).unwrap().check().unwrap();
+        focus.conn.destroy_window(other).unwrap().check().unwrap();
+    }
 
     #[test]
     fn shortcut_configuration_respects_the_private_papercusp_home() {
