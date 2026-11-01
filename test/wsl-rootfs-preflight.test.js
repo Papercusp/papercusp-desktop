@@ -113,7 +113,7 @@ function stampFor(tarball, zip, extra = {}) {
 
 // Mirrors release-local.sh: strict mode, then the call in an `||` context. The
 // PREFLIGHT_RC line proves the function RETURNED instead of exiting the caller.
-function preflight(t, target, env = {}) {
+function preflight(t, target, env = {}, mode = '') {
   const log = path.join(path.dirname(path.dirname(target)), 'stub.log');
   fs.writeFileSync(log, '');
   const cleanEnv = { ...process.env };
@@ -124,9 +124,9 @@ function preflight(t, target, env = {}) {
     'set -euo pipefail',
     'source "$1"',
     'rc=0',
-    'papercusp_wsl_rootfs_preflight "$2" || rc=$?',
+    'papercusp_wsl_rootfs_preflight "$2" "$3" || rc=$?',
     'echo "PREFLIGHT_RC=$rc"',
-  ].join('\n'), 'preflight', helper, target], {
+  ].join('\n'), 'preflight', helper, target, mode], {
     encoding: 'utf8',
     env: { ...cleanEnv, STUB_LOG: log, ...env },
     timeout: 120_000,
@@ -306,6 +306,74 @@ test('release-local.sh gates WITH_WINDOWS on this helper, sourced from the orche
   assert.match(gate[1], /papercusp_wsl_rootfs_preflight "\$ROOT" \|\| exit 1/);
   // The sha-only compare that let the 0.0.32 cut through must not come back inline.
   assert.doesNotMatch(source, /rootfs_have_sha=/);
+});
+
+test('read-only readiness accepts verified donors without materializing target artifacts', (t) => {
+  const ws = tempWorkspace(t);
+  const target = checkout(ws, 'target');
+  useStubVerifier(target);
+  const tarball = Buffer.from('rootfs bytes');
+  const zip = Buffer.from('bun archive bytes');
+  writeArtifacts(resources(target), { stamp: stampFor(tarball, zip), recipe: 'a'.repeat(64) });
+  const donor = resources(checkout(ws, 'donor'));
+  writeArtifacts(donor, { tarball, zip });
+  const before = fs.readdirSync(resources(target));
+  const scratch = path.join(ws, 'scratch');
+  fs.mkdirSync(scratch);
+
+  const out = preflight(t, target, { TMPDIR: scratch }, '--read-only');
+
+  assert.equal(out.rc, 0, out.stdout + out.stderr);
+  assert.deepEqual(fs.readdirSync(resources(target)), before, 'dry-run must not hydrate the target');
+  assert.deepEqual(fs.readdirSync(scratch), [], 'validation view must be removed');
+  assert.match(out.log, /VERIFY\|.*papercusp-wsl-readiness.*\|linux\/amd64/);
+  assert.deepEqual(fs.readFileSync(path.join(donor, TARBALL)), tarball);
+});
+
+test('read-only readiness leaves missing inputs absent after verifier refusal', (t) => {
+  const ws = tempWorkspace(t);
+  const target = checkout(ws, 'target');
+  useRealVerifier(target);
+  const tarball = Buffer.from('rootfs bytes');
+  const zip = Buffer.from('bun archive bytes');
+  writeArtifacts(resources(target), { stamp: stampFor(tarball, zip), recipe: 'a'.repeat(64) });
+  writeArtifacts(resources(checkout(ws, 'donor')), { tarball, zip });
+  const before = fs.readdirSync(resources(target));
+  const out = preflight(t, target, {}, '--read-only');
+  assert.notEqual(out.rc, 0);
+  assert.match(out.stderr, /rootfs recipe is stale/);
+  assert.deepEqual(fs.readdirSync(resources(target)), before);
+});
+
+test('read-only readiness refuses frozen stamps without a Bun receipt before copying any donor', (t) => {
+  const ws = tempWorkspace(t);
+  const target = checkout(ws, 'target');
+  useStubVerifier(target);
+  const tarball = Buffer.from('rootfs bytes');
+  const zip = Buffer.from('bun archive bytes');
+  const stamp = stampFor(tarball, zip);
+  delete stamp.bunArchiveSha256;
+  writeArtifacts(resources(target), { stamp, recipe: 'a'.repeat(64) });
+  writeArtifacts(resources(checkout(ws, 'donor')), { tarball, zip });
+  const before = fs.readdirSync(resources(target));
+  const out = preflight(t, target, {}, '--read-only');
+  assert.notEqual(out.rc, 0);
+  assert.match(out.stderr, /has no bunArchiveSha256/);
+  assert.deepEqual(fs.readdirSync(resources(target)), before);
+  assert.equal(out.log, '');
+});
+
+test('read-only readiness never invokes a legacy full-build script', (t) => {
+  const ws = tempWorkspace(t);
+  const target = checkout(ws, 'target');
+  useOldVerifier(target);
+  const tarball = Buffer.from('rootfs bytes');
+  const zip = Buffer.from('bun archive bytes');
+  writeArtifacts(resources(target), { tarball, zip, stamp: stampFor(tarball, zip) });
+  const out = preflight(t, target, {}, '--read-only');
+  assert.equal(out.rc, 0, out.stdout + out.stderr);
+  assert.equal(out.log, '');
+  assert.deepEqual(fs.readFileSync(path.join(resources(target), TARBALL)), tarball);
 });
 
 test('every path build-rootfs.sh or hydration writes under resources is tracked or gitignored', (t) => {
