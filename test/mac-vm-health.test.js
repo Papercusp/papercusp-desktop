@@ -440,6 +440,20 @@ test('recovery is opt-in and refused without the picker signature', async () => 
   assert.match(result.stderr, /refusing recovery/);
 });
 
+test('picker-suspect never sends Return to an unverified OpenCore entry', async () => {
+  const { env, dir } = await fixture({ ssh: false });
+  const commands = path.join(dir, 'qmp-commands');
+  await writeFile(env.MAC_VM_QMP_PROBE,
+    '#!/bin/sh\nprintf "%s\\n" "$1" >> "$MAC_VM_TEST_COMMANDS"\nexit 0\n');
+  const result = spawnSync('bash', [script, '--recover-picker'], {
+    env: { ...env, MAC_VM_TEST_COMMANDS: commands }, encoding: 'utf8',
+  });
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, /picker-suspect does not verify the selected boot entry/);
+  assert.match(result.stderr, /mac-vm-screenshot\.sh/);
+  assert.deepEqual((await readFile(commands, 'utf8')).trim().split('\n'), ['query-status']);
+});
+
 test('shared QMP helper exits distinctly when a connected socket never sends a greeting', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'qmp-command-'));
   const socketPath = path.join(dir, 'qmp.sock');

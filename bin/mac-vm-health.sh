@@ -380,8 +380,11 @@ if [[ "$RECOVER" == 1 ]]; then
     echo "refusing recovery: status is $status, not picker-suspect" >&2
     exit 2
   fi
-  qmp_cmd send-key
-  recovery=return-key-sent
+  # Liveness cannot identify the selected OpenCore entry. A real picker can
+  # contain only Reset NVRAM and Toggle SIP, with Reset NVRAM selected. Never
+  # turn this deliberately weak diagnosis into a destructive firmware action.
+  echo "refusing recovery: picker-suspect does not verify the selected boot entry; capture the console with mac-vm-screenshot.sh and verify a macOS volume before navigating it" >&2
+  exit 2
 fi
 
 if [[ "$JSON" == 1 ]]; then
