@@ -195,7 +195,7 @@ test('native Server builder defaults enter the real release guard before install
 
 test('clean-source native transformer validation follows dependency hydration and precedes SPA assembly', () => {
   const install = builder.indexOf('(cd "$REPO_ROOT" && node scripts/npm-install-safe.mjs install');
-  const validation = builder.indexOf('papercusp_verify_transformers_native_target "$REPO_ROOT" "$TARGET_OS" "$TARGET_ARCH" || exit 1');
+  const validation = builder.indexOf('papercusp_verify_transformers_native_target "$REPO_ROOT" "$TARGET_OS" "$TARGET_ARCH" "" "$_transformers_declaration_policy" || exit 1');
   const spa = builder.indexOf('echo "→ building operator-vite SPA (vite build → locked sidecar snapshot)"');
   assert.ok(install >= 0 && validation > install && spa > validation,
     'installed native packages must be checked after clean-source installation, before expensive assembly');
@@ -1753,6 +1753,7 @@ test('sidecar source union declares every bare runtime import in operator-core',
     'packages/operator-core/lib/sync/hyperbee/snapshot-fold.worker.dev.mjs',
     'packages/operator-core/lib/release/admission-jobs.tsx-worker.mjs',
     'packages/operator-core/lib/role-codex-home.worker.dev.mjs',
+    'packages/operator-core/lib/code-intelligence/warm-cochange-index.worker.dev.mjs',
     'packages/operator-core/lib/search/lexical/test-pg/bm25-test-db.ts',
   ]);
   for (const relative of sourceTreeOnly) {
@@ -1769,6 +1770,11 @@ test('sidecar source union declares every bare runtime import in operator-core',
     path.join(repoRoot, 'apps/operator/bin/bundle-host-common.sh'), 'utf8',
   );
   assert.ok(hostBundler.includes('"$repo_root/packages/operator-core/lib/role-codex-home.worker.ts"'));
+  const warmWorkerSelector = fs.readFileSync(
+    path.join(repoRoot, 'packages/operator-core/lib/code-intelligence/warm-cochange-index.ts'), 'utf8',
+  );
+  assert.match(warmWorkerSelector, /existsSync\(bundled\) \? bundled : join\(dirname\(here\), WARM_COCHANGE_WORKER_SOURCE\)/);
+  assert.ok(hostBundler.includes('"$repo_root/packages/operator-core/lib/code-intelligence/warm-cochange-index.worker.ts"'));
   const missing = new Map();
   const packageName = (specifier) =>
     specifier.startsWith('@')

@@ -152,6 +152,29 @@ const { spawnSync } = require('node:child_process');
 
 const [out, ...specs] = process.argv.slice(2);
 const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
+function sha256File(file) {
+  const hash = crypto.createHash('sha256');
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  const fd = fs.openSync(file, 'r');
+  try {
+    const before = fs.fstatSync(fd);
+    let bytes = 0, count;
+    while ((count = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+      hash.update(buffer.subarray(0, count));
+      bytes += count;
+    }
+    const after = fs.fstatSync(fd);
+    const current = fs.statSync(file);
+    if (bytes !== before.size || before.size !== after.size
+        || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
+        || current.dev !== after.dev || current.ino !== after.ino) {
+      throw new Error(`source changed during provenance hash: ${file}`);
+    }
+    return hash.digest('hex');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 
 function git(root, args, encoding = 'buffer') {
   const result = spawnSync('git', ['-C', root, ...args], {
@@ -217,7 +240,7 @@ function snapshotRepository(label, candidate, seen = new Set()) {
         row.sha256 = sha256(Buffer.from(fs.readlinkSync(absolutePath)));
       } else if (stat.isFile()) {
         row.kind = 'file';
-        row.sha256 = sha256(fs.readFileSync(absolutePath));
+        row.sha256 = sha256File(absolutePath);
       } else if (stat.isDirectory()) {
         // A dirty submodule is one porcelain row. Hash its own content-addressed
         // snapshot rather than merely its HEAD, which would miss worktree edits.
