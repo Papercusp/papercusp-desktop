@@ -7,6 +7,77 @@ const test = require('node:test');
 const { createHash } = require('node:crypto');
 
 const helper = path.resolve(__dirname, '../src-tauri/resources/papercup-bun-runtime.py');
+test('install lifecycle forwards detached eligibility before content bootstrap and refuses incomplete pairs', t => {
+  const source = fs.readFileSync(path.resolve(__dirname, '../bin/install-workspace-host-entrypoints.sh'), 'utf8');
+  const marker = 'cat > "$stage/papercusp-install" <<\'ENTRYPOINT\'\n';
+  const start = source.indexOf(marker) + marker.length;
+  const script = source.slice(start, source.indexOf('\nENTRYPOINT', start));
+  assert.ok(start >= marker.length);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-install-route-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const bin = path.join(root, 'bin'); fs.mkdirSync(bin);
+  const record = path.join(root, 'calls.jsonl');
+  const shim = '#!/usr/bin/env node\nrequire("node:fs").appendFileSync(process.env.RECORD, JSON.stringify({name:require("node:path").basename(process.argv[1]),args:process.argv.slice(2)})+"\\n");\n';
+  for (const name of ['node','papercusp-rollback','papercusp-migrate','papercusp-server','papercusp-health','psu','pui','claude','codex','omp','papercusp-remote-initializer','papercusp-deliver-material','papercusp-content-bootstrap']) {
+    fs.writeFileSync(path.join(bin, name), shim, { mode: 0o755 });
+  }
+  fs.writeFileSync(path.join(bin, 'papercusp-install'), script, { mode: 0o755 });
+  fs.mkdirSync(path.join(root, 'scripts')); fs.mkdirSync(path.join(root, 'db-sql'));
+  for (const name of ['serve.mjs','pui-companion.wasm','pui-install.json','scripts/psu.mjs']) fs.writeFileSync(path.join(root, name), 'fixture');
+  const state = path.join(root, 'state'); fs.mkdirSync(state);
+  const run = extra => spawnSync('bash', [path.join(bin, 'papercusp-install'), '--action','install','--release-root',root,'--state-root',state,...extra], {
+    encoding: 'utf8', env: { ...process.env, RECORD: record },
+  });
+  const ok = run(['--runtime-acceptance','literal $file','--runtime-acceptance-signature','literal `sig`']);
+  assert.equal(ok.status, 0, ok.stderr);
+  const calls = fs.readFileSync(record,'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(calls, [ { name:'node', args:[path.join(root,'serve.mjs'),'--install-runtime-acceptance','literal $file','literal `sig`'] },
+    { name:'papercusp-content-bootstrap', args:['--state-root',state] } ]);
+  fs.unlinkSync(record);
+  const refused = run(['--runtime-acceptance','one-file']);
+  assert.equal(refused.status,1); assert.match(refused.stderr,/both envelope and signature/); assert.equal(fs.existsSync(record), false);
+});
+test('detached companion reuses the actual Tauri release signer and verifier', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-native-sign-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const desktop = path.resolve(__dirname, '..');
+  const cli = path.join(path.dirname(require.resolve('@tauri-apps/cli/package.json', { paths: [desktop] })), 'tauri.js');
+  const key = path.join(root, 'fixture.key');
+  const gen = spawnSync(process.execPath, [cli, 'signer', 'generate', '--ci', '--password', '', '--write-keys', key], { encoding: 'utf8', timeout: 30000 });
+  assert.equal(gen.status, 0, gen.stderr);
+  const artifact = path.join(root, 'eligibility.json'); fs.writeFileSync(artifact, '{"fixture":"signed canonical envelope bytes"}\n');
+  const before = fs.readFileSync(artifact);
+  const signer = path.join(root, 'sign');
+  const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+  fs.writeFileSync(signer, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(cli)} signer sign "$@"\n`, { mode: 0o755 });
+  const result = spawnSync('bash', ['-c', 'source "$1"\npapercusp_sign_release_artifact "$2"', 'sign',
+    path.join(desktop, 'bin/lib/inno-spanned-server.sh'), artifact], { encoding: 'utf8', timeout: 30000,
+    env: { ...process.env, TAURI_SIGNING_PRIVATE_KEY: key, TAURI_SIGNING_PRIVATE_KEY_PATH: key, PAPERCUSP_SIGNER_CMD: signer } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(fs.readFileSync(artifact), before);
+  const verified = spawnSync(process.execPath, [path.join(desktop, 'bin/verify-tauri-signature.mjs'), key + '.pub', artifact, artifact + '.sig', '--json'], { encoding: 'utf8' });
+  assert.equal(verified.status, 0, verified.stderr); assert.equal(JSON.parse(verified.stdout).valid, true);
+});
+test('sidecar compiler pins the updater key from its source config and refuses a missing key', t => {
+  const builder = fs.readFileSync(path.resolve(__dirname, '../bin/build-desktop-sidecar.sh'), 'utf8');
+  const start = builder.indexOf('RUNTIME_ACCEPTANCE_KEY_JSON=');
+  const end = builder.indexOf('\n# ── EI-160:', start);
+  assert.ok(start > 0 && end > start);
+  const section = builder.slice(start, end);
+  assert.match(builder, /--define:__PAPERCUSP_RUNTIME_ACCEPTANCE_PUBLIC_KEY__="\$RUNTIME_ACCEPTANCE_KEY_JSON"/);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-key-build-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'src-tauri'));
+  const config = path.join(root, 'src-tauri/tauri.conf.json');
+  const key = 'public key "literal" with $shell and `syntax`';
+  fs.writeFileSync(config, JSON.stringify({ plugins: { updater: { pubkey: key } } }));
+  const run = () => spawnSync('bash', ['-c', 'set -euo pipefail\n' + section + '\nprintf "%s" "$RUNTIME_ACCEPTANCE_KEY_JSON"'], {
+    env: { ...process.env, ROOT: root, PAPERCUSP_RUNTIME_ACCEPTANCE_PUBLIC_KEY: 'attacker' }, encoding: 'utf8',
+  });
+  const good = run(); assert.equal(good.status, 0, good.stderr); assert.equal(JSON.parse(good.stdout), key);
+  fs.writeFileSync(config, '{}');
+  const refused = run(); assert.equal(refused.status, 1); assert.match(refused.stderr, /missing compiled updater trust key/);
+});
 const fixture = String.raw`
 import hashlib, importlib.util, io, json, os, pathlib, stat, struct, sys, zipfile
 from unittest.mock import patch

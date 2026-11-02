@@ -36,6 +36,12 @@ PAPERCUSP_SPANNED_SERVER_OUTPUTS=()
 #
 # Sets PAPERCUSP_SPANNED_SERVER_ZIP_SIG on success; leaves it empty otherwise.
 papercusp_sign_spanned_server_zip() {
+  papercusp_sign_release_artifact "$@"
+}
+
+# Shared updater signer also handles detached canonical eligibility companions.
+# Preserve the original wrapper/output variable for the Windows packager.
+papercusp_sign_release_artifact() {
   local zip="$1"
   PAPERCUSP_SPANNED_SERVER_ZIP_SIG=""
   [[ -s "$zip" ]] || return 1
