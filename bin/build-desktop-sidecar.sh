@@ -203,7 +203,7 @@ if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == 1 && "$REPO_ROOT" != "$(cd "$HERE/../..
   # verify their exact lock/runtime bytes instead of rewriting frozen source.
   _transformers_declaration_policy=frozen-lock
 fi
-if [[ "$DISTRIBUTION_PROFILE" == "vm-release" || "${PAPERCUSP_RELEASE_AUDIT:-0}" == 1 || "${PAPERCUSP_TRANSFORMERS_VERIFY_PINNED:-0}" == "1" ]]; then
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" || "${PAPERCUSP_TRANSFORMERS_VERIFY_PINNED:-0}" == "1" ]]; then
   papercusp_verify_transformers_dependencies "$REPO_ROOT" 0 "$_transformers_declaration_policy" || exit 1
 fi
 
@@ -285,6 +285,17 @@ fi
 
 # Keep source identity/cleanliness refusals first, then detect an incompatible
 # helper before SPA assembly, downloads or npm writes.
+if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == 1 && "$DISTRIBUTION_PROFILE" != vm-release \
+   && "${PAPERCUSP_TRANSFORMERS_VERIFY_PINNED:-0}" != 1 ]]; then
+  papercusp_verify_transformers_dependencies "$REPO_ROOT" 0 "$_transformers_declaration_policy" || exit 1
+fi
+# Producer metadata tooling follows the current script, while hook content and
+# git dates continue to come from the selected exact product source.
+HOOK_PROVENANCE_WRITER="$(cd "$HERE/../.." && pwd)/apps/operator/scripts/write-hook-source-provenance.mjs"
+[[ -r "$HOOK_PROVENANCE_WRITER" ]] || {
+  echo "ERROR: current producer is missing hook provenance writer: $HOOK_PROVENANCE_WRITER" >&2
+  exit 1
+}
 run_sidecar_cached_package --check || exit 1
 
 # EI-21832562420831737: having DEMANDED an immutable source sha above, refuse to read a tree
@@ -2596,7 +2607,7 @@ if [[ -d "$OMP_HOOK_SRC_DIR" ]]; then
     done
   fi
   # WI-6554700010010534: date the packaged copy for the installer's downgrade guard.
-  node "$WEB_DIR/scripts/write-hook-source-provenance.mjs" "$OMP_HOOK_SRC_DIR" "$OMP_HOOK_DST_DIR"
+  node "$HOOK_PROVENANCE_WRITER" "$OMP_HOOK_SRC_DIR" "$OMP_HOOK_DST_DIR"
 fi
 
 # Same reason again, for the CONTEXT-INJECTION pair
@@ -2620,7 +2631,7 @@ if [[ -d "$INJECT_SRC_DIR" && -f "$OMP_HOOK_SRC_DIR/inject-hook.ts" ]]; then
   cp -a "$INJECT_SRC_DIR"/*.mjs "$INJECT_DST_DIR"/
   cp -a "$INJECT_SRC_DIR"/adapters/*.mjs "$INJECT_DST_DIR"/adapters/
   # WI-6554700010010534: date the packaged copy for the installer's downgrade guard.
-  node "$WEB_DIR/scripts/write-hook-source-provenance.mjs" "$INJECT_SRC_DIR" "$INJECT_DST_DIR"
+  node "$HOOK_PROVENANCE_WRITER" "$INJECT_SRC_DIR" "$INJECT_DST_DIR"
 fi
 
 # Same reason: the Claude/Codex CC hooks (statusline-fleet + lock/coord/activity/
@@ -2657,7 +2668,7 @@ if [[ -d "$CC_HOOK_SRC_DIR" ]]; then
   # WI-6554700010010534: the packaged app has no git, so record what git says about these
   # hooks NOW. install-provenance.ts reads it so the installer's downgrade guard can refuse
   # an older package; without it a 2026-10-07 build overwrote newer hooks on 2026-10-13.
-  node "$WEB_DIR/scripts/write-hook-source-provenance.mjs" "$CC_HOOK_SRC_DIR" "$CC_HOOK_DST_DIR"
+  node "$HOOK_PROVENANCE_WRITER" "$CC_HOOK_SRC_DIR" "$CC_HOOK_DST_DIR"
 fi
 
 # WI-6554700010009448: the pinned RTK installer. papercusp-files.ts (provisionRtk)

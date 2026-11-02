@@ -118,6 +118,34 @@ test('the sidecar builder runs the ptool SDK self-check on the bundled ptool', (
   assert.match(guarded, /exit 1/, 'a failed self-check must fail the build');
 });
 
+test('current hook provenance tooling hashes the selected older source without requiring its writer', () => {
+  const root = fs.mkdtempSync(path.join(isolatedTmpRoot(), 'hook-provenance-producer-'));
+  const src = path.join(root, 'older-hooks'), dst = path.join(root, 'packaged-hooks');
+  fs.mkdirSync(src); fs.mkdirSync(dst);
+  const git = (...args) => {
+    const result = childProcess.spawnSync('git', ['-C', src, ...args], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  try {
+    git('init', '-q');
+    fs.writeFileSync(path.join(src, 'hook.ts'), 'export const hook = true;\n');
+    git('add', 'hook.ts');
+    git('-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'old hook');
+    fs.copyFileSync(path.join(src, 'hook.ts'), path.join(dst, 'hook.ts'));
+    const writer = path.join(repoRoot, 'apps/operator/scripts/write-hook-source-provenance.mjs');
+    const result = childProcess.spawnSync(process.execPath, [writer, src, dst], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const manifest = JSON.parse(fs.readFileSync(path.join(dst, '.source-provenance.json')));
+    assert.equal(manifest.directory.sha, git('rev-parse', 'HEAD'));
+    assert.equal(manifest.files['hook.ts'].sha, manifest.directory.sha);
+    assert.equal(fs.existsSync(path.join(src, 'write-hook-source-provenance.mjs')), false);
+    assert.equal((builder.match(/node "\$HOOK_PROVENANCE_WRITER"/g) || []).length, 3);
+    assert.ok(builder.indexOf('current producer is missing hook provenance writer') < builder.indexOf('run_sidecar_cached_package --check'));
+    assert.equal(builder.includes('node "$WEB_DIR/scripts/write-hook-source-provenance.mjs"'), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('the current producer checks the real ptool bundle even when the frozen target predates its checker', () => {
   const source = fs.readFileSync(ptoolSource, 'utf8');
   assert(source.includes(LITERAL_TYPES_LOADER), 'ptool.mjs no longer has the literal types.js loader');
