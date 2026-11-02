@@ -85,28 +85,63 @@ function runChecker(bundlePath, tmpRoot = isolatedTmpRoot()) {
   return { status: result.status, output: `${result.stdout}\n${result.stderr}` };
 }
 
+test('the sidecar builder refuses missing producer tooling before dependency or UI builds', () => {
+  const preflight = builder.match(/^if \[\[ ! -r "\$HERE\/check-ptool-sdk-bundle\.mjs" \]\]; then\n[\s\S]*?^fi$/m)?.[0];
+  assert.ok(preflight, 'early producer checker preflight is missing');
+  assert.ok(builder.indexOf(preflight) < builder.indexOf('node "$HERE/lib/spa-freshness.js"'));
+  const absent = fs.mkdtempSync(path.join(isolatedTmpRoot(), 'ptool-producer-missing-'));
+  try {
+    const run = (here) => childProcess.spawnSync('bash', ['-c', preflight], {
+      encoding: 'utf8', env: { ...process.env, HERE: here },
+    });
+    assert.equal(run(path.join(desktopRoot, 'bin')).status, 0);
+    const missing = run(absent);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /current producer is missing ptool SDK checker/);
+  } finally {
+    fs.rmSync(absent, { recursive: true, force: true });
+  }
+});
+
 test('the sidecar builder runs the ptool SDK self-check on the bundled ptool', () => {
   const loopEnd = builder.indexOf(
     'for _psu_cli in psu:psu-launcher ptool:ptool onboard:onboard-launcher',
   );
   assert(loopEnd >= 0, 'psu/ptool esbuild loop not found in build-desktop-sidecar.sh');
   const check = builder.indexOf(
-    'node "$ROOT/bin/check-ptool-sdk-bundle.mjs" "$SIDECAR_DIR/scripts/ptool.mjs"',
+    'node "$HERE/check-ptool-sdk-bundle.mjs" "$SIDECAR_DIR/scripts/ptool.mjs"',
   );
   assert(check > loopEnd, 'the self-check must run on scripts/ptool.mjs after the esbuild loop');
   const guarded = builder.slice(check - 10, check + 200);
-  assert.match(guarded, /if ! node "\$ROOT\/bin\/check-ptool-sdk-bundle\.mjs"/);
+  assert.match(guarded, /if ! node "\$HERE\/check-ptool-sdk-bundle\.mjs"/);
   assert.match(guarded, /exit 1/, 'a failed self-check must fail the build');
 });
 
-test('the real ptool bundle loads every SDK module from an isolated copy', () => {
+test('the current producer checks the real ptool bundle even when the frozen target predates its checker', () => {
   const source = fs.readFileSync(ptoolSource, 'utf8');
   assert(source.includes(LITERAL_TYPES_LOADER), 'ptool.mjs no longer has the literal types.js loader');
   const { outDir, outfile } = bundle(source, 'real');
   try {
-    const { status, output } = runChecker(outfile);
-    assert.equal(status, 0, output);
-    assert.match(output, /ptool SDK self-check: 3 loader\(s\) resolve from an isolated copy/);
+    const block = builder.match(/^if ! node [^\n]*check-ptool-sdk-bundle\.mjs[^\n]*\n[\s\S]*?^fi$/m)?.[0];
+    assert.ok(block, 'maintained producer checker call is missing');
+    const sidecar = path.join(outDir, 'sidecar');
+    const target = path.join(outDir, 'older-desktop');
+    fs.mkdirSync(path.join(sidecar, 'scripts'), { recursive: true });
+    fs.mkdirSync(target);
+    fs.copyFileSync(outfile, path.join(sidecar, 'scripts/ptool.mjs'));
+    const execute = (source) => childProcess.spawnSync('bash', ['-c', `set -euo pipefail\n${source}`], {
+      encoding: 'utf8', timeout: 120_000,
+      env: { ...process.env, HERE: path.join(desktopRoot, 'bin'), ROOT: target, SIDECAR_DIR: sidecar },
+    });
+    const result = execute(block);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /ptool SDK self-check: 3 loader\(s\) resolve from an isolated copy/);
+    assert.equal(fs.existsSync(path.join(target, 'bin/check-ptool-sdk-bundle.mjs')), false);
+    const oldPath = block.replace('$HERE/check-ptool-sdk-bundle.mjs', '$ROOT/bin/check-ptool-sdk-bundle.mjs');
+    assert.notEqual(oldPath, block);
+    const counterexample = execute(oldPath);
+    assert.equal(counterexample.status, 1);
+    assert.match(counterexample.stderr, /Cannot find module .*older-desktop\/bin\/check-ptool-sdk-bundle/);
   } finally {
     fs.rmSync(outDir, { recursive: true, force: true });
   }

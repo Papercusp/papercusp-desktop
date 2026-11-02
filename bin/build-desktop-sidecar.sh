@@ -44,6 +44,10 @@ set -euo pipefail
 # differs (e.g. CI clones into a flat workspace dir).
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+if [[ ! -r "$HERE/check-ptool-sdk-bundle.mjs" ]]; then
+  echo "ERROR: current producer is missing ptool SDK checker: $HERE/check-ptool-sdk-bundle.mjs" >&2
+  exit 1
+fi
 # The ordinary producer remains legacy until the separate public cutover.
 # Candidate packaging must use its explicit isolated entrypoint, not this rail.
 node "$HERE/lib/spa-freshness.js" || exit $?
@@ -1264,7 +1268,12 @@ unset _runtime_workspace_install_args _runtime_workspace
 source "$WEB_DIR/bin/bundle-host-common.sh"
 case " ${NATIVE_PKGS[*]} " in
   *" playwright-core "*) ;;
-  *) echo "ERROR: Playwright must use the external package-copy boundary (optional BiDi and package-relative assets)" >&2; exit 1 ;;
+  *)
+    # Older frozen products predate this boundary. Extend the producer's in-memory
+    # copy list without changing their source or inlining optional BiDi imports.
+    NATIVE_PKGS+=(playwright-core)
+    echo "→ preserving Playwright external package-copy boundary for older target helper"
+    ;;
 esac
 node --input-type=module - "$REPO_ROOT" <<'PLAYWRIGHT_RUNTIME_PREFLIGHT'
 import { createRequire } from 'node:module';
@@ -1894,7 +1903,8 @@ done
 # node_modules is an ancestor of $SIDECAR_DIR) and fails on every install. Load
 # every SDK loader from an isolated copy of the bundle and fail the build if one
 # cannot resolve. (Server 0.0.26 shipped a /usr/bin/ptool that could not start.)
-if ! node "$ROOT/bin/check-ptool-sdk-bundle.mjs" "$SIDECAR_DIR/scripts/ptool.mjs"; then
+# The checker is producer tooling; an older exact-source target need not contain it.
+if ! node "$HERE/check-ptool-sdk-bundle.mjs" "$SIDECAR_DIR/scripts/ptool.mjs"; then
   echo "ERROR: bundled ptool cannot load @modelcontextprotocol/sdk without a node_modules tree" >&2
   exit 1
 fi
