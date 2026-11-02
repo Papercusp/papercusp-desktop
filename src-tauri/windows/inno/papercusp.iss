@@ -69,19 +69,17 @@ LZMAUseSeparateProcess=yes
 CompressionThreads=auto
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-; All-5-buttons source bundle (WI-3306/WI-3308): when stage-source-tree.sh has
-; staged the runnable dev/local source tree (sidecar\source.tar.zst, ~2.2 GB
-; zstd, PAPERCUSP_STAGE_SOURCE=1 builds), the Server payload exceeds Inno's
-; ~4 GB single-exe max — span it: a small setup.exe + setup-*.bin slices.
+; The Server's offline seed and runtime can exceed Inno's ~4 GB single-exe
+; limit even without source.tar.zst. Span every default Server build: a small
+; setup.exe + setup-*.bin slices. Do not infer size from optional source files.
 ; Installing then needs the .bin files NEXT TO the exe (build-windows-on-vm.sh
 ; collects every file from the output dir, so they travel together). Detected
-; at compile time from the staged file itself — no new /D define to plumb.
 ; SINGLE-FILE OVERRIDE (owner-directed 2026-07-08): pass ISCC /DSingleFile
 ; (build-windows-on-vm.sh does so when PAPERCUSP_SINGLE_FILE=1) to FORCE one
 ; setup.exe even with the 2.2 GB source tree present — better UX than
 ; setup.exe + .bin slices, for hosting OFF GitHub (whose release assets cap at
 ; 2 GiB). Default (no define) stays spanned so the standard GitHub flow works.
-#if !Defined(SingleFile) && AppId == "com.papercusp.server" && FileExists(AddBackslash(BuildRoot) + "sidecar\source.tar.zst")
+#if !Defined(SingleFile) && AppId == "com.papercusp.server"
 DiskSpanning=yes
 DiskSliceSize=2100000000
 #endif

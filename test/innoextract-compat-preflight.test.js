@@ -6,7 +6,7 @@
 // artifact audit must use the same explicitly selected extractor.
 
 const assert = require('node:assert/strict');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -118,6 +118,32 @@ test('the Inno compatibility preflight runs before the first cargo-xwin build', 
   assert.match(helper, /grep -qi 'probe-payload\\\.txt'/);
   assert.match(helper, /DiskSpanning=yes/);
   assert.match(helper, /DiskSliceSize=8388608/);
+});
+
+test('the real Inno probe inherits the selected production policy without inventing a source archive', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-inno-policy-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const template = fs.readFileSync(path.join(root, 'src-tauri/windows/inno/papercusp.iss'), 'utf8');
+  const policy = template.match(/^#if [^\n]*\nDiskSpanning=yes\nDiskSliceSize=\d+\n#endif$/m)?.[0];
+  assert.ok(policy);
+  const selected = path.join(dir, 'selected.iss');
+  const output = path.join(dir, 'probe.iss');
+  const run = text => {
+    fs.writeFileSync(selected, text);
+    return spawnSync('bash', ['-c', 'source "$1"; _innoextract_write_probe "$2" "$3"',
+      'policy-probe', helperPath, selected, output], { encoding: 'utf8' });
+  };
+  assert.equal(run(template).status, 0);
+  assert.ok(fs.readFileSync(output, 'utf8').includes(policy.replace(/DiskSliceSize=\d+/, 'DiskSliceSize=8388608')));
+  assert.equal(fs.existsSync(path.join(dir, 'sidecar/source.tar.zst')), false);
+  // The real compiler/extractor preflight must consume a regressed decision,
+  // rather than hard-code DiskSpanning=yes and conceal that regression.
+  const changed = template.replace(policy, policy.replace('!Defined(SingleFile)', 'Defined(RegressionControl)'));
+  assert.equal(run(changed).status, 0);
+  assert.match(fs.readFileSync(output, 'utf8'), /#if Defined\(RegressionControl\)/);
+  const malformed = run(template.replace(policy, ''));
+  assert.notEqual(malformed.status, 0);
+  assert.match(malformed.stderr, /missing or ambiguous/);
 });
 
 test('compatibility requires extraction, intact bytes, and corruption refusal', (t) => {

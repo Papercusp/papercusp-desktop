@@ -59,12 +59,45 @@ _innoextract_candidate_paths() {
   fi
 }
 
+# Compile the production spanning decision on a tiny source-less Server, so a
+# policy regression is detected before the multi-GB installer reaches ISCC.
+_innoextract_write_probe() {
+  python3 - "$1" "$2" <<'PY'
+import pathlib, re, sys
+
+template = pathlib.Path(sys.argv[1]).read_text()
+policies = re.findall(r'(?m)^#if [^\n]*\nDiskSpanning=yes\nDiskSliceSize=[0-9]+\n#endif$', template)
+if len(policies) != 1:
+    raise SystemExit('production Server spanning policy is missing or ambiguous')
+policy = re.sub(r'DiskSliceSize=[0-9]+', 'DiskSliceSize=8388608', policies[0])
+pathlib.Path(sys.argv[2]).write_text('''#define AppId "com.papercusp.server"
+#define BuildRoot SourcePath
+[Setup]
+AppName=Papercusp Inno Compatibility Probe
+AppVersion=6.7.3
+DefaultDirName={localappdata}\\PapercuspInnoCompatibilityProbe
+DisableProgramGroupPage=yes
+PrivilegesRequired=lowest
+Uninstallable=no
+CreateAppDir=no
+Compression=none
+''' + policy + '''
+OutputDir=out
+OutputBaseFilename=innoextract-compat-probe
+
+[Files]
+Source: "probe-payload.txt"; DestDir: "{app}"
+''')
+PY
+}
+
 innoextract_compat_preflight() (
   set -euo pipefail
 
   local configured="${1:-${PAPERCUSP_INNOEXTRACT:-}}"
   local wine_prefix="${2:-${PAPERCUSP_WINE_INNO_PREFIX:-$HOME/.papercusp/wine-inno}}"
   local iscc_exe="${3:-${PAPERCUSP_ISCC_EXE:-$wine_prefix/drive_c/InnoSetup6/ISCC.exe}}"
+  local installer_template="${4:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)/src-tauri/windows/inno/papercusp.iss}"
   local candidate_output extractor work probe_iss probe_win probe_exe list_log
   local audit_script
   local -a candidates=()
@@ -97,24 +130,7 @@ innoextract_compat_preflight() (
   probe_iss="$work/innoextract-compat-probe.iss"
   # The payload name is asserted below, so an extractor that exits 0 without
   # actually listing the fixture cannot satisfy this preflight.
-  printf '%s\n' \
-    '[Setup]' \
-    'AppName=Papercusp Inno Compatibility Probe' \
-    'AppVersion=6.7.3' \
-    'DefaultDirName={localappdata}\\PapercuspInnoCompatibilityProbe' \
-    'DisableProgramGroupPage=yes' \
-    'PrivilegesRequired=lowest' \
-    'Uninstallable=no' \
-    'CreateAppDir=no' \
-    'Compression=none' \
-    'DiskSpanning=yes' \
-    'DiskSliceSize=8388608' \
-    'OutputDir=out' \
-    'OutputBaseFilename=innoextract-compat-probe' \
-    '' \
-    '[Files]' \
-    'Source: "probe-payload.txt"; DestDir: "{app}"' \
-    > "$probe_iss"
+  _innoextract_write_probe "$installer_template" "$probe_iss" || return 1
   python3 - "$work/probe-payload.txt" <<'PY'
 import pathlib
 import sys

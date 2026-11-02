@@ -71,6 +71,9 @@
 
     "allow-list-envs",
     "allow-open-docs-search-palette",
+    "allow-startup-policy-status",
+    "allow-startup-policy-set-login",
+    "allow-startup-policy-set-keep-running",
     "allow-open-route-in-app",
 
     "allow---dev-bridge-result"

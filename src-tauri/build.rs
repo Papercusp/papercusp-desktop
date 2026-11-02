@@ -259,6 +259,28 @@ fn check_capability_commands_are_registered(manifest_dir: &Path, commands: &[&st
     }
 }
 
+/// Specta bypasses Tauri's generate_handler scanner. Reject a missing manifest
+/// entry during compilation, before a working desktop can ship an ACL-dead IPC.
+fn check_specta_commands_are_registered(manifest_dir: &Path, commands: &[&str]) {
+    let source = std::fs::read_to_string(manifest_dir.join("src/main.rs"))
+        .expect("read main.rs for the specta command permission check");
+    let source = source.lines()
+        .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+        .collect::<Vec<_>>().join("\n");
+    let (_, invocation) = source.split_once("collect_commands!")
+        .expect("main.rs must expose its collect_commands! list for ACL validation");
+    let open = invocation.find('[').expect("collect_commands! must use a command list");
+    let (body, _) = invocation[open + 1..].split_once(']')
+        .expect("collect_commands! command list is incomplete");
+    let known: HashSet<&str> = commands.iter().copied().collect();
+    let missing: Vec<&str> = body.split(',').map(str::trim).filter(|token| !token.is_empty())
+        .map(|token| token.rsplit("::").next().unwrap().trim())
+        .filter(|command| !known.contains(command)).collect();
+    assert!(missing.is_empty(),
+        "Specta commands missing from AppManifest: {}. Add them to build.rs commands AND capabilities/default.json; run desktop-acl-command-sync.test.ts.",
+        missing.join(", "));
+}
+
 fn main() {
     // Read this at build-script RUN time, not via env! at compile time. The
     // fleet shares CARGO_TARGET_DIR across the canonical and checkpoint
@@ -394,6 +416,10 @@ fn main() {
         "list_envs",
         // docs search palette
         "open_docs_search_palette",
+        // Device-local startup choices, including backend-independent status.
+        "startup_policy_status",
+        "startup_policy_set_login",
+        "startup_policy_set_keep_running",
         // WI-4827: Quick Panel "open in the main app window" — the palette
         // webview invokes this to hand a full-app route to the main window
         // (Spotlight-style) instead of navigating the small popup in place.
@@ -409,6 +435,9 @@ fn main() {
     // message, before handing off to tauri_build (whose own error on the same
     // condition is a ~500-line permission-enum wall with zero signal about the
     // likely cause — see the function doc above).
+    println!("cargo:rerun-if-changed=src/main.rs");
+    println!("cargo:rerun-if-changed=capabilities/default.json");
+    check_specta_commands_are_registered(&manifest_dir, commands);
     check_capability_commands_are_registered(&manifest_dir, commands);
 
     tauri_build::try_build(

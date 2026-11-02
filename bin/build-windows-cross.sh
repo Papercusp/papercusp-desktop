@@ -253,7 +253,7 @@ SPAN_DEFINE=()
 # artifact audit consumes the exact binary that passed this probe rather than
 # resolving PATH again after hours of build work.
 PAPERCUSP_INNOEXTRACT="$(
-  innoextract_compat_preflight "${PAPERCUSP_INNOEXTRACT:-}" "$WINEPREFIX_INNO" "$ISCC_EXE"
+  innoextract_compat_preflight "${PAPERCUSP_INNOEXTRACT:-}" "$WINEPREFIX_INNO" "$ISCC_EXE" "$SRC_TAURI/windows/inno/papercusp.iss"
 )" || fail "Inno extractor compatibility preflight failed — refusing to start cargo xwin"
 export PAPERCUSP_INNOEXTRACT
 
@@ -753,9 +753,9 @@ for f in "$OUT_DIR"/*-setup.exe; do
     echo "WARN: $(basename "$f") is $((size/1024/1024))MB — within ~10% of Inno's ~4GB single-exe max (WI-3172)" >&2
   fi
 done
-if [[ "${PAPERCUSP_STAGE_SOURCE:-1}" == "1" && "${PAPERCUSP_SINGLE_FILE:-0}" != "1" && " $ROLES " == *" server "* ]]; then
+if [[ "${PAPERCUSP_SINGLE_FILE:-0}" != "1" && " $ROLES " == *" server "* ]]; then
   compgen -G "$OUT_DIR/*Server*-setup-*.bin" > /dev/null \
-    || fail "Server role built with PAPERCUSP_STAGE_SOURCE=1 but no *-setup-*.bin slices — DiskSpanning didn't engage (source.tar.zst missing from the BuildRoot?)"
+    || fail "default Server build has no *-setup-*.bin slices — production DiskSpanning policy did not engage"
 fi
 shopt -u nullglob
 
