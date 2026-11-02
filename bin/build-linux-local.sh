@@ -483,6 +483,16 @@ if [[ "${1:-}" == --finalize-deb ]]; then
   exit $?
 fi
 
+# Capture the product before sidecar/source staging mutates it. A split-root
+# caller may carry workspace provenance; the package's primary identity is the
+# desktop revision baked into the launcher, with the workspace recorded beside it.
+LINUX_PROVENANCE_SOURCE_MANIFEST="$PAPERCUSP_BUILD_LINUX_SNAPSHOT_DIR/linux-source-state.json"
+LINUX_PROVENANCE_SOURCE_STATE="$(bash "$HERE/emit-build-provenance.sh" --capture-source "$ROOT")"
+LINUX_PROVENANCE_SOURCE_HEAD="$(printf '%s\n' "$LINUX_PROVENANCE_SOURCE_STATE" | head -1)"
+LINUX_PROVENANCE_SOURCE_DIRTY="$(printf '%s\n' "$LINUX_PROVENANCE_SOURCE_STATE" | tail -1)"
+bash "$HERE/emit-build-provenance.sh" --capture-dirty-source \
+  "$LINUX_PROVENANCE_SOURCE_MANIFEST" "desktop=$ROOT" "workspace=$ROOT/.."
+
 case "${PAPERCUSP_REUSE_SIDECAR:-0}" in
   0)
     echo "==> [1/5] building sidecar (build-desktop-sidecar.sh)"
@@ -701,6 +711,15 @@ fi
 # into DEST_BUNDLE; retain the final roots only after that collection is done
 # so the lease cannot block the producer's own move.
 papercusp_retain_release_paths "$SRC_ROOT" "$DEST_BUNDLE" "${collected[@]}" || exit 1
+
+# Attest the final collected bytes, including split Server seed companions and
+# signatures, after every repack/sign/move. Emitter failure must fail the build.
+PROVENANCE_GIT_ROOT="$ROOT" \
+PROVENANCE_SOURCE_GIT_HEAD="$LINUX_PROVENANCE_SOURCE_HEAD" \
+PROVENANCE_SOURCE_GIT_DIRTY="$LINUX_PROVENANCE_SOURCE_DIRTY" \
+PROVENANCE_SOURCE_DIRTY_MANIFEST="$LINUX_PROVENANCE_SOURCE_MANIFEST" \
+PROVENANCE_SIDECAR_DIR="$ROOT/src-tauri/sidecar" \
+  bash "$HERE/emit-build-provenance.sh" "$DEST_BUNDLE" "$VERSION" "$BUILD_SHA" false "${collected[@]}"
 
 echo "=== LINUX BUILD DONE  $(date -u +%H:%M:%SZ) ==="
 echo "Artifacts (under papercusp-desktop/src-tauri/target/release/bundle):"

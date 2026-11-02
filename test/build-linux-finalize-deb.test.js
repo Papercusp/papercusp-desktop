@@ -69,7 +69,8 @@ function fixture(t, { role = 'papercusp-server', version = '0.0.26', forbidden =
     sidecarBuildProvenanceSha256: sha(provenance),
   };
   fs.writeFileSync(receipt, JSON.stringify(data));
-  fs.copyFileSync(path.join(desktop, 'bin/verify-tauri-signature.mjs'), path.join(here, 'verify-tauri-signature.mjs'));
+  // Keep the maintained verifier's relative shared-module imports intact.
+  fs.symlinkSync(path.join(desktop, 'bin/verify-tauri-signature.mjs'), path.join(here, 'verify-tauri-signature.mjs'));
   fs.writeFileSync(path.join(here, 'audit-release-bundle.py'),
     "import os,sys\nwith open(os.environ['CALL_LOG'],'a') as f:f.write('audit '+','.join(sys.argv[1:])+'\\n')\n");
   fs.writeFileSync(path.join(here, 'repack-deb-xz.sh'), [

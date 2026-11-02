@@ -16,6 +16,99 @@ const vmConfig = JSON.parse(
   fs.readFileSync(path.join(root, 'src-tauri/tauri.vm-release.conf.json'), 'utf8'),
 );
 
+test('normal Linux collection attests final GUI, Server, split seed and AppImage bytes', () => {
+  const crypto = require('node:crypto');
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-linux-final-provenance-'));
+  try {
+    const captureStart = linuxScript.indexOf('# Capture the product before sidecar/source staging');
+    const captureEnd = linuxScript.indexOf('case "${PAPERCUSP_REUSE_SIDECAR', captureStart);
+    const collectStart = linuxScript.indexOf('# ── COLLECT:');
+    assert.ok(captureStart > 0 && captureEnd > captureStart && collectStart > captureEnd);
+    assert.ok(collectStart > linuxScript.indexOf('papercusp_repack_linux_deb "$deb"'));
+    assert.ok(collectStart > linuxScript.indexOf('bash "$ROOT/bin/build-appimage.sh"'));
+    const artifacts = [
+      'deb/papercusp_0.0.32_amd64.deb',
+      'deb/papercusp-server_0.0.32_amd64.deb',
+      'deb/papercusp-server-seed_0.0.32_all.deb',
+      'appimage/Papercusp_0.0.32_amd64.AppImage',
+    ].flatMap(name => [name, `${name}.sig`]);
+    for (const relocated of [false, true]) {
+      const workspace = path.join(fixture, String(relocated));
+      const product = path.join(workspace, 'desktop');
+      const snapshot = path.join(fixture, `snapshot-${relocated}`);
+      fs.mkdirSync(product, { recursive: true });
+      fs.mkdirSync(snapshot);
+      for (const repo of [workspace, product]) {
+        for (const args of [['init', '-q'], ['config', 'user.name', 'Fixture'],
+          ['config', 'user.email', 'fixture@example.invalid']]) {
+          const r = spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' });
+          assert.equal(r.status, 0, r.stderr);
+        }
+        fs.writeFileSync(path.join(repo, 'input'), 'accepted source');
+        fs.writeFileSync(path.join(repo, '.gitignore'), 'desktop/\nsrc-tauri/\n');
+        assert.equal(spawnSync('git', ['-C', repo, 'add', 'input', '.gitignore']).status, 0);
+        assert.equal(spawnSync('git', ['-C', repo, 'commit', '-qm', 'fixture']).status, 0);
+      }
+      const head = spawnSync('git', ['-C', product, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+      const dest = path.join(product, 'src-tauri/target/release/bundle');
+      const cargo = relocated ? path.join(fixture, 'external-cargo') : path.join(product, 'src-tauri/target');
+      const src = path.join(cargo, 'release/bundle');
+      for (const name of [...artifacts, 'deb/stale_0.0.31_amd64.deb']) {
+        fs.mkdirSync(path.dirname(path.join(src, name)), { recursive: true });
+        fs.writeFileSync(path.join(src, name), `final signed bytes: ${name}`);
+      }
+      const result = spawnSync('bash', ['-c', [
+        'set -euo pipefail',
+        linuxScript.slice(captureStart, captureEnd),
+        'printf build-mutation > "$ROOT/input"',
+        'papercusp_prepare_collection_target_root() { mkdir -p "$1"; }',
+        'papercusp_retain_release_paths() { test ! -f "$DEST_BUNDLE/build-provenance.json"; }',
+        linuxScript.slice(collectStart),
+      ].join('\n')], { encoding: 'utf8', timeout: 30_000, env: { ...process.env,
+        ROOT: product, HERE: path.join(root, 'bin'), SRC_ROOT: cargo, DEST_BUNDLE: dest,
+        VERSION: '0.0.32', BUILD_SHA: head.slice(0, 8), DISTRIBUTION_PROFILE: 'public',
+        PAPERCUSP_BUILD_LINUX_SNAPSHOT_DIR: snapshot,
+        PROVENANCE_SOURCE_GIT_HEAD: 'f'.repeat(40), PROVENANCE_SOURCE_GIT_DIRTY: 'true',
+        PROVENANCE_SOURCE_DIRTY_MANIFEST: '/wrong-caller-manifest',
+        PROVENANCE_REQUIRE_CANDIDATE_PIN: '1',
+      } });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      const provenance = JSON.parse(fs.readFileSync(path.join(dest, 'build-provenance.json')));
+      assert.equal(provenance.buildSha, head.slice(0, 8));
+      assert.equal(provenance.gitHead, head);
+      assert.equal(provenance.gitDirty, false);
+      assert.equal(provenance.gitDirtyAtEmit, true);
+      assert.equal(provenance.reused, false);
+      assert.deepEqual(provenance.artifacts.map(row => row.name).sort(), artifacts.sort());
+      for (const row of provenance.artifacts) {
+        const bytes = fs.readFileSync(path.join(dest, row.name));
+        assert.equal(row.sha256, crypto.createHash('sha256').update(bytes).digest('hex'));
+        assert.equal(row.bytes, bytes.length);
+      }
+      assert.equal(provenance.dirtySource.repositories.find(row => row.label === 'workspace').gitHead.length, 40);
+      if (relocated) assert.ok(!fs.existsSync(path.join(src, artifacts[0])));
+      assert.match(result.stdout, /LINUX BUILD DONE/);
+    }
+  } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
+});
+
+test('normal Linux producer cannot report success when final provenance emission fails', () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-linux-provenance-failure-'));
+  try {
+    fs.writeFileSync(path.join(fixture, 'emit-build-provenance.sh'), 'exit 19\n');
+    const start = linuxScript.indexOf('# Attest the final collected bytes');
+    assert.ok(start > linuxScript.indexOf('papercusp_retain_release_paths "$SRC_ROOT"'));
+    const result = spawnSync('bash', ['-c', ['set -euo pipefail', 'collected=(package.deb package.deb.sig)',
+      linuxScript.slice(start)].join('\n')], { encoding: 'utf8', env: { ...process.env,
+      HERE: fixture, ROOT: fixture, DEST_BUNDLE: fixture, VERSION: '0.0.32', BUILD_SHA: '12345678',
+      LINUX_PROVENANCE_SOURCE_HEAD: '1'.repeat(40), LINUX_PROVENANCE_SOURCE_DIRTY: 'false',
+      LINUX_PROVENANCE_SOURCE_MANIFEST: path.join(fixture, 'source.json'),
+    } });
+    assert.equal(result.status, 19, result.stdout + result.stderr);
+    assert.doesNotMatch(result.stdout, /LINUX BUILD DONE/);
+  } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
+});
+
 test('standalone Linux installers survive guarded cleanup under a bounded lease', () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-linux-installer-retention-'));
   try {
