@@ -10661,7 +10661,9 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
     // Inject into every window and every new document, before app shortcuts.
     // WebKitGTK reports MacIntel even on Linux; select the modifier from Rust.
     let base = tauri::Builder::default().append_invoke_initialization_script(format!(
-        "Object.defineProperty(window, '__papercuspStartupOrigin', {{value: Object.freeze({{startedAtEpochMs: {native_started_at_ms}, pid: {}, primaryWindow: window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label === 'main'}})}});",
+        // Tauri installs window metadata AFTER invoke initialization. Evaluate
+        // the primary-window predicate when the app reads it, not here.
+        "Object.defineProperty(window, '__papercuspStartupOrigin', {{value: Object.freeze({{startedAtEpochMs: {native_started_at_ms}, pid: {}, get primaryWindow() {{ return window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label === 'main'; }} }})}});",
         std::process::id(),
     )).append_invoke_initialization_script(
         include_str!("zoom-shortcuts.js").replace(
