@@ -628,6 +628,15 @@ else
   echo "WARN: could not read version from $ROOT/src-tauri/tauri.conf.json — sidecar will report its unstamped fallback version"
 fi
 
+# D-010: only the source-cut updater key is baked into the offline verifier.
+# JSON.stringify supplies the esbuild literal; no runtime env key is trusted.
+RUNTIME_ACCEPTANCE_KEY_JSON="$(node -e '
+  const fs = require("node:fs");
+  const key = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).plugins?.updater?.pubkey;
+  if (typeof key !== "string" || !key.trim()) process.exit(1);
+  process.stdout.write(JSON.stringify(key));
+' "$ROOT/src-tauri/tauri.conf.json")" || { echo "ERROR: missing compiled updater trust key" >&2; exit 1; }
+
 # ── EI-160: no concurrent-build clobber (P-056) ─────────────────────────────
 # Two builds racing into the same live SIDECAR_DIR used to interleave
 # rm -rf/cp — a reader (a running `tauri dev`, the federation smoke rigs)
@@ -1735,6 +1744,7 @@ fi
 bundle_host_primary "$REPO_ROOT" "$SIDECAR_DIR" \
   "${MINIFY_ARGS[@]}" \
   --define:__PAPERCUSP_BUNDLED_SIDECAR__=true \
+  --define:__PAPERCUSP_RUNTIME_ACCEPTANCE_PUBLIC_KEY__="$RUNTIME_ACCEPTANCE_KEY_JSON" \
   --define:process.env.PAPERCUP_DOGFOOD_REPO_REF="\"${PAPERCUP_DOGFOOD_REPO_REF:-}\"" \
   --define:process.env.PAPERCUP_DOGFOOD_POT_PUBKEY="\"${PAPERCUP_DOGFOOD_POT_PUBKEY:-${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}}\"" \
   --define:process.env.PAPERCUP_DOGFOOD_POT_INVITE_SECRET="\"${PAPERCUP_DOGFOOD_POT_INVITE_SECRET:-${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}}\"" \
