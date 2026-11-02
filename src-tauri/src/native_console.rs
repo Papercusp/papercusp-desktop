@@ -29,7 +29,7 @@
 // All paths produce a NEW WINDOW. No tabs.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -432,19 +432,66 @@ fn wait_for_sentinels_to_clear(cwd: &str) -> bool {
 
 #[cfg(not(target_os = "windows"))]
 fn count_sentinels(cwd: &str) -> usize {
-    let Ok(entries) = std::fs::read_dir(cwd) else {
+    reap_stale_sentinels(cwd);
+    count_sentinels_in_dir(Path::new(cwd))
+        + count_sentinels_in_dir(&Path::new(cwd).join(SENTINEL_RELATIVE_DIR))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn count_sentinels_in_dir(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
-    let prefix = SENTINEL_PREFIX;
     entries
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .map(|n| n.starts_with(prefix))
-                .unwrap_or(false)
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_file())
+                && entry.file_name().to_str()
+                    .map(|name| name.starts_with(SENTINEL_PREFIX))
+                    .unwrap_or(false)
         })
         .count()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn reap_stale_sentinels(cwd: &str) {
+    let dirs = [
+        PathBuf::from(cwd),
+        Path::new(cwd).join(SENTINEL_RELATIVE_DIR),
+    ];
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(|entry| entry.ok()) {
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(pid) = name
+                .strip_prefix(SENTINEL_PREFIX)
+                .and_then(|suffix| suffix.strip_prefix('.'))
+                .and_then(|suffix| suffix.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if pid != 0 && !sentinel_pid_is_alive(pid) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn sentinel_pid_is_alive(pid: u32) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    // SAFETY: signal 0 probes process existence without delivering a signal.
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Windows: the sentinels live in the WSL cwd — count them through the distro.
@@ -454,9 +501,11 @@ fn count_sentinels(cwd: &str) -> usize {
 #[cfg(target_os = "windows")]
 fn count_sentinels(cwd: &str) -> usize {
     let script = format!(
-        "ls -1d {}/{}* 2>/dev/null | wc -l",
-        shell_escape_single(cwd),
-        SENTINEL_PREFIX
+        "cd {cwd} || exit 1; {reaper}; ls -1d {prefix}.* {sentinel_dir}/{prefix}.* 2>/dev/null | wc -l",
+        cwd = shell_escape_single(cwd),
+        reaper = LEGACY_SENTINEL_CLEANUP,
+        prefix = SENTINEL_PREFIX,
+        sentinel_dir = SENTINEL_RELATIVE_DIR,
     );
     match wsl_fs(&["bash", "-c", &script], None) {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
@@ -709,16 +758,17 @@ fn cfs_remove(path: &str) {
 
 /// Build the bash one-liner the terminal runs as its first command.
 /// Pattern:
-///   cd → env exports → stamp process birth identity → drop sentinel →
-///   trap-cleanup → greeting → exec shell
+///   cd → env exports → reap stale markers → create scratch marker →
+///   interactive supervisor → greeting → foreground login shell → EXIT cleanup
 ///
-/// The sentinel file (`.papercup-console-active.$`) is how the Rust
+/// The marker under SENTINEL_RELATIVE_DIR is how the Rust
 /// side knows the user's shell is still alive. We can't trust the pid
 /// of the terminal launcher itself (open/wt.exe/gnome-terminal etc.
 /// exit immediately after the window appears), so we use a filesystem
 /// fingerprint that survives across process boundaries.
 ///
-/// `exec` chains so the env survives without touching rc files.
+/// The initial exec replaces the non-interactive wrapper; the foreground
+/// login-shell child returns through the EXIT-trap supervisor.
 fn build_launcher_oneliner(envelope: &ConsoleEnvelope) -> String {
     let env_exports = build_env_exports(&envelope.env);
     // The greeting travels as a shell-escaped LITERAL that a subshell `eval`s
@@ -749,14 +799,16 @@ fn build_launcher_oneliner(envelope: &ConsoleEnvelope) -> String {
     let interactive_script = format!(
         "trap 'rm -f {sentinel_glob}.$$' EXIT; \
          (eval {greet}); \
-         exec \"${{SHELL:-/bin/bash}}\" -l",
-        sentinel_glob = SENTINEL_PREFIX,
+         \"{login_shell}\" -l; __papercusp_login_rc=$?; exit \"$__papercusp_login_rc\"",
+        sentinel_glob = format!("{}/{}", SENTINEL_RELATIVE_DIR, SENTINEL_PREFIX),
+        login_shell = String::from("$") + "{SHELL:-/bin/bash}",
         greet = greeting,
     );
     let interactive_script_quoted = shell_escape_single(&interactive_script);
     format!(
         "printf '\\033]0;%s\\007' {title} \
          ; cd {cwd} && {exports} \
+         && {stale_reaper} && mkdir -p {sentinel_dir} \
          && PAPERCUSP_CONSOLE_IDENTITY=\"$( \
               if [ -r /proc/sys/kernel/random/boot_id ] && [ -r /proc/$$/stat ]; then \
                 printf 'linux:%s:%s' \
@@ -772,15 +824,22 @@ fn build_launcher_oneliner(envelope: &ConsoleEnvelope) -> String {
         title = title_quoted,
         cwd = cwd_escaped,
         exports = env_exports,
-        sentinel_glob = SENTINEL_PREFIX,
+        stale_reaper = LEGACY_SENTINEL_CLEANUP,
+        sentinel_dir = SENTINEL_RELATIVE_DIR,
+        sentinel_glob = format!("{}/{}", SENTINEL_RELATIVE_DIR, SENTINEL_PREFIX),
         interactive_script = interactive_script_quoted,
     )
 }
 
-/// Sentinel filename prefix. The launcher one-liner writes
-/// `<prefix>.<pid>` on entry and deletes it on exit (trap). The
-/// cleanup watcher polls for any matching file in cwd.
+/// Marker prefix. New files live under SENTINEL_RELATIVE_DIR; cleanup also
+/// recognizes and reaps stale legacy markers in the cwd root.
 const SENTINEL_PREFIX: &str = ".papercup-console-active";
+const SENTINEL_RELATIVE_DIR: &str = ".papercusp/scratch/console-active";
+const LEGACY_SENTINEL_CLEANUP: &str = concat!(
+    "stale_markers=(); for marker in .papercup-console-active.* .papercusp/scratch/console-active/.papercup-console-active.*; do [ -f \"$marker\" ] || continue; marker_pid=\"$",
+    "{marker##*.}\"; case \"$marker_pid\" in \"\"|0|*[!0-9]*) continue ;; esac; kill -0 \"$marker_pid\" 2>/dev/null || stale_markers+=( \"$marker\" ); done; rm -f \"$",
+    "{stale_markers[@]}\" 2>/dev/null || true",
+);
 
 fn build_env_exports(env: &HashMap<String, String>) -> String {
     let mut parts = Vec::with_capacity(env.len() + 1);
@@ -1794,7 +1853,7 @@ mod tests {
     }
 
     #[test]
-    fn oneliner_includes_cwd_env_greeting_and_exec() {
+    fn oneliner_includes_cwd_env_greeting_and_returns_through_cleanup() {
         let e = envelope("/some/harness/dir");
         let out = build_launcher_oneliner(&e);
         #[cfg(unix)]
@@ -1805,7 +1864,9 @@ mod tests {
         #[cfg(unix)]
         assert!(script.contains("(eval 'papercup status')"));
         #[cfg(unix)]
-        assert!(script.contains("exec \"${SHELL:-/bin/bash}\" -l"));
+        assert!(script.contains(
+            "\"${SHELL:-/bin/bash}\" -l; __papercusp_login_rc=$?; exit \"$__papercusp_login_rc\""
+        ));
     }
 
     /// A greeting containing single quotes (e.g. fleet:launch-on-plan's
@@ -1865,14 +1926,19 @@ mod tests {
         assert!(
             out.contains("PAPERCUSP_CONSOLE_IDENTITY=\"$(")
                 && out.contains("export PAPERCUSP_CONSOLE_IDENTITY")
-                && out.contains("> .papercup-console-active.$$"),
+                && out.contains("> .papercusp/scratch/console-active/.papercup-console-active.$$"),
             "sentinel identity stamp missing or has a literal (unexpanded) $ suffix: {out}"
         );
         // trap fires on EXIT to clean up
         #[cfg(unix)]
         assert!(
-            script.contains("trap 'rm -f .papercup-console-active.$$' EXIT"),
+            script.contains("trap 'rm -f .papercusp/scratch/console-active/.papercup-console-active.$$' EXIT"),
             "EXIT trap missing or has a literal (unexpanded) $ suffix: {out}"
+        );
+        #[cfg(unix)]
+        assert!(
+            script.contains("-l; __papercusp_login_rc=$?; exit \"$__papercusp_login_rc\""),
+            "login shell must return through the sentinel trap supervisor: {out}"
         );
     }
 
@@ -1886,6 +1952,8 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let mut e = envelope(tmp.to_str().unwrap());
         e.env.insert("SHELL".to_string(), "/bin/true".to_string());
+        let stale_marker = tmp.join(".papercup-console-active.4294967295");
+        std::fs::write(&stale_marker, "").unwrap();
         e.greeting_cmd = "expected=\"linux:$(cat /proc/sys/kernel/random/boot_id):$(awk '{print $22}' /proc/$$/stat)\"; test \"$PAPERCUSP_CONSOLE_IDENTITY\" = \"$expected\" && printf ok > identity-check"
             .to_string();
 
@@ -1898,6 +1966,12 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(tmp.join("identity-check")).unwrap(),
             "ok"
+        );
+        assert!(!stale_marker.exists());
+        assert_eq!(
+            std::fs::read_dir(tmp.join(SENTINEL_RELATIVE_DIR)).unwrap().count(),
+            0,
+            "the EXIT trap should remove the current scratch marker after the login shell exits"
         );
         std::fs::remove_dir_all(tmp).ok();
     }
@@ -2090,6 +2164,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn count_sentinels_finds_only_matching_files() {
         let tmp =
@@ -2098,13 +2173,21 @@ mod tests {
         let tmp_s = tmp.to_str().unwrap();
         // None yet.
         assert_eq!(count_sentinels(tmp_s), 0);
-        // Drop two sentinels + an unrelated file.
-        std::fs::write(tmp.join(".papercup-console-active.123"), "").unwrap();
-        std::fs::write(tmp.join(".papercup-console-active.456"), "").unwrap();
+        // One active legacy root marker, one dead pid marker, one active
+        // scratch marker, and an unrelated file.
+        let live_pid = std::process::id();
+        let live_root = tmp.join(format!(".papercup-console-active.{live_pid}"));
+        std::fs::write(&live_root, "").unwrap();
+        let stale_root = tmp.join(".papercup-console-active.4294967295");
+        std::fs::write(&stale_root, "").unwrap();
+        let scratch = tmp.join(SENTINEL_RELATIVE_DIR);
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(scratch.join(format!(".papercup-console-active.{live_pid}")), "").unwrap();
         std::fs::write(tmp.join("README.md"), "").unwrap();
         assert_eq!(count_sentinels(tmp_s), 2);
-        // Remove one.
-        std::fs::remove_file(tmp.join(".papercup-console-active.123")).unwrap();
+        assert!(!stale_root.exists(), "dead pid markers are reaped");
+        // Remove the legacy root marker; the scratch marker remains active.
+        std::fs::remove_file(live_root).unwrap();
         assert_eq!(count_sentinels(tmp_s), 1);
         std::fs::remove_dir_all(&tmp).ok();
     }
