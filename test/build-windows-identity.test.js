@@ -11,6 +11,32 @@ const linuxScript = fs.readFileSync(path.join(root, 'bin/build-linux-local.sh'),
 const appimageScript = fs.readFileSync(path.join(root, 'bin/build-appimage.sh'), 'utf8');
 const stageSource = fs.readFileSync(path.join(root, 'bin/stage-source-tree.sh'), 'utf8');
 const audit = path.join(root, 'bin/audit-release-bundle.py');
+
+test('application binary scrub preserves configured updater URL while removing the same login from paths', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'windows-functional-url-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const binary = path.join(dir, 'app.exe');
+  const host = 'https://build-person.example.invalid/releases/fixture-token';
+  const input = Buffer.concat([Buffer.from(`MZ\0${host}\0/home/build-person/work/app\0`),
+    Buffer.from(host, 'utf16le'), Buffer.from('\0tail')]);
+  fs.writeFileSync(binary, input);
+  const result = spawnSync('python3', ['-c', [
+    'import importlib.util,sys',
+    'spec=importlib.util.spec_from_file_location("audit",sys.argv[1])',
+    'audit=importlib.util.module_from_spec(spec);spec.loader.exec_module(audit)',
+    'audit._high_entropy_pairs=lambda: [("build-person","builduser")]',
+    'raise SystemExit(audit.scrub_app_binary([sys.argv[2]]))',
+  ].join('\n'), audit, binary], { encoding: 'utf8', env: { ...process.env, PAPERCUSP_RELEASE_HOST: host } });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const output = fs.readFileSync(binary);
+  assert.equal(output.length, input.length);
+  assert.ok(output.includes(Buffer.from(host)));
+  assert.ok(output.includes(Buffer.from(host, 'utf16le')));
+  assert.ok(!output.includes(Buffer.from('/home/build-person/')));
+  assert.ok(output.includes(Buffer.from('/home/builduser___/')));
+  assert.ok(output.subarray(-5).equals(input.subarray(-5)));
+});
+
 const repoRoot = path.resolve(root, '..');
 const supportSources = [
   path.join(repoRoot, 'apps/operator-vite/src/routes/support.tsx'),

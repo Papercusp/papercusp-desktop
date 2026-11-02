@@ -2446,7 +2446,7 @@ def _identity_pairs():
     return pairs
 
 
-def _scrub_one(p, pairs):
+def _scrub_one(p, pairs, protected_values=()):
     """Length-preserving identity scrub of ONE file, in place. Returns the hit
     list ([] when nothing matched, so the caller can stay quiet).
 
@@ -2460,24 +2460,36 @@ def _scrub_one(p, pairs):
     except OSError:
         return []
     orig = data
+    protected_ranges = []
+    for value in protected_values:
+        if not value:
+            continue
+        offset = 0
+        while (offset := orig.find(value, offset)) >= 0:
+            protected_ranges.append((offset, offset + len(value)))
+            offset += len(value)
     hits = []
     for lit, placeholder in pairs:
         b = lit.encode()
         if b not in data:
             continue
         rep = placeholder.encode()[:len(b)].ljust(len(b), b"_")
-        if is_word_bounded(lit):
-            # Same token rule as the scan: a dictionary-word login must not rewrite
-            # a symbol that merely contains it (e.g. `IPCTester`, `smoketester`).
-            rx = re.compile(rb"\b" + re.escape(b) + rb"\b")
-            n = len(rx.findall(data))
-            if not n:
-                continue
+        # Match the scan's token rule while keeping functional values byte-exact.
+        # Every replacement is length-preserving, so original offsets stay valid.
+        bounded = is_word_bounded(lit)
+        rx = re.compile((rb"\b" if bounded else b"") + re.escape(b)
+                        + (rb"\b" if bounded else b""))
+        n = 0
+        def replace(match):
+            nonlocal n
+            if any(start <= match.start() and match.end() <= end
+                   for start, end in protected_ranges):
+                return match.group()
+            n += 1
+            return rep
+        data = rx.sub(replace, data)
+        if n:
             hits.append(f"{lit} x{n}")
-            data = rx.sub(lambda _m: rep, data)
-            continue
-        hits.append(f"{lit} x{data.count(b)}")
-        data = data.replace(b, rep)
     if not hits or data == orig:
         return []
     assert len(data) == len(orig), "scrub must preserve byte length"
@@ -2616,6 +2628,11 @@ def scrub_app_binary(paths):
     changing its size would invalidate offsets, sections, and relocations.
     """
     pairs = _high_entropy_pairs()
+    # The configured updater URL is executable behavior, even when its hostname
+    # contains the build login. Protect only exact URL occurrences; the same
+    # identity in a build-machine path must still be scrubbed.
+    release_host = os.environ.get("PAPERCUSP_RELEASE_HOST", "")
+    protected_values = (release_host.encode(), release_host.encode("utf-16-le")) if release_host else ()
     if not pairs:
         print("    scrub-app-binary: no high-entropy literals on this box — nothing to do")
         return 0
@@ -2624,7 +2641,7 @@ def scrub_app_binary(paths):
         if not os.path.isfile(p):
             print(f"    scrub-app-binary: {p} absent — skipping")
             continue
-        hits = _scrub_one(p, pairs)
+        hits = _scrub_one(p, pairs, protected_values)
         if hits:
             scrubbed += 1
             print(f"    ✂ scrubbed {os.path.basename(p)}: {', '.join(hits)}")
