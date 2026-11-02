@@ -76,10 +76,10 @@ function bundle(contents, label) {
   return { outDir, outfile };
 }
 
-function runChecker(bundlePath, tmpRoot = isolatedTmpRoot()) {
+function runChecker(bundlePath, tmpRoot = isolatedTmpRoot(), extraArgs = []) {
   const result = childProcess.spawnSync(
     process.execPath,
-    [checker, bundlePath, '--tmp-root', tmpRoot],
+    [checker, bundlePath, '--tmp-root', tmpRoot, ...extraArgs],
     { encoding: 'utf8', timeout: 120_000 },
   );
   return { status: result.status, output: `${result.stdout}\n${result.stderr}` };
@@ -112,7 +112,8 @@ test('the sidecar builder runs the ptool SDK self-check on the bundled ptool', (
     'node "$HERE/check-ptool-sdk-bundle.mjs" "$SIDECAR_DIR/scripts/ptool.mjs"',
   );
   assert(check > loopEnd, 'the self-check must run on scripts/ptool.mjs after the esbuild loop');
-  const guarded = builder.slice(check - 10, check + 200);
+  const guarded = builder.match(/^if ! node [^\n]*check-ptool-sdk-bundle\.mjs[^\n]*\n[\s\S]*?^fi$/m)?.[0];
+  assert.ok(guarded, 'the checker must run in a build-failing guard');
   assert.match(guarded, /if ! node "\$HERE\/check-ptool-sdk-bundle\.mjs"/);
   assert.match(guarded, /exit 1/, 'a failed self-check must fail the build');
 });
@@ -168,6 +169,61 @@ test('a bundle that exports no loader table fails the self-check', () => {
     const { status, output } = runChecker(outfile);
     assert.equal(status, 1, output);
     assert.match(output, /exports no PTOOL_SDK_MODULE_LOADERS table/);
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('retained computed SDK imports qualify only with the shipped dependency closure', () => {
+  const { outDir, outfile } = bundle(`
+    export async function importSdkModuleWithInstallAwareness(specifier) { return import(specifier); }
+    if (process.argv.includes('--list')) {
+      const { Client } = await importSdkModuleWithInstallAwareness('@modelcontextprotocol/sdk/client/index.js');
+      if (typeof Client !== 'function') throw new Error('SDK client unavailable');
+    }
+  `, 'legacy');
+  const sidecar = path.join(outDir, 'sidecar');
+  fs.mkdirSync(sidecar);
+  try {
+    const missing = runChecker(outfile);
+    assert.equal(missing.status, 1, missing.output);
+    assert.match(missing.output, /exports no PTOOL_SDK_MODULE_LOADERS/);
+    const copied = childProcess.spawnSync('bash', ['-c', `
+      set -euo pipefail
+      source "$CLOSURE"
+      nat_copied=0; nat_missing=0; _seen='|'
+      _bare_node_platform=''; _bare_node_arch=''
+      copy_pkg_closure @modelcontextprotocol/sdk
+      test "$nat_missing" -eq 0
+    `], { encoding: 'utf8', timeout: 120_000, env: {
+      ...process.env, CLOSURE: path.join(desktopRoot, 'bin/lib/host-runtime-closure.sh'),
+      WEB_DIR: path.join(repoRoot, 'apps/operator'), REPO_ROOT: repoRoot,
+      ROOT: desktopRoot, SIDECAR_DIR: sidecar,
+    } });
+    assert.equal(copied.status, 0, `${copied.stdout}\n${copied.stderr}`);
+    const closure = path.join(sidecar, 'node_modules');
+    const qualified = runChecker(outfile, isolatedTmpRoot(), ['--runtime-closure', closure]);
+    assert.equal(qualified.status, 0, qualified.output);
+    assert.match(qualified.output, /3 loader\(s\).*runtime-closure/);
+    // Remove a real transitive dependency, not the SDK entrypoint. No ancestor
+    // install may rescue an incomplete shipped graph.
+    fs.rmSync(path.join(closure, 'zod'), { recursive: true, force: true });
+    const broken = runChecker(outfile, isolatedTmpRoot(), ['--runtime-closure', closure]);
+    assert.equal(broken.status, 1, broken.output);
+    assert.match(broken.output, /isolated runtime closure/);
+    assert.match(broken.output, /ERR_MODULE_NOT_FOUND/);
+  } finally {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('supplying a closure cannot mask a modern computed loader regression', () => {
+  const source = fs.readFileSync(ptoolSource, 'utf8');
+  const { outDir, outfile } = bundle(source.replace(LITERAL_TYPES_LOADER, COMPUTED_TYPES_LOADER), 'strict-closure');
+  try {
+    const result = runChecker(outfile, isolatedTmpRoot(), ['--runtime-closure', path.join(repoRoot, 'node_modules')]);
+    assert.equal(result.status, 1, result.output);
+    assert.match(result.output, /cannot load @modelcontextprotocol\/sdk\/types\.js without a node_modules tree/);
   } finally {
     fs.rmSync(outDir, { recursive: true, force: true });
   }

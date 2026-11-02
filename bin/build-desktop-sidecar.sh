@@ -1897,18 +1897,6 @@ for _psu_cli in psu:psu-launcher ptool:ptool onboard:onboard-launcher tutorial-r
   fi
 done
 
-# WI-6554700010012487 — the sidecar ships no @modelcontextprotocol tree, so ptool's
-# SDK must be inlined. esbuild inlines only string-literal import() specifiers; a
-# computed one survives as a runtime lookup that resolves here (the repo
-# node_modules is an ancestor of $SIDECAR_DIR) and fails on every install. Load
-# every SDK loader from an isolated copy of the bundle and fail the build if one
-# cannot resolve. (Server 0.0.26 shipped a /usr/bin/ptool that could not start.)
-# The checker is producer tooling; an older exact-source target need not contain it.
-if ! node "$HERE/check-ptool-sdk-bundle.mjs" "$SIDECAR_DIR/scripts/ptool.mjs"; then
-  echo "ERROR: bundled ptool cannot load @modelcontextprotocol/sdk without a node_modules tree" >&2
-  exit 1
-fi
-
 # The bundled psu entrypoint loads these as runtime file URLs (not static
 # imports), so esbuild cannot inline or trace them. Keep them adjacent to
 # scripts/psu.mjs: resolveNativeMcpAssets() prefers this relocatable packaged
@@ -2288,6 +2276,26 @@ copy_tree_filtered() {
     | tar -C "$dst" -xf -
   rm -f "$list"
 }
+# Retained rollback sources can predate the literal SDK loader table. Preserve
+# their source pin and reuse the exact dependency topology copier for their
+# computed imports. Modern bundles continue to qualify without this closure.
+# Check before copying the heavyweight native/model closures: isolation needs
+# only these SDK packages and the small node-pty tree already staged above.
+_ptool_legacy="$(node --input-type=module - "$HERE/check-ptool-sdk-bundle.mjs" "$SIDECAR_DIR/scripts/ptool.mjs" <<'NODE'
+import { pathToFileURL } from 'node:url';
+const { needsPtoolSdkRuntimeClosure } = await import(pathToFileURL(process.argv[2]).href);
+console.log(await needsPtoolSdkRuntimeClosure(process.argv[3]) ? 'yes' : 'no');
+NODE
+)" || exit 1
+if [[ "$_ptool_legacy" == yes ]]; then
+  copy_pkg_closure @modelcontextprotocol/sdk || exit 1
+fi
+# Qualify the unchanged importer and CLI bootstrap outside the checkout. A
+# supplied closure is used only by legacy bundles; modern tables stay strict.
+if ! node "$HERE/check-ptool-sdk-bundle.mjs" "$SIDECAR_DIR/scripts/ptool.mjs" --runtime-closure "$SIDECAR_DIR/node_modules"; then
+  echo "ERROR: bundled ptool SDK or CLI bootstrap failed isolated qualification" >&2
+  exit 1
+fi
 for np in "${NATIVE_PKGS[@]}"; do copy_pkg_closure "$np"; done
 copy_host_external_closures || exit 1
 echo "  copied $nat_copied package(s) ($nat_missing missing)"
