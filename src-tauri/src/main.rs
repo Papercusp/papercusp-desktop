@@ -7148,6 +7148,7 @@ fn handle_startup_menu(app: &tauri::AppHandle, id: &str) {
         "startup-keep" => startup_policy::status().map_err(|e| e.to_string()).and_then(|s| startup_policy::startup_policy_set_keep_running(!s.policy.keep_running_after_close).map(|_| ())),
         "startup-start" => startup_policy::Store::device().and_then(|s| s.set_clean_stop(false)).and_then(|_| {
             if matches!(app_role::detect(&app.config().identifier), app_role::Role::Server) {
+                std::env::set_var("PAPERCUSP_NATIVE_POLICY_RESTART", "manual");
                 app.restart();
             }
             launch_bundle(SERVER_BUNDLE_ID, "Papercusp Server")
@@ -9014,7 +9015,7 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     download_verify_then_install(&app, update).await?;
 
     // tauri-plugin-process is in scope so we can restart cleanly.
-    std::env::set_var("PAPERCUSP_NATIVE_POLICY_RESTART", "1");
+    std::env::set_var("PAPERCUSP_NATIVE_POLICY_RESTART", "upgrade");
     app.restart();
 }
 
@@ -9277,7 +9278,7 @@ async fn revert_to(app: AppHandle, tag: String) -> Result<(), String> {
     download_verify_then_install(&app, update).await?;
 
     // tauri-plugin-process is in scope so we can restart cleanly.
-    std::env::set_var("PAPERCUSP_NATIVE_POLICY_RESTART", "1");
+    std::env::set_var("PAPERCUSP_NATIVE_POLICY_RESTART", "upgrade");
     app.restart();
 }
 

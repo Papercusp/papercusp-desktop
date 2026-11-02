@@ -28,6 +28,15 @@ pub enum StartTrigger {
 }
 
 impl StartTrigger {
+    fn restart_flag(marker: Option<&str>) -> &'static str {
+        match marker {
+            Some("manual") => "--manual-start",
+            Some("upgrade") => "--upgrade",
+            Some("repair") => "--repair",
+            _ => "--restart",
+        }
+    }
+
     pub fn marker(self) -> &'static str {
         match self {
             Self::Manual => "--startup-trigger=manual",
@@ -621,8 +630,8 @@ pub fn apply_launch_intent(store: &Store, args: &[String], gui: bool) -> io::Res
 
 pub fn apply_current_launch(gui: bool) -> io::Result<()> {
     let mut args: Vec<String> = std::env::args().collect();
-    if std::env::var_os("PAPERCUSP_NATIVE_POLICY_RESTART").is_some() {
-        args.push("--restart".into());
+    if let Some(marker) = std::env::var_os("PAPERCUSP_NATIVE_POLICY_RESTART") {
+        args.push(StartTrigger::restart_flag(marker.to_str()).into());
         std::env::remove_var("PAPERCUSP_NATIVE_POLICY_RESTART");
     }
     // A dev verifier shares the OS identity but is not a user relaunch.
@@ -678,6 +687,21 @@ mod tests {
         }
         assert_eq!(StartTrigger::Supervisor.marker(), "--startup-trigger=supervisor");
         assert_eq!(StartTrigger::Unknown.marker(), "--startup-trigger=unknown");
+    }
+
+    #[test]
+    fn relaunch_markers_preserve_the_known_cause_without_promoting_legacy_restart_to_manual() {
+        for (marker, expected) in [
+            (Some("manual"), StartTrigger::Manual),
+            (Some("upgrade"), StartTrigger::Upgrade),
+            (Some("repair"), StartTrigger::Repair),
+            (Some("1"), StartTrigger::Unknown),
+            (Some("unrecognized"), StartTrigger::Unknown),
+            (None, StartTrigger::Unknown),
+        ] {
+            let args = vec!["--startup".into(), StartTrigger::restart_flag(marker).into()];
+            assert_eq!(StartTrigger::from_launch(&args, false), expected);
+        }
     }
 
     struct Fixture(PathBuf);
