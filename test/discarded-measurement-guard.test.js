@@ -27,8 +27,8 @@ const SCANNER = path.resolve(__dirname, '../bin/lib/scan-discarded-measurements.
 const BASELINE = path.resolve(__dirname, '../bin/lib/scan-discarded-measurements.baseline.txt');
 const PKG = path.resolve(__dirname, '../package.json');
 
-function runScanner(args) {
-  return spawnSync('python3', [SCANNER, ...args], { encoding: 'utf8' });
+function runScanner(args, scanner = SCANNER) {
+  return spawnSync('python3', [scanner, ...args], { encoding: 'utf8' });
 }
 
 // ── half 1: the detector works, and can FAIL ────────────────────────────────
@@ -42,6 +42,43 @@ test('guard passes against the current tree (every candidate is baselined)', () 
   const r = runScanner(['--guard']);
   assert.equal(r.status, 0, `guard unexpectedly failed:\n${r.stdout}\n${r.stderr}`);
   assert.match(r.stdout, /GUARD OK/);
+});
+
+test('seed and guard share path identities across equivalent roots', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'discarded-seed-roots-'));
+  try {
+    const sourceRoot = path.join(dir, 'source', 'bin', 'lib');
+    const extractRoot = path.join(dir, 'extract', 'bin', 'lib');
+    const isolatedScanner = path.join(sourceRoot, path.basename(SCANNER));
+    const fixture = [
+      '#!/usr/bin/env bash',
+      'scn_seed_identity_probe() {',
+      '  local probe_value other',
+      '  probe_value="$(rig_read_content a F-SEED-IDENTITY)"',
+      '  other="$(rig_resolve_ws b)"',
+      '  [ -n "$other" ] || { echo "probe FAIL"; return 1; }',
+      '  echo "probe reading=$probe_value"',
+      '}',
+      '',
+    ].join('\n');
+
+    for (const root of [sourceRoot, extractRoot]) {
+      const scenarios = path.join(root, 'scenarios');
+      fs.mkdirSync(scenarios, { recursive: true });
+      fs.writeFileSync(path.join(scenarios, 'probe-scenario.sh'), fixture);
+    }
+    fs.copyFileSync(SCANNER, isolatedScanner);
+
+    const seed = runScanner(['--seed-baseline', sourceRoot, extractRoot], isolatedScanner);
+    assert.equal(seed.status, 0, 'seed failed:\n' + seed.stdout + '\n' + seed.stderr);
+
+    const guard = runScanner(['--guard'], isolatedScanner);
+    assert.equal(guard.status, 0, 'guard failed:\n' + guard.stdout + '\n' + guard.stderr);
+    assert.ok(guard.stdout.includes('GUARD OK — 1 candidate(s), all baselined, 0 new.'));
+    assert.ok(!guard.stdout.includes('stale baseline'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // THE CONTROL. A guard that has never failed is a guard nobody has tested, and

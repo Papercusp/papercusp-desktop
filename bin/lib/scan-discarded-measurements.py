@@ -461,7 +461,7 @@ BASELINE_PATH = Path(__file__).resolve().parent / "scan-discarded-measurements.b
 LIB_ROOT = Path(__file__).resolve().parent
 
 
-def _identity(path, hit):
+def _identity(path, hit, scan_root):
     """Line-INDEPENDENT identity for a candidate site.
 
     Deliberately NOT keyed on line number: the WI-40549 fix moved one site from L394
@@ -469,13 +469,14 @@ def _identity(path, hit):
     stale on that unrelated edit. A baseline that goes stale on every edit trains
     people to re-seed it blindly, which is how an allowlist stops being a guard.
 
-    Path-qualified (relative to bin/lib) rather than bare basename, so two files with
-    the same name in different directories cannot collide into one baseline entry —
-    a collision would let a NEW strand inherit an existing entry's amnesty silently.
+    Path-qualified relative to the root used for this scan, so equivalent files in a
+    source tree and an extracted copy have the same identity while two files with
+    the same name in different directories cannot share an entry's amnesty silently.
     """
-    p = Path(path).resolve()
+    p = Path(path)
+    root = Path(scan_root)
     try:
-        name = str(p.relative_to(LIB_ROOT))
+        name = str(p.relative_to(root))
     except ValueError:
         name = p.name
     return f"{name}::{hit['func']}::{hit['var']}"
@@ -514,14 +515,17 @@ def main(argv):
     # shape, and a guard covering 15 of 58 comparable files reports GUARD OK while
     # the class walks in through the other 43.
     roots = args or [str(LIB_ROOT)]
-    files = []
+    scan_targets = []
     for r in roots:
         p = Path(r)
-        files.extend(sorted(p.rglob("*.sh")) if p.is_dir() else [p])
+        scan_root = p if p.is_dir() else p.parent
+        scanned_files = sorted(p.rglob("*.sh")) if p.is_dir() else [p]
+        scan_targets.extend((scan_root, f) for f in scanned_files)
+    files = [f for _, f in scan_targets]
 
     total = 0
     found = []
-    for f in files:
+    for scan_root, f in scan_targets:
         hits = scan_text(Path(f).read_text(errors="replace"))
         if not hits:
             continue
@@ -529,7 +533,7 @@ def main(argv):
             print(f"\n=== {f} ===")
         for h in hits:
             total += 1
-            found.append((f, h))
+            found.append((_identity(f, h, scan_root), f, h))
             if guard_mode or seed_mode:
                 continue
             print(
@@ -540,7 +544,7 @@ def main(argv):
             print(f"      rhs: {h['rhs']}")
 
     if seed_mode:
-        idents = sorted({_identity(f, h) for f, h in found})
+        idents = sorted({identity for identity, _, _ in found})
         BASELINE_PATH.write_text(
             "\n".join(
                 [
@@ -571,7 +575,7 @@ def main(argv):
                 file=sys.stderr,
             )
             return 2
-        current = {_identity(f, h) for f, h in found}
+        current = {identity for identity, _, _ in found}
         new = sorted(current - baseline)
         stale = sorted(baseline - current)
         for ident in stale:
@@ -579,7 +583,7 @@ def main(argv):
         if new:
             print(f"\nGUARD FAILED — {len(new)} NEW discarded-measurement site(s):", file=sys.stderr)
             for ident in new:
-                h = next(h for f, h in found if _identity(f, h) == ident)
+                h = next(h for identity, _, h in found if identity == ident)
                 print(
                     f"  {ident}  (measured L{h['assigned']}, first used L{h['first_use']}, "
                     f"intervening return/exit at {h['returns']})",
