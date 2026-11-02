@@ -25,6 +25,10 @@ tauri-plugin-shell = "2"
 # Windows HKCU Run key, Linux XDG ~/.config/autostart. Registered only when
 # role=Server so the backend is up (and psu works) before any window opens.
 tauri-plugin-autostart = "2"
+# Reuse the plugin's OS adapter with the Server identity even from the GUI.
+auto-launch = "=0.5.0"
+# Serialize preserving policy updates across the separate GUI/Server processes.
+fs2 = "0.4"
 # Single-instance guard (P-009): reject a duplicate launch of the SAME bundle.
 # The plugin keys its OS lock on the app identifier, which is DISTINCT per bundle
 # (com.papercusp.gui vs com.papercusp.server) → per-bundle-identity semantics:

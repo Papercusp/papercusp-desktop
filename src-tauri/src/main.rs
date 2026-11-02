@@ -58,6 +58,7 @@ mod localstorage_wal;
 mod native_console;
 mod native_terminal;
 mod pty;
+mod startup_policy;
 mod webkit_render;
 mod workspaces;
 mod wsl_setup;
@@ -5455,6 +5456,11 @@ fn spawn_operator_watcher(
         let mut dead_notified = false;
         loop {
             std::thread::sleep(std::time::Duration::from_millis(1500));
+            if startup_policy::clean_stop_requested() {
+                app_handle.exit(0);
+                return;
+            }
+            if !startup_policy::automatic_start_allowed() { continue; }
             let latest = find_operator_discovery(&workspace_home, via_wsl);
 
             // --- WI-1869: follow the operator's port across restarts (unchanged) ---
@@ -6787,6 +6793,10 @@ fn ensure_server_running(
     workspace_home: &std::path::Path,
     via_wsl: bool,
 ) {
+    if !startup_policy::automatic_start_allowed() {
+        surface_server_connection_required(app_handle, "Papercusp is stopped. Use Startup & background → Start Papercusp Server to resume.");
+        return;
+    }
     if wait_for_operator(app_handle, workspace_home, via_wsl, Duration::from_secs(2)).is_ok() {
         println!("[papercusp-gui] a Papercusp Server is already running — attaching");
         return;
@@ -7080,6 +7090,7 @@ fn build_server_tray_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::
     // native terminal — the tray twin of the "Papercusp Tutorial & setup" icon.
     let tutorial = MenuItem::with_id(app, "open-tutorial", "Open Tutorial", true, None::<&str>)?;
     let shortcut = build_docs_shortcut_submenu(app)?;
+    let startup = build_startup_submenu(app)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(
         app,
@@ -7108,10 +7119,59 @@ fn build_server_tray_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::
         let sep2 = PredefinedMenuItem::separator(app)?;
         return Menu::with_items(
             app,
-            &[&open, &install, &sep2, &tutorial, &shortcut, &sep, &quit],
+            &[&open, &install, &sep2, &tutorial, &shortcut, &startup, &sep, &quit],
         );
     }
-    Menu::with_items(app, &[&open, &tutorial, &shortcut, &sep, &quit])
+    Menu::with_items(app, &[&open, &tutorial, &shortcut, &startup, &sep, &quit])
+}
+
+/// Native controls never depend on the SPA, operator, WSL, or database.
+fn build_startup_submenu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Submenu<tauri::Wry>> {
+    use tauri::menu::{CheckMenuItem, MenuItem, Submenu};
+    let status = startup_policy::status().ok();
+    let login = CheckMenuItem::with_id(app, "startup-login", "Start at sign-in", status.as_ref().is_some_and(|s| s.login_enabled.is_some()), status.as_ref().and_then(|s| s.login_enabled).unwrap_or(false), None::<&str>)?;
+    let keep = CheckMenuItem::with_id(app, "startup-keep", "Keep running after the GUI closes", status.is_some(), status.as_ref().is_some_and(|s| s.policy.keep_running_after_close), None::<&str>)?;
+    let details = MenuItem::with_id(app, "startup-details", "Startup and boot service status…", true, None::<&str>)?;
+    let start = MenuItem::with_id(app, "startup-start", "Start Papercusp Server", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "startup-quit", "Full quit (keep sign-in choice)", true, None::<&str>)?;
+    Submenu::with_items(app, "Startup & background", true, &[&login, &keep, &details, &start, &quit])
+}
+
+fn handle_startup_menu(app: &tauri::AppHandle, id: &str) {
+    use tauri_plugin_dialog::DialogExt;
+    let result: Result<(), String> = match id {
+        "startup-login" => startup_policy::status().map_err(|e| e.to_string()).and_then(|s| {
+            let enabled = s.login_enabled.ok_or("OS startup registration is unavailable")?;
+            startup_policy::startup_policy_set_login(!enabled).map(|_| ())
+        }),
+        "startup-keep" => startup_policy::status().map_err(|e| e.to_string()).and_then(|s| startup_policy::startup_policy_set_keep_running(!s.policy.keep_running_after_close).map(|_| ())),
+        "startup-start" => startup_policy::Store::device().and_then(|s| s.set_clean_stop(false)).and_then(|_| {
+            if matches!(app_role::detect(&app.config().identifier), app_role::Role::Server) {
+                app.restart();
+            }
+            launch_bundle(SERVER_BUNDLE_ID, "Papercusp Server")
+        }).map_err(|e| e.to_string()),
+        "startup-quit" | "quit-server" => startup_policy::Store::device().and_then(|s| s.set_clean_stop(true)).map(|_| app.exit(0)).map_err(|_| "Could not save the clean-stop choice; Papercusp remains open.".into()),
+        "startup-details" => {
+            let message = match startup_policy::status() {
+                Ok(s) => format!("Sign-in startup: {}\nKeep running after close: {}\nBoot service: {}\nMechanism: {}\n\n{}\n\nFull quit stops Papercusp on this device without changing sign-in startup. Use Start Papercusp Server to resume.", match s.login_enabled { Some(true) => "On", Some(false) => "Off", None => "Unknown" }, if s.policy.keep_running_after_close { "On" } else { "Off" }, match s.boot_enabled { Some(true) => "On", Some(false) => "Off", None => "Unknown — inspect with your administrator" }, s.boot_mechanism, s.boot_handoff),
+                Err(_) => "Native startup settings are unreadable. Repair the local settings before starting the backend. No startup choices have been changed.".into(),
+            };
+            app.dialog().message(message).title("Startup & background").show(|_| {});
+            Ok(())
+        }
+        _ => return,
+    };
+    if let Err(error) = result {
+        app.dialog().message(error).title("Startup choice could not be applied").show(|_| {});
+    }
+    // Native check items toggle before callbacks. Rebuild after refusal too.
+    if let Ok(submenu) = build_startup_submenu(app) {
+        if let Ok(menu) = tauri::menu::Menu::with_items(app, &[&submenu]) { let _ = app.set_menu(menu); }
+    }
+    if let Some(tray) = app.tray_by_id("papercusp-server") {
+        if let Ok(menu) = build_server_tray_menu(app) { let _ = tray.set_menu(Some(menu)); }
+    }
 }
 
 /// The spec the tray "Open Tutorial" runs on Linux/Windows: the `papercusp
@@ -7195,8 +7255,8 @@ fn install_server_tray(app: &tauri::App) -> tauri::Result<()> {
                 }
             } else if id == "open-tutorial" {
                 launch_tutorial_console();
-            } else if id == "quit-server" {
-                app.exit(0);
+            } else if id == "quit-server" || id.starts_with("startup-") {
+                handle_startup_menu(app, id);
             } else if id == "install-update" {
                 // WI-4404: this click IS the confirm gesture (the Server has no
                 // webview to run UpdateChip's confirm dialog in) — go straight to
@@ -7247,7 +7307,7 @@ fn install_server_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Register the Server bundle to launch at login (idempotent).
+/// Observe login registration. Launching, repairing, or upgrading never enables it.
 ///
 /// Linux is package-owned instead: the Server `.deb` installs and globally
 /// enables `papercusp-server.service` for the user manager's `default.target`.
@@ -7264,10 +7324,7 @@ fn enable_login_autostart(app: &tauri::App) {
     let mgr = app.autolaunch();
     match mgr.is_enabled() {
         Ok(true) => println!("[papercusp-server] login auto-start already enabled"),
-        Ok(false) => match mgr.enable() {
-            Ok(()) => println!("[papercusp-server] login auto-start enabled"),
-            Err(e) => eprintln!("[papercusp-server] could not enable auto-start: {e}"),
-        },
+        Ok(false) => println!("[papercusp-server] login auto-start disabled; preserving OS choice"),
         Err(e) => eprintln!("[papercusp-server] auto-start state unknown: {e}"),
     }
 }
@@ -8317,6 +8374,12 @@ fn spawn_serve_supervisor(
         let mut distro_reset_done = false;
         loop {
             std::thread::sleep(Duration::from_millis(1500));
+            if startup_policy::clean_stop_requested() {
+                shutdown_children_once(&sup_handle);
+                sup_handle.exit(0);
+                return;
+            }
+            if !startup_policy::automatic_start_allowed() { continue; }
             // WI-3270 (c): refresh the shell-liveness beacon so the
             // bundle watcher can tell "shell alive, operator dead —
             // defer" from "shell gone — relaunch the bundle".
@@ -10113,6 +10176,10 @@ where
 /// path.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_headless_service() -> ! {
+    if !startup_policy::automatic_start_allowed() {
+        eprintln!("[papercusp-server] clean stop or unreadable policy; automatic service start suppressed");
+        std::process::exit(0);
+    }
     let sidecar_dir = match std::env::var_os("PAPERCUSP_SIDECAR_DIR") {
         Some(path) if !path.is_empty() => std::path::PathBuf::from(path),
         _ => {
@@ -10202,7 +10269,7 @@ fn run_headless_service() -> ! {
     if status.as_ref().is_ok_and(|status| status.success()) {
         loop {
             #[cfg(unix)]
-            if shutdown_requested.load(Ordering::Relaxed) {
+            if shutdown_requested.load(Ordering::Relaxed) || startup_policy::clean_stop_requested() {
                 break;
             }
             let healthy = find_operator_discovery(&workspace_home, false)
@@ -10222,7 +10289,7 @@ fn run_headless_service() -> ! {
             std::thread::sleep(Duration::from_secs(2));
         }
         #[cfg(unix)]
-        if shutdown_requested.load(Ordering::Relaxed) {
+        if shutdown_requested.load(Ordering::Relaxed) || startup_policy::clean_stop_requested() {
             std::process::exit(0);
         }
     }
@@ -10240,8 +10307,17 @@ fn wait_for_headless_child(
     child: &mut Child,
     shutdown_requested: &AtomicBool,
 ) -> std::io::Result<HeadlessWaitResult> {
+    wait_for_headless_child_with_stop(child, shutdown_requested, startup_policy::clean_stop_requested)
+}
+
+#[cfg(unix)]
+fn wait_for_headless_child_with_stop(
+    child: &mut Child,
+    shutdown_requested: &AtomicBool,
+    clean_stop: impl Fn() -> bool,
+) -> std::io::Result<HeadlessWaitResult> {
     loop {
-        if shutdown_requested.load(Ordering::Relaxed) {
+        if shutdown_requested.load(Ordering::Relaxed) || clean_stop() {
             // systemd sends SIGTERM to this wrapper, not the serve child.
             // Forward it through the existing process-group shutdown path so
             // serve can stop embedded Postgres with pg_ctl before we exit.
@@ -10258,7 +10334,7 @@ fn wait_for_headless_child(
 
 #[cfg(all(test, unix))]
 mod headless_service_shutdown_tests {
-    use super::{isolate_process_group, wait_for_headless_child, HeadlessWaitResult};
+    use super::{isolate_process_group, wait_for_headless_child_with_stop, HeadlessWaitResult};
     use std::fs;
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -10267,6 +10343,15 @@ mod headless_service_shutdown_tests {
 
     #[test]
     fn shutdown_request_forwards_term_before_reaping_headless_child() {
+        assert_shutdown(false);
+    }
+
+    #[test]
+    fn clean_stop_forwards_term_without_requiring_an_os_signal() {
+        assert_shutdown(true);
+    }
+
+    fn assert_shutdown(clean_stop: bool) {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock after epoch")
@@ -10293,11 +10378,11 @@ mod headless_service_shutdown_tests {
         }
         assert!(ready.exists(), "fixture did not become ready");
 
-        let shutdown_requested = AtomicBool::new(true);
-        let result = wait_for_headless_child(&mut child, &shutdown_requested)
+        let shutdown_requested = AtomicBool::new(!clean_stop);
+        let result = wait_for_headless_child_with_stop(&mut child, &shutdown_requested, || clean_stop)
             .expect("wait for headless child");
         assert!(matches!(result, HeadlessWaitResult::ShutdownRequested));
-        assert!(shutdown_requested.load(Ordering::Relaxed));
+        assert_eq!(shutdown_requested.load(Ordering::Relaxed), !clean_stop);
         assert_eq!(
             fs::read_to_string(&marker).expect("read TERM marker"),
             "reached"
@@ -10455,6 +10540,9 @@ pub fn run() {
             dev_bridge::__dev_bridge_result,
             env_switch::list_envs,
             docs_search::open_docs_search_palette,
+            startup_policy::startup_policy_status,
+            startup_policy::startup_policy_set_login,
+            startup_policy::startup_policy_set_keep_running,
             open_route_in_app,
         ])
         .events(tauri_specta::collect_events![OperatorDeadPayload]);
@@ -10572,6 +10660,9 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
     };
 
     let builder = base
+        .on_menu_event(|app, event| {
+            if event.id.as_ref().starts_with("startup-") { handle_startup_menu(app, event.id.as_ref()); }
+        })
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -10662,6 +10753,9 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
                 return Err(msg.into());
             }
             let role = app_role::detect(&app.config().identifier);
+            if let Ok(submenu) = build_startup_submenu(app.handle()) {
+                if let Ok(menu) = tauri::menu::Menu::with_items(app.handle(), &[&submenu]) { let _ = app.set_menu(menu); }
+            }
             // WI-6502: make the WebKitGTK compositor honour the damage rects it
             // already computes, instead of repainting the whole viewport on
             // every keystroke. Unconditional (NOT dev-gated like env_switch
@@ -11099,6 +11193,11 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
             // "surface via the tray", not "auto-install".
             spawn_server_update_poller(app);
 
+            if !startup_policy::automatic_start_allowed() {
+                eprintln!("[papercusp-server] automatic start suppressed; native settings remain available");
+                return Ok(());
+            }
+
             #[cfg(target_os = "windows")]
             {
                 let status = wsl_setup::detect(&app.handle());
@@ -11222,6 +11321,17 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
                 if code.is_none() && is_server {
                     api.prevent_exit();
                 } else {
+                    if code.is_none() && !is_server {
+                        match startup_policy::Store::device().and_then(|s| s.read()) {
+                            Ok(policy) if !policy.keep_running_after_close => {
+                                if startup_policy::Store::device().and_then(|s| s.set_clean_stop(true)).is_err() {
+                                    api.prevent_exit();
+                                    return;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     shutdown_children_once(app_handle);
                 }
             }
