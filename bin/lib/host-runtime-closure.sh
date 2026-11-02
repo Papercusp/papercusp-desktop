@@ -520,7 +520,7 @@ copy_pkg_closure() {
       # D-180: upstream omitted Intel macOS from the pinned registry package.
       # Import only an exact-version, hash-bound upstream source-build closure
       # through the existing native copier; never modify the dependency donor.
-      papercusp_verify_transformers_native_target "$REPO_ROOT" "$TARGET_OS" "$TARGET_ARCH" "$dest" || exit 1
+      papercusp_verify_transformers_native_target "$REPO_ROOT" "$TARGET_OS" "$TARGET_ARCH" "$dest" "${_transformers_declaration_policy:-exact}" || exit 1
     fi
     prune_foreign_prebuilds "$dest"
     prune_foreign_onnx_bins "$dest"
