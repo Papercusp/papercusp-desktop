@@ -48,6 +48,23 @@ test('native builder refuses moving or shell-looking toolchain versions', () => 
   }
 });
 
+test('native builder checks the full GUI development closure before compilation', () => {
+  const script = recipe.split('# NATIVE_GUI_PREFLIGHT_BEGIN\n')[1]
+    .split('# NATIVE_GUI_PREFLIGHT_END')[0];
+  const run = (missing) => spawnSync('bash', ['-euo', 'pipefail', '-c',
+    'pkg-config() { [[ "$1" = --exists && "$2" != "$FIXTURE_MISSING_MODULE" ]]; };\n' + script], {
+    encoding: 'utf8', env: { ...process.env, FIXTURE_MISSING_MODULE: missing },
+  });
+  assert.equal(run('').status, 0);
+  for (const module of ['gtk+-3.0', 'webkit2gtk-4.1', 'javascriptcoregtk-4.1',
+    'ayatana-appindicator3-0.1', 'librsvg-2.0']) {
+    const r = run(module);
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /requires GUI development module/);
+    assert.ok(r.stderr.includes(module));
+  }
+});
+
 test('factory pgvector validation admits target ELF and refuses missing, empty or host inputs', () => {
   const scratch = makeDesktopTestScratchDirSync('native-pgvector-');
   const lib = path.join(scratch, 'lib');
