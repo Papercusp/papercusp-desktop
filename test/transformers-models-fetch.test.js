@@ -47,7 +47,7 @@ function nativeTargetFixture() {
     return dir;
   }
   const cache = path.join(root, 'bin-cache');
-  const probe = (os, arch, stage = '') => spawnSync('bash', ['-c', 'source "$1"; papercusp_verify_transformers_native_target "$2" "$3" "$4" "$5"', 'test', lib, root, os, arch, stage], {
+  const probe = (os, arch, stage = '', policy = 'exact') => spawnSync('bash', ['-c', 'source "$1"; papercusp_verify_transformers_native_target "$2" "$3" "$4" "$5" "$6"', 'test', lib, root, os, arch, stage, policy], {
     encoding: 'utf8', env: { ...process.env, PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT: contract, PAPERCUSP_SIDECAR_BIN_CACHE: cache },
   });
   function sourceCache() {
@@ -76,8 +76,44 @@ function nativeTargetFixture() {
     save();
     return { dir, receipt, save };
   }
-  return { root, runtime, writeTarget, probe, sourceCache };
+  return { root, runtime, contract, writeTarget, probe, sourceCache };
 }
+
+test('historical caret declarations require explicit frozen-lock policy and exact source/lock/runtime agreement', () => {
+  const f = nativeTargetFixture();
+  try {
+    f.writeTarget('linux', 'x64');
+    const lockPath = path.join(f.root, 'package-lock.json');
+    const manifestPath = path.join(f.root, 'apps/operator/package.json');
+    const lock = JSON.parse(fs.readFileSync(lockPath));
+    lock.packages['apps/operator'].dependencies['@huggingface/transformers'] = '^4.2.0';
+    const manifest = { dependencies: { '@huggingface/transformers': '^4.2.0' } };
+    fs.writeFileSync(lockPath, JSON.stringify(lock));
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    assert.equal(f.probe('linux', 'x64').status, 1, 'default maintained-source policy stays strict');
+    let result = f.probe('linux', 'x64', '', 'frozen-lock');
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    lock.packages['node_modules/@huggingface/transformers'].version = '4.3.0';
+    fs.writeFileSync(lockPath, JSON.stringify(lock));
+    result = f.probe('linux', 'x64', '', 'frozen-lock');
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /lock entry .*expects 4.2.0, got 4.3.0/);
+    lock.packages['node_modules/@huggingface/transformers'].version = '4.2.0';
+    fs.writeFileSync(lockPath, JSON.stringify(lock));
+    manifest.dependencies['@huggingface/transformers'] = '^4.1.0';
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    result = f.probe('linux', 'x64', '', 'frozen-lock');
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /must match lock declaration/);
+    manifest.dependencies['@huggingface/transformers'] = '^4.2.0';
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    fs.writeFileSync(path.join(f.root, 'node_modules/@huggingface/transformers/package.json'),
+      JSON.stringify({ name: '@huggingface/transformers', version: '4.3.0' }));
+    result = f.probe('linux', 'x64', '', 'frozen-lock');
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /installed package expects .*4.2.0/);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
 
 test('split tooling reads the selected product model contract and preserves explicit override and ordinary defaults', () => {
   const f = nativeTargetFixture();

@@ -38,17 +38,17 @@ PAPERCUSP_TRANSFORMERS_MODELS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && 
 PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT_DEFAULT="${PAPERCUSP_DESKTOP_TARGET_ROOT:-$PAPERCUSP_TRANSFORMERS_MODELS_LIB_DIR/../..}/src-tauri/distribution-contract.json"
 
 papercusp_verify_transformers_dependencies() {
-  local repo_root="${1:-}" check_installed="${2:-0}"
+  local repo_root="${1:-}" check_installed="${2:-0}" declaration_policy="${3:-exact}"
   local contract="${PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT:-$PAPERCUSP_TRANSFORMERS_DISTRIBUTION_CONTRACT_DEFAULT}"
   [ -n "$repo_root" ] || return 2
-  python3 - "$contract" "$repo_root" "$check_installed" <<'PY'
+  python3 - "$contract" "$repo_root" "$check_installed" "$declaration_policy" <<'PY'
 import json
 import os
 import posixpath
 import re
 import sys
 
-contract_path, repo_root, check_installed = sys.argv[1:]
+contract_path, repo_root, check_installed, declaration_policy = sys.argv[1:]
 package_name = "@huggingface/transformers"
 package_suffix = "node_modules/" + package_name
 
@@ -66,6 +66,8 @@ def read_object(path):
     return document
 
 contract = read_object(contract_path)
+if declaration_policy not in ('exact', 'frozen-lock'):
+    fail(f"unknown declaration policy: {declaration_policy}")
 matches = [
     pack for pack in contract.get("server", {}).get("optionalPacks", [])
     if pack.get("name") == "local-models"
@@ -95,12 +97,16 @@ for relative_path, entry in packages.items():
     declaration = entry.get("dependencies", {}).get(package_name)
     if declaration is None:
         continue
-    if declaration != expected:
+    # Older immutable releases used ^<expected>. Their lock and installed
+    # resolution must STILL be exactly expected, and source/lock declarations
+    # must agree. The default policy for maintained source stays literal-exact.
+    allowed = (expected, '^' + expected) if declaration_policy == 'frozen-lock' else (expected,)
+    if declaration not in allowed:
         fail(f"lock declaration {relative_path} must pin {expected}, got {declaration}")
     manifest = read_object(os.path.join(repo_root, relative_path, "package.json"))
     actual = manifest.get("dependencies", {}).get(package_name)
-    if actual != expected:
-        fail(f"package declaration {relative_path} must pin {expected}, got {actual}")
+    if actual != declaration:
+        fail(f"package declaration {relative_path} must match lock declaration {declaration}, got {actual}")
     candidates = []
     directory = relative_path
     while True:
@@ -135,6 +141,7 @@ print(json.dumps({
     "consumers": sorted(consumers),
     "resolutions": resolutions,
     "installedChecked": check_installed == "1",
+    "declarationPolicy": declaration_policy,
 }))
 PY
 }
@@ -145,7 +152,7 @@ PY
 # different runtime version or another architecture's binding.
 papercusp_verify_transformers_native_target() {
   local repo_root="$1" target_os="$2" target_arch="$3" dependency_contract stage_package="${4:-}"
-  dependency_contract="$(papercusp_verify_transformers_dependencies "$repo_root" 1)" || return $?
+  dependency_contract="$(papercusp_verify_transformers_dependencies "$repo_root" 1 "${5:-exact}")" || return $?
   node - "$repo_root" "$target_os" "$target_arch" "$dependency_contract" \
     "${PAPERCUSP_SIDECAR_BIN_CACHE:-$HOME/.cache/papercusp-sidecar-bins}" "$stage_package" <<'NODE'
 const fs = require('node:fs');
