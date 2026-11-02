@@ -463,6 +463,38 @@ test('clean build-start provenance survives cutter-authored dirt at emit time', 
   assert.equal(doc.gitDirtyAtEmit, true, 'post-preflight cutter mutations stay visible as diagnostics');
 });
 
+test('source provenance hashes regular files with bounded reads and refuses a changing file', () => {
+  const text = fs.readFileSync(EMITTER, 'utf8');
+  const helper = text.match(/^function sha256File\(file\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(helper, 'source provenance file hasher is missing');
+  const dir = tmp();
+  try {
+    const file = path.join(dir, 'source.bin');
+    const bytes = Buffer.alloc(3 * 1024 * 1024 + 17, 42);
+    fs.writeFileSync(file, bytes);
+    const run = (mutate) => {
+      const reads = [];
+      let changed = false;
+      const guarded = { ...fs,
+        readFileSync() { throw new Error('unbounded source read'); },
+        readSync(fd, buffer, offset, length, position) {
+          reads.push(length);
+          const count = fs.readSync(fd, buffer, offset, length, position);
+          if (mutate && !changed) { changed = true; fs.appendFileSync(file, 'changed'); }
+          return count;
+        },
+      };
+      const hash = new Function('fs', 'crypto', `${helper}; return sha256File;`)(guarded, crypto);
+      return { digest: hash(file), reads };
+    };
+    const result = run(false);
+    assert.equal(result.digest, crypto.createHash('sha256').update(bytes).digest('hex'));
+    assert.ok(result.reads.length > 3);
+    assert.ok(result.reads.every(length => length <= 1024 * 1024));
+    assert.throws(() => run(true), /source changed during provenance hash/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('dirty build-start provenance content-binds source paths and each artifact clock', () => {
   const repo = tmp();
   const git = (args) => {
