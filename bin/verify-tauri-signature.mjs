@@ -26,7 +26,8 @@
 //              a path to a pubkey file, or the bare "RWR..." key line.
 // Exit 0 = signature valid; 1 = invalid / key-id mismatch; 2 = usage/parse error.
 import { readFileSync, existsSync, createReadStream } from 'node:fs';
-import { createHash, createPublicKey, verify as edVerify } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { verifyTauriSignature } from '../../libs/generic/tauri-release-kit/src/signature.mjs';
 
 const args = process.argv.slice(2);
 const wantJson = args.includes('--json');
@@ -49,63 +50,6 @@ if (!pubArg || !artifact || !sigPath) {
 if (!existsSync(artifact)) finish(2, { valid: false, error: `artifact not found: ${artifact}` });
 if (!existsSync(sigPath)) finish(2, { valid: false, error: `sig file not found: ${sigPath}` });
 
-// ── Resolve the pubkey's key line ─────────────────────────────────────────
-function decodeMaybeText(s) {
-  const t = s.replace(/\s+/g, '');
-  if (!/^[A-Za-z0-9+/=]+$/.test(t)) return null;
-  try { return Buffer.from(t, 'base64').toString('utf8'); } catch { return null; }
-}
-function keyLineFrom(arg) {
-  let text = arg;
-  if (existsSync(arg)) text = readFileSync(arg, 'utf8');
-  const decoded = decodeMaybeText(text.trim());
-  // tauri.conf pubkey is base64 of the 2-line file → decoded text names the key.
-  if (decoded && /minisign public key/i.test(decoded)) text = decoded;
-  const lines = text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-  // The key material is the LAST non-empty line (comment line comes first).
-  return lines[lines.length - 1] || '';
-}
-
-let keyBytes, sigBytes, sigFileText, trustedComment, globalSignature;
-try {
-  keyBytes = Buffer.from(keyLineFrom(pubArg), 'base64');
-  // The .sig file on disk is base64 of the whole minisign sig file.
-  sigFileText = Buffer.from(readFileSync(sigPath, 'utf8').trim(), 'base64').toString('utf8');
-  // Comment bytes are signed: trimming them would accept altered metadata.
-  const sigLines = sigFileText.split(/\r?\n/);
-  while (sigLines.at(-1) === '') sigLines.pop();
-  if (sigLines.length !== 2 && sigLines.length !== 4) {
-    finish(2, { valid: false, error: 'expected an artifact signature or a complete trusted-comment signature' });
-  }
-  sigBytes = Buffer.from(sigLines[1] || '', 'base64');
-  if (sigLines.length === 4) {
-    const prefix = 'trusted comment: ';
-    if (!sigLines[2].startsWith(prefix)) {
-      finish(2, { valid: false, error: 'missing trusted comment prefix' });
-    }
-    trustedComment = sigLines[2].slice(prefix.length);
-    globalSignature = Buffer.from(sigLines[3], 'base64');
-    if (globalSignature.length !== 64) {
-      finish(2, { valid: false, error: 'global signature must contain 64 bytes' });
-    }
-  }
-} catch (e) {
-  finish(2, { valid: false, error: `parse error: ${e.message}` });
-}
-if (keyBytes.length !== 42) finish(2, { valid: false, error: `pubkey block is ${keyBytes.length} bytes, expected 42` });
-if (sigBytes.length !== 74) finish(2, { valid: false, error: `sig block is ${sigBytes.length} bytes, expected 74` });
-
-const pubKeyId = keyBytes.subarray(2, 10);
-const pub = keyBytes.subarray(10, 42);
-const sigAlgo = sigBytes.subarray(0, 2).toString('latin1');
-const sigKeyId = sigBytes.subarray(2, 10);
-const sig = sigBytes.subarray(10, 74);
-const keyIdHex = pubKeyId.toString('hex');
-
-if (!pubKeyId.equals(sigKeyId)) {
-  finish(1, { valid: false, reason: `key id mismatch — sig key ${sigKeyId.toString('hex')} != pubkey ${keyIdHex} (signature not from this key)`, keyId: keyIdHex });
-}
-
 function blake2b512File(p) {
   return new Promise((res, rej) => {
     const h = createHash('blake2b512');
@@ -117,25 +61,9 @@ function blake2b512File(p) {
 }
 
 async function main() {
-  let message;
-  if (sigAlgo === 'ED') message = await blake2b512File(artifact); // prehashed (tauri default)
-  else if (sigAlgo === 'Ed') message = readFileSync(artifact); // legacy raw-file
-  else finish(2, { valid: false, error: `unknown signature algorithm '${sigAlgo}'` });
-
-  // Rebuild an SPKI DER wrapper around the raw 32-byte Ed25519 public key.
-  const spki = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), pub]);
-  let ok;
-  try {
-    const keyObj = createPublicKey({ key: spki, format: 'der', type: 'spki' });
-    ok = edVerify(null, message, keyObj, sig);
-    if (ok && globalSignature && !edVerify(null,
-      Buffer.concat([sig, Buffer.from(trustedComment, 'utf8')]), keyObj, globalSignature)) {
-      finish(1, { valid: false, reason: 'global signature does not verify against the trusted comment', algo: sigAlgo, keyId: keyIdHex });
-    }
-  } catch (e) {
-    finish(1, { valid: false, reason: `verify error: ${e.message}`, algo: sigAlgo, keyId: keyIdHex });
-  }
-  if (ok) finish(0, { valid: true, algo: sigAlgo, keyId: keyIdHex });
-  finish(1, { valid: false, reason: 'ed25519 signature does not verify against the pubkey', algo: sigAlgo, keyId: keyIdHex });
+  const publicKey = existsSync(pubArg) ? readFileSync(pubArg, 'utf8') : pubArg;
+  const { code, ...result } = await verifyTauriSignature(publicKey, readFileSync(sigPath, 'utf8'),
+    algo => algo === 'ED' ? blake2b512File(artifact) : readFileSync(artifact));
+  finish(code, result);
 }
 main();
