@@ -386,8 +386,99 @@ pub struct Status {
     pub login_enabled: Option<bool>,
     pub login_error: Option<String>,
     pub boot_enabled: Option<bool>,
+    pub boot_installed: Option<bool>,
     pub boot_mechanism: String,
     pub boot_handoff: String,
+}
+
+/// Registration and enabled state are independent. Inaccessible OS state must
+/// remain unknown; a present plist/task alone does not prove enabled/running.
+#[derive(Debug, PartialEq, Eq)]
+struct BootRegistration {
+    installed: Option<bool>,
+    enabled: Option<bool>,
+}
+
+#[cfg(target_os = "macos")]
+fn boot_registration() -> BootRegistration {
+    let path = PathBuf::from("/Library/LaunchDaemons/com.papercusp.server.plist");
+    match fs::metadata(&path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return BootRegistration {
+                installed: Some(false),
+                enabled: Some(false),
+            }
+        }
+        Err(_) => {
+            return BootRegistration {
+                installed: None,
+                enabled: None,
+            }
+        }
+        Ok(_) => {}
+    }
+    let output = crate::wsl_sidecar_staging::run_bounded_output(
+        std::process::Command::new("launchctl").args(["print-disabled", "system"]),
+        std::time::Duration::from_secs(3),
+    );
+    let disabled = output.ok().filter(|o| o.status.success()).and_then(|o| {
+        String::from_utf8_lossy(&o.stdout).lines().find_map(|line| {
+            let (key, value) = line.trim().split_once(" => ")?;
+            if key != "\"com.papercusp.server\"" {
+                return None;
+            }
+            match value.trim_end_matches(';').trim() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            }
+        })
+    });
+    let enabled = if disabled == Some(true) {
+        Some(false)
+    } else {
+        crate::wsl_sidecar_staging::run_bounded_output(
+            std::process::Command::new("launchctl").args(["print", "system/com.papercusp.server"]),
+            std::time::Duration::from_secs(3),
+        )
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|_| true)
+    };
+    BootRegistration {
+        installed: Some(true),
+        enabled,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn boot_registration() -> BootRegistration {
+    // Read-only inspection. Services/tasks may require elevation; do not turn
+    // AccessDenied or an incomplete census into "not installed".
+    let script = r#"$ErrorActionPreference='Stop'
+$services=@(Get-CimInstance Win32_Service | Where-Object { $_.Name -like '*Papercusp*' -and $_.PathName -like '*Papercusp*' })
+$tasks=@(Get-ScheduledTask | Where-Object { ($_.Actions | Where-Object { $_.Execute -like '*Papercusp*' }).Count -gt 0 -and ($_.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskBootTrigger' }).Count -gt 0 })
+$boot=@($services | Where-Object { $_.StartMode -eq 'Auto' })
+$enabledTasks=@($tasks | Where-Object { $_.Settings.Enabled })
+@{installed=($services.Count -gt 0 -or $tasks.Count -gt 0);enabled=($boot.Count -gt 0 -or $enabledTasks.Count -gt 0)} | ConvertTo-Json -Compress
+"#;
+    let output = crate::wsl_sidecar_staging::run_bounded_output(
+        std::process::Command::new("powershell.exe").args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ]),
+        std::time::Duration::from_secs(5),
+    );
+    let result = output
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok());
+    BootRegistration {
+        installed: result.as_ref().and_then(|v| v["installed"].as_bool()),
+        enabled: result.as_ref().and_then(|v| v["enabled"].as_bool()),
+    }
 }
 
 pub fn status() -> io::Result<Status> {
@@ -398,7 +489,7 @@ pub fn status() -> io::Result<Status> {
         .err()
         .map(|_| "Sign-in registration is unavailable; check the OS startup settings.".into());
     #[cfg(target_os = "linux")]
-    let (boot_enabled, boot_mechanism, boot_handoff) = {
+    let (boot_enabled, boot_installed, boot_mechanism, boot_handoff) = {
         let uid = unsafe { libc::geteuid() }.to_string();
         let linger = crate::wsl_sidecar_staging::run_bounded_output(
             std::process::Command::new("loginctl").args([
@@ -418,18 +509,38 @@ pub fn status() -> io::Result<Status> {
                     "no" => Some(false),
                     _ => None,
                 });
-        (match (login_enabled, linger) { (Some(false), _) | (_, Some(false)) => Some(false), (Some(true), Some(true)) => Some(true), _ => None },
+        let installed = systemctl(&[
+            "show",
+            "papercusp-server.service",
+            "--property=LoadState",
+            "--value",
+        ])
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| match String::from_utf8_lossy(&o.stdout).trim() {
+            "loaded" | "masked" => Some(true),
+            "not-found" => Some(false),
+            _ => None,
+        });
+        (match (login_enabled, linger) { (Some(false), _) | (_, Some(false)) => Some(false), (Some(true), Some(true)) => Some(true), _ => None }, installed,
          "systemd user service and account linger", "For boot without sign-in, an administrator can run papercusp-server-enable-boot-start for your account. Disabling sign-in startup also blocks this user service at boot.")
     };
     #[cfg(target_os = "macos")]
-    let (boot_enabled, boot_mechanism, boot_handoff) = (None, "launchd system/com.papercusp.server", "An administrator must inspect or change the installed com.papercusp.server LaunchDaemon with launchctl. Sign-in settings do not disable a machine service.");
+    let (boot_enabled, boot_installed, boot_mechanism, boot_handoff) = {
+        let b = boot_registration();
+        (b.enabled, b.installed, "launchd system/com.papercusp.server", "An administrator must inspect or change the installed com.papercusp.server LaunchDaemon with launchctl. Sign-in settings do not disable a machine service.")
+    };
     #[cfg(target_os = "windows")]
-    let (boot_enabled, boot_mechanism, boot_handoff) = (None, "Windows Services and Task Scheduler", "An administrator must inspect Papercusp boot services or tasks in Services and Task Scheduler. Sign-in settings do not disable a machine service.");
+    let (boot_enabled, boot_installed, boot_mechanism, boot_handoff) = {
+        let b = boot_registration();
+        (b.enabled, b.installed, "Windows Services and Task Scheduler", "An administrator must inspect Papercusp boot services or tasks in Services and Task Scheduler. Sign-in settings do not disable a machine service.")
+    };
     Ok(Status {
         policy,
         login_enabled,
         login_error,
         boot_enabled,
+        boot_installed,
         boot_mechanism: boot_mechanism.into(),
         boot_handoff: boot_handoff.into(),
     })
@@ -447,6 +558,34 @@ pub fn clean_stop_requested() -> bool {
     Store::device()
         .and_then(|s| s.read())
         .is_ok_and(|p| p.clean_stop)
+}
+
+/// --startup belongs to OS registration. --manual-start is an explicit user
+/// service launch; ordinary Server launches stay conservative because older
+/// registrations have no marker. Preference/repair/restart never clears stop.
+pub fn apply_launch_intent(store: &Store, args: &[String], gui: bool) -> io::Result<()> {
+    let automatic = args
+        .iter()
+        .any(|s| matches!(s.as_str(), "--startup" | "--headless-service"));
+    let explicit = args.iter().any(|s| s == "--manual-start");
+    let restore = args
+        .iter()
+        .any(|s| matches!(s.as_str(), "--restart" | "--upgrade" | "--repair"));
+    if explicit || (gui && !automatic && !restore) {
+        store.set_clean_stop(false)?;
+    }
+    Ok(())
+}
+
+pub fn apply_current_launch(gui: bool) -> io::Result<()> {
+    let mut args: Vec<String> = std::env::args().collect();
+    if std::env::var_os("PAPERCUSP_NATIVE_POLICY_RESTART").is_some() {
+        args.push("--restart".into());
+        std::env::remove_var("PAPERCUSP_NATIVE_POLICY_RESTART");
+    }
+    // A dev verifier shares the OS identity but is not a user relaunch.
+    // Explicit --manual-start remains testable in a disposable OS account.
+    apply_launch_intent(&Store::device()?, &args, gui && !cfg!(debug_assertions))
 }
 
 #[tauri::command]
@@ -527,6 +666,42 @@ mod tests {
         assert!(f.store().read().unwrap().clean_stop);
         s.set_clean_stop(false).unwrap();
         assert!(!s.read().unwrap().clean_stop);
+    }
+
+    #[test]
+    fn only_manual_launch_clears_clean_stop_not_upgrade_or_login() {
+        let f = Fixture::new();
+        let s = f.store();
+        for (args, gui) in [
+            (vec!["--startup"], false),
+            (vec!["--headless-service"], false),
+            (vec![], false),
+            (vec!["--upgrade"], true),
+            (vec!["--repair"], true),
+            (vec!["--restart"], true),
+        ] {
+            s.set_clean_stop(true).unwrap();
+            apply_launch_intent(
+                &s,
+                &args.into_iter().map(String::from).collect::<Vec<_>>(),
+                gui,
+            )
+            .unwrap();
+            assert!(s.read().unwrap().clean_stop);
+        }
+        for (args, gui) in [
+            (vec![], true),
+            (vec!["--manual-start", "--headless-service"], false),
+        ] {
+            s.set_clean_stop(true).unwrap();
+            apply_launch_intent(
+                &s,
+                &args.into_iter().map(String::from).collect::<Vec<_>>(),
+                gui,
+            )
+            .unwrap();
+            assert!(!s.read().unwrap().clean_stop);
+        }
     }
 
     #[test]

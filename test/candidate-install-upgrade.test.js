@@ -123,7 +123,10 @@ function fixture({
   // user-data check (optionally reporting the database row lost).
   executable(vmctl, `printf 'VMCTL %s\\n' "$*" >>"$MOCK_LOG"
 case "$1" in
-  endpoint) printf 'ssh_port=2224\\nssh_key=%s\\nssh_host=tester@127.0.0.1\\n' "$MOCK_KEY" ;;
+  up) touch "$MOCK_LOG.booted" ;;
+  endpoint)
+    [[ -f "$MOCK_LOG.booted" && "$MOCK_ENDPOINT_FAIL" != 1 ]] || exit 23
+    printf 'ssh_port=2224\\nssh_key=%s\\nssh_host=tester@127.0.0.1\\n' "$MOCK_KEY" ;;
   is-running) [[ "$MOCK_RUNNING" == 1 ]] ;;
   ssh)
     script="$(cat)"
@@ -201,6 +204,7 @@ printf '{"ok":true,"flipped":true,"portHeld":true,"shaAfter":"%s","versionAfter"
       MOCK_SSH_DIR: sshDir,
       MOCK_KEY: key,
       MOCK_RUNNING: running ? "1" : "0",
+      MOCK_ENDPOINT_FAIL: "0",
       MOCK_SPLIT_SEED: splitSeed ? "1" : "0",
       MOCK_FAIL_VERIFIER: failVerifier,
       MOCK_FAIL_VM_AT: "",
@@ -247,6 +251,7 @@ test("candidate upgrade and exact baseline rollback produce a content-bound rece
     const result = run(f);
     assert.equal(result.status, 0, `${result.stdout}\\n${result.stderr}`);
     const lines = calls(f);
+    assert.ok(lines.indexOf("VMCTL up clean") < lines.indexOf("VMCTL endpoint clean"));
     assert.ok(lines.indexOf("VMCTL reset clean") < lines.indexOf(`VMCTL install clean ${f.baselineServer}`));
     assert.ok(lines.indexOf(`VMCTL install clean ${f.baselineGui}`) < lines.findIndex((line) => line.startsWith("VERIFY ")));
     assert.deepEqual(lines.filter((line) => line.startsWith("VERIFY ")).map((line) => line.split(" ").at(-1)), [f.candidateSha, f.baselineSha]);
@@ -266,6 +271,20 @@ test("candidate upgrade and exact baseline rollback produce a content-bound rece
     assert.equal(evidence.rollbackTarget.server.sha256.length, 64);
     assert.equal(evidence.candidate.upgrade.flipped, true);
     assert.equal(evidence.rollbackTarget.rollback.flipped, true);
+  });
+});
+
+test('endpoint failure after boot powers down the owned VM before any package install', () => {
+  withFixture({}, (f) => {
+    f.env.MOCK_ENDPOINT_FAIL = '1';
+    const result = run(f);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /cannot read the clean VM endpoint/);
+    assert.equal(failure(f).phase, 'vm-endpoint');
+    assert.ok(calls(f).includes('VMCTL up clean'));
+    assert.equal(calls(f).at(-1), 'VMCTL down clean');
+    assert.equal(calls(f).some(line => line.startsWith('VMCTL install ')), false);
+    assert.equal(fs.existsSync(f.receipt), false);
   });
 });
 

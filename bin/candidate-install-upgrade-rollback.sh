@@ -138,17 +138,6 @@ TRUSTED_PUBKEY="$(legacy_client_recovery_trusted_pubkey "$KEY_REPO" "$BASELINE_S
 signature_rows="$(legacy_client_recovery_verify_signatures "$TRUSTED_PUBKEY" "$CANDIDATE_GUI" "$CANDIDATE_SERVER")" \
   || die "candidate packages do not verify under the updater key baseline $BASELINE_SHA trusts: $signature_rows"
 
-# Resolve the endpoint before starting the VM. A reset clean-room VM rotates its
-# host key, so the verifier receives the release route's explicit transport policy.
-endpoint="$(bash "$VMCTL" endpoint "$VM")" || die "cannot read the $VM VM endpoint"
-SSH_PORT="$(sed -n 's/^ssh_port=//p' <<<"$endpoint" | head -1)"
-SSH_KEY="$(sed -n 's/^ssh_key=//p' <<<"$endpoint" | head -1)"
-SSH_HOST="$(sed -n 's/^ssh_host=//p' <<<"$endpoint" | head -1)"
-[[ "$SSH_PORT" =~ ^[0-9]+$ && -n "$SSH_KEY" && -n "$SSH_HOST" ]] || die "malformed VM endpoint: $endpoint"
-[[ -r "$SSH_KEY" ]] || die "Linux install credential is unreadable: $SSH_KEY"
-key_mode="$(stat -c '%a' "$SSH_KEY")"
-(( (8#$key_mode & 077) == 0 )) || die "Linux install credential must not be group/world accessible (mode $key_mode): $SSH_KEY"
-
 lock_file="${TMPDIR:-/tmp}/papercusp-linux-smoke-$VM.lock"
 exec {lock_fd}>"$lock_file" || die "cannot open VM lock: $lock_file"
 flock -n "$lock_fd" || die "another candidate install/upgrade route holds $lock_file"
@@ -224,6 +213,19 @@ timeout --kill-after=30 "${PAPERCUSP_CANDIDATE_VM_RESET_TIMEOUT:-180}" bash "$VM
 timeout --kill-after=30 "${PAPERCUSP_CANDIDATE_VM_UP_TIMEOUT:-300}" bash "$VMCTL" up "$VM"
 timeout --kill-after=30 "$(( ${PAPERCUSP_CANDIDATE_VM_SSH_TIMEOUT:-300} + 30 ))" \
   bash "$VMCTL" wait-ssh "$VM" "${PAPERCUSP_CANDIDATE_VM_SSH_TIMEOUT:-300}"
+
+# Ad-hoc VM ports are allocated at boot. Read the actual owned instance after
+# it starts; guessing a stopped instance's ports can reach a peer's guest.
+# Endpoint failures remain inside cleanup, so this VM is still powered down.
+PHASE=vm-endpoint
+endpoint="$(bash "$VMCTL" endpoint "$VM")" || die "cannot read the $VM VM endpoint"
+SSH_PORT="$(sed -n 's/^ssh_port=//p' <<<"$endpoint" | head -1)"
+SSH_KEY="$(sed -n 's/^ssh_key=//p' <<<"$endpoint" | head -1)"
+SSH_HOST="$(sed -n 's/^ssh_host=//p' <<<"$endpoint" | head -1)"
+[[ "$SSH_PORT" =~ ^[0-9]+$ && -n "$SSH_KEY" && -n "$SSH_HOST" ]] || die "malformed VM endpoint: $endpoint"
+[[ -r "$SSH_KEY" ]] || die "Linux install credential is unreadable: $SSH_KEY"
+key_mode="$(stat -c '%a' "$SSH_KEY")"
+(( (8#$key_mode & 077) == 0 )) || die "Linux install credential must not be group/world accessible (mode $key_mode): $SSH_KEY"
 
 echo "candidate-install-upgrade-rollback: installing exact rollback baseline $BASELINE_SHA"
 PHASE=baseline-install

@@ -9010,6 +9010,7 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     download_verify_then_install(&app, update).await?;
 
     // tauri-plugin-process is in scope so we can restart cleanly.
+    std::env::set_var("PAPERCUSP_NATIVE_POLICY_RESTART", "1");
     app.restart();
 }
 
@@ -9272,6 +9273,7 @@ async fn revert_to(app: AppHandle, tag: String) -> Result<(), String> {
     download_verify_then_install(&app, update).await?;
 
     // tauri-plugin-process is in scope so we can restart cleanly.
+    std::env::set_var("PAPERCUSP_NATIVE_POLICY_RESTART", "1");
     app.restart();
 }
 
@@ -10176,6 +10178,10 @@ where
 /// path.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_headless_service() -> ! {
+    if let Err(error) = startup_policy::apply_current_launch(false) {
+        eprintln!("[papercusp-server] native launch policy unavailable: {error}");
+        std::process::exit(0);
+    }
     if !startup_policy::automatic_start_allowed() {
         eprintln!("[papercusp-server] clean stop or unreadable policy; automatic service start suppressed");
         std::process::exit(0);
@@ -10753,6 +10759,10 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
                 return Err(msg.into());
             }
             let role = app_role::detect(&app.config().identifier);
+            let is_gui = matches!(role, app_role::Role::Gui);
+            if let Err(error) = startup_policy::apply_current_launch(is_gui) {
+                eprintln!("[papercusp-desktop] native launch policy unavailable: {error}");
+            }
             if let Ok(submenu) = build_startup_submenu(app.handle()) {
                 if let Ok(menu) = tauri::menu::Menu::with_items(app.handle(), &[&submenu]) { let _ = app.set_menu(menu); }
             }
