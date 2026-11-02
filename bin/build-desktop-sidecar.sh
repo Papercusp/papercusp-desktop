@@ -196,8 +196,15 @@ fi
 # BEFORE the vulnerability-DB refresh below: an incompatible source input must be
 # refused before any network or expensive work (pinned by
 # packages/operator-core/lib/sidecar-transformers-model-source.test.ts).
-if [[ "$DISTRIBUTION_PROFILE" == "vm-release" || "${PAPERCUSP_TRANSFORMERS_VERIFY_PINNED:-0}" == "1" ]]; then
-  papercusp_verify_transformers_dependencies "$REPO_ROOT" 0 || exit 1
+_transformers_declaration_policy=exact
+if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == 1 && "$REPO_ROOT" != "$(cd "$HERE/../.." && pwd)" ]]; then
+  # Audited exact-source cuts already require clean committed source and
+  # decoupled pinned dependencies below. Preserve historical declarations;
+  # verify their exact lock/runtime bytes instead of rewriting frozen source.
+  _transformers_declaration_policy=frozen-lock
+fi
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" || "${PAPERCUSP_RELEASE_AUDIT:-0}" == 1 || "${PAPERCUSP_TRANSFORMERS_VERIFY_PINNED:-0}" == "1" ]]; then
+  papercusp_verify_transformers_dependencies "$REPO_ROOT" 0 "$_transformers_declaration_policy" || exit 1
 fi
 
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
@@ -1573,11 +1580,11 @@ if [[ "$dep_check_ok" -ne 1 ]]; then
   exit 1
 fi
 
-if [[ "$DISTRIBUTION_PROFILE" == "vm-release" || "${PAPERCUSP_TRANSFORMERS_VERIFY_PINNED:-0}" == "1" ]]; then
-  papercusp_verify_transformers_dependencies "$REPO_ROOT" 1 || exit 1
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" || "${PAPERCUSP_RELEASE_AUDIT:-0}" == 1 || "${PAPERCUSP_TRANSFORMERS_VERIFY_PINNED:-0}" == "1" ]]; then
+  papercusp_verify_transformers_dependencies "$REPO_ROOT" 1 "$_transformers_declaration_policy" || exit 1
   # A managed cut starts without node_modules. Validate installed native bytes
   # after dependency hydration, while still failing before SPA/model assembly.
-  papercusp_verify_transformers_native_target "$REPO_ROOT" "$TARGET_OS" "$TARGET_ARCH" || exit 1
+  papercusp_verify_transformers_native_target "$REPO_ROOT" "$TARGET_OS" "$TARGET_ARCH" "" "$_transformers_declaration_policy" || exit 1
 fi
 
 # Prepare the sidecar staging root before the Vite build. The singleflight seam
