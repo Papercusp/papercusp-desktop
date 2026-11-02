@@ -10424,6 +10424,12 @@ mod headless_service_arg_tests {
 }
 
 pub fn run() {
+    // Process entry precedes toolkit/bootstrap work. The version self-report
+    // is written during setup and must not be substituted for this origin.
+    let native_started_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
     // Must precede `tauri::Builder::default()`: the whole purpose of the service
     // entrypoint is to avoid initializing a GUI toolkit when no display exists —
     // GTK on Linux, the window server on a logged-out Mac.
@@ -10654,7 +10660,10 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
     // See app_role.rs + the two-bundle split above.
     // Inject into every window and every new document, before app shortcuts.
     // WebKitGTK reports MacIntel even on Linux; select the modifier from Rust.
-    let base = tauri::Builder::default().append_invoke_initialization_script(
+    let base = tauri::Builder::default().append_invoke_initialization_script(format!(
+        "Object.defineProperty(window, '__papercuspStartupOrigin', {{value: Object.freeze({{startedAtEpochMs: {native_started_at_ms}, pid: {}, primaryWindow: window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label === 'main'}})}});",
+        std::process::id(),
+    )).append_invoke_initialization_script(
         include_str!("zoom-shortcuts.js").replace(
             "__PAPERCUSP_ZOOM_MACOS__",
             if cfg!(target_os = "macos") {
