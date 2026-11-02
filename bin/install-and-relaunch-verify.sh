@@ -46,6 +46,8 @@
 #                                  beside --artifact when the exact-version file
 #                                  is unambiguous. Windows Inno spans are read
 #                                  from provenance.
+#   --seed-artifact PATH           Linux seed companion (repeatable); otherwise
+#                                  resolve the Server's exact provenance-listed seed.
 #   --expected-sha SHA             the new build's sha; default: buildSha from a
 #                                  build-provenance.json next to the artifact
 #   --expected-version VER         optional; default: version from that provenance
@@ -117,6 +119,7 @@ APP_IMAGE="papercusp-desktop.exe"
 REMOTE_DIR=""
 INSTALL_CMD=""
 SERVER_INSTALL_CMD=""
+SEED_ARTIFACTS=()
 RELAUNCH_CMD=""
 OPJSON_PATH=""
 FLIP_TIMEOUT="${FLIP_TIMEOUT:-180}"
@@ -142,6 +145,7 @@ while [[ $# -gt 0 ]]; do
     --platform) PLATFORM="${2:-}"; shift 2 ;;
     --artifact) ARTIFACT="${2:-}"; shift 2 ;;
     --server-artifact) SERVER_ARTIFACT="${2:-}"; shift 2 ;;
+    --seed-artifact) SEED_ARTIFACTS+=("${2:-}"); shift 2 ;;
     --expected-sha) EXPECTED_SHA="${2:-}"; shift 2 ;;
     --expected-version) EXPECTED_VERSION="${2:-}"; shift 2 ;;
     --ssh-key) SSH_KEY="${2:-}"; shift 2 ;;
@@ -187,6 +191,9 @@ if [[ "$ALLOW_DOWNGRADE" == 1 && ( "$PLATFORM" != linux || -n "$INSTALL_CMD" || 
 fi
 [[ -n "$ARTIFACT" ]] || { echo "need --artifact PATH (the new installer to push+install)" >&2; exit 2; }
 [[ -f "$ARTIFACT" ]] || { echo "artifact not found: $ARTIFACT" >&2; exit 2; }
+if (( ${#SEED_ARTIFACTS[@]} > 0 )) && [[ "$PLATFORM" != linux ]]; then
+  echo "--seed-artifact is linux-only" >&2; exit 2
+fi
 REMOTE_BASENAME="$(basename "$ARTIFACT")"
 if [[ "$VERIFY_INSTALLED_MAC" == 1 ]]; then
   [[ "$PLATFORM" == mac && "$REMOTE_BASENAME" == *.dmg && -z "$INSTALL_CMD" && -z "$SERVER_INSTALL_CMD" ]] || {
@@ -611,8 +618,8 @@ elif [[ "$PLATFORM" == "linux" ]]; then
     }
     shopt -s nullglob
     server_candidates=(
-      "$(dirname "$ARTIFACT")"/*Server*_$EXPECTED_VERSION\_*.deb
-      "$(dirname "$ARTIFACT")"/*server*_$EXPECTED_VERSION\_*.deb
+      "$(dirname "$ARTIFACT")"/*Server_$EXPECTED_VERSION\_*.deb
+      "$(dirname "$ARTIFACT")"/*server_$EXPECTED_VERSION\_*.deb
     )
     shopt -u nullglob
     if (( ${#server_candidates[@]} != 1 )); then
@@ -637,7 +644,10 @@ elif [[ "$PLATFORM" == "linux" ]]; then
     echo "server artifact version mismatch: got '$SERVER_VERSION', expected '$EXPECTED_VERSION' from the GUI artifact" >&2
     exit 2
   }
-  SERVER_ARTIFACTS+=( "$SERVER_ARTIFACT" )
+  seed_paths="$(release_artifacts_linux_seed_companions "$SERVER_ARTIFACT" "$SERVER_PROV" "${SEED_ARTIFACTS[@]}")" || exit 2
+  SEED_ARTIFACTS=()
+  while IFS= read -r seed; do [[ -z "$seed" ]] || SEED_ARTIFACTS+=("$seed"); done <<<"$seed_paths"
+  SERVER_ARTIFACTS+=( "$SERVER_ARTIFACT" "${SEED_ARTIFACTS[@]}" )
 elif [[ -n "$SERVER_ARTIFACT" ]]; then
   echo "--server-artifact is supported only for --platform windows|mac|linux" >&2
   exit 2
@@ -1040,6 +1050,14 @@ if [[ ${#FAILURES[@]} -eq 0 ]]; then
 fi
 if [[ ${#FAILURES[@]} -eq 0 && ${#SERVER_ARTIFACTS[@]} -gt 0 ]]; then
   SERVER_INSTALL_RUN="${SERVER_INSTALL_CMD//__SERVER_ARTIFACT__/$SERVER_REMOTE_Q}"
+  if [[ "$PLATFORM" == linux ]]; then
+    # Keep Server and its exact-version seed in one apt transaction on both
+    # upgrade and explicitly authorized downgrade legs.
+    for seed in "${SEED_ARTIFACTS[@]}"; do
+      printf -v seed_q '%q' "$REMOTE_DIR/$(basename "$seed")"
+      SERVER_INSTALL_RUN+=" $seed_q"
+    done
+  fi
   run_installer "Server" "$SERVER_INSTALL_RUN"
 fi
 if [[ ${#FAILURES[@]} -eq 0 && "$VERIFY_INSTALLED_MAC" == 1 ]]; then
@@ -1048,6 +1066,13 @@ fi
 if [[ ${#FAILURES[@]} -eq 0 && "$PLATFORM" == "linux" ]]; then
   verify_linux_package_configured "$REMOTE_Q" "GUI"
   [[ ${#FAILURES[@]} -gt 0 ]] || verify_linux_package_configured "$SERVER_REMOTE_Q" "Server"
+  if [[ ${#FAILURES[@]} -eq 0 ]]; then
+    for seed in "${SEED_ARTIFACTS[@]}"; do
+      printf -v seed_q '%q' "$REMOTE_DIR/$(basename "$seed")"
+      verify_linux_package_configured "$seed_q" "seed companion"
+      [[ ${#FAILURES[@]} -eq 0 ]] || break
+    done
+  fi
 fi
 
 # ── 4. RELAUNCH — WITHOUT TERMINATING (serve --ensure must do the replacement) ─
