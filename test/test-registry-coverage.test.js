@@ -86,6 +86,14 @@ function findOrphans(onDisk, reachable, exclusions) {
   return onDisk.filter((f) => !reachable.has(f) && !(f in exclusions));
 }
 
+test('test:shell routes through the Node ledger wrapper', () => {
+  assert.match(
+    pkg.scripts?.['test:shell'] ?? '',
+    /^node bin\/run-node-test-suite\.mjs(?:\s|$)/,
+    'test:shell must preserve its Node runner while recording per-file ledger rows.',
+  );
+});
+
 test('CONTROL: the orphan predicate detects a file no script names', () => {
   // Falsifiability, without mutating the shared tree (a mutate-and-restore probe
   // races git-sync's whole-tree sweep and can commit the mutant — see CLAUDE.md).
