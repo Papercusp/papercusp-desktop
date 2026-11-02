@@ -359,6 +359,38 @@ authenticode_sign() {
 # Convert an absolute Linux path to the wine drive path (Z: maps to /).
 winpath() { printf 'Z:%s' "$(printf '%s' "$1" | sed 's:/:\\:g')"; }
 
+# Preserve accepted source state before the producer rewrites tracked staging.
+# A caller carrying an earlier cut receipt keeps that boundary; partial receipts
+# are refused rather than silently combining two different moments.
+capture_windows_source_provenance() {
+  local capture
+  WINDOWS_SOURCE_DIRTY_MANIFEST="${PROVENANCE_SOURCE_DIRTY_MANIFEST:-}"
+  if [[ -n "${PROVENANCE_SOURCE_GIT_HEAD:-}${PROVENANCE_SOURCE_GIT_DIRTY:-}" ]]; then
+    [[ -n "${PROVENANCE_SOURCE_GIT_HEAD:-}" && -n "${PROVENANCE_SOURCE_GIT_DIRTY:-}" ]] \
+      || fail "Windows source provenance requires both input head and dirty state"
+    WINDOWS_SOURCE_GIT_HEAD="$PROVENANCE_SOURCE_GIT_HEAD"
+    WINDOWS_SOURCE_GIT_DIRTY="$PROVENANCE_SOURCE_GIT_DIRTY"
+  else
+    WINDOWS_SOURCE_DIRTY_MANIFEST="$BUILD_CONTAINER/source-input-at-cut.json"
+    capture="$(bash "$PROVENANCE_TOOLS_ROOT/emit-build-provenance.sh" --capture-source \
+      "$SOURCE_ROOT")" || fail "could not capture Windows input source"
+    bash "$PROVENANCE_TOOLS_ROOT/emit-build-provenance.sh" --capture-dirty-source \
+      "$WINDOWS_SOURCE_DIRTY_MANIFEST" "desktop=$SOURCE_ROOT" "workspace=$SUPERPROJECT_ROOT" \
+      || fail "could not capture Windows input repositories"
+    WINDOWS_SOURCE_GIT_HEAD="$(printf '%s\n' "$capture" | sed -n '1p')"
+    WINDOWS_SOURCE_GIT_DIRTY="$(printf '%s\n' "$capture" | sed -n '2p')"
+  fi
+  [[ "$WINDOWS_SOURCE_GIT_HEAD" = "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" ]] \
+    || fail "Windows source provenance head differs from selected source"
+  [[ "$WINDOWS_SOURCE_GIT_DIRTY" == true || "$WINDOWS_SOURCE_GIT_DIRTY" == false ]] \
+    || fail "invalid Windows input dirty state"
+}
+BUILD_CONTAINER="$(mktemp -d /tmp/papercusp-win-cross-source-XXXXXX)"
+PROVENANCE_TOOLS_ROOT="$BUILD_CONTAINER/provenance-tools"
+WINDOWS_PROVENANCE_TOOLCHAIN="$(snapshot_provenance_tools "$PROVENANCE_TOOLS_ROOT" "$HERE")" \
+  || fail "could not snapshot the Windows provenance producer"
+capture_windows_source_provenance
+
 # ── Server-only source-tree + env-sidecar staging. A GUI-only cut must neither
 # construct nor snapshot these runtime payloads.
 # stage-source-tree.sh writes src-tauri/sidecar/source.tar.zst (the Server span
@@ -434,15 +466,11 @@ else
   export PAPERCUSP_BUILD_SHA="$BUILD_COMMIT_SHORT"
 fi
 
-BUILD_CONTAINER="$(mktemp -d /tmp/papercusp-win-cross-source-XXXXXX)"
 BUILD_ROOT="$BUILD_CONTAINER/papercusp-desktop"
 if ! git -C "$SOURCE_ROOT" worktree add --detach "$BUILD_ROOT" "$BUILD_COMMIT_SHA" >/dev/null 2>&1; then
   fail "could not create the isolated Windows build source at $BUILD_ROOT"
 fi
 BUILD_WORKTREE=1
-PROVENANCE_TOOLS_ROOT="$BUILD_CONTAINER/provenance-tools"
-WINDOWS_PROVENANCE_TOOLCHAIN="$(snapshot_provenance_tools "$PROVENANCE_TOOLS_ROOT" "$HERE")" \
-  || fail "could not snapshot the Windows provenance producer"
 SOURCE_REPAIR_APPLIED=""
 
 # A release cut intentionally edits its version manifests before the build and
@@ -779,6 +807,9 @@ emit_windows_provenance() {
   toolchain="$(node -e 'process.stdout.write(JSON.stringify({...JSON.parse(process.argv[1]), windowsBuildPhase:process.argv[2]}))' \
     "$WINDOWS_PROVENANCE_TOOLCHAIN" "$phase")" || fail "invalid Windows source-evidence toolchain"
   PROVENANCE_GIT_ROOT="$ROOT" \
+  PROVENANCE_SOURCE_GIT_HEAD="${WINDOWS_SOURCE_GIT_HEAD:-${PROVENANCE_SOURCE_GIT_HEAD:-}}" \
+  PROVENANCE_SOURCE_GIT_DIRTY="${WINDOWS_SOURCE_GIT_DIRTY:-${PROVENANCE_SOURCE_GIT_DIRTY:-}}" \
+  PROVENANCE_SOURCE_DIRTY_MANIFEST="${WINDOWS_SOURCE_DIRTY_MANIFEST:-${PROVENANCE_SOURCE_DIRTY_MANIFEST:-}}" \
   PROVENANCE_SIGNED="$signed" \
   PROVENANCE_SIDECAR_DIR="$SRC_TAURI/sidecar" \
   PROVENANCE_SOURCE_REPAIR_MANIFEST="$SOURCE_REPAIR_APPLIED" \

@@ -463,6 +463,56 @@ test('clean build-start provenance survives cutter-authored dirt at emit time', 
   assert.equal(doc.gitDirtyAtEmit, true, 'post-preflight cutter mutations stay visible as diagnostics');
 });
 
+test('Windows producer preserves accepted input state through its real final emitter', () => {
+  const source = fs.readFileSync(path.join(BIN, 'build-windows-cross.sh'), 'utf8');
+  const capture = source.match(/^capture_windows_source_provenance\(\) \{[\s\S]*?^\}/m)?.[0];
+  const emitWindows = source.match(/^emit_windows_provenance\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(capture && emitWindows);
+  assert.ok(source.indexOf('capture_windows_source_provenance\n') < source.indexOf('# ── Server-only source-tree'));
+  for (const dirty of [false, true]) {
+    const dir = tmp();
+    try {
+      const repo = path.join(dir, 'repo'); fs.mkdirSync(repo);
+      const git = (args) => {
+        const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
+        assert.equal(r.status, 0, r.stderr);
+        return r.stdout.trim();
+      };
+      git(['init', '-q', '-b', 'main']);
+      git(['config', 'user.email', 'provenance@test']);
+      git(['config', 'user.name', 'Provenance Test']);
+      git(['config', 'commit.gpgsign', 'false']);
+      fs.writeFileSync(path.join(repo, 'staging.txt'), 'accepted source\n');
+      git(['add', '.']); git(['commit', '-qm', 'accepted source']);
+      const head = git(['rev-parse', 'HEAD']);
+      if (dirty) fs.writeFileSync(path.join(repo, 'staging.txt'), 'pre-existing edit\n');
+      const out = path.join(dir, 'out'); fs.mkdirSync(out);
+      fs.writeFileSync(path.join(out, 'Papercusp Server_0.0.32_x64-setup.exe'), 'candidate installer');
+      const tools = path.join(dir, 'tools');
+      fs.mkdirSync(path.join(tools, 'lib'), { recursive: true });
+      for (const relative of ['emit-build-provenance.sh', 'lib/windows-source-repair.js', 'lib/spa-freshness.js']) {
+        fs.copyFileSync(path.join(BIN, relative), path.join(tools, relative));
+      }
+      fs.writeFileSync(path.join(tools, 'producer-inputs.json'), '{"schemaVersion":1,"files":[]}');
+      const env = { ...process.env, BUILD_CONTAINER: dir, SOURCE_ROOT: repo, SUPERPROJECT_ROOT: repo, ROOT: repo,
+        SRC_TAURI: path.join(repo, 'src-tauri'), OUT_DIR: out, VERSION: '0.0.32',
+        PAPERCUSP_BUILD_SHA: head.slice(0, 8), SOURCE_REPAIR_APPLIED: '', ROLES: 'server',
+        PROVENANCE_TOOLS_ROOT: tools, WINDOWS_PROVENANCE_TOOLCHAIN: '{}' };
+      for (const key of ['PROVENANCE_SOURCE_GIT_HEAD', 'PROVENANCE_SOURCE_GIT_DIRTY', 'PROVENANCE_SOURCE_DIRTY_MANIFEST']) delete env[key];
+      const r = spawnSync('bash', ['-euo', 'pipefail', '-c',
+        'fail() { echo "$*" >&2; exit 1; };\n' + capture + '\n' + emitWindows + '\n' +
+        'capture_windows_source_provenance\nprintf "generated staging\\n" > "$ROOT/staging.txt"\n' +
+        'emit_windows_provenance artifact-audited-and-signed false'], { encoding: 'utf8', env });
+      assert.equal(r.status, 0, r.stderr);
+      const doc = JSON.parse(fs.readFileSync(path.join(out, 'build-provenance.json')));
+      assert.equal(doc.gitHead, head);
+      assert.equal(doc.gitDirty, dirty, 'pre-existing dirty input must remain dirty');
+      assert.equal(doc.gitDirtyAtEmit, true, 'generated staging remains visible separately');
+      assert.deepEqual(doc.dirtySource.repositories.map((r) => r.label), ['desktop', 'workspace']);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
 test('source provenance hashes regular files with bounded reads and refuses a changing file', () => {
   const text = fs.readFileSync(EMITTER, 'utf8');
   const helper = text.match(/^function sha256File\(file\) \{[\s\S]*?^\}/m)?.[0];
