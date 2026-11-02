@@ -89,15 +89,26 @@ test('entryBundle is not fooled by a repeated reference to the same bundle', () 
   assert.equal(entryBundle(repeated), 'index-AAAAAAAA.js');
 });
 
-test('the CLI exits 4 on skew and 0 under the documented override', () => {
+test('the ordinary no-dist CLI check does not inherit packaging context', () => {
   const cli = path.resolve(__dirname, '../bin/check-spa-freshness.js');
   // Point the guard at a repo root with no dist so it cannot block, proving the
   // no-dist path really is non-blocking end-to-end (not just in the pure function).
   const noDist = spawnSync(process.execPath, [cli], {
-    env: { ...process.env, PAPERCUSP_REPO_DIR: '/nonexistent-repo-root' },
+    env: {
+      ...process.env,
+      PAPERCUSP_REPO_DIR: '/nonexistent-repo-root',
+      PAPERCUSP_VERIFY_TAURI_ISOLATED: '0',
+      VERIFY_TAURI_SPA_DIST: '',
+      PAPERCUSP_ALLOW_STALE_SPA: '0',
+      PAPERCUSP_DESKTOP_INTERFACE: 'legacy',
+      PAPERCUSP_RELEASE_HOST: '',
+      PAPERCUSP_RELEASE_TAG: '',
+      PAPERCUSP_DISTRIBUTION_PROFILE: 'dogfood',
+    },
     encoding: 'utf8',
   });
   assert.equal(noDist.status, 0, noDist.stderr);
+  assert.match(noDist.stdout, /cannot be judged/);
 });
 
 test('isolated package freshness uses its frozen SPA and fails closed without weakening ambient builds', () => {
@@ -140,6 +151,19 @@ test('isolated package freshness uses its frozen SPA and fails closed without we
     const matching = run();
     assert.equal(matching.status, 0, matching.stderr);
     assert.match(matching.stdout, /SPA freshness OK/);
+
+    // A matching bundle without an interface marker is sufficient for this
+    // private fixture, but every public release context must still reject it.
+    for (const publicContext of [
+      { PAPERCUSP_RELEASE_HOST: 'https://release.example.invalid' },
+      { PAPERCUSP_RELEASE_TAG: 'fixture-public-release' },
+      { PAPERCUSP_DISTRIBUTION_PROFILE: 'public' },
+    ]) {
+      const unmarkedPublic = run({ ...publicContext, PAPERCUSP_ALLOW_STALE_SPA: '1' });
+      assert.equal(unmarkedPublic.status, 4, JSON.stringify(publicContext));
+      assert.match(unmarkedPublic.stderr, /PUBLIC DESKTOP INTERFACE HOLD/);
+      assert.match(unmarkedPublic.stderr, /no measured legacy/);
+    }
 
     const ambientSkew = run({ PAPERCUSP_VERIFY_TAURI_ISOLATED: '0' });
     assert.equal(ambientSkew.status, 4, 'ordinary packaging must still compare against the ambient built SPA');
