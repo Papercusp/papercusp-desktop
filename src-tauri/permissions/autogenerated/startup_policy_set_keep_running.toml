@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-startup-policy-set-keep-running"
+description = "Enables the startup_policy_set_keep_running command without any pre-configured scope."
+commands.allow = ["startup_policy_set_keep_running"]
+
+[[permission]]
+identifier = "deny-startup-policy-set-keep-running"
+description = "Denies the startup_policy_set_keep_running command without any pre-configured scope."
+commands.deny = ["startup_policy_set_keep_running"]

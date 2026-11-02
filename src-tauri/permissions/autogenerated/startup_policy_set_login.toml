@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-startup-policy-set-login"
+description = "Enables the startup_policy_set_login command without any pre-configured scope."
+commands.allow = ["startup_policy_set_login"]
+
+[[permission]]
+identifier = "deny-startup-policy-set-login"
+description = "Denies the startup_policy_set_login command without any pre-configured scope."
+commands.deny = ["startup_policy_set_login"]
