@@ -109,6 +109,28 @@ case "$OUT_MAC" in
   *"-C link-arg=-fuse-ld=lld"*) ok "macOS release flags carry the LLD linker flag" ;;
   *) bad "macOS release flags omitted the LLD linker flag (got: $OUT_MAC)" ;;
 esac
+case "$OUT_MAC" in
+  *"-C link-arg=-Wl,-headerpad,0x1000"*) ok "Darwin leaves space for the signature load command" ;;
+  *) bad "Darwin omitted signature header space (got: $OUT_MAC)" ;;
+esac
+OUT_MAC_INHERITED="$(remap_under /home/buildbot "$OUT_LINUX" '' darwin)"
+if [[ "$OUT_MAC_INHERITED" == *"-C link-arg=-Wl,-headerpad,0x1000"* ]]; then
+  ok "inherited LLD does not suppress Darwin signature header space"
+else
+  bad "inherited LLD suppressed Darwin signature header space"
+fi
+OUT_MAC_IDEM="$(remap_under /home/buildbot "$OUT_MAC_INHERITED" '' darwin)"
+if [ "$OUT_MAC_IDEM" = "$OUT_MAC_INHERITED" ] && [[ "$OUT_LINUX" != *headerpad* ]]; then
+  ok "Darwin flags are idempotent and Linux does not inherit Darwin padding"
+else
+  bad "Darwin flags duplicate or contaminate Linux"
+fi
+WASM_FROM_MAC="$({ . "$LIB" || exit 9; papercusp_rustflags_without_native_lld "$OUT_MAC"; })"
+if [[ "$WASM_FROM_MAC" != *headerpad* && "$WASM_FROM_MAC" != *fuse-ld* && "$WASM_FROM_MAC" == *--remap-path-prefix* ]]; then
+  ok "wasm sanitizer removes Darwin linker arguments while retaining remaps"
+else
+  bad "Darwin linker arguments reached wasm or remaps were lost"
+fi
 OUT_REMAP_ONLY="$(remap_under /home/buildbot "$PRESET" '' linux)"
 case "$OUT_REMAP_ONLY" in
   *"--remap-path-prefix=/home/other=/build-home"*"-C link-arg=-fuse-ld=lld"*) ok "adds LLD even when remap was inherited" ;;

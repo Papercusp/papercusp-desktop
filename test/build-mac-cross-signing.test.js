@@ -363,7 +363,7 @@ else:
   }
 });
 
-for (const mode of ['normal', 'companion-change', 'shallow-change', 'pre-sign-change', 'generation-change']) {
+for (const mode of ['normal', 'companion-change', 'shallow-change', 'pre-sign-change', 'generation-change', 'deep-fail', 'shallow-fail']) {
   test(`app signing seals the final PUI generation and rejects ${mode} corruption`, t => {
     const f = fixture(t);
     const sidecar = path.join(f.app, 'Contents/Resources/sidecar');
@@ -392,6 +392,9 @@ const fs=require('node:fs'), path=require('node:path'), crypto=require('node:cry
 const args=process.argv.slice(2), app=args.at(-1), shallow=args.includes('--shallow');
 const sidecar=path.join(app,'Contents/Resources/sidecar'), manifest=path.join(sidecar,'pui-install.json');
 fs.appendFileSync(process.env.SIGNING_CALLS, shallow ? 'shallow\\n' : 'deep\\n');
+if (process.env.PUI_SIGNING_MODE===(shallow?'shallow-fail':'deep-fail')) {
+  console.error('insufficient room to write code signature load command'); process.exit(8);
+}
 if (!shallow || process.env.PUI_SIGNING_MODE==='shallow-change') fs.appendFileSync(path.join(sidecar,'bin/pui'),'signature');
 if (process.env.PUI_SIGNING_MODE==='companion-change') fs.appendFileSync(path.join(sidecar,'pui-companion.wasm'),'corruption');
 if (process.env.PUI_SIGNING_MODE==='generation-change') { const j=JSON.parse(fs.readFileSync(manifest)); j.binarySha256='wrong'; fs.writeFileSync(manifest,JSON.stringify(j)); }
@@ -402,6 +405,17 @@ fs.writeFileSync(path.join(app,'Contents/_CodeSignature/CodeResources'),crypto.c
       ENTITLEMENTS: path.join(f.root, 'fixture-entitlements'), PUI_SIGNING_MODE: mode,
       SIGNING_CALLS: path.join(f.root, 'calls') });
     const result = run(f, 'sign_app');
+    if (mode === 'deep-fail' || mode === 'shallow-fail') {
+      assert.notEqual(result.status, 0, result.stdout + result.stderr);
+      assert.match(result.stderr, /insufficient room to write code signature load command/);
+      assert.match(result.stderr, /diagnostics=/);
+      const attempts = fs.readdirSync(path.join(f.out, 'macos/diagnostics'));
+      assert.equal(attempts.length, 1);
+      const phase = mode === 'deep-fail' ? 'deep' : 'shallow';
+      const log = path.join(f.out, 'macos/diagnostics', attempts[0], `${phase}.log`);
+      assert.match(fs.readFileSync(log, 'utf8'), /insufficient room to write code signature load command/);
+      return;
+    }
     if (mode !== 'normal') {
       assert.notEqual(result.status, 0, result.stdout + result.stderr);
       assert.match(result.stderr, /PUI generation|companion changed|binary generation changed|cannot bind/);

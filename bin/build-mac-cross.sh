@@ -515,6 +515,7 @@ assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out $
 sign_app() { # $1=app
   local app="$1" args=(--entitlements-xml-path "$ENTITLEMENTS")
   local pui_sidecar="$app/Contents/Resources/sidecar" pui_helper="" pui_previous=""
+  local signing_logs=""
 
   if [[ -f "$pui_sidecar/bin/pui" || -f "$pui_sidecar/pui-install.json" ]]; then
     source "$HERE/lib/source-roots.sh"
@@ -529,9 +530,14 @@ sign_app() { # $1=app
   fi
 
   [[ -n "$MAC_CERT_P12" ]] && args+=(--p12-file "$MAC_CERT_P12" --p12-password "${MAC_SIGN_P12_PASSWORD:-}")
+  mkdir -p "$OUT_BUNDLE/macos/diagnostics"
+  signing_logs="$(mktemp -d "$OUT_BUNDLE/macos/diagnostics/$(basename "$app").sign.XXXXXX")" \
+    || fail "cannot create signing diagnostics for $app"
   echo "    signing $(basename "$app") (rcodesign${MAC_CERT_P12:+, cert})"
-  rcodesign sign "${args[@]}" "$app" >/dev/null 2>&1 \
-    || fail "rcodesign failed to sign $app"
+  if ! rcodesign sign "${args[@]}" "$app" >"$signing_logs/deep.log" 2>&1; then
+    tail -n 40 "$signing_logs/deep.log" >&2
+    fail "rcodesign failed to sign $app; diagnostics=$signing_logs/deep.log"
+  fi
   [[ -f "$app/Contents/_CodeSignature/CodeResources" ]] \
     || fail "signing produced no _CodeSignature for $app"
   if [[ -n "$pui_previous" ]]; then
@@ -540,8 +546,10 @@ sign_app() { # $1=app
     python3 "$pui_helper" rebind-binary --manifest "$pui_sidecar/pui-install.json" \
       --binary "$pui_sidecar/bin/pui" --companion "$pui_sidecar/pui-companion.wasm" \
       --previous-binary-sha256 "$pui_previous" || fail "cannot bind the signed PUI generation"
-    rcodesign sign "${args[@]}" --shallow "$app" >/dev/null 2>&1 \
-      || fail "rcodesign failed to reseal the PUI generation in $app"
+    if ! rcodesign sign "${args[@]}" --shallow "$app" >"$signing_logs/shallow.log" 2>&1; then
+      tail -n 40 "$signing_logs/shallow.log" >&2
+      fail "rcodesign failed to reseal the PUI generation in $app; diagnostics=$signing_logs/shallow.log"
+    fi
     python3 "$pui_helper" verify --manifest "$pui_sidecar/pui-install.json" \
       --binary "$pui_sidecar/bin/pui" --companion "$pui_sidecar/pui-companion.wasm" \
       || fail "PUI generation changed during the final app seal"

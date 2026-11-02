@@ -83,11 +83,21 @@ papercusp_rustflags_with_lld() { # $1=linux|macos|darwin  $2=flags (default RUST
   esac
 
   case " $flags " in
-    *" -C link-arg=-fuse-ld=lld "*) printf '%s' "$flags"; return 0 ;;
-    *"-C link-arg=-fuse-ld=lld"*) printf '%s' "$flags"; return 0 ;;
+    *"-C link-arg=-fuse-ld=lld"*) ;;
+    *) flags="$flags -C link-arg=-fuse-ld=lld" ;;
   esac
 
-  printf '%s' "$flags -C link-arg=-fuse-ld=lld"
+  # Cross-linked x64 Mach-O executables can leave no room for the
+  # LC_CODE_SIGNATURE command. Reserve it at link time, before rcodesign runs;
+  # Cargo's config-only flags would be suppressed by the exported path remap.
+  case "$platform" in
+    macos|darwin)
+      case " $flags " in
+        *" -C link-arg=-Wl,-headerpad,0x1000 "*) ;;
+        *) flags="$flags -C link-arg=-Wl,-headerpad,0x1000" ;;
+      esac ;;
+  esac
+  printf '%s' "$flags"
 }
 
 # A native producer may already have exported the LLD cc-driver flag before it
@@ -97,6 +107,7 @@ papercusp_rustflags_with_lld() { # $1=linux|macos|darwin  $2=flags (default RUST
 papercusp_rustflags_without_native_lld() { # $1=flags (default RUSTFLAGS)
   local flags="${1-${RUSTFLAGS:-}}"
   flags="${flags//-C link-arg=-fuse-ld=lld/}"
+  flags="${flags//-C link-arg=-Wl,-headerpad,0x1000/}"
   printf '%s' "$flags"
 }
 
