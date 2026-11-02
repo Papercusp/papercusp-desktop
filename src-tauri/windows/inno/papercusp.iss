@@ -166,7 +166,8 @@ Name: "{autoprograms}\Papercusp Tutorial & Setup"; Filename: "{sys}\wsl.exe"; Pa
 ; relaunch the app at the end of the install. A manual first-install (no
 ; /UPDATE on the tail) is unaffected.
 [Run]
-Filename: "{app}\papercusp-desktop.exe"; Flags: nowait; Check: IsUpdaterLaunch
+; Preserve clean-stop intent and identify this automatic relaunch as an upgrade.
+Filename: "{app}\papercusp-desktop.exe"; Parameters: "--upgrade"; Flags: nowait; Check: IsUpdaterLaunch
 
 [UninstallDelete]
 ; Inno normally removes {app} with its payload. Keep the role root cleanup
