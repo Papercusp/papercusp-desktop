@@ -3279,6 +3279,7 @@ mod discovery_tests {
             &missing_dir,
             &install_defect,
             false,
+            super::startup_policy::StartTrigger::Unknown,
         )
         .expect_err("a sidecar dir with no serve.mjs must not spawn");
 
@@ -7661,6 +7662,7 @@ fn bring_up_sidecar(
         &workspace_home,
         &INSTALL_DEFECT,
         false,
+        startup_policy::current_start_trigger(),
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -7858,6 +7860,7 @@ fn spawn_serve(
     workspace_home: &std::path::Path,
     install_defect: &InstallDefectLatch,
     headless_service: bool,
+    start_trigger: startup_policy::StartTrigger,
 ) -> std::io::Result<Child> {
     // WI-5390: fail CLOSED on a structurally broken install instead of spawning a
     // command that cannot possibly work. Without this the spawn "succeeds" (the
@@ -7980,7 +7983,7 @@ fn spawn_serve(
 
     let preload = runtime_sidecar_dir.join("sidecar-preload.js");
     let mut cmd = make_sidecar_command(via_wsl, runtime_sidecar_dir, &preload, &server_js);
-    cmd.arg("--ensure");
+    cmd.arg("--ensure").arg(start_trigger.marker());
     // When routed via WSL, env vars must be listed in WSLENV to cross the
     // Windows→Linux boundary. The `/p` flag translates Windows paths.
     //
@@ -8616,6 +8619,7 @@ fn spawn_serve_supervisor(
                         &sup_home,
                         &INSTALL_DEFECT,
                         false,
+                        startup_policy::StartTrigger::Supervisor,
                     ) {
                         Ok(c) => {
                             *state.child.lock().unwrap() = Some(c);
@@ -10249,6 +10253,7 @@ fn run_headless_service() -> ! {
         &workspace_home,
         &INSTALL_DEFECT,
         true,
+        startup_policy::current_start_trigger(),
     ) {
         Ok(child) => child,
         Err(error) => {

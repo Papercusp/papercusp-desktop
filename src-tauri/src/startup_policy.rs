@@ -12,8 +12,50 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static CURRENT_START_TRIGGER: OnceLock<StartTrigger> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartTrigger {
+    Manual,
+    Login,
+    Supervisor,
+    Upgrade,
+    Repair,
+    Unknown,
+}
+
+impl StartTrigger {
+    pub fn marker(self) -> &'static str {
+        match self {
+            Self::Manual => "--startup-trigger=manual",
+            Self::Login => "--startup-trigger=login",
+            Self::Supervisor => "--startup-trigger=supervisor",
+            Self::Upgrade => "--startup-trigger=upgrade",
+            Self::Repair => "--startup-trigger=repair",
+            Self::Unknown => "--startup-trigger=unknown",
+        }
+    }
+
+    fn from_launch(args: &[String], gui: bool) -> Self {
+        let has = |arg: &str| args.iter().any(|value| value == arg);
+        if has("--manual-start") { Self::Manual }
+        else if has("--upgrade") { Self::Upgrade }
+        else if has("--repair") { Self::Repair }
+        else if has("--restart") { Self::Unknown }
+        else if has("--startup") { Self::Login }
+        // A service invocation cannot distinguish boot, user action and an OS
+        // restart. Preserve that uncertainty instead of inventing a cause.
+        else if gui && !has("--headless-service") { Self::Manual }
+        else { Self::Unknown }
+    }
+}
+
+pub fn current_start_trigger() -> StartTrigger {
+    CURRENT_START_TRIGGER.get().copied().unwrap_or(StartTrigger::Unknown)
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -585,7 +627,9 @@ pub fn apply_current_launch(gui: bool) -> io::Result<()> {
     }
     // A dev verifier shares the OS identity but is not a user relaunch.
     // Explicit --manual-start remains testable in a disposable OS account.
-    apply_launch_intent(&Store::device()?, &args, gui && !cfg!(debug_assertions))
+    let gui = gui && !cfg!(debug_assertions);
+    let _ = CURRENT_START_TRIGGER.set(StartTrigger::from_launch(&args, gui));
+    apply_launch_intent(&Store::device()?, &args, gui)
 }
 
 #[tauri::command]
@@ -616,6 +660,25 @@ pub fn startup_policy_set_keep_running(enabled: bool) -> Result<Status, String> 
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn launch_provenance_preserves_explicit_causes_and_service_uncertainty() {
+        for (args, gui, expected) in [
+            (vec!["--manual-start", "--headless-service"], false, StartTrigger::Manual),
+            (vec!["--startup"], false, StartTrigger::Login),
+            (vec!["--upgrade", "--startup"], false, StartTrigger::Upgrade),
+            (vec!["--repair"], true, StartTrigger::Repair),
+            (vec!["--restart", "--startup"], true, StartTrigger::Unknown),
+            (vec!["--headless-service"], false, StartTrigger::Unknown),
+            (vec![], false, StartTrigger::Unknown),
+            (vec![], true, StartTrigger::Manual),
+        ] {
+            let args = args.into_iter().map(String::from).collect::<Vec<_>>();
+            assert_eq!(StartTrigger::from_launch(&args, gui), expected);
+        }
+        assert_eq!(StartTrigger::Supervisor.marker(), "--startup-trigger=supervisor");
+        assert_eq!(StartTrigger::Unknown.marker(), "--startup-trigger=unknown");
+    }
 
     struct Fixture(PathBuf);
     impl Fixture {
