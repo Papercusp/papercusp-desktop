@@ -115,6 +115,7 @@ async function captureIdentity(env = process.env) {
     path.join(here, 'audit-release-bundle.py'),
     path.join(here, 'emit-build-provenance.sh'),
     path.join(here, 'lib/transformers-models.sh'),
+    path.join(here, 'lib/host-runtime-closure.sh'),
     path.join(here, 'verify-sidecar-bundle.sh'),
     path.join(here, 'lib/server-container.mjs'),
     path.join(repoRoot, 'package-lock.json'),
