@@ -76,12 +76,14 @@ set -Eeuo pipefail
 die() { printf 'papercusp-install: ERROR: %s\n' "$1" >&2; exit 1; }
 BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd "$BIN/.." && pwd -P)"
-action=""; release_root=""; state_root=""
+action=""; release_root=""; state_root=""; eligibility=""; eligibility_sig=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --action) [[ $# -ge 2 ]] || die "--action needs a value"; action="$2"; shift 2 ;;
     --release-root) [[ $# -ge 2 ]] || die "--release-root needs a value"; release_root="$2"; shift 2 ;;
     --state-root) [[ $# -ge 2 ]] || die "--state-root needs a value"; state_root="$2"; shift 2 ;;
+    --runtime-acceptance) [[ $# -ge 2 ]] || die "--runtime-acceptance needs a value"; eligibility="$2"; shift 2 ;;
+    --runtime-acceptance-signature) [[ $# -ge 2 ]] || die "--runtime-acceptance-signature needs a value"; eligibility_sig="$2"; shift 2 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -103,6 +105,12 @@ done
 [[ -d "$ROOT/db-sql" ]] || die "db-sql migration payload is missing"
 [[ -x "$BIN/papercusp-content-bootstrap" ]] \
   || die "content bootstrap entrypoint is missing or not executable"
+if [[ -n "$eligibility" || -n "$eligibility_sig" ]]; then
+  [[ -n "$eligibility" && -n "$eligibility_sig" ]] || die "runtime eligibility needs both envelope and signature"
+  # The compiled verifier installs beside the immutable sidecar, so signed
+  # package bytes remain frozen. It rechecks signature/expiry again at boot.
+  "$BIN/node" "$ROOT/serve.mjs" --install-runtime-acceptance "$eligibility" "$eligibility_sig"
+fi
 "$BIN/papercusp-content-bootstrap" --state-root "$state_root"
 ENTRYPOINT
 
