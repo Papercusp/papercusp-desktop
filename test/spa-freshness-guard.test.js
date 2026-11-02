@@ -90,25 +90,44 @@ test('entryBundle is not fooled by a repeated reference to the same bundle', () 
 });
 
 test('the ordinary no-dist CLI check does not inherit packaging context', () => {
-  const cli = path.resolve(__dirname, '../bin/check-spa-freshness.js');
-  // Point the guard at a repo root with no dist so it cannot block, proving the
-  // no-dist path really is non-blocking end-to-end (not just in the pure function).
-  const noDist = spawnSync(process.execPath, [cli], {
-    env: {
-      ...process.env,
-      PAPERCUSP_REPO_DIR: '/nonexistent-repo-root',
-      PAPERCUSP_VERIFY_TAURI_ISOLATED: '0',
-      VERIFY_TAURI_SPA_DIST: '',
-      PAPERCUSP_ALLOW_STALE_SPA: '0',
-      PAPERCUSP_DESKTOP_INTERFACE: 'legacy',
-      PAPERCUSP_RELEASE_HOST: '',
-      PAPERCUSP_RELEASE_TAG: '',
-      PAPERCUSP_DISTRIBUTION_PROFILE: 'dogfood',
-    },
-    encoding: 'utf8',
-  });
-  assert.equal(noDist.status, 0, noDist.stderr);
-  assert.match(noDist.stdout, /cannot be judged/);
+  const fs = require('node:fs');
+  const { makeDesktopTestScratchDirSync } = require('./test-scratch.cjs');
+  const root = makeDesktopTestScratchDirSync('ordinary-spa-freshness-');
+  const desktop = path.join(root, 'desktop');
+  const stagedIndex = path.join(desktop, 'src-tauri/sidecar/spa/index.html');
+  try {
+    fs.mkdirSync(path.join(desktop, 'bin/lib'), { recursive: true });
+    fs.mkdirSync(path.dirname(stagedIndex), { recursive: true });
+    for (const file of ['check-spa-freshness.js', 'lib/spa-freshness.js']) {
+      fs.copyFileSync(path.resolve(__dirname, '../bin', file), path.join(desktop, 'bin', file));
+    }
+    fs.writeFileSync(stagedIndex, html('index-STAGED.js'));
+    const run = () => spawnSync(process.execPath, [path.join(desktop, 'bin/check-spa-freshness.js')], {
+      env: {
+        ...process.env,
+        PAPERCUSP_REPO_DIR: root,
+        PAPERCUSP_VERIFY_TAURI_ISOLATED: '0',
+        VERIFY_TAURI_SPA_DIST: '',
+        PAPERCUSP_ALLOW_STALE_SPA: '0',
+        PAPERCUSP_DESKTOP_INTERFACE: 'legacy',
+        PAPERCUSP_RELEASE_HOST: '',
+        PAPERCUSP_RELEASE_TAG: '',
+        PAPERCUSP_DISTRIBUTION_PROFILE: 'dogfood',
+      },
+      encoding: 'utf8',
+    });
+    // A known staged document makes the missing-dist branch independent of builds
+    // in the checkout running this test, including a clean committed extraction.
+    const noDist = run();
+    assert.equal(noDist.status, 0, noDist.stderr);
+    assert.match(noDist.stdout, /cannot be judged/);
+    fs.rmSync(stagedIndex);
+    const noStagedSpa = run();
+    assert.equal(noStagedSpa.status, 0, noStagedSpa.stderr);
+    assert.match(noStagedSpa.stdout, /no staged SPA/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('isolated package freshness uses its frozen SPA and fails closed without weakening ambient builds', () => {
