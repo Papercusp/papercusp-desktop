@@ -886,5 +886,10 @@ copy_host_runtime_require_closures() {
   # the pinned compiler and Solidity dependency sources at runtime.
   copy_pkg_closure solc || return 1
   copy_pkg_closure @openzeppelin/contracts || return 1
+
+  # The plan execution guard parses shell commands through an opaque
+  # createRequire loader. esbuild cannot inline it; ship the parser at the
+  # existing runtime dependency boundary so installed hosts stay self-contained.
+  copy_pkg_closure shell-quote || return 1
   
 }

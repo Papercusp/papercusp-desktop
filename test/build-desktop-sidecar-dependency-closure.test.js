@@ -199,6 +199,50 @@ test('closure preserves nested package identity and follows its hoisted dependen
   }
 });
 
+test('packaged plan guard resolves shell-quote without checkout node_modules', () => {
+  const fixture = makeFixture();
+  try {
+    const parserRoot = findPackageRoot(require.resolve('shell-quote'), 'shell-quote');
+    const parserDonor = path.join(fixture.repoRoot, 'node_modules/shell-quote');
+    fs.cpSync(parserRoot, parserDonor, { recursive: true });
+    const entry = path.join(fixture.sidecarDir, 'serve.mjs');
+    fs.writeFileSync(entry, `
+      import assert from 'node:assert/strict';
+      import { createRequire } from 'node:module';
+      const require = createRequire(import.meta.url);
+      const resolved = require.resolve('shell-quote');
+      assert.ok(resolved.startsWith(${JSON.stringify(fixture.sidecarDir + path.sep)}), resolved);
+      assert.deepEqual(require('shell-quote').parse('cat "two words" && pwd'),
+        ['cat', 'two words', { op: '&&' }, 'pwd']);
+    `);
+    const runProbe = () => spawnSync(process.execPath, [entry], {
+      cwd: fixture.fixtureRoot,
+      encoding: 'utf8',
+      env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' },
+    });
+    const missing = runProbe();
+    assert.notEqual(missing.status, 0, missing.stdout);
+    assert.match(missing.stderr, /Cannot find module 'shell-quote'/);
+
+    const realCopier = COPY_PKG_CLOSURE.replace(
+      /^copy_pkg_closure\(\) \{/,
+      'copy_pkg_closure_real() {',
+    );
+    assert.notEqual(realCopier, COPY_PKG_CLOSURE);
+    const copied = runBash([
+      shellPrelude(), realCopier,
+      'copy_pkg_closure() { [[ "$1" == "shell-quote" ]] && copy_pkg_closure_real "$1" || [[ "$1" != "shell-quote" ]]; }',
+      COPY_HOST_RUNTIME_REQUIRE_CLOSURES,
+      'copy_host_runtime_require_closures',
+    ].join('\n'), fixture);
+    assert.equal(copied.status, 0, copied.stdout + copied.stderr);
+    const installed = runProbe();
+    assert.equal(installed.status, 0, installed.stdout + installed.stderr);
+  } finally {
+    fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
+  }
+});
+
 test('packaged PSU Codex resume resolves the actual TOML parser without checkout node_modules', () => {
   const fixture = makeFixture();
   try {
