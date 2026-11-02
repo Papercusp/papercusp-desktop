@@ -65,6 +65,7 @@ function fixture({
   running = false, failVerifier = "", sameSha = false, wrongKey = false,
   updateCheck = "cannot_check", loseDataAfter = "",
   seedKey = "k-fixture", checkKey = "k-fixture",
+  splitSeed = false,
 } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "candidate-install-rollback-"));
   const shims = path.join(root, "bin");
@@ -98,6 +99,18 @@ function fixture({
   fs.writeFileSync(path.join(baselineDir, "build-provenance.json"), JSON.stringify({
     buildSha: baselineSha, version: "0.0.25", dirty: false,
   }));
+  const candidateSeed = path.join(candidateDir, 'papercusp-server-seed_0.0.26_all.deb');
+  const baselineSeed = path.join(baselineDir, 'papercusp-server-seed_0.0.25_all.deb');
+  if (splitSeed) {
+    for (const seed of [candidateSeed, baselineSeed]) {
+      fs.writeFileSync(seed, `exact seed bytes: ${path.basename(seed)}`);
+      const provenance = path.join(path.dirname(seed), 'build-provenance.json');
+      const doc = JSON.parse(fs.readFileSync(provenance, 'utf8'));
+      doc.artifacts = [{ name: path.basename(seed), bytes: fs.statSync(seed).size,
+        sha256: createHash('sha256').update(fs.readFileSync(seed)).digest('hex') }];
+      fs.writeFileSync(provenance, JSON.stringify(doc));
+    }
+  }
   const key = path.join(root, ".ssh", "papercup-vm-linux");
   fs.mkdirSync(path.dirname(key));
   fs.writeFileSync(key, "private-test-key", { mode: 0o600 });
@@ -144,6 +157,10 @@ esac`);
   executable(dpkgDeb, `[[ "$1" == -f && $# == 3 ]] || exit 2
 name=$(basename -- "$2")
 case "$3:$name" in
+  Depends:*) exit 0 ;;
+  Recommends:*Server*) [[ "$MOCK_SPLIT_SEED" != 1 ]] || printf 'papercusp-server-seed\\n' ;;
+  Recommends:*) exit 0 ;;
+  Package:papercusp-server-seed*) printf 'papercusp-server-seed\\n' ;;
   Package:*Server*) printf 'papercusp-server\\n' ;;
   Package:*) printf 'papercusp-gui\\n' ;;
   Version:*_0.0.26_*) printf '0.0.26\\n' ;;
@@ -155,6 +172,7 @@ esac`);
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --artifact) artifact="$2"; shift 2 ;;
+    --seed-artifact) printf 'SEED_ARG %s\\n' "$2" >>"$MOCK_LOG"; shift 2 ;;
     --expected-sha) expected_sha="$2"; shift 2 ;;
     --expected-version) expected_version="$2"; shift 2 ;;
     --install-timeout) install_timeout="$2"; shift 2 ;;
@@ -173,7 +191,7 @@ fi
 printf '{"ok":true,"flipped":true,"portHeld":true,"shaAfter":"%s","versionAfter":"%s","shaBefore":"previous","versionBefore":"previous","portBefore":3999,"portAfter":3999}\\n' "$expected_sha" "$expected_version"`);
   return {
     root, log, vmScript, receipt, vmctl, verifier, key, candidateGui, candidateServer,
-    baselineGui, baselineServer, candidateSha, baselineSha, sshDir, args: [],
+    baselineGui, baselineServer, candidateSeed, baselineSeed, candidateSha, baselineSha, sshDir, args: [],
     env: {
       ...process.env,
       PATH: `${shims}:${process.env.PATH}`,
@@ -183,6 +201,7 @@ printf '{"ok":true,"flipped":true,"portHeld":true,"shaAfter":"%s","versionAfter"
       MOCK_SSH_DIR: sshDir,
       MOCK_KEY: key,
       MOCK_RUNNING: running ? "1" : "0",
+      MOCK_SPLIT_SEED: splitSeed ? "1" : "0",
       MOCK_FAIL_VERIFIER: failVerifier,
       MOCK_FAIL_VM_AT: "",
       MOCK_UPDATE_CHECK: updateCheck,
@@ -249,6 +268,35 @@ test("candidate upgrade and exact baseline rollback produce a content-bound rece
     assert.equal(evidence.rollbackTarget.rollback.flipped, true);
   });
 });
+
+test('split seeds follow their own exact baseline and candidate through both installer legs', () => {
+  withFixture({ splitSeed: true }, (f) => {
+    const result = run(f);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.ok(calls(f).includes(`VMCTL install clean ${f.baselineServer} ${f.baselineSeed}`));
+    assert.deepEqual(calls(f).filter(line => line.startsWith('SEED_ARG ')),
+      [`SEED_ARG ${f.candidateSeed}`, `SEED_ARG ${f.baselineSeed}`]);
+    const receipt = JSON.parse(fs.readFileSync(f.receipt, 'utf8'));
+    for (const [row, seed] of [[receipt.candidate, f.candidateSeed], [receipt.rollbackTarget, f.baselineSeed]]) {
+      assert.equal(row.seedCompanions.length, 1);
+      assert.equal(row.seedCompanions[0].sha256, createHash('sha256').update(fs.readFileSync(seed)).digest('hex'));
+    }
+  });
+});
+
+for (const fault of ['missing', 'tampered', 'wrong-version']) {
+  test(`split seed ${fault} is rejected before any VM operation`, () => {
+    withFixture({ splitSeed: true }, (f) => {
+      if (fault === 'missing') fs.unlinkSync(f.candidateSeed);
+      if (fault === 'tampered') fs.appendFileSync(f.candidateSeed, 'different bytes');
+      if (fault === 'wrong-version') f.args.push('--candidate-seed-artifact', f.baselineSeed);
+      const result = run(f);
+      assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`);
+      assert.match(result.stderr, /seed companion/);
+      assert.deepEqual(calls(f), []);
+    });
+  });
+}
 
 test("the old client's update check, the trusted-key signatures and user data are proven around both flips", () => {
   withFixture({}, (f) => {

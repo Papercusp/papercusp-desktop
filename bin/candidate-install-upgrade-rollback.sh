@@ -15,6 +15,8 @@ CANDIDATE_GUI=""
 CANDIDATE_SERVER=""
 BASELINE_GUI=""
 BASELINE_SERVER=""
+CANDIDATE_SEEDS=()
+BASELINE_SEEDS=()
 EVIDENCE_OUT=""
 LEGACY_HOST_UNAVAILABLE=0
 # The baseline's own source commit holds the updater key that installed client
@@ -28,6 +30,7 @@ usage() {
 Usage: candidate-install-upgrade-rollback.sh \
   --candidate-gui PATH --candidate-server PATH \
   --baseline-gui PATH --baseline-server PATH --evidence-out PATH [--vm NAME] \
+  [--candidate-seed-artifact PATH]... [--baseline-seed-artifact PATH]... \
   [--legacy-host-unavailable]
 
 Build provenance beside each GUI .deb must identify a distinct build SHA;
@@ -53,6 +56,8 @@ while [[ $# -gt 0 ]]; do
     --candidate-server) CANDIDATE_SERVER="${2:-}"; shift 2 ;;
     --baseline-gui) BASELINE_GUI="${2:-}"; shift 2 ;;
     --baseline-server) BASELINE_SERVER="${2:-}"; shift 2 ;;
+    --candidate-seed-artifact) CANDIDATE_SEEDS+=("${2:-}"); shift 2 ;;
+    --baseline-seed-artifact) BASELINE_SEEDS+=("${2:-}"); shift 2 ;;
     --evidence-out) EVIDENCE_OUT="${2:-}"; shift 2 ;;
     --vm) VM="${2:-}"; shift 2 ;;
     --legacy-host-unavailable) LEGACY_HOST_UNAVAILABLE=1; shift ;;
@@ -114,6 +119,11 @@ candidate_server_prov="$(release_artifacts_find_provenance "$CANDIDATE_SERVER")"
   || die "candidate Server has no nearby build-provenance.json"
 baseline_server_prov="$(release_artifacts_find_provenance "$BASELINE_SERVER")" \
   || die "baseline Server has no nearby build-provenance.json"
+candidate_seeds="$(release_artifacts_linux_seed_companions "$CANDIDATE_SERVER" "$candidate_server_prov" "${CANDIDATE_SEEDS[@]}")" || die "candidate seed qualification failed"
+baseline_seeds="$(release_artifacts_linux_seed_companions "$BASELINE_SERVER" "$baseline_server_prov" "${BASELINE_SEEDS[@]}")" || die "baseline seed qualification failed"
+CANDIDATE_SEEDS=(); BASELINE_SEEDS=()
+while IFS= read -r seed; do [[ -z "$seed" ]] || CANDIDATE_SEEDS+=("$seed"); done <<<"$candidate_seeds"
+while IFS= read -r seed; do [[ -z "$seed" ]] || BASELINE_SEEDS+=("$seed"); done <<<"$baseline_seeds"
 [[ "$(read_build_field "$candidate_server_prov" buildSha)" == "$CANDIDATE_SHA" ]] \
   || die "candidate Server provenance does not match the GUI build SHA"
 [[ "$(read_build_field "$baseline_server_prov" buildSha)" == "$BASELINE_SHA" ]] \
@@ -217,7 +227,7 @@ timeout --kill-after=30 "$(( ${PAPERCUSP_CANDIDATE_VM_SSH_TIMEOUT:-300} + 30 ))"
 
 echo "candidate-install-upgrade-rollback: installing exact rollback baseline $BASELINE_SHA"
 PHASE=baseline-install
-timeout --kill-after=30 "${PAPERCUSP_CANDIDATE_INSTALL_TIMEOUT:-2400}" bash "$VMCTL" install "$VM" "$BASELINE_SERVER"
+timeout --kill-after=30 "${PAPERCUSP_CANDIDATE_INSTALL_TIMEOUT:-2400}" bash "$VMCTL" install "$VM" "$BASELINE_SERVER" "${BASELINE_SEEDS[@]}"
 timeout --kill-after=30 "${PAPERCUSP_CANDIDATE_INSTALL_TIMEOUT:-2400}" bash "$VMCTL" install "$VM" "$BASELINE_GUI"
 baseline_script="$(release_artifacts_linux_smoke_baseline_start_script \
   | sed "s/BASELINE_BUDGET/${PAPERCUSP_CANDIDATE_BASELINE_START_TIMEOUT:-900}/g")"
@@ -282,12 +292,18 @@ run_leg() {
   local name="$1"
   local gui="$2" server="$3" sha="$4" version="$5"
   shift 5
+  local -a seed_args=()
+  if [[ "$name" == candidate-upgrade ]]; then
+    for seed in "${CANDIDATE_SEEDS[@]}"; do seed_args+=(--seed-artifact "$seed"); done
+  else
+    for seed in "${BASELINE_SEEDS[@]}"; do seed_args+=(--seed-artifact "$seed"); done
+  fi
   local output="$RUN_DIR/$name.json"
   local stderr_output="$RUN_DIR/$name.stderr.log" verifier_status=0
   PHASE="$name"
   echo "candidate-install-upgrade-rollback: running $name verifier for $sha (install timeout ${PAPERCUSP_CANDIDATE_INSTALL_TIMEOUT:-2400}s)"
   if "$VERIFIER" \
-    --platform linux --artifact "$gui" --server-artifact "$server" \
+    --platform linux --artifact "$gui" --server-artifact "$server" "${seed_args[@]}" \
     --expected-sha "$sha" --expected-version "$version" \
     --install-timeout "${PAPERCUSP_CANDIDATE_INSTALL_TIMEOUT:-2400}" \
     --ssh-port "$SSH_PORT" --ssh-key "$SSH_KEY" --ssh-host "$SSH_HOST" \
@@ -339,17 +355,21 @@ python3 - "$EVIDENCE_OUT" "$started_at" "$VM" "$SSH_HOST" "$SSH_PORT" \
   "$CANDIDATE_GUI" "$CANDIDATE_SERVER" "$CANDIDATE_SHA" "$CANDIDATE_VERSION" \
   "$BASELINE_GUI" "$BASELINE_SERVER" "$BASELINE_SHA" "$BASELINE_VERSION" \
   "$RUN_DIR/candidate-upgrade.json" "$RUN_DIR/exact-baseline-rollback.json" \
-  "$RUN_DIR" "$UPDATE_VERDICT" "$LEGACY_HOST_UNAVAILABLE" "$NONCE" <<'PY'
+  "$RUN_DIR" "$UPDATE_VERDICT" "$LEGACY_HOST_UNAVAILABLE" "$NONCE" \
+  "${#CANDIDATE_SEEDS[@]}" "${CANDIDATE_SEEDS[@]}" "${BASELINE_SEEDS[@]}" <<'PY'
 import datetime, hashlib, json, os, pathlib, sys
 (out, started, vm, host, port, candidate_gui, candidate_server, candidate_sha,
  candidate_version, baseline_gui, baseline_server, baseline_sha, baseline_version,
  candidate_result, rollback_result, run_dir, update_verdict, host_unavailable,
- nonce) = sys.argv[1:]
+ nonce, candidate_seed_count, *seed_paths) = sys.argv[1:]
 run = pathlib.Path(run_dir)
 def artifact(path):
     p = pathlib.Path(path).resolve()
-    data = p.read_bytes()
-    return {"path": str(p), "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+    digest = hashlib.sha256()
+    with p.open('rb') as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b''):
+            digest.update(chunk)
+    return {"path": str(p), "sha256": digest.hexdigest(), "bytes": p.stat().st_size}
 def read_json(path):
     return json.loads(pathlib.Path(path).read_text())
 def fields(line):
@@ -397,11 +417,13 @@ doc = {
     "candidate": {
         "buildSha": candidate_sha, "version": candidate_version,
         "gui": artifact(candidate_gui), "server": artifact(candidate_server),
+        "seedCompanions": [artifact(p) for p in seed_paths[:int(candidate_seed_count)]],
         "upgrade": read_json(candidate_result),
     },
     "rollbackTarget": {
         "buildSha": baseline_sha, "version": baseline_version,
         "gui": artifact(baseline_gui), "server": artifact(baseline_server),
+        "seedCompanions": [artifact(p) for p in seed_paths[int(candidate_seed_count):]],
         "rollback": read_json(rollback_result),
     },
     "legacyClient": legacy,

@@ -163,7 +163,7 @@ fi
   };
 }
 
-function linuxFixture({ emitDpkgWarning = false, policyCase = 'old-baseline', policyChannel = 'stable' } = {}) {
+function linuxFixture({ emitDpkgWarning = false, policyCase = 'old-baseline', policyChannel = 'stable', splitSeed = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'install-relaunch-linux-'));
   const artifacts = join(root, 'artifacts');
   const shims = join(root, 'shims');
@@ -172,12 +172,23 @@ function linuxFixture({ emitDpkgWarning = false, policyCase = 'old-baseline', po
 
   const deb = join(artifacts, `papercusp-gui_${VERSION}_amd64.deb`);
   const server = join(artifacts, `Papercusp Server_${VERSION}_amd64.deb`);
+  const seed = join(artifacts, `papercusp-server-seed_${VERSION}_all.deb`);
   writeFileSync(deb, 'pristine ubuntu deb fixture');
   writeFileSync(server, 'pristine ubuntu server deb fixture');
+  if (splitSeed) writeFileSync(seed, 'exact offline seed companion');
+  executable(shims, 'dpkg-deb', `#!/usr/bin/env bash
+case "$3" in
+  Depends) exit 0 ;;
+  Recommends) printf '%s\\n' '${splitSeed ? 'papercusp-server-seed' : ''}' ;;
+  Version) printf '%s\\n' '${VERSION}' ;;
+  Package) printf 'papercusp-server-seed\\n' ;;
+  *) exit 2 ;;
+esac
+`);
   writeFileSync(join(artifacts, 'build-provenance.json'), JSON.stringify({
     version: VERSION,
     buildSha: TARGET_SHA,
-    artifacts: [deb, server].map((file) => ({
+    artifacts: [deb, server, ...(splitSeed ? [seed] : [])].map((file) => ({
       name: basename(file),
       bytes: statSync(file).size,
       sha256: createHash('sha256').update(readFileSync(file)).digest('hex'),
@@ -325,7 +336,7 @@ esac
 printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
 `);
 
-  return { root, deb, server, log, flipped, configured, updated, ssh, scp, emitDpkgWarning, shims, vmctl, policy, policyCase, policyChannel };
+  return { root, deb, server, seed, log, flipped, configured, updated, ssh, scp, emitDpkgWarning, shims, vmctl, policy, policyCase, policyChannel };
 }
 
 function macFixture({ executeInstall = false, executeTransfer = false, freeGb = 20, nativePreflight = 'healthy', installedMismatch = false } = {}) {
@@ -813,6 +824,32 @@ test('Linux resolves missing WebKit dependencies before relaunching the installe
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
+});
+
+test('Linux transfers and configures a split seed in the same downgrade transaction as Server', () => {
+  const f = linuxFixture({ splitSeed: true });
+  try {
+    const result = runVerify(f, ['--allow-downgrade'], 'linux', f.deb, { MOCK_INSTALLED_NEWER: '1' });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const lines = readFileSync(f.log, 'utf8').split('\n');
+    assert.ok(lines.some(line => line.startsWith('SCP ') && line.includes(f.seed)));
+    const transaction = lines.find(line => line.startsWith('SSH ') && line.includes('apt-get install --yes') && line.includes(basename(f.server)));
+    assert.ok(transaction.includes(basename(f.seed)), transaction);
+    assert.ok(transaction.includes('--allow-downgrades'), transaction);
+    assert.ok(lines.some(line => line.includes('dpkg-query -W') && line.includes(basename(f.seed))));
+    assert.equal(JSON.parse(result.stdout).serverCompanionCount, 1);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('Linux refuses an altered seed before reaching the guest', () => {
+  const f = linuxFixture({ splitSeed: true });
+  try {
+    writeFileSync(f.seed, 'altered companion');
+    const result = runVerify(f, [], 'linux', f.deb);
+    assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /seed companion bytes differ/);
+    assert.equal(existsSync(f.log), false);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
 test('Linux installs an older package over a newer one only when the leg opts into --allow-downgrade', () => {

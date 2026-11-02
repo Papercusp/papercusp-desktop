@@ -10,7 +10,7 @@
 #   vmctl down  [name]            graceful shutdown
 #   vmctl reset [name]            recreate a pristine overlay from golden
 #   vmctl ssh   [name] [cmd...]   shell / run a command in the VM
-#   vmctl install [name] [deb]    scp the newest .deb in + apt install (fresh-install test)
+#   vmctl install [name] [deb] [companion.deb ...]  scp + install in one apt transaction
 #   vmctl launch  [name]          start the installed app in the VM's GUI session
 #   vmctl hotpatch [name] [serve.mjs]  swap ONLY the sidecar bundle + relaunch (fast
 #                                 JS iteration; no .deb rebuild). Records provenance.
@@ -165,9 +165,19 @@ cmd_install() {
   local name="${1:-clean}" deb="${2:-}"
   [ -n "$deb" ] || deb="$(default_deb)"
   [ -n "$deb" ] && [ -f "$deb" ] || die "no .deb found. Build one or pass a path: vmctl install $name <deb>"
+  local -a debs=("$deb") remote_debs=(/tmp/Papercusp.deb)
+  [[ $# -le 2 ]] || debs+=("${@:3}")
+  local index=0 package
+  for package in "${debs[@]}"; do
+    [[ -f "$package" && "$package" == *.deb ]] || die "invalid install companion: $package"
+  done
   vm_running "$name" || die "$name is not running. vmctl up $name"
   log "copying $(basename "$deb") ($(du -h "$deb" | cut -f1)) into $name…"
   vm_scp "$name" "$deb" /tmp/Papercusp.deb
+  for ((index=1; index<${#debs[@]}; index++)); do
+    remote_debs+=("/tmp/Papercusp-companion-$index.deb")
+    vm_scp "$name" "${debs[$index]}" "${remote_debs[$index]}"
+  done
   log "apt install (resolving runtime deps — the fresh-install test)…"
   # --reinstall so a SAME-version rebuilt .deb (version stays 0.0.1) is actually
   # re-laid-down on a --no-reset overlay; without it apt skips "already newest"
@@ -181,7 +191,9 @@ cmd_install() {
   # two consecutive probes before BOTH apt phases. Keep apt's native dpkg waiter
   # as the final race backstop; the bounded outer wait still fails loudly when a
   # guest package manager is genuinely wedged.
-  vm_run "$name" <<'EOF'
+  {
+  printf 'set --'; printf ' %q' "${remote_debs[@]}"; printf '\n'
+  cat <<'EOF'
 set -euo pipefail
 
 wait_for_guest_apt_idle() {
@@ -217,8 +229,9 @@ wait_for_guest_apt_idle
 sudo apt-get update -qq
 wait_for_guest_apt_idle
 sudo DEBIAN_FRONTEND=noninteractive \
-  apt-get -o DPkg::Lock::Timeout=300 install -y --reinstall /tmp/Papercusp.deb
+  apt-get -o DPkg::Lock::Timeout=300 install -y --reinstall "$@"
 EOF
+  } | vm_run "$name"
   log "installed:"; vm_ssh "$name" "dpkg -l | grep -i papercusp || true"
 }
 

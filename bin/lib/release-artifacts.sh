@@ -1,6 +1,56 @@
 #!/usr/bin/env bash
 # release-artifacts.sh — the SINGLE source of truth for "which files make up this
 # desktop cut", shared by the two halves of the release pipeline (EI-12913).
+# Resolve D-236 Linux seed companions from the Server's own version/provenance.
+# Explicit paths use the same validation as discovery; no VM/SSH side effects.
+release_artifacts_linux_seed_companions() {
+  python3 - "$@" <<'PY'
+import hashlib, json, pathlib, re, subprocess, sys
+server, provenance, *explicit = sys.argv[1:]
+def field(file, name):
+    return subprocess.check_output(['dpkg-deb', '-f', str(file), name], text=True).strip()
+try:
+    required = any(re.search(r'(?<![\w-])papercusp-server-seed(?![\w-])', field(server, key))
+                   for key in ('Depends', 'Recommends'))
+    if not required and not explicit:
+        raise SystemExit(0)
+    version = field(server, 'Version')
+    root = pathlib.Path(provenance).resolve().parent
+    doc = json.loads(pathlib.Path(provenance).read_text())
+    if doc.get('version') != version:
+        raise ValueError('seed provenance version differs from Server package')
+    rows = doc.get('artifacts', [])
+    paths = [pathlib.Path(p).resolve() for p in explicit]
+    if not paths:
+        for row in rows:
+            name = row.get('name', '')
+            if pathlib.Path(name).name == f'papercusp-server-seed_{version}_all.deb':
+                paths.append((root / name).resolve())
+    if not paths:
+        raise ValueError(f'Server {version} requires its provenance-listed seed companion')
+    if len(set(paths)) != len(paths):
+        raise ValueError('duplicate seed companion')
+    for seed in paths:
+        if not seed.is_file() or '\n' in str(seed):
+            raise ValueError(f'seed companion missing or unsafe: {seed}')
+        if field(seed, 'Package') != 'papercusp-server-seed' or field(seed, 'Version') != version:
+            raise ValueError(f'seed companion package/version differs from Server {version}: {seed}')
+        matches = [r for r in rows if (root / r.get('name', '')).resolve() == seed
+                   and (root / r.get('name', '')).resolve().is_relative_to(root)]
+        if len(matches) != 1:
+            raise ValueError(f'seed companion is not uniquely bound to Server provenance: {seed}')
+        digest = hashlib.sha256()
+        with seed.open('rb') as handle:
+            for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b''):
+                digest.update(chunk)
+        if matches[0].get('bytes') != seed.stat().st_size or matches[0].get('sha256') != digest.hexdigest():
+            raise ValueError(f'seed companion bytes differ from Server provenance: {seed}')
+    for seed in paths:
+        print(seed)
+except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+    raise SystemExit(f'release-artifacts: {exc}')
+PY
+}
 #
 # THE BUG THIS FIXES: release-local.sh (the BUILD half) and upload-release.sh
 # (the PUBLISH half) each decided INDEPENDENTLY which files were "this cut's

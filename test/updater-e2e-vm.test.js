@@ -642,6 +642,30 @@ test("updater E2E is pinned to a dedicated disposable VM lane", () => {
   assert.match(common, /grep -v '\/Papercusp Server_'/);
 });
 
+test('vmctl transfers every companion and passes exactly that set to one guest apt transaction', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vmctl-seed-install-'));
+  try {
+    const server = path.join(root, 'Server with spaces.deb');
+    const seed = path.join(root, 'seed with spaces.deb');
+    fs.writeFileSync(server, 'server'); fs.writeFileSync(seed, 'seed');
+    const probe = spawnSync('bash', ['-c', `
+      PAPERCUSP_VMCTL_SOURCE_ONLY=1 source "$1"
+      vm_running() { return 0; }
+      vm_scp() { printf 'COPY <%s> <%s>\\n' "$2" "$3"; }
+      vm_run() { cat >"$GUEST_SCRIPT"; }
+      vm_ssh() { :; }
+      cmd_install clean "$2" "$3"
+    `, 'bash', vmctlPath, server, seed], {
+      encoding: 'utf8', env: { ...process.env, GUEST_SCRIPT: path.join(root, 'guest.sh') },
+    });
+    assert.equal(probe.status, 0, `${probe.stdout}\n${probe.stderr}`);
+    assert.ok(probe.stdout.includes(`COPY <${seed}> </tmp/Papercusp-companion-1.deb>`));
+    const guest = fs.readFileSync(path.join(root, 'guest.sh'), 'utf8');
+    assert.match(guest, /^set -- \/tmp\/Papercusp.deb \/tmp\/Papercusp-companion-1.deb\n/);
+    assert.match(guest, /apt-get .*install -y --reinstall "\$@"/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("vmctl install waits boundedly for every guest apt lock before update and install", () => {
   const start = vmctl.indexOf("cmd_install()");
   const end = vmctl.indexOf("\ncmd_launch()", start);
