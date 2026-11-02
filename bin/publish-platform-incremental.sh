@@ -49,6 +49,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+# Apply the public interface hold before stamps, collection or live-feed reads.
+node "$HERE/lib/spa-freshness.js" || exit $?
 # shellcheck source=lib/gen-latest-manifest.sh
 source "$HERE/lib/gen-latest-manifest.sh"
 # shellcheck source=lib/release-artifacts.sh
@@ -76,21 +78,6 @@ esac
 
 TAG="$(desktop_release_tag "$VERSION" "$CHANNEL")"
 echo "==> version=$VERSION channel=$CHANNEL platform=$PLATFORM tag=$TAG"
-
-# EI-20551860898590077: retain the original full-cut start when this is an
-# incremental addition; otherwise already-live platforms in the union would be
-# incorrectly judged stale against a newly-created stamp. A first incremental
-# publish with no prior cut creates the stamp and then checks only NEW_ARTIFACTS.
-PAPERCUSP_RELEASE_CUT_START_NS="$(release_artifacts_cut_start_ensure "$TAG")"
-export PAPERCUSP_RELEASE_CUT_START_NS PAPERCUSP_RELEASE_TAG="$TAG"
-# Bound this publish's retention lease -- same contract and same reason as
-# release-local.sh (WI-10002441). Any entry point that exports
-# PAPERCUSP_RELEASE_TAG will cause a lease to be acquired, so it must also state a
-# retention window or it writes expires_ns=0 and pins its paths forever. Kept in
-# sync by the release-artifacts selftest, which fails if an entry point sets the
-# tag without a TTL.
-export PAPERCUSP_RELEASE_RETENTION_TTL_SEC="${PAPERCUSP_RELEASE_RETENTION_TTL_SEC:-604800}"
-echo "==> release artifact freshness: cut-start=$PAPERCUSP_RELEASE_CUT_START_NS"
 
 load_release_host
 if [[ -z "${PAPERCUSP_UPDATE_BASE_URL:-}" ]]; then
@@ -172,6 +159,18 @@ for f in "${NEW_ARTIFACTS[@]}"; do echo "      $(basename "$f")"; done
 # Catch a dropped signature HERE, where the fault actually is, rather than three steps
 # later as "would publish an unsigned download" about an artifact that is in fact signed
 # (EI-23962107353168459 — the mac collector globbed *.dmg but not *.dmg.sig).
+# A legacy caller cannot authorize candidate bytes. Check the collected records
+# before freshness stamps, smoke execution or merging the public updater feeds.
+node "$HERE/lib/spa-freshness.js" "${NEW_ARTIFACTS[@]}" || exit $?
+
+# Preserve the original full-cut start for an incremental addition. A first
+# addition creates its stamp only after the interface identity is accepted.
+PAPERCUSP_RELEASE_CUT_START_NS="$(release_artifacts_cut_start_ensure "$TAG")"
+export PAPERCUSP_RELEASE_CUT_START_NS PAPERCUSP_RELEASE_TAG="$TAG"
+# Every tag-scoped retention lease needs a finite window (WI-10002441).
+export PAPERCUSP_RELEASE_RETENTION_TTL_SEC="${PAPERCUSP_RELEASE_RETENTION_TTL_SEC:-604800}"
+echo "==> release artifact freshness: cut-start=$PAPERCUSP_RELEASE_CUT_START_NS"
+
 if ! release_artifacts_assert_collected_sigs_complete "$PLATFORM" "${NEW_ARTIFACTS[@]}"; then
   echo "ERROR: the $PLATFORM collector above did not pick up signature(s) that exist on disk — refusing to merge an incomplete set." >&2
   exit 1

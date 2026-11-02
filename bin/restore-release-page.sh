@@ -19,6 +19,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DESKTOP_ROOT="$(cd "$HERE/.." && pwd)"
 REPO_ROOT="$(cd "$DESKTOP_ROOT/.." && pwd)"
+# Match the publisher's hold before launching the recorder or regenerating pages.
+node "$HERE/lib/spa-freshness.js" || exit $?
 
 echo "==> restoring the real releases page"
 npx tsx "${REPO_ROOT}/apps/operator/lib/release/record-release-cli.ts" --restore-page
