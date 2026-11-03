@@ -406,10 +406,79 @@ impl ExtractedInputs {
     }
 }
 
-/// Read one bounded provenance section from a thin ELF/Mach-O/PE executable.
-/// Archive and universal-image callers must first select the actual native image
-/// with a format-aware adapter. Unsupported containers fail closed here.
+/// Read actual native inputs without running the candidate. Universal Mach-O
+/// images are selected by their validated architecture table, never by scanning
+/// for a provenance marker. Archive callers must first select the executable.
 pub fn extract_binary_inputs(binary: &[u8], platform: &str) -> Result<ExtractedInputs, String> {
+    use object::read::macho::{MachOFatFile32, MachOFatFile64};
+    match object::FileKind::parse(binary).map_err(|_| "invalid candidate native image")? {
+        object::FileKind::MachOFat32 => {
+            let fat = MachOFatFile32::parse(binary).map_err(|_| "invalid universal candidate table")?;
+            extract_universal_inputs(binary, platform, fat.arches())
+        }
+        object::FileKind::MachOFat64 => {
+            let fat = MachOFatFile64::parse(binary).map_err(|_| "invalid universal candidate table")?;
+            extract_universal_inputs(binary, platform, fat.arches())
+        }
+        _ => extract_thin_binary_inputs(binary, platform),
+    }
+}
+
+fn extract_universal_inputs<F: object::read::macho::FatArch>(
+    binary: &[u8], platform: &str, arches: &[F],
+) -> Result<ExtractedInputs, String> {
+    use object::macho;
+    use object::read::macho::{MachHeader, MachOFile64};
+    use std::collections::HashSet;
+
+    // Multiple subtypes of one CPU could let the host select a different
+    // executable from the one reviewed. Support only the baseline subtypes.
+    if !matches!(platform, "darwin-x86_64" | "darwin-aarch64") || arches.is_empty() || arches.len() > 2 {
+        return Err("unsupported universal candidate platform or slice count".into());
+    }
+    let header_end = 8 + std::mem::size_of_val(arches) as u64;
+    let mut ranges = Vec::new();
+    let mut cpus = HashSet::new();
+    let mut identity = None;
+    let mut selected = None;
+    for arch in arches {
+        let (slice_platform, subtype) = match arch.cputype() {
+            macho::CPU_TYPE_X86_64 => ("darwin-x86_64", macho::CPU_SUBTYPE_X86_64_ALL),
+            macho::CPU_TYPE_ARM64 => ("darwin-aarch64", macho::CPU_SUBTYPE_ARM64_ALL),
+            _ => return Err("unsupported universal candidate architecture".into()),
+        };
+        let (offset, size) = arch.file_range();
+        let end = offset.checked_add(size).ok_or("invalid universal candidate slice range")?;
+        let alignment = 1u64.checked_shl(arch.align()).ok_or("invalid universal candidate alignment")?;
+        if !cpus.insert(arch.cputype()) || arch.cpusubtype() != subtype || size == 0
+            || offset < header_end || end > binary.len() as u64 || offset % alignment != 0
+            || ranges.iter().any(|&(start, stop)| offset < stop && start < end)
+        {
+            return Err("ambiguous or invalid universal candidate slice".into());
+        }
+        ranges.push((offset, end));
+        let bytes = arch.data(binary).map_err(|_| "unreadable universal candidate slice")?;
+        let image = MachOFile64::parse(bytes).map_err(|_| "universal candidate slice is not thin Mach-O")?;
+        if image.macho_header().cputype(image.endian()) != arch.cputype()
+            || image.macho_header().cpusubtype(image.endian()) != subtype
+        {
+            return Err("universal candidate table differs from native slice".into());
+        }
+        // Inspect every slice: source, product, version and complete authors
+        // must agree across CPUs. Effective policy/config can be target-specific.
+        let inputs = extract_thin_binary_inputs(bytes, slice_platform)?;
+        let current = (inputs.source_revision.clone(), inputs.product.clone(),
+            inputs.version.clone(), inputs.author_ids.clone());
+        if identity.as_ref().is_some_and(|expected| expected != &current) {
+            return Err("universal candidate slices disagree on reviewed identity".into());
+        }
+        identity = Some(current);
+        if slice_platform == platform { selected = Some(inputs); }
+    }
+    selected.ok_or_else(|| "universal candidate has no target architecture".into())
+}
+
+fn extract_thin_binary_inputs(binary: &[u8], platform: &str) -> Result<ExtractedInputs, String> {
     use object::{Architecture, BinaryFormat, Object, ObjectKind, ObjectSection};
 
     const MAX_INPUT_BYTES: u64 = 1024 * 1024;
