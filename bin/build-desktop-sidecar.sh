@@ -1197,6 +1197,21 @@ await withFsMutex(repoLockName(root),async()=>{
   const appRequire=createRequire(join(root,"apps/operator-vite/package.json"));
   const viteManifest=appRequire.resolve("vite/package.json");
   const vite=JSON.parse(readFileSync(viteManifest,"utf8"));
+  // Node caches a missing package.json for an empty optional-package directory.
+  // Hydration cannot invalidate that private cache. Load the completed graph in
+  // the fresh interpreter the actual build will use, while retaining our leases.
+  const verifyVite=(parentManifest="",binding="")=>{
+    const result=spawnSync(process.execPath,["--input-type=module","-e",`
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+const [appManifest,parentManifest,binding]=process.argv.slice(1);
+if (binding) createRequire(parentManifest)(binding);
+await import(pathToFileURL(createRequire(appManifest).resolve("vite")));
+`,join(root,"apps/operator-vite/package.json"),parentManifest,binding],
+      {stdio:"inherit",env:process.env,timeout:60_000});
+    if (result.error) throw result.error;
+    if (result.status!==0) throw new Error(`Vite native toolchain load failed (${result.status})`);
+  };
   if (vite.dependencies?.rolldown) {
     const viteRequire=createRequire(viteManifest);
     const manifest=viteRequire.resolve("rolldown/package.json");
@@ -1237,8 +1252,7 @@ await withFsMutex(repoLockName(root),async()=>{
       if (installed.name!==binding || installed.version!==pkg.version) {
         throw new Error(`Vite native binding ${installed.name}@${installed.version} differs from exact pin ${binding}@${pkg.version}`);
       }
-      requireBinding(binding);
-      await import(pathToFileURL(appRequire.resolve("vite")));
+      verifyVite(manifest,binding);
       return true;
     };
     const available=dependencyRoot!==root
@@ -1257,8 +1271,9 @@ await withFsMutex(repoLockName(root),async()=>{
       if (dependencyRoot!==root) await withFsMutex(repoLockName(dependencyRoot),hydrateAndLoad);
       else await hydrateAndLoad();
     }
+  } else {
+    verifyVite();
   }
-  await import(pathToFileURL(appRequire.resolve("vite")));
   console.log("VITE_NATIVE_TOOLCHAIN_OK: exact binding and Vite import load on the build host");
 });
 ' "$REPO_ROOT" || status=$?
