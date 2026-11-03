@@ -69,6 +69,9 @@ serde_json = "1"
 # Already pinned transitively; use the maintained implementation for complete
 # Windows runtime payload identity, not a hand-written or serve-only hash.
 sha2 = "=0.10.9"
+# Same maintained verifier already locked by tauri-plugin-updater. It authenticates
+# both the payload and trusted comment for independent update approval metadata.
+minisign-verify = "=0.2.5"
 
 # Boot-time WebKitGTK localStorage WAL reclaim (EI-14135): the webview's
 # localStorage is a SQLite DB in WAL mode whose `-wal` never resets (a

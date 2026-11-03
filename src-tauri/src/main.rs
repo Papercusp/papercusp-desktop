@@ -59,6 +59,7 @@ mod native_console;
 mod native_terminal;
 mod pty;
 mod startup_policy;
+mod update_authorization;
 mod webkit_render;
 mod workspaces;
 mod wsl_setup;
