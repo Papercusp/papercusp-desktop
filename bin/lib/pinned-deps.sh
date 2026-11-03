@@ -559,6 +559,22 @@ papercusp_pinned_deps_verifier_desktop() (
   }
 )
 
+# Validate an explicitly selected immutable closure before allocating a native
+# runtime. This owns only a selector lease; it never opens the donor reader or
+# publishes/repairs a generation. Repeat validation during materialization.
+papercusp_pinned_deps_preflight_generation() (
+  local _donor="$1" _snap="$2" _self="${BASH_SOURCE[0]}" _store
+  _donor="$(cd "$_donor" && pwd -P)" || return 1
+  _snap="$(cd "$_snap" && pwd -P)" || return 1
+  source "$(dirname "$_self")/../../../apps/operator/bin/release/dependency-generation.sh" || return 1
+  _store="$(dependency_generation_resolve_root "$_donor" '' 1)" || return $?
+  dependency_generation_select_inputs "$_snap" "$_store" || return $?
+  dependency_generation_acquire_selector_lease "$_store" "$DEPENDENCY_GENERATION_ID" "${BASHPID:-$$}" "$DEPENDENCY_GENERATION_TOKEN" || return $?
+  trap 'dependency_generation_release_selector_lease' EXIT
+  dependency_generation_select_prevalidated "$_store" "$DEPENDENCY_GENERATION_ID" "$DEPENDENCY_GENERATION_TOKEN" || return $?
+  node "$(dirname "$_self")/../../../apps/operator/bin/release/dependency-generation-verifier.mjs" verify "$DEPENDENCY_GENERATION_PATH" "$_snap"
+)
+
 # Consume the full generation and complete the standalone desktop runtime.
 # Never publish a generation or recopy the whole live donor.
 papercusp_pinned_deps_snapshot_generation_locked() (
@@ -877,6 +893,7 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     snapshot) shift; papercusp_pinned_deps_snapshot "$@" ;;
     snapshot-locked) shift; papercusp_pinned_deps_snapshot_locked "$@" ;;
     snapshot-generation-locked) shift; papercusp_pinned_deps_snapshot_generation_locked "$@" ;;
+    preflight-generation) shift; papercusp_pinned_deps_preflight_generation "$@" ;;
     verifier-workspace-outputs) shift; papercusp_pinned_deps_workspace_outputs "$@" ;;
     trees) shift; papercusp_pinned_deps_trees "$@" ;;
     preflight) shift; papercusp_pinned_deps_preflight "$@" ;;
