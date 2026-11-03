@@ -99,6 +99,7 @@ function makeFixture() {
   // The published JS wrapper eagerly imports without opening its native files.
   fs.copyFileSync(require.resolve('odiff-bin'), path.join(odiff, 'odiff.js'));
   for (const rel of ['bin/odiff', '_export/native.tar.gz',
+    '3/i/odiff-33ddbef3/bin/ODiffBin', '3/i/odiff-33ddbef3/bin/RunTests.exe',
     'platform-linux/bin/odiff', 'platform-darwin/bin/odiff']) {
     fs.mkdirSync(path.dirname(path.join(odiff, rel)), { recursive: true });
     fs.writeFileSync(path.join(odiff, rel), 'unused native engine payload');
@@ -184,7 +185,7 @@ test('closure preserves nested package identity and follows its hoisted dependen
     );
     assert.equal(readVersion(path.join(installed, 'rusha')), '0.8.14');
     assert.equal(readVersion(path.join(installed, 'odiff-bin')), '2.6.1');
-    for (const rel of ['bin', '_export', 'platform-linux', 'platform-darwin']) {
+    for (const rel of ['bin', '_export', '3', 'platform-linux', 'platform-darwin']) {
       assert.equal(fs.existsSync(path.join(installed, 'odiff-bin', rel)), false, rel);
       assert.equal(fs.existsSync(path.join(fixture.repoRoot, 'node_modules/odiff-bin', rel)), true,
         'the dependency donor must remain untouched');
@@ -366,6 +367,39 @@ test('pruned odiff preserves the real eager import and pixelmatch comparison wit
   } finally { fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true }); }
 });
 
+test('odiff pruning removes the nested esy engine while inventory rejects other foreign payloads', async () => {
+  const fixture = makeFixture();
+  try {
+    const { sidecarInventory } = await import('../bin/lib/server-container.mjs');
+    const relativeEngine = 'node_modules/odiff-bin/3/i/odiff-33ddbef3/bin/ODiffBin';
+    const sourceEngine = path.join(fixture.repoRoot, relativeEngine);
+    // ELF64 little-endian x86-64, as shipped in odiff's esy installation store.
+    const foreignElf = Buffer.alloc(64);
+    foreignElf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1]);
+    foreignElf.writeUInt16LE(62, 18);
+    fs.writeFileSync(sourceEngine, foreignElf, { mode: 0o755 });
+    const installedOdiff = path.join(fixture.sidecarDir, 'node_modules/odiff-bin');
+    fs.cpSync(path.join(fixture.repoRoot, 'node_modules/odiff-bin'), installedOdiff,
+      { recursive: true });
+    await assert.rejects(sidecarInventory(fixture.sidecarDir, 'linux/arm64'),
+      /Native payload architecture mismatch: .*3\/i\/odiff-33ddbef3\/bin\/ODiffBin/);
+    const result = runBash([shellPrelude(),
+      'prune_unused_odiff_payload "$SIDECAR_DIR/node_modules/odiff-bin"'].join('\n'), fixture);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(fs.existsSync(path.join(installedOdiff, '3')), false);
+    assert.deepEqual(fs.readFileSync(sourceEngine), foreignElf, 'donor stays intact');
+    await sidecarInventory(fixture.sidecarDir, 'linux/arm64');
+    const unexpected = path.join(installedOdiff, 'unexpected.node');
+    fs.writeFileSync(unexpected, foreignElf);
+    const again = runBash([shellPrelude(),
+      'prune_unused_odiff_payload "$SIDECAR_DIR/node_modules/odiff-bin"'].join('\n'), fixture);
+    assert.equal(again.status, 0, again.stdout + again.stderr);
+    assert.deepEqual(fs.readFileSync(unexpected), foreignElf);
+    await assert.rejects(sidecarInventory(fixture.sidecarDir, 'linux/arm64'),
+      /Native payload architecture mismatch: .*unexpected\.node/);
+  } finally { fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true }); }
+});
+
 test('odiff prune follows distinct nested requester versions and refuses a different package', () => {
   const fixture = makeFixture();
   try {
@@ -379,6 +413,7 @@ test('odiff prune follows distinct nested requester versions and refuses a diffe
     assert.equal(readVersion(path.join(modules, 'odiff-bin')), '2.6.1');
     assert.equal(readVersion(path.join(modules, 'lost-pixel/node_modules/odiff-bin')), '2.5.0');
     assert.equal(fs.existsSync(path.join(modules, 'lost-pixel/node_modules/odiff-bin/platform-linux')), false);
+    assert.equal(fs.existsSync(path.join(modules, 'lost-pixel/node_modules/odiff-bin/3')), false);
     const wrong = runBash([shellPrelude(),
       'prune_unused_odiff_payload "$REPO_ROOT/node_modules/rusha"'].join('\n'), fixture);
     assert.equal(wrong.status, 1);

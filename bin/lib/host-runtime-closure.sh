@@ -4,7 +4,9 @@ HOST_RUNTIME_CLOSURE_POLICY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # lost-pixel eagerly imports odiff-bin's JS wrapper, but our production provider
 # calls compareImagesViaPixelmatch directly. odiff 2.6.1's fat package carries
-# x64 Linux/Darwin executables even on ARM, including dormant platform-* trees.
+# x64 Linux/Darwin executables even on ARM, including dormant platform-* trees
+# and the esy v3 installation store (3/i/.../bin/ODiffBin). postinstall extracts
+# that store alongside bin/, so removing only the export/platform trees misses it.
 # Preserve the real JS package, version and requester topology; omit only this
 # unselected engine's installation/native payload. Never delete arbitrary foreign
 # ELF files: the complete target inventory must reject an unexpected runtime dep.
@@ -14,7 +16,7 @@ prune_unused_odiff_payload() {
     echo "ERROR: refusing odiff payload prune for a different package: $pkg_dir" >&2
     return 1
   }
-  rm -rf "$pkg_dir/bin" "$pkg_dir/_export" "$pkg_dir"/platform-* || return 1
+  rm -rf "$pkg_dir/bin" "$pkg_dir/_export" "$pkg_dir/3" "$pkg_dir"/platform-* || return 1
   echo "  ✂ odiff-bin: omitted unused native engine; retained eager-import JS wrapper"
 }
 prune_foreign_prebuilds() {
