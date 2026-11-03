@@ -4942,22 +4942,24 @@ fi
 # contains none of plperl/plpython/pltcl as a substring.
 echo "→ stripping unused PL/* extensions (plperl, plpython, pltcl) from embedded-postgres"
 pl_count=0
-for ext_dir in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/*/native/share/postgresql/extension; do
+# The source-aware closure can hoist @embedded-postgres beside its requester.
+# Walk the assembled topology so both hoisted and nested copies are covered.
+while IFS= read -r -d '' ext_dir; do
   [[ -d "$ext_dir" ]] || continue
   for f in "$ext_dir"/*plperl* "$ext_dir"/*plpython* "$ext_dir"/*pltcl*; do
     [[ -e "$f" ]] || continue
     rm -f "$f"
     pl_count=$((pl_count + 1))
   done
-done
-for lib_dir in "$EMBEDDED_PG_DST/node_modules/@embedded-postgres"/*/native/lib/postgresql; do
+done < <(find "$SIDECAR_DIR/node_modules" -type d -path '*/@embedded-postgres/*/native/share/postgresql/extension' -print0)
+while IFS= read -r -d '' lib_dir; do
   [[ -d "$lib_dir" ]] || continue
   for f in "$lib_dir"/*plperl* "$lib_dir"/*plpython* "$lib_dir"/*pltcl*; do
     [[ -e "$f" ]] || continue
     rm -f "$f"
     pl_count=$((pl_count + 1))
   done
-done
+done < <(find "$SIDECAR_DIR/node_modules" -type d -path '*/@embedded-postgres/*/native/lib/postgresql' -print0)
 echo "  removed $pl_count PL/* extension files (plpgsql preserved)"
 
 # Strip musl-libc native binary variants. npm pulls these in as optional

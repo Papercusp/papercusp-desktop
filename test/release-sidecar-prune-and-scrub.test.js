@@ -36,6 +36,42 @@ const TRUST_TOOLCHAIN = path.join(root, 'bin/lib/vm-release-trust-toolchain.sh')
 const SOURCE_NOTE_HELPER = path.join(root, 'bin/lib/sidecar-source-note.sh');
 const { collectImports, collectStaticClosure, collectLexicalReferences } = require('../bin/lib/runtime-import-census.cjs');
 
+test('unused PostgreSQL language pruning follows hoisted and nested packages while preserving plpgsql', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pg-language-prune-'));
+  try {
+    const builder = fs.readFileSync(path.join(root, 'bin/build-desktop-sidecar.sh'), 'utf8');
+    const start = builder.indexOf('echo "→ stripping unused PL/* extensions');
+    const end = builder.indexOf('\n# Strip musl-libc', start);
+    assert.ok(start >= 0 && end > start, 'production language prune must be present');
+    const retained = [];
+    const removed = [];
+    const packageRoots = ['node_modules/@embedded-postgres/linux-arm64/native',
+      'node_modules/@papercusp/embedded-postgres-server/node_modules/@embedded-postgres/linux-x64/native'];
+    for (const packageRoot of packageRoots) {
+      for (const folder of ['lib/postgresql', 'share/postgresql/extension']) {
+        for (const name of ['plpython3', 'ltree_plpython3', 'plperl', 'hstore_plperl', 'jsonb_plperl', 'pltcl']) {
+          const file = path.join(dir, packageRoot, folder, name + (folder.startsWith('lib') ? '.so' : '.control'));
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          fs.writeFileSync(file, 'unselected language');
+          removed.push(file);
+        }
+        for (const name of ['plpgsql', 'vector', 'pg_textsearch', 'dict_snowball', 'libpq']) {
+          const file = path.join(dir, packageRoot, folder, name + (folder.startsWith('lib') ? '.so' : '.control'));
+          fs.writeFileSync(file, 'required runtime');
+          retained.push(file);
+        }
+      }
+    }
+    const result = spawnSync('bash', ['-ec', builder.slice(start, end)], {
+      encoding: 'utf8', env: { ...process.env, SIDECAR_DIR: dir,
+        EMBEDDED_PG_DST: path.join(dir, 'node_modules/@papercusp/embedded-postgres-server') },
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    for (const file of removed) assert.equal(fs.existsSync(file), false, file);
+    for (const file of retained) assert.equal(fs.readFileSync(file, 'utf8'), 'required runtime', file);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('D-161 namespace census follows the seeded binding through getters and excludes shadowed names', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-lexical-census-'));
   try {
