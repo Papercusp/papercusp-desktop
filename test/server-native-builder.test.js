@@ -65,18 +65,22 @@ test('native builder checks the full GUI development closure before compilation'
   }
 });
 
-test('factory pgvector validation admits target ELF and refuses missing, empty or host inputs', () => {
-  const scratch = makeDesktopTestScratchDirSync('native-pgvector-');
+for (const [name, library, marker] of [
+  ['pgvector', 'vector', 'NATIVE_PGVECTOR_PREFLIGHT'],
+  ['pg_textsearch', 'pg_textsearch', 'NATIVE_PGTEXTSEARCH_PREFLIGHT'],
+]) {
+test(`factory ${name} validation admits target ELF and refuses missing, empty or host inputs`, () => {
+  const scratch = makeDesktopTestScratchDirSync(`native-${name}-`);
   const lib = path.join(scratch, 'lib');
   const extension = path.join(scratch, 'extension');
   fs.mkdirSync(lib);
   fs.mkdirSync(extension);
-  const script = recipe.split('# NATIVE_PGVECTOR_PREFLIGHT_BEGIN\n')[1]
-    .split('# NATIVE_PGVECTOR_PREFLIGHT_END')[0]
+  const script = recipe.split(`# ${marker}_BEGIN\n`)[1]
+    .split(`# ${marker}_END`)[0]
     .replaceAll('/usr/lib/postgresql/18/lib', lib)
     .replaceAll('/usr/share/postgresql/18/extension', extension);
-  const files = [path.join(lib, 'vector.so'), path.join(extension, 'vector.control'),
-    path.join(extension, 'vector--0.8.2.sql')];
+  const files = [path.join(lib, `${library}.so`), path.join(extension, `${library}.control`),
+    path.join(extension, `${library}--1.0.sql`)];
   const reset = () => files.forEach(file => fs.writeFileSync(file, 'fixture'));
   const run = (arch, machine) => spawnSync('bash', ['-euo', 'pipefail', '-c',
     'file() { printf "%s\\n" "$FIXTURE_ELF"; };\n' + script], {
@@ -93,16 +97,17 @@ test('factory pgvector validation admits target ELF and refuses missing, empty o
           if (state === 'missing') fs.unlinkSync(file); else fs.writeFileSync(file, '');
           const r = run(arch, machine);
           assert.equal(r.status, 2, `${file} ${state}: ${r.stderr}`);
-          assert.match(r.stderr, /requires PostgreSQL 18 pgvector library, control and SQL/);
+          assert.ok(r.stderr.includes(`requires PostgreSQL 18 ${name} library, control and SQL`), r.stderr);
         }
       }
       reset();
       const r = run(arch, arch === 'arm64' ? 'ELF x86-64' : 'ELF ARM aarch64');
       assert.equal(r.status, 2, r.stderr);
-      assert.match(r.stderr, /pgvector architecture differs/);
+      assert.ok(r.stderr.includes(`${name} architecture differs`), r.stderr);
     }
   } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
 });
+}
 
 test('factory Git adapter distinguishes stale ENOMEM at EOF from real stream errors', { skip: process.platform !== 'linux' }, () => {
   const scratch = makeDesktopTestScratchDirSync('native-git-eof-');
