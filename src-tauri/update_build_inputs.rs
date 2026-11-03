@@ -25,7 +25,7 @@ struct Inputs {
     version: String,
     product: String,
     platform: String,
-    author_id: String,
+    author_ids: Vec<String>,
 }
 
 fn read_json(path: &Path) -> Result<String, String> {
@@ -123,17 +123,17 @@ pub fn emit(
         .cloned()
         .unwrap_or_default();
     let bytes = serde_json::to_vec(&Inputs {
-        schema: "tauri-update-inputs-v1",
+        schema: "tauri-update-inputs-v2",
         policy,
         configuration,
         source_revision,
         version,
         product: config.identifier,
         platform: platform(target)?,
-        // The existing provenance does not authenticate an author. An empty
-        // identity deliberately fails the native extractor's label check. Do
+        // The existing provenance does not authenticate all authors. An empty
+        // set deliberately fails the native extractor's author check. Do
         // not turn git author text or an environment variable into authority.
-        author_id: String::new(),
+        author_ids: Vec::new(),
     })
     .map_err(|e| e.to_string())?;
     if bytes.len() > MAX_BYTES {

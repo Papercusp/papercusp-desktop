@@ -22,7 +22,7 @@ pub struct Metadata {
     pub version: String,
     pub product: String,
     pub platform: String,
-    pub author_id: String,
+    pub author_ids: Vec<String>,
     pub approver_id: String,
     pub approver_epoch: u64,
     pub signer_id: String,
@@ -371,7 +371,7 @@ pub struct Candidate<'a> {
     pub version: &'a str,
     pub product: &'a str,
     pub platform: &'a str,
-    pub author_id: &'a str,
+    pub author_ids: &'a [String],
 }
 
 /// Actual build inputs embedded in a native image, not digests supplied by the
@@ -388,7 +388,7 @@ pub struct ExtractedInputs {
     version: String,
     product: String,
     platform: String,
-    author_id: String,
+    author_ids: Vec<String>,
 }
 
 impl ExtractedInputs {
@@ -401,7 +401,7 @@ impl ExtractedInputs {
             version: &self.version,
             product: &self.product,
             platform: &self.platform,
-            author_id: &self.author_id,
+            author_ids: &self.author_ids,
         }
     }
 }
@@ -444,10 +444,11 @@ pub fn extract_binary_inputs(binary: &[u8], platform: &str) -> Result<ExtractedI
         }
         let value: ExtractedInputs = serde_json::from_slice(bytes)
             .map_err(|_| "invalid candidate build inputs")?;
-        if value.schema != "tauri-update-inputs-v1"
+        if value.schema != "tauri-update-inputs-v2"
             || value.platform != platform
             || !hex(&value.source_revision, 40)
-            || ![&value.version, &value.product, &value.author_id].iter().all(|s| label(s))
+            || ![&value.version, &value.product].iter().all(|s| label(s))
+            || !authors(&value.author_ids)
             || ![&value.policy, &value.configuration].iter().all(|text| {
                 serde_json::from_str::<serde_json::Value>(text)
                     .map(|v| v.is_object())
@@ -487,6 +488,16 @@ fn hex(value: &str, length: usize) -> bool {
         && value
             .bytes()
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
+
+fn authors(values: &[String]) -> bool {
+    !values.is_empty()
+        && values.len() <= 64
+        && values.iter().all(|s| label(s))
+        // Match JavaScript's string ordering, including supplementary Unicode.
+        && values.windows(2).all(|pair| {
+            pair[0].encode_utf16().cmp(pair[1].encode_utf16()).is_lt()
+        })
 }
 
 fn decode(value: &str) -> Result<Vec<u8>, String> {
@@ -551,7 +562,7 @@ pub fn verify(
     }
     let m: Metadata = serde_json::from_str(&envelope.payload)
         .map_err(|_| "invalid update authorization metadata")?;
-    if m.schema != "tauri-update-authorization-v1"
+    if m.schema != "tauri-update-authorization-v2"
         || ![
             &m.artifact_sha256,
             &m.policy_sha256,
@@ -564,12 +575,12 @@ pub fn verify(
             &m.version,
             &m.product,
             &m.platform,
-            &m.author_id,
             &m.approver_id,
             &m.signer_id,
         ]
         .iter()
         .all(|s| label(s))
+        || !authors(&m.author_ids)
         || [
             m.approver_epoch,
             m.signer_epoch,
@@ -615,11 +626,13 @@ pub fn verify(
         ("version", candidate.version, m.version.as_str()),
         ("product", candidate.product, m.product.as_str()),
         ("platform", candidate.platform, m.platform.as_str()),
-        ("authorId", candidate.author_id, m.author_id.as_str()),
     ] {
         if actual != expected {
             return Err(format!("candidate {field} differs from reviewed update"));
         }
+    }
+    if !authors(candidate.author_ids) || candidate.author_ids != m.author_ids {
+        return Err("candidate authorIds differs from reviewed update".into());
     }
     if [
         now,
@@ -653,7 +666,7 @@ pub fn verify(
     let approver = select(&trust.approvers, &m.approver_id, m.approver_epoch)?;
     let (signer_key, signer_bytes) = key(&signer.public_key)?;
     let (approver_key, approver_bytes) = key(&approver.public_key)?;
-    if approver.principal_id == m.author_id
+    if m.author_ids.contains(&approver.principal_id)
         || approver.principal_id == signer.principal_id
         || signer_bytes[10..] == approver_bytes[10..]
     {
