@@ -192,6 +192,13 @@ if [[ "$TARGET_OS" == "linux" \
   echo "       Run this producer in a target-platform builder; setting TARGET_ARCH alone cannot cross-build pui, PostgreSQL and native addons." >&2
   exit 2
 fi
+# Reject unsupported vm-release targets before the transformer contract reads
+# source manifests. Scanner preparation stays after that source-input check.
+if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+  # shellcheck source=lib/vm-release-trust-toolchain.sh
+  source "$HERE/lib/vm-release-trust-toolchain.sh"
+  papercusp_validate_vm_release_target "$TARGET_OS" "$TARGET_ARCH" || exit 1
+fi
 # The transformers identity check reads only package.json + the lock, so it runs
 # BEFORE the vulnerability-DB refresh below: an incompatible source input must be
 # refused before any network or expensive work (pinned by
@@ -208,9 +215,6 @@ if [[ "$DISTRIBUTION_PROFILE" == "vm-release" || "${PAPERCUSP_TRANSFORMERS_VERIF
 fi
 
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
-  # shellcheck source=lib/vm-release-trust-toolchain.sh
-  source "$HERE/lib/vm-release-trust-toolchain.sh"
-  papercusp_validate_vm_release_target "$TARGET_OS" "$TARGET_ARCH" || exit 1
   # Share the final audit's scanner/DB integrity and freshness checks before
   # source capture, installs or compilation. A ready scanner is not a green
   # artifact: the finished tree still receives its SBOM and vulnerability gate.

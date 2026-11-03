@@ -692,13 +692,14 @@ test('vulnerability scanner preflight rejects invalid, stale, future and malform
   }
 });
 
-test('vm-release scanner preflight refuses an invalid database before source or build work', () => {
+test('vm-release scanner preflight refuses an invalid database before source capture or build work', () => {
   const run = runFakeVulnerabilityAudit({ dbValid: false, preflight: true });
   try {
+    const repo = prepareBuilderPreflightRepo(run.dir);
     const result = spawnSync('bash', [path.join(root, 'bin/build-desktop-sidecar.sh')], {
       encoding: 'utf8',
       env: { ...run.env, PAPERCUSP_DISTRIBUTION_PROFILE: 'vm-release',
-        REPO_ROOT: path.join(run.dir, 'missing-repo') },
+        REPO_ROOT: repo },
       timeout: 15_000,
     });
     assert.equal(result.error, undefined);
