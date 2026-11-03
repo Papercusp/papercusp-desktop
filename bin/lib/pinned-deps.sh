@@ -686,18 +686,20 @@ papercusp_pinned_deps_snapshot_locked() (
 # the SBOM and the vulnerability scan all inspect the FINISHED bundle, which agrees with
 # itself whether or not its inputs were torn.
 #
-# TWO COUPLING SHAPES ARE CHECKED, because both are reachable from here:
+# THREE COUPLING SHAPES ARE CHECKED, because all are reachable from here:
 #   1. an overlay whose lowerdir is outside the pinned tree — the r15 workaround's shape, and
 #      the one that killed r14;
 #   2. a node_modules that is a SYMLINK out of the pinned tree — the cheaper thing a reader
 #      reaches for first, and worse than the overlay: the workspace packages' relative links
 #      would resolve back into the donor and npm's writes would land there directly.
+#   3. a writable regular dependency file with a hard link — rename-based npm installs are
+#      isolated by a hardlink snapshot, but a consumer that writes file contents in place can
+#      still mutate the donor through that shared inode.
 # A bind mount is caught by the same mountinfo pass as (1), since its field-4 root IS the
 # source path when the filesystem is mounted at /.
 #
-# A PLAIN DIRECTORY PASSES, and that is the point rather than a gap: real dependencies inside
-# the pinned tree are decoupled by construction, so the gate fires only on the shapes that
-# borrow storage from somewhere else.
+# A plain dependency directory passes when its writable files are not hard-linked to other
+# storage. Path confinement alone does not prove inode independence.
 #
 # PLATFORM: the mount pass reads /proc/self/mountinfo directly rather than shelling to
 # findmnt, which does not exist on macOS. Where that file is unreadable the mount axis is
@@ -712,6 +714,46 @@ papercusp_pinned_deps_snapshot_locked() (
 # ambient `PAPERCUSP_..._MOUNTINFO=/dev/null` would silently blind a release gate, whereas an
 # argument has to be passed by the caller, and the producer is guard-tested to pass exactly
 # two. Default is the live table.
+papercusp_pinned_deps_writable_hardlink_check() (
+  local _root="${1:-}"
+  local _trees _rel _tree _tmp _file _found=0
+  [ -n "$_root" ] && [ -d "$_root" ] || return 0
+  _root="$(cd "$_root" 2>/dev/null && pwd -P)" || return 1
+  _trees="$(papercusp_pinned_deps_trees "$_root")" || {
+    echo "ERROR: could not enumerate dependency trees for hardlink checking: $_root" >&2
+    return 1
+  }
+  _tmp="$(mktemp "${TMPDIR:-/tmp}/pinned-deps-hardlinks.XXXXXX")" || {
+    echo "ERROR: could not create a temporary file for dependency hardlink checking." >&2
+    return 1
+  }
+  trap 'rm -f "$_tmp"' EXIT
+
+  while IFS= read -r _rel; do
+    [ -n "$_rel" ] || continue
+    _tree="$_root/$_rel"
+    [ -d "$_tree" ] || continue
+    : >"$_tmp" || return 1
+    if ! find "$_tree" -type f -links +1 \
+      \( -perm -u+w -o -perm -g+w -o -perm -o+w \) -print -quit >"$_tmp"; then
+      echo "ERROR: could not inspect dependency files for writable hardlinks under $_tree" >&2
+      return 1
+    fi
+    if [ -s "$_tmp" ]; then
+      IFS= read -r _file <"$_tmp" || _file="unknown path"
+      echo "ERROR: writable dependency file has a hard-linked inode (link count greater than one): $_file" >&2
+      _found=1
+    fi
+  done <<EOF
+$_trees
+EOF
+
+  if [ "$_found" -ne 0 ]; then
+    echo "ERROR: writable dependency files are not proven independent under $_root." >&2
+    return 1
+  fi
+)
+
 papercusp_assert_pinned_deps_decoupled() {
   local _root="${1:-}"
   local _allowed="${2:-}"
@@ -751,6 +793,18 @@ papercusp_assert_pinned_deps_decoupled() {
   done <<EOF
 $(papercusp_pinned_deps_trees "$_root_real")
 EOF
+
+  # A regular directory and a confined symlink can still contain writable files
+  # hard-linked to a donor. Check the pinned tree and the declared snapshot tree;
+  # `find` reports only the first matching file per dependency tree.
+  if ! papercusp_pinned_deps_writable_hardlink_check "$_root_real"; then
+    _fail=1
+  fi
+  if [ -n "$_allowed_real" ] && [ "$_allowed_real" != "$_root_real" ]; then
+    if ! papercusp_pinned_deps_writable_hardlink_check "$_allowed_real"; then
+      _fail=1
+    fi
+  fi
 
   # --- shape 1: an overlay/bind whose backing storage is outside the pinned tree ---------
   if [ ! -r "$_mountinfo" ]; then
@@ -802,8 +856,9 @@ EOF
   echo "       A release-audited cut may not read dependencies out of a tree other agents are" >&2
   echo "       writing: overlayfs calls a mutating lower layer undefined behaviour, and this is" >&2
   echo "       how r14 died (D-187) — with dependency generation off (D-186) nothing detects it." >&2
-  echo "       Snapshot the donor first, then point the pinned tree at the SNAPSHOT:" >&2
-  echo "         papercusp_pinned_deps_snapshot_locked <donor_root> <snapshot_root>" >&2
+  echo "       Use an independent copy snapshot for writable dependency trees; a hardlink" >&2
+  echo "       snapshot can still let an in-place write reach the donor:" >&2
+  echo "         papercusp_pinned_deps_snapshot_locked <donor_root> <snapshot_root> copy" >&2
   return 1
 }
 
