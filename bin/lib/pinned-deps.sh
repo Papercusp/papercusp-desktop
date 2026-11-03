@@ -576,6 +576,10 @@ papercusp_pinned_deps_snapshot_generation_locked() (
   dependency_generation_acquire_selector_lease "$_store" "$_identity" "${BASHPID:-$$}" "$_token" || return $?
   trap 'dependency_generation_release_copy_lock; dependency_generation_release_selector_lease' EXIT
   dependency_generation_select_prevalidated "$_store" "$_identity" "$_token" || return $?
+  local _verifier_helper="$(dirname "$_self")/../../../apps/operator/bin/release/dependency-generation-verifier.mjs"
+  # A legacy/incomplete generation remains valid for release consumers, but
+  # cannot authorize a native runtime. Validate before the first tree copy.
+  node "$_verifier_helper" verify "$DEPENDENCY_GENERATION_PATH" "$_snap" || return $?
   _source_device="$(dependency_generation_device "$DEPENDENCY_GENERATION_TREE")" || return 1
   _dest_device="$(dependency_generation_device "$_snap")" || return 1
   if [ "$_source_device" != "$_dest_device" ]; then
@@ -600,10 +604,13 @@ papercusp_pinned_deps_snapshot_generation_locked() (
     echo "snapshot progress: completed=$_n tree=$_rel"
   done < "$DEPENDENCY_GENERATION_PATH/.tree-manifest"
   [ "$_n" -gt 0 ] || return 74
-  papercusp_pinned_deps_verifier_desktop "$_donor" "$_snap" || return $?
-  # Only the small generated workspace output closure reads the mutable donor.
-  node "$_donor/scripts/npm-install-safe.mjs" --repo-root "$_donor" --exec-under-lock -- \
-    bash "$_self" verifier-workspace-outputs "$_donor" "$_snap" copy || return $?
+  node "$_verifier_helper" copy "$DEPENDENCY_GENERATION_PATH" "$_snap" || return $?
+  # Full native generations contain the standalone install with exact-lock
+  # custody. Never fill a missing tree through the mutable donor reader.
+  if [ -f "$_snap/papercusp-desktop/package.json" ]; then
+    [ -x "$_snap/papercusp-desktop/node_modules/.bin/tauri" ] || return 74
+    dependency_generation_audit_lock_tree "$_snap/papercusp-desktop" "$_snap/papercusp-desktop" || return $?
+  fi
   papercusp_pinned_deps_preflight "$_snap" || return $?
   dependency_generation_select_prevalidated "$_store" "$_identity" "$_token" || return $?
   [ "$(dependency_generation_input_fingerprint "$_snap")" = "$_input" ] || return 74
