@@ -406,6 +406,199 @@ impl ExtractedInputs {
     }
 }
 
+/// Inspect the same .app.tar.gz layout the Mac updater installs, without
+/// extracting files or executing the candidate. The signed artifact remains the
+/// WHOLE archive. This only selects inputs; it grants no installation authority.
+pub fn extract_macos_archive_inputs(artifact: &[u8], platform: &str) -> Result<ExtractedInputs, String> {
+    use std::collections::{BTreeMap, HashSet};
+    use std::io::Cursor;
+
+    if !matches!(platform, "darwin-x86_64" | "darwin-aarch64") {
+        return Err("unsupported Mac archive target".into());
+    }
+    // First bound physical entries, including metadata hidden by tar's logical
+    // iterator. GNU long names/links are used by the bundler. PAX/sparse/device
+    // records are not part of this qualified format and must refuse explicitly.
+    scan_macos_archive(artifact, true, |_, _, _, _| Ok(()))?;
+    let mut root = None;
+    let mut explicit = HashSet::new();
+    let mut nodes: BTreeMap<String, (String, bool)> = BTreeMap::new();
+    let mut info = None;
+    scan_macos_archive(artifact, false, |path, header, link, reader| {
+        let directory = header.entry_type().is_dir();
+        let parts = mac_path(path, directory)?;
+        if !parts[0].ends_with(".app") || root.as_ref().is_some_and(|s| s != parts[0]) {
+            return Err("Mac archive must contain exactly one app root".into());
+        }
+        root = Some(parts[0].to_owned());
+        if parts.len() == 1 && !directory {
+            return Err("Mac archive root is not a directory".into());
+        }
+        // Mirror updater.rs: discard the FIRST component. Reject aliases and
+        // file/link ancestors even if an archive puts the conflicting node last.
+        let installed = parts[1..].join("/");
+        if !explicit.insert(installed.clone()) {
+            return Err("duplicate installed Mac archive path".into());
+        }
+        for i in 1..parts.len() {
+            let prefix = parts[1..=i].join("/");
+            let is_directory = i + 1 < parts.len() || directory;
+            let key = prefix.to_ascii_lowercase();
+            if let Some((prior, prior_directory)) = nodes.get(&key) {
+                if prior != &prefix || !prior_directory || !is_directory {
+                    return Err("aliased or conflicting installed Mac archive path".into());
+                }
+            } else {
+                nodes.insert(key, (prefix, is_directory));
+            }
+        }
+        if header.entry_type().is_symlink() {
+            // No ascending or absolute targets: common Frameworks/Versions/Current
+            // links remain usable, while every possible link chain stays inside
+            // its app. Descendants of links are rejected by the namespace above.
+            mac_path(link.ok_or("missing Mac archive link target")?, false)?;
+        }
+        if installed == "Contents/Info.plist" {
+            if !header.entry_type().is_file() || header.size().map_err(|e| e.to_string())? > 65_536 {
+                return Err("invalid or oversized Mac bundle info".into());
+            }
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+            info = Some(bytes);
+        }
+        Ok(())
+    })?;
+    let info = info.ok_or("Mac archive has no installed bundle info")?;
+    // Bound nesting/event amplification before serde constructs the plist.
+    let mut depth = 0u32;
+    for (n, event) in plist::stream::Reader::new(Cursor::new(&info)).enumerate() {
+        use plist::stream::Event;
+        if n >= 16_384 { return Err("Mac bundle info has too many events".into()); }
+        match event.map_err(|e| e.to_string())? {
+            Event::StartArray(_) | Event::StartDictionary(_) => {
+                depth += 1;
+                if depth > 32 { return Err("Mac bundle info is too deeply nested".into()); }
+            }
+            Event::EndCollection => { depth = depth.checked_sub(1).ok_or("invalid Mac bundle info")?; }
+            _ => {}
+        }
+    }
+    #[derive(Deserialize)]
+    struct BundleInfo {
+        #[serde(rename = "CFBundleExecutable")]
+        executable: String,
+        #[serde(rename = "CFBundleIdentifier")]
+        identifier: String,
+        #[serde(rename = "CFBundleShortVersionString")]
+        version: String,
+    }
+    // Direct deserialization also rejects duplicate identity fields, rather than
+    // silently choosing a value from a lossy dictionary conversion.
+    let bundle: BundleInfo = plist::from_bytes(&info).map_err(|e| e.to_string())?;
+    if mac_path(&bundle.executable, false)?.len() != 1 {
+        return Err("invalid Mac bundle executable name".into());
+    }
+    let selected = format!("Contents/MacOS/{}", bundle.executable);
+    let mut binary = None;
+    scan_macos_archive(artifact, false, |path, header, _, reader| {
+        if mac_path(path, header.entry_type().is_dir())?[1..].join("/") == selected {
+            if !header.entry_type().is_file() || header.mode().map_err(|e| e.to_string())? & 0o111 == 0 {
+                return Err("Mac bundle executable is not an executable regular file".into());
+            }
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+            binary = Some(bytes);
+        }
+        Ok(())
+    })?;
+    let binary = binary.ok_or("Mac archive has no installed main executable")?;
+    let inputs = extract_binary_inputs(&binary, platform)?;
+    if inputs.product != bundle.identifier || inputs.version != bundle.version {
+        return Err("Mac bundle info differs from reviewed executable identity".into());
+    }
+    Ok(inputs)
+}
+
+// Canonical ASCII paths avoid Unicode normalization/case aliases across Mac
+// volumes. Non-ASCII archive paths refuse until their native semantics qualify.
+fn mac_path(path: &str, directory: bool) -> Result<Vec<&str>, String> {
+    let path = if directory { path.strip_suffix('/').unwrap_or(path) } else { path };
+    if path.len() > 4096 || !path.bytes().all(|b| (0x20..=0x7e).contains(&b) && b != b'\\' && b != b':') {
+        return Err("unsupported Mac archive path encoding".into());
+    }
+    let parts: Vec<_> = path.split('/').collect();
+    if parts.iter().any(|s| s.is_empty() || *s == "." || *s == "..") {
+        return Err("noncanonical or escaping Mac archive path".into());
+    }
+    Ok(parts)
+}
+
+fn scan_macos_archive(
+    artifact: &[u8], raw: bool,
+    inspect: impl FnMut(&str, &tar::Header, Option<&str>, &mut dyn std::io::Read) -> Result<(), String>,
+) -> Result<(), String> {
+    scan_macos_archive_with_budget(artifact, raw, 2 * 1024 * 1024 * 1024, inspect)
+}
+
+fn scan_macos_archive_with_budget(
+    artifact: &[u8], raw: bool, max_unpacked: u64,
+    mut inspect: impl FnMut(&str, &tar::Header, Option<&str>, &mut dyn std::io::Read) -> Result<(), String>,
+) -> Result<(), String> {
+    use std::io::{self, Read};
+    if artifact.len() as u64 > 1024 * 1024 * 1024 { return Err("Mac archive is too large".into()); }
+    let mut decoder = flate2::bufread::GzDecoder::new(artifact).take(max_unpacked + 1);
+    {
+        let mut archive = tar::Archive::new(&mut decoder);
+        for (n, entry) in archive.entries().map_err(|e| e.to_string())?.raw(raw).enumerate() {
+            if n >= 65_536 { return Err("Mac archive has too many entries".into()); }
+            let mut entry = entry.map_err(|e| e.to_string())?;
+            let header = entry.header().clone();
+            let kind = header.entry_type();
+            let extension = raw && (kind.is_gnu_longname() || kind.is_gnu_longlink());
+            let limit = if extension { 4096 } else { 512 * 1024 * 1024 };
+            if entry.size() > limit || (!extension && !kind.is_file() && !kind.is_dir() && !kind.is_symlink())
+                || header.mode().map_err(|e| e.to_string())? & 0o7000 != 0
+                || ((kind.is_dir() || kind.is_symlink()) && entry.size() != 0)
+            {
+                return Err("unsupported or oversized Mac archive entry".into());
+            }
+            if !raw {
+                let path = entry.path_bytes().into_owned();
+                let link = entry.link_name_bytes().map(|s| s.into_owned());
+                let path = std::str::from_utf8(&path).map_err(|_| "invalid Mac archive path")?;
+                let link = link.as_deref().map(std::str::from_utf8).transpose().map_err(|_| "invalid Mac archive link")?;
+                inspect(path, &header, link, &mut entry)?;
+            }
+            io::copy(&mut entry, &mut io::sink()).map_err(|e| e.to_string())?;
+        }
+    }
+    // Read through the gzip trailer even when tar has reached its zero blocks:
+    // enforce total inflation, CRC/truncation, and exactly one gzip member.
+    io::copy(&mut decoder, &mut io::sink()).map_err(|e| e.to_string())?;
+    if decoder.limit() == 0 || !decoder.into_inner().into_inner().is_empty() {
+        return Err("oversized or trailing Mac gzip data".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn candidate_inflation_limit_counts_trailing_tar_padding() {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&[0u8; 4096]).unwrap();
+        let archive = encoder.finish().unwrap();
+        for raw in [false, true] {
+            assert!(scan_macos_archive_with_budget(&archive, raw, 1024, |_, _, _, _| Ok(())).is_err());
+            assert!(scan_macos_archive_with_budget(&archive, raw, 4096, |_, _, _, _| Ok(())).is_ok());
+        }
+        println!("native-mac-inflation: bound includes padding after tar end");
+    }
+}
+
 /// Read actual native inputs without running the candidate. Universal Mach-O
 /// images are selected by their validated architecture table, never by scanning
 /// for a provenance marker. Archive callers must first select the executable.
