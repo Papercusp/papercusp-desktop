@@ -2013,6 +2013,9 @@ release_artifacts_write() {
       # Absolute-ize so the reader (a different CWD) resolves it.
       [[ "$f" = /* ]] || f="$(cd "$(dirname "$f")" && pwd)/$(basename "$f")"
       printf '%s\n' "$f"
+      # Keep the reviewed metadata in the same authoritative upload/retention set
+      # as its artifact. Full and incremental cuts both pass this writer.
+      [[ ! -f "$f.update-authorization.json" ]] || printf '%s\n' "$f.update-authorization.json"
     done
   } | sort -u > "$out"
   while IFS= read -r manifest_path || [[ -n "$manifest_path" ]]; do

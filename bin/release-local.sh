@@ -3824,6 +3824,13 @@ fi
 release_artifacts_assert_collected_sigs_complete "release-local" "${ARTIFACTS[@]}" \
   || { echo "ERROR: a release-local leg collector dropped an on-disk signature (see above) — fix its glob" >&2; exit 1; }
 
+# Carry the independent approval alongside the existing detached signature before
+# manifest-stage input hashing and retention. The ledger writer also covers
+# incremental cuts, which use this same detached-companion convention.
+for artifact in "${ARTIFACTS[@]}"; do
+  [[ ! -f "$artifact.update-authorization.json" ]] || ARTIFACTS+=("$artifact.update-authorization.json")
+done
+
 # ARTIFACTS is now the exact publish set, including detached signatures and any
 # normalized spanned-Server outputs. Validate that same complete set before the
 # manifest can certify it; do not reconstruct a narrower platform root list.

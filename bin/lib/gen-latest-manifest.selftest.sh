@@ -415,6 +415,52 @@ else
   bad "an unknown channel must default to side-by-side"
 fi
 
+# P-006 structural transport controls (authentic signatures are tested in the kit).
+write_update_authorization_fixture() {
+  node --input-type=module - "$DIR/../../../libs/generic/tauri-release-kit/src/signature.mjs" "$GUI_APPIMAGE" "$1" <<'NODE'
+import { readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+const [modulePath, artifact, platform] = process.argv.slice(2);
+const { encodeTauriUpdateAuthorization } = await import(pathToFileURL(modulePath).href);
+const payload = encodeTauriUpdateAuthorization({ schema: 'tauri-update-authorization-v1',
+  artifactSha256: createHash('sha256').update(readFileSync(artifact)).digest('hex'),
+  policySha256: 'b'.repeat(64), configurationSha256: 'c'.repeat(64), sourceRevision: 'd'.repeat(40),
+  version: '9.9.9', product: 'gui', platform, authorId: 'author', approverId: 'reviewer', approverEpoch: 1,
+  signerId: 'signer', signerEpoch: 1, rootEpoch: 1, rollbackCounter: 5, issuedAt: 1000, expiresAt: 2000 });
+const signature = Buffer.from('untrusted comment: fixture\nAA\ntrusted comment: fixture\nAA\n').toString('base64');
+writeFileSync(`${artifact}.update-authorization.json`, JSON.stringify({ [platform]: { payload, signature, approvalSignature: signature } }));
+NODE
+}
+if write_update_authorization_fixture linux-x86_64 &&
+   PAPERCUSP_UPDATE_BASE_URL='https://example.com/releases' gen_latest_manifest "$VER" alpha "$TAG_GUI" "$GUI_APPIMAGE" "$GUI_SIG" >/dev/null 2>&1; then
+  python3 - "$GUI_JSON" "$GUI_APPIMAGE.update-authorization.json" <<'PY' && ok "approval bytes survive the canonical producer" || bad "approval was dropped or rewritten"
+import json, sys
+manifest, companion = [json.load(open(path)) for path in sys.argv[1:]]
+assert manifest['platforms']['linux-x86_64']['updateAuthorization'] == companion['linux-x86_64']
+PY
+else
+  bad "valid structural approval fixture could not be published"
+fi
+printf 'changed bytes' >> "$GUI_APPIMAGE"
+if gen_latest_manifest "$VER" alpha "$TAG_GUI" "$GUI_APPIMAGE" "$GUI_SIG" >/dev/null 2>&1; then
+  bad "different artifact bytes were accepted"
+else
+  ok "altered actual bytes refuse before publication"
+fi
+write_update_authorization_fixture windows-x86_64
+if gen_latest_manifest "$VER" alpha "$TAG_GUI" "$GUI_APPIMAGE" "$GUI_SIG" >/dev/null 2>&1; then
+  bad "wrong-platform approval was accepted"
+else
+  ok "missing selected-platform approval refuses"
+fi
+printf '{}' > "$GUI_APPIMAGE.update-authorization.json"
+if gen_latest_manifest "$VER" alpha "$TAG_GUI" "$GUI_APPIMAGE" "$GUI_SIG" >/dev/null 2>&1; then
+  bad "malformed approval was silently dropped"
+else
+  ok "malformed approval refuses instead of downgrading"
+fi
+
 echo
 if [[ "$FAILS" -eq 0 ]]; then
   echo "gen-latest-manifest self-test: ALL PASS"

@@ -211,11 +211,56 @@ gen_latest_manifest() {
   local merge_gui="${GEN_LATEST_MANIFEST_MERGE_GUI_JSON:-}"
   local merge_srv="${GEN_LATEST_MANIFEST_MERGE_SERVER_JSON:-}"
 
-  python3 - "$version" "$channel" "$tag" "$out_path" "$out_server_path" "$notes_path" "$merge_gui" "$merge_srv" "$@" <<'PY'
+  # Reuse the detached-companion artifact transport. A companion maps updater
+  # platform keys to dual-signed envelopes (a universal Mac bundle needs both).
+  # Parsing is shared with the release kit; no second Python protocol encoder.
+  # Legacy cuts without a companion remain representable, not security-qualified.
+  local authorizations='{}' artifact needs_authorization=0 signature_module
+  for artifact in "$@"; do
+    [[ ! -e "$artifact.update-authorization.json" ]] || needs_authorization=1
+  done
+  if [[ "$needs_authorization" == 1 ]]; then
+    signature_module="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/libs/generic/tauri-release-kit/src/signature.mjs"
+    authorizations="$(node --input-type=module - "$signature_module" "$version" "$@" <<'NODE'
+import { existsSync, readFileSync, statSync, createReadStream } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+const [modulePath, version, ...artifacts] = process.argv.slice(2);
+const { parseTauriUpdateEnvelope } = await import(pathToFileURL(modulePath).href);
+const result = Object.create(null);
+for (const artifact of artifacts) {
+  const companion = `${artifact}.update-authorization.json`;
+  if (!existsSync(companion)) continue;
+  if (statSync(companion).size > 1024 * 1024) throw new Error('update authorization companion exceeds bound');
+  const entries = JSON.parse(readFileSync(companion, 'utf8'));
+  if (!entries || typeof entries !== 'object' || Array.isArray(entries) ||
+      Object.keys(entries).length === 0 || Object.keys(entries).length > 16) {
+    throw new Error('update authorization companion must map platform keys to envelopes');
+  }
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(artifact)) hash.update(chunk);
+  const artifactSha256 = hash.digest('hex');
+  result[artifact] = Object.create(null);
+  for (const [platform, value] of Object.entries(entries)) {
+    const envelope = parseTauriUpdateEnvelope(value);
+    const metadata = JSON.parse(envelope.payload);
+    if (metadata.platform !== platform || metadata.version !== version || metadata.artifactSha256 !== artifactSha256) {
+      throw new Error('update authorization differs from actual artifact/version/platform');
+    }
+    result[artifact][platform] = envelope;
+  }
+}
+process.stdout.write(JSON.stringify(result));
+NODE
+    )" || return 1
+  fi
+
+  python3 - "$version" "$channel" "$tag" "$out_path" "$out_server_path" "$notes_path" "$merge_gui" "$merge_srv" "$authorizations" "$@" <<'PY'
 import json, os, sys, pathlib, hashlib
 from urllib.parse import quote, unquote, urlsplit
 version, channel, tag, out_path, out_server_path, notes_path, merge_gui, merge_srv = sys.argv[1:9]
-artifacts = [pathlib.Path(p) for p in sys.argv[9:]]
+authorizations = json.loads(sys.argv[9])
+artifacts = [pathlib.Path(p) for p in sys.argv[10:]]
 
 def load_merge_base(path: str) -> dict:
     """MERGE MODE: load a previously-published manifest's `platforms` dict as the
@@ -286,6 +331,11 @@ def build_platforms(artifacts, want_token, reject_token):
             "signature": sig,
             "url": repo_url(bin_path.name),
         }
+        if str(bin_path) in authorizations:
+            envelope = authorizations[str(bin_path)].get(platform_key)
+            if envelope is None:
+                raise ValueError("update authorization missing for selected platform " + platform_key)
+            platforms[platform_key]["updateAuthorization"] = envelope
 
     def appimage_platform_key(art):
         """Return exactly one Linux platform key for an AppImage.

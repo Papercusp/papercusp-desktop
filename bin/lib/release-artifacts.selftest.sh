@@ -1281,6 +1281,17 @@ else
   bad "control FAILED: the entry-point scan found ${#__pc_tag_setters[@]} tag setter(s) under $__pc_bin_dir — expected at least 2, so this check measured nothing"
 fi
 
+# P-006: the canonical writer carries approvals for full and incremental uploads.
+AUTH_ARTIFACT="$WORK/approval-fixture.AppImage"
+printf 'artifact' > "$AUTH_ARTIFACT"
+printf '{}' > "$AUTH_ARTIFACT.update-authorization.json"
+AUTH_MANIFEST="$(release_artifacts_write "$TAG" "$AUTH_ARTIFACT")"
+if [[ -f "$AUTH_MANIFEST" ]] && grep -Fxq "$AUTH_ARTIFACT.update-authorization.json" "$AUTH_MANIFEST"; then
+  ok "artifact ledger retains the approval companion for upload"
+else
+  bad "artifact ledger dropped the approval companion"
+fi
+
 echo
 if [[ "$FAILS" -eq 0 ]]; then
   echo "release-artifacts self-test: ALL PASS"
