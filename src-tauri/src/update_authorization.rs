@@ -374,6 +374,94 @@ pub struct Candidate<'a> {
     pub author_id: &'a str,
 }
 
+/// Actual build inputs embedded in a native image, not digests supplied by the
+/// update manifest. The build producer must emit these from the same effective
+/// inputs it compiles. Extraction alone does not attest that producer or approve
+/// installation; `verify` still authenticates the complete artifact and inputs.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExtractedInputs {
+    schema: String,
+    policy: String,
+    configuration: String,
+    source_revision: String,
+    version: String,
+    product: String,
+    platform: String,
+    author_id: String,
+}
+
+impl ExtractedInputs {
+    pub fn candidate<'a>(&'a self, artifact: &'a [u8]) -> Candidate<'a> {
+        Candidate {
+            artifact,
+            policy: self.policy.as_bytes(),
+            configuration: self.configuration.as_bytes(),
+            source_revision: &self.source_revision,
+            version: &self.version,
+            product: &self.product,
+            platform: &self.platform,
+            author_id: &self.author_id,
+        }
+    }
+}
+
+/// Read one bounded provenance section from a thin ELF/Mach-O/PE executable.
+/// Archive and universal-image callers must first select the actual native image
+/// with a format-aware adapter. Unsupported containers fail closed here.
+pub fn extract_binary_inputs(binary: &[u8], platform: &str) -> Result<ExtractedInputs, String> {
+    use object::{Architecture, BinaryFormat, Object, ObjectKind, ObjectSection};
+
+    const MAX_INPUT_BYTES: u64 = 1024 * 1024;
+    let image = object::File::parse(binary).map_err(|_| "invalid candidate native image")?;
+    let expected = match platform {
+        "linux-x86_64" => (BinaryFormat::Elf, Architecture::X86_64),
+        "linux-aarch64" => (BinaryFormat::Elf, Architecture::Aarch64),
+        "darwin-x86_64" => (BinaryFormat::MachO, Architecture::X86_64),
+        "darwin-aarch64" => (BinaryFormat::MachO, Architecture::Aarch64),
+        "windows-x86_64" => (BinaryFormat::Pe, Architecture::X86_64),
+        _ => return Err("unsupported candidate platform or container".into()),
+    };
+    if (image.format(), image.architecture()) != expected
+        || !image.is_64()
+        || !matches!(image.kind(), ObjectKind::Executable | ObjectKind::Dynamic)
+    {
+        return Err("candidate native image platform differs from update target".into());
+    }
+    let mut inputs = None;
+    for section in image.sections() {
+        let name = section.name().map_err(|_| "invalid candidate section name")?;
+        // PE image section names have an eight-byte limit.
+        if name != ".pcupd" && name != "__pcupd" {
+            continue;
+        }
+        if inputs.is_some() || section.size() == 0 || section.size() > MAX_INPUT_BYTES {
+            return Err("missing, ambiguous or oversized candidate build inputs".into());
+        }
+        let bytes = section.data().map_err(|_| "unreadable candidate build inputs")?;
+        if bytes.len() as u64 != section.size() {
+            return Err("candidate build inputs are not file-backed bytes".into());
+        }
+        let value: ExtractedInputs = serde_json::from_slice(bytes)
+            .map_err(|_| "invalid candidate build inputs")?;
+        if value.schema != "tauri-update-inputs-v1"
+            || value.platform != platform
+            || !hex(&value.source_revision, 40)
+            || ![&value.version, &value.product, &value.author_id].iter().all(|s| label(s))
+            || ![&value.policy, &value.configuration].iter().all(|text| {
+                serde_json::from_str::<serde_json::Value>(text)
+                    .map(|v| v.is_object())
+                    .unwrap_or(false)
+            })
+            || serde_json::to_vec(&value).map_err(|_| "unencodable candidate build inputs")? != bytes
+        {
+            return Err("invalid or noncanonical candidate build inputs".into());
+        }
+        inputs = Some(value);
+    }
+    inputs.ok_or_else(|| "candidate native image has no reviewed build inputs".into())
+}
+
 /// Only this module constructs an authorized result. It remains a snapshot, not
 /// permission to install after the caller releases its protected-state transaction.
 pub struct AuthorizedUpdate {

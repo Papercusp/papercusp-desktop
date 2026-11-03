@@ -72,6 +72,9 @@ sha2 = "=0.10.9"
 # Same maintained verifier already locked by tauri-plugin-updater. It authenticates
 # both the payload and trusted comment for independent update approval metadata.
 minisign-verify = "=0.2.5"
+# Read candidate provenance from native object sections without executing an
+# untrusted binary or searching arbitrary strings in its payload.
+object = { version = "=0.37.3", default-features = false, features = ["read", "std"] }
 
 # Boot-time WebKitGTK localStorage WAL reclaim (EI-14135): the webview's
 # localStorage is a SQLite DB in WAL mode whose `-wal` never resets (a
