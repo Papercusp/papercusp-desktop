@@ -572,7 +572,12 @@ papercusp_pinned_deps_preflight_generation() (
   dependency_generation_acquire_selector_lease "$_store" "$DEPENDENCY_GENERATION_ID" "${BASHPID:-$$}" "$DEPENDENCY_GENERATION_TOKEN" || return $?
   trap 'dependency_generation_release_selector_lease' EXIT
   dependency_generation_select_prevalidated "$_store" "$DEPENDENCY_GENERATION_ID" "$DEPENDENCY_GENERATION_TOKEN" || return $?
-  node "$(dirname "$_self")/../../../apps/operator/bin/release/dependency-generation-verifier.mjs" verify "$DEPENDENCY_GENERATION_PATH" "$_snap"
+  node "$(dirname "$_self")/../../../apps/operator/bin/release/dependency-generation-verifier.mjs" verify "$DEPENDENCY_GENERATION_PATH" "$_snap" || return $?
+  if [ "${3:-}" = size ]; then
+    local _size
+    _size="$(LC_ALL=C du -s -B1 --apparent-size -- "$DEPENDENCY_GENERATION_TREE")" || return $?
+    printf '%s\n' "${_size%%[[:space:]]*}"
+  fi
 )
 
 # Consume the full generation and complete the standalone desktop runtime.
