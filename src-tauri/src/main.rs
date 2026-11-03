@@ -26,6 +26,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app_role;
+include!(concat!(env!("OUT_DIR"), "/update-build-inputs.rs"));
 mod custom_protocol;
 mod dev_bridge;
 #[cfg(any(target_os = "windows", test))]
@@ -11937,5 +11938,7 @@ fn shutdown_children_once(app_handle: &tauri::AppHandle) {
 }
 
 fn main() {
+    // Keep the reviewed input section reachable through release LTO/section GC.
+    std::hint::black_box(&PAPERCUSP_UPDATE_BUILD_INPUTS);
     run();
 }

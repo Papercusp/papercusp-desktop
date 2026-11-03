@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+mod update_build_inputs;
+
 /// EI-21234338815162020: the operator Vite dist contains a wholesale public/
 /// copy, including `internal/docs`. The canonical sidecar builder removes that
 /// duplicate because `/internal/docs/*` is served from `sidecar/internal-docs`;
@@ -445,4 +447,17 @@ fn main() {
             .app_manifest(tauri_build::AppManifest::new().commands(commands)),
     )
     .expect("failed to run tauri_build with the app-command manifest (WI-1976)");
+
+    let baked = [
+        "PAPERCUSP_BUILD_SHA", "PAPERCUSP_BUILD_VERSION", "PAPERCUSP_RELEASE_HOST",
+        "PAPERCUSP_CHANNEL", "PAPERCUSP_CHANNEL_DATA_HOME", "PAPERCUSP_VERIFY_TAURI_DEV_URL",
+    ].into_iter().filter_map(|name| std::env::var(name).ok().map(|value| (name.to_string(), value)))
+        .collect();
+    update_build_inputs::emit(
+        &manifest_dir,
+        &std::env::var_os("OUT_DIR").map(std::path::PathBuf::from).expect("Cargo OUT_DIR"),
+        &std::env::var("TARGET").expect("Cargo TARGET"),
+        std::env::var("TAURI_CONFIG").ok().as_deref(),
+        &baked,
+    ).expect("cannot record effective native update inputs");
 }
