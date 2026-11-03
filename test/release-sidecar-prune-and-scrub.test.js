@@ -820,33 +820,51 @@ test('vulnerability audit refuses empty or unidentified SBOM coverage before sca
   }
 });
 
+function prepareBuilderPreflightRepo(dir) {
+  // These tests stop before building. Give the real source/dependency guards a
+  // repository with no borrowed node_modules, rather than inspecting the live
+  // checkout (which may legitimately contain writable hardlinks).
+  const source = path.resolve(root, '..');
+  const repo = path.join(dir, 'source');
+  execFileSync('git', ['clone', '--quiet', '--shared', '--no-checkout', source, repo]);
+  const copy = (relative) => {
+    const target = path.join(repo, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(source, relative), target);
+  };
+  for (const relative of ['.nvmrc', 'package.json', 'package-lock.json']) copy(relative);
+  const lock = JSON.parse(fs.readFileSync(path.join(repo, 'package-lock.json'), 'utf8'));
+  for (const [relative, entry] of Object.entries(lock.packages)) {
+    if (!relative.split('/').includes('node_modules') && entry.dependencies?.['@huggingface/transformers']) {
+      copy(path.posix.join(relative, 'package.json'));
+    }
+  }
+  // The producer's --check imports this API without executing it. Any accidental
+  // package command is a test failure; no install/cache lease is needed here.
+  fs.mkdirSync(path.join(repo, 'scripts'), { recursive: true });
+  fs.writeFileSync(path.join(repo, 'scripts/npm-install-safe.mjs'),
+    'export function withPackageCacheReadLease() { throw new Error("preflight must not run a package command"); }\n');
+  return repo;
+}
+
 function runBuilderOwnerPreflight({ audit, owner, advance = false }) {
   const dir = tmp('owner-preflight');
+  const repo = advance ? prepareBuilderPreflightRepo(dir) : path.join(dir, 'missing-repo');
   const env = {
     ...process.env,
     PAPERCUSP_RELEASE_AUDIT: audit,
     // The rejecting cases use a missing repo to prove they stop before the first
-    // runtime-pin read. Allowed cases use the real pin, then stop safely at the
-    // deliberately absent Papercusp dependency before any build operation.
-    REPO_ROOT: advance ? path.resolve(root, '..') : path.join(dir, 'missing-repo'),
+    // runtime-pin read. Allowed cases use isolated source inputs, then stop at
+    // the deliberately absent Papercusp dependency before any build operation.
+    REPO_ROOT: repo,
     PAPERCUSP_ROOT: path.join(dir, 'missing-papercusp'),
   };
   delete env.PAPERCUSP_RELEASE_OWNER_NAME;
   delete env.PROVENANCE_SOURCE_GIT_HEAD;
   delete env.PROVENANCE_SOURCE_GIT_DIRTY;
   if (advance) {
-    // EI-21809903601430402 — HERMETICITY, not a product change. This case is about the OWNER-NAME
-    // guard, but the advancing audit=1 input has to cross the clean-source-tree guard
-    // (bin/build-desktop-sidecar.sh, "requires a clean source tree at cut start") to reach the
-    // deliberately-absent Papercusp dependency it asserts on. That guard reads the source
-    // provenance captured from REPO_ROOT — which here is the SHARED fleet checkout, where
-    // gitDirty is essentially always true — so without this the case could never pass on a
-    // developer or CI checkout that has any uncommitted file, and a red here said nothing about
-    // the guard under test. The script documents the seam this uses (same file, "A release
-    // orchestrator that already captured the phase boundary supplies both seams, and remains
-    // authoritative"): supplying the PAIR pins the source state instead of shelling out to git.
-    // Supplied for advance-only inputs, so the rejecting cases still prove they stop before any
-    // filesystem work. The clean-tree guard itself keeps its own coverage in
+    // Pin the fixture's phase-boundary source identity. The deliberately partial
+    // checkout is not a release input; source-cleanliness coverage lives in
     // test/provenance-sidecar-record.test.js.
     env.PROVENANCE_SOURCE_GIT_HEAD = execFileSync('git', ['-C', env.REPO_ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     env.PROVENANCE_SOURCE_GIT_DIRTY = 'false';
@@ -864,6 +882,7 @@ function runBuilderOwnerPreflight({ audit, owner, advance = false }) {
 
 function runBuilderVmReleaseIdentityPreflight({ sha, version, advance = false, targetOs = 'linux', targetArch = 'x64' }) {
   const dir = tmp('vm-release-identity-preflight');
+  const repo = advance ? prepareBuilderPreflightRepo(dir) : path.join(dir, 'missing-repo');
   const readiness = advance ? runFakeVulnerabilityAudit({ preflight: true }) : null;
   const env = {
     ...(readiness?.env ?? process.env),
@@ -874,22 +893,14 @@ function runBuilderVmReleaseIdentityPreflight({ sha, version, advance = false, t
     // Rejecting cases use a missing repo to prove identity fails before the
     // first runtime-pin read. The admitted case advances safely to the missing
     // Papercusp dependency without starting a build.
-    REPO_ROOT: advance ? path.resolve(root, '..') : path.join(dir, 'missing-repo'),
+    REPO_ROOT: repo,
     PAPERCUSP_ROOT: path.join(dir, 'missing-papercusp'),
   };
   delete env.PAPERCUSP_BUILD_SHA;
   delete env.PAPERCUSP_DESKTOP_VERSION;
   if (advance) {
-    // EI-21832562420831737: vm-release now also refuses a source tree that was DIRTY at the
-    // phase boundary, and the advancing case points REPO_ROOT at the SHARED fleet checkout,
-    // where uncommitted files are essentially always present — so without this the case
-    // could never pass on a developer or CI checkout and a red here would say nothing about
-    // the identity preflight under test. Same seam, and same reasoning, as the owner
-    // preflight above: supplying the PAIR pins the source state instead of shelling out to
-    // git, and a release orchestrator that captured the boundary itself remains
-    // authoritative. Supplied for advance-only inputs, so the rejecting cases still prove
-    // they stop at the identity gate before any filesystem work. The clean-source guard
-    // keeps its own coverage in packages/operator-core/lib/sidecar-source-root-coherence.test.ts.
+    // Same phase-boundary seam as the owner preflight. The clean-source guard
+    // has separate coverage in sidecar-source-root-coherence.test.ts.
     env.PROVENANCE_SOURCE_GIT_HEAD = execFileSync('git', ['-C', env.REPO_ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     env.PROVENANCE_SOURCE_GIT_DIRTY = 'false';
   }
