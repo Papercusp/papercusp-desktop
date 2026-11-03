@@ -296,6 +296,30 @@ test('Vite native prerequisite hydrates the exact parent pin missing from a plat
   assert.ok(builder.indexOf('prepare_vite_native_toolchain || exit 1') < builder.indexOf('build_runtime_workspace_outputs_after_install\n'));
 });
 
+test('Vite native prerequisite loads hydrated bytes despite cached missing package metadata', t => {
+  const fixture = viteNativeFixture(t);
+  // npm can leave an empty optional-package directory. Even after it is removed,
+  // Node retains its missing package.json in this interpreter's resolver cache.
+  fs.appendFileSync(path.join(fixture.root, 'scripts/npm-install-safe.mjs'), `
+import primeFs from 'node:fs';
+import { createRequire as primeRequire } from 'node:module';
+const placeholder = ${JSON.stringify(fixture.destination)};
+primeFs.mkdirSync(placeholder, { recursive: true });
+try {
+  primeRequire(${JSON.stringify(path.join(fixture.root, 'node_modules/rolldown/package.json'))})
+    .resolve(${JSON.stringify(fixture.binding + '/package.json')});
+} catch (error) {
+  if (error.code !== 'MODULE_NOT_FOUND') throw error;
+}
+primeFs.rmSync(placeholder, { recursive: true });
+`);
+  const result = fixture.run();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /VITE_NATIVE_TOOLCHAIN_OK/);
+  assert.equal(fixture.records().length, 1);
+  fixture.assertSourceUnchanged();
+});
+
 test('Vite native prerequisite refuses an unpinned parent before fetching and preserves source files', t => {
   const fixture = viteNativeFixture(t, { parentVersion: '1.0.4' });
   const result = fixture.run();
