@@ -458,7 +458,8 @@ fn extract_universal_inputs<F: object::read::macho::FatArch>(
         }
         ranges.push((offset, end));
         let bytes = arch.data(binary).map_err(|_| "unreadable universal candidate slice")?;
-        let image = MachOFile64::parse(bytes).map_err(|_| "universal candidate slice is not thin Mach-O")?;
+        let image = MachOFile64::<object::Endianness>::parse(bytes)
+            .map_err(|_| "universal candidate slice is not thin Mach-O")?;
         if image.macho_header().cputype(image.endian()) != arch.cputype()
             || image.macho_header().cpusubtype(image.endian()) != subtype
         {
