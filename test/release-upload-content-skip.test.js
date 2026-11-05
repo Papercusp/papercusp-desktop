@@ -24,9 +24,10 @@
 // blind. Both are asserted here for that reason.
 
 const assert = require('node:assert/strict');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
@@ -439,3 +440,215 @@ test('public verification applies the same feed rail to the optional Server mani
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(result.requestPaths, ['stable/latest-server.json', 'latest-server.json']);
 });
+
+// Exercise the complete, unchanged upload entrypoint. The provider emulator is
+// shared with release-storage's contract suite; public reads use real HTTP on
+// loopback. Only registry preflight/finalization is a recorder. These fixtures
+// qualify publication guards and ordering, not installation or live shipment.
+async function isolatedPublication({ channel, selection = 'legacy', artifactKind = 'legacy' }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-upload-journey-'));
+  const version = `9.8.7-p005-${crypto.randomUUID()}`;
+  const tag = `desktop-v${version}${channel === 'stable' ? '' : `-${channel}`}`;
+  const tmpFiles = [
+    `/tmp/papercusp-artifacts-${tag}.txt`,
+    `/tmp/papercusp-cut-start-${tag}.txt`,
+    `/tmp/papercusp-latest-${tag}.json`,
+    `/tmp/papercusp-latest-server-${tag}.json`,
+  ];
+  const objects = path.join(dir, 'objects');
+  const requests = [];
+  const bucket = 'test-release-bucket';
+  const prefix = 'fixture-release';
+  const sha256 = value => crypto.createHash('sha256').update(value).digest('hex');
+  const objectFiles = key => {
+    const id = sha256(`gs://${bucket}/${key}`);
+    return { data: path.join(objects, `${id}.data`), meta: path.join(objects, `${id}.json`) };
+  };
+  const putFixture = (key, body) => {
+    const files = objectFiles(key);
+    fs.writeFileSync(files.data, body);
+    fs.writeFileSync(files.meta, JSON.stringify({
+      generation: '41', size: String(Buffer.byteLength(body)), metadata: { sha256: sha256(body) },
+    }));
+  };
+  const snapshot = keys => Object.fromEntries(keys.map(key => {
+    const files = objectFiles(key);
+    return [key, fs.existsSync(files.data)
+      ? { body: sha256(fs.readFileSync(files.data)), metadata: fs.readFileSync(files.meta, 'utf8') }
+      : null];
+  }));
+  const readLines = file => fs.existsSync(file)
+    ? fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean) : [];
+  const server = http.createServer((req, res) => {
+    const key = decodeURIComponent(req.url.slice(1));
+    const file = objectFiles(key).data;
+    const status = fs.existsSync(file) ? 200 : 404;
+    requests.push({ key, status, range: req.headers.range, userAgent: req.headers['user-agent'] });
+    fs.writeFileSync(path.join(dir, 'requests.json'), JSON.stringify(requests));
+    res.writeHead(status);
+    res.end(status === 200 ? fs.readFileSync(file) : 'missing fixture object');
+  });
+  try {
+    fs.mkdirSync(objects);
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const base = `http://127.0.0.1:${server.address().port}/${prefix}`;
+    const bin = path.join(dir, 'bin');
+    const desktopBin = path.join(dir, 'papercusp-desktop', 'bin');
+    const home = path.join(dir, 'home');
+    fs.mkdirSync(bin);
+    fs.mkdirSync(path.join(desktopBin, 'lib'), { recursive: true });
+    fs.mkdirSync(path.join(home, '.papercusp'), { recursive: true });
+    fs.copyFileSync(UPLOAD, path.join(desktopBin, 'upload-release.sh'));
+    for (const name of ['spa-freshness.js', 'release-artifacts.sh', 'release-storage.sh', 'gen-latest-manifest.sh']) {
+      fs.copyFileSync(path.join(__dirname, '../bin/lib', name), path.join(desktopBin, 'lib', name));
+    }
+    const storageContract = fs.readFileSync(path.join(__dirname, '../bin/lib/remote-object-state.selftest.sh'), 'utf8');
+    const provider = storageContract.match(/cat > "\$TEST_ROOT\/bin\/gcloud" <<'PY'\n([\s\S]*?)\nPY\n/);
+    assert.ok(provider, 'maintained release-storage provider fixture must exist');
+    fs.writeFileSync(path.join(bin, 'gcloud'), provider[1], { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, 'npx'), [
+      '#!/usr/bin/env node',
+      'const fs = require("node:fs"), path = require("node:path");',
+      'const args = process.argv.slice(2);',
+      'if (args[0] !== "tsx" || !args[1].endsWith("/finalize-release-publication.ts")) process.exit(91);',
+      'const root = process.env.PUBLICATION_FIXTURE;',
+      'const read = file => fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";',
+      'fs.appendFileSync(path.join(root, "registry.jsonl"), JSON.stringify({',
+      '  phase: args.includes("--preflight") ? "preflight" : "finalize",',
+      '  writes: read(path.join(root, "objects/writes")).trim().split("\\n").filter(Boolean),',
+      '  requests: JSON.parse(read(path.join(root, "requests.json")) || "[]"),',
+      '}) + "\\n");',
+    ].join('\n'), { mode: 0o755 });
+    fs.writeFileSync(path.join(home, '.papercusp/release-host.env'), `PAPERCUSP_UPDATE_BASE_URL=${base}\n`);
+
+    // Enumerate the actual registry, including every other channel's protected
+    // feeds. Expected writes below stay explicit so a registry regression fails.
+    const registry = spawnSync('bash', ['-c', [
+      '. "$1"',
+      'for channel in alpha beta stable nightly; do',
+      '  desktop_channel_feed_paths "$channel" latest.json',
+      '  desktop_channel_feed_paths "$channel" latest-server.json',
+      'done',
+    ].join('\n'), '--', CHANNEL_HELPERS], { encoding: 'utf8', env: { PATH: process.env.PATH } });
+    assert.equal(registry.status, 0, registry.stderr);
+    const protectedKeys = [...new Set(registry.stdout.trim().split('\n'))]
+      .map(key => `${prefix}/${key}`);
+    protectedKeys.push(`${prefix}/index.html`, `${prefix}/desktop-vprevious/installer.exe`,
+      `${prefix}/desktop-vprevious/installer.exe.sig`);
+    for (const key of protectedKeys) putFixture(key, `previous bytes for ${key}\n`);
+
+    const startedNs = String(BigInt(Date.now()) * 1000000n);
+    const artifactDir = path.join(dir, 'artifacts');
+    fs.mkdirSync(artifactDir);
+    const installers = ['papercusp', 'papercusp-server'].map(product =>
+      path.join(artifactDir, `${product}_${version}_x64-setup.exe`));
+    for (const file of installers) {
+      fs.writeFileSync(file, `publication fixture, never executed\0${base}\0${path.basename(file)}\n`);
+      fs.writeFileSync(`${file}.sig`, SIG_A);
+    }
+    const artifacts = installers.flatMap(file => [file, `${file}.sig`]);
+    const provenance = path.join(artifactDir, 'build-provenance.json');
+    fs.writeFileSync(provenance, JSON.stringify({
+      version, buildSha: 'fixture-publication-source', releaseHostSha256: sha256(base),
+      desktopInterface: { kind: artifactKind, spaIndexSha256: sha256('measured fixture legacy SPA') },
+      artifacts: installers.map(file => ({ name: path.basename(file),
+        bytes: fs.statSync(file).size, sha256: sha256(fs.readFileSync(file)) })),
+    }));
+    fs.writeFileSync(tmpFiles[0], `${artifacts.join('\n')}\n`);
+    const manifests = installers.map(file => `${JSON.stringify({
+      version, channel,
+      platforms: { 'windows-x86_64': { url: `${base}/${tag}/${path.basename(file)}`, signature: SIG_A } },
+    })}\n`);
+    manifests.forEach((body, i) => fs.writeFileSync(tmpFiles[2 + i], body));
+    const env = {
+      PATH: `${bin}:${process.env.PATH}`, HOME: home, TMPDIR: dir,
+      PAPERCUSP_DESKTOP_INTERFACE: selection,
+      PAPERCUSP_RELEASE_GCS_BUCKET: bucket,
+      PAPERCUSP_RELEASE_STORAGE_ENV: path.join(dir, 'absent-storage-config'),
+      PAPERCUSP_SMOKE_RECEIPT_ROOT: path.join(dir, 'smoke'),
+      PAPERCUSP_RELEASE_RETENTION_ROOT: path.join(dir, 'retention'),
+      RELEASE_STORAGE_FIXTURE_ROOT: objects, PUBLICATION_FIXTURE: dir,
+    };
+    // A content-bound synthetic receipt exercises the real receipt reader. It
+    // deliberately names a fixture verifier and makes no installed-app claim.
+    const setup = spawnSync('bash', ['-c', [
+      '. "$1"',
+      'release_artifacts_cut_start_write "$2" "$5"',
+      'release_artifacts_smoke_receipt_write "$2" "$3" windows publication-fixture fixture-publication-source "$4" "${@:6}"',
+    ].join('\n'), '--', path.join(desktopBin, 'lib/release-artifacts.sh'), tag, version,
+    provenance, startedNs, ...installers], { encoding: 'utf8', env });
+    assert.equal(setup.status, 0, `fixture preparation: ${setup.stderr}`);
+    const artifactKeys = artifacts.map(file => `${prefix}/${tag}/${path.basename(file)}`);
+    const allKeys = [...protectedKeys, ...artifactKeys];
+    const before = snapshot(allKeys);
+    const result = await new Promise((resolve, reject) => {
+      const child = spawn('bash', [path.join(desktopBin, 'upload-release.sh'), version, channel], { env });
+      let stdout = '', stderr = '';
+      child.stdout.on('data', chunk => { stdout += chunk; });
+      child.stderr.on('data', chunk => { stderr += chunk; });
+      const timer = setTimeout(() => child.kill('SIGKILL'), 60000);
+      child.once('error', error => { clearTimeout(timer); reject(error); });
+      child.once('close', (status, signal) => {
+        clearTimeout(timer);
+        resolve({ status, signal, stdout, stderr });
+      });
+    });
+    const writes = readLines(path.join(objects, 'writes')).map(uri => uri.replace(`gs://${bucket}/`, ''));
+    const feeds = ['latest.json', 'latest-server.json'].flatMap(name =>
+      channel === 'nightly' ? [`${prefix}/nightly/${name}`] : [`${prefix}/${channel}/${name}`, `${prefix}/${name}`]);
+    return {
+      ...result, writes, artifactKeys, feeds, before, after: snapshot(allKeys), requests,
+      registry: readLines(path.join(dir, 'registry.jsonl')).map(line => JSON.parse(line)),
+      manifestBodies: Object.fromEntries(feeds.map(key => [key,
+        fs.existsSync(objectFiles(key).data) ? fs.readFileSync(objectFiles(key).data, 'utf8') : null])),
+      manifests,
+    };
+  } finally {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    for (const file of tmpFiles) fs.rmSync(file, { force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+for (const channel of ['alpha', 'beta', 'stable', 'nightly']) {
+  test(`complete legacy ${channel} upload writes artifacts before feeds and verifies public reads`, async () => {
+    const result = await isolatedPublication({ channel });
+    assert.equal(result.status, 0, `${result.signal || ''}\n${result.stdout}\n${result.stderr}`);
+    assert.deepEqual(result.writes, [...result.artifactKeys, ...result.feeds]);
+    assert.deepEqual(result.registry.map(row => row.phase), ['preflight', 'finalize']);
+    assert.deepEqual(result.registry[0].writes, []);
+    assert.deepEqual(result.registry[0].requests, []);
+    assert.equal(result.registry[1].writes.length, result.writes.length);
+    assert.deepEqual(result.registry[1].requests, result.requests);
+    for (const [key, before] of Object.entries(result.before)) {
+      if (!result.writes.includes(key)) assert.deepEqual(result.after[key], before, `${key} must remain untouched`);
+    }
+    for (const [key, body] of Object.entries(result.manifestBodies)) {
+      assert.equal(body, result.manifests[key.endsWith('latest-server.json') ? 1 : 0]);
+    }
+    assert.deepEqual(result.requests.filter(row => row.key.endsWith('.json')).map(row => row.key), result.feeds);
+    const probes = result.requests.filter(row => row.range === 'bytes=0-0');
+    assert.equal(probes.length, result.feeds.length);
+    assert.ok(probes.every(row => row.status === 200 && row.userAgent.startsWith('Papercusp-Updater')));
+    assert.ok(result.requests.every(row => row.status === 200));
+  });
+
+  for (const candidate of [
+    { selection: 'portal-candidate', artifactKind: 'legacy' },
+    { selection: 'legacy', artifactKind: 'portal-candidate' },
+  ]) {
+    test(`${channel} candidate ${candidate.selection === 'legacy' ? 'artifact' : 'selection'} leaves every protected object unchanged`, async () => {
+      const result = await isolatedPublication({ channel, ...candidate });
+      assert.equal(result.status, 4, `${result.stdout}\n${result.stderr}`);
+      assert.match(result.stderr, /PUBLIC DESKTOP INTERFACE HOLD/);
+      assert.deepEqual(result.writes, []);
+      assert.deepEqual(result.requests, []);
+      assert.deepEqual(result.registry, []);
+      assert.deepEqual(result.after, result.before);
+    });
+  }
+}
