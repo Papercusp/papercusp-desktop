@@ -77,6 +77,13 @@
 #                                  exact mounted-DMG/installed tree equality and
 #                                  strict codesign for BOTH roles, then relaunch.
 #                                  Does not copy/replace apps; reported explicitly.
+#   --mac-protected-installer PATH administrator-provisioned remote mac-vm-build.sh.
+#                                  Required for .pkg pairs; never uploaded here.
+#   --mac-package-sha256 SHA       independently approved OUTER GUI package hash.
+#   --mac-server-package-sha256 SHA independently approved OUTER Server package hash.
+#   --mac-team-id TEAM             administrator-pinned Apple Developer Team ID.
+#                                  These approvals must come from the trusted
+#                                  management channel, never candidate metadata.
 #   --verify-managed-policy CHANNEL Linux only: require an already provisioned,
 #                                  trusted /etc/papercusp/managed-policy.json;
 #                                  preserve policy/setup identity and verify the
@@ -133,6 +140,11 @@ JSON=0
 SMOKE_RECEIPT_TAG="${PAPERCUSP_SMOKE_RECEIPT_TAG:-}"
 SMOKE_PROVENANCE=""
 VERIFY_INSTALLED_MAC=0
+MAC_PROTECTED_INSTALLER=""
+MAC_PACKAGE_SHA256=""
+MAC_SERVER_PACKAGE_SHA256=""
+MAC_TEAM_ID=""
+MAC_PROTECTED_PACKAGE=0
 ALLOW_DOWNGRADE=0
 MANAGED_POLICY_CHANNEL=""
 MANAGED_POLICY_BEFORE=null
@@ -163,6 +175,10 @@ while [[ $# -gt 0 ]]; do
     --install-cmd) INSTALL_CMD="${2:-}"; shift 2 ;;
     --server-install-cmd) SERVER_INSTALL_CMD="${2:-}"; shift 2 ;;
     --verify-installed-mac) VERIFY_INSTALLED_MAC=1; shift ;;
+    --mac-protected-installer) MAC_PROTECTED_INSTALLER="${2:-}"; shift 2 ;;
+    --mac-package-sha256) MAC_PACKAGE_SHA256="${2:-}"; shift 2 ;;
+    --mac-server-package-sha256) MAC_SERVER_PACKAGE_SHA256="${2:-}"; shift 2 ;;
+    --mac-team-id) MAC_TEAM_ID="${2:-}"; shift 2 ;;
     --allow-downgrade) ALLOW_DOWNGRADE=1; shift ;;
     --verify-managed-policy)
       [[ "${2:-}" =~ ^(alpha|beta|stable)$ ]] || { echo "--verify-managed-policy needs alpha|beta|stable" >&2; exit 2; }
@@ -195,6 +211,20 @@ if (( ${#SEED_ARTIFACTS[@]} > 0 )) && [[ "$PLATFORM" != linux ]]; then
   echo "--seed-artifact is linux-only" >&2; exit 2
 fi
 REMOTE_BASENAME="$(basename "$ARTIFACT")"
+if [[ "$PLATFORM" == mac && "$REMOTE_BASENAME" == *.pkg ]]; then
+  MAC_PROTECTED_PACKAGE=1
+  [[ -z "$INSTALL_CMD" && -z "$SERVER_INSTALL_CMD" && "$VERIFY_INSTALLED_MAC" == 0 &&
+     "$MAC_PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ && "$MAC_SERVER_PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ &&
+     "$MAC_TEAM_ID" =~ ^[A-Z0-9]{10}$ && "$MAC_PROTECTED_INSTALLER" == /*/mac-vm-build.sh &&
+     "$MAC_PROTECTED_INSTALLER" != *//* && "$MAC_PROTECTED_INSTALLER" != */../* &&
+     "$MAC_PROTECTED_INSTALLER" != */./* ]] || {
+    echo 'protected macOS packages require an administrator-provisioned absolute mac-vm-build.sh path, independent GUI/Server SHA256 approvals and Apple Team ID; custom installers are forbidden' >&2
+    exit 2
+  }
+elif [[ -n "$MAC_PROTECTED_INSTALLER$MAC_PACKAGE_SHA256$MAC_SERVER_PACKAGE_SHA256$MAC_TEAM_ID" ]]; then
+  echo 'protected Mac installer arguments require --platform mac and a .pkg pair' >&2
+  exit 2
+fi
 if [[ "$VERIFY_INSTALLED_MAC" == 1 ]]; then
   [[ "$PLATFORM" == mac && "$REMOTE_BASENAME" == *.dmg && -z "$INSTALL_CMD" && -z "$SERVER_INSTALL_CMD" ]] || {
     echo "--verify-installed-mac requires macOS DMGs and forbids custom install commands" >&2
@@ -205,6 +235,46 @@ fi
 # ── JSON field extractors (health body + provenance) ────────────────────────
 json_str() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1; }
 json_num() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" | head -1; }
+
+# Only the already provisioned administrator copy may execute as root. Validate
+# its library and every ancestor too: a root-owned script under a writable
+# directory, or a writable sourced library, does not establish trusted delivery.
+mac_protected_install_command() { # remote package path, independent package hash
+  local script
+  script="$(
+    printf 'set -euo pipefail\nexport PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C\n'
+    printf 'tool=%q\nartifact=%q\nsha=%q\nteam=%q\n' "$MAC_PROTECTED_INSTALLER" "$1" "$2" "$MAC_TEAM_ID"
+    cat <<'PROTECTED'
+# PAPERCUSP_PROTECTED_MAC_INSTALL
+trusted_directory() {
+  local p="$1" acl
+  while :; do
+    [ -d "$p" ] && [ ! -L "$p" ] && [ "$(/usr/bin/stat -f %u "$p")" = 0 ] || return 1
+    case "$(/usr/bin/stat -f %Lp "$p")" in 755|750|700) ;; *) return 1 ;; esac
+    acl="$(/bin/ls -lde "$p")" || return 1
+    if /usr/bin/grep -q ' allow ' <<<"$acl"; then return 1; fi
+    [ "$p" != / ] || break
+    p="$(/usr/bin/dirname "$p")"
+  done
+}
+trusted_file() {
+  local p="$1" acl
+  [ -f "$p" ] && [ ! -L "$p" ] && [ "$(/usr/bin/stat -f %u "$p")" = 0 ] && [ "$(/usr/bin/stat -f %l "$p")" = 1 ] || return 1
+  case "$(/usr/bin/stat -f %Lp "$p")" in 644|640|600|755|750|700) ;; *) return 1 ;; esac
+  acl="$(/bin/ls -lde "$p")" || return 1
+  if /usr/bin/grep -q ' allow ' <<<"$acl"; then return 1; fi
+  trusted_directory "$(/usr/bin/dirname "$p")"
+}
+trusted_file "$tool" && trusted_file "$(/usr/bin/dirname "$tool")/lib/mac-protected-installer.sh" || {
+  echo 'administrator installer or its library/ancestry is not protected' >&2; exit 2;
+}
+# The tool hashes a private copy and checks Apple signature/Team BEFORE Installer
+# executes the outer package's scripts. Do not bootstrap trust from the candidate.
+sudo -n /bin/bash "$tool" --install-protected-package "$artifact" "$sha" "$team"
+PROTECTED
+  )"
+  printf 'bash -c %q' "$script"
+}
 
 # Render the remote install command for one macOS DMG role. Product is one of
 # our fixed bundle names, and artifact_placeholder is replaced with the quoted
@@ -352,8 +422,9 @@ case "$PLATFORM" in
         INSTALL_CMD="$(mac_dmg_verify_installed_command "Papercusp GUI" "__ARTIFACT__")"
         SERVER_INSTALL_CMD="$(mac_dmg_verify_installed_command "Papercusp Server" "__SERVER_ARTIFACT__")"
       fi
-    else
-      INSTALL_CMD="${INSTALL_CMD:-installer -pkg __ARTIFACT__ -target CurrentUserHomeDirectory}"
+    elif [[ "$MAC_PROTECTED_PACKAGE" != 1 ]]; then
+      echo 'macOS install requires a DMG or an administrator-approved protected .pkg pair' >&2
+      exit 2
     fi
     # macOS is the same split product as Windows: the GUI attaches when a Server
     # operator already answers, so GUI-only relaunch can never exercise the
@@ -589,27 +660,39 @@ PY
     exit 2
   }
 elif [[ "$PLATFORM" == "mac" ]]; then
+  MAC_EXTENSION=dmg
+  [[ "$MAC_PROTECTED_PACKAGE" != 1 ]] || MAC_EXTENSION=pkg
   if [[ -z "$SERVER_ARTIFACT" ]]; then
     [[ -n "$EXPECTED_VERSION" ]] || {
-      echo "need --server-artifact: cannot auto-resolve the macOS Server DMG without an expected version" >&2
+      echo "need --server-artifact: cannot auto-resolve the macOS Server $MAC_EXTENSION without an expected version" >&2
       exit 2
     }
     shopt -s nullglob
-    server_candidates=( "$(dirname "$ARTIFACT")"/*Server*_$EXPECTED_VERSION\_*.dmg )
+    server_candidates=( "$(dirname "$ARTIFACT")"/*Server*_$EXPECTED_VERSION\_*.$MAC_EXTENSION )
     shopt -u nullglob
     if (( ${#server_candidates[@]} != 1 )); then
-      echo "need --server-artifact: expected exactly one Papercusp Server ${EXPECTED_VERSION} DMG beside $(basename "$ARTIFACT"), found ${#server_candidates[@]}" >&2
+      echo "need --server-artifact: expected exactly one Papercusp Server ${EXPECTED_VERSION} $MAC_EXTENSION beside $(basename "$ARTIFACT"), found ${#server_candidates[@]}" >&2
       exit 2
     fi
     SERVER_ARTIFACT="${server_candidates[0]}"
   fi
   [[ -f "$SERVER_ARTIFACT" ]] || { echo "server artifact not found: $SERVER_ARTIFACT" >&2; exit 2; }
   SERVER_BASENAME="$(basename "$SERVER_ARTIFACT")"
-  [[ -n "$EXPECTED_VERSION" && "$SERVER_BASENAME" == *"Server_${EXPECTED_VERSION}_"*.dmg ]] || {
+  [[ -n "$EXPECTED_VERSION" && "$SERVER_BASENAME" == *"Server_${EXPECTED_VERSION}_"*.$MAC_EXTENSION ]] || {
     echo "macOS Server artifact filename does not match expected version $EXPECTED_VERSION: $SERVER_BASENAME" >&2
     exit 2
   }
   SERVER_ARTIFACTS+=( "$SERVER_ARTIFACT" )
+  if [[ "$MAC_PROTECTED_PACKAGE" == 1 ]]; then
+    for role in GUI Server; do
+      if [[ "$role" == GUI ]]; then package_path="$ARTIFACT"; approved_hash="$MAC_PACKAGE_SHA256";
+      else package_path="$SERVER_ARTIFACT"; approved_hash="$MAC_SERVER_PACKAGE_SHA256"; fi
+      actual_hash="$({ sha256sum "$package_path" 2>/dev/null || shasum -a 256 "$package_path"; } | awk '{print $1}')"
+      [[ "$actual_hash" == "$approved_hash" ]] || {
+        echo "protected macOS $role package differs from its independent SHA256 approval" >&2; exit 2;
+      }
+    done
+  fi
 elif [[ "$PLATFORM" == "linux" ]]; then
   if [[ -z "$SERVER_ARTIFACT" ]]; then
     [[ -n "$EXPECTED_VERSION" ]] || {
@@ -655,6 +738,10 @@ fi
 SERVER_REMOTE_Q=""
 if (( ${#SERVER_ARTIFACTS[@]} > 0 )); then
   SERVER_REMOTE_Q="\"$REMOTE_DIR/$(basename "${SERVER_ARTIFACTS[0]}")\""
+fi
+if [[ "$MAC_PROTECTED_PACKAGE" == 1 ]]; then
+  INSTALL_CMD="$(mac_protected_install_command "$REMOTE_ARTIFACT" "$MAC_PACKAGE_SHA256")"
+  SERVER_INSTALL_CMD="$(mac_protected_install_command "$REMOTE_DIR/$SERVER_BASENAME" "$MAC_SERVER_PACKAGE_SHA256")"
 fi
 
 # ── ssh/scp transport (PC_SSH / PC_SCP overridable for the D-007 mock path) ─
@@ -1161,7 +1248,8 @@ if [[ "$JSON" == "1" ]]; then
   printf '  "platform": %s,\n' "$(jstr "$PLATFORM")"
   printf '  "expectedSha": %s,\n' "$(jstr "$EXPECTED_SHA")"
   printf '  "expectedVersion": %s,\n' "$(jstr "$EXPECTED_VERSION")"
-  printf '  "installationMode": %s,\n' "$(jstr "$([[ "$VERIFY_INSTALLED_MAC" == 1 ]] && echo verify-existing-dmg || echo install)")"
+  printf '  "installationMode": %s,\n' "$(jstr "$([[ "$VERIFY_INSTALLED_MAC" == 1 ]] && echo verify-existing-dmg || { [[ "$MAC_PROTECTED_PACKAGE" == 1 ]] && echo install-protected-pkg || echo install; })")"
+  printf '  "protectedMac": {"administratorTool": %s, "teamId": %s, "guiPackageSha256": %s, "serverPackageSha256": %s},\n' "$(jstr "$MAC_PROTECTED_INSTALLER")" "$(jstr "$MAC_TEAM_ID")" "$(jstr "$MAC_PACKAGE_SHA256")" "$(jstr "$MAC_SERVER_PACKAGE_SHA256")"
   printf '  "downgradeAllowed": %s,\n' "$([[ "$ALLOW_DOWNGRADE" == 1 ]] && echo true || echo false)"
   printf '  "serverArtifact": %s,\n' "$(jstr "${SERVER_ARTIFACTS[0]:-}")"
   printf '  "serverCompanionCount": %s,\n' "$(( ${#SERVER_ARTIFACTS[@]} > 0 ? ${#SERVER_ARTIFACTS[@]} - 1 : 0 ))"

@@ -339,7 +339,7 @@ printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
   return { root, deb, server, seed, log, flipped, configured, updated, ssh, scp, emitDpkgWarning, shims, vmctl, policy, policyCase, policyChannel };
 }
 
-function macFixture({ executeInstall = false, executeTransfer = false, freeGb = 20, nativePreflight = 'healthy', installedMismatch = false } = {}) {
+function macFixture({ executeInstall = false, executeTransfer = false, freeGb = 20, nativePreflight = 'healthy', installedMismatch = false, protectedPackages = false, protectedRefusal = '' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'install-relaunch-mac-'));
   const artifacts = join(root, 'artifacts');
   const shims = join(root, 'shims');
@@ -348,8 +348,9 @@ function macFixture({ executeInstall = false, executeTransfer = false, freeGb = 
   mkdirSync(shims);
   mkdirSync(remote);
 
-  const dmg = join(artifacts, `Papercusp GUI_${VERSION}_universal-apple-darwin.dmg`);
-  const server = join(artifacts, `Papercusp Server_${VERSION}_universal-apple-darwin.dmg`);
+  const extension = protectedPackages ? 'pkg' : 'dmg';
+  const dmg = join(artifacts, `Papercusp GUI_${VERSION}_universal-apple-darwin.${extension}`);
+  const server = join(artifacts, `Papercusp Server_${VERSION}_universal-apple-darwin.${extension}`);
   writeFileSync(dmg, 'signed macOS GUI dmg fixture');
   writeFileSync(server, 'signed macOS Server dmg fixture');
   writeFileSync(join(artifacts, 'build-provenance.json'), JSON.stringify({
@@ -372,6 +373,34 @@ function macFixture({ executeInstall = false, executeTransfer = false, freeGb = 
     mkdirSync(join(applications, `${product}.app.rollback`));
     writeFileSync(join(applications, `${product}.app.rollback`, 'payload'), 'retained-rollback');
   }
+  const administrator = join(root, 'administrator');
+  mkdirSync(join(administrator, 'lib'), { recursive: true });
+  const administratorTool = executable(administrator, 'mac-vm-build.sh', `#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == --install-protected-package && "$#" == 4 ]] || exit 98
+printf 'ADMIN-CALL %s %s %s\\n' "$2" "$3" "$4" >> "$MOCK_LOG"
+[[ "$MOCK_PROTECTED_REFUSAL" != installer-failure ]] || exit 12
+[[ "$4" == ABCDE12345 ]] || exit 13
+actual="$(sha256sum "$2" | awk '{print $1}')"
+[[ "$actual" == "$3" ]] || exit 14
+case "$2" in *GUI*) product='Papercusp GUI';; *Server*) product='Papercusp Server';; *) exit 15;; esac
+printf new-build > "$MOCK_APPLICATIONS/$product.app/payload"
+`);
+  writeFileSync(join(administrator, 'lib', 'mac-protected-installer.sh'), '# trusted administrator library fixture\n');
+  executable(shims, 'admin-stat', `#!/usr/bin/env bash
+target="\${@: -1}"
+case "$2" in
+  %u) [[ "$MOCK_PROTECTED_REFUSAL" != owner ]] || { echo 1000; exit; }; echo 0 ;;
+  %Lp) [[ "$MOCK_PROTECTED_REFUSAL" != writable-ancestor || "$target" != "$MOCK_ADMIN_DIR" ]] || { echo 777; exit; }; echo 755 ;;
+  %l) [[ "$MOCK_PROTECTED_REFUSAL" != hardlink ]] || { echo 2; exit; }; echo 1 ;;
+  *) exit 97 ;;
+esac
+`);
+  executable(shims, 'admin-ls', `#!/usr/bin/env bash
+[[ "$MOCK_PROTECTED_REFUSAL" != acl ]] || { echo '0: user:fixture allow write'; exit; }
+echo 'drwxr-xr-x root wheel fixture'
+`);
+  executable(shims, 'sudo', '#!/usr/bin/env bash\n[[ "$1" == -n ]] || exit 96\nshift\nexec "$@"\n');
   executable(shims, 'hdiutil', `#!/usr/bin/env bash
 if [[ "$1" == attach ]]; then
   while [[ "$1" != -mountpoint ]]; do shift; done
@@ -417,9 +446,9 @@ case "$*" in
     fi
     ;;
   *"PAPERCUSP_NATIVE_ARTIFACT_STAGE"*)
-    if [[ "$*" == *"GUI_${VERSION}_universal-apple-darwin.dmg"* ]]; then
+    if [[ "$*" == *"GUI_${VERSION}_universal-apple-darwin.${extension}"* ]]; then
       printf 'TRANSFER GUI\\n' >> "$MOCK_LOG"
-    elif [[ "$*" == *"Server_${VERSION}_universal-apple-darwin.dmg"* ]]; then
+    elif [[ "$*" == *"Server_${VERSION}_universal-apple-darwin.${extension}"* ]]; then
       printf 'TRANSFER Server\\n' >> "$MOCK_LOG"
     fi
     if [[ "$MOCK_EXECUTE_TRANSFER" == 1 ]]; then
@@ -454,6 +483,13 @@ case "$*" in
     fi
     printf 'PAPERCUSP_VERIFY_INSTALLED_MAC_OK\\n'
     ;;
+  *"PAPERCUSP_PROTECTED_MAC_INSTALL"*)
+    command="\${@: -1}"
+    # The production command uses fixed native tools; substitute only native
+    # owner/mode/ACL and sudo facilities on this Linux fixture. Execute the real
+    # trust-path checks, argument quoting, file predicates and failure flow.
+    eval "$command"
+    ;;
   *"codesign --verify --deep --strict"*)
     if [[ "$*" != *"ditto --noextattr --noqtn"* || "$*" != *"xattr -cr"* ]]; then
       printf 'resource fork, Finder information, or similar detritus not allowed\\n' >&2
@@ -476,7 +512,20 @@ esac
 printf 'SCP %s\\n' "$*" >> "$MOCK_LOG"
 `);
 
-  return { root, dmg, server, log, flipped, ssh, scp, shims, applications, remote, executeInstall, executeTransfer, freeGb, nativePreflight, installedMismatch };
+  if (protectedPackages) {
+    // Decode the outer bash -c locally in the SSH fixture, replace native tool
+    // paths in the decoded script, and execute that script without flattening.
+    const source = readFileSync(ssh, 'utf8').replace('    eval "$command"', `    eval "set -- \${command#bash -c }"
+    script="$1"
+    native_stat=/usr/bin/stat; native_ls=/bin/ls; native_sudo='sudo -n'
+    script="\${script//"$native_stat"/$MOCK_SHIMS/admin-stat}"
+    script="\${script//"$native_ls"/$MOCK_SHIMS/admin-ls}"
+    script="\${script//"$native_sudo"/$MOCK_SHIMS/sudo -n}"
+    bash -c "$script"
+    exit $?`);
+    writeFileSync(ssh, source);
+  }
+  return { root, dmg, server, log, flipped, ssh, scp, shims, applications, remote, executeInstall, executeTransfer, freeGb, nativePreflight, installedMismatch, protectedPackages, protectedRefusal, administrator, administratorTool };
 }
 
 // Ambient endpoint variables from the runner's shell must never decide which VM
@@ -520,6 +569,12 @@ function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui, ex
   if (f.requireHostKeyOptions) env.MOCK_REQUIRE_HOST_KEY_OPTIONS = '1';
   if (f.nativePreflight) env.MOCK_NATIVE_PREFLIGHT = f.nativePreflight;
   if (f.installedMismatch) env.MOCK_INSTALLED_MISMATCH = '1';
+  if (f.protectedPackages) {
+    env.MOCK_PROTECTED_REFUSAL = f.protectedRefusal;
+    env.MOCK_ADMIN_DIR = f.administrator;
+    env.MOCK_APPLICATIONS = f.applications;
+    env.MOCK_SHIMS = f.shims;
+  }
   if (f.executeInstall || f.executeTransfer) {
     env.PATH = `${f.shims}:${process.env.PATH}`;
     env.MOCK_FREE_GB = String(f.freeGb);
@@ -1149,6 +1204,108 @@ for (const nativePreflight of ['no-console', 'no-domain', 'competing-supervisor'
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }
+  });
+}
+
+function protectedMacArgs(f) {
+  const digest = (file) => createHash('sha256').update(readFileSync(file)).digest('hex');
+  return [
+    '--mac-protected-installer', f.administratorTool,
+    '--mac-package-sha256', digest(f.dmg),
+    '--mac-server-package-sha256', digest(f.server),
+    '--mac-team-id', 'ABCDE12345',
+    '--remote-dir', f.remote,
+    '--install-timeout', '15',
+  ];
+}
+
+test('macOS protected package pair uses the provisioned administrator path before split-role relaunch', () => {
+  const f = macFixture({ protectedPackages: true, executeTransfer: true });
+  try {
+    const args = protectedMacArgs(f);
+    const result = runVerify(f, args, 'mac', f.dmg);
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.installationMode, 'install-protected-pkg');
+    assert.equal(verdict.flipped, true);
+    assert.equal(verdict.portHeld, true);
+    assert.equal(verdict.protectedMac.administratorTool, f.administratorTool);
+    assert.equal(verdict.protectedMac.guiPackageSha256, args[3]);
+    assert.equal(verdict.protectedMac.serverPackageSha256, args[5]);
+    const lines = readFileSync(f.log, 'utf8').split('\n');
+    const calls = lines.filter(line => line.startsWith('ADMIN-CALL '));
+    assert.deepEqual(calls, [
+      `ADMIN-CALL ${f.remote}/${basename(f.dmg)} ${args[3]} ABCDE12345`,
+      `ADMIN-CALL ${f.remote}/${basename(f.server)} ${args[5]} ABCDE12345`,
+    ]);
+    const relaunch = lines.findIndex(line => line.startsWith('SSH ') && line.includes('open -n'));
+    assert.ok(relaunch > lines.indexOf(calls[1]));
+    assert.equal(lines.filter(line => line.startsWith('TRANSFER ')).length, 2, 'only candidate packages are uploaded; never the administrator tool');
+    for (const product of ['Papercusp GUI', 'Papercusp Server']) {
+      assert.equal(readFileSync(join(f.applications, `${product}.app`, 'payload'), 'utf8'), 'new-build');
+      assert.equal(readFileSync(join(f.applications, `${product}.app.rollback`, 'payload'), 'utf8'), 'retained-rollback');
+    }
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+for (const scenario of ['missing-approvals', 'gui-hash', 'server-hash', 'custom-gui', 'custom-server', 'relative-tool', 'traversing-tool', 'mixed-container']) {
+  test(`macOS protected packages refuse ${scenario} before contacting a host`, () => {
+    const f = macFixture({ protectedPackages: true });
+    try {
+      const args = protectedMacArgs(f);
+      if (scenario === 'missing-approvals') args.splice(0);
+      if (scenario === 'gui-hash') args[3] = '0'.repeat(64);
+      if (scenario === 'server-hash') args[5] = '0'.repeat(64);
+      if (scenario === 'custom-gui') args.push('--install-cmd', 'unsafe __ARTIFACT__');
+      if (scenario === 'custom-server') args.push('--server-install-cmd', 'unsafe __SERVER_ARTIFACT__');
+      if (scenario === 'relative-tool') args[1] = 'candidate/mac-vm-build.sh';
+      if (scenario === 'traversing-tool') args[1] = '/trusted/../candidate/mac-vm-build.sh';
+      if (scenario === 'mixed-container') {
+        const dmg = join(f.root, `Papercusp Server_${VERSION}_universal-apple-darwin.dmg`);
+        writeFileSync(dmg, 'different container');
+        args.push('--server-artifact', dmg);
+      }
+      const result = runVerify(f, args, 'mac', f.dmg);
+      assert.equal(result.signal, null);
+      assert.equal(result.status, 2, result.stdout + result.stderr);
+      assert.equal(existsSync(f.log), false, 'setup refusal must precede SSH/transfer/install');
+      assert.equal(existsSync(f.flipped), false);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+}
+
+for (const scenario of ['owner', 'writable-ancestor', 'acl', 'hardlink', 'missing-tool', 'missing-library', 'aliased-library', 'installer-failure', 'remote-swap']) {
+  test(`macOS protected package ${scenario} preserves installed apps and prevents relaunch`, () => {
+    const f = macFixture({ protectedPackages: true, executeTransfer: true, protectedRefusal: scenario });
+    try {
+      const args = protectedMacArgs(f);
+      const library = join(f.administrator, 'lib', 'mac-protected-installer.sh');
+      if (scenario === 'missing-tool') unlinkSync(f.administratorTool);
+      if (scenario === 'missing-library') unlinkSync(library);
+      if (scenario === 'aliased-library') { unlinkSync(library); symlinkSync(f.administratorTool, library); }
+      if (scenario === 'remote-swap') {
+        // Swap after the runner's local approval check, at the remote install
+        // boundary. The administrator command must still receive the original
+        // independent hash, so the substituted package cannot execute.
+        writeFileSync(f.ssh, readFileSync(f.ssh, 'utf8').replace('    native_stat=', `    printf tampered > "$MOCK_PACKAGE_PATH"\n    native_stat=`));
+      }
+      const result = runVerify(f, args, 'mac', f.dmg, { MOCK_PACKAGE_PATH: join(f.remote, basename(f.dmg)) });
+      assert.equal(result.signal, null);
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      const verdict = JSON.parse(result.stdout);
+      assert.equal(verdict.ok, false);
+      const refusalExit = scenario === 'installer-failure' ? 12 : scenario === 'remote-swap' ? 14 : 2;
+      assert.match(verdict.failures.join('\n'), new RegExp(`GUI install failed with exit ${refusalExit}(?: —|$)`));
+      assert.doesNotMatch(verdict.failures.join('\n'), /timed out|killed|signal/i, 'a timeout or signal is not security refusal evidence');
+      assert.equal(existsSync(f.flipped), false);
+      for (const product of ['Papercusp GUI', 'Papercusp Server']) {
+        assert.equal(readFileSync(join(f.applications, `${product}.app`, 'payload'), 'utf8'), 'known-good');
+        assert.equal(readFileSync(join(f.applications, `${product}.app.rollback`, 'payload'), 'utf8'), 'retained-rollback');
+      }
+      const log = readFileSync(f.log, 'utf8');
+      if (!['installer-failure', 'remote-swap'].includes(scenario)) assert.doesNotMatch(log, /^ADMIN-CALL /m);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 }
 
