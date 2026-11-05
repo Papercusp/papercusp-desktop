@@ -65,7 +65,7 @@ pub struct Trust {
 /// Read CURRENT trust from the existing administrator policy. Manifest keys,
 /// environment overrides and user-owned startup policy cannot supply this state.
 /// A channel-only or missing policy refuses update authorization.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn read_current_trust() -> Result<Trust, String> {
     protected_policy::read_current()
 }
@@ -73,7 +73,7 @@ pub fn read_current_trust() -> Result<Trust, String> {
 /// Activation uses CURRENT administrator trust, not an earlier verifier result.
 /// All cooperating policy writers and activators lock the protected directory.
 /// A crash releases the kernel lock but never lowers the persisted floors.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn activate_current_update<T>(
     envelope: &Envelope,
     candidate: &Candidate<'_>,
@@ -81,6 +81,51 @@ pub fn activate_current_update<T>(
     install: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     protected_policy::activate_in(&protected_policy::current_directory()?, 0, envelope, candidate, now, install)
+}
+
+/// Identity comes from the running application and the selected Tauri update;
+/// candidate policy/source/authors come only from the downloaded native image.
+pub struct DownloadedUpdate<'a> {
+    pub artifact: &'a [u8],
+    pub manifest: &'a serde_json::Value,
+    pub version: &'a str,
+    pub product: &'a str,
+    pub platform: &'a str,
+}
+
+fn prepare_macos_update(download: &DownloadedUpdate<'_>) -> Result<(Envelope, ExtractedInputs), String> {
+    let envelope = serde_json::from_value(download.manifest.get("updateAuthorization")
+        .ok_or("update has no independent release authorization")?.clone())
+        .map_err(|_| "update has invalid independent release authorization")?;
+    let inputs = extract_macos_archive_inputs(download.artifact, download.platform)?;
+    if inputs.version != download.version || inputs.product != download.product {
+        return Err("downloaded Mac update differs from selected version or running product".into());
+    }
+    Ok((envelope, inputs))
+}
+
+#[cfg(target_os = "macos")]
+pub fn activate_downloaded_macos_update<T>(
+    download: &DownloadedUpdate<'_>,
+    install: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let (envelope, inputs) = prepare_macos_update(download)?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "update authorization clock is unavailable")?.as_millis()
+        .try_into().map_err(|_| "update authorization clock is out of range")?;
+    activate_current_update(&envelope, &inputs.candidate(download.artifact), now, install)
+}
+
+// Same preparation and transaction, with a test-only protected directory/uid.
+#[cfg(all(test, unix))]
+pub fn activate_test_macos_update<T>(
+    directory: &std::fs::File,
+    download: &DownloadedUpdate<'_>,
+    now: u64,
+    install: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let (envelope, inputs) = prepare_macos_update(download)?;
+    activate_test_update(directory, &envelope, &inputs.candidate(download.artifact), now, install)
 }
 
 // The owner/path override exists only in the maintained native test harness.
@@ -145,22 +190,31 @@ mod protected_policy {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) fn current_directory() -> Result<File, String> {
-        let mut directory = File::open("/").map_err(|_| INVALID)?;
-        for name in ["etc", "papercusp"] {
-            if !trusted(&directory.metadata().map_err(|_| INVALID)?, 0, true) {
+        // /etc is a symlink on macOS. Walk its fixed physical path instead of
+        // relaxing NOFOLLOW or accepting a user/environment-selected location.
+        #[cfg(target_os = "linux")]
+        let components = ["etc", "papercusp"].as_slice();
+        #[cfg(target_os = "macos")]
+        let components = ["private", "etc", "papercusp"].as_slice();
+        directory_at(File::open("/").map_err(|_| INVALID)?, components, 0)
+    }
+
+    fn directory_at(mut directory: File, components: &[&str], owner: u32) -> Result<File, String> {
+        for name in components {
+            if !trusted(&directory.metadata().map_err(|_| INVALID)?, owner, true) {
                 return Err(INVALID.into());
             }
             directory = child(&directory, name, true)?;
         }
-        if !trusted(&directory.metadata().map_err(|_| INVALID)?, 0, true) {
+        if !trusted(&directory.metadata().map_err(|_| INVALID)?, owner, true) {
             return Err(INVALID.into());
         }
         Ok(directory)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) fn read_current() -> Result<Trust, String> {
         read_in(&current_directory()?, 0)
     }
@@ -378,6 +432,29 @@ mod protected_policy {
             serde_json::json!({"version":1,"update_channel":"stable","updateAuthorization":{
                 "rootEpoch":3,"minRollbackCounter":7,"minIssuedAt":1000,"maxMetadataAgeMs":1500,
                 "signers":[key.clone()],"approvers":[key]}})
+        }
+
+        #[test]
+        fn protected_mac_physical_ancestors_refuse_symlinks_and_writable_directories() {
+            let f = Fixture::new();
+            fs::create_dir_all(f.0.join("private/etc/papercusp")).unwrap();
+            let root = || File::open(&f.0).unwrap();
+            let owner = root().metadata().unwrap().uid();
+            let components = ["private", "etc", "papercusp"];
+            assert!(directory_at(root(), &components, owner).is_ok());
+            for path in ["private", "private/etc", "private/etc/papercusp"] {
+                let path = f.0.join(path);
+                fs::set_permissions(&path, Permissions::from_mode(0o777)).unwrap();
+                assert!(directory_at(root(), &components, owner).is_err());
+                fs::set_permissions(&path, Permissions::from_mode(0o755)).unwrap();
+                let target = path.with_extension("actual");
+                fs::rename(&path, &target).unwrap();
+                symlink(&target, &path).unwrap();
+                assert!(directory_at(root(), &components, owner).is_err());
+                fs::remove_file(&path).unwrap();
+                fs::rename(&target, &path).unwrap();
+            }
+            assert!(directory_at(root(), &components, owner.wrapping_add(1)).is_err());
         }
 
         #[test]

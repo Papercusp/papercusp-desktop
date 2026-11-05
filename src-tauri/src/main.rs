@@ -8962,19 +8962,32 @@ async fn download_verify_then_install(
             .store(done, std::sync::atomic::Ordering::SeqCst);
     };
 
-    // Verified payload in hand — NOW tear the sidecar down (children must not
-    // outlive the parent across the binary swap).
-    set_shutdown(true);
-    kill_sidecar(app);
-
-    if let Err(e) = update.install(bytes) {
-        // The swap failed with the sidecar already down. Un-latch so the
-        // supervisor stops reading this as a deliberate teardown and revives the
-        // operator, then surface the real failure to the caller.
-        set_shutdown(false);
-        return Err(e.to_string());
+    let install = || {
+        // Mac authorization (including durable rollback floors) must succeed
+        // BEFORE this effect. Refusal leaves the running sidecar untouched.
+        set_shutdown(true);
+        kill_sidecar(app);
+        if let Err(e) = update.install(&bytes) {
+            set_shutdown(false);
+            return Err(e.to_string());
+        }
+        Ok(())
+    };
+    #[cfg(target_os = "macos")]
+    {
+        let platform = tauri_plugin_updater::target().ok_or("unsupported native updater target")?;
+        update_authorization::activate_downloaded_macos_update(
+            &update_authorization::DownloadedUpdate {
+                artifact: &bytes,
+                manifest: &update.raw_json,
+                version: &update.version,
+                product: &app.config().identifier,
+                platform: &platform,
+            }, install,
+        )
     }
-    Ok(())
+    #[cfg(not(target_os = "macos"))]
+    install()
 }
 
 #[tauri::command]
