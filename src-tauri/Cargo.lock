@@ -2999,6 +2999,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "security-framework",
  "sha2",
  "signal-hook",
  "specta",

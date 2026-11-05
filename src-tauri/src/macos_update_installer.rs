@@ -43,9 +43,17 @@ impl Request {
         Ok(Self { header, artifact: download.artifact.to_vec() })
     }
 
-    /// One request per transport: fixed-width lengths, bounded header, then the
-    /// exact artifact. The caller closes its write half before awaiting READY.
+    /// Standalone frame reader: fixed-width lengths, bounded header and exact
+    /// artifact followed by EOF. Duplex sessions use the explicit REQUEST_END.
     pub fn receive(mut input: impl Read) -> Result<Self, String> {
+        let request = Self::receive_frame(&mut input)?;
+        if input.read(&mut [0u8; 1]).map_err(|_| INVALID)? != 0 {
+            return Err("trailing Mac installer artifact".into());
+        }
+        Ok(request)
+    }
+
+    fn receive_frame(mut input: impl Read) -> Result<Self, String> {
         let mut lengths = [0u8; 12];
         input.read_exact(&mut lengths).map_err(|_| "truncated Mac installer request")?;
         let header_len = u32::from_be_bytes(lengths[..4].try_into().unwrap()) as usize;
@@ -59,8 +67,8 @@ impl Request {
         destination(&header.product)?;
         let mut artifact = Vec::new();
         (&mut input).take(artifact_len).read_to_end(&mut artifact).map_err(|_| "unreadable Mac installer artifact")?;
-        if artifact.len() as u64 != artifact_len || input.read(&mut [0u8; 1]).map_err(|_| INVALID)? != 0 {
-            return Err("truncated or trailing Mac installer artifact".into());
+        if artifact.len() as u64 != artifact_len {
+            return Err("truncated Mac installer artifact".into());
         }
         Ok(Self { header, artifact })
     }
@@ -77,6 +85,165 @@ impl Request {
         DownloadedUpdate { artifact: &self.artifact, manifest: &self.header.manifest,
             version: &self.header.version, product: &self.header.product, platform: &self.header.platform }
     }
+}
+
+const REQUEST_END: &[u8; 8] = b"PCREQ01\n";
+const READY: &[u8; 8] = b"PCRDY01\n";
+const COMMIT: &[u8; 8] = b"PCCMT01\n";
+const ABORT: &[u8; 8] = b"PCABT01\n";
+const DONE: &[u8; 8] = b"PCDON01\n";
+const FAILED: &[u8; 8] = b"PCERR01\n";
+
+fn control(input: &mut impl Read, expected: &[u8; 8]) -> Result<(), String> {
+    let mut bytes = [0; 8];
+    input.read_exact(&mut bytes).map_err(|_| "Mac installer connection closed or timed out")?;
+    if &bytes != expected { return Err("Mac installer refused or returned an invalid handshake".into()); }
+    Ok(())
+}
+
+fn send_control(output: &mut impl Write, frame: &[u8; 8]) -> Result<(), String> {
+    output.write_all(frame).and_then(|_| output.flush()).map_err(|_| "Mac installer connection closed or timed out".into())
+}
+
+/// The only callback runs WITHOUT administrator authority in the GUI, after the
+/// helper has unpacked and authorized CURRENT trust under its activation lock.
+/// No caller-supplied command, executable path or destination crosses the pipe.
+pub fn transact(
+    transport: &mut (impl Read + Write), request: Request,
+    quiesce: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    request.send(&mut *transport)?;
+    send_control(transport, REQUEST_END)?;
+    control(transport, READY)?;
+    if let Err(error) = quiesce() {
+        let _ = send_control(transport, ABORT);
+        return Err(error);
+    }
+    send_control(transport, COMMIT)?;
+    control(transport, DONE)
+}
+
+/// One transaction per elevated process. The root-side transaction owns the
+/// bytes and the lock through READY, COMMIT and the atomic product exchange.
+pub fn serve(
+    transport: &mut (impl Read + Write),
+    install: impl FnOnce(Request, &mut dyn FnMut() -> Result<(), String>) -> Result<(), String>,
+) -> Result<(), String> {
+    let result = (|| {
+        let request = Request::receive_frame(&mut *transport)?;
+        control(transport, REQUEST_END)?;
+        install(request, &mut || {
+            send_control(transport, READY)?;
+            control(transport, COMMIT)
+        })
+    })();
+    let sent = send_control(transport, if result.is_ok() { DONE } else { FAILED });
+    result.and(sent)
+}
+
+/// Fixed root-owned executable, provisioned by the administrator's signed
+/// installer. Never elevate current_exe(), an app resource or a temporary file.
+#[cfg(target_os = "macos")]
+const HELPER: &str = "/Library/PrivilegedHelperTools/com.papercusp.update-installer";
+
+#[cfg(any(target_os = "macos", test))]
+fn helper_at(root: &File, owner: u32) -> Result<File, String> {
+    trusted_directory(root, owner)?;
+    let library = directory(root, &CString::new("Library").unwrap(), owner)?;
+    let helpers = directory(&library, &CString::new("PrivilegedHelperTools").unwrap(), owner)?;
+    let name = CString::new("com.papercusp.update-installer").unwrap();
+    let fd = unsafe { libc::openat(helpers.as_raw_fd(), name.as_ptr(),
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC) };
+    if fd < 0 { return Err("administrator Mac update helper is not installed".into()); }
+    let file = unsafe { File::from_raw_fd(fd) };
+    let stat = file.metadata().map_err(|_| INVALID)?;
+    if !stat.is_file() || stat.uid() != owner || stat.nlink() != 1
+        || stat.mode() & 0o022 != 0 || stat.mode() & 0o111 != 0o111 {
+        return Err("administrator Mac update helper is not protected".into());
+    }
+    Ok(file)
+}
+
+/// Authorization Services is available on the supported macOS 10.15 floor.
+/// Elevation is limited to the already protected helper; a missing helper is a
+/// refusal, with the sidecar still running. Installation is a packaging duty.
+#[cfg(target_os = "macos")]
+pub fn install_privileged(
+    download: &DownloadedUpdate<'_>, quiesce: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    use security_framework::authorization::{Authorization, AuthorizationItemSetBuilder, Flags};
+    let request = Request::capture(download)?;
+    let root = File::open("/").map_err(|_| INVALID)?;
+    let _helper = helper_at(&root, 0)?;
+    let rights = AuthorizationItemSetBuilder::new().add_right("system.privilege.admin")
+        .map_err(|e| e.to_string())?.build();
+    let authorization = Authorization::new(Some(rights), None,
+        Flags::INTERACTION_ALLOWED | Flags::EXTEND_RIGHTS | Flags::PREAUTHORIZE)
+        .map_err(|e| format!("Mac update administrator authorization failed: {e}"))?;
+    let pipe = authorization.execute_with_privileges_piped(HELPER, std::iter::empty::<&str>(), Flags::DEFAULTS)
+        .map_err(|e| format!("Mac update helper could not start: {e}"))?;
+    let mut transport = TimedPipe::new(pipe.try_clone().map_err(|_| INVALID)?, pipe, std::time::Duration::from_secs(300))?;
+    transact(&mut transport, request, quiesce)
+}
+
+/// Poll plus NONBLOCK bounds both directions, including a helper or GUI that
+/// disappears halfway through a frame. No read may retain the root lock forever.
+#[cfg(any(target_os = "macos", test))]
+pub struct TimedPipe { input: File, output: File, deadline: std::time::Instant }
+
+#[cfg(any(target_os = "macos", test))]
+impl TimedPipe {
+    pub fn new(input: File, output: File, budget: std::time::Duration) -> Result<Self, String> {
+        for file in [&input, &output] {
+            let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+            if flags < 0 || unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+                return Err("Mac update pipe cannot be bounded".into());
+            }
+        }
+        Ok(Self { input, output, deadline: std::time::Instant::now() + budget })
+    }
+
+    fn wait(&self, file: &File, events: libc::c_short) -> std::io::Result<()> {
+        loop {
+            let left = self.deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() { return Err(std::io::ErrorKind::TimedOut.into()); }
+            let mut fd = libc::pollfd { fd: file.as_raw_fd(), events, revents: 0 };
+            let status = unsafe { libc::poll(&mut fd, 1, left.as_millis().max(1).min(i32::MAX as u128) as i32) };
+            if status > 0 { return Ok(()); }
+            if status == 0 { return Err(std::io::ErrorKind::TimedOut.into()); }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted { return Err(error); }
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Read for TimedPipe {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if bytes.is_empty() { return Ok(0); }
+        loop {
+            self.wait(&self.input, libc::POLLIN)?;
+            match self.input.read(bytes) {
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => continue,
+                result => return result,
+            }
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Write for TimedPipe {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.is_empty() { return Ok(0); }
+        loop {
+            self.wait(&self.output, libc::POLLOUT)?;
+            match self.output.write(bytes) {
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => continue,
+                result => return result,
+            }
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
 }
 
 fn destination(product: &str) -> Result<&'static str, String> {
@@ -252,4 +419,61 @@ fn remove_stage(parent: &File, name: &CStr) {
 
 impl Drop for Stage<'_> {
     fn drop(&mut self) { remove_stage(self.parent, &self.name); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::{self, Permissions};
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::net::UnixStream;
+    use std::os::fd::IntoRawFd;
+    use std::time::Duration;
+
+    #[test]
+    fn candidate_fixed_helper_and_stalled_pipe_refuse() {
+        let path = std::env::temp_dir().join(format!("pc-fixed-helper-{}",std::process::id()));
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o700)).unwrap();
+        let root = File::open(&path).unwrap();
+        let owner = root.metadata().unwrap().uid();
+        let library = path.join("Library");
+        let helpers = library.join("PrivilegedHelperTools");
+        let helper = helpers.join("com.papercusp.update-installer");
+        fs::create_dir(&library).unwrap();fs::create_dir(&helpers).unwrap();
+        for directory in [&library,&helpers] {fs::set_permissions(directory,Permissions::from_mode(0o755)).unwrap();}
+        assert!(helper_at(&root,owner).is_err());
+        fs::write(&helper,b"protected helper fixture").unwrap();
+        fs::set_permissions(&helper,Permissions::from_mode(0o755)).unwrap();
+        assert!(helper_at(&root,owner).is_ok());
+        for file in [&helper,&helpers,&library,&path] {
+            let original=fs::metadata(file).unwrap().permissions();
+            fs::set_permissions(file,Permissions::from_mode(0o775)).unwrap();
+            assert!(helper_at(&root,owner).is_err(),"writable helper or ancestor");
+            fs::set_permissions(file,original).unwrap();
+        }
+        fs::set_permissions(&helper,Permissions::from_mode(0o644)).unwrap();
+        assert!(helper_at(&root,owner).is_err());
+        fs::set_permissions(&helper,Permissions::from_mode(0o755)).unwrap();
+        let alias=path.join("alias");fs::hard_link(&helper,&alias).unwrap();
+        assert!(helper_at(&root,owner).is_err());fs::remove_file(&alias).unwrap();
+        fs::rename(&helper,&alias).unwrap();symlink(&alias,&helper).unwrap();
+        assert!(helper_at(&root,owner).is_err());
+        fs::remove_file(&helper).unwrap();fs::rename(&alias,&helper).unwrap();
+        fs::rename(&helpers,&alias).unwrap();symlink(&alias,&helpers).unwrap();
+        assert!(helper_at(&root,owner).is_err());
+        fs::remove_file(&helpers).unwrap();fs::rename(&alias,&helpers).unwrap();
+        assert!(helper_at(&root,owner).is_ok());
+        fs::remove_dir_all(&path).unwrap();
+
+        let (stream,_stalled_peer)=UnixStream::pair().unwrap();
+        let file=unsafe {File::from_raw_fd(stream.into_raw_fd())};
+        let mut pipe=TimedPipe::new(file.try_clone().unwrap(),file,Duration::from_millis(50)).unwrap();
+        assert_eq!(pipe.read(&mut [0;8]).unwrap_err().kind(),std::io::ErrorKind::TimedOut);
+        let (stream,_stalled_peer)=UnixStream::pair().unwrap();
+        let file=unsafe {File::from_raw_fd(stream.into_raw_fd())};
+        let mut pipe=TimedPipe::new(file.try_clone().unwrap(),file,Duration::from_millis(50)).unwrap();
+        assert_eq!(pipe.write_all(&vec![0;1024*1024]).unwrap_err().kind(),std::io::ErrorKind::TimedOut);
+        println!("native-mac-helper: fixed protected executable and bounded stalled pipe");
+    }
 }

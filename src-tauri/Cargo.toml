@@ -6,10 +6,15 @@ authors = ["Papercusp Team"]
 license = "LicenseRef-Sustainable-Use-1.0"
 edition = "2021"
 rust-version = "1.77"
+default-run = "papercusp-desktop"
 
 [[bin]]
 name = "papercusp-desktop"
 path = "src/main.rs"
+
+[[bin]]
+name = "papercusp-update-installer"
+path = "src/macos_update_helper.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -169,6 +174,8 @@ global-hotkey = "0.8"
 # the Linux VTE embed; absent shim → NewWindow downgrade).
 [target.'cfg(target_os = "macos")'.dependencies]
 libloading = "0.8"
+# Reuse the locked macOS Authorization Services wrapper, including 10.15.
+security-framework = "=3.7.0"
 
 # windows — the D-009 Windows embedded terminal: Win32 allows SetParent on
 # foreign windows (unlike Wayland), so the strongest portable-path backend

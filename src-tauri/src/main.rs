@@ -8962,32 +8962,37 @@ async fn download_verify_then_install(
             .store(done, std::sync::atomic::Ordering::SeqCst);
     };
 
-    let install = || {
-        // Mac authorization (including durable rollback floors) must succeed
-        // BEFORE this effect. Refusal leaves the running sidecar untouched.
-        set_shutdown(true);
-        kill_sidecar(app);
-        if let Err(e) = update.install(&bytes) {
-            set_shutdown(false);
-            return Err(e.to_string());
-        }
-        Ok(())
-    };
     #[cfg(target_os = "macos")]
     {
         let platform = tauri_plugin_updater::target().ok_or("unsupported native updater target")?;
-        update_authorization::activate_downloaded_macos_update(
+        let result = update_authorization::macos_update_installer::install_privileged(
             &update_authorization::DownloadedUpdate {
                 artifact: &bytes,
                 manifest: &update.raw_json,
                 version: &update.version,
                 product: &app.config().identifier,
                 platform: &platform,
-            }, install,
-        )
+            }, || {
+                // The root helper has verified CURRENT trust, durably advanced
+                // floors and staged the owned bytes BEFORE returning READY.
+                set_shutdown(true);
+                kill_sidecar(app);
+                Ok(())
+            },
+        );
+        if result.is_err() { set_shutdown(false); }
+        result
     }
     #[cfg(not(target_os = "macos"))]
-    install()
+    {
+        set_shutdown(true);
+        kill_sidecar(app);
+        if let Err(error) = update.install(&bytes) {
+            set_shutdown(false);
+            return Err(error.to_string());
+        }
+        Ok(())
+    }
 }
 
 #[tauri::command]
