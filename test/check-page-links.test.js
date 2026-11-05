@@ -15,7 +15,8 @@ const os = require('node:os');
 const path = require('node:path');
 
 const CHECKER = path.join(__dirname, '..', 'bin', 'check-page-links.mjs');
-const PUBLISH = path.join(__dirname, '..', 'bin', 'publish-release-history.sh');
+// Reuse the shell suites' mutation-probe seam without changing the shared publisher.
+const PUBLISH = process.env.PROBE_SCRIPT || path.join(__dirname, '..', 'bin', 'publish-release-history.sh');
 const PREFIX = '/SECRETPREFIX0123456789';
 // Objects the stand-in host serves under the channel prefix.
 const SERVED = new Set([
@@ -164,8 +165,9 @@ test('CLI exits 1 naming the dead link, and never prints the base URL (it carrie
 test('publish-release-history.sh runs the check before uploading index.html and stops on dead links', () => {
   const src = fs.readFileSync(PUBLISH, 'utf8');
   const check = src.indexOf('node "$HERE/check-page-links.mjs" "$UPLOAD_FROM/index.html" "$BASE"');
-  const upload = src.indexOf('aws s3 cp "$UPLOAD_FROM/index.html"');
+  const upload = src.indexOf('release_storage_put "$UPLOAD_FROM/index.html"');
   assert.ok(check > 0, 'publish-release-history.sh no longer runs check-page-links.mjs on the index');
+  assert.ok(upload > 0, 'publish-release-history.sh no longer publishes the index through release_storage_put');
   assert.ok(upload > check, 'the link check must run BEFORE index.html is uploaded');
   const between = src.slice(check, upload);
   assert.match(between, /if \[\[ "\$LINK_RC" == "1" \]\]; then[\s\S]*?exit 1/, 'a dead link must stop the publish');

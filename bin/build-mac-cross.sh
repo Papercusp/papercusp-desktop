@@ -24,9 +24,9 @@
 #            packaged mac app renders a BLANK page, so this merge is load-bearing).
 #   Sign     strips only Apple signing-invalid xattrs (preserving required
 #            user.* attributes), then rcodesign (Rust; no `codesign`) deep-signs
-#            the bundle with entitlements.plist — ad-hoc by default (parity with
-#            the current unsigned prod dmgs), real cert when MAC_SIGN_P12_BASE64
-#            is supplied.
+#            the bundle with entitlements.plist. Protected updater helpers
+#            require MAC_SIGN_P12_BASE64 with an Apple Developer ID Application
+#            certificate; ad-hoc signing cannot establish their publisher.
 #   Updater  `tauri signer sign` over <productName>.app.tar.gz is the SAME
 #            host-side ed25519/minisign step the mac leg always ran.
 #   DMG      libdmg-hfsplus (`hfsplus addall` + the `dmg` UDIF converter) over an
@@ -66,9 +66,8 @@
 #                             the path release-local.sh's mac leg collects from)
 #   TAURI_SIGNING_PRIVATE_KEY_PATH / _PASSWORD   updater .sig key (default
 #                             ~/.papercusp/signing/papercusp.key, empty password)
-#   MAC_SIGN_P12_BASE64 + MAC_SIGN_P12_PASSWORD  optional Apple code-signing cert
-#                             (base64 PKCS#12). Unset => ad-hoc signature (same
-#                             gatekeeper posture as the current prod dmgs).
+#   MAC_SIGN_P12_BASE64 + MAC_SIGN_P12_PASSWORD  Apple code-signing cert
+#                             (base64 PKCS#12), required for the protected helper.
 #
 # KNOWN CROSS-BUILD GAPS (disclosed):
 #   - libPapercuspTermShim.dylib is Swift, built on macOS only (a real mac-native
@@ -268,7 +267,9 @@ CARGO_TARGET_ROOT="$(papercusp_cargo_target_root "$SRC_TAURI")" || exit $?
 # scratch test cuts.
 OUT_BUNDLE="${PAPERCUSP_MAC_OUT:-$SRC_TAURI/target/$MAC_BUILD_TARGET/release/bundle}"
 
-# Optional real Apple code-signing cert (else ad-hoc). Materialize once.
+# The protected helper must have an authenticated publisher. Refuse before
+# compilation instead of minting an ad-hoc privileged artifact that cannot be
+# independently authenticated by the administrator's installation workflow.
 MAC_CERT_P12=""
 if [[ -n "${MAC_SIGN_P12_BASE64:-}" ]]; then
   MAC_CERT_P12="$(mktemp /tmp/papercusp-mac-cert-XXXX.p12)"
@@ -276,7 +277,7 @@ if [[ -n "${MAC_SIGN_P12_BASE64:-}" ]]; then
     || fail "MAC_SIGN_P12_BASE64 is not valid base64"
   echo "==> mac code-signing ENABLED (owner cert supplied)"
 else
-  echo "==> mac code-signing: ad-hoc (no MAC_SIGN_P12_BASE64) — same gatekeeper posture as current prod dmgs"
+  fail "protected update helper requires MAC_SIGN_P12_BASE64 with an Apple Developer ID Application certificate; ad-hoc signing is unavailable"
 fi
 
 cleanup() {
@@ -515,11 +516,16 @@ assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out $
 stage_update_helper() { # $1=helper binary $2=app
   local binary="$1" app="$2" helper="$2/Contents/Library/HelperTools/com.papercusp.update-installer"
   local args=() diagnostics
+  [[ -n "$MAC_CERT_P12" && -f "$MAC_CERT_P12" && ! -L "$MAC_CERT_P12" ]] \
+    || fail "protected update helper requires an Apple Developer ID Application certificate; ad-hoc signing is unavailable"
   [[ -f "$binary" && ! -L "$binary" ]] || fail "protected update helper binary missing or aliased: $binary"
   file -b "$binary" | grep -q 'Mach-O' || fail "protected update helper is not Mach-O: $binary"
   mkdir -p "$(dirname "$helper")" "$OUT_BUNDLE/macos/diagnostics"
   install -m 755 "$binary" "$helper"
-  [[ -n "$MAC_CERT_P12" ]] && args+=(--p12-file "$MAC_CERT_P12" --p12-password "${MAC_SIGN_P12_PASSWORD:-}")
+  # The maintained signer enforces Apple's Developer ID profile, timestamp and
+  # hardened runtime. A self-signed test certificate is not release authority.
+  args+=(--for-notarization --binary-identifier com.papercusp.update-installer
+    --p12-file "$MAC_CERT_P12" --p12-password "${MAC_SIGN_P12_PASSWORD:-}")
   diagnostics="$(mktemp -d "$OUT_BUNDLE/macos/diagnostics/update-helper.sign.XXXXXX")"
   # No GUI entitlements: this process exposes only the bounded installer protocol.
   if ! rcodesign sign "${args[@]}" "$helper" >"$diagnostics/sign.log" 2>&1; then
