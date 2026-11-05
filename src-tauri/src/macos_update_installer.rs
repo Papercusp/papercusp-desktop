@@ -594,6 +594,37 @@ mod tests {
     use std::os::fd::IntoRawFd;
     use std::time::Duration;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn candidate_darwin_acl_grants_refuse_without_rejecting_deny_delete() {
+        let path = std::env::temp_dir().join(format!("pc-mac-acl-{}", std::process::id()));
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o1775)).unwrap();
+        let directory = File::open(&path).unwrap();
+        let owner = directory.metadata().unwrap().uid();
+        let chmod = |arguments: &[&str]| {
+            let result = std::process::Command::new("/bin/chmod")
+                .args(arguments).arg(&path).output().unwrap();
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        };
+        assert!(no_acl_grants(&directory).unwrap());
+        assert!(trusted_applications(&directory, owner).is_ok());
+        chmod(&["+a", "everyone deny delete"]);
+        assert!(no_acl_grants(&directory).unwrap(), "the standard deny-delete ACE is safe");
+        assert!(trusted_applications(&directory, owner).is_ok());
+        chmod(&["+a", "everyone allow write,delete,writeattr,writeextattr"]);
+        assert_eq!(directory.metadata().unwrap().mode() & 0o7777, 0o1775,
+            "POSIX permission bits alone do not expose the ACL grant");
+        assert!(!no_acl_grants(&directory).unwrap(), "inspect every ACE after the deny entry");
+        assert!(trusted_applications(&directory, owner).is_err());
+        assert!(applications_permissions(&directory, owner, true).is_err());
+        chmod(&["-N"]);
+        assert!(no_acl_grants(&directory).unwrap());
+        assert!(trusted_applications(&directory, owner).is_ok());
+        fs::remove_dir(&path).unwrap();
+        println!("native-mac-acl: native deny-delete accepted, hidden grants refused, removal restores access");
+    }
+
     #[test]
     fn candidate_fixed_helper_and_stalled_pipe_refuse() {
         let path = std::env::temp_dir().join(format!("pc-fixed-helper-{}",std::process::id()));
