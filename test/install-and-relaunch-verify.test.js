@@ -401,6 +401,14 @@ esac
 echo 'drwxr-xr-x root wheel fixture'
 `);
   executable(shims, 'sudo', '#!/usr/bin/env bash\n[[ "$1" == -n ]] || exit 96\nshift\nexec "$@"\n');
+  executable(shims, 'timeout', `#!/usr/bin/env bash
+# Synthetic native-tool fixtures test effects, not host scheduling speed. Model
+# a deadline deterministically; runVerify separately bounds the entire child.
+[[ "$1" =~ ^[0-9]+$ ]] || exit 95
+shift
+if [[ "\${MOCK_INSTALL_DEADLINE:-0}" == 1 && "$*" == *hdiutil* ]]; then exit 124; fi
+exec "$@"
+`);
   executable(shims, 'hdiutil', `#!/usr/bin/env bash
 if [[ "$1" == attach ]]; then
   while [[ "$1" != -mountpoint ]]; do shift; done
@@ -606,6 +614,7 @@ function runVerify(f, extraArgs = [], platform = 'windows', artifact = f.gui, ex
   ], {
     encoding: 'utf8',
     env,
+    timeout: 60_000,
   });
 }
 
@@ -1441,6 +1450,22 @@ test('macOS refuses low-space staging before copy and preserves installed and ro
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
+});
+
+test('macOS installer deadline withholds relaunch and preserves installed and rollback apps', () => {
+  const f = macFixture({ executeInstall: true, freeGb: 3 });
+  try {
+    const result = runVerify(f, [], 'mac', f.dmg, { MOCK_INSTALL_DEADLINE: '1' });
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(JSON.parse(result.stdout).failures.join('\n'), /GUI install: timed out after 2s/);
+    assert.equal(existsSync(f.flipped), false);
+    assert.doesNotMatch(readFileSync(f.log, 'utf8'), /^COPY /m);
+    for (const product of ['Papercusp GUI', 'Papercusp Server']) {
+      assert.equal(readFileSync(join(f.applications, `${product}.app`, 'payload'), 'utf8'), 'known-good');
+      assert.equal(readFileSync(join(f.applications, `${product}.app.rollback`, 'payload'), 'utf8'), 'retained-rollback');
+    }
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
 test('macOS reserves the expanded app on its destination filesystem before each role copy', () => {
