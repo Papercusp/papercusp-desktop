@@ -568,7 +568,7 @@ papercusp_pinned_deps_preflight_generation() (
   _snap="$(cd "$_snap" && pwd -P)" || return 1
   source "$(dirname "$_self")/../../../apps/operator/bin/release/dependency-generation.sh" || return 1
   _store="$(dependency_generation_resolve_root "$_donor" '' 1)" || return $?
-  dependency_generation_select_inputs "$_snap" "$_store" || return $?
+  dependency_generation_select_verifier_inputs "$_snap" "$_store" || return $?
   dependency_generation_acquire_selector_lease "$_store" "$DEPENDENCY_GENERATION_ID" "${BASHPID:-$$}" "$DEPENDENCY_GENERATION_TOKEN" || return $?
   trap 'dependency_generation_release_selector_lease' EXIT
   dependency_generation_select_prevalidated "$_store" "$DEPENDENCY_GENERATION_ID" "$DEPENDENCY_GENERATION_TOKEN" || return $?
@@ -584,16 +584,17 @@ papercusp_pinned_deps_preflight_generation() (
 # Never publish a generation or recopy the whole live donor.
 papercusp_pinned_deps_snapshot_generation_locked() (
   local _donor="$1" _snap="$2" _self="${BASH_SOURCE[0]}"
-  local _store _identity _token _input _rel _fingerprint _extra _src _dst _source_device _dest_device _n=0
+  local _store _identity _token _input _selector _rel _fingerprint _extra _src _dst _source_device _dest_device _n=0
   _donor="$(cd "$_donor" && pwd -P)" || return 1
   _snap="$(cd "$_snap" && pwd -P)" || return 1
   rm -f -- "$_snap/.papercusp-pinned-deps" || return 1
   source "$(dirname "$_self")/../../../apps/operator/bin/release/dependency-generation.sh" || return 1
   _store="$(dependency_generation_resolve_root "$_donor" '' 1)" || return $?
-  dependency_generation_select_inputs "$_snap" "$_store" || return $?
+  dependency_generation_select_verifier_inputs "$_snap" "$_store" || return $?
   _identity="$DEPENDENCY_GENERATION_ID"
   _token="$DEPENDENCY_GENERATION_TOKEN"
   _input="$DEPENDENCY_GENERATION_INPUT_FINGERPRINT"
+  _selector="$DEPENDENCY_GENERATION_SELECTOR_KEY"
   dependency_generation_acquire_selector_lease "$_store" "$_identity" "${BASHPID:-$$}" "$_token" || return $?
   trap 'dependency_generation_release_copy_lock; dependency_generation_release_selector_lease' EXIT
   dependency_generation_select_prevalidated "$_store" "$_identity" "$_token" || return $?
@@ -636,7 +637,7 @@ papercusp_pinned_deps_snapshot_generation_locked() (
   dependency_generation_select_prevalidated "$_store" "$_identity" "$_token" || return $?
   [ "$(dependency_generation_input_fingerprint "$_snap")" = "$_input" ] || return 74
   {
-    printf 'donor=%s\nmode=generation-copy\ntrees=%s\ngeneration=%s\ninput=%s\ntoken=%s\n' "$_donor" "$_n" "$_identity" "$_input" "$_token"
+    printf 'donor=%s\nmode=generation-copy\ntrees=%s\ngeneration=%s\ninput=%s\ntoken=%s\nselector=%s\n' "$_donor" "$_n" "$_identity" "$_input" "$_token" "$_selector"
     echo "takenAtUtc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   } > "$_snap/.papercusp-pinned-deps" || return 1
 )
