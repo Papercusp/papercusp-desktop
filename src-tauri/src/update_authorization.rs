@@ -1,8 +1,8 @@
 //! Native consumer of tauri-release-kit's exact dual-signed update protocol.
 //!
 //! The caller supplies CURRENT protected trust and independently extracted candidate
-//! bytes/identity. This module neither trusts manifest-supplied keys nor persists
-//! activation floors. Keep that state transaction outside this pure verifier.
+//! bytes/identity. `verify` is pure; `activate_current_update` keeps the protected
+//! trust read, durable monotonic floors and install effect in one transaction.
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use minisign_verify::{PublicKey, Signature};
@@ -41,7 +41,7 @@ pub struct Envelope {
     pub approval_signature: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TrustedKey {
     pub id: String,
@@ -51,7 +51,7 @@ pub struct TrustedKey {
     pub revoked: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Trust {
     pub root_epoch: u64,
@@ -70,18 +70,47 @@ pub fn read_current_trust() -> Result<Trust, String> {
     protected_policy::read_current()
 }
 
+/// Activation uses CURRENT administrator trust, not an earlier verifier result.
+/// All cooperating policy writers and activators lock the protected directory.
+/// A crash releases the kernel lock but never lowers the persisted floors.
+#[cfg(target_os = "linux")]
+pub fn activate_current_update<T>(
+    envelope: &Envelope,
+    candidate: &Candidate<'_>,
+    now: u64,
+    install: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    protected_policy::activate_in(&protected_policy::current_directory()?, 0, envelope, candidate, now, install)
+}
+
+// The owner/path override exists only in the maintained native test harness.
+#[cfg(all(test, unix))]
+pub fn activate_test_update<T>(
+    directory: &std::fs::File,
+    envelope: &Envelope,
+    candidate: &Candidate<'_>,
+    now: u64,
+    install: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    use std::os::unix::fs::MetadataExt;
+    let owner = directory.metadata().map_err(|e| e.to_string())?.uid();
+    protected_policy::activate_in(directory, owner, envelope, candidate, now, install)
+}
+
 #[cfg(unix)]
 mod protected_policy {
     use super::*;
+    use fs2::FileExt;
     use std::fs::{File, Metadata as FileMetadata};
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::MetadataExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     const MAX_BYTES: u64 = 16_384;
     const INVALID: &str = "protected administrator update trust is absent, invalid or unreadable";
 
-    #[derive(Deserialize)]
+    #[derive(Deserialize, Serialize)]
     #[serde(deny_unknown_fields)]
     struct Policy {
         version: u32,
@@ -117,7 +146,7 @@ mod protected_policy {
     }
 
     #[cfg(target_os = "linux")]
-    pub(super) fn read_current() -> Result<Trust, String> {
+    pub(super) fn current_directory() -> Result<File, String> {
         let mut directory = File::open("/").map_err(|_| INVALID)?;
         for name in ["etc", "papercusp"] {
             if !trusted(&directory.metadata().map_err(|_| INVALID)?, 0, true) {
@@ -125,7 +154,15 @@ mod protected_policy {
             }
             directory = child(&directory, name, true)?;
         }
-        read_in(&directory, 0)
+        if !trusted(&directory.metadata().map_err(|_| INVALID)?, 0, true) {
+            return Err(INVALID.into());
+        }
+        Ok(directory)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn read_current() -> Result<Trust, String> {
+        read_in(&current_directory()?, 0)
     }
 
     fn stable(a: &FileMetadata, b: &FileMetadata) -> bool {
@@ -157,6 +194,10 @@ mod protected_policy {
     }
 
     fn read_in(directory: &File, owner: u32) -> Result<Trust, String> {
+        Ok(read_policy_in(directory, owner)?.update_authorization)
+    }
+
+    fn read_policy_in(directory: &File, owner: u32) -> Result<Policy, String> {
         if !trusted(&directory.metadata().map_err(|_| INVALID)?, owner, true) {
             return Err(INVALID.into());
         }
@@ -180,7 +221,7 @@ mod protected_policy {
         {
             return Err(INVALID.into());
         }
-        let trust = policy.update_authorization;
+        let trust = &policy.update_authorization;
         if [
             trust.root_epoch,
             trust.min_rollback_counter,
@@ -208,7 +249,76 @@ mod protected_policy {
                 }
             }
         }
-        Ok(trust)
+        Ok(policy)
+    }
+
+    /// Reuse the protected policy directory as the kernel lock identity across
+    /// GUI/Server processes. Open it afresh: closing this descriptor must release
+    /// its flock even when the caller retains the original directory descriptor.
+    pub(super) fn activate_in<T>(
+        directory: &File,
+        owner: u32,
+        envelope: &Envelope,
+        candidate: &Candidate<'_>,
+        now: u64,
+        install: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let locked = child(directory, ".", true)?;
+        if !trusted(&locked.metadata().map_err(|_| INVALID)?, owner, true) {
+            return Err(INVALID.into());
+        }
+        locked.try_lock_exclusive().map_err(|_| "protected update activation is busy or unavailable")?;
+        let mut policy = read_policy_in(&locked, owner)?;
+        let authorized = verify(&policy.update_authorization, envelope, candidate, now)?;
+        let original = serde_json::to_vec(&policy).map_err(|_| INVALID)?;
+        policy.update_authorization.min_rollback_counter = policy.update_authorization
+            .min_rollback_counter.max(authorized.metadata().rollback_counter);
+        policy.update_authorization.min_issued_at = policy.update_authorization
+            .min_issued_at.max(authorized.metadata().issued_at);
+        let next = serde_json::to_vec(&policy).map_err(|_| INVALID)?;
+        if next.len() as u64 > MAX_BYTES {
+            return Err(INVALID.into());
+        }
+        // Catch an administrator edit before replacing it. Administrators must
+        // use this same lock to serialize revocation with the install effect.
+        if serde_json::to_vec(&read_policy_in(&locked, owner)?).map_err(|_| INVALID)? != original {
+            return Err("administrator update trust changed before activation".into());
+        }
+        if next != original {
+            replace_policy(&locked, owner, &next)?;
+        }
+        // Commit BEFORE install. An install failure conservatively retains the
+        // floors so another process cannot reopen an older signed candidate.
+        let result = install();
+        drop(locked);
+        result
+    }
+
+    fn replace_policy(directory: &File, owner: u32, bytes: &[u8]) -> Result<(), String> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let name = std::ffi::CString::new(format!(
+            ".managed-policy-{}-{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)
+        )).map_err(|_| INVALID)?;
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600) };
+        if fd < 0 { return Err("cannot durably advance protected update floors".into()); }
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        let target = std::ffi::CString::new("managed-policy.json").unwrap();
+        let result = (|| {
+            if !trusted(&file.metadata().map_err(|_| INVALID)?, owner, false) {
+                return Err(INVALID.into());
+            }
+            file.write_all(bytes).and_then(|_| file.sync_all()).map_err(|_| INVALID)?;
+            if unsafe { libc::renameat(directory.as_raw_fd(), name.as_ptr(), directory.as_raw_fd(), target.as_ptr()) } != 0 {
+                return Err("cannot atomically advance protected update floors".into());
+            }
+            directory.sync_all().map_err(|_| "cannot sync protected update floors")?;
+            Ok(())
+        })();
+        if result.is_err() {
+            unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0); }
+        }
+        result
     }
 
     #[cfg(test)]
