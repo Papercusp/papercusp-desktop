@@ -286,6 +286,11 @@ fn trusted_directory(file: &File, owner: u32) -> Result<(), String> {
 // ACLs are refusals; an absent ACL is the only null result we accept.
 #[cfg(target_os = "macos")]
 fn no_acl_grants(file: &File) -> Result<bool, String> {
+    no_acl_grants_fd(file.as_raw_fd())
+}
+
+#[cfg(target_os = "macos")]
+fn no_acl_grants_fd(fd: libc::c_int) -> Result<bool, String> {
     use std::ffi::c_void;
     unsafe extern "C" {
         fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut c_void;
@@ -293,9 +298,13 @@ fn no_acl_grants(file: &File) -> Result<bool, String> {
         fn acl_get_tag_type(entry: *mut c_void, tag: *mut libc::c_int) -> libc::c_int;
         fn acl_free(acl: *mut c_void) -> libc::c_int;
     }
-    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), 0x100) }; // ACL_TYPE_EXTENDED
+    let acl = unsafe { acl_get_fd_np(fd, 0x100) }; // ACL_TYPE_EXTENDED
     if acl.is_null() {
-        return if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOATTR) {
+        // Darwin also reports ENOENT for an absent extended ACL on an open
+        // descriptor. There is no pathname lookup here; EBADF, EACCES and
+        // unsupported ACL inspection must still refuse.
+        return if matches!(std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENOENT) | Some(libc::ENOATTR)) {
             Ok(true)
         } else { Err("cannot inspect Mac installation ACL".into()) };
     }
@@ -597,6 +606,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn candidate_darwin_acl_grants_refuse_without_rejecting_deny_delete() {
+        assert!(no_acl_grants_fd(-1).is_err(), "a real descriptor inspection failure must refuse");
         let path = std::env::temp_dir().join(format!("pc-mac-acl-{}", std::process::id()));
         fs::create_dir(&path).unwrap();
         fs::set_permissions(&path, Permissions::from_mode(0o1775)).unwrap();
