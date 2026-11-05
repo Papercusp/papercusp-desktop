@@ -296,6 +296,10 @@ mod protected_policy {
 
     fn replace_policy(directory: &File, owner: u32, bytes: &[u8]) -> Result<(), String> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
+        let previous = child(directory, "managed-policy.json", false)?.metadata().map_err(|_| INVALID)?;
+        if !trusted(&previous, owner, false) {
+            return Err(INVALID.into());
+        }
         let name = std::ffi::CString::new(format!(
             ".managed-policy-{}-{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)
         )).map_err(|_| INVALID)?;
@@ -305,6 +309,16 @@ mod protected_policy {
         let mut file = unsafe { File::from_raw_fd(fd) };
         let target = std::ffi::CString::new("managed-policy.json").unwrap();
         let result = (|| {
+            // Retain administrator-authorized readers (including the existing
+            // operator channel reader); do not silently make a 0644 policy 0600.
+            let created = file.metadata().map_err(|_| INVALID)?;
+            if created.gid() != previous.gid()
+                && unsafe { libc::fchown(file.as_raw_fd(), owner, previous.gid()) } != 0 {
+                return Err(INVALID.into());
+            }
+            if unsafe { libc::fchmod(file.as_raw_fd(), previous.mode() & 0o777) } != 0 {
+                return Err(INVALID.into());
+            }
             if !trusted(&file.metadata().map_err(|_| INVALID)?, owner, false) {
                 return Err(INVALID.into());
             }
