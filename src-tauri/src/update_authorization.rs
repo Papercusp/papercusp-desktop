@@ -438,14 +438,22 @@ mod protected_policy {
         fn protected_mac_physical_ancestors_refuse_symlinks_and_writable_directories() {
             let f = Fixture::new();
             fs::create_dir_all(f.0.join("private/etc/papercusp")).unwrap();
+            // create_dir_all inherits the runner's umask, which may allow group
+            // writes. Establish trusted ancestors explicitly before testing them.
+            for path in ["private", "private/etc", "private/etc/papercusp"] {
+                fs::set_permissions(f.0.join(path), Permissions::from_mode(0o755)).unwrap();
+            }
             let root = || File::open(&f.0).unwrap();
             let owner = root().metadata().unwrap().uid();
             let components = ["private", "etc", "papercusp"];
-            assert!(directory_at(root(), &components, owner).is_ok());
+            directory_at(root(), &components, owner).expect("explicitly protected ancestors");
             for path in ["private", "private/etc", "private/etc/papercusp"] {
                 let path = f.0.join(path);
-                fs::set_permissions(&path, Permissions::from_mode(0o777)).unwrap();
-                assert!(directory_at(root(), &components, owner).is_err());
+                for mode in [0o775, 0o757, 0o777] {
+                    fs::set_permissions(&path, Permissions::from_mode(mode)).unwrap();
+                    assert!(directory_at(root(), &components, owner).is_err(),
+                        "must refuse writable ancestor {} ({mode:o})", path.display());
+                }
                 fs::set_permissions(&path, Permissions::from_mode(0o755)).unwrap();
                 let target = path.with_extension("actual");
                 fs::rename(&path, &target).unwrap();
