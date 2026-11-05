@@ -11,6 +11,12 @@ use sha2::{Digest, Sha256};
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
+// Shared by the privileged Mac entry point and the maintained native harness.
+// No GUI-supplied installer closure receives root authority.
+#[cfg(unix)]
+#[path = "macos_update_installer.rs"]
+pub mod macos_update_installer;
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Metadata {
