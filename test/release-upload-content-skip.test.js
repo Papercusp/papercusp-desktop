@@ -483,7 +483,7 @@ async function isolatedPublication({ channel, selection = 'legacy', artifactKind
     const key = decodeURIComponent(req.url.slice(1));
     const file = objectFiles(key).data;
     const status = fs.existsSync(file) ? 200 : 404;
-    requests.push({ key, status, range: req.headers.range, userAgent: req.headers['user-agent'] });
+    requests.push({ key, status, range: req.headers.range ?? null, userAgent: req.headers['user-agent'] });
     fs.writeFileSync(path.join(dir, 'requests.json'), JSON.stringify(requests));
     res.writeHead(status);
     res.end(status === 200 ? fs.readFileSync(file) : 'missing fixture object');
@@ -508,7 +508,12 @@ async function isolatedPublication({ channel, selection = 'legacy', artifactKind
     const storageContract = fs.readFileSync(path.join(__dirname, '../bin/lib/remote-object-state.selftest.sh'), 'utf8');
     const provider = storageContract.match(/cat > "\$TEST_ROOT\/bin\/gcloud" <<'PY'\n([\s\S]*?)\nPY\n/);
     assert.ok(provider, 'maintained release-storage provider fixture must exist');
-    fs.writeFileSync(path.join(bin, 'gcloud'), provider[1], { mode: 0o755 });
+    const argsLine = 'args = sys.argv[1:]';
+    assert.equal(provider[1].split(argsLine).length, 2, 'provider call recorder needs one argument boundary');
+    fs.writeFileSync(path.join(bin, 'gcloud'), provider[1].replace(argsLine, [
+      argsLine,
+      "with (root / 'calls').open('a') as log: log.write(json.dumps(args) + '\\n')",
+    ].join('\n')), { mode: 0o755 });
     fs.writeFileSync(path.join(bin, 'npx'), [
       '#!/usr/bin/env node',
       'const fs = require("node:fs"), path = require("node:path");',
@@ -540,7 +545,6 @@ async function isolatedPublication({ channel, selection = 'legacy', artifactKind
       `${prefix}/desktop-vprevious/installer.exe.sig`);
     for (const key of protectedKeys) putFixture(key, `previous bytes for ${key}\n`);
 
-    const startedNs = String(BigInt(Date.now()) * 1000000n);
     const artifactDir = path.join(dir, 'artifacts');
     fs.mkdirSync(artifactDir);
     const installers = ['papercusp', 'papercusp-server'].map(product =>
@@ -550,6 +554,10 @@ async function isolatedPublication({ channel, selection = 'legacy', artifactKind
       fs.writeFileSync(`${file}.sig`, SIG_A);
     }
     const artifacts = installers.flatMap(file => [file, `${file}.sig`]);
+    // Establish fixture chronology from the filesystem's exact clock, rather
+    // than comparing its rounded write times to an independently sampled clock.
+    const mtimes = artifacts.map(file => fs.statSync(file, { bigint: true }).mtimeNs);
+    const startedNs = String(mtimes.reduce((a, b) => a < b ? a : b) - 1n);
     const provenance = path.join(artifactDir, 'build-provenance.json');
     fs.writeFileSync(provenance, JSON.stringify({
       version, buildSha: 'fixture-publication-source', releaseHostSha256: sha256(base),
@@ -585,11 +593,11 @@ async function isolatedPublication({ channel, selection = 'legacy', artifactKind
     const allKeys = [...protectedKeys, ...artifactKeys];
     const before = snapshot(allKeys);
     const result = await new Promise((resolve, reject) => {
-      const child = spawn('bash', [path.join(desktopBin, 'upload-release.sh'), version, channel], { env });
+      const child = spawn('bash', [path.join(desktopBin, 'upload-release.sh'), version, channel], { env, detached: true });
       let stdout = '', stderr = '';
       child.stdout.on('data', chunk => { stdout += chunk; });
       child.stderr.on('data', chunk => { stderr += chunk; });
-      const timer = setTimeout(() => child.kill('SIGKILL'), 60000);
+      const timer = setTimeout(() => process.kill(-child.pid, 'SIGKILL'), 60000);
       child.once('error', error => { clearTimeout(timer); reject(error); });
       child.once('close', (status, signal) => {
         clearTimeout(timer);
@@ -601,6 +609,7 @@ async function isolatedPublication({ channel, selection = 'legacy', artifactKind
       channel === 'nightly' ? [`${prefix}/nightly/${name}`] : [`${prefix}/${channel}/${name}`, `${prefix}/${name}`]);
     return {
       ...result, writes, artifactKeys, feeds, before, after: snapshot(allKeys), requests,
+      providerCalls: readLines(path.join(objects, 'calls')).map(line => JSON.parse(line)),
       registry: readLines(path.join(dir, 'registry.jsonl')).map(line => JSON.parse(line)),
       manifestBodies: Object.fromEntries(feeds.map(key => [key,
         fs.existsSync(objectFiles(key).data) ? fs.readFileSync(objectFiles(key).data, 'utf8') : null])),
@@ -619,6 +628,7 @@ for (const channel of ['alpha', 'beta', 'stable', 'nightly']) {
     const result = await isolatedPublication({ channel });
     assert.equal(result.status, 0, `${result.signal || ''}\n${result.stdout}\n${result.stderr}`);
     assert.deepEqual(result.writes, [...result.artifactKeys, ...result.feeds]);
+    assert.ok(result.providerCalls.length > 0, 'legacy control must exercise provider transport');
     assert.deepEqual(result.registry.map(row => row.phase), ['preflight', 'finalize']);
     assert.deepEqual(result.registry[0].writes, []);
     assert.deepEqual(result.registry[0].requests, []);
@@ -646,6 +656,7 @@ for (const channel of ['alpha', 'beta', 'stable', 'nightly']) {
       assert.equal(result.status, 4, `${result.stdout}\n${result.stderr}`);
       assert.match(result.stderr, /PUBLIC DESKTOP INTERFACE HOLD/);
       assert.deepEqual(result.writes, []);
+      assert.deepEqual(result.providerCalls, []);
       assert.deepEqual(result.requests, []);
       assert.deepEqual(result.registry, []);
       assert.deepEqual(result.after, result.before);
