@@ -106,7 +106,7 @@ async function publishPage({ channel, selection, artifactKind = 'legacy',
   });
   try {
     for (const directory of [objects, site, bin, path.join(home, '.papercusp'),
-      path.join(desktopBin, 'lib'), path.join(dir, 'apps/operator/lib')]) {
+      path.join(desktopBin, 'lib'), path.join(dir, 'apps/operator/lib'), path.join(dir, 'scripts/lib')]) {
       fs.mkdirSync(directory, { recursive: true });
     }
     await new Promise((resolve, reject) => {
@@ -118,10 +118,17 @@ async function publishPage({ channel, selection, artifactKind = 'legacy',
       'lib/spa-freshness.js', 'lib/release-storage.sh']) {
       fs.copyFileSync(path.join(__dirname, '../bin', file), path.join(desktopBin, file));
     }
-    // Resolve the actual TypeScript CLIs and their imports in the monorepo.
-    // A recorder delegates to the installed tsx; it never invents a gate or plan.
+    // Keep the real TypeScript sources in the checkout, but scope their retained
+    // fixture URLs to ESM. The source guard still realpaths each URL before HEAD
+    // judgment; no production package metadata or enforcement changes here.
+    fs.writeFileSync(path.join(dir, 'apps/operator/package.json'), '{"type":"module"}\n');
     fs.symlinkSync(path.join(repo, 'apps/operator/lib/release'),
       path.join(dir, 'apps/operator/lib/release'), 'dir');
+    fs.symlinkSync(path.join(repo, 'node_modules'), path.join(dir, 'node_modules'), 'dir');
+    fs.symlinkSync(path.join(repo, 'scripts/lib/identity-leak-patterns.mjs'),
+      path.join(dir, 'scripts/lib/identity-leak-patterns.mjs'));
+    // The recorder stays CommonJS outside apps/operator. The installed tsx must
+    // retain both the entry URL and relative-import URLs in that ESM scope.
     fs.writeFileSync(path.join(bin, 'npx'), [
       '#!/usr/bin/env node',
       'const fs = require("node:fs"), path = require("node:path");',
@@ -129,8 +136,8 @@ async function publishPage({ channel, selection, artifactKind = 'legacy',
       'const args = process.argv.slice(2), root = process.env.PAGE_FIXTURE;',
       'const approved = ["release-site-delta.ts", "gate-release-site.ts"];',
       'if (args[0] !== "tsx" || !approved.some(name => args[1] === path.join(root, "apps/operator/lib/release", name))) process.exit(91);',
-      'const result = spawnSync(process.execPath, [process.env.PAGE_FIXTURE_TSX, ...args.slice(1)], { stdio: "inherit", env: process.env });',
-      'fs.appendFileSync(path.join(root, "cli.jsonl"), JSON.stringify({ cli: path.basename(args[1]), command: args[2], status: result.status }) + "\\n");',
+      'const result = spawnSync(process.execPath, [process.env.PAGE_FIXTURE_TSX, "--preserve-symlinks", "--preserve-symlinks-main", ...args.slice(1)], { stdio: "inherit", env: process.env });',
+      'fs.appendFileSync(path.join(root, "cli.jsonl"), JSON.stringify({ cli: path.basename(args[1]), source: fs.realpathSync(args[1]), command: args[2], status: result.status }) + "\\n");',
       'process.exit(result.status ?? 92);',
     ].join('\n'), { mode: 0o755 });
     const storageContract = fs.readFileSync(path.join(__dirname, '../bin/lib/remote-object-state.selftest.sh'), 'utf8');
@@ -248,6 +255,8 @@ for (const channel of ['alpha', 'beta', 'stable', 'nightly']) {
       'release-site-delta.ts', 'gate-release-site.ts', 'gate-release-site.ts', 'release-site-delta.ts',
     ]);
     assert.ok(result.cliCalls.every(row => row.status === 0));
+    assert.ok(result.cliCalls.every(row => row.source === path.join(path.resolve(__dirname, '../..'),
+      'apps/operator/lib/release', row.cli)), 'each call must reach its real checkout CLI');
     assert.deepEqual(result.manifest.files, Object.fromEntries(Object.entries(result.expected)
       .map(([key, hash]) => [key.slice('fixture-release/'.length), hash])));
   });
