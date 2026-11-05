@@ -214,8 +214,9 @@ const tool=path.basename(process.argv[1]),args=process.argv.slice(2);
 fs.appendFileSync(process.env.PKG_CALLS,JSON.stringify({tool,args})+'\\n');
 if(process.env.PKG_MODE===tool+'-fail')process.exit(9);
 if(tool==='pkgbuild') {
- const root=args[args.indexOf('--root')+1],scripts=args[args.indexOf('--scripts')+1];
- fs.copyFileSync(path.join(root,'Library/PrivilegedHelperTools/com.papercusp.update-installer.payload/approved-request'),process.env.PKG_REQUEST);
+ if(!args.includes('--nopayload')||args.includes('--root'))throw new Error('candidate package may not install its verifier');
+ const scripts=args[args.indexOf('--scripts')+1];
+ fs.copyFileSync(path.join(scripts,'approved-request'),process.env.PKG_REQUEST);
  for(const name of ['preinstall','postinstall'])fs.copyFileSync(path.join(scripts,name),process.env.PKG_REQUEST+'.'+name);
  fs.writeFileSync(args.at(-1),'unsigned-package');
 }
@@ -249,12 +250,15 @@ if(tool==='productsign')fs.copyFileSync(args.at(-2),args.at(-1));
     const recorded = fs.readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse);
     assert.deepEqual(recorded.map(c => c.tool), ['codesign', 'codesign', 'pkgbuild', 'productsign', 'pkgutil']);
     assert.ok(recorded[1].args.includes('-R'));
-    assert.ok(recorded[2].args.includes('recommended'));
+    assert.ok(recorded[2].args.includes('--nopayload'));
+    assert.equal(recorded[2].args.includes('--root'), false);
     for (const script of ['preinstall', 'postinstall']) {
       const parsed = spawnSync('sh', ['-n', request + '.' + script], { encoding: 'utf8' });
       assert.equal(parsed.status, 0, parsed.stderr);
     }
     assert.match(fs.readFileSync(request + '.postinstall', 'utf8'), /com\.papercusp\.update-installer --provision/);
+    assert.match(fs.readFileSync(request + '.postinstall', 'utf8'), /< "\$scripts\/approved-request"/);
+    assert.match(fs.readFileSync(request + '.preinstall', 'utf8'), /candidate package cannot bootstrap its own verifier/);
   });
 }
 

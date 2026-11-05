@@ -151,6 +151,11 @@ fn helper_at(root: &File, owner: u32) -> Result<File, String> {
     trusted_directory(root, owner)?;
     let library = directory(root, &CString::new("Library").unwrap(), owner)?;
     let helpers = directory(&library, &CString::new("PrivilegedHelperTools").unwrap(), owner)?;
+    helper_file(&helpers, owner)
+}
+
+fn helper_file(helpers: &File, owner: u32) -> Result<File, String> {
+    trusted_directory(helpers, owner)?;
     let name = CString::new("com.papercusp.update-installer").unwrap();
     let fd = unsafe { libc::openat(helpers.as_raw_fd(), name.as_ptr(),
         libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC) };
@@ -343,45 +348,40 @@ pub fn install_current(request: Request, ready: impl FnOnce() -> Result<(), Stri
     let applications = open_directory(&root, &CString::new("Applications").unwrap())?;
     trusted_applications(&applications, 0)?;
     let policy = protected_policy::current_directory()?;
+    let library = directory(&root, &CString::new("Library").unwrap(), 0)?;
+    let helpers = directory(&library, &CString::new("PrivilegedHelperTools").unwrap(), 0)?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| "update authorization clock is unavailable")?.as_millis()
         .try_into().map_err(|_| "update authorization clock is out of range")?;
-    install_in(&policy, &applications, 0, request, now, false, ready)
+    install_in(&policy, &applications, Some(&helpers), 0, request, now, false, ready)
 }
 
-/// Only the signed package's root postinstall invokes this mode. Its fixed
-/// request is still checked against CURRENT managed trust and independent
-/// approval, exactly like a normal update. A Developer ID signature alone never
-/// authorizes an enforcement replacement.
+/// A scripts-only package feeds data to the ALREADY administrator-trusted
+/// verifier. It never installs or executes candidate verifier code first.
+/// The initial verifier and managed policy are provisioned by the administrator
+/// through their trusted channel, independently of this candidate package.
 #[cfg(target_os = "macos")]
-pub fn provision_current() -> Result<(), String> {
+pub fn provision_current(request: Request) -> Result<(), String> {
     if unsafe { libc::geteuid() } != 0 { return Err("Mac provisioning requires administrator authority".into()); }
     let root = File::open("/").map_err(|_| INVALID)?;
     trusted_directory(&root, 0)?;
     let library = directory(&root, &CString::new("Library").unwrap(), 0)?;
     let helpers = directory(&library, &CString::new("PrivilegedHelperTools").unwrap(), 0)?;
-    let payload = directory(&helpers, &CString::new("com.papercusp.update-installer.payload").unwrap(), 0)?;
-    let name = CString::new("approved-request").unwrap();
-    let fd = unsafe { libc::openat(payload.as_raw_fd(), name.as_ptr(),
-        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC) };
-    if fd < 0 { return Err("signed Mac package has no protected approval request".into()); }
-    let request_file = unsafe { File::from_raw_fd(fd) };
-    let stat = request_file.metadata().map_err(|_| INVALID)?;
-    if !stat.is_file() || stat.uid() != 0 || stat.nlink() != 1 || stat.mode() & 0o022 != 0
-        || !no_acl_grants(&request_file)? { return Err(INVALID.into()); }
-    let request = Request::receive(request_file)?;
     let applications = open_directory(&root, &CString::new("Applications").unwrap())?;
     let policy = protected_policy::current_directory()?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| INVALID)?.as_millis().try_into().map_err(|_| INVALID)?;
-    install_in(&policy, &applications, 0, request, now, true, || Ok(()))
+    install_in(&policy, &applications, Some(&helpers), 0, request, now, true, || Ok(()))
 }
 
 fn install_in(
-    policy: &File, applications: &File, owner: u32, request: Request, now: u64, provisioning: bool,
+    policy: &File, applications: &File, helpers: Option<&File>, owner: u32, request: Request, now: u64, provisioning: bool,
     ready: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     applications_permissions(applications, owner, provisioning)?;
+    // Capture the pre-existing trusted verifier before reading any candidate.
+    // Missing/aliased/writable baselines cannot authorize their own replacement.
+    let installed_helper = helpers.map(|directory| helper_file(directory, owner)).transpose()?;
     let target = CString::new(destination(&request.header.product)?).unwrap();
     // Auto-update replaces an existing protected product, never arbitrary files
     // or an alias selected by the archive's outer .app name.
@@ -391,6 +391,7 @@ fn install_in(
     protected_policy::activate_in(policy, owner, &envelope, &inputs.candidate(download.artifact), now, || {
         let stage = Stage::new(applications, owner)?;
         stage.extract(download.artifact, owner)?;
+        let helper_stage = helpers.map(|directory| stage.stage_helper(directory, owner)).transpose()?;
         if provisioning {
             // Keep the group write bit for ordinary installs. Sticky semantics
             // protect root-owned products without locking down unrelated apps.
@@ -417,6 +418,19 @@ fn install_in(
             // cleanup unlinks an exchanged symlink without visiting its target.
             place_provisioned(&stage.file, applications, &target)?;
         }
+        if let (Some(helpers), Some(prior), Some(helper_stage)) = (helpers, installed_helper, helper_stage) {
+            let current = helper_file(helpers, owner)?.metadata().map_err(|_| INVALID)?;
+            let prior = prior.metadata().map_err(|_| INVALID)?;
+            if (current.dev(), current.ino()) != (prior.dev(), prior.ino()) {
+                return Err("administrator Mac verifier changed before activation".into());
+            }
+            // The executing old inode stays alive. Only approved archive bytes
+            // become the next verifier, under the SAME current-trust lock.
+            exchange(&helper_stage.file, &CString::new("approved-helper").unwrap(), helpers,
+                &CString::new("com.papercusp.update-installer").unwrap())?;
+            helpers.sync_all().map_err(|_| INVALID)?;
+            helper_stage.file.sync_all().map_err(|_| INVALID)?;
+        }
         applications.sync_all().map_err(|_| "cannot sync installed Mac product")?;
         stage.file.sync_all().map_err(|_| "cannot sync previous Mac product")?;
         Ok(())
@@ -429,12 +443,17 @@ pub fn install_test(
     policy: &File, applications: &File, request: Request, now: u64,
     ready: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
-    install_in(policy, applications, policy.metadata().map_err(|_| INVALID)?.uid(), request, now, false, ready)
+    install_in(policy, applications, None, policy.metadata().map_err(|_| INVALID)?.uid(), request, now, false, ready)
 }
 
 #[cfg(test)]
 pub fn provision_test(policy: &File, applications: &File, request: Request, now: u64) -> Result<(), String> {
-    install_in(policy, applications, policy.metadata().map_err(|_| INVALID)?.uid(), request, now, true, || Ok(()))
+    install_in(policy, applications, None, policy.metadata().map_err(|_| INVALID)?.uid(), request, now, true, || Ok(()))
+}
+
+#[cfg(test)]
+pub fn provision_with_helper_test(policy: &File, applications: &File, helpers: &File, request: Request, now: u64) -> Result<(), String> {
+    install_in(policy, applications, Some(helpers), policy.metadata().map_err(|_| INVALID)?.uid(), request, now, true, || Ok(()))
 }
 
 fn place_provisioned(stage: &File, applications: &File, target: &CStr) -> Result<(), String> {
@@ -453,6 +472,26 @@ fn place_provisioned(stage: &File, applications: &File, target: &CStr) -> Result
 struct Stage<'a> { parent: &'a File, name: CString, file: File }
 
 impl<'a> Stage<'a> {
+    fn stage_helper<'b>(&self, helpers: &'b File, owner: u32) -> Result<Stage<'b>, String> {
+        // Follow no candidate aliases, including any ancestor of HelperTools.
+        let mut source = self.file.try_clone().map_err(|_| INVALID)?;
+        for name in ["candidate.app", "Contents", "Library", "HelperTools"] {
+            source = directory(&source, &CString::new(name).unwrap(), owner)?;
+        }
+        let mut input = helper_file(&source, owner)?;
+        let stage = Stage::new(helpers, owner)?;
+        let name = CString::new("approved-helper").unwrap();
+        let fd = unsafe { libc::openat(stage.file.as_raw_fd(), name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600) };
+        if fd < 0 { return Err(INVALID.into()); }
+        let mut output = unsafe { File::from_raw_fd(fd) };
+        std::io::copy(&mut input, &mut output).map_err(|_| INVALID)?;
+        if unsafe { libc::fchmod(output.as_raw_fd(), 0o755) } != 0 { return Err(INVALID.into()); }
+        output.sync_all().map_err(|_| INVALID)?;
+        stage.file.sync_all().map_err(|_| INVALID)?;
+        Ok(stage)
+    }
+
     fn new(parent: &'a File, owner: u32) -> Result<Self, String> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let name = CString::new(format!(".papercusp-update-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))).unwrap();

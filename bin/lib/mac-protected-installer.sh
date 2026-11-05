@@ -20,10 +20,12 @@ make_protected_mac_package() ( # app, updater tar.gz, manifest.json, platform, o
   codesign --verify --strict -R 'anchor apple generic and identifier "com.papercusp.update-installer" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists' "$helper"
   work="$(mktemp -d)"
   trap 'rm -rf "$work"' EXIT
-  local payload="$work/root/Library/PrivilegedHelperTools" scripts="$work/scripts"
-  mkdir -p "$payload/com.papercusp.update-installer.payload" "$scripts"
-  install -m 755 "$helper" "$payload/com.papercusp.update-installer"
-  python3 - "$app" "$archive" "$manifest" "$platform" "$payload/com.papercusp.update-installer.payload/approved-request" "$work/identity" <<'PY'
+  local scripts="$work/scripts"
+  mkdir -p "$scripts"
+  # No package payload may replace the verifier before independent approval.
+  # The administrator establishes the first trusted helper separately, alongside
+  # managed policy. This candidate package cannot establish its own trust root.
+  python3 - "$app" "$archive" "$manifest" "$platform" "$scripts/approved-request" "$work/identity" <<'PY'
 import base64, hashlib, json, pathlib, plistlib, struct, sys, tarfile
 app, archive, manifest, platform, output, identity = map(pathlib.Path, sys.argv[1:])
 platform = str(platform)
@@ -62,14 +64,14 @@ if len(header) > 65536:
 pathlib.Path(output).write_bytes(struct.pack('>IQ', len(header), len(artifact)) + header + artifact)
 pathlib.Path(identity).write_text(product + '\n' + version + '\n')
 PY
-  chmod 644 "$payload/com.papercusp.update-installer.payload/approved-request"
+  chmod 644 "$scripts/approved-request"
   # Installer scripts run on the supported 10.15 floor without Python or Node.
   cat >"$scripts/preinstall" <<'SH'
 #!/bin/sh
 set -eu
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C
 [ "${3:-/}" = / ] || { echo 'protected Mac package requires the startup volume' >&2; exit 1; }
-for p in /Library /Library/PrivilegedHelperTools /Library/PrivilegedHelperTools/com.papercusp.update-installer.payload; do
+for p in / /Library /Library/PrivilegedHelperTools; do
   [ ! -L "$p" ] || exit 1
   if [ -e "$p" ]; then
     [ -d "$p" ] && [ "$(/usr/bin/stat -f %u "$p")" = 0 ] || exit 1
@@ -77,12 +79,15 @@ for p in /Library /Library/PrivilegedHelperTools /Library/PrivilegedHelperTools/
     if /bin/ls -lde "$p" | /usr/bin/grep -q ' allow '; then exit 1; fi
   fi
 done
-for p in /Library/PrivilegedHelperTools/com.papercusp.update-installer /Library/PrivilegedHelperTools/com.papercusp.update-installer.payload/approved-request; do
+for p in /Library/PrivilegedHelperTools/com.papercusp.update-installer; do
   [ ! -L "$p" ] || exit 1
   if [ -e "$p" ]; then
     [ -f "$p" ] && [ "$(/usr/bin/stat -f %u "$p")" = 0 ] && [ "$(/usr/bin/stat -f %l "$p")" = 1 ] || exit 1
-    case "$(/usr/bin/stat -f %Lp "$p")" in 755|750|700|644|640|600) ;; *) exit 1 ;; esac
+    case "$(/usr/bin/stat -f %Lp "$p")" in 755|750|700) ;; *) exit 1 ;; esac
     if /bin/ls -lde "$p" | /usr/bin/grep -q ' allow '; then exit 1; fi
+  else
+    echo 'Administrator must first provision the independently trusted Papercusp verifier and managed policy; a candidate package cannot bootstrap its own verifier.' >&2
+    exit 1
   fi
 done
 SH
@@ -91,13 +96,15 @@ SH
 set -eu
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C
 [ "${3:-/}" = / ] || exit 1
-/Library/PrivilegedHelperTools/com.papercusp.update-installer --provision
-/bin/rm /Library/PrivilegedHelperTools/com.papercusp.update-installer.payload/approved-request
+# Installer supplies this script resource; it is data, never an executable.
+# The installed verifier owns the current-trust lock through both replacements.
+scripts=$(/usr/bin/dirname "$0")
+/Library/PrivilegedHelperTools/com.papercusp.update-installer --provision < "$scripts/approved-request"
 SH
   chmod 755 "$scripts/preinstall" "$scripts/postinstall"
   local product version
   product="$(sed -n '1p' "$work/identity")"; version="$(sed -n '2p' "$work/identity")"
-  pkgbuild --root "$work/root" --install-location / --ownership recommended \
+  pkgbuild --nopayload \
     --scripts "$scripts" --identifier "$product.protected-installer" --version "$version" "$work/unsigned.pkg"
   productsign --sign "$MAC_INSTALLER_SIGNING_IDENTITY" "$work/unsigned.pkg" "$work/signed.pkg"
   pkgutil --check-signature "$work/signed.pkg"
