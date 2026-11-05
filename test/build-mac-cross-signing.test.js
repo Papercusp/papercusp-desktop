@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 
 const sourcePath = process.env.BUILD_MAC_CROSS_SCRIPT
   || path.join(__dirname, '../bin/build-mac-cross.sh');
@@ -178,6 +179,83 @@ function run(f, name = 'make_dmg') {
     `${name} "$APP" 'Papercusp GUI'`,
     'if [[ "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" == "$KEY_FILE" ]]; then echo CALLER_PATH_PRESERVED; fi',
   ].join('\n')], { encoding: 'utf8', timeout: 10_000, env: f.env });
+}
+
+for (const mode of ['normal', 'missing-identity', 'unattributed', 'wrong-artifact',
+  'wrong-helper', 'wrong-platform', 'codesign-fail', 'productsign-fail', 'pkgutil-fail']) {
+  test(`administrator package binds the existing approved request and validates signing: ${mode}`, t => {
+    const f = fixture(t);
+    const helperDir = path.join(f.app, 'Contents/Library/HelperTools');
+    fs.mkdirSync(helperDir, { recursive: true });
+    const helper = path.join(helperDir, 'com.papercusp.update-installer');
+    fs.writeFileSync(helper, 'approved-helper');
+    const plist = spawnSync('python3', ['-c',
+      'import plistlib,sys;plistlib.dump(dict(CFBundleIdentifier="com.papercusp.gui",CFBundleShortVersionString="1.2.3"),open(sys.argv[1],"wb"))',
+      path.join(f.app, 'Contents/Info.plist')], { encoding: 'utf8' });
+    assert.equal(plist.status, 0, plist.stderr);
+    const archive = path.join(f.root, 'approved.tar.gz');
+    const packed = spawnSync('tar', ['-czf', archive, '-C', path.dirname(f.app), path.basename(f.app)], { encoding: 'utf8' });
+    assert.equal(packed.status, 0, packed.stderr);
+    const artifact = fs.readFileSync(archive);
+    if (mode === 'wrong-helper') fs.writeFileSync(helper, 'unapproved-replacement');
+    const manifest = path.join(f.root, 'manifest.json');
+    const metadata = { product: 'com.papercusp.gui', version: '1.2.3', platform: 'darwin-x86_64',
+      authorIds: mode === 'unattributed' ? [] : ['fixture-author'],
+      artifactSha256: mode === 'wrong-artifact' ? '0'.repeat(64) : createHash('sha256').update(artifact).digest('hex') };
+    // These framing fixtures do not claim signature authenticity. Native tests
+    // exercise real independent signatures and CURRENT-policy refusal.
+    const data = { updateAuthorization: { payload: Buffer.from(JSON.stringify(metadata)).toString('base64'),
+      signature: 'fixture-release-signature', approvalSignature: 'fixture-independent-signature' } };
+    fs.writeFileSync(manifest, JSON.stringify(data));
+    for (const tool of ['codesign', 'pkgbuild', 'productsign', 'pkgutil']) {
+      fs.writeFileSync(path.join(f.root, 'bin', tool), `#!/usr/bin/env node
+const fs=require('node:fs'),path=require('node:path');
+const tool=path.basename(process.argv[1]),args=process.argv.slice(2);
+fs.appendFileSync(process.env.PKG_CALLS,JSON.stringify({tool,args})+'\\n');
+if(process.env.PKG_MODE===tool+'-fail')process.exit(9);
+if(tool==='pkgbuild') {
+ const root=args[args.indexOf('--root')+1],scripts=args[args.indexOf('--scripts')+1];
+ fs.copyFileSync(path.join(root,'Library/PrivilegedHelperTools/com.papercusp.update-installer.payload/approved-request'),process.env.PKG_REQUEST);
+ for(const name of ['preinstall','postinstall'])fs.copyFileSync(path.join(scripts,name),process.env.PKG_REQUEST+'.'+name);
+ fs.writeFileSync(args.at(-1),'unsigned-package');
+}
+if(tool==='productsign')fs.copyFileSync(args.at(-2),args.at(-1));
+`, { mode: 0o755 });
+    }
+    const request = path.join(f.root, 'request');
+    const calls = path.join(f.root, 'pkg-calls');
+    const output = path.join(f.root, 'Papercusp GUI.pkg');
+    const result = spawnSync('bash', ['-c',
+      'source "$PKG_LIBRARY"\nmake_protected_mac_package "$APP" "$PKG_ARCHIVE" "$PKG_MANIFEST" "$PKG_PLATFORM" "$PKG_OUTPUT"'],
+    { encoding: 'utf8', timeout: 10_000, env: { ...f.env,
+      PKG_LIBRARY: path.join(__dirname, '../bin/lib/mac-protected-installer.sh'),
+      MAC_INSTALLER_SIGNING_IDENTITY: mode === 'missing-identity' ? '' : 'Developer ID Installer: Fixture',
+      PKG_ARCHIVE: archive, PKG_MANIFEST: manifest, PKG_PLATFORM: mode === 'wrong-platform' ? 'linux-x86_64' : 'darwin-x86_64',
+      PKG_OUTPUT: output, PKG_CALLS: calls, PKG_REQUEST: request, PKG_MODE: mode } });
+    if (mode !== 'normal') {
+      assert.notEqual(result.status, 0, result.stdout + result.stderr);
+      assert.equal(fs.existsSync(output), false, 'failed packaging must not publish an installer');
+      return;
+    }
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(fs.readFileSync(output, 'utf8'), 'unsigned-package'); // signer is mocked
+    const frame = fs.readFileSync(request);
+    const length = frame.readUInt32BE(0);
+    assert.equal(frame.readBigUInt64BE(4), BigInt(artifact.length));
+    assert.deepEqual(JSON.parse(frame.subarray(12, 12 + length)), {
+      manifest: data, version: '1.2.3', product: 'com.papercusp.gui', platform: 'darwin-x86_64',
+    });
+    assert.deepEqual(frame.subarray(12 + length), artifact);
+    const recorded = fs.readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.deepEqual(recorded.map(c => c.tool), ['codesign', 'codesign', 'pkgbuild', 'productsign', 'pkgutil']);
+    assert.ok(recorded[1].args.includes('-R'));
+    assert.ok(recorded[2].args.includes('recommended'));
+    for (const script of ['preinstall', 'postinstall']) {
+      const parsed = spawnSync('sh', ['-n', request + '.' + script], { encoding: 'utf8' });
+      assert.equal(parsed.status, 0, parsed.stderr);
+    }
+    assert.match(fs.readFileSync(request + '.postinstall', 'utf8'), /com\.papercusp\.update-installer --provision/);
+  });
 }
 
 for (const mode of ['normal', 'missing-cert', 'aliased-cert', 'missing', 'symlink', 'linux', 'sign-fail', 'verify-fail']) {

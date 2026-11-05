@@ -8,9 +8,14 @@ mod update_authorization;
 #[cfg(target_os = "macos")]
 fn main() {
     use std::{fs::File, os::fd::FromRawFd, time::Duration};
-    use update_authorization::macos_update_installer::{install_current, serve, TimedPipe};
+    use update_authorization::macos_update_installer::{install_current, provision_current, serve, TimedPipe};
     let result = (|| -> Result<(), String> {
-        if unsafe { libc::geteuid() } != 0 || std::env::args_os().count() != 1 {
+        if unsafe { libc::geteuid() } != 0 {
+            return Err("Mac update helper requires administrator authority".into());
+        }
+        let args: Vec<_> = std::env::args_os().skip(1).collect();
+        if args.as_slice() == ["--provision"] { return provision_current(); }
+        if !args.is_empty() {
             return Err("Mac update helper requires administrator authority and accepts no arguments".into());
         }
         let input = unsafe { libc::dup(0) };

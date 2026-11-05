@@ -158,7 +158,7 @@ fn helper_at(root: &File, owner: u32) -> Result<File, String> {
     let file = unsafe { File::from_raw_fd(fd) };
     let stat = file.metadata().map_err(|_| INVALID)?;
     if !stat.is_file() || stat.uid() != owner || stat.nlink() != 1
-        || stat.mode() & 0o022 != 0 || stat.mode() & 0o111 != 0o111 {
+        || stat.mode() & 0o022 != 0 || stat.mode() & 0o111 != 0o111 || !no_acl_grants(&file)? {
         return Err("administrator Mac update helper is not protected".into());
     }
     Ok(file)
@@ -256,60 +256,167 @@ fn destination(product: &str) -> Result<&'static str, String> {
 }
 
 fn directory(parent: &File, name: &CStr, owner: u32) -> Result<File, String> {
-    let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(),
-        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-    if fd < 0 { return Err(INVALID.into()); }
-    let file = unsafe { File::from_raw_fd(fd) };
+    let file = open_directory(parent, name)?;
     trusted_directory(&file, owner)?;
     Ok(file)
 }
 
+fn open_directory(parent: &File, name: &CStr) -> Result<File, String> {
+    let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(),
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    if fd < 0 { return Err(INVALID.into()); }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
 fn trusted_directory(file: &File, owner: u32) -> Result<(), String> {
     let stat = file.metadata().map_err(|_| INVALID)?;
-    if !stat.is_dir() || stat.uid() != owner || stat.mode() & 0o022 != 0 {
+    if !stat.is_dir() || stat.uid() != owner || stat.mode() & 0o022 != 0 || !no_acl_grants(file)? {
         return Err(INVALID.into());
     }
     Ok(())
 }
 
-/// The administrator-provisioned applications directory must itself be protected;
-/// a writable ancestor would permit replacing an installed enforcement binary.
+// Darwin mode bits do not describe extended ACL grants. Refuse grant ACEs,
+// retaining Apple's usual deny-delete ACE on /Applications. Failures to inspect
+// ACLs are refusals; an absent ACL is the only null result we accept.
+#[cfg(target_os = "macos")]
+fn no_acl_grants(file: &File) -> Result<bool, String> {
+    use std::ffi::c_void;
+    unsafe extern "C" {
+        fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut c_void;
+        fn acl_get_entry(acl: *mut c_void, entry_id: libc::c_int, entry: *mut *mut c_void) -> libc::c_int;
+        fn acl_get_tag_type(entry: *mut c_void, tag: *mut libc::c_int) -> libc::c_int;
+        fn acl_free(acl: *mut c_void) -> libc::c_int;
+    }
+    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), 0x100) }; // ACL_TYPE_EXTENDED
+    if acl.is_null() {
+        return if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOATTR) {
+            Ok(true)
+        } else { Err("cannot inspect Mac installation ACL".into()) };
+    }
+    let result = (|| {
+        let mut selector = 0; // ACL_FIRST_ENTRY; ACL_NEXT_ENTRY is -1 on Darwin.
+        loop {
+            let mut entry = std::ptr::null_mut();
+            let status = unsafe { acl_get_entry(acl, selector, &mut entry) };
+            if status != 0 {
+                return if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) {
+                    Ok(true) // Darwin reports end-of-ACL as -1/EINVAL.
+                } else { Err("cannot inspect Mac installation ACL entry".into()) };
+            }
+            let mut tag = 0;
+            if unsafe { acl_get_tag_type(entry, &mut tag) } != 0 { return Err(INVALID.into()); }
+            if tag != 2 { return Ok(false); } // ACL_EXTENDED_DENY only
+            selector = -1;
+        }
+    })();
+    unsafe { acl_free(acl); }
+    result
+}
+
+#[cfg(not(target_os = "macos"))]
+fn no_acl_grants(_file: &File) -> Result<bool, String> { Ok(true) }
+
+fn trusted_applications(file: &File, owner: u32) -> Result<(), String> {
+    applications_permissions(file, owner, false)
+}
+
+fn applications_permissions(file: &File, owner: u32, provisioning: bool) -> Result<(), String> {
+    let stat = file.metadata().map_err(|_| INVALID)?;
+    // A root-owned sticky directory permits ordinary users to add their own
+    // applications, while only root can remove/rename our root-owned products.
+    // This exception applies solely to this parent, never a product or helper.
+    if !stat.is_dir() || stat.uid() != owner || stat.mode() & 0o002 != 0
+        || (!provisioning && stat.mode() & 0o020 != 0 && stat.mode() & 0o1000 == 0) || !no_acl_grants(file)? {
+        return Err("Applications requires administrator-provisioned replacement protection".into());
+    }
+    Ok(())
+}
+
+/// The signed administrator package establishes the sticky Applications parent;
+/// the helper only verifies it and never changes shared installation permissions.
 #[cfg(target_os = "macos")]
 pub fn install_current(request: Request, ready: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     if unsafe { libc::geteuid() } != 0 { return Err("Mac installer requires administrator authority".into()); }
     let root = File::open("/").map_err(|_| INVALID)?;
     trusted_directory(&root, 0)?;
-    let applications = directory(&root, &CString::new("Applications").unwrap(), 0)?;
+    let applications = open_directory(&root, &CString::new("Applications").unwrap())?;
+    trusted_applications(&applications, 0)?;
     let policy = protected_policy::current_directory()?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| "update authorization clock is unavailable")?.as_millis()
         .try_into().map_err(|_| "update authorization clock is out of range")?;
-    install_in(&policy, &applications, 0, request, now, ready)
+    install_in(&policy, &applications, 0, request, now, false, ready)
+}
+
+/// Only the signed package's root postinstall invokes this mode. Its fixed
+/// request is still checked against CURRENT managed trust and independent
+/// approval, exactly like a normal update. A Developer ID signature alone never
+/// authorizes an enforcement replacement.
+#[cfg(target_os = "macos")]
+pub fn provision_current() -> Result<(), String> {
+    if unsafe { libc::geteuid() } != 0 { return Err("Mac provisioning requires administrator authority".into()); }
+    let root = File::open("/").map_err(|_| INVALID)?;
+    trusted_directory(&root, 0)?;
+    let library = directory(&root, &CString::new("Library").unwrap(), 0)?;
+    let helpers = directory(&library, &CString::new("PrivilegedHelperTools").unwrap(), 0)?;
+    let payload = directory(&helpers, &CString::new("com.papercusp.update-installer.payload").unwrap(), 0)?;
+    let name = CString::new("approved-request").unwrap();
+    let fd = unsafe { libc::openat(payload.as_raw_fd(), name.as_ptr(),
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC) };
+    if fd < 0 { return Err("signed Mac package has no protected approval request".into()); }
+    let request_file = unsafe { File::from_raw_fd(fd) };
+    let stat = request_file.metadata().map_err(|_| INVALID)?;
+    if !stat.is_file() || stat.uid() != 0 || stat.nlink() != 1 || stat.mode() & 0o022 != 0
+        || !no_acl_grants(&request_file)? { return Err(INVALID.into()); }
+    let request = Request::receive(request_file)?;
+    let applications = open_directory(&root, &CString::new("Applications").unwrap())?;
+    let policy = protected_policy::current_directory()?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| INVALID)?.as_millis().try_into().map_err(|_| INVALID)?;
+    install_in(&policy, &applications, 0, request, now, true, || Ok(()))
 }
 
 fn install_in(
-    policy: &File, applications: &File, owner: u32, request: Request, now: u64,
+    policy: &File, applications: &File, owner: u32, request: Request, now: u64, provisioning: bool,
     ready: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
-    trusted_directory(applications, owner)?;
+    applications_permissions(applications, owner, provisioning)?;
     let target = CString::new(destination(&request.header.product)?).unwrap();
     // Auto-update replaces an existing protected product, never arbitrary files
     // or an alias selected by the archive's outer .app name.
-    let installed = directory(applications, &target, owner)?;
+    let installed = if provisioning { None } else { Some(directory(applications, &target, owner)?) };
     let download = request.download();
     let (envelope, inputs) = prepare_macos_update(&download)?;
     protected_policy::activate_in(policy, owner, &envelope, &inputs.candidate(download.artifact), now, || {
         let stage = Stage::new(applications, owner)?;
         stage.extract(download.artifact, owner)?;
+        if provisioning {
+            // Keep the group write bit for ordinary installs. Sticky semantics
+            // protect root-owned products without locking down unrelated apps.
+            let mode = applications.metadata().map_err(|_| INVALID)?.mode() & 0o7777;
+            if unsafe { libc::fchmod(applications.as_raw_fd(), (mode | 0o1000) as libc::mode_t) } != 0 {
+                return Err("cannot protect administrator-installed Mac applications".into());
+            }
+            applications.sync_all().map_err(|_| INVALID)?;
+            trusted_applications(applications, owner)?;
+        }
         // Floors are durable, all unpacking has succeeded, and CURRENT trust is
         // still locked. Only now may the GUI quiesce its sidecar and send COMMIT.
         ready()?;
-        let current = directory(applications, &target, owner)?.metadata().map_err(|_| INVALID)?;
-        let prior = installed.metadata().map_err(|_| INVALID)?;
-        if (current.dev(), current.ino()) != (prior.dev(), prior.ino()) {
-            return Err("installed Mac product changed before activation".into());
+        if let Some(installed) = installed {
+            let current = directory(applications, &target, owner)?.metadata().map_err(|_| INVALID)?;
+            let prior = installed.metadata().map_err(|_| INVALID)?;
+            if (current.dev(), current.ino()) != (prior.dev(), prior.ino()) {
+                return Err("installed Mac product changed before activation".into());
+            }
+            exchange(&stage.file, &CString::new("candidate.app").unwrap(), applications, &target)?;
+        } else {
+            // An unprivileged process may create the fixed destination before
+            // first installation. EXCL then SWAP never follows that entry; stage
+            // cleanup unlinks an exchanged symlink without visiting its target.
+            place_provisioned(&stage.file, applications, &target)?;
         }
-        exchange(&stage.file, &CString::new("candidate.app").unwrap(), applications, &target)?;
         applications.sync_all().map_err(|_| "cannot sync installed Mac product")?;
         stage.file.sync_all().map_err(|_| "cannot sync previous Mac product")?;
         Ok(())
@@ -322,7 +429,25 @@ pub fn install_test(
     policy: &File, applications: &File, request: Request, now: u64,
     ready: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
-    install_in(policy, applications, policy.metadata().map_err(|_| INVALID)?.uid(), request, now, ready)
+    install_in(policy, applications, policy.metadata().map_err(|_| INVALID)?.uid(), request, now, false, ready)
+}
+
+#[cfg(test)]
+pub fn provision_test(policy: &File, applications: &File, request: Request, now: u64) -> Result<(), String> {
+    install_in(policy, applications, policy.metadata().map_err(|_| INVALID)?.uid(), request, now, true, || Ok(()))
+}
+
+fn place_provisioned(stage: &File, applications: &File, target: &CStr) -> Result<(), String> {
+    let from = CString::new("candidate.app").unwrap();
+    #[cfg(target_os = "macos")]
+    let status = unsafe { libc::renameatx_np(stage.as_raw_fd(), from.as_ptr(), applications.as_raw_fd(), target.as_ptr(), libc::RENAME_EXCL) };
+    #[cfg(target_os = "linux")]
+    let status = unsafe { libc::renameat2(stage.as_raw_fd(), from.as_ptr(), applications.as_raw_fd(), target.as_ptr(), libc::RENAME_NOREPLACE) };
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let status = -1;
+    if status == 0 { return Ok(()); }
+    if std::io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) { return Err(INVALID.into()); }
+    exchange(stage, &from, applications, target)
 }
 
 struct Stage<'a> { parent: &'a File, name: CString, file: File }

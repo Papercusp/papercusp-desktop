@@ -21,6 +21,16 @@ ROOT="$(cd "$HERE/.." && pwd)"
 MAC_SIGNING_XATTR_HELPER="$HERE/lib/strip-mac-signing-xattrs.py"
 TAURI_CLI_VERSION="${PAPERCUSP_TAURI_CLI_VERSION:-${TAURI_CLI_VERSION:-2.11.0}}"
 
+# The cross producer can hand its exact app/updater/approved manifest to this
+# native packaging continuation without rebuilding or running any app as root.
+if [[ "${1:-}" == --package-protected-app ]]; then
+  [[ $# -eq 6 ]] || { echo 'usage: --package-protected-app APP ARCHIVE MANIFEST PLATFORM OUTPUT.pkg' >&2; exit 2; }
+  source "$HERE/lib/mac-protected-installer.sh"
+  shift
+  make_protected_mac_package "$@"
+  exit $?
+fi
+
 [[ -f "$MAC_SIGNING_XATTR_HELPER" ]] \
   || { echo "ERROR: mac signing xattr helper missing at $MAC_SIGNING_XATTR_HELPER" >&2; exit 1; }
 
