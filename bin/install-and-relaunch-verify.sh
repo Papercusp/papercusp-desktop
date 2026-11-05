@@ -154,6 +154,10 @@ SCP_OPTIONS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --mac-protected-installer|--mac-package-sha256|--mac-server-package-sha256|--mac-team-id)
+      [[ -n "${2:-}" && "${2:-}" != --* ]] || { echo "$1 needs a value" >&2; exit 2; } ;;
+  esac
+  case "$1" in
     --platform) PLATFORM="${2:-}"; shift 2 ;;
     --artifact) ARTIFACT="${2:-}"; shift 2 ;;
     --server-artifact) SERVER_ARTIFACT="${2:-}"; shift 2 ;;

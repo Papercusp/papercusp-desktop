@@ -1258,6 +1258,21 @@ test('macOS protected package pair uses the provisioned administrator path befor
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test('macOS protected package flags reject missing values without looping or contacting a host', () => {
+  const f = macFixture({ protectedPackages: true });
+  try {
+    for (const flag of ['--mac-protected-installer', '--mac-package-sha256', '--mac-server-package-sha256', '--mac-team-id']) {
+      for (const suffix of [[flag], [flag, '--json']]) {
+        const result = runVerify(f, suffix, 'mac', f.dmg);
+        assert.equal(result.signal, null);
+        assert.equal(result.status, 2, result.stdout + result.stderr);
+        assert.match(result.stderr, /needs a value/);
+        assert.equal(existsSync(f.log), false);
+      }
+    }
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
 for (const scenario of ['missing-approvals', 'gui-hash', 'server-hash', 'custom-gui', 'custom-server', 'relative-tool', 'traversing-tool', 'mixed-container']) {
   test(`macOS protected packages refuse ${scenario} before contacting a host`, () => {
     const f = macFixture({ protectedPackages: true });
