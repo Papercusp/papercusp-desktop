@@ -375,7 +375,7 @@ impl<'a> Stage<'a> {
                     if fd < 0 { return Err(INVALID.into()); }
                     let mut file = unsafe { File::from_raw_fd(fd) };
                     std::io::copy(reader, &mut file).map_err(|_| INVALID)?;
-                    if unsafe { libc::fchmod(file.as_raw_fd(), mode & 0o777) } != 0 { return Err(INVALID.into()); }
+                    if unsafe { libc::fchmod(file.as_raw_fd(), (mode & 0o777) as libc::mode_t) } != 0 { return Err(INVALID.into()); }
                     file.sync_all().map_err(|_| INVALID)?;
                 }
                 parent.sync_all().map_err(|_| INVALID)?;

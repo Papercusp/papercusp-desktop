@@ -20,7 +20,7 @@ function functionBody(name) {
 }
 
 const packagingNames = ['gen_info_plist', 'strip_mac_signing_xattrs',
-  'verify_mac_signing_xattrs', 'sign_app', 'make_updater', 'build_tutorial_app', 'make_dmg'];
+  'verify_mac_signing_xattrs', 'stage_update_helper', 'sign_app', 'make_updater', 'build_tutorial_app', 'make_dmg'];
 function exportPackaging(script = sourcePath) {
   const result = spawnSync('bash', [script, '--export-packaging-functions'], {
     encoding: 'utf8', timeout: 10_000,
@@ -31,7 +31,7 @@ function exportPackaging(script = sourcePath) {
   return result;
 }
 
-test('packaging export parses all seven real functions and invokes the complete plist writer', t => {
+test('packaging export parses all selected real functions and invokes the complete plist writer', t => {
   const f = fixture(t);
   const exported = exportPackaging();
   assert.equal(exported.status, 0, exported.stdout + exported.stderr);
@@ -178,6 +178,51 @@ function run(f, name = 'make_dmg') {
     `${name} "$APP" 'Papercusp GUI'`,
     'if [[ "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" == "$KEY_FILE" ]]; then echo CALLER_PATH_PRESERVED; fi',
   ].join('\n')], { encoding: 'utf8', timeout: 10_000, env: f.env });
+}
+
+for (const mode of ['normal', 'missing', 'symlink', 'linux', 'sign-fail', 'verify-fail']) {
+  test(`protected update helper staging and signature validation: ${mode}`, t => {
+    const f = fixture(t);
+    const binary = path.join(f.root, 'helper');
+    // A non-executed Mach-O header lets the real file classifier distinguish
+    // this local packaging fixture from a Linux executable. Signing is mocked.
+    const bytes = Buffer.alloc(32);
+    bytes.writeUInt32LE(0xfeedfacf); bytes.writeUInt32LE(0x01000007, 4);
+    bytes.writeUInt32LE(3, 8); bytes.writeUInt32LE(2, 12);
+    if (mode !== 'missing') fs.writeFileSync(binary, mode === 'linux' ? 'Linux helper' : bytes);
+    if (mode === 'symlink') {
+      fs.renameSync(binary, binary + '.actual'); fs.symlinkSync(binary + '.actual', binary);
+    }
+    const calls = path.join(f.root, 'helper-calls.jsonl');
+    fs.writeFileSync(path.join(f.root, 'bin/rcodesign'), `#!/usr/bin/env node
+const fs=require('node:fs'); const args=process.argv.slice(2);
+fs.appendFileSync(process.env.HELPER_CALLS, JSON.stringify(args)+'\\n');
+if (process.env.HELPER_MODE===args[0]+'-fail') process.exit(9);
+`, { mode: 0o755 });
+    const exported = exportPackaging();
+    assert.equal(exported.status, 0, exported.stderr);
+    const result = spawnSync('bash', ['-c', [
+      'set -euo pipefail',
+      'fail() { echo "ERROR: $*" >&2; exit 1; }', exported.stdout,
+      'stage_update_helper "$HELPER_BINARY" "$APP"',
+    ].join('\n')], { encoding: 'utf8', timeout: 10_000,
+      env: { ...f.env, HELPER_BINARY: binary, HELPER_CALLS: calls, HELPER_MODE: mode } });
+    const helper = path.join(f.app, 'Contents/Library/HelperTools/com.papercusp.update-installer');
+    if (mode === 'normal') {
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.deepEqual(fs.readFileSync(helper), bytes);
+      assert.equal(fs.statSync(helper).mode & 0o777, 0o755);
+      assert.deepEqual(fs.readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse),
+        [['sign', helper], ['verify', helper]]);
+    } else {
+      assert.notEqual(result.status, 0, result.stdout + result.stderr);
+      assert.match(result.stderr, /protected update helper/);
+      if (['missing', 'symlink', 'linux'].includes(mode)) {
+        assert.equal(fs.existsSync(helper), false);
+        assert.equal(fs.existsSync(calls), false);
+      }
+    }
+  });
 }
 
 test('DMG packaging rejects an unsafe allocator before copying or allocating the app image', t => {

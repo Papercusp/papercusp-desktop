@@ -376,7 +376,9 @@ mod protected_policy {
                 && unsafe { libc::fchown(file.as_raw_fd(), owner, previous.gid()) } != 0 {
                 return Err(INVALID.into());
             }
-            if unsafe { libc::fchmod(file.as_raw_fd(), previous.mode() & 0o777) } != 0 {
+            // Darwin mode_t is u16; Linux mode_t is u32. The permission mask
+            // fits both, while MetadataExt::mode() always returns u32.
+            if unsafe { libc::fchmod(file.as_raw_fd(), (previous.mode() & 0o777) as libc::mode_t) } != 0 {
                 return Err(INVALID.into());
             }
             if !trusted(&file.metadata().map_err(|_| INVALID)?, owner, false) {

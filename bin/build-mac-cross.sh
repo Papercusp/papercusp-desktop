@@ -113,7 +113,7 @@ import subprocess, sys
 
 source = Path(sys.argv[1]).read_text()
 names = ['gen_info_plist', 'strip_mac_signing_xattrs', 'verify_mac_signing_xattrs',
-         'sign_app', 'make_updater', 'build_tutorial_app', 'make_dmg']
+         'stage_update_helper', 'sign_app', 'make_updater', 'build_tutorial_app', 'make_dmg']
 functions = []
 for name in names:
     start = source.index(name + '() {')
@@ -509,6 +509,29 @@ assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out $
 
 }
 
+# Stage the fixed-purpose helper as sealed bundle code, never as a caller-selected
+# executable to elevate. Administrator installation into PrivilegedHelperTools is
+# a separate prerequisite; copying the app alone does not grant update authority.
+stage_update_helper() { # $1=helper binary $2=app
+  local binary="$1" app="$2" helper="$2/Contents/Library/HelperTools/com.papercusp.update-installer"
+  local args=() diagnostics
+  [[ -f "$binary" && ! -L "$binary" ]] || fail "protected update helper binary missing or aliased: $binary"
+  file -b "$binary" | grep -q 'Mach-O' || fail "protected update helper is not Mach-O: $binary"
+  mkdir -p "$(dirname "$helper")" "$OUT_BUNDLE/macos/diagnostics"
+  install -m 755 "$binary" "$helper"
+  [[ -n "$MAC_CERT_P12" ]] && args+=(--p12-file "$MAC_CERT_P12" --p12-password "${MAC_SIGN_P12_PASSWORD:-}")
+  diagnostics="$(mktemp -d "$OUT_BUNDLE/macos/diagnostics/update-helper.sign.XXXXXX")"
+  # No GUI entitlements: this process exposes only the bounded installer protocol.
+  if ! rcodesign sign "${args[@]}" "$helper" >"$diagnostics/sign.log" 2>&1; then
+    tail -n 40 "$diagnostics/sign.log" >&2
+    fail "cannot sign protected update helper; diagnostics=$diagnostics/sign.log"
+  fi
+  if ! rcodesign verify "$helper" >"$diagnostics/verify.log" 2>&1; then
+    tail -n 40 "$diagnostics/verify.log" >&2
+    fail "cannot verify protected update helper; diagnostics=$diagnostics/verify.log"
+  fi
+}
+
 # ── rcodesign deep-sign the bundle (ad-hoc, or the supplied cert). The nested
 # sidecar Mach-O were signed individually during the sidecar build; the bundle
 # sign seals them into CodeResources. ─────────────────────────────────────────
@@ -799,6 +822,7 @@ for role in $ROLES; do
   [[ -n "$tauri_cfg" ]] && cfg_env=(TAURI_CONFIG="$(cat "$tauri_cfg")")
 
   thin_bins=()
+  thin_helpers=()
   for arch in "${ARCHES[@]}"; do
     echo "    [$role] cargo zigbuild $arch"
     ( cd "$SRC_TAURI" && env \
@@ -808,18 +832,24 @@ for role in $ROLES; do
         "PAPERCUSP_BUILD_VERSION=${PAPERCUSP_BUILD_VERSION:-}" \
         "PAPERCUSP_RELEASE_HOST=${PAPERCUSP_RELEASE_HOST:-}" \
         "${cfg_env[@]}" \
-        cargo zigbuild --release --target "$arch" -p papercusp-desktop --features custom-protocol )
+        cargo zigbuild --release --target "$arch" -p papercusp-desktop --bins --features custom-protocol )
     local_bin="$CARGO_TARGET_ROOT/$arch/release/papercusp-desktop"
     [[ -f "$local_bin" ]] || fail "[$role] cross-compile produced no binary for $arch at $local_bin"
     thin_bins+=("$local_bin")
+    local_helper="$CARGO_TARGET_ROOT/$arch/release/papercusp-update-installer"
+    [[ -f "$local_helper" ]] || fail "[$role] cross-compile produced no protected update helper for $arch"
+    thin_helpers+=("$local_helper")
   done
 
   # lipo → universal (or copy the single arch)
   uni_bin="$CARGO_TARGET_ROOT/papercusp-desktop-$role-$DMG_ARCH"
+  uni_helper="$CARGO_TARGET_ROOT/papercusp-update-installer-$role-$DMG_ARCH"
   if [[ ${#thin_bins[@]} -gt 1 ]]; then
     "$LIPO_BIN" -create "${thin_bins[@]}" -output "$uni_bin" || fail "[$role] llvm-lipo failed"
+    "$LIPO_BIN" -create "${thin_helpers[@]}" -output "$uni_helper" || fail "[$role] update helper llvm-lipo failed"
   else
     cp "${thin_bins[0]}" "$uni_bin"
+    cp "${thin_helpers[0]}" "$uni_helper"
   fi
 
   # Assert the release host was baked into the BYTES (the 0.0.8 silent-killer).
@@ -855,6 +885,7 @@ for role in $ROLES; do
   app="$OUT_BUNDLE/macos/$product.app"
   echo "    [$role] assembling $product.app"
   assemble_app "$app_id" "$product" "$uni_bin" "$app" "$role"
+  stage_update_helper "$uni_helper" "$app"
 
   # `cp -a` preserves extended attributes when the source filesystem supports
   # them. Remove only FinderInfo/resource-fork metadata before any signature or
