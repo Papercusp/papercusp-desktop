@@ -1,6 +1,107 @@
 #!/usr/bin/env bash
 # Native packaging extension for mac-vm-build.sh. The request uses the existing
 # independently signed update envelope; the package never invents approval keys.
+
+# These ADMINISTRATOR operations must themselves be delivered through an already
+# trusted management channel (for example MDM or authenticated administrator SSH).
+# Never source this library from a candidate package, or obtain the expected
+# hashes/Team ID from that package. The explicit arguments are administrator
+# authorization, not a substitute for independently authenticated review records.
+mac_protected_admin_directory() {
+  local p="$1"
+  [[ -d "$p" && ! -L "$p" && "$(/usr/bin/stat -f %u "$p")" == 0 ]] || return 1
+  case "$(/usr/bin/stat -f %Lp "$p")" in 755|750|700) ;; *) return 1 ;; esac
+  # On the 10.15 floor, reject ACL grants as well as POSIX write permission.
+  local acl
+  acl="$(/bin/ls -lde "$p")" || return 1
+  ! /usr/bin/grep -q ' allow ' <<<"$acl"
+}
+
+mac_protected_admin_stage() {
+  [[ "$(/usr/bin/uname -s)" == Darwin && "$(/usr/bin/id -u)" == 0 ]] || {
+    echo 'protected Mac administration requires a trusted root management channel on macOS' >&2; return 1;
+  }
+  local p
+  for p in / /private /private/var /private/var/root; do
+    mac_protected_admin_directory "$p" || { echo "unprotected administrator ancestor: $p" >&2; return 1; }
+  done
+  /usr/bin/mktemp -d /private/var/root/papercusp-administrator.XXXXXXXX
+}
+
+mac_protected_admin_hash() {
+  local actual
+  [[ "$2" =~ ^[0-9a-f]{64}$ ]] || { echo 'an independently supplied exact SHA256 is required' >&2; return 1; }
+  actual="$(/usr/bin/shasum -a 256 "$1")" || return 1
+  [[ "${actual%% *}" == "$2" ]] || { echo 'administrator-approved SHA256 mismatch' >&2; return 1; }
+}
+
+bootstrap_protected_mac_verifier() ( # helper, policy, approved-helper-sha, approved-policy-sha, Apple Team ID
+  set -euo pipefail
+  export PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C
+  umask 077
+  [[ $# -eq 5 && "$5" =~ ^[A-Z0-9]{10}$ ]] || {
+    echo 'bootstrap requires helper, policy, independently approved helper/policy SHA256 and pinned Apple Team ID' >&2; exit 2;
+  }
+  [[ -f "$1" && ! -L "$1" && -f "$2" && ! -L "$2" ]] || exit 1
+  local work p helper=/Library/PrivilegedHelperTools/com.papercusp.update-installer
+  local policy=/private/etc/papercusp/managed-policy.json
+  work="$(mac_protected_admin_stage)"
+  trap 'rm -rf "$work"' EXIT
+  # Hash the private COPIES, then install those same bytes. Input paths may be
+  # user-writable; a later swap cannot change what gets verified or installed.
+  /bin/cat < "$1" > "$work/helper"
+  /bin/cat < "$2" > "$work/policy"
+  mac_protected_admin_hash "$work/helper" "$3"
+  mac_protected_admin_hash "$work/policy" "$4"
+  /bin/chmod 755 "$work/helper"
+  /usr/bin/codesign --verify --strict -R "anchor apple generic and identifier \"com.papercusp.update-installer\" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$5\"" "$work/helper"
+  for p in /Library /private/etc; do
+    mac_protected_admin_directory "$p" || { echo "unprotected bootstrap ancestor: $p" >&2; exit 1; }
+  done
+  for p in /Library/PrivilegedHelperTools /private/etc/papercusp; do
+    if [[ ! -e "$p" && ! -L "$p" ]]; then /bin/mkdir -m 755 "$p"; fi
+    mac_protected_admin_directory "$p" || { echo "unprotected bootstrap directory: $p" >&2; exit 1; }
+  done
+  [[ ! -e "$helper" && ! -L "$helper" && ! -e "$policy" && ! -L "$policy" ]] || {
+    echo 'administrator baseline already exists; bootstrap never replaces trust' >&2; exit 1;
+  }
+  /bin/chmod 644 "$work/policy"
+  # Exclusive links cannot overwrite a baseline installed concurrently. A
+  # failed second link can leave only the approved policy, never an unapproved
+  # verifier. A subsequent bootstrap refuses that partial baseline for repair.
+  /bin/ln "$work/policy" "$policy"
+  /bin/ln "$work/helper" "$helper"
+  /bin/rm "$work/policy" "$work/helper"
+  /bin/sync
+  echo 'Administrator-approved initial verifier and policy provisioned.'
+)
+
+install_protected_mac_package() ( # package, independently approved package sha, Apple Team ID
+  set -euo pipefail
+  export PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C
+  umask 077
+  [[ $# -eq 3 && "$3" =~ ^[A-Z0-9]{10}$ ]] || {
+    echo 'install requires package, independently approved outer-package SHA256 and pinned Apple Team ID' >&2; exit 2;
+  }
+  [[ -f "$1" && ! -L "$1" ]] || exit 1
+  local work assessment
+  work="$(mac_protected_admin_stage)"
+  trap 'rm -rf "$work"' EXIT
+  /bin/cat < "$1" > "$work/candidate.pkg"
+  mac_protected_admin_hash "$work/candidate.pkg" "$2"
+  /usr/sbin/pkgutil --check-signature "$work/candidate.pkg"
+  assessment="$(/usr/sbin/spctl --assess --type install --verbose=2 "$work/candidate.pkg" 2>&1)" || {
+    printf '%s\n' "$assessment" >&2; exit 1;
+  }
+  /usr/bin/grep -Eq "^origin=Developer ID Installer: .+ \\($3\\)$" <<<"$assessment" || {
+    echo 'installer signature does not match the administrator-pinned Apple Team ID' >&2; exit 1;
+  }
+  # Approval binds the OUTER package, including root scripts. Inner archive
+  # signatures alone cannot authorize an Installer script. Execute the same
+  # private staged inode that was hashed and assessed, never the input path.
+  /usr/sbin/installer -pkg "$work/candidate.pkg" -target /
+)
+
 make_protected_mac_package() ( # app, updater tar.gz, manifest.json, platform, output.pkg
   set -euo pipefail
   [[ $# -eq 5 ]] || { echo 'protected package requires app, archive, manifest, platform, output' >&2; exit 2; }

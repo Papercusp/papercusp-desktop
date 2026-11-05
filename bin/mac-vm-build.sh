@@ -21,6 +21,20 @@ ROOT="$(cd "$HERE/.." && pwd)"
 MAC_SIGNING_XATTR_HELPER="$HERE/lib/strip-mac-signing-xattrs.py"
 TAURI_CLI_VERSION="${PAPERCUSP_TAURI_CLI_VERSION:-${TAURI_CLI_VERSION:-2.11.0}}"
 
+# Run these only from the administrator's independently trusted management copy.
+# Expected hashes and Apple Team ID come from that channel, never the candidate.
+if [[ "${1:-}" == --bootstrap-protected-verifier || "${1:-}" == --install-protected-package ]]; then
+  source "$HERE/lib/mac-protected-installer.sh"
+  operation="$1"
+  shift
+  if [[ "$operation" == --bootstrap-protected-verifier ]]; then
+    bootstrap_protected_mac_verifier "$@"
+  else
+    install_protected_mac_package "$@"
+  fi
+  exit $?
+fi
+
 # The cross producer can hand its exact app/updater/approved manifest to this
 # native packaging continuation without rebuilding or running any app as root.
 if [[ "${1:-}" == --package-protected-app ]]; then

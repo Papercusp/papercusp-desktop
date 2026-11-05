@@ -181,6 +181,137 @@ function run(f, name = 'make_dmg') {
   ].join('\n')], { encoding: 'utf8', timeout: 10_000, env: f.env });
 }
 
+// Exercise administrator delivery effects without root or a Mac. Only this
+// copy substitutes system paths/Apple tools; production has no test-root knob.
+function adminFixture(t, mode) {
+  const f = fixture(t);
+  const system = path.join(f.root, 'system');
+  for (const dir of ['private/var/root', 'private/etc', 'Library']) {
+    fs.mkdirSync(path.join(system, dir), { recursive: true, mode: 0o755 });
+  }
+  const tools = path.join(f.root, 'admin-tools');
+  fs.mkdirSync(tools);
+  const calls = path.join(f.root, 'admin-calls');
+  const tool = (name, body) => {
+    const file = path.join(tools, name);
+    fs.writeFileSync(file, '#!' + process.execPath + '\n' + body, { mode: 0o755 });
+    return file;
+  };
+  const replacements = new Map([
+    ['/usr/bin/uname', tool('uname', `console.log('Darwin')`)],
+    ['/usr/bin/id', tool('id', `console.log(process.env.ADMIN_MODE==='non-root'?'501':'0')`)],
+    ['/usr/bin/stat', tool('stat', `
+const fs=require('node:fs'),args=process.argv.slice(2),s=fs.lstatSync(args.at(-1));
+console.log(args[1]==='%u'?'0':(s.mode&0o7777).toString(8));`)],
+    ['/bin/ls', tool('ls', `console.log(process.env.ADMIN_MODE==='acl'?'0: everyone allow write':'no ACL grants')`)],
+    // Unit effects must never flush the shared build host's entire filesystem.
+    // This fixture does not qualify native persistence or Apple trust services.
+    ['/bin/sync', tool('sync', 'process.exit(0)')],
+  ]);
+  for (const name of ['codesign', 'pkgutil', 'spctl', 'installer']) {
+    replacements.set((name === 'codesign' ? '/usr/bin/' : '/usr/sbin/') + name, tool(name, `
+const fs=require('node:fs'),path=require('node:path'),name=path.basename(process.argv[1]),args=process.argv.slice(2);
+fs.appendFileSync(process.env.ADMIN_CALLS,JSON.stringify({name,args})+'\\n');
+if(process.env.ADMIN_MODE===name+'-fail')process.exit(9);
+if(name==='codesign'&&!args[args.indexOf('-R')+1].includes('subject.OU] = "ABC1234567"'))process.exit(10);
+if(name==='spctl')console.error('origin=Developer ID Installer: Fixture ('+(process.env.ADMIN_MODE==='wrong-team'?'WRONG12345':'ABC1234567')+')');
+if(name==='installer'){
+ const bytes=fs.readFileSync(args[args.indexOf('-pkg')+1],'utf8');
+ fs.writeFileSync(process.env.ADMIN_INSTALLED,bytes);
+}
+// Change the original only AFTER its private copy was approved.
+if(process.env.ADMIN_MODE==='source-swap'&&(name==='codesign'||name==='spctl'))fs.writeFileSync(process.env.ADMIN_INPUT,'swapped attacker bytes');
+`));
+  }
+  let library = fs.readFileSync(path.join(__dirname, '../bin/lib/mac-protected-installer.sh'), 'utf8');
+  library = library.replaceAll('/private', system + '/private').replaceAll('/Library', system + '/Library');
+  for (const [before, after] of replacements) library = library.replaceAll(before, after);
+  const copy = path.join(f.root, 'admin-library.sh');
+  fs.writeFileSync(copy, library);
+  const input = path.join(f.root, 'candidate');
+  const policy = path.join(f.root, 'policy');
+  fs.writeFileSync(input, 'administrator approved candidate');
+  fs.writeFileSync(policy, '{"version":1,"administrator":"fixture"}');
+  const digest = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  const expected = digest(input), policyExpected = digest(policy);
+  const helper = path.join(system, 'Library/PrivilegedHelperTools/com.papercusp.update-installer');
+  const targetPolicy = path.join(system, 'private/etc/papercusp/managed-policy.json');
+  if (mode === 'writable-ancestor') fs.chmodSync(path.join(system, 'private/var/root'), 0o777);
+  if (mode === 'existing' || mode === 'alias') {
+    fs.mkdirSync(path.dirname(helper));
+    if (mode === 'existing') fs.writeFileSync(helper, 'existing administrator trust');
+    else fs.symlinkSync(input, helper);
+  }
+  const installed = path.join(f.root, 'installer-effect');
+  const invoke = operation => {
+    const result = spawnSync('bash', ['-x', '-c',
+    'source "$ADMIN_LIBRARY"\n' + (operation === 'bootstrap'
+      ? 'bootstrap_protected_mac_verifier "$ADMIN_INPUT" "$ADMIN_POLICY" "$ADMIN_EXPECTED" "$ADMIN_POLICY_EXPECTED" "$ADMIN_TEAM"'
+      : 'install_protected_mac_package "$ADMIN_INPUT" "$ADMIN_EXPECTED" "$ADMIN_TEAM"')],
+  { encoding: 'utf8', timeout: 10_000, env: { ...f.env, ADMIN_LIBRARY: copy,
+    ADMIN_MODE: mode, ADMIN_CALLS: calls, ADMIN_INPUT: input, ADMIN_POLICY: policy,
+    ADMIN_EXPECTED: mode === 'hash' ? '0'.repeat(64) : expected,
+    ADMIN_POLICY_EXPECTED: mode === 'policy-hash' ? '0'.repeat(64) : policyExpected,
+    ADMIN_TEAM: mode === 'invalid-team' ? 'TEAM" OR true' : 'ABC1234567', ADMIN_INSTALLED: installed } });
+    // Neither a timeout nor a signal is evidence of a deliberate refusal.
+    assert.equal(result.error, undefined, `${result.error || ''}\n${result.stderr}`);
+    assert.equal(result.signal, null, result.stderr);
+    return result;
+  };
+  return { ...f, invoke, helper, targetPolicy, input, installed, calls };
+}
+
+for (const mode of ['normal', 'source-swap', 'hash', 'policy-hash', 'invalid-team', 'non-root', 'acl', 'writable-ancestor', 'codesign-fail', 'existing', 'alias']) {
+  test(`independent administrator bootstrap authorizes only pinned copied bytes: ${mode}`, t => {
+    const f = adminFixture(t, mode);
+    const result = f.invoke('bootstrap');
+    if (mode === 'normal' || mode === 'source-swap') {
+      assert.equal(result.status, 0, `${result.error || ''}; signal=${result.signal}\n${result.stdout}${result.stderr}`);
+      assert.equal(fs.readFileSync(f.helper, 'utf8'), 'administrator approved candidate');
+      assert.equal(fs.readFileSync(f.targetPolicy, 'utf8'), '{"version":1,"administrator":"fixture"}');
+      assert.equal(fs.statSync(f.helper).nlink, 1);
+      assert.equal(fs.statSync(f.helper).mode & 0o777, 0o755);
+      assert.equal(fs.statSync(f.targetPolicy).mode & 0o777, 0o644);
+      // A second bootstrap may not replace already established trust.
+      assert.notEqual(f.invoke('bootstrap').status, 0);
+    } else {
+      assert.notEqual(result.status, 0, result.stdout + result.stderr);
+      assert.equal(fs.existsSync(f.targetPolicy), false);
+      if (mode === 'existing') assert.equal(fs.readFileSync(f.helper, 'utf8'), 'existing administrator trust');
+      else if (mode === 'alias') assert.equal(fs.lstatSync(f.helper).isSymbolicLink(), true);
+      else assert.equal(fs.existsSync(f.helper), false);
+    }
+  });
+}
+
+for (const mode of ['normal', 'source-swap', 'hash', 'invalid-team', 'non-root', 'acl', 'writable-ancestor', 'pkgutil-fail', 'spctl-fail', 'wrong-team']) {
+  test(`trusted delivery authenticates outer package before root scripts: ${mode}`, t => {
+    const f = adminFixture(t, mode);
+    const result = f.invoke('package');
+    if (mode === 'normal' || mode === 'source-swap') {
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.equal(fs.readFileSync(f.installed, 'utf8'), 'administrator approved candidate');
+      const calls = fs.readFileSync(f.calls, 'utf8').trim().split('\n').map(JSON.parse);
+      assert.deepEqual(calls.map(c => c.name), ['pkgutil', 'spctl', 'installer']);
+      assert.notEqual(calls[2].args[1], f.input);
+      assert.deepEqual(calls[2].args.slice(-2), ['-target', '/']);
+    } else {
+      assert.notEqual(result.status, 0, result.stdout + result.stderr);
+      assert.equal(fs.existsSync(f.installed), false, 'no root package scripts may run before approval');
+    }
+  });
+}
+
+for (const operation of ['--bootstrap-protected-verifier', '--install-protected-package']) {
+  test(`native administrator entry point refuses incomplete authorization before build setup: ${operation}`, () => {
+    const result = spawnSync('bash', [path.join(__dirname, '../bin/mac-vm-build.sh'), operation],
+      { encoding: 'utf8', timeout: 10_000, env: { ...process.env, PAPERCUSP_DESKTOP_TARGET_ROOT: '/missing-admin-dispatch' } });
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    assert.match(result.stderr, /independently approved/);
+    assert.equal(result.stdout, '');
+  });
+}
+
 for (const mode of ['normal', 'missing-identity', 'unattributed', 'wrong-artifact',
   'wrong-helper', 'wrong-platform', 'codesign-fail', 'productsign-fail', 'pkgutil-fail']) {
   test(`administrator package binds the existing approved request and validates signing: ${mode}`, t => {
