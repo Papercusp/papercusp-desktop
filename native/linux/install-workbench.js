@@ -54,7 +54,7 @@ export function installWorkbench(archive, {reload = reloadWorkbench, pui = null}
 function reloadWorkbench(uuid) {
     // Reload the installed module in the current Shell; a missing Shell bus
     // leaves the persistent registration ready for the next desktop login.
-    Gio.DBus.session.call_sync('org.gnome.Shell.Extensions', '/org/gnome/Shell/Extensions',
+    Gio.DBus.session.call_sync('org.gnome.Shell', '/org/gnome/Shell',
         'org.gnome.Shell.Extensions', 'ReloadExtension', new GLib.Variant('(s)', [uuid]),
         null, Gio.DBusCallFlags.NONE, 5000, null);
 }
