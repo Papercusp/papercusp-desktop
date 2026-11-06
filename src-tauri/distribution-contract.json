@@ -47,6 +47,11 @@
     },
     "resourceAllowlist": [
       {
+        "glob": "resources/workbench-windows/*",
+        "owner": "native-workbench",
+        "platforms": ["windows"]
+      },
+      {
         "glob": "resources/workbench@papercusp.ai.shell-extension.zip",
         "owner": "native-workbench",
         "platforms": ["linux"]

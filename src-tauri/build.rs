@@ -297,14 +297,16 @@ fn main() {
     println!("cargo:rerun-if-changed=tauri.linux.conf.json");
     println!("cargo:rerun-if-changed=../native");
     println!("cargo:rerun-if-changed=../bin/package-native-workbench.mjs");
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+    let workbench_target = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if matches!(workbench_target.as_str(), "linux" | "windows") {
         let output = std::process::Command::new("node")
             .arg(manifest_dir.join("../bin/package-native-workbench.mjs"))
             .arg("--stage-bundle")
             .arg(manifest_dir.parent().expect("desktop root"))
+            .arg(&workbench_target)
             .output()
-            .expect("Linux Workbench packaging requires Node and gnome-extensions");
-        assert!(output.status.success(), "Linux Workbench packaging failed: {}",
+            .expect("Native Workbench packaging requires Node (and gnome-extensions on Linux)");
+        assert!(output.status.success(), "Native Workbench packaging failed: {}",
             String::from_utf8_lossy(&output.stderr));
     }
     println!("cargo:rerun-if-changed=sidecar/spa/internal/docs");

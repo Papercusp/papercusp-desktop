@@ -103,6 +103,9 @@ WizardStyle=modern
 ; `ignoreversion` makes the exe follow the same unconditional-overwrite semantics
 ; as every other file in this installer.
 Source: "{#BuildRoot}\target\release\papercusp-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
+; The resident panels are native WPF source, shared by both roles. The GUI
+; connects through the installed Server's PUI instead of carrying a runtime.
+Source: "{#BuildRoot}\resources\workbench-windows\*"; DestDir: "{app}\resources\workbench-windows"; Flags: ignoreversion
 #if AppId == "com.papercusp.gui"
 ; D-004 / P-007: fail-closed thin GUI. The shell carries the shared bootstrap
 ; SPA and no Server/runtime sibling. Do not widen this to sidecar\* or resources\*.
@@ -152,6 +155,7 @@ Source: "{#BuildRoot}\.sidecar-runtime-generation"; DestDir: "{app}\sidecar"; Fl
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\papercusp-desktop.exe"
+Name: "{autoprograms}\{#AppName} Workbench settings"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-STA -NoProfile -ExecutionPolicy Bypass -File ""{app}\resources\workbench-windows\workbench.ps1"" -Action Settings"; IconFilename: "{app}\papercusp-desktop.exe"
 ; Parity with windows/hooks.nsh NSIS_HOOK_POSTINSTALL (WI-2197): the guided
 ; tutorial shortcut targets wsl.exe directly (needs the app run once so the
 ; papercup-runtime distro is registered — same precondition as NSIS-era).
@@ -175,6 +179,11 @@ Filename: "{app}\papercusp-desktop.exe"; Parameters: "--upgrade"; Flags: nowait;
 ; behind. The dirifempty type is intentionally narrow: it cannot remove user
 ; config nested under a non-empty directory or the shared %LOCALAPPDATA% parent.
 Type: dirifempty; Name: "{app}"
+
+[UninstallRun]
+; Run while this role's script still exists. The controller checks the exact
+; registered command before removing login state and leaves account choices.
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-STA -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\resources\workbench-windows\workbench.ps1"" -Action Uninstall"; Flags: runhidden waituntilterminated
 
 [Code]
 const
