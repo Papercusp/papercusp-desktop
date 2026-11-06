@@ -24,6 +24,10 @@ function privateBus(temp) {
 function fixturePui(temp) {
     const file = join(temp, "pui '$ fixture");
     writeFileSync(file, `#!/usr/bin/env node
+if(process.argv[2]==='workbench'){
+require('node:fs').writeFileSync(${JSON.stringify(join(temp,'terminal-launch.json'))},JSON.stringify({
+argv:process.argv.slice(2),tty:[0,1,2].map(fd=>require('node:tty').isatty(fd))}));
+process.exit(0);}
 let text='';process.stdin.on('data',c=>text+=c);process.stdin.on('end',()=>{
 const r=JSON.parse(text);let rows=[];
 if(r.name==='failure'){console.error('canonical ACL refusal');process.exitCode=1;return;}
@@ -457,6 +461,7 @@ export default class Probe extends Workbench {
   await waitFor(()=>qa.results().some(row=>row.row.advSessionId===4241));
   const selectedEnded=qa.results().find(row=>row.row.advSessionId===4241);
   const handoffs=[];
+  const launchResume=this._launchResume;
   this._launchResume=argv=>handoffs.push(argv);
   writeRoster({active:[{ownerId:'ended-owner',advSessionId:4243,sessionState:'live'}],ended:[ended]});
   await this._resume('quick-access',selectedEnded);
@@ -485,6 +490,23 @@ export default class Probe extends Workbench {
   await this._resume('quick-access',qa.results().find(row=>row.row.advSessionId===4241));
   check(handoffs.length===2&&handoffs[1][4]==='saved-remote',
     'native remote Resume preserves the saved host for terminal-side connection selection');
+  phase='real GIO terminal launch';
+  this._launchResume=launchResume;
+  writeRoster({active:[],ended:[ended]});
+  this._toggle('quick-access');
+  await waitFor(()=>qa.sources.agents?.status==='ready');
+  const realResume=this._views.get('quick-access').content.get_children()
+    .find(actor=>actor.accessible_name==='Resume session: Needle ended session');
+  check(Boolean(realResume),'real terminal journey exposes the selected Resume button');
+  await click(realResume);
+  await waitFor(()=>GLib.file_test(${JSON.stringify(join(temp,'terminal-launch.json'))},GLib.FileTest.EXISTS));
+  const launched=JSON.parse(new TextDecoder().decode(GLib.file_get_contents(
+    ${JSON.stringify(join(temp,'terminal-launch.json'))})[1]));
+  check(JSON.stringify(launched.argv)===JSON.stringify(['workbench','resume','4241',
+    GLib.get_host_name(),'ended-owner']),
+    'production GIO terminal launch preserves exact arguments and quoted PUI executable path');
+  check(launched.tty.every(Boolean),'GIO launches the selected command inside a real terminal PTY');
+  check(!qa.visible,'real terminal handoff dismisses its native launcher');
   this.finish(null);
  }
 }
