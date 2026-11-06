@@ -43,7 +43,10 @@ export default class Workbench extends Extension {
         this._monitorSignal = Main.layoutManager.connect('monitors-changed', () => this._position());
         this._capture = global.stage.connect('captured-event', (_stage, event) => {
             if (event.type() !== Clutter.EventType.BUTTON_PRESS) return Clutter.EVENT_PROPAGATE;
-            const target = event.get_source();
+            // Native Wayland seat events can have no source actor during
+            // capture. Pick at the actual pointer before judging outside focus.
+            const target = event.get_source() || global.stage.get_actor_at_pos(
+                Clutter.PickMode.REACTIVE, ...event.get_coords());
             for (const [surface, view] of this._views) {
                 const state = this._states.get(surface);
                 if (state.pinned || (target && view.panel.contains(target))) continue;
@@ -127,6 +130,11 @@ export default class Workbench extends Extension {
         panel.add_child(header);
         view.search = new St.Entry({text: state.query, hint_text: 'Search plans, agents, reports and goals',
             can_focus: true, x_expand: true, accessible_name: 'Search Workbench'});
+        // Clutter.Text consumes Enter and emits activate instead of bubbling
+        // key-press-event to the panel. Keep the focused search route native.
+        view.search.clutter_text.connect('activate', () => {
+            if (!state.detail) this._activate(surface, state.selected());
+        });
         view.search.clutter_text.connect('text-changed', () => {
             state.query = view.search.get_text();
             // Invalidate old completions immediately, before the debounce.
