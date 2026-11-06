@@ -32,6 +32,55 @@ const { spawnSync } = require('node:child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'bin', 'dev-operator-ifneeded.sh');
 
+for (const diagnostics of [false, true]) {
+  for (const fromEnvFile of [false, true]) {
+    test(`frozen host isolates Node preloads after env sourcing (diagnostics=${diagnostics}, envFile=${fromEnvFile})`, () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'operator preload boundary '));
+      try {
+        const entry = path.join(dir, 'host.mjs');
+        const preload = path.join(dir, 'preload.mjs');
+        fs.writeFileSync(preload, 'globalThis.callerPreloadRan = true;\n');
+        fs.writeFileSync(entry, 'console.log(JSON.stringify({preloaded:!!globalThis.callerPreloadRan,options:process.env.NODE_OPTIONS,path:process.env.NODE_PATH,args:process.execArgv}));\n');
+        const options = `--import=${JSON.stringify(require('node:url').pathToFileURL(preload).href)}`;
+        fs.writeFileSync(path.join(dir, '.env.local'), fromEnvFile
+          ? `NODE_OPTIONS='${options}'\nNODE_PATH='${dir}'\n` : '');
+        const src = fs.readFileSync(SCRIPT, 'utf8');
+        const start = src.indexOf('DEV_HOST_COMMAND="npx tsx bin/hono-host.ts"');
+        const end = src.indexOf('printf -v DEV_OPERATOR_DIR_Q', start);
+        assert.ok(start >= 0 && end > start, 'frozen host command setup moved');
+        const result = spawnSync('bash', ['-c', [
+          'set -euo pipefail',
+          'DEV_SOURCE_ROOT=""',
+          src.slice(start, end),
+          'printf -v DEV_OPERATOR_DIR_Q %q "$FIXTURE_ROOT"',
+          'printf -v DEV_ENV_FILE_Q %q "$FIXTURE_ROOT/.env.local"',
+          'DEV_CALLER_OVERRIDES=""; DEV_BACKGROUND_WORKERS=0; PORT=33701; PTY_PORT=33705',
+          devCommandLine(),
+          'eval "$DEFAULT_DEV_CMD"',
+          // A source fixture still needs its caller's loader after the host runs.
+          'node "$PAPERCUSP_DEV_HOST_ENTRY"',
+        ].join('\n')], {
+          encoding: 'utf8', timeout: 10000,
+          env: { ...process.env, FIXTURE_ROOT: dir, PAPERCUSP_DEV_HOST_ENTRY: entry,
+            PAPERCUSP_DEV_HOST_DIAGNOSTIC_DIR: diagnostics ? path.join(dir, 'reports') : '',
+            NODE_OPTIONS: fromEnvFile ? '' : options, NODE_PATH: fromEnvFile ? '' : dir },
+        });
+        assert.equal(result.status, 0, result.stderr);
+        const observed = result.stdout.trim().split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line));
+        assert.equal(observed.length, 2, result.stdout);
+        assert.equal(observed[0].preloaded, false, 'plain host executed caller preload');
+        assert.equal(observed[0].options, undefined);
+        assert.equal(observed[0].path, undefined);
+        assert.equal(observed[0].args.includes('--report-on-signal'), diagnostics);
+        assert.equal(observed[1].preloaded, true, 'source fixture lost its caller preload');
+        assert.equal(observed[1].options, options);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
 test('frozen host diagnostics preserve the actual exec PID and exclude credentials', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'operator diagnostic '));
   try {

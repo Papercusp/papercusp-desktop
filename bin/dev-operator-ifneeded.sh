@@ -233,6 +233,12 @@ if [ -n "$DEV_HOST_ENTRY" ]; then
     printf -v DEV_HOST_RUN_Q '%q' "$DEV_HOST_RUN"
     DEV_HOST_COMMAND="bash -c $DEV_HOST_RUN_Q"
   fi
+  # Match the private-host/import-smoke isolation policy at the actual exec.
+  # The outer verifier needs its TS loader for source fixtures, but loading the
+  # frozen bundle through that loader can exhaust V8 before server.listen().
+  # Keep this on the command, after DEFAULT_DEV_CMD sources .env.local, so
+  # neither caller nor file preloads/path overrides leak into the plain host.
+  DEV_HOST_COMMAND="env -u NODE_OPTIONS -u NODE_PATH $DEV_HOST_COMMAND"
   echo "[tauri] using frozen plain-node operator host: $DEV_HOST_ENTRY"
 fi
 printf -v DEV_OPERATOR_DIR_Q '%q' "$DEV_OPERATOR_DIR"
