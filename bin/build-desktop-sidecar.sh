@@ -44,6 +44,11 @@ set -euo pipefail
 # differs (e.g. CI clones into a flat workspace dir).
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# Select explicit signed input receipts before any build side effects or cwd
+# changes. Omitting them retains measurement-only packaging, never approval.
+# shellcheck source=lib/host-runtime-closure.sh
+source "$HERE/lib/host-runtime-closure.sh"
+select_handler_build_inputs "$@" || exit 1
 if [[ ! -r "$HERE/check-ptool-sdk-bundle.mjs" ]]; then
   echo "ERROR: current producer is missing ptool SDK checker: $HERE/check-ptool-sdk-bundle.mjs" >&2
   exit 1
@@ -2152,7 +2157,7 @@ assert_lock_exact_install() {
 NODE
 }
 # Runtime package policy is shared with the disposable PRIMARY builder.
-source "$HERE/lib/host-runtime-closure.sh"
+# host-runtime-closure.sh was sourced before build-input selection above.
 # Backstop the source prune by scanning the assembled model tree (the package's
 # `models/` dir since D-178).  This is deliberately fail-closed: a future
 # downloader/layout change must stop the build rather than silently shipping

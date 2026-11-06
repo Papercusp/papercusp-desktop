@@ -3,16 +3,17 @@
  */
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync,
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readSync, readFileSync, realpathSync,
   renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { parseTauriUpdateEnvelope } from '../../../libs/generic/tauri-release-kit/src/signature.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const compare = (a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
 const inside = (root, file) => { const rel = relative(root, file); return rel !== '..' && !rel.startsWith('../') && !rel.startsWith('/'); };
 
-export function stageHandlerRuntime({ node, bootstrap, koffi, addon, arch, output, libraryDirs }) {
+export function stageHandlerRuntime({ node, bootstrap, koffi, addon, arch, output, libraryDirs, build }) {
   if (!['x64', 'arm64'].includes(arch) || !Array.isArray(libraryDirs) || !libraryDirs.length) {
     throw new Error('explicit supported target and library roots required');
   }
@@ -100,14 +101,98 @@ export function stageHandlerRuntime({ node, bootstrap, koffi, addon, arch, outpu
     const records = [...files.values()].sort(compare);
     const inventory = { schema: 'handler-runtime-files-v1', platform: 'linux', arch,
       sha256: hash(JSON.stringify(records)), bootstrapSha256: files.get('/runtime/bootstrap.cjs').sha256, files: records };
-    writeFileSync(join(temporary, 'inventory.json'), JSON.stringify(inventory) + '\n', { flag: 'wx', mode: 0o444 });
+    if (build !== undefined) {
+      // Transport existing signed receipts, never mint authority here. Admission
+      // rebuilds these sources and checks CURRENT protected trust independently.
+      const exact = (value, fields) => value && typeof value === 'object' && !Array.isArray(value)
+        && Object.keys(value).length === fields.length && fields.every(field => Object.hasOwn(value, field));
+      if (!exact(build, ['entryPoint', 'identity', 'sources', 'assets', 'authorization'])
+        || !exact(build.identity, ['sourceRevision', 'version', 'rollbackCounter'])
+        || !Array.isArray(build.sources) || !build.sources.length || !Array.isArray(build.assets)
+        || build.sources.length + files.size > 1023) throw new Error('invalid handler build population');
+      const receipts = (input, file) => {
+        if (!Array.isArray(input) || !input.length || input.length > 64) throw new Error('complete input author receipts required');
+        return input.map(value => {
+          const envelope = parseTauriUpdateEnvelope(value), metadata = JSON.parse(envelope.payload);
+          if (metadata.artifactSha256 !== file.sha256
+            || metadata.policySha256 !== hash(JSON.stringify({ path: file.path, executable: file.executable }))
+            || metadata.product !== 'papercusp-handler-input'
+            || metadata.platform !== (arch === 'x64' ? 'linux-x86_64' : 'linux-aarch64')
+            || ['sourceRevision', 'version', 'rollbackCounter'].some(field => metadata[field] !== build.identity[field])) {
+            throw new Error('handler input receipt differs from packaged bytes or identity');
+          }
+          return envelope;
+        });
+      };
+      const seen = new Set();
+      const sources = build.sources.map(source => {
+        if (!exact(source, ['path', 'source', 'sha256', 'executable', 'authorizations'])
+          || typeof source.path !== 'string' || !/^\/src\/[A-Za-z0-9_@/+.\-]+$/.test(source.path)
+          || source.path.slice(1).split('/').some(part => part === '.' || part === '..' || !part) || source.executable !== false
+          || !/^[a-f0-9]{64}$/.test(source.sha256) || seen.has(source.path)) throw new Error('invalid handler source record');
+        seen.add(source.path);
+        const fd = openSync(source.source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        let contents;
+        try {
+          const before = fstatSync(fd, { bigint: true });
+          if (!before.isFile() || before.nlink !== 1n || before.size > 256n * 1024n * 1024n
+            || bytesTotal + Number(before.size) > 512 * 1024 * 1024) throw new Error('invalid handler source size or type');
+          contents = Buffer.alloc(Number(before.size) + 1);
+          let size = 0;
+          while (size < contents.length) {
+            const count = readSync(fd, contents, size, contents.length - size, null);
+            if (!count) break;
+            size += count;
+          }
+          const after = fstatSync(fd, { bigint: true });
+          if (BigInt(size) !== before.size || !['dev', 'ino', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs']
+            .every(field => before[field] === after[field])) throw new Error('handler source changed during snapshot');
+          contents = contents.subarray(0, size);
+        } finally { closeSync(fd); }
+        if (hash(contents) !== source.sha256) throw new Error('handler source digest mismatch');
+        bytesTotal += contents.length;
+        const target = join(temporary, source.path.slice(1));
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, contents, { flag: 'wx', mode: 0o444 });
+        return { path: source.path, sha256: source.sha256, executable: false, authorizations: receipts(source.authorizations, source) };
+      });
+      if (!seen.has(build.entryPoint)) throw new Error('handler build entry is absent');
+      const assets = new Map(records.filter(file => file.path !== '/runtime/bootstrap.cjs').map(file => [file.path, file]));
+      if (build.assets.length !== assets.size) throw new Error('handler asset receipt population mismatch');
+      const assetReceipts = build.assets.map(asset => {
+        if (!exact(asset, ['path', 'authorizations']) || !assets.has(asset.path)) throw new Error('handler asset receipt population mismatch');
+        const file = assets.get(asset.path); assets.delete(asset.path);
+        return { path: asset.path, authorizations: receipts(asset.authorizations, file) };
+      });
+      const authorization = parseTauriUpdateEnvelope(build.authorization), metadata = JSON.parse(authorization.payload);
+      if (metadata.artifactSha256 !== inventory.sha256 || metadata.policySha256 !== inventory.bootstrapSha256
+        || metadata.product !== 'papercusp-handler-runtime'
+        || metadata.platform !== (arch === 'x64' ? 'linux-x86_64' : 'linux-aarch64')
+        || ['sourceRevision', 'version', 'rollbackCounter'].some(field => metadata[field] !== build.identity[field])) {
+        throw new Error('handler runtime receipt differs from packaged bytes or identity');
+      }
+      inventory.build = { entryPoint: build.entryPoint, identity: { ...build.identity }, sources,
+        assets: assetReceipts, authorization };
+    }
+    const serialized = JSON.stringify(inventory) + '\n';
+    if (Buffer.byteLength(serialized) > 16 * 1024 * 1024) throw new Error('handler inventory exceeds admission limit');
+    writeFileSync(join(temporary, 'inventory.json'), serialized, { flag: 'wx', mode: 0o444 });
     renameSync(temporary, destination);
     return inventory;
   } finally { rmSync(temporary, { recursive: true, force: true }); }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const [node, bootstrap, koffi, addon, arch, output, ...libraryDirs] = process.argv.slice(2);
-  try { stageHandlerRuntime({ node, bootstrap, koffi, addon, arch, output, libraryDirs }); }
+  const [node, bootstrap, koffi, addon, arch, output, ...options] = process.argv.slice(2);
+  try {
+    let build;
+    if (options[0] === '--build-inputs') {
+      const file = resolve(options[1]); options.splice(0, 2);
+      if (statSync(file).size > 16 * 1024 * 1024) throw new Error('handler build description exceeds admission limit');
+      build = JSON.parse(readFileSync(file, 'utf8'));
+      for (const source of build.sources ?? []) source.source = resolve(dirname(file), source.source);
+    }
+    stageHandlerRuntime({ node, bootstrap, koffi, addon, arch, output, libraryDirs: options, build });
+  }
   catch (error) { console.error('handler runtime packaging refused: ' + error.message); process.exitCode = 1; }
 }

@@ -269,6 +269,20 @@ prune_gyp_build_intermediates() {
 # also carries top-level posthog-node@5.x. The old name-only lookup read 5.x's
 # manifest, missed 3.5.0's rusha dependency, and produced a signed Server bundle
 # that installed successfully but died on clean-machine boot.
+select_handler_build_inputs() {
+  # Reuse the package writer's explicit option. A description transports signed
+  # receipts; it does not select trust or approve the resulting runtime.
+  handler_runtime_build_options=()
+  [[ $# -gt 0 ]] || return 0
+  if [[ $# -ne 2 || "$1" != --build-inputs || ! -f "$2" || ! -r "$2" ]]; then
+    echo "ERROR: expected --build-inputs <readable handler build description>" >&2
+    return 1
+  fi
+  local directory
+  directory="$(cd -- "$(dirname -- "$2")" && pwd -P)" || return 1
+  handler_runtime_build_options=(--build-inputs "$directory/$(basename -- "$2")")
+}
+
 stage_handler_runtime() {
   # Inspect private copies statically; candidate executables never run here.
   local node_file="$1" arch="$2" output="$3"
@@ -277,7 +291,7 @@ stage_handler_runtime() {
     "$node_file" "$SIDECAR_DIR/handler-bootstrap.cjs" \
     "$SIDECAR_DIR/node_modules/koffi" \
     "$SIDECAR_DIR/node_modules/@koromix/koffi-linux-$arch/linux_$arch/koffi.node" \
-    "$arch" "$output" "$@"
+    "$arch" "$output" "${handler_runtime_build_options[@]}" "$@"
 }
 
 resolve_pkg_source() {

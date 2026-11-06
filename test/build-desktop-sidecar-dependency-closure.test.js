@@ -10,7 +10,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { createHash } = require('node:crypto');
+const { createHash, generateKeyPairSync, sign } = require('node:crypto');
 const { createRequire } = require('node:module');
 const { pathToFileURL } = require('node:url');
 
@@ -691,4 +691,146 @@ test('handler runtime package refuses an origin-dependent ELF graph', async t =>
   const { stageHandlerRuntime } = await runtimePackaging;
   assert.throws(() => stageHandlerRuntime({ ...f, node: candidate }), /unsupported runtime ELF search path/);
   assert.equal(fs.existsSync(f.output), false);
+});
+
+// These fixture keys exercise receipt transport, not production enrollment.
+async function handlerBuildPackageFixture(t) {
+  const f = handlerPackageFixture(t);
+  const { stageHandlerRuntime } = await runtimePackaging;
+  const measured = stageHandlerRuntime({ ...f, output: path.join(f.root, 'measurement') });
+  const { encodeTauriUpdateAuthorization } = await import(pathToFileURL(path.join(desktopRoot,
+    '../libs/generic/tauri-release-kit/src/signature.mjs')).href);
+  const digest = value => createHash('sha256').update(value).digest('hex');
+  const signer = () => {
+    const pair = generateKeyPairSync('ed25519'), keyId = Buffer.alloc(8, 1);
+    return payload => {
+      const signature = sign(null, createHash('blake2b512').update(payload).digest(), pair.privateKey);
+      const comment = 'timestamp:1 file:fixture';
+      return Buffer.from('untrusted comment: fixture\n'
+        + Buffer.concat([Buffer.from('ED'), keyId, signature]).toString('base64') + '\n'
+        + 'trusted comment: ' + comment + '\n'
+        + sign(null, Buffer.concat([signature, Buffer.from(comment)]), pair.privateKey).toString('base64') + '\n').toString('base64');
+    };
+  };
+  const author = signer(), reviewer = signer();
+  const identity = { sourceRevision: 'a'.repeat(40), version: '1.0.0', rollbackCounter: 3 };
+  const envelope = candidate => {
+    const payload = encodeTauriUpdateAuthorization({ ...identity, ...candidate,
+      configurationSha256: digest('fixture configuration; runtime admission verifies its own profile'),
+      schema: 'tauri-update-authorization-v2', platform: process.arch === 'x64' ? 'linux-x86_64' : 'linux-aarch64',
+      authorIds: ['fixture-author'], signerId: 'fixture-author', signerEpoch: 1,
+      approverId: 'fixture-reviewer', approverEpoch: 1, rootEpoch: 1, issuedAt: 1000, expiresAt: 3000 });
+    return { payload, signature: author(payload), approvalSignature: reviewer(payload) };
+  };
+  const receipt = file => envelope({ artifactSha256: file.sha256,
+    policySha256: digest(JSON.stringify({ path: file.path, executable: file.executable })), product: 'papercusp-handler-input' });
+  const source = { path: '/src/bootstrap.cjs', source: f.bootstrap, executable: false, sha256: digest(fs.readFileSync(f.bootstrap)) };
+  const build = { entryPoint: source.path, identity,
+    sources: [{ ...source, authorizations: [receipt(source)] }],
+    assets: measured.files.filter(file => file.path !== '/runtime/bootstrap.cjs')
+      .map(file => ({ path: file.path, authorizations: [receipt(file)] })),
+    authorization: envelope({ artifactSha256: measured.sha256, policySha256: measured.bootstrapSha256,
+      product: 'papercusp-handler-runtime' }) };
+  return { ...f, build, measured };
+}
+
+test('handler runtime package transports exact signed source and asset receipts without claiming approval', async t => {
+  const f = await handlerBuildPackageFixture(t);
+  const { stageHandlerRuntime } = await runtimePackaging;
+  const inventory = stageHandlerRuntime(f);
+  assert.deepEqual(inventory.files, f.measured.files);
+  assert.equal(inventory.sha256, f.measured.sha256);
+  assert.deepEqual(fs.readFileSync(path.join(f.output, 'src/bootstrap.cjs')), fs.readFileSync(f.bootstrap));
+  assert.equal(fs.statSync(path.join(f.output, 'src/bootstrap.cjs')).mode & 0o777, 0o444);
+  assert.equal(Object.hasOwn(inventory.build.sources[0], 'source'), false);
+  assert.doesNotMatch(JSON.stringify(inventory), new RegExp(f.root));
+  const original = JSON.stringify(inventory);
+  f.build.sources[0].authorizations[0].payload = 'changed';
+  f.build.identity.version = 'changed';
+  assert.equal(JSON.stringify(inventory), original, 'caller mutated the staged inventory');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.output, 'inventory.json'))), inventory);
+});
+
+for (const change of ['digest', 'traversal', 'duplicate-source', 'symlink', 'hardlink', 'missing-asset',
+  'duplicate-asset', 'missing-author', 'wrong-input-receipt', 'wrong-runtime-receipt', 'extra-field']) {
+  test('handler runtime package refuses build receipt ' + change + ' atomically', async t => {
+    const f = await handlerBuildPackageFixture(t);
+    const source = f.build.sources[0];
+    if (change === 'digest') source.sha256 = '0'.repeat(64);
+    if (change === 'traversal') source.path = '/src/../escape.cjs';
+    if (change === 'duplicate-source') f.build.sources.push({ ...source });
+    if (change === 'symlink' || change === 'hardlink') {
+      const link = path.join(f.root, 'linked.cjs');
+      if (change === 'symlink') fs.symlinkSync(f.bootstrap, link); else fs.linkSync(f.bootstrap, link);
+      source.source = link;
+    }
+    if (change === 'missing-asset') f.build.assets.pop();
+    if (change === 'duplicate-asset') f.build.assets[1] = f.build.assets[0];
+    if (change === 'missing-author') source.authorizations = [];
+    if (change === 'wrong-input-receipt') source.authorizations = f.build.assets[0].authorizations;
+    if (change === 'wrong-runtime-receipt') f.build.authorization = source.authorizations[0];
+    if (change === 'extra-field') f.build.authority = 'caller-selected';
+    const { stageHandlerRuntime } = await runtimePackaging;
+    assert.throws(() => stageHandlerRuntime(f));
+    assert.equal(fs.existsSync(f.output), false, 'invalid build was published');
+    assert.deepEqual(fs.readdirSync(f.root).filter(name => name.startsWith('.handler-runtime-')), []);
+  });
+}
+
+test('handler runtime package CLI resolves signed source inputs relative to its explicit description', async t => {
+  const f = await handlerBuildPackageFixture(t);
+  f.build.sources[0].source = path.basename(f.bootstrap);
+  const description = path.join(f.root, 'build.json');
+  fs.writeFileSync(description, JSON.stringify(f.build));
+  const result = spawnSync(process.execPath, [path.join(desktopRoot, 'bin/lib/handler-runtime-package.mjs'),
+    f.node, f.bootstrap, f.koffi, f.addon, f.arch, f.output, '--build-inputs', description, ...f.libraryDirs],
+  { encoding: 'utf8', timeout: 30000, cwd: os.tmpdir() });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const inventory = JSON.parse(fs.readFileSync(path.join(f.output, 'inventory.json')));
+  assert.deepEqual(inventory.build.authorization, f.build.authorization);
+  assert.deepEqual(fs.readFileSync(path.join(f.output, 'src/bootstrap.cjs')), fs.readFileSync(f.bootstrap));
+});
+
+test('handler build selector forwards explicit receipt paths before library roots without shell expansion', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-handler-selector-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const description = 'signed inputs $(touch UNEXPECTED).json';
+  fs.writeFileSync(path.join(root, description), '{}');
+  const script = [
+    'set -euo pipefail', extractFunction('select_handler_build_inputs'), extractFunction('stage_handler_runtime'),
+    'HOST_RUNTIME_CLOSURE_POLICY_DIR="/producer helpers"', 'SIDECAR_DIR="/sidecar copy"',
+    'node() { printf "%s\\0" "$@"; }',
+    'select_handler_build_inputs --build-inputs "$1"', 'cd /',
+    'stage_handler_runtime "/node copy" x64 "/output copy" "/library root"',
+  ].join('\n');
+  const result = spawnSync('bash', ['-c', script, 'handler-selector', description],
+    { encoding: 'utf8', cwd: root });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.stdout.split('\0').slice(0, -1), [
+    '/producer helpers/handler-runtime-package.mjs', '/node copy', '/sidecar copy/handler-bootstrap.cjs',
+    '/sidecar copy/node_modules/koffi', '/sidecar copy/node_modules/@koromix/koffi-linux-x64/linux_x64/koffi.node',
+    'x64', '/output copy', '--build-inputs', path.join(root, description), '/library root',
+  ]);
+  assert.equal(fs.existsSync(path.join(root, 'UNEXPECTED')), false);
+});
+
+test('handler build selector keeps measurement-only packaging and refuses malformed selection before staging', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-handler-selection-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const description = path.join(root, 'build.json'); fs.writeFileSync(description, '{}');
+  const prelude = ['set -euo pipefail', extractFunction('select_handler_build_inputs')].join('\n');
+  const measurement = spawnSync('bash', ['-c', prelude
+    + '\nselect_handler_build_inputs\n[[ ${#handler_runtime_build_options[@]} -eq 0 ]]'], { encoding: 'utf8' });
+  assert.equal(measurement.status, 0, measurement.stderr);
+  for (const args of [['--build-inputs'], ['--unknown', description], ['--build-inputs', root],
+    ['--build-inputs', description + '.absent'], ['--build-inputs', description, '--build-inputs', description]]) {
+    const result = spawnSync('bash', ['-c', prelude
+      + '\nselect_handler_build_inputs "$@"\nprintf STAGED', 'handler-selector', ...args], { encoding: 'utf8' });
+    assert.notEqual(result.status, 0, JSON.stringify(args));
+    assert.match(result.stderr, /expected --build-inputs/);
+    assert.equal(result.stdout, '');
+  }
+  const producer = fs.readFileSync(builderPath, 'utf8');
+  assert.ok(producer.indexOf('select_handler_build_inputs "$@" || exit 1') < producer.indexOf('node "$HERE/lib/spa-freshness.js"'));
+  assert.equal((producer.match(/source "\$HERE\/lib\/host-runtime-closure\.sh"/g) || []).length, 1);
 });
