@@ -1,4 +1,5 @@
 import Clutter from 'gi://Clutter';
+import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
@@ -7,7 +8,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {ResidentBridge} from './bridge.js';
 import {PanelState, SOURCES, sourceRequests, detailRequest, readRows, rebindShortcuts,
-    agentFocusTarget, exactAgentWindow} from './panel-model.mjs';
+    agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow} from './panel-model.mjs';
 
 function label(text, style = '') {
     const actor = new St.Label({text: String(text), style_class: style, x_expand: true});
@@ -221,10 +222,45 @@ export default class Workbench extends Extension {
             row.set_child(body);
             row.connect('clicked', () => { state.selection = result.key; this._activate(surface, result); });
             view.content.add_child(row);
+            if (result.kind === 'agents' && result.row.sessionState === 'ended') {
+                const resume = button('Resume session', () => this._resume(surface, result));
+                resume.accessible_name = 'Resume session: ' + result.title;
+                view.content.add_child(resume);
+            }
         }
         if (state.hasMoreResults()) view.content.add_child(button('Show more results', () => {
             state.showMoreResults(); this._render(surface);
         }));
+    }
+    _launchResume(argv) {
+        // GLib quotes each argv cell, including spaces/apostrophes in an
+        // installed path. GIO chooses the desktop's terminal application.
+        const command = argv.map(value => GLib.shell_quote(value)).join(' ');
+        const app = Gio.AppInfo.create_from_commandline(command, 'Papercusp session',
+            Gio.AppInfoCreateFlags.NEEDS_TERMINAL);
+        if (!app.launch([], global.create_app_launch_context(0, -1)))
+            throw new Error('Could not open the selected session in a terminal');
+    }
+    async _resume(surface, result) {
+        if (!result || !this._views.has(surface)) return;
+        const state = this._states.get(surface), generation = ++state.detailGeneration;
+        state.selection = result.key;
+        state.detail = {title: result.title, text: 'Checking session…'}; this._render(surface);
+        try {
+            const pui = this._settings.get_string('pui-path');
+            const roster = await this._bridge.read(pui, {name: 'advRoster.list', args: {}});
+            if (generation !== state.detailGeneration || !state.visible) return;
+            if (pui !== this._settings.get_string('pui-path'))
+                throw new Error('Selected PUI connection changed; refresh the results');
+            const target = agentResumeTarget(roster, result.row, GLib.get_host_name());
+            this._launchResume(resumeArgv(pui, target));
+            this._hide(surface, false);
+        } catch (error) {
+            if (generation === state.detailGeneration) {
+                state.detail = {title: result.title, text: String(error.message || error)};
+                this._render(surface);
+            }
+        }
     }
     async _activate(surface, result) {
         if (!result || !this._views.has(surface)) return;
@@ -272,7 +308,8 @@ export default class Workbench extends Extension {
             if (generation === state.detailGeneration) state.detail = {title: result.title, text};
         } catch (error) {
             if (generation === state.detailGeneration)
-                state.detail = {title: result.title, text: String(error.message || error)};
+                state.detail = {title: result.title, text: String(error.message || error),
+                    resume: result.kind === 'agents' && result.row.sessionState === 'ended' ? result : null};
         }
         this._render(surface);
     }
@@ -283,6 +320,7 @@ export default class Workbench extends Extension {
             ++state.detailGeneration; state.detail = null; this._render(surface);
         }));
         view.content.add_child(label(detail.title, 'papercusp-panel-title'));
+        if (detail.resume) view.content.add_child(button('Resume session', () => this._resume(surface, detail.resume)));
         const text = label(detail.text, 'papercusp-detail');
         text.clutter_text.set_selectable(true); text.clutter_text.set_ellipsize(0);
         view.content.add_child(text);

@@ -6,12 +6,48 @@ import {pathToFileURL} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import test from 'node:test';
 import {PanelState, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests,
-    agentFocusTarget, exactAgentWindow}
+    agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow}
     from '../native/gnome/panel-model.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const plan = (harness = 'one', slug = 'same') => ({harness, slug, title: 'Shared title', status: 'active'});
 const envelope = rows => ({rows, version: 'canonical-version'});
+
+test('canonical ended session rows retain Agents results and exact launch identities', () => {
+    const active = {ownerId:'same-owner',advSessionId:42,label:'Same title',
+        host:'desktop',sessionState:'live'};
+    const ended = {id:41,coordOwnerId:'same-owner',label:'Same title',
+        endedAt:'2026-11-06T00:00:00Z',sessionId:'native-old'};
+    const unregistered = {id:40,coordOwnerId:null,label:null,agent:'codex',
+        endedAt:'2026-11-05T00:00:00Z',sessionId:'native-unregistered'};
+    const payload = envelope([{active:[active],ended:[ended,unregistered],pending:[],starting:[]}]);
+    const state = new PanelState(), generation = state.beginRefresh(['agents']);
+    state.settle('agents',generation,payload);
+    assert.equal(state.sources.agents.status,'ready');
+    const results = state.results();
+    assert.equal(results.length,3);
+    assert.equal(new Set(results.map(row=>row.key)).size,3);
+    const previous = results.find(row=>row.row.advSessionId===41);
+    assert.equal(previous.row.ownerId,'same-owner');
+    assert.equal(previous.row.sessionState,'ended');
+    assert.equal(previous.row.sessionId,'native-old');
+    assert.match(previous.subtitle,/ended/);
+    assert.equal(results.find(row=>row.row.advSessionId===40).title,'codex');
+    assert.equal('ownerId' in ended,false,'Do not mutate the canonical payload');
+    assert.deepEqual(agentFocusTarget(payload,active,'desktop'),
+        {ownerId:'same-owner',windowId:null,advSessionId:42});
+    assert.throws(()=>agentFocusTarget(payload,previous.row,'desktop'),/saved connection/);
+});
+
+test('native agent selection distinguishes incarnations and retains an unregistered ended session', () => {
+    const current = resultFor('agents',{ownerId:'same-owner',advSessionId:42});
+    const previous = resultFor('agents',{ownerId:'same-owner',advSessionId:41});
+    assert.notEqual(current.key,previous.key);
+    const noOwner = sourceRows('agents',envelope([{active:[],ended:[{id:40,coordOwnerId:null}]}]))[0];
+    assert.equal(resultFor('agents',noOwner).title,'Session 40');
+    assert.throws(()=>agentFocusTarget(envelope([{active:[],ended:[]}]),noOwner,'desktop'),/saved connection/);
+    assert.throws(()=>resultFor('agents',{}),/canonical agent/);
+});
 
 test('native agent activation revalidates exact owner, live incarnation and actual desktop host', () => {
     const agent = {ownerId:'selected',host:'desktop',sessionState:'parked',advSessionId:42,pid:17};
@@ -35,6 +71,37 @@ test('native activation refuses a replaced session behind the same selected owne
     assert.equal(agentFocusTarget(roster(legacy),legacy,'desktop').windowId,'0x2a');
     assert.throws(()=>agentFocusTarget(roster({...legacy,windowId:'0x2b'}),legacy,'desktop'),/changed/);
     assert.throws(()=>agentFocusTarget(roster(selected),{ownerId:'selected'},'desktop'),/identity/);
+});
+
+test('native resume retains exact canonical launch and saved host, including an ownerless ended launch', () => {
+    const raw = {id:41,coordOwnerId:'selected',hostname:'desktop',sessionId:'native-exact'};
+    const roster = envelope([{active:[],ended:[raw]}]);
+    const selected = sourceRows('agents',roster)[0];
+    assert.deepEqual(agentResumeTarget(roster,selected,'desktop'),
+        {advSessionId:41,host:'desktop',ownerId:'selected',remote:false});
+    assert.deepEqual(agentResumeTarget(roster,selected,'another-desktop'),
+        {advSessionId:41,host:'desktop',ownerId:'selected',remote:true});
+    assert.deepEqual(resumeArgv("/installed path/pui '$",agentResumeTarget(roster,selected,'desktop')),
+        ["/installed path/pui '$",'workbench','resume','41','desktop','selected']);
+    const unregistered = envelope([{active:[],ended:[{...raw,coordOwnerId:null}]}]);
+    assert.equal(agentResumeTarget(unregistered,sourceRows('agents',unregistered)[0],'desktop').advSessionId,41);
+    assert.equal('advSessionId' in raw,false,'Resume never rewrites canonical records');
+});
+
+test('native resume refuses changed, live, ambiguous, inaccessible and hostless selections', () => {
+    const raw = {id:41,coordOwnerId:'selected',hostname:'desktop'};
+    const roster = (ended=[raw],active=[]) => envelope([{active,ended}]);
+    const selected = sourceRows('agents',roster())[0];
+    for (const payload of [roster([]),roster([raw,raw]),
+        roster([{...raw,hostname:'another-host'}]),roster([{...raw,coordOwnerId:'another-owner'}]),
+        roster([{...raw,pidAlive:true}]),roster([{...raw,revoked:true}]),
+        roster([],[{...selected,sessionState:'live'}]),
+        roster([raw],[{ownerId:'selected',advSessionId:42,sessionState:'parked'}]),
+        {ok:false,error:'ACL refused',rows:[]}])
+        assert.throws(()=>agentResumeTarget(payload,selected,'desktop'));
+    for (const patch of [{advSessionId:0},{advSessionId:1.5},{advSessionId:null},{hostname:null}])
+        assert.throws(()=>agentResumeTarget(roster(),{...selected,...patch},'desktop'));
+    assert.throws(()=>agentResumeTarget(roster(),selected,''),/desktop host/);
 });
 
 test('native focus rejects shared labels, PID guesses, missing windows and conflicting exact handles', () => {

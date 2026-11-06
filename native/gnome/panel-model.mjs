@@ -25,7 +25,14 @@ export function sourceRows(source, payload) {
     if (source === 'agents') {
         if (rows.length !== 1 || !Array.isArray(rows[0].active) || !Array.isArray(rows[0].ended))
             throw new Error('Agent roster is unavailable');
-        return [...rows[0].active, ...rows[0].ended, ...(rows[0].pending || []), ...(rows[0].starting || [])];
+        // The canonical ended tier contains adv_sessions records, rather
+        // than presence-backed RosterEntry rows. Keep the stored launch ID
+        // even when that session never registered a coordination owner.
+        const ended = rows[0].ended.map(row => ({...row,
+            ownerId: row.coordOwnerId ?? row.ownerId ?? null,
+            advSessionId: row.id ?? row.advSessionId ?? null,
+            sessionState: 'ended'}));
+        return [...rows[0].active, ...ended, ...(rows[0].pending || []), ...(rows[0].starting || [])];
     }
     if (source === 'goals') {
         if (rows.length !== 1 || !Array.isArray(rows[0].goals))
@@ -42,8 +49,9 @@ export function resultFor(kind, row) {
         title = row.title || row.slug;
         subtitle = [row.status, row.harness, row.nextAction];
     } else if (kind === 'agents') {
-        identity = [required(row.ownerId, 'agent owner')];
-        title = row.label || row.ownerId;
+        identity = Number.isSafeInteger(row.advSessionId) && row.advSessionId > 0 ?
+            ['adv', row.advSessionId] : ['owner', required(row.ownerId, 'agent owner')];
+        title = row.label || row.agent || row.ownerId || `Session ${row.advSessionId}`;
         subtitle = [row.intent || row.sessionState, row.machineLabel || row.host || row.hostname,
             row.workspaceName || row.desktop];
     } else if (kind === 'reports') {
@@ -89,12 +97,18 @@ export function detailRequest(result) {
 // Revalidate the selected owner immediately before a desktop action. Roster
 // locality alone refers to the selected operator, which may be on another host.
 export function agentFocusTarget(payload, selected, localHost) {
+    if (selected?.sessionState === 'ended' || selected?.endedAt)
+        throw new Error('The selected session has ended; use its saved connection to resume it');
     const ownerId = required(selected?.ownerId, 'agent owner');
     const selectedSession = Number.isSafeInteger(selected.advSessionId) && selected.advSessionId > 0 ?
         selected.advSessionId : null;
     const selectedWindow = typeof selected.windowId === 'string' && selected.windowId.trim() ? selected.windowId : null;
     if (!selectedSession && !selectedWindow) throw new Error('The selected row has no exact session identity; refresh the results');
-    const matches = sourceRows('agents', payload).filter(row => row.ownerId === ownerId);
+    const owners = sourceRows('agents', payload).filter(row => row.ownerId === ownerId);
+    const matches = owners.filter(row => selectedSession ? row.advSessionId === selectedSession :
+        row.windowId === selectedWindow);
+    if (!matches.length && owners.length)
+        throw new Error('The selected session changed; refresh the results before opening it');
     if (matches.length !== 1) throw new Error('The selected agent is unavailable or ambiguous');
     const row = matches[0];
     const selectedHost = selected.host || selected.hostname;
@@ -110,6 +124,33 @@ export function agentFocusTarget(payload, selected, localHost) {
     const advSessionId = Number.isSafeInteger(row.advSessionId) && row.advSessionId > 0 ? row.advSessionId : null;
     if (!windowId && !advSessionId) throw new Error('No exact desktop window is recorded for this session');
     return {ownerId, windowId, advSessionId};
+}
+
+// Resume is a separate, explicit action. Re-read the selected operator before
+// constructing a terminal command: numeric launch IDs belong to that host,
+// and an ended search result may have become live since it was displayed.
+export function agentResumeTarget(payload, selected, localHost) {
+    required(localHost, 'desktop host');
+    const id = selected?.advSessionId;
+    if (!Number.isSafeInteger(id) || id < 1)
+        throw new Error('The selected row has no exact session identity; refresh the results');
+    const host = required(selected.host || selected.hostname, 'session host');
+    const rows = sourceRows('agents', payload);
+    const matches = rows.filter(row => row.advSessionId === id);
+    if (matches.length !== 1) throw new Error('The selected session is unavailable or ambiguous');
+    const row = matches[0];
+    if ((row.host || row.hostname) !== host || (row.ownerId || null) !== (selected.ownerId || null))
+        throw new Error('The selected session changed; refresh the results before resuming it');
+    if (row.revoked || row.sessionState !== 'ended' || row.pidAlive === true ||
+        rows.some(other => other !== row && row.ownerId && other.ownerId === row.ownerId &&
+            ['live', 'parked', 'starting'].includes(other.sessionState)))
+        throw new Error('The selected session is running or cannot be resumed; refresh the results');
+    return {advSessionId: id, host, ownerId: row.ownerId || null, remote: host !== localHost};
+}
+
+export function resumeArgv(pui, target) {
+    required(pui, 'PUI command');
+    return [pui, 'workbench', 'resume', String(target.advSessionId), target.host, target.ownerId || ''];
 }
 
 export function exactAgentWindow(target, windows) {
