@@ -27,8 +27,25 @@ export function packageNativeWorkbench(outputDirectory, {
 
 // Both Linux products consume resources/*; the GUI's platform overlay names
 // these two files explicitly so it never acquires the Server's runtime payload.
-export function stageNativeWorkbench(desktopRoot = resolve(import.meta.dirname, '..')) {
+export const windowsWorkbenchFiles = Object.freeze([
+    'PuiReadBridge.cs', 'WorkbenchModel.cs', 'WorkbenchHost.cs', 'WorkbenchLifecycle.psm1', 'workbench.ps1',
+]);
+
+export function stageNativeWorkbench(desktopRoot = resolve(import.meta.dirname, '..'), {platform = process.platform} = {}) {
     const resources = join(desktopRoot, 'src-tauri/resources');
+    if (platform === 'windows' || platform === 'win32') {
+        const destination = join(resources, 'workbench-windows');
+        mkdirSync(destination, {recursive:true});
+        const files = {};
+        for (const name of windowsWorkbenchFiles) {
+            const source = join(desktopRoot, 'native/windows', name);
+            const bytes = readFileSync(source); // Fail closed on an incomplete native source closure.
+            copyFileSync(source, join(destination, name));
+            files[name] = createHash('sha256').update(bytes).digest('hex');
+        }
+        return {platform:'windows', directory:destination, files};
+    }
+    if (platform !== 'linux') throw new Error('Unsupported native Workbench bundle platform: ' + platform);
     const bundle = packageNativeWorkbench(resources, {sourceDirectory: join(desktopRoot, 'native/gnome')});
     copyFileSync(join(desktopRoot, 'native/linux/install-workbench.js'), join(resources, 'workbench-install.js'));
     return bundle;
@@ -36,6 +53,6 @@ export function stageNativeWorkbench(desktopRoot = resolve(import.meta.dirname, 
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
     try { console.log(JSON.stringify(process.argv[2] === '--stage-bundle'
-        ? stageNativeWorkbench(process.argv[3]) : packageNativeWorkbench(process.argv[2]))); }
+        ? stageNativeWorkbench(process.argv[3], {platform:process.argv[4] || process.platform}) : packageNativeWorkbench(process.argv[2]))); }
     catch (error) { console.error(error.message); process.exitCode = 1; }
 }
