@@ -448,6 +448,43 @@ export default class Probe extends Workbench {
   check(global.display.focus_window?.get_title()==='Needle agent [adv:4242]',
     'native activation observes exact launch window despite shared process and similar titles');
   check(!qa.visible,'verified terminal focus dismisses its native launcher');
+  phase='native explicit resume';
+  const ended={id:4241,coordOwnerId:'ended-owner',agent:'codex',label:'Needle ended session',
+    hostname:GLib.get_host_name()};
+  const writeRoster=value=>GLib.file_set_contents(${JSON.stringify(join(temp,'roster.json'))},JSON.stringify(value));
+  writeRoster({active:[],ended:[ended]});
+  this._toggle('quick-access');
+  await waitFor(()=>qa.results().some(row=>row.row.advSessionId===4241));
+  const selectedEnded=qa.results().find(row=>row.row.advSessionId===4241);
+  const handoffs=[];
+  this._launchResume=argv=>handoffs.push(argv);
+  writeRoster({active:[{ownerId:'ended-owner',advSessionId:4243,sessionState:'live'}],ended:[ended]});
+  await this._resume('quick-access',selectedEnded);
+  check(qa.visible&&qa.detail?.text.includes('running')&&handoffs.length===0,
+    'native Resume refuses a running replacement before opening a terminal');
+  writeRoster({active:[],ended:[ended]});
+  this._launchResume=()=>{throw new Error('fixture terminal unavailable');};
+  await this._resume('quick-access',selectedEnded);
+  check(qa.visible&&qa.detail?.text.includes('terminal unavailable'),
+    'failed terminal launch stays visible with its error');
+  this._launchResume=argv=>handoffs.push(argv);
+  qa.detail=null;this._render('quick-access');
+  const resumeButton=this._views.get('quick-access').content.get_children()
+    .find(actor=>actor.accessible_name==='Resume session: Needle ended session');
+  check(Boolean(resumeButton),'ended result exposes an explicit native Resume button');
+  await click(resumeButton);
+  await waitFor(()=>handoffs.length===1);
+  check(JSON.stringify(handoffs[0])===JSON.stringify([${JSON.stringify(pui)},'workbench','resume',
+    '4241',GLib.get_host_name(),'ended-owner']),
+    'seat Resume passes the exact ID, host and owner through the configured PUI argv');
+  check(!qa.visible,'accepted terminal handoff dismisses its native launcher');
+  phase='native saved remote resume';
+  writeRoster({active:[],ended:[{...ended,hostname:'saved-remote'}]});
+  this._toggle('quick-access');
+  await waitFor(()=>qa.sources.agents?.status==='ready');
+  await this._resume('quick-access',qa.results().find(row=>row.row.advSessionId===4241));
+  check(handoffs.length===2&&handoffs[1][4]==='saved-remote',
+    'native remote Resume preserves the saved host for terminal-side connection selection');
   this.finish(null);
  }
 }
