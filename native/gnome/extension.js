@@ -237,7 +237,7 @@ export default class Workbench extends Extension {
                 const roster = await this._bridge.read(this._settings.get_string('pui-path'),
                     {name: 'advRoster.list', args: {}});
                 if (generation !== state.detailGeneration || !state.visible) return;
-                const target = agentFocusTarget(roster, result.row.ownerId, GLib.get_host_name());
+                const target = agentFocusTarget(roster, result.row, GLib.get_host_name());
                 const windows = global.get_window_actors().map(actor => {
                     const window = actor.meta_window;
                     return {window, title: window.get_title(),

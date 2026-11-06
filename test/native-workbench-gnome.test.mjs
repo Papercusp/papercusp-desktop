@@ -16,14 +16,25 @@ const envelope = rows => ({rows, version: 'canonical-version'});
 test('native agent activation revalidates exact owner, live incarnation and actual desktop host', () => {
     const agent = {ownerId:'selected',host:'desktop',sessionState:'parked',advSessionId:42,pid:17};
     const roster = row => envelope([{active:[row],ended:[]}]);
-    assert.deepEqual(agentFocusTarget(roster(agent),'selected','desktop'),
+    assert.deepEqual(agentFocusTarget(roster(agent),agent,'desktop'),
         {ownerId:'selected',windowId:null,advSessionId:42});
     for (const patch of [{ownerId:'other'},{host:'remote'},{isLocal:false},{host:null},
         {stale:true},{revoked:true},{sessionState:'ended'},{sessionState:'starting'},
         {advSessionId:null},{advSessionId:1.5}])
-        assert.throws(()=>agentFocusTarget(roster({...agent,...patch}),'selected','desktop'));
-    assert.throws(()=>agentFocusTarget(envelope([{active:[agent],ended:[agent]}]),'selected','desktop'),/ambiguous/);
-    assert.throws(()=>agentFocusTarget({error:'ACL refused',rows:[]},'selected','desktop'),/ACL/);
+        assert.throws(()=>agentFocusTarget(roster({...agent,...patch}),agent,'desktop'));
+    assert.throws(()=>agentFocusTarget(envelope([{active:[agent],ended:[agent]}]),agent,'desktop'),/ambiguous/);
+    assert.throws(()=>agentFocusTarget({error:'ACL refused',rows:[]},agent,'desktop'),/ACL/);
+});
+
+test('native activation refuses a replaced session behind the same selected owner', () => {
+    const selected = {ownerId:'selected',host:'desktop',sessionState:'live',advSessionId:42};
+    const roster = row => envelope([{active:[row],ended:[]}]);
+    assert.throws(()=>agentFocusTarget(roster({...selected,advSessionId:43}),selected,'desktop'),/changed/);
+    assert.throws(()=>agentFocusTarget(roster(selected),{...selected,host:'old-desktop'},'desktop'),/changed/);
+    const legacy = {ownerId:'selected',host:'desktop',sessionState:'live',windowId:'0x2a'};
+    assert.equal(agentFocusTarget(roster(legacy),legacy,'desktop').windowId,'0x2a');
+    assert.throws(()=>agentFocusTarget(roster({...legacy,windowId:'0x2b'}),legacy,'desktop'),/changed/);
+    assert.throws(()=>agentFocusTarget(roster(selected),{ownerId:'selected'},'desktop'),/identity/);
 });
 
 test('native focus rejects shared labels, PID guesses, missing windows and conflicting exact handles', () => {
@@ -35,6 +46,9 @@ test('native focus rejects shared labels, PID guesses, missing windows and confl
     for (const target of [{windowId:'Same label'},{pid:17},{advSessionId:4},
         {windowId:'0x2b',advSessionId:42}])assert.throws(()=>exactAgentWindow(target,windows));
     assert.throws(()=>exactAgentWindow({advSessionId:42},[windows[0],{...windows[0]}]),/ambiguous/);
+    assert.throws(()=>exactAgentWindow({windowId:'0x2b',advSessionId:42},[windows[0]]),/unavailable/);
+    assert.throws(()=>exactAgentWindow({windowId:'0x2b',advSessionId:42},[windows[1]]),/conflict/);
+    assert.equal(exactAgentWindow({windowId:'0x2a',advSessionId:42},[windows[0]]),windows[0]);
 });
 
 test('native results expose later matches while retaining exact selection and source capacity', () => {

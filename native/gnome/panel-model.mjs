@@ -88,10 +88,19 @@ export function detailRequest(result) {
 
 // Revalidate the selected owner immediately before a desktop action. Roster
 // locality alone refers to the selected operator, which may be on another host.
-export function agentFocusTarget(payload, ownerId, localHost) {
+export function agentFocusTarget(payload, selected, localHost) {
+    const ownerId = required(selected?.ownerId, 'agent owner');
+    const selectedSession = Number.isSafeInteger(selected.advSessionId) && selected.advSessionId > 0 ?
+        selected.advSessionId : null;
+    const selectedWindow = typeof selected.windowId === 'string' && selected.windowId.trim() ? selected.windowId : null;
+    if (!selectedSession && !selectedWindow) throw new Error('The selected row has no exact session identity; refresh the results');
     const matches = sourceRows('agents', payload).filter(row => row.ownerId === ownerId);
     if (matches.length !== 1) throw new Error('The selected agent is unavailable or ambiguous');
     const row = matches[0];
+    const selectedHost = selected.host || selected.hostname;
+    if ((selectedSession ? row.advSessionId !== selectedSession : row.windowId !== selectedWindow) ||
+        (selectedHost && (row.host || row.hostname) !== selectedHost))
+        throw new Error('The selected session changed; refresh the results before opening it');
     if (row.revoked || row.stale || !['live', 'parked'].includes(row.sessionState))
         throw new Error('The selected session is no longer live; use its saved connection to resume it');
     const host = row.host || row.hostname;
@@ -107,10 +116,14 @@ export function exactAgentWindow(target, windows) {
     const xid = value => /^0x[0-9a-f]+$/i.test(value || '') ? BigInt(value).toString() : null;
     const recordedId = xid(target.windowId);
     const marker = target.advSessionId ? `[adv:${target.advSessionId}]` : null;
-    const matches = windows.filter(window =>
-        (target.windowId && (recordedId ? xid(window.id) === recordedId : window.title === target.windowId)) ||
+    const matches = windows.filter(window => target.windowId ?
+        (recordedId ? xid(window.id) === recordedId : window.title === target.windowId) :
         (marker && window.title?.includes(marker)));
     if (matches.length !== 1) throw new Error('The exact terminal window is unavailable or ambiguous');
+    // A recorded handle is authoritative: do not fall back to a different
+    // window's marker, or accept a recycled handle carrying another session.
+    if (marker && /\[adv:\d+\]/.test(matches[0].title || '') && !matches[0].title.includes(marker))
+        throw new Error('The recorded terminal handle conflicts with the selected session');
     return matches[0];
 }
 
