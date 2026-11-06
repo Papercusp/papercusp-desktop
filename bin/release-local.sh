@@ -1902,7 +1902,11 @@ fi
 # the KNOWN 631 pattern statically in seconds; this catches the GENERAL class (any
 # migration-vs-seed / ordering / dup-key crash) that the ordinary integration suite
 # misses because it provisions from the squashed baseline, never a from-scratch
-# replay. Docker/testcontainers required. A registered release:cut invocation may
+# replay. Reuse the selected source's disposable embedded-PG supervisor rather
+# than the fleet's shared Docker volume. It checks temporary-storage headroom,
+# pins the test admin URL, and owns cleanup on both success and failure. The
+# unmanaged wrapper also keeps this child suite out of the live release journal.
+# A registered release:cut invocation may
 # skip only after an independent exact-source replay passes and its proof is
 # audited before launch; a direct shell may set the flag on a Docker-less box.
 # The skip flag is PAPERCUSP_SKIP_MIGRATION_BOOTSMOKE=1. Plan
@@ -1921,7 +1925,7 @@ if [[ "${PAPERCUSP_SKIP_MIGRATION_BOOTSMOKE:-0}" != "1" ]]; then
   # setup, and teardown so it cannot kill a still-progressing proof at 10 minutes.
   migration_sql_count="$(find "$ROOT/../libs/papercusp/libs/db/sql" -maxdepth 1 -name '*.sql' -type f | wc -l)"
   migration_file_timeout_ms="$((600000 + migration_sql_count * 2100))"
-  ( cd "$ROOT/.." && VITEST_INTEGRATION_HOOK_TIMEOUT_MS="${VITEST_INTEGRATION_HOOK_TIMEOUT_MS:-180000}" PAPERCUSP_TEST_FILE_TIMEOUT_MS="${PAPERCUSP_TEST_FILE_TIMEOUT_MS:-$migration_file_timeout_ms}" npm run test:file -- packages/operator-core/lib/release-preflight-migration-boot-smoke.integration.test.ts ) \
+  ( cd "$ROOT/.." && VITEST_INTEGRATION_HOOK_TIMEOUT_MS="${VITEST_INTEGRATION_HOOK_TIMEOUT_MS:-180000}" PAPERCUSP_TEST_FILE_TIMEOUT_MS="${PAPERCUSP_TEST_FILE_TIMEOUT_MS:-$migration_file_timeout_ms}" release_run_unmanaged node --import tsx scripts/with-test-pg.mjs -- node scripts/test-files.mjs packages/operator-core/lib/release-preflight-migration-boot-smoke.integration.test.ts ) \
     || { echo "ERROR: migration boot-smoke failed (above) — a migration may crash on a from-scratch replay. Fix it, or independently prove the exact source and use release:cut's audited migrationBootSmokeOverride (direct shell skip remains for Docker-less boxes)."; exit 1; }
 fi
 

@@ -84,6 +84,7 @@ test('scanner and collector preflight runs both real suites and stops on either 
   for (const [failed, expected] of [['none', 0], ['node', 1], ['npm', 1]]) {
     const command = [
       'set -euo pipefail', 'ROOT=' + JSON.stringify(root),
+      'ORCHESTRATOR_HERE=' + JSON.stringify(path.join(root, 'bin')),
       identityList, wrapper, definition,
       'release_verify_contract_regressions || exit 1', 'echo CONTRACTS_PASSED',
     ].join('\n');
@@ -96,6 +97,66 @@ test('scanner and collector preflight runs both real suites and stops on either 
     assert.equal(result.stdout.includes('WORKER_CHECK'), failed !== 'node');
     assert.equal(result.stdout.includes('CONTRACTS_PASSED'), failed === 'none');
     assert.doesNotMatch(result.stdout, /LEAK:/, 'the managed-release identity reached a child suite');
+  }
+});
+
+test('migration preflight uses private PG for the selected source and preserves failure and identity isolation', (t) => {
+  const text = src();
+  const start = text.indexOf('if [[ "${PAPERCUSP_SKIP_MIGRATION_BOOTSMOKE:-0}" != "1" ]]');
+  const end = text.indexOf('\n# Build-set architecture invariant', start);
+  assert(start >= 0 && end > start, 'migration preflight block is missing');
+  const block = text.slice(start, end);
+  const identityList = text.match(/^RELEASE_MANAGED_IDENTITY_ENV=\(\n[\s\S]*?^\)/m)?.[0];
+  const wrapper = text.match(/^release_run_unmanaged\(\) \{[^\n]*\n[\s\S]*?^\}/m)?.[0];
+  assert(identityList && wrapper, 'managed identity isolation is missing');
+  const identity = identityList.split('\n').slice(1, -1).map((line) => line.trim()).filter(Boolean);
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'release-private-migration-pg-'));
+  t.after(() => fs.rmSync(fixture, { recursive: true, force: true }));
+  const selected = path.join(fixture, 'selected-source');
+  const desktop = path.join(selected, 'papercusp-desktop');
+  const scripts = path.join(selected, 'scripts');
+  const sql = path.join(selected, 'libs', 'papercusp', 'libs', 'db', 'sql');
+  for (const dir of [desktop, scripts, sql]) fs.mkdirSync(dir, { recursive: true });
+  fs.symlinkSync(path.join(root, '..', 'node_modules'), path.join(selected, 'node_modules'), 'dir');
+  fs.writeFileSync(path.join(sql, '000.sql'), '');
+  fs.writeFileSync(path.join(sql, '104.sql'), '');
+  const receipt = path.join(fixture, 'receipt.json');
+  fs.writeFileSync(path.join(scripts, 'with-test-pg.mjs'), [
+    "import { spawnSync } from 'node:child_process';",
+    "const args = process.argv.slice(process.argv.indexOf('--') + 1);",
+    "const child = spawnSync(args[0], args.slice(1), { stdio: 'inherit', env: { ...process.env, PAPERCUSP_TEST_PG_ADMIN_URL: 'postgres://fixture@127.0.0.1:12345/postgres' } });",
+    'process.exitCode = child.status ?? 1;',
+  ].join('\n'));
+  fs.writeFileSync(path.join(scripts, 'test-files.mjs'), [
+    "import { writeFileSync } from 'node:fs';",
+    'writeFileSync(process.env.FIXTURE_RECEIPT, JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2), admin: process.env.PAPERCUSP_TEST_PG_ADMIN_URL, hookTimeout: process.env.VITEST_INTEGRATION_HOOK_TIMEOUT_MS, fileTimeout: process.env.PAPERCUSP_TEST_FILE_TIMEOUT_MS, identity: Object.keys(process.env).filter(key => JSON.parse(process.env.FIXTURE_IDENTITY_KEYS).includes(key)) }));',
+    'process.exitCode = Number(process.env.FIXTURE_CHILD_EXIT);',
+  ].join('\n'));
+  const command = ['set -euo pipefail', 'ROOT=' + JSON.stringify(desktop), identityList, wrapper, block].join('\n');
+  for (const childExit of [0, 7]) {
+    const result = spawnSync('bash', ['-c', command], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ...Object.fromEntries(identity.map((name) => [name, 'live-release-operation'])),
+        PAPERCUSP_SKIP_MIGRATION_BOOTSMOKE: '0',
+        PAPERCUSP_TEST_PG_ADMIN_URL: 'postgres://inherited-shared@127.0.0.1:5432/postgres',
+        VITEST_INTEGRATION_HOOK_TIMEOUT_MS: '',
+        PAPERCUSP_TEST_FILE_TIMEOUT_MS: '',
+        FIXTURE_RECEIPT: receipt,
+        FIXTURE_CHILD_EXIT: String(childExit),
+        FIXTURE_IDENTITY_KEYS: JSON.stringify(identity),
+      },
+    });
+    assert.equal(result.status, childExit === 0 ? 0 : 1, result.stderr || result.stdout);
+    const observed = JSON.parse(fs.readFileSync(receipt, 'utf8'));
+    assert.equal(observed.cwd, selected);
+    assert.deepEqual(observed.args, ['packages/operator-core/lib/release-preflight-migration-boot-smoke.integration.test.ts']);
+    assert.equal(observed.admin, 'postgres://fixture@127.0.0.1:12345/postgres');
+    assert.equal(observed.hookTimeout, '180000');
+    assert.equal(observed.fileTimeout, '604200');
+    assert.deepEqual(observed.identity, []);
+    if (childExit !== 0) assert.match(result.stdout, /ERROR: migration boot-smoke failed/);
   }
 });
 
