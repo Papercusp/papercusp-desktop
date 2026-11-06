@@ -924,7 +924,7 @@ function runSeedFallbackProbe(script) {
   return spawnSync('bash', ['-c', [seedFallbackHarness, script].join('\n')], { encoding: 'utf8' });
 }
 
-function runCutSeedProbe({ snapshot = null, env = {} } = {}) {
+function runCutSeedProbe({ snapshot = null, env = {}, timeoutMs = 5_000, npxDelayMs = 0 } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-cut-seed-'));
   const rootDir = path.join(temp, 'root');
   const monorepo = path.join(temp, 'monorepo');
@@ -938,6 +938,7 @@ function runCutSeedProbe({ snapshot = null, env = {} } = {}) {
   fs.writeFileSync(path.join(bin, 'npx'), [
     '#!/usr/bin/env bash',
     'printf "called %s\\n" "$*" >> "$PROBE_NPX_LOG"',
+    'if [[ -n "$PROBE_NPX_DELAY" ]]; then sleep "$PROBE_NPX_DELAY"; fi',
     'exit 0',
   ].join('\n'));
   fs.chmodSync(path.join(bin, 'npx'), 0o755);
@@ -958,9 +959,10 @@ function runCutSeedProbe({ snapshot = null, env = {} } = {}) {
     // cut_release_seed calls the shared age guard (WI-10004593); source the real helper.
     const ageGuard = `source ${JSON.stringify(path.join(root, 'bin', 'lib', 'seed-reuse-age.sh'))}`;
     const script = [ageGuard, seedFallbackHarness, cutReleaseSeedHarness, 'cut_release_seed'].join('\n');
+    const startedAt = Date.now();
     const result = spawnSync('bash', ['-c', script], {
       encoding: 'utf8',
-      timeout: 5_000,
+      timeout: timeoutMs,
       env: {
         ...process.env,
         PATH: bin + path.delimiter + (process.env.PATH || ''),
@@ -976,8 +978,19 @@ function runCutSeedProbe({ snapshot = null, env = {} } = {}) {
         PAPERCUSP_SEED_SNAPSHOT_DIR: snapshotDir,
         PAPERCUSP_SEED_REUSE_MAX_AGE_HOURS: '72',
         ...env,
+        PROBE_NPX_DELAY: npxDelayMs > 0 ? String(npxDelayMs / 1_000) : '',
       },
     });
+    if (result.error || result.status === null) {
+      result.stderr = [result.stderr, JSON.stringify({
+        phase: 'cut-release-seed-probe',
+        status: result.status,
+        signal: result.signal,
+        error: result.error && { code: result.error.code, message: result.error.message },
+        elapsedMs: Date.now() - startedAt,
+        timeoutMs,
+      })].filter(Boolean).join('\n');
+    }
     return {
       result,
       npxCalled: fs.existsSync(npxLog),
@@ -988,6 +1001,18 @@ function runCutSeedProbe({ snapshot = null, env = {} } = {}) {
     fs.rmSync(temp, { recursive: true, force: true });
   }
 }
+
+test('a timed-out seed probe preserves its child error, signal and deadline', () => {
+  const { result } = runCutSeedProbe({ timeoutMs: 100, npxDelayMs: 1_000 });
+  assert.equal(result.status, null);
+  assert.equal(result.error?.code, 'ETIMEDOUT');
+  const diagnostic = JSON.parse(result.stderr.trim().split('\n').at(-1));
+  assert.equal(diagnostic.phase, 'cut-release-seed-probe');
+  assert.equal(diagnostic.error.code, 'ETIMEDOUT');
+  assert.equal(diagnostic.signal, result.signal);
+  assert.equal(diagnostic.timeoutMs, 100);
+  assert.ok(diagnostic.elapsedMs >= diagnostic.timeoutMs);
+});
 
 test('a fresh release seed passes through to cut-seed-cli without quiescence', () => {
   const absent = runCutSeedProbe();
