@@ -303,15 +303,22 @@ public static class WorkbenchNativeHostFixture
     }
     private static void AccountsNative()
     {
+        Console.Error.WriteLine("STAGE Accounts constructor thread=" + Thread.CurrentThread.ManagedThreadId +
+            " context=" + (SynchronizationContext.Current == null ? "null" : SynchronizationContext.Current.GetType().FullName));
         using (var host = new WorkbenchHost(Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_FIXTURE")))
         {
+            Console.Error.WriteLine("STAGE Accounts toggle");
             host.Toggle("accounts"); var panel = host.Panel("accounts");
+            Console.Error.WriteLine("STAGE Accounts logical control lookup");
             var scope = Find<System.Windows.Controls.TextBlock>(panel, "Account environment");
             var summary = Find<System.Windows.Controls.TextBlock>(panel, "Account steering");
             var force = Find<System.Windows.Controls.Button>(panel, "Account force");
             var exclude = Find<System.Windows.Controls.Button>(panel, "Account exclude");
             var normal = Find<System.Windows.Controls.Button>(panel, "Account default");
             var auto = Find<System.Windows.Controls.Button>(panel, "Account auto");
+            if (scope == null || summary == null || force == null || exclude == null || normal == null || auto == null)
+                throw new Exception("Accounts logical tree is missing a required named control");
+            Console.Error.WriteLine("STAGE Accounts dispatcher wait");
             Until(() => force.IsEnabled);
             Check(panel.IsVisible && scope.Text.Contains("fixture.invalid:3170") && scope.Text.Contains("isolated") &&
                 normal.IsEnabled && exclude.IsEnabled && auto.IsEnabled, "native Accounts displays selected environment and four separate controls");
@@ -338,6 +345,19 @@ public static class WorkbenchNativeHostFixture
     public static string Run(string phase)
     {
         cases.Clear();
+        AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            Console.Error.WriteLine("UNHANDLED thread=" + Thread.CurrentThread.ManagedThreadId + ": " + e.ExceptionObject);
+        AppDomain.CurrentDomain.FirstChanceException += (s, e) =>
+        {
+            if (e.Exception is InvalidOperationException && e.Exception.Message.Contains("thread"))
+                Console.Error.WriteLine("THREAD ACCESS thread=" + Thread.CurrentThread.ManagedThreadId + ": " + e.Exception);
+        };
+        // Application.Run installs this context in the resident host. PowerShell
+        // calls this fixture before any dispatcher frame, so reproduce that
+        // precondition before async WPF actions capture their continuation.
+        SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(Dispatcher.CurrentDispatcher));
+        if (!(SynchronizationContext.Current is DispatcherSynchronizationContext))
+            throw new Exception("Native fixture requires the WPF dispatcher synchronization context");
         if (phase == "preflight")
         {
             if (!WorkbenchHost.HasInteractiveDesktop)
