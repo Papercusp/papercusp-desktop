@@ -87,6 +87,112 @@ test('a sourced current Windows producer keeps frozen source paths but loads cur
   ], 'exact-source invocation must not load the frozen helper or move the source root');
 });
 
+test('Windows builds isolate the runtime Wine prefix and clean only prefixes they own', (t) => {
+  const extractFunction = (name) => builder.match(
+    new RegExp('^' + name + '\\(\\) \\{[\\s\\S]*?^\\}', 'm'),
+  )?.[0];
+  const prepare = extractFunction('prepare_wine_inno_prefix');
+  const cleanup = extractFunction('cleanup_wine_inno_prefix');
+  assert.ok(prepare, 'the Windows producer must define its Wine prefix selection');
+  assert.ok(cleanup, 'the Windows producer must define owned-prefix cleanup');
+  assert.ok(
+    builder.indexOf('trap cleanup_wine_inno_prefix_on_exit EXIT')
+      < builder.indexOf('innoextract_compat_preflight "${PAPERCUSP_INNOEXTRACT:-}"'),
+    'the private prefix cleanup trap must be active before the real Inno probe',
+  );
+
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-inno-prefix-isolation-'));
+  t.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+  const home = path.join(sandbox, 'home');
+  const temp = path.join(sandbox, 'tmp');
+  const bin = path.join(sandbox, 'bin');
+  fs.mkdirSync(home);
+  fs.mkdirSync(temp);
+  fs.mkdirSync(bin);
+
+  const prepareRun = (overrides = {}) => {
+    const result = spawnSync('bash', ['-c', [
+      'set -euo pipefail',
+      prepare,
+      'prepare_wine_inno_prefix',
+      'printf "%s\\n%s\\nOWNED=%s\\n" "$WINEPREFIX_INNO" "$ISCC_EXE" "$OWNED_WINEPREFIX_INNO"',
+    ].join('\n')], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: home,
+        TMPDIR: temp,
+        PAPERCUSP_WINE_INNO_PREFIX: '',
+        PAPERCUSP_ISCC_EXE: '',
+        ...overrides,
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trimEnd().split('\n');
+  };
+
+  const first = prepareRun({});
+  const second = prepareRun({});
+  const defaultIscc = path.join(home, '.papercusp', 'wine-inno', 'drive_c', 'InnoSetup6', 'ISCC.exe');
+  assert.equal(first.length, 3);
+  assert.equal(first[1], defaultIscc, 'the installed ISCC path remains independent of the runtime prefix');
+  assert.equal(first[2], 'OWNED=' + first[0], 'the producer owns its generated runtime prefix');
+  assert.ok(first[0].startsWith(temp + path.sep), 'the runtime prefix must live in the per-run temp area');
+  assert.notEqual(first[0], second[0], 'separate build invocations must not share a Wine server prefix');
+  assert.ok(fs.statSync(first[0]).isDirectory());
+  assert.ok(fs.statSync(second[0]).isDirectory());
+
+  const explicitPrefix = path.join(sandbox, 'explicit-prefix');
+  fs.mkdirSync(explicitPrefix);
+  const explicit = prepareRun({ PAPERCUSP_WINE_INNO_PREFIX: explicitPrefix });
+  assert.equal(explicit[0], explicitPrefix, 'an explicit runtime prefix must be honored');
+  assert.equal(
+    explicit[1],
+    path.join(explicitPrefix, 'drive_c', 'InnoSetup6', 'ISCC.exe'),
+    'an explicit prefix retains its existing ISCC default',
+  );
+  assert.equal(explicit[2], 'OWNED=', 'the producer must not delete caller-owned prefixes');
+
+  const ownedPrefix = path.join(sandbox, 'cleanup-prefix');
+  const calls = path.join(sandbox, 'wineserver-calls.log');
+  fs.mkdirSync(ownedPrefix);
+  fs.writeFileSync(path.join(bin, 'wineserver'), [
+    '#!/usr/bin/env bash',
+    'printf "%s|%s\\n" "$WINEPREFIX" "$*" >> "$WINE_SERVER_CALLS"',
+  ].join('\n') + '\n', { mode: 0o755 });
+  const cleanupRun = spawnSync('bash', ['-c', [
+    'set -euo pipefail',
+    cleanup,
+    'cleanup_wine_inno_prefix',
+  ].join('\n')], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: bin + path.delimiter + process.env.PATH,
+      OWNED_WINEPREFIX_INNO: ownedPrefix,
+      WINE_SERVER_CALLS: calls,
+    },
+  });
+  assert.equal(cleanupRun.status, 0, cleanupRun.stderr);
+  assert.equal(fs.existsSync(ownedPrefix), false, 'the producer must remove its private prefix');
+  assert.deepEqual(
+    fs.readFileSync(calls, 'utf8').trim().split('\n'),
+    [ownedPrefix + '|-k', ownedPrefix + '|-w'],
+    'Wine shutdown must target only the owned prefix',
+  );
+
+  const preservedRun = spawnSync('bash', ['-c', [
+    'set -euo pipefail',
+    cleanup,
+    'cleanup_wine_inno_prefix',
+  ].join('\n')], {
+    encoding: 'utf8',
+    env: { ...process.env, OWNED_WINEPREFIX_INNO: '', WINEPREFIX_INNO: explicitPrefix },
+  });
+  assert.equal(preservedRun.status, 0, preservedRun.stderr);
+  assert.equal(fs.existsSync(explicitPrefix), true, 'caller-owned prefix must survive cleanup');
+});
+
 test('the Inno compatibility preflight runs before the first cargo-xwin build', () => {
   const preflightAt = builder.indexOf(
     'innoextract_compat_preflight "${PAPERCUSP_INNOEXTRACT:-}"',

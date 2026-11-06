@@ -62,6 +62,12 @@
 #                             PATH. The selected absolute consumer is
 #                             fixture-tested before cargo xwin and inherited by
 #                             the finished-artifact audit.
+#   PAPERCUSP_WINE_INNO_PREFIX optional preconfigured runtime prefix override.
+#                             Without it, each build gets a private temporary
+#                             prefix; an explicit prefix is preserved.
+#   PAPERCUSP_ISCC_EXE        optional path to ISCC.exe. The default compiler is
+#                             loaded from ~/.papercusp/wine-inno even when Wine
+#                             runs in its private per-build prefix.
 #
 # PREREQS (release-local.sh does these before calling any Windows leg; this
 # script SHIPS the tree as-is and never rebuilds them — same fail-closed
@@ -72,8 +78,10 @@
 #
 # TOOLCHAIN (one-time, already provisioned on this box — WI-5651):
 #   - cargo-xwin + `rustup target add x86_64-pc-windows-msvc` + clang/lld/llvm-rc
-#   - wine 9.0 (+ wine32:i386) + Inno Setup 6.7.3 under WINEPREFIX
-#     ~/.papercusp/wine-inno (ISCC at drive_c/InnoSetup6/ISCC.exe) + xvfb
+#   - wine 9.0 (+ wine32:i386) + xvfb
+#   - Inno Setup 6.7.3 installed at
+#     ~/.papercusp/wine-inno/drive_c/InnoSetup6/ISCC.exe; the build uses a
+#     private runtime WINEPREFIX unless PAPERCUSP_WINE_INNO_PREFIX is supplied.
 #   - osslsigncode 2.8 (only used when a WINDOWS_CERT_* cert is supplied)
 
 set -euo pipefail
@@ -235,8 +243,46 @@ KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 # release checkout) and die with "could not determine executable to run" (the
 # attempt-8 rc=1: the updater-.sig signer step below). Same idiom as release-local.sh.
 TAURI_CLI_VERSION="${PAPERCUSP_TAURI_CLI_VERSION:-${TAURI_CLI_VERSION:-2.11.0}}"
-WINEPREFIX_INNO="${PAPERCUSP_WINE_INNO_PREFIX:-$HOME/.papercusp/wine-inno}"
-ISCC_EXE="${PAPERCUSP_ISCC_EXE:-$WINEPREFIX_INNO/drive_c/InnoSetup6/ISCC.exe}"
+OWNED_WINEPREFIX_INNO=""
+WINEPREFIX_INNO=""
+ISCC_EXE=""
+
+prepare_wine_inno_prefix() {
+  OWNED_WINEPREFIX_INNO=""
+  if [[ -n "${PAPERCUSP_WINE_INNO_PREFIX:-}" ]]; then
+    WINEPREFIX_INNO="$PAPERCUSP_WINE_INNO_PREFIX"
+    ISCC_EXE="${PAPERCUSP_ISCC_EXE:-$WINEPREFIX_INNO/drive_c/InnoSetup6/ISCC.exe}"
+    return 0
+  fi
+
+  WINEPREFIX_INNO="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-wine-inno.XXXXXX")"
+  OWNED_WINEPREFIX_INNO="$WINEPREFIX_INNO"
+  ISCC_EXE="${PAPERCUSP_ISCC_EXE:-$HOME/.papercusp/wine-inno/drive_c/InnoSetup6/ISCC.exe}"
+}
+
+cleanup_wine_inno_prefix() {
+  local owned_prefix="${OWNED_WINEPREFIX_INNO:-}"
+  [[ -n "$owned_prefix" ]] || return 0
+  OWNED_WINEPREFIX_INNO=""
+  if command -v timeout >/dev/null 2>&1 && command -v wineserver >/dev/null 2>&1; then
+    WINEPREFIX="$owned_prefix" timeout 15 wineserver -k >/dev/null 2>&1 || true
+    WINEPREFIX="$owned_prefix" timeout 15 wineserver -w >/dev/null 2>&1 || true
+  fi
+  rm -rf -- "$owned_prefix"
+}
+
+cleanup_wine_inno_prefix_on_exit() {
+  local status="$?"
+  trap - EXIT
+  if ! cleanup_wine_inno_prefix; then
+    echo "ERROR: could not remove the private Inno WINEPREFIX" >&2
+    [[ "$status" -ne 0 ]] || status=1
+  fi
+  exit "$status"
+}
+
+prepare_wine_inno_prefix
+trap cleanup_wine_inno_prefix_on_exit EXIT
 WINDOWS_SIGN_DIGEST="${WINDOWS_SIGN_DIGEST:-sha256}"
 WINDOWS_SIGN_TIMESTAMP_URL="${WINDOWS_SIGN_TIMESTAMP_URL-http://timestamp.digicert.com}"
 
@@ -275,7 +321,7 @@ case $'\n'"$rustup_targets"$'\n' in
 esac
 command -v wine >/dev/null 2>&1 || fail "wine not installed (apt install wine + dpkg --add-architecture i386)"
 command -v xvfb-run >/dev/null 2>&1 || fail "xvfb-run not installed (apt install xvfb) — ISCC runs headless under it"
-[[ -f "$ISCC_EXE" ]] || fail "ISCC not found at $ISCC_EXE — provision Inno Setup 6.7.3 under WINEPREFIX=$WINEPREFIX_INNO"
+[[ -f "$ISCC_EXE" ]] || fail "ISCC not found at $ISCC_EXE — set PAPERCUSP_ISCC_EXE or install Inno Setup 6.7.3 in the selected prefix"
 [[ -f "$KEY_FILE" ]] || fail "updater signing key not found at $KEY_FILE (bin/setup-signing-key.sh)"
 
 # ── Payload presence, scoped to the requested products. A GUI-only cut needs
@@ -326,6 +372,10 @@ cleanup() {
   local status="$?"
   trap - EXIT
   [[ -n "$AUTHENTICODE_PFX" && -f "$AUTHENTICODE_PFX" ]] && rm -f "$AUTHENTICODE_PFX"
+  if ! cleanup_wine_inno_prefix; then
+    echo "ERROR: could not remove the private Inno WINEPREFIX" >&2
+    [[ "$status" -ne 0 ]] || status=1
+  fi
   if [[ "$BUILD_WORKTREE" == "1" && -n "$BUILD_ROOT" ]]; then
     git -C "$SOURCE_ROOT" worktree remove --force "$BUILD_ROOT" >/dev/null 2>&1 \
       || rm -rf -- "$BUILD_ROOT"
