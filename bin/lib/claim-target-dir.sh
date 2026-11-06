@@ -583,6 +583,10 @@ JS
 
 __pc_reap_private_target_slots() {
   local shared="${1:?shared target root required}" adopt_name="${2:-}"
+  # Launch-time GC is optional. Scope the existing mutex admission budget to
+  # this invocation, including guarded debris deletion; standalone reclamation
+  # keeps its ordinary budget. A busy pin writer always keeps the cache intact.
+  local -x PAPERCUSP_FS_MUTEX_TIMEOUT_MS="${3:-${PAPERCUSP_FS_MUTEX_TIMEOUT_MS:-180000}}"
   __pc_adopted_private_root=""
   __pc_adopted_private_lock_fd=""
   [[ "${PAPERCUSP_DESKTOP_PRIVATE_SLOT_REAP:-1}" != "0" ]] || return 0
@@ -599,7 +603,10 @@ __pc_reap_private_target_slots() {
   # unrelated retention work. Renamed debris has its own guarded-delete lock.
   while IFS= read -r candidate; do has_candidates=1; break; done < <(__pc_private_slot_candidates "$shared")
   if ((has_candidates)); then
-    release_artifacts_retention_mutex_acquire mutex_input mutex_pid || return $?
+    if ! release_artifacts_retention_mutex_acquire mutex_input mutex_pid; then
+      echo 'private-slot-cap deferred stage=before-reap reason=retention-admission-failed' >&2
+      return 2
+    fi
   fi
   if ! exec {reap_fd}>>"${__pc_slot_lockdir}/private-slots.lock"; then
     release_artifacts_retention_mutex_release "$mutex_input" "$mutex_pid"
@@ -739,7 +746,10 @@ $(while IFS= read -r row; do [[ "$row" == "$adopt_row" ]] || printf '%s\n' "$row
   has_candidates=0
   while IFS= read -r candidate; do has_candidates=1; break; done < <(__pc_private_slot_candidates "$shared")
   if ((has_candidates)); then
-    release_artifacts_retention_mutex_acquire mutex_input mutex_pid || return $?
+    if ! release_artifacts_retention_mutex_acquire mutex_input mutex_pid; then
+      echo 'private-slot-cap deferred stage=after-delete reason=retention-admission-failed' >&2
+      return 2
+    fi
   fi
   local pins_before pins_after pin_coverage=1
   pins_before="$(__pc_private_slot_cap_pins "$shared")" || pin_coverage=0
@@ -980,7 +990,7 @@ __pc_claim_target_root() {
         echo "→ target dir: $dir (slot $i — another desktop instance holds the shared dir; isolating so we cannot corrupt its app-manifest, WI-7101)" >&2
         echo "  first build in this slot is a COLD build; later launches reuse its cache" >&2
       fi
-      __pc_reap_private_target_slots "$shared" || true
+      __pc_reap_private_target_slots "$shared" '' 1000 || true
       return 0
     fi
     # Someone else holds this slot. Drop our handle and try the next one.
@@ -1003,7 +1013,7 @@ __pc_claim_target_root() {
     flock -n 8 || true
   fi
   # Prefer a dead private root's warm cache over a cold build (WI-10004764).
-  __pc_reap_private_target_slots "$shared" "$private_name" || true
+  __pc_reap_private_target_slots "$shared" "$private_name" 1000 || true
   if [[ -n "${__pc_adopted_private_root:-}" ]]; then
     # Move the claim onto the adopted root's own lock: fd 8 is the descriptor the
     # launch inherits. Re-pointing it releases the per-pid lock, which guards no root.

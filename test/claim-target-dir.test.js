@@ -575,6 +575,47 @@ function auditLines() {
   return existsSync(audit) ? readFileSync(audit, 'utf8').trim().split('\n') : [];
 }
 
+test('a native slot claim defers optional reaping while a pin writer remains active', async () => {
+  const root = makePrivateRoot('pid99999986');
+  const { pathToFileURL } = require('node:url');
+  const { withFsMutex } = await import(pathToFileURL(join(__dirname, '../../scripts/lib/fs-mutex.mjs')).href);
+  const saved = [process.env.PAPERCUSP_FS_MUTEX_LOCK_DIR, process.env.PAPERCUSP_DISABLE_FS_MUTEX];
+  process.env.PAPERCUSP_FS_MUTEX_LOCK_DIR = join(home, 'mutexes');
+  delete process.env.PAPERCUSP_DISABLE_FS_MUTEX;
+  let child, completion, output = '';
+  try {
+    await withFsMutex('papercusp-disk-retention', async () => {
+      child = spawn('bash', ['-c', 'set -euo pipefail; source "$1"; printf "CLAIMED:%s\\n" "$CARGO_TARGET_DIR"', 'claim', HELPER], {
+        cwd: home, env: isolatedEnv(reapEnv()), stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 15_000, killSignal: 'SIGKILL',
+      });
+      child.stdout.on('data', chunk => { output += chunk; });
+      child.stderr.on('data', chunk => { output += chunk; });
+      completion = new Promise((resolve, reject) => {
+        child.once('error', reject);
+        child.once('close', resolve);
+      });
+      // The writer stays held until the claim finishes. The old unbounded
+      // launch-time reaper cannot finish here; it waits for this very writer.
+      assert.strictEqual(await completion, 0, output);
+      assert.match(output, /CLAIMED:/);
+      assert.match(output, /private-slot-cap deferred stage=before-reap/);
+      assert.ok(existsSync(root), 'deferred cleanup must not rename or delete a protected root');
+    });
+    // A later standalone reclamation still removes the now-unprotected cache.
+    execFileSync('bash', [join(__dirname, '../bin/reap-private-target-slots.sh')], {
+      cwd: home, env: isolatedEnv(reapEnv({ ROOT: home })), encoding: 'utf8',
+    });
+    assert.ok(!existsSync(root));
+  } finally {
+    if (child && child.exitCode === null) child.kill('SIGKILL');
+    if (completion) await completion;
+    for (const [index, key] of ['PAPERCUSP_FS_MUTEX_LOCK_DIR', 'PAPERCUSP_DISABLE_FS_MUTEX'].entries()) {
+      if (saved[index] === undefined) delete process.env[key]; else process.env[key] = saved[index];
+    }
+  }
+});
+
 test('private reaping waits for a pin writer before renaming its root', async () => {
   const root = makePrivateRoot('pid99999989');
   const control = makePrivateRoot('pid99999988');
