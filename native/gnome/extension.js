@@ -254,6 +254,7 @@ export default class Workbench extends Extension {
                 throw new Error('Selected PUI connection changed; refresh the results');
             const target = agentResumeTarget(roster, result.row, GLib.get_host_name());
             this._launchResume(resumeArgv(pui, target));
+            state.detail = null;
             this._hide(surface, false);
         } catch (error) {
             if (generation === state.detailGeneration) {

@@ -490,6 +490,7 @@ export default class Probe extends Workbench {
   await this._resume('quick-access',qa.results().find(row=>row.row.advSessionId===4241));
   check(handoffs.length===2&&handoffs[1][4]==='saved-remote',
     'native remote Resume preserves the saved host for terminal-side connection selection');
+  check(qa.detail===null,'accepted Resume clears transient checking detail before reopen');
   phase='real GIO terminal launch';
   this._launchResume=launchResume;
   writeRoster({active:[],ended:[ended]});
