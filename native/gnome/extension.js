@@ -221,6 +221,9 @@ export default class Workbench extends Extension {
             row.connect('clicked', () => { state.selection = result.key; this._activate(surface, result); });
             view.content.add_child(row);
         }
+        if (state.hasMoreResults()) view.content.add_child(button('Show more results', () => {
+            state.showMoreResults(); this._render(surface);
+        }));
     }
     async _activate(surface, result) {
         if (!result || !this._views.has(surface)) return;

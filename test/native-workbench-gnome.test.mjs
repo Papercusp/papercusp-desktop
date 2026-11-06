@@ -12,6 +12,35 @@ const root = resolve(import.meta.dirname, '..');
 const plan = (harness = 'one', slug = 'same') => ({harness, slug, title: 'Shared title', status: 'active'});
 const envelope = rows => ({rows, version: 'canonical-version'});
 
+test('native results expose later matches while retaining exact selection and source capacity', () => {
+    const state = new PanelState();
+    const plans = Array.from({length:60}, (_, i) => plan('exact', String(i)));
+    const refresh = () => {
+        const generation = state.beginRefresh(['plans', 'reports']);
+        state.settle('plans', generation, envelope(plans));
+        state.settle('reports', generation, envelope([{report_id:'report',title:'Report'}]));
+    };
+    refresh();
+    assert.equal(state.results().length, 27);
+    assert.equal(state.hasMoreResults(), true);
+    state.showMoreResults();
+    const later = state.results().find(result => result.row.slug === '51');
+    assert.ok(later);
+    state.selection = later.key;
+    refresh();
+    assert.equal(state.selected().row.slug, '51');
+    assert.equal(state.results().filter(result => result.kind === 'reports').length, 1);
+    state.showMoreResults();
+    assert.equal(state.results().length, 61);
+    assert.equal(state.hasMoreResults(), false);
+    state.query = 'same';
+    refresh();
+    assert.equal(state.resultLimit, 26);
+    state.scope = 'reports';
+    refresh();
+    assert.equal(state.hasMoreResults(), false);
+});
+
 test('qualified identity survives identical titles, harnesses and literal search characters', () => {
     const one = resultFor('plans', plan('one')), two = resultFor('plans', plan('two'));
     assert.notEqual(one.key, two.key);

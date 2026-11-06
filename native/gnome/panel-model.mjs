@@ -91,7 +91,8 @@ export function detailRequest(result) {
 export class PanelState {
     constructor() {
         Object.assign(this, { visible: false, pinned: false, query: '', scope: 'all',
-            selection: null, detail: null, sources: {}, generation: 0, detailGeneration: 0 });
+            selection: null, detail: null, sources: {}, generation: 0, detailGeneration: 0,
+            resultLimit: 26, resultQuery: null });
     }
     toggle() { this.visible = !this.visible; return this.visible; }
     outsideFocus() { if (!this.pinned) this.visible = false; }
@@ -100,6 +101,8 @@ export class PanelState {
         this.visible = false; return 'panel';
     }
     beginRefresh(kinds = Object.keys(SOURCES)) {
+        const query = JSON.stringify([this.query, this.scope]);
+        if (query !== this.resultQuery) { this.resultLimit = 26; this.resultQuery = query; }
         ++this.generation;
         this.sources = Object.fromEntries(kinds.map(kind => [kind, { status: 'loading' }]));
         return this.generation;
@@ -120,7 +123,11 @@ export class PanelState {
         }
         return true;
     }
-    results() { return searchResults(this.sources, this.query, this.scope); }
+    results() { return searchResults(this.sources, this.query, this.scope, this.resultLimit); }
+    hasMoreResults() {
+        return searchResults(this.sources, this.query, this.scope, Infinity).length > this.results().length;
+    }
+    showMoreResults() { this.resultLimit += 26; }
     selected() {
         const rows = this.results();
         return rows.find(row => row.key === this.selection) || rows[0] || null;
