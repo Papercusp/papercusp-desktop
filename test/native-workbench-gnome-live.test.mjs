@@ -414,11 +414,19 @@ export default class Probe extends Workbench {
   check(this._views.size===0,'seat shortcut toggles pinned panel closed');
   phase='focus fixture mapping';
   this._focusFixture=Gio.Subprocess.new(['gjs','-m',${JSON.stringify(focusDriver)}],Gio.SubprocessFlags.NONE);
-  await waitFor(()=>global.get_window_actors().filter(actor=>actor.meta_window.get_title()?.startsWith('Needle agent [adv:')).length===2);
+  await waitFor(()=>{
+   const actors=global.get_window_actors().filter(actor=>actor.meta_window.get_title()?.startsWith('Needle agent [adv:'));
+   return actors.length===2&&actors.every(actor=>actor.mapped);
+  });
   phase='focus fixture ready';
   const distractor=global.get_window_actors().find(actor=>actor.meta_window.get_title()==='Needle agent [adv:42420]').meta_window;
+  const focusSnapshot=step=>inputLog.push({focusStep:step,currentTime:global.get_current_time(),
+   windows:global.get_window_actors().map(actor=>({title:actor.meta_window.get_title(),mapped:actor.mapped,
+    userTime:actor.meta_window.get_user_time(),focused:actor.meta_window===global.display.focus_window}))});
+  focusSnapshot('before mapped fixture activation');
   Main.activateWindow(distractor);
   await waitFor(()=>global.display.focus_window?.get_title()==='Needle agent [adv:42420]');
+  focusSnapshot('distractor focus verified');
   const agent={ownerId:'exact-local-agent',label:'Needle agent',host:GLib.get_host_name(),
     sessionState:'live',advSessionId:4242,pid:Number(this._focusFixture.get_identifier())};
   GLib.file_set_contents(${JSON.stringify(join(temp,'roster.json'))},JSON.stringify({active:[agent],ended:[]}));
