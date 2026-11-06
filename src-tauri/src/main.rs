@@ -10834,7 +10834,7 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
             let is_dev = cfg!(debug_assertions);
             #[cfg(target_os = "linux")]
             if let (Ok(resources), Ok(data)) = (app.path().resource_dir(), app.path().data_dir()) {
-                native_workbench::prepare(resources, data);
+                native_workbench::prepare(app.handle().clone(), resources, data);
             }
 
             // Demo-pipeline version gate (demo-pipeline-version-gate-2026-07-13):

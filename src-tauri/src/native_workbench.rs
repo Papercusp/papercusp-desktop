@@ -1,7 +1,33 @@
 //! GNOME owns resident/login lifecycle after the desktop installs its bundle.
 //! No Server startup preference, real shortcut or global user file is reset.
 #[cfg(target_os = "linux")]
-pub fn prepare(resource_root: std::path::PathBuf, user_data: std::path::PathBuf) {
+fn login_notice(output: &[u8]) -> Result<Option<&'static str>, serde_json::Error> {
+    #[derive(serde::Deserialize)]
+    struct Outcome {
+        changed: bool,
+        #[serde(default, rename = "firstInstall")]
+        first_install: bool,
+        #[serde(default, rename = "loginRequired")]
+        login_required: bool,
+    }
+    let outcome: Outcome = serde_json::from_slice(output)?;
+    Ok(if outcome.changed && outcome.login_required {
+        Some(if outcome.first_install {
+            "Sign out and back in to enable Workbench's native desktop panels."
+        } else {
+            "Sign out and back in to finish updating Workbench's native desktop panels."
+        })
+    } else {
+        None
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub fn prepare(
+    app: tauri::AppHandle,
+    resource_root: std::path::PathBuf,
+    user_data: std::path::PathBuf,
+) {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
     if !desktop
         .split(':')
@@ -52,10 +78,52 @@ pub fn prepare(resource_root: std::path::PathBuf, user_data: std::path::PathBuf)
                 "[workbench] {}",
                 String::from_utf8_lossy(&output.stdout).trim()
             );
+            let notice = login_notice(&output.stdout).map_err(std::io::Error::other)?;
+            if let Some(body) = notice {
+                use tauri_plugin_notification::NotificationExt;
+                if let Err(error) = app
+                    .notification()
+                    .builder()
+                    .title("Papercusp Workbench")
+                    .body(body)
+                    .show()
+                {
+                    eprintln!("[workbench] Login notification unavailable: {error}");
+                }
+            }
             Ok(())
         };
         if let Err(error) = install() {
             eprintln!("[workbench] Native installation unavailable: {error}");
         }
     });
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::login_notice;
+
+    #[test]
+    fn restart_requirement_reaches_the_account_with_install_or_upgrade_context() {
+        let install = login_notice(br#"{"changed":true,"firstInstall":true,"loginRequired":true}"#)
+            .unwrap()
+            .unwrap();
+        assert!(install.contains("enable Workbench"));
+        let upgrade = login_notice(br#"{"changed":true,"loginRequired":true}"#)
+            .unwrap()
+            .unwrap();
+        assert!(upgrade.contains("finish updating"));
+    }
+
+    #[test]
+    fn unchanged_or_live_install_does_not_request_an_unnecessary_login() {
+        for output in [
+            br#"{"changed":false}"#.as_slice(),
+            br#"{"changed":true,"loginRequired":false}"#.as_slice(),
+        ] {
+            assert_eq!(login_notice(output).unwrap(), None);
+        }
+        assert!(login_notice(b"not an installer result").is_err());
+        assert!(login_notice(br#"{"loginRequired":true}"#).is_err());
+    }
 }
