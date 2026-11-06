@@ -163,11 +163,14 @@ PROFILE_DIR="${DEB_DIR%/bundle/deb}"
 if [[ -n "${PAPERCUSP_RELEASE_HOST:-}" || "${PAPERCUSP_DISTRIBUTION_PROFILE:-}" == public || -n "${PAPERCUSP_RELEASE_TAG:-}" ]]; then
   # Tauri overlays can rename the main binary (the Server is papercusp-server).
   # Audit the binary in each fresh bundle's actual payload, after Tauri's patch,
-  # rather than a fixed GUI name in Cargo's output directory.
+  # rather than a fixed GUI name in Cargo's output directory. Cargo also ships
+  # the update installer helper; it is not the app that reads the updater host.
+  # Exclude only that known helper so unknown executable siblings still fail.
   for deb in "${BUILT_DEBS[@]}"; do
     package_bin_dir="${deb%.deb}/data/usr/bin"
     mapfile -d '' -t package_binaries < <(
-      find "$package_bin_dir" -maxdepth 1 -type f -perm /111 -print0 2>/dev/null
+      find "$package_bin_dir" -maxdepth 1 -type f -perm /111 \
+        ! -name 'papercusp-update-installer' -print0 2>/dev/null
     )
     if [[ ${#package_binaries[@]} -ne 1 ]]; then
       echo "FATAL: fresh Debian payload must contain exactly one main executable under $package_bin_dir" >&2
