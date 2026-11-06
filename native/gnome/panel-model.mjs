@@ -86,6 +86,34 @@ export function detailRequest(result) {
     throw new Error('Select an agent through its exact terminal route');
 }
 
+// Revalidate the selected owner immediately before a desktop action. Roster
+// locality alone refers to the selected operator, which may be on another host.
+export function agentFocusTarget(payload, ownerId, localHost) {
+    const matches = sourceRows('agents', payload).filter(row => row.ownerId === ownerId);
+    if (matches.length !== 1) throw new Error('The selected agent is unavailable or ambiguous');
+    const row = matches[0];
+    if (row.revoked || row.stale || !['live', 'parked'].includes(row.sessionState))
+        throw new Error('The selected session is no longer live; use its saved connection to resume it');
+    const host = row.host || row.hostname;
+    if (!host || host !== localHost || row.isLocal === false)
+        throw new Error('This session is on another machine; use its saved connection');
+    const windowId = typeof row.windowId === 'string' && row.windowId.trim() ? row.windowId : null;
+    const advSessionId = Number.isSafeInteger(row.advSessionId) && row.advSessionId > 0 ? row.advSessionId : null;
+    if (!windowId && !advSessionId) throw new Error('No exact desktop window is recorded for this session');
+    return {ownerId, windowId, advSessionId};
+}
+
+export function exactAgentWindow(target, windows) {
+    const xid = value => /^0x[0-9a-f]+$/i.test(value || '') ? BigInt(value).toString() : null;
+    const recordedId = xid(target.windowId);
+    const marker = target.advSessionId ? `[adv:${target.advSessionId}]` : null;
+    const matches = windows.filter(window =>
+        (target.windowId && (recordedId ? xid(window.id) === recordedId : window.title === target.windowId)) ||
+        (marker && window.title?.includes(marker)));
+    if (matches.length !== 1) throw new Error('The exact terminal window is unavailable or ambiguous');
+    return matches[0];
+}
+
 // One instance per surface. Dismissal retains drafts and canonical selections;
 // stale transport completions cannot overwrite a newer refresh or detail.
 export class PanelState {

@@ -5,12 +5,37 @@ import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import test from 'node:test';
-import {PanelState, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests}
+import {PanelState, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests,
+    agentFocusTarget, exactAgentWindow}
     from '../native/gnome/panel-model.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const plan = (harness = 'one', slug = 'same') => ({harness, slug, title: 'Shared title', status: 'active'});
 const envelope = rows => ({rows, version: 'canonical-version'});
+
+test('native agent activation revalidates exact owner, live incarnation and actual desktop host', () => {
+    const agent = {ownerId:'selected',host:'desktop',sessionState:'parked',advSessionId:42,pid:17};
+    const roster = row => envelope([{active:[row],ended:[]}]);
+    assert.deepEqual(agentFocusTarget(roster(agent),'selected','desktop'),
+        {ownerId:'selected',windowId:null,advSessionId:42});
+    for (const patch of [{ownerId:'other'},{host:'remote'},{isLocal:false},{host:null},
+        {stale:true},{revoked:true},{sessionState:'ended'},{sessionState:'starting'},
+        {advSessionId:null},{advSessionId:1.5}])
+        assert.throws(()=>agentFocusTarget(roster({...agent,...patch}),'selected','desktop'));
+    assert.throws(()=>agentFocusTarget(envelope([{active:[agent],ended:[agent]}]),'selected','desktop'),/ambiguous/);
+    assert.throws(()=>agentFocusTarget({error:'ACL refused',rows:[]},'selected','desktop'),/ACL/);
+});
+
+test('native focus rejects shared labels, PID guesses, missing windows and conflicting exact handles', () => {
+    const windows = [{title:'Same label [adv:42]',id:'0x002a'},
+        {title:'Same label [adv:420]',id:'0x002b'}];
+    assert.equal(exactAgentWindow({advSessionId:42},windows),windows[0]);
+    assert.equal(exactAgentWindow({windowId:'0x2A'},windows),windows[0]);
+    assert.equal(exactAgentWindow({windowId:windows[1].title},windows),windows[1]);
+    for (const target of [{windowId:'Same label'},{pid:17},{advSessionId:4},
+        {windowId:'0x2b',advSessionId:42}])assert.throws(()=>exactAgentWindow(target,windows));
+    assert.throws(()=>exactAgentWindow({advSessionId:42},[windows[0],{...windows[0]}]),/ambiguous/);
+});
 
 test('native results expose later matches while retaining exact selection and source capacity', () => {
     const state = new PanelState();

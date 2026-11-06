@@ -6,7 +6,8 @@ import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {ResidentBridge} from './bridge.js';
-import {PanelState, SOURCES, sourceRequests, detailRequest, readRows, rebindShortcuts} from './panel-model.mjs';
+import {PanelState, SOURCES, sourceRequests, detailRequest, readRows, rebindShortcuts,
+    agentFocusTarget, exactAgentWindow} from './panel-model.mjs';
 
 function label(text, style = '') {
     const actor = new St.Label({text: String(text), style_class: style, x_expand: true});
@@ -232,8 +233,34 @@ export default class Workbench extends Extension {
         const generation = ++state.detailGeneration;
         state.detail = {title: result.title, text: 'Loading…'}; this._render(surface);
         try {
-            if (result.kind === 'agents') throw new Error(
-                'Exact terminal activation is not connected in this host yet. The agent is unchanged.');
+            if (result.kind === 'agents') {
+                const roster = await this._bridge.read(this._settings.get_string('pui-path'),
+                    {name: 'advRoster.list', args: {}});
+                if (generation !== state.detailGeneration || !state.visible) return;
+                const target = agentFocusTarget(roster, result.row.ownerId, GLib.get_host_name());
+                const windows = global.get_window_actors().map(actor => {
+                    const window = actor.meta_window;
+                    return {window, title: window.get_title(),
+                        id: window.get_description().match(/^0x[0-9a-f]+/i)?.[0]};
+                });
+                const {window} = exactAgentWindow(target, windows);
+                Main.activateWindow(window);
+                await new Promise((resolve, reject) => {
+                    let attempts = 0;
+                    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 25, () => {
+                        if (global.display.focus_window === window && !window.minimized) {
+                            resolve(); return GLib.SOURCE_REMOVE;
+                        }
+                        if (++attempts === 40) {
+                            reject(new Error('Could not verify focus on the selected terminal'));
+                            return GLib.SOURCE_REMOVE;
+                        }
+                        return GLib.SOURCE_CONTINUE;
+                    });
+                });
+                if (generation === state.detailGeneration) this._hide(surface, false);
+                return;
+            }
             const payload = await this._bridge.read(this._settings.get_string('pui-path'), detailRequest(result));
             const rows = readRows(payload);
             if (!rows.length) throw new Error('The selected item is unavailable or no longer authorized');
