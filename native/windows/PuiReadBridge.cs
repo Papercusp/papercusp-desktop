@@ -21,7 +21,8 @@ namespace Papercusp.Workbench
         private static readonly HashSet<string> Models = new HashSet<string>(StringComparer.Ordinal)
         {
             "plans.list", "plans.get", "advRoster.list", "reports.list", "reports.get",
-            "goals.list", "goals.detail", "planSessions.list"
+            "goals.list", "goals.detail", "planSessions.list", "operator.identity",
+            "accounts.pool", "accounts.sessionOverride"
         };
 
         private static void Stop(Process process)
@@ -50,23 +51,38 @@ namespace Papercusp.Workbench
             catch { Stop(process); throw; }
         }
 
-        public static async Task<Dictionary<string, object>> ReadAsync(
+        public static Task<Dictionary<string, object>> ReadAsync(
             string pui, string name, Dictionary<string, object> args,
-            CancellationToken cancellation, int timeoutMilliseconds = 22000)
+            CancellationToken cancellation, int timeoutMilliseconds = 22000,
+            Dictionary<string, object> environment = null)
+        {
+            if (!Models.Contains(name ?? "")) throw new ArgumentException("Unsupported native read model", "name");
+            return InvokeAsync(pui, "native-read", new Dictionary<string, object> {
+                { "name", name }, { "args", args ?? new Dictionary<string, object>() }, { "environment", environment }
+            }, cancellation, timeoutMilliseconds);
+        }
+
+        public static Task<Dictionary<string, object>> AccountAsync(string pui,
+            Dictionary<string, object> environment, string action, string accountId, CancellationToken cancellation)
+        {
+            if (environment == null || !(action == "default" || action == "force" || action == "exclude" || action == "auto"))
+                throw new ArgumentException("Select an environment and account control");
+            return InvokeAsync(pui, "native-account", new Dictionary<string, object> {
+                { "environment", environment }, { "action", action }, { "accountId", accountId }
+            }, cancellation, 22000);
+        }
+
+        private static async Task<Dictionary<string, object>> InvokeAsync(string pui, string command,
+            Dictionary<string, object> body, CancellationToken cancellation, int timeoutMilliseconds)
         {
             cancellation.ThrowIfCancellationRequested();
             if (String.IsNullOrWhiteSpace(pui) || !Path.IsPathRooted(pui) || !File.Exists(pui))
                 throw new ArgumentException("Select an installed PUI executable", "pui");
-            if (!Models.Contains(name ?? ""))
-                throw new ArgumentException("Unsupported native read model", "name");
             if (timeoutMilliseconds < 1) throw new ArgumentOutOfRangeException("timeoutMilliseconds");
             var json = new JavaScriptSerializer { MaxJsonLength = MaxResponseBytes };
-            var request = Utf8.GetBytes(json.Serialize(new Dictionary<string, object>
-            {
-                { "name", name }, { "args", args ?? new Dictionary<string, object>() }
-            }));
+            var request = Utf8.GetBytes(json.Serialize(body));
             if (request.Length > MaxRequestBytes)
-                throw new ArgumentException("native-read request exceeds 64 KiB", "args");
+                throw new ArgumentException("native panel request exceeds 64 KiB", "body");
 
             using (var process = new Process())
             using (var deadline = new CancellationTokenSource())
@@ -74,7 +90,7 @@ namespace Papercusp.Workbench
                 process.StartInfo = new ProcessStartInfo
                 {
                     FileName = pui,
-                    Arguments = "native-read",
+                    Arguments = command,
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     RedirectStandardInput = true,

@@ -272,4 +272,86 @@ namespace Papercusp.Workbench
             return matches[0].Key;
         }
     }
+
+    public sealed class AccountState
+    {
+        public int Generation;
+        public bool Busy;
+        public string Error, Selection;
+        public Dictionary<string, object> Environment, Override;
+        public List<Dictionary<string, object>> Accounts = new List<Dictionary<string, object>>();
+        public bool Ready { get { return Environment != null && Override != null && Error == null; } }
+        public int Begin()
+        { Busy = true; Error = null; Environment = null; Override = null; Accounts.Clear(); return ++Generation; }
+        public static Dictionary<string, object> One(Dictionary<string, object> payload)
+        {
+            object value;
+            if (payload == null || !payload.TryGetValue("rows", out value) || !(value is IList) || ((IList)value).Count != 1 ||
+                !(((IList)value)[0] is Dictionary<string, object>)) throw new InvalidOperationException("Canonical account state is unavailable");
+            return (Dictionary<string, object>)((IList)value)[0];
+        }
+        public static bool SameEnvironment(Dictionary<string, object> a, Dictionary<string, object> b)
+        {
+            if (a == null || b == null) return false;
+            foreach (var key in new[] { "endpoint", "workspaceId" })
+                if (PanelState.Text(a, key) == "" || PanelState.Text(a, key) != PanelState.Text(b, key)) return false;
+            foreach (var key in new[] { "store", "agentChat" })
+            {
+                object av, bv;
+                if (!a.TryGetValue(key, out av) || !b.TryGetValue(key, out bv) ||
+                    !(av is Dictionary<string, object>) || !(bv is Dictionary<string, object>)) return false;
+                var field = key == "store" ? "id" : "scope";
+                if (PanelState.Text((Dictionary<string, object>)av, field) == "" ||
+                    PanelState.Text((Dictionary<string, object>)av, field) != PanelState.Text((Dictionary<string, object>)bv, field)) return false;
+            }
+            return true;
+        }
+        public static void ValidateOverride(Dictionary<string, object> value)
+        {
+            foreach (var key in new[] { "forcedAccounts", "excludeAccounts" })
+            {
+                object items;
+                if (!value.TryGetValue(key, out items) || !(items is IList) || ((IList)items).Cast<object>().Any(item => !(item is string)))
+                    throw new InvalidOperationException("Canonical account steering is unavailable");
+            }
+        }
+        public bool Settle(int generation, Dictionary<string, object> environment,
+            Dictionary<string, object> pool, Dictionary<string, object> steering, Exception failure)
+        {
+            if (generation != Generation) return false;
+            Busy = false;
+            try
+            {
+                if (failure != null) throw failure;
+                if (!SameEnvironment(environment, environment)) throw new InvalidOperationException("Selected account environment is unavailable");
+                object rows, partial;
+                if (!pool.TryGetValue("rows", out rows) || !(rows is IList) ||
+                    (pool.TryGetValue("partial", out partial) && Object.Equals(partial, true))) throw new InvalidOperationException("Account pool is unavailable or incomplete");
+                var accounts = ((IList)rows).Cast<Dictionary<string, object>>().ToList();
+                if (accounts.Any(row => PanelState.Text(row, "id") == "") || accounts.Select(row => PanelState.Text(row, "id")).Distinct().Count() != accounts.Count)
+                    throw new InvalidOperationException("Account identity is missing or ambiguous");
+                var current = One(steering); ValidateOverride(current);
+                Environment = environment; Accounts = accounts; Override = current; Error = null;
+            }
+            catch (Exception error) { Environment = null; Override = null; Accounts.Clear(); Error = error.Message; }
+            return true;
+        }
+        public bool Applied(int generation, Dictionary<string, object> expected, Dictionary<string, object> payload, Exception failure)
+        {
+            if (generation != Generation) return false;
+            Busy = false;
+            try
+            {
+                if (failure != null) throw failure;
+                object actual;
+                if (!payload.TryGetValue("environment", out actual) || !SameEnvironment(expected, actual as Dictionary<string, object>) ||
+                    !SameEnvironment(Environment, expected)) throw new InvalidOperationException("Account environment changed; refresh before applying another control");
+                var current = One(payload); ValidateOverride(current); Override = current; Error = null;
+            }
+            catch (Exception error) { Error = error.Message; }
+            return true;
+        }
+        public bool Contains(string field, string id)
+        { return Override != null && ((IList)Override[field]).Cast<object>().Any(value => Object.Equals(value, id)); }
+    }
 }
