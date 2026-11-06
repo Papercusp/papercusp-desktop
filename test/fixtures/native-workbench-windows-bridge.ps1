@@ -1,4 +1,10 @@
-param([Parameter(Mandatory=$true)][string]$BridgeSource)
+param(
+    [Parameter(Mandatory=$true)][string]$BridgeSource,
+    [ValidateSet('fixture', 'operator')][string]$Phase = 'fixture',
+    [string]$PuiExecutable,
+    [string]$OperatorUrl,
+    [string]$ExpectedWorkspace
+)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('workbench-bridge-' + [Guid]::NewGuid().ToString('N'))
@@ -15,7 +21,12 @@ function Read-Fixture([string]$Mode, [Threading.CancellationToken]$Token = [Thre
     return [Papercusp.Workbench.PuiReadBridge]::ReadAsync($pui, 'reports.get', $arguments, $Token, $Timeout)
 }
 function Assert-Fails($Task, [string]$Pattern) {
-    try { $Task.GetAwaiter().GetResult() | Out-Null }
+    try {
+        # ReadAsync rejects unsupported models synchronously, before returning
+        # a Task. Keep that refusal inside the same expected-failure boundary.
+        if ($Task -is [scriptblock]) { $Task = & $Task }
+        $Task.GetAwaiter().GetResult() | Out-Null
+    }
     catch {
         Assert-True ($_.Exception.ToString() -match $Pattern) $_.Exception.ToString()
         return
@@ -30,6 +41,35 @@ function Assert-Reaped([string]$Mode) {
 }
 try {
     Add-Type -Path $BridgeSource -ReferencedAssemblies System.Web.Extensions
+    if ($Phase -eq 'operator') {
+        if (-not [IO.File]::Exists($PuiExecutable) -or -not $OperatorUrl -or -not $ExpectedWorkspace) {
+            throw 'Operator phase requires the actual PUI, explicit operator URL and expected workspace'
+        }
+        $env:PUI_OPERATOR = $OperatorUrl; $env:PAPERCUSP_OPERATOR_URL = $OperatorUrl
+        $emptyArgs = [Collections.Generic.Dictionary[string,object]]::new()
+        $identity = [Papercusp.Workbench.PuiReadBridge]::ReadAsync($PuiExecutable, 'operator.identity', $emptyArgs,
+            [Threading.CancellationToken]::None, 22000).GetAwaiter().GetResult()['rows'][0]
+        Assert-True ($identity['endpoint'].TrimEnd('/') -ceq $OperatorUrl.TrimEnd('/') -and
+            $identity['workspaceId'] -ceq $ExpectedWorkspace -and $identity['store']['id']) 'PUI selected a different backend'
+        $passed.Add('actual PUI selects the expected endpoint workspace and store')
+        $models = [Collections.Generic.List[object]]::new()
+        foreach ($model in @('plans.list', 'advRoster.list', 'reports.list', 'goals.list')) {
+            $payload = [Papercusp.Workbench.PuiReadBridge]::ReadAsync($PuiExecutable, $model, $emptyArgs,
+                [Threading.CancellationToken]::None, 22000, $identity).GetAwaiter().GetResult()
+            Assert-True ($payload.ContainsKey('rows') -and $payload.ContainsKey('version')) ('Missing canonical envelope: ' + $model)
+            $models.Add(@{name=$model; rows=$payload['rows'].Count; version=$payload['version']})
+            $passed.Add('actual canonical ' + $model + ' envelope and version preserved')
+        }
+        $wrong = [Collections.Generic.Dictionary[string,object]]::new($identity)
+        $wrong['workspaceId'] = $ExpectedWorkspace + '-negative-control'
+        Assert-Fails ([Papercusp.Workbench.PuiReadBridge]::ReadAsync($PuiExecutable, 'plans.list', $emptyArgs,
+            [Threading.CancellationToken]::None, 22000, $wrong)) 'selected environment changed'
+        $passed.Add('actual PUI refuses a different selected workspace before reading')
+        [pscustomobject]@{ok=$true; platform='windows'; phase=$Phase; cases=$passed.ToArray(); count=$passed.Count;
+            environment=$identity; models=$models.ToArray(); puiSha256=(Get-FileHash -LiteralPath $PuiExecutable -Algorithm SHA256).Hash.ToLowerInvariant();
+            scope='actual-PUI-canonical-operator-read-only'} | ConvertTo-Json -Depth 12 -Compress
+        return
+    }
     $pui = Join-Path $temp "pui ' literal.exe"
     # Compile a real native child. It deliberately changes the console encoding;
     # only byte-exact redirected pipe framing can preserve the returned Unicode.
@@ -103,7 +143,7 @@ public static class NativeFixture {
     $arguments = [Collections.Generic.Dictionary[string,object]]::new()
     $arguments.Add('query', ('x' * 70000))
     Assert-Fails ([Papercusp.Workbench.PuiReadBridge]::ReadAsync($pui, 'reports.list', $arguments, [Threading.CancellationToken]::None)) '64 KiB'
-    Assert-Fails ([Papercusp.Workbench.PuiReadBridge]::ReadAsync($pui, 'goals.pause', $null, [Threading.CancellationToken]::None)) 'Unsupported'
+    Assert-Fails { [Papercusp.Workbench.PuiReadBridge]::ReadAsync($pui, 'goals.pause', $null, [Threading.CancellationToken]::None) } 'Unsupported'
     $passed.Add('oversized request and mutation rejected before spawn')
     [pscustomobject]@{ok=$true; platform='windows'; cases=$passed.ToArray(); count=$passed.Count} | ConvertTo-Json -Depth 8 -Compress
 } finally {
