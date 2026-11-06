@@ -12,7 +12,7 @@ const helper = path.join(root, 'bin', 'lib', 'release-artifacts.sh');
 const upload = path.join(root, 'bin', 'upload-release.sh');
 const base = 'https://download-test.example.invalid/secret-prefix';
 
-function debHostFixture(t, { configured = true, mismatch = false, profile = 'public', binary = 'papercusp-desktop', ambiguous = false, spaKind = 'legacy' } = {}) {
+function debHostFixture(t, { configured = true, mismatch = false, profile = 'public', binary = 'papercusp-desktop', ambiguous = false, helper = false, helperHost = false, main = true, spaKind = 'legacy' } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-deb-host-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -37,7 +37,8 @@ fs.mkdirSync(p.join(release, 'bundle/deb'), { recursive: true });
 fs.writeFileSync(e.FIXTURE_RECORD, JSON.stringify({host: e.PAPERCUSP_RELEASE_HOST, rustflags: e.RUSTFLAGS}));
 const payload = p.join(release, 'bundle/deb/fixture/data/usr/bin');
 fs.mkdirSync(payload, { recursive: true });
-fs.writeFileSync(p.join(payload, e.FIXTURE_BINARY), e.FIXTURE_HOST_MISMATCH === '1' ? 'hostless-binary' : (e.PAPERCUSP_RELEASE_HOST || 'hostless-binary'), { mode: 0o755 });
+if (e.FIXTURE_MAIN === '1') fs.writeFileSync(p.join(payload, e.FIXTURE_BINARY), e.FIXTURE_HOST_MISMATCH === '1' ? 'hostless-binary' : (e.PAPERCUSP_RELEASE_HOST || 'hostless-binary'), { mode: 0o755 });
+if (e.FIXTURE_HELPER === '1') fs.writeFileSync(p.join(payload, 'papercusp-update-installer'), e.FIXTURE_HELPER_HOST === '1' ? e.PAPERCUSP_RELEASE_HOST : 'installer-helper', { mode: 0o755 });
 if (e.FIXTURE_AMBIGUOUS === '1') fs.writeFileSync(p.join(payload, 'unrelated'), e.PAPERCUSP_RELEASE_HOST, { mode: 0o755 });
 fs.writeFileSync(p.join(release, 'bundle/deb/fixture.deb'), 'fixture-deb');
 `, { mode: 0o755 });
@@ -46,7 +47,8 @@ fs.writeFileSync(p.join(release, 'bundle/deb/fixture.deb'), 'fixture-deb');
     PAPERCUSP_DISTRIBUTION_PROFILE: profile, PAPERCUSP_DEFER_DEB_REPACK: '1',
     PAPERCUSP_BUILD_SHA: '1234567', FIXTURE_TARGET: target, FIXTURE_RECORD: record,
     FIXTURE_HOST_MISMATCH: mismatch ? '1' : '0', FIXTURE_BINARY: binary,
-    FIXTURE_AMBIGUOUS: ambiguous ? '1' : '0' };
+    FIXTURE_AMBIGUOUS: ambiguous ? '1' : '0', FIXTURE_HELPER: helper ? '1' : '0',
+    FIXTURE_HELPER_HOST: helperHost ? '1' : '0', FIXTURE_MAIN: main ? '1' : '0' };
   for (const key of ['PAPERCUSP_RELEASE_HOST', 'PAPERCUSP_UPDATE_BASE_URL',
     'PAPERCUSP_ALLOW_HOSTLESS_RELEASE', 'PAPERCUSP_RELEASE_TAG', '__PAPERCUSP_RELEASE_HOST_LIB']) delete env[key];
   delete env.CARGO_ENCODED_RUSTFLAGS;
@@ -104,7 +106,32 @@ test('public Debian producer audits the renamed Server payload without a GUI bin
 });
 
 test('public Debian producer refuses an ambiguous main executable payload', t => {
-  const f = debHostFixture(t, { ambiguous: true });
+  for (const helper of [false, true]) {
+    const f = debHostFixture(t, { ambiguous: true, helper });
+    const result = f.run();
+    assert.equal(result.status, 7, result.stdout + result.stderr);
+    assert.match(result.stderr, /exactly one main executable/);
+  }
+});
+
+test('public Debian producer audits GUI and Server apps alongside the update installer', t => {
+  for (const binary of ['papercusp-desktop', 'papercusp-server']) {
+    const f = debHostFixture(t, { binary, helper: true });
+    const result = f.run();
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.ok(result.stdout.includes(`release host is BAKED into ${binary}`));
+  }
+});
+
+test('public Debian producer cannot use the installer host to satisfy the main app audit', t => {
+  const f = debHostFixture(t, { helper: true, helperHost: true, mismatch: true });
+  const result = f.run();
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /RELEASE HOST NOT BAKED/);
+});
+
+test('public Debian producer rejects an installer without a main app', t => {
+  const f = debHostFixture(t, { helper: true, helperHost: true, main: false });
   const result = f.run();
   assert.equal(result.status, 7, result.stdout + result.stderr);
   assert.match(result.stderr, /exactly one main executable/);
