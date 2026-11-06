@@ -28,7 +28,7 @@ let text='';process.stdin.on('data',c=>text+=c);process.stdin.on('end',()=>{
 const r=JSON.parse(text);let rows=[];
 if(r.name==='failure'){console.error('canonical ACL refusal');process.exitCode=1;return;}
 if(r.name==='plans.list')rows=[{harness:'exact-harness',slug:'same',title:'Plan'}];
-else if(r.name==='advRoster.list')rows=[{active:[],ended:[]}];
+else if(r.name==='advRoster.list'){const fs=require('node:fs');const path=${JSON.stringify(join(temp,'roster.json'))};rows=[fs.existsSync(path)?JSON.parse(fs.readFileSync(path,'utf8')):{active:[],ended:[]}];}
 else if(r.name==='goals.list')rows=[{goals:[{id:'goal-id',title:'Goal '+(r.args.query||'')}],totalGoals:1}];
 else if(r.name==='reports.list')rows=[{report_id:'exact+/=&',title:'Report '+(r.args.query||'')}];
 else if(r.name==='reports.get')rows=[{body_md:'# Exact report '+r.args.reportId}];
@@ -290,6 +290,14 @@ test('private GNOME Shell renders actors and handles real seat keyboard, pointer
             cpSync(join(extension,'extension.js'),join(extension,'workbench.js'));
             const pui=fixturePui(temp), resultFile=join(temp,'result.json');
             const screenshot=join(temp,'native-input.png');
+            const focusDriver=join(temp,'focus-windows.mjs');
+            writeFileSync(focusDriver,`import Gtk from 'gi://Gtk?version=4.0';
+import Gio from 'gi://Gio';
+const app=new Gtk.Application({application_id:'ai.papercusp.Workbench.FocusFixture',flags:Gio.ApplicationFlags.NON_UNIQUE});
+app.connect('activate',()=>{for(const title of ['Needle agent [adv:4242]','Needle agent [adv:42420]']){
+ const window=new Gtk.ApplicationWindow({application:app,title,default_width:320,default_height:200});window.present();}});
+app.run(['focus-fixture']);`);
+            checkScript(focusDriver);
             writeFileSync(join(extension,'extension.js'), `import GLib from 'gi://GLib';
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
@@ -305,7 +313,7 @@ function tick(){return new Promise(resolve=>GLib.timeout_add(GLib.PRIORITY_DEFAU
 async function captureScreen(){const stream=Gio.File.new_for_path(${JSON.stringify(screenshot)}).replace(null,false,Gio.FileCreateFlags.REPLACE_DESTINATION,null);const shooter=new Shell.Screenshot();let timer;try{await Promise.race([new Promise((resolve,reject)=>shooter.screenshot(false,stream,(object,result)=>{try{object.screenshot_finish(result);resolve();}catch(error){reject(error);}})),new Promise((_,reject)=>{timer=GLib.timeout_add(GLib.PRIORITY_DEFAULT,3000,()=>{timer=null;reject(Error('Screenshot deadline'));return GLib.SOURCE_REMOVE;});})]);}finally{if(timer)GLib.source_remove(timer);stream.close(null);}}
 export default class Probe extends Workbench {
  enable(){this._pointerCapture=global.stage.connect('captured-event',(_stage,event)=>{if(event.type()===Clutter.EventType.BUTTON_PRESS){const [x,y]=event.get_coords();const picked=global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE,x,y);inputLog.push({button:event.get_button(),x,y,source:String(event.get_source()),picked:String(picked),inside:[...this._views].map(([surface,v])=>({surface,contains:v.panel.contains(picked)}))});}return Clutter.EVENT_PROPAGATE;});super.enable();GLib.timeout_add(GLib.PRIORITY_DEFAULT,500,()=>{this.probe().catch(error=>this.finish(error));return GLib.SOURCE_REMOVE;});}
- async finish(error){if(error){try{await captureScreen();}catch(cause){inputLog.push({screenshotError:String(cause)});}}GLib.file_set_contents(${JSON.stringify(resultFile)},JSON.stringify({ok:!error,error:error?String(error)+'; '+String(error.stack||''):null,phase,inputLog,actionMode:Main.actionMode,overview:Main.overview.visible,states:[...this._states].map(([surface,s])=>({surface,visible:s.visible,pinned:s.pinned,selection:s.selection,detail:s.detail})),assertions}));if(this._inputCapture)global.stage.disconnect(this._inputCapture);global.stage.disconnect(this._pointerCapture);this.disable();global.context.terminate();}
+ async finish(error){if(error){try{await captureScreen();}catch(cause){inputLog.push({screenshotError:String(cause)});}}GLib.file_set_contents(${JSON.stringify(resultFile)},JSON.stringify({ok:!error,error:error?String(error)+'; '+String(error.stack||''):null,phase,inputLog,actionMode:Main.actionMode,overview:Main.overview.visible,states:[...this._states].map(([surface,s])=>({surface,visible:s.visible,pinned:s.pinned,selection:s.selection,detail:s.detail})),assertions}));if(this._focusFixture){this._focusFixture.force_exit();await new Promise(resolve=>this._focusFixture.wait_async(null,(child,result)=>{child.wait_finish(result);resolve();}));}if(this._inputCapture)global.stage.disconnect(this._inputCapture);global.stage.disconnect(this._pointerCapture);this.disable();global.context.terminate();}
  async probe(){
   this._settings.set_string('pui-path',${JSON.stringify(pui)});
   check(this._bindings.size===2,'native shortcut acquisition');
@@ -404,6 +412,18 @@ export default class Probe extends Workbench {
   await chord([Clutter.KEY_Super_L,Clutter.KEY_Alt_L,Clutter.KEY_space]);
   await waitFor(()=>!qa.visible);
   check(this._views.size===0,'seat shortcut toggles pinned panel closed');
+  phase='exact native agent focus';
+  this._focusFixture=Gio.Subprocess.new(['gjs','-m',${JSON.stringify(focusDriver)}],Gio.SubprocessFlags.NONE);
+  await waitFor(()=>global.get_window_actors().filter(actor=>actor.meta_window.get_title()?.startsWith('Needle agent [adv:')).length===2);
+  const agent={ownerId:'exact-local-agent',label:'Needle agent',host:GLib.get_host_name(),
+    sessionState:'live',advSessionId:4242,pid:Number(this._focusFixture.get_identifier())};
+  GLib.file_set_contents(${JSON.stringify(join(temp,'roster.json'))},JSON.stringify({active:[agent],ended:[]}));
+  qa.pinned=false;this._toggle('quick-access');
+  await waitFor(()=>qa.results().some(row=>row.kind==='agents'));
+  await this._activate('quick-access',qa.results().find(row=>row.kind==='agents'));
+  check(global.display.focus_window?.get_title()==='Needle agent [adv:4242]',
+    'native activation observes exact launch window despite shared process and similar titles');
+  check(!qa.visible,'verified terminal focus dismisses its native launcher');
   this.finish(null);
  }
 }
