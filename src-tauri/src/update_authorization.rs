@@ -76,6 +76,17 @@ pub fn read_current_trust() -> Result<Trust, String> {
     protected_policy::read_current()
 }
 
+/// Hold CURRENT administrator trust through a bounded runtime admission effect.
+/// Shared admissions may overlap; policy activation/revocation uses the same
+/// directory's exclusive lock. This supplies authority only, not source-author
+/// authentication or approval of an independently supplied runtime candidate.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn with_current_update_trust<T>(
+    admit: impl FnOnce(&Trust) -> Result<T, String>,
+) -> Result<T, String> {
+    protected_policy::with_current_in(&protected_policy::current_directory()?, 0, admit)
+}
+
 /// Activation uses CURRENT administrator trust, not an earlier verifier result.
 /// All cooperating policy writers and activators lock the protected directory.
 /// A crash releases the kernel lock but never lowers the persisted floors.
@@ -146,6 +157,16 @@ pub fn activate_test_update<T>(
     use std::os::unix::fs::MetadataExt;
     let owner = directory.metadata().map_err(|e| e.to_string())?.uid();
     protected_policy::activate_in(directory, owner, envelope, candidate, now, install)
+}
+
+#[cfg(all(test, unix))]
+pub fn with_test_update_trust<T>(
+    directory: &std::fs::File,
+    admit: impl FnOnce(&Trust) -> Result<T, String>,
+) -> Result<T, String> {
+    use std::os::unix::fs::MetadataExt;
+    let owner = directory.metadata().map_err(|e| e.to_string())?.uid();
+    protected_policy::with_current_in(directory, owner, admit)
 }
 
 #[cfg(unix)]
@@ -222,7 +243,8 @@ mod protected_policy {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) fn read_current() -> Result<Trust, String> {
-        read_in(&current_directory()?, 0)
+        let locked = lock_in(&current_directory()?, 0, false)?;
+        read_in(&locked, 0)
     }
 
     fn stable(a: &FileMetadata, b: &FileMetadata) -> bool {
@@ -312,9 +334,35 @@ mod protected_policy {
         Ok(policy)
     }
 
-    /// Reuse the protected policy directory as the kernel lock identity across
-    /// GUI/Server processes. Open it afresh: closing this descriptor must release
-    /// its flock even when the caller retains the original directory descriptor.
+    // Reuse the protected policy directory as the kernel lock identity across
+    // native readers, runtime admissions and activators. Open it afresh so the
+    // original directory descriptor never extends a completed lease's lifetime.
+    fn lock_in(directory: &File, owner: u32, exclusive: bool) -> Result<File, String> {
+        let locked = child(directory, ".", true)?;
+        if !trusted(&locked.metadata().map_err(|_| INVALID)?, owner, true) {
+            return Err(INVALID.into());
+        }
+        let result = if exclusive {
+            FileExt::try_lock_exclusive(&locked)
+        } else {
+            FileExt::try_lock_shared(&locked)
+        };
+        result.map_err(|_| "protected update trust is busy or unavailable")?;
+        Ok(locked)
+    }
+
+    pub(super) fn with_current_in<T>(
+        directory: &File,
+        owner: u32,
+        admit: impl FnOnce(&Trust) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let locked = lock_in(directory, owner, false)?;
+        let trust = read_in(&locked, owner)?;
+        // The descriptor remains owned by this scope across the whole callback,
+        // including errors and unwinding. No monotonic floor is changed here.
+        admit(&trust)
+    }
+
     pub(super) fn activate_in<T>(
         directory: &File,
         owner: u32,
@@ -323,11 +371,7 @@ mod protected_policy {
         now: u64,
         install: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
-        let locked = child(directory, ".", true)?;
-        if !trusted(&locked.metadata().map_err(|_| INVALID)?, owner, true) {
-            return Err(INVALID.into());
-        }
-        locked.try_lock_exclusive().map_err(|_| "protected update activation is busy or unavailable")?;
+        let locked = lock_in(directory, owner, true)?;
         let mut policy = read_policy_in(&locked, owner)?;
         let authorized = verify(&policy.update_authorization, envelope, candidate, now)?;
         let original = serde_json::to_vec(&policy).map_err(|_| INVALID)?;
