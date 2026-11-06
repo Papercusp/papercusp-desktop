@@ -1,0 +1,11 @@
+.papercusp-panel { background-color: #20242b; color: #f3f4f5; border: 1px solid #626975; border-radius: 14px; padding: 18px; spacing: 12px; }
+.papercusp-panel-header { spacing: 12px; }
+.papercusp-panel-title { font-size: 19px; font-weight: bold; }
+.papercusp-panel-scopes { spacing: 8px; }
+.papercusp-panel-status { color: #bbc4d3; font-size: 12px; }
+.papercusp-result { text-align: left; border-radius: 8px; padding: 10px; }
+.papercusp-result:hover, .papercusp-result.selected { background-color: #384455; }
+.papercusp-result-kind { color: #9bbdff; font-size: 11px; }
+.papercusp-result-title { font-weight: bold; }
+.papercusp-result-subtitle { color: #bbc4d3; font-size: 12px; }
+.papercusp-detail { spacing: 10px; }

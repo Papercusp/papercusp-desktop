@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.papercusp-workbench" path="/org/gnome/shell/extensions/papercusp-workbench/">
+    <key name="enabled" type="b"><default>true</default><summary>Enable resident Workbench panels</summary></key>
+    <key name="pui-path" type="s"><default>'pui'</default><summary>Installed PUI executable</summary></key>
+    <key name="quick-access" type="as"><default>['&lt;Super&gt;&lt;Shift&gt;space']</default><summary>Quick Access shortcut</summary></key>
+    <key name="goals" type="as"><default>['&lt;Super&gt;&lt;Shift&gt;g']</default><summary>Goals shortcut</summary></key>
+    <key name="panel-width" type="i"><range min="360" max="1200"/><default>640</default><summary>Native panel width</summary></key>
+  </schema>
+</schemalist>

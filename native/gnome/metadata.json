@@ -1,0 +1,8 @@
+{
+  "uuid": "workbench@papercusp.ai",
+  "name": "Papercusp Workbench",
+  "description": "Resident native Workbench panels using the selected Papercusp operator.",
+  "shell-version": ["45", "46"],
+  "settings-schema": "org.gnome.shell.extensions.papercusp-workbench",
+  "session-modes": ["user"]
+}
