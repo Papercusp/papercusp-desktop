@@ -47,6 +47,16 @@
     },
     "resourceAllowlist": [
       {
+        "glob": "resources/workbench@papercusp.ai.shell-extension.zip",
+        "owner": "native-workbench",
+        "platforms": ["linux"]
+      },
+      {
+        "glob": "resources/workbench-install.js",
+        "owner": "native-workbench",
+        "platforms": ["linux"]
+      },
+      {
         "glob": "sidecar/spa/**/*",
         "owner": "shared-generated-ui",
         "platforms": [

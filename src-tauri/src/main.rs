@@ -58,6 +58,7 @@ mod fd_limit;
 mod localstorage_wal;
 mod native_console;
 mod native_terminal;
+mod native_workbench;
 mod pty;
 mod startup_policy;
 mod update_authorization;
@@ -10831,6 +10832,10 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
                 app.config().identifier
             );
             let is_dev = cfg!(debug_assertions);
+            #[cfg(target_os = "linux")]
+            if let (Ok(resources), Ok(data)) = (app.path().resource_dir(), app.path().data_dir()) {
+                native_workbench::prepare(resources, data);
+            }
 
             // Demo-pipeline version gate (demo-pipeline-version-gate-2026-07-13):
             // write THIS running app's real version to a well-known file so the

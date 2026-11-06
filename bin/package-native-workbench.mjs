@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Use GNOME's maintained archive/schema compiler rather than a second packer.
-import {mkdirSync, readFileSync} from 'node:fs';
+import {mkdirSync, readFileSync, copyFileSync} from 'node:fs';
 import {resolve, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
@@ -25,7 +25,17 @@ export function packageNativeWorkbench(outputDirectory, {
     return {archive, uuid: metadata.uuid, sha256};
 }
 
+// Both Linux products consume resources/*; the GUI's platform overlay names
+// these two files explicitly so it never acquires the Server's runtime payload.
+export function stageNativeWorkbench(desktopRoot = resolve(import.meta.dirname, '..')) {
+    const resources = join(desktopRoot, 'src-tauri/resources');
+    const bundle = packageNativeWorkbench(resources, {sourceDirectory: join(desktopRoot, 'native/gnome')});
+    copyFileSync(join(desktopRoot, 'native/linux/install-workbench.js'), join(resources, 'workbench-install.js'));
+    return bundle;
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-    try { console.log(JSON.stringify(packageNativeWorkbench(process.argv[2]))); }
+    try { console.log(JSON.stringify(process.argv[2] === '--stage-bundle'
+        ? stageNativeWorkbench(process.argv[3]) : packageNativeWorkbench(process.argv[2]))); }
     catch (error) { console.error(error.message); process.exitCode = 1; }
 }

@@ -1,0 +1,15 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "linux": {
+      "deb": {
+        "depends": ["gjs", "gir1.2-adw-1", "gir1.2-gtk-4.0"]
+      }
+    },
+    "resources": [
+      "sidecar/spa/**/*",
+      "resources/workbench@papercusp.ai.shell-extension.zip",
+      "resources/workbench-install.js"
+    ]
+  }
+}

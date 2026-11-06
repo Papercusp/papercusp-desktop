@@ -5,7 +5,7 @@ import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {spawn, spawnSync} from 'node:child_process';
 import test from 'node:test';
-import {packageNativeWorkbench} from '../bin/package-native-workbench.mjs';
+import {packageNativeWorkbench, stageNativeWorkbench} from '../bin/package-native-workbench.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 function checkScript(file) {
@@ -93,6 +93,72 @@ test('GNOME archive installs all runtime sources and preserves private preferenc
                         plane:'GNOME CLI archive and private install/upgrade; desktop distribution not verified'},null,2)+'\n');
             }
             console.log('GNOME_PACKAGE_UPGRADE_PASS '+JSON.stringify({uuid:bundle.uuid,sha256:bundle.sha256}));
+        } finally {rmSync(temp,{recursive:true,force:true});}
+    });
+
+test('bundled production installer preserves login, disabled and shortcut choices through upgrade and repair',
+    {skip:process.platform!=='linux',timeout:45000}, () => {
+        const temp=mkdtempSync(join(tmpdir(),'workbench-distribution-'));
+        try {
+            const desktop=join(temp,'desktop');
+            cpSync(join(root,'native'),join(desktop,'native'),{recursive:true});
+            const original=stageNativeWorkbench(desktop);
+            const installer=join(desktop,'src-tauri/resources/workbench-install.js');
+            assert.deepEqual(readFileSync(installer),readFileSync(join(root,'native/linux/install-workbench.js')));
+            const upgradedSource=join(temp,'upgraded');
+            cpSync(join(root,'native/gnome'),upgradedSource,{recursive:true});
+            writeFileSync(join(upgradedSource,'stylesheet.css'),readFileSync(join(upgradedSource,'stylesheet.css'),'utf8')+'\n/* upgrade fixture */\n');
+            const upgraded=packageNativeWorkbench(join(temp,'upgrade'),{sourceDirectory:upgradedSource});
+            const pui=fixturePui(temp),driver=join(temp,'install.mjs');
+            writeFileSync(driver,`import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
+import {installWorkbench} from ${JSON.stringify(pathToFileURL(installer).href)};
+const uuid='workbench@papercusp.ai',data=GLib.get_user_data_dir();
+const shell=new Gio.Settings({schema_id:'org.gnome.shell'});
+shell.set_strv('enabled-extensions',['unrelated@example.invalid']);
+shell.set_strv('disabled-extensions',[]);
+const options={reload:()=>{},pui:${JSON.stringify(pui)}};
+const first=installWorkbench(${JSON.stringify(original.archive)},{reload:()=>{}});
+const laterServer=installWorkbench(${JSON.stringify(original.archive)},options);
+const enabled=shell.get_strv('enabled-extensions');
+const dir=GLib.build_filenamev([data,'gnome-shell/extensions',uuid]);
+const source=Gio.SettingsSchemaSource.new_from_directory(dir+'/schemas',Gio.SettingsSchemaSource.get_default(),false);
+const prefs=new Gio.Settings({settings_schema:source.lookup('org.gnome.shell.extensions.papercusp-workbench',false)});
+const bundledPui=prefs.get_string('pui-path');
+prefs.set_strv('goals',['<Super><Alt>g']);prefs.set_string('pui-path','/custom/operator/pui');
+shell.set_strv('enabled-extensions',['unrelated@example.invalid']);
+const upgrade=installWorkbench(${JSON.stringify(upgraded.archive)},options);
+const preserved=shell.get_strv('enabled-extensions');
+const unchanged=installWorkbench(${JSON.stringify(upgraded.archive)},options);
+GLib.unlink(dir+'/schemas/gschemas.compiled');
+const repair=installWorkbench(${JSON.stringify(upgraded.archive)},options);
+Gio.Settings.sync();
+print(JSON.stringify({first,laterServer,enabled,bundledPui,upgrade,preserved,unchanged,repair,
+ goals:prefs.get_strv('goals'),pui:prefs.get_string('pui-path'),
+ compiled:GLib.file_test(dir+'/schemas/gschemas.compiled',GLib.FileTest.EXISTS)}));`);
+            checkScript(driver);
+            const result=spawnSync('gjs',['-m',driver],{encoding:'utf8',timeout:30000,env:{...process.env,
+                XDG_DATA_HOME:join(temp,'data'),XDG_CONFIG_HOME:join(temp,'config'),
+                XDG_CACHE_HOME:join(temp,'cache'),GSETTINGS_BACKEND:'keyfile',GIO_USE_VFS:'local'}});
+            assert.equal(result.status,0,result.stderr||String(result.error));
+            const evidence=JSON.parse(result.stdout.trim());
+            assert.equal(evidence.first.firstInstall,true);
+            assert.equal(evidence.laterServer.changed,false);
+            assert.deepEqual(evidence.enabled,['unrelated@example.invalid',original.uuid]);
+            assert.equal(evidence.bundledPui,pui);
+            assert.equal(evidence.upgrade.changed,true);
+            assert.deepEqual(evidence.preserved,['unrelated@example.invalid']);
+            assert.equal(evidence.unchanged.changed,false);
+            assert.equal(evidence.repair.changed,true);
+            assert.equal(evidence.compiled,true);
+            assert.deepEqual(evidence.goals,['<Super><Alt>g']);
+            assert.equal(evidence.pui,'/custom/operator/pui');
+            if(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR){
+                mkdirSync(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,{recursive:true});
+                writeFileSync(join(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,'gnome-distribution-install.json'),
+                    JSON.stringify({...evidence,plane:'production bundle staging and private XDG installation; no desktop login restart or final artifact'},null,2)+'\n');
+            }
+            console.log('GNOME_DISTRIBUTION_INSTALL_PASS '+JSON.stringify(evidence));
         } finally {rmSync(temp,{recursive:true,force:true});}
     });
 
@@ -219,6 +285,10 @@ export default class Probe extends Workbench {
   await waitFor(()=>qa.query==='needle'&&qa.sources.reports?.rows?.[0]?.title==='Report needle');
   check(this._views.get('quick-access').search.get_text()==='needle','seat typing reaches focused native search');
   phase='navigation';
+  // Each source completes independently. A report response alone does not
+  // establish the two-result population that this navigation case exercises.
+  await waitFor(()=>Object.values(qa.sources).every(source=>source.status==='ready')&&
+    qa.results().some(row=>row.kind==='goals'));
   await key(Clutter.KEY_Down);
   check(qa.selected()?.kind==='goals','seat arrow navigates results');
   await key(Clutter.KEY_Up);

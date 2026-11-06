@@ -294,6 +294,19 @@ fn main() {
         .expect("Cargo must provide CARGO_MANIFEST_DIR to build.rs");
     println!("cargo:rerun-if-env-changed=TAURI_CONFIG");
     println!("cargo:rerun-if-changed=tauri.conf.json");
+    println!("cargo:rerun-if-changed=tauri.linux.conf.json");
+    println!("cargo:rerun-if-changed=../native");
+    println!("cargo:rerun-if-changed=../bin/package-native-workbench.mjs");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        let output = std::process::Command::new("node")
+            .arg(manifest_dir.join("../bin/package-native-workbench.mjs"))
+            .arg("--stage-bundle")
+            .arg(manifest_dir.parent().expect("desktop root"))
+            .output()
+            .expect("Linux Workbench packaging requires Node and gnome-extensions");
+        assert!(output.status.success(), "Linux Workbench packaging failed: {}",
+            String::from_utf8_lossy(&output.stderr));
+    }
     println!("cargo:rerun-if-changed=sidecar/spa/internal/docs");
     reject_unpruned_spa_docs(&manifest_dir);
     ensure_sidecar_placeholder(&manifest_dir);

@@ -15,6 +15,26 @@ test('macOS bundles have an explicit code signing identity', () => {
   assert.equal(readConfig('tauri.conf.json').bundle.macOS.signingIdentity, '-');
 });
 
+test('Linux GUI and Server carry the same native Workbench without adding Server payloads to the GUI', () => {
+  const linux = readConfig('tauri.linux.conf.json');
+  assert.deepEqual(linux.bundle.resources, ['sidecar/spa/**/*',
+    'resources/workbench@papercusp.ai.shell-extension.zip', 'resources/workbench-install.js']);
+  assert(readConfig('tauri.server.conf.json').bundle.resources.includes('resources/*'));
+  for (const dependency of ['gjs', 'gir1.2-adw-1', 'gir1.2-gtk-4.0']) {
+    assert(linux.bundle.linux.deb.depends.includes(dependency));
+    assert(readConfig('tauri.server.conf.json').bundle.linux.deb.depends.includes(dependency));
+  }
+  const contract = readDistributionContract();
+  for (const glob of linux.bundle.resources.slice(1)) {
+    assert(contract.gui.resourceAllowlist.some(row => row.glob === glob && row.platforms.includes('linux')));
+  }
+  const build = readText('src-tauri', 'build.rs');
+  assert.match(build, /CARGO_CFG_TARGET_OS/);
+  assert.match(build, /package-native-workbench\.mjs/);
+  assert.match(build, /--stage-bundle/);
+  assert.match(readText('src-tauri', 'src', 'main.rs'), /native_workbench::prepare\(resources, data\)/);
+});
+
 test('Mac producer strips Swift debug paths before signing the vendored terminal shim', () => {
   const producer = fs.readFileSync(path.join(root, 'bin/mac-vm-build.sh'), 'utf8');
   const copiedAt = producer.indexOf('cp "$SHIM" src-tauri/resources/libPapercuspTermShim.dylib');
@@ -56,6 +76,9 @@ function buildDistributionDeb(role, { forbiddenGui = false, modelFragment = fals
     writeFixture(packageRoot, path.join(resourceRoot, 'sidecar/spa/index.html'), 'spa');
     const primary = writeFixture(packageRoot, path.join(resourceRoot, 'sidecar/spa/chunk.js'), 'shared-chunk');
     fs.linkSync(primary, path.join(packageRoot, resourceRoot, 'sidecar/spa/chunk-copy.js'));
+    writeFixture(packageRoot, path.join(resourceRoot, 'resources/workbench-install.js'), 'installer fixture');
+    writeFixture(packageRoot, path.join(resourceRoot, 'resources/workbench@papercusp.ai.shell-extension.zip'),
+      Buffer.from('UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==', 'base64'));
     if (forbiddenGui) writeFixture(packageRoot, path.join(resourceRoot, 'sidecar/serve.mjs'), 'server');
   } else {
     for (const required of contract.server.requiredResources) {
@@ -89,8 +112,10 @@ function buildDistributionAppImage({ forbiddenGui = false } = {}) {
 set -eu
 [ "\${1:-}" = "--appimage-extract" ]
 root="squashfs-root/${resourceRoot}"
-mkdir -p "$root/sidecar/spa"
+mkdir -p "$root/sidecar/spa" "$root/resources"
 printf spa > "$root/sidecar/spa/index.html"
+printf 'installer fixture' > "$root/resources/workbench-install.js"
+printf UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA== | base64 -d > "$root/resources/workbench@papercusp.ai.shell-extension.zip"
 head -c 4096 /dev/zero > "$root/sidecar/spa/chunk.js"
 ${forbiddenGui ? 'printf server > "$root/sidecar/serve.mjs"' : ''}
 `,
@@ -134,6 +159,8 @@ test('GUI/Server distribution contract is fail-closed and archive-aware', () => 
 
   const guiGlobs = contract.gui.resourceAllowlist.map(({ glob }) => glob);
   assert.deepEqual(guiGlobs, [
+    'resources/workbench@papercusp.ai.shell-extension.zip',
+    'resources/workbench-install.js',
     'sidecar/spa/**/*',
     'resources/libPapercuspTermShim.dylib',
   ]);
@@ -431,7 +458,7 @@ test('Tauri seed bundle is server-only, not duplicated into the GUI bundle', () 
   );
   assert.deepEqual(
     guiMac.bundle.resources,
-    contract.gui.resourceAllowlist.map(({ glob }) => glob),
+    contract.gui.resourceAllowlist.filter(row => row.platforms.includes('macos')).map(({ glob }) => glob),
     'the macOS GUI overlay may add only the reviewed native terminal shim',
   );
   assert(!baseResources.some((resource) => resource.includes('seed')), 'GUI/base resources must not include the multi-GB seed');
