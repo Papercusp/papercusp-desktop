@@ -69,6 +69,7 @@ namespace Papercusp.Workbench
             messages = new HwndSource(args); messages.AddHook(Message);
             panels.Add("quick-access", new NativePanel(pui, "Quick Access", "all", Relayout));
             panels.Add("goals", new NativePanel(pui, "Goals", "goals", Relayout));
+            panels.Add("accounts", new NativePanel(pui, "Accounts", "accounts", Relayout));
         }
         public Window Panel(string name) { return panels[name]; }
         public PanelState State(string name) { return panels[name].State; }
@@ -85,7 +86,7 @@ namespace Papercusp.Workbench
         }
         private void Relayout()
         {
-            var visible = new[] { "quick-access", "goals" }.Where(name => panels[name].State.Visible).ToArray();
+            var visible = new[] { "quick-access", "goals", "accounts" }.Where(name => panels[name].State.Visible).ToArray();
             for (var i = 0; i < visible.Length; ++i)
                 panels[visible[i]].Position(PanelBounds(SystemParameters.WorkArea, visible.Length, i));
         }
@@ -177,6 +178,9 @@ namespace Papercusp.Workbench
             private readonly ListBox results;
             private readonly Button more;
             private readonly Button resume;
+            private readonly AccountState accounts;
+            private readonly List<Button> accountControls = new List<Button>();
+            private readonly TextBlock accountScope, accountSummary;
             private readonly Action relayout;
             private readonly DispatcherTimer debounce;
             private CancellationTokenSource refresh, detailRead;
@@ -212,7 +216,24 @@ namespace Papercusp.Workbench
                     filter.SelectionChanged += (s, e) => { State.Scope = (string)filter.SelectedItem; Schedule(); };
                 }
                 status = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 8) };
+                AutomationProperties.SetName(status, "Workbench status");
                 controls.Children.Add(status);
+                if (scope == "accounts")
+                {
+                    accounts = new AccountState();
+                    accountScope = new TextBlock { TextWrapping = TextWrapping.Wrap };
+                    AutomationProperties.SetName(accountScope, "Account environment"); controls.Children.Add(accountScope);
+                    accountSummary = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 8) };
+                    AutomationProperties.SetName(accountSummary, "Account steering"); controls.Children.Add(accountSummary);
+                    var actions = new WrapPanel(); controls.Children.Add(actions);
+                    foreach (var action in new[] { "default", "force", "exclude", "auto" })
+                    {
+                        var value = action;
+                        var button = new Button { Content = Char.ToUpper(action[0]) + action.Substring(1), Margin = new Thickness(4), Tag = action };
+                        AutomationProperties.SetName(button, "Account " + action);
+                        button.Click += (s, e) => ApplyAccount(value); actions.Children.Add(button); accountControls.Add(button);
+                    }
+                }
                 more = new Button { Content = "Show more results", Visibility = Visibility.Collapsed };
                 more.Click += (s, e) => { State.ResultLimit += 26; Render(); };
                 DockPanel.SetDock(more, Dock.Bottom); layout.Children.Add(more);
@@ -229,6 +250,7 @@ namespace Papercusp.Workbench
                     if (row != null) State.Selection = row.Key;
                     resume.Visibility = row != null && row.Kind == "agents" && PanelState.Text(row.Row, "sessionState") == "ended" ?
                         Visibility.Visible : Visibility.Collapsed;
+                    if (accounts != null) UpdateAccountControls();
                 };
                 results.MouseDoubleClick += (s, e) => OpenSelected();
                 detail = new TextBox { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
@@ -276,18 +298,21 @@ namespace Papercusp.Workbench
             internal void Dismiss(bool restore)
             {
                 State.Visible = false; debounce.Stop();
+                if (accounts != null) { ++accounts.Generation; accounts.Busy = false; }
                 if (refresh != null) { refresh.Cancel(); refresh.Dispose(); refresh = null; }
                 ++State.Generation; CancelDetail();
                 var ownedFocus = IsActive; Hide();
                 relayout();
                 if (restore && ownedFocus && IsWindow(priorWindow)) SetForegroundWindow(priorWindow);
             }
-            private void Schedule() { if (ready && State.Visible) { debounce.Stop(); debounce.Start(); } }
+            private void Schedule()
+            { if (ready && State.Visible) { if (accounts != null) RenderAccounts(); else { debounce.Stop(); debounce.Start(); } } }
             private async void Refresh()
             {
                 if (!State.Visible) return;
                 if (refresh != null) { refresh.Cancel(); refresh.Dispose(); }
                 refresh = new CancellationTokenSource();
+                if (accounts != null) { await RefreshAccounts(refresh.Token); return; }
                 var token = refresh.Token; var generation = State.BeginRefresh();
                 Render();
                 var tasks = State.Sources.Keys.ToArray().Select(async kind =>
@@ -305,6 +330,7 @@ namespace Papercusp.Workbench
             private void Render()
             {
                 if (shuttingDown) return;
+                if (accounts != null) { RenderAccounts(); return; }
                 status.Text = String.Join("\n", PanelState.Kinds.Where(k => State.Sources.ContainsKey(k)).Select(k =>
                 {
                     var source = State.Sources[k];
@@ -329,6 +355,7 @@ namespace Papercusp.Workbench
             }
             private async void OpenSelected()
             {
+                if (accounts != null) return;
                 var row = results.SelectedItem as PanelResult;
                 if (row == null) return;
                 CancelDetail(); var generation = State.DetailGeneration;
@@ -357,6 +384,63 @@ namespace Papercusp.Workbench
                     State.Detail = "Unavailable · " + error.Message;
                 }
                 Render();
+            }
+            private async Task RefreshAccounts(CancellationToken token)
+            {
+                var generation = accounts.Begin(); RenderAccounts();
+                Dictionary<string, object> environment = null, pool = null, steering = null; Exception failure = null;
+                try
+                {
+                    environment = AccountState.One(await PuiReadBridge.ReadAsync(pui, "operator.identity", null, token));
+                    var workspace = PanelState.Text(environment, "workspaceId");
+                    var poolRead = PuiReadBridge.ReadAsync(pui, "accounts.pool", new Dictionary<string, object> { { "workspace", workspace } }, token, 22000, environment);
+                    var overrideRead = PuiReadBridge.ReadAsync(pui, "accounts.sessionOverride", new Dictionary<string, object> { { "workspaceId", workspace } }, token, 22000, environment);
+                    await Task.WhenAll(poolRead, overrideRead); pool = poolRead.Result; steering = overrideRead.Result;
+                }
+                catch (Exception error) { failure = error; }
+                if (!token.IsCancellationRequested && State.Visible && accounts.Settle(generation, environment, pool, steering, failure)) RenderAccounts();
+            }
+            private void UpdateAccountControls()
+            {
+                var row = results.SelectedItem as PanelResult;
+                foreach (var button in accountControls)
+                    button.IsEnabled = accounts.Ready && !accounts.Busy && ((string)button.Tag == "auto" || row != null);
+            }
+            private void RenderAccounts()
+            {
+                status.Text = accounts.Busy ? "Checking account state…" : accounts.Error == null ?
+                    (accounts.Accounts.Count == 0 ? "No accounts" : accounts.Accounts.Count + " accounts") : "Unavailable · " + accounts.Error;
+                accountScope.Text = accounts.Environment == null ? "Environment unavailable" :
+                    PanelState.Text(accounts.Environment, "endpoint") + "\nWorkspace: " + PanelState.Text(accounts.Environment, "workspaceId");
+                accountSummary.Text = accounts.Override == null ? "Steering unavailable" :
+                    "Default: " + (PanelState.Text(accounts.Override, "defaultAccountId") == "" ? "This machine's login" : PanelState.Text(accounts.Override, "defaultAccountId")) +
+                    "\nForce: " + String.Join(", ", ((System.Collections.IList)accounts.Override["forcedAccounts"]).Cast<object>()) +
+                    "\nExclude: " + String.Join(", ", ((System.Collections.IList)accounts.Override["excludeAccounts"]).Cast<object>()) +
+                    "\nAuto clears Force and Exclude; it preserves Default.";
+                var query = State.Query.Trim();
+                var rows = accounts.Accounts.Where(row => (PanelState.Text(row, "id") + " " + PanelState.Text(row, "label") + " " + PanelState.Text(row, "provider")).IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)
+                    .Select(row => new PanelResult { Kind = "accounts", Key = PanelState.Text(row, "id"), Row = row,
+                        Title = (PanelState.Text(row, "label") == "" ? PanelState.Text(row, "id") : PanelState.Text(row, "label")) + " (" + PanelState.Text(row, "id") + ")",
+                        Subtitle = PanelState.Text(row, "provider") + " · " + (PanelState.Text(row, "available") == "True" ? "Available" : "Unavailable") +
+                            (accounts.Contains("forcedAccounts", PanelState.Text(row, "id")) ? " · Forced" : "") +
+                            (accounts.Contains("excludeAccounts", PanelState.Text(row, "id")) ? " · Excluded" : "") }).ToList();
+                var selected = State.Selection; results.ItemsSource = rows;
+                results.SelectedItem = rows.FirstOrDefault(row => row.Key == selected) ?? rows.FirstOrDefault();
+                UpdateAccountControls();
+            }
+            private async void ApplyAccount(string action)
+            {
+                if (!accounts.Ready || accounts.Busy) return;
+                var row = results.SelectedItem as PanelResult;
+                if (action != "auto" && row == null) return;
+                var environment = accounts.Environment; var generation = ++accounts.Generation;
+                if (refresh != null) { refresh.Cancel(); refresh.Dispose(); }
+                refresh = new CancellationTokenSource(); var token = refresh.Token;
+                accounts.Busy = true; RenderAccounts();
+                Dictionary<string, object> payload = null; Exception failure = null;
+                try { payload = await PuiReadBridge.AccountAsync(pui, environment, action, action == "auto" ? null : row.Key, token); }
+                catch (Exception error) { failure = error; }
+                if (!token.IsCancellationRequested && State.Visible && accounts.Applied(generation, environment, payload, failure)) RenderAccounts();
             }
             private async void ActivateAgent(PanelResult selected, bool resumeSession)
             {

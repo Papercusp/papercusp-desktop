@@ -22,7 +22,7 @@ function Test-WorkbenchSettings {
         throw 'Select an installed PUI executable'
     }
     $seen = @{}
-    foreach ($name in @('quick-access', 'goals')) {
+    foreach ($name in @('quick-access', 'goals', 'accounts')) {
         $binding = $Settings.bindings.$name
         if ($binding.enabled -isnot [bool]) { throw 'Invalid panel enabled value' }
         # Validate disabled bindings too, so re-enabling cannot resurrect an
@@ -40,6 +40,21 @@ function Test-WorkbenchSettings {
     }
 }
 
+function Complete-WorkbenchSettings {
+    param($Settings)
+    # Add the new panel to existing per-account settings without resetting any
+    # shortcut or disable choice. Choose a free accelerator if A is already used.
+    if ($null -eq $Settings.bindings.PSObject.Properties['accounts']) {
+        $used = @($Settings.bindings.PSObject.Properties | Where-Object { $_.Value.enabled } |
+            ForEach-Object { [string]$_.Value.modifiers + ':' + [string]$_.Value.key })
+        $key = @(65..90 | Where-Object { ('3:' + $_) -notin $used })[0]
+        if ($null -eq $key) { throw 'No free default Accounts shortcut; configure existing shortcuts first' }
+        $Settings.bindings | Add-Member -NotePropertyName accounts -NotePropertyValue (
+            [pscustomobject]@{ enabled = $true; modifiers = 3; key = [int]$key })
+    }
+    return $Settings
+}
+
 function Read-WorkbenchSettings {
     param($Context, [string]$Pui)
     if ([IO.File]::Exists($Context.File)) {
@@ -49,6 +64,7 @@ function Read-WorkbenchSettings {
             'quick-access' = [pscustomobject]@{ enabled = $true; modifiers = 3; key = 32 };
             goals = [pscustomobject]@{ enabled = $true; modifiers = 3; key = 71 } } }
     }
+    $settings = Complete-WorkbenchSettings $settings
     Test-WorkbenchSettings $settings
     return $settings
 }
@@ -76,7 +92,7 @@ function Save-WorkbenchSettings {
     try {
         $previous = if ([IO.File]::Exists($Context.File)) { [IO.File]::ReadAllText($Context.File) } else { $null }
         if ($PreserveExisting -and $null -ne $previous) {
-            $Settings = $previous | ConvertFrom-Json
+            $Settings = Complete-WorkbenchSettings ($previous | ConvertFrom-Json)
             Test-WorkbenchSettings $Settings
         }
         [IO.File]::WriteAllText($temporary, ($Settings | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))

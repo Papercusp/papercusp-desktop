@@ -30,6 +30,17 @@ try {
     [void](New-Item -Path $context.RunKey -Force)
     [void](New-ItemProperty -Path $context.RunKey -Name 'Unrelated login application' -Value 'keep this command' -PropertyType String)
     Check ($settings.enabled -and $settings.bindings.'quick-access'.key -eq 32 -and $settings.bindings.goals.key -eq 71) 'first install enables native panels with distinct default shortcuts'
+    Check ($settings.bindings.accounts.enabled -and $settings.bindings.accounts.modifiers -eq 3 -and $settings.bindings.accounts.key -eq 65) 'first install enables the Accounts shortcut'
+    [void](Save-WorkbenchSettings $context $settings $script)
+    $legacy = $settings | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $legacy.bindings.PSObject.Properties.Remove('accounts')
+    $legacy.enabled = $false; $legacy.bindings.'quick-access'.key = 65; $legacy.bindings.goals.enabled = $false
+    [IO.File]::WriteAllText($context.File, ($legacy | ConvertTo-Json -Depth 8))
+    $migrated = Read-WorkbenchSettings $context $pui
+    Check (-not $migrated.enabled -and -not $migrated.bindings.goals.enabled -and $migrated.bindings.'quick-access'.key -eq 65) 'adding Accounts preserves legacy disable and shortcut choices'
+    Check ($migrated.bindings.accounts.enabled -and $migrated.bindings.accounts.key -eq 66) 'Accounts migration avoids an existing shortcut collision'
+    [void](Save-WorkbenchSettings $context $settings $script -PreserveExisting)
+    Check ((Read-WorkbenchSettings $context $pui).bindings.accounts.key -eq 66) 'preserve-existing installer persists the missing Accounts binding'
     [void](Save-WorkbenchSettings $context $settings $script)
     $command = Login $context
     Check ($command -eq (Get-WorkbenchLoginCommand $script)) 'login registration uses the exact installed controller and fixed argv'
