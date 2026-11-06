@@ -105,7 +105,12 @@ WizardStyle=modern
 Source: "{#BuildRoot}\target\release\papercusp-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; The resident panels are native WPF source, shared by both roles. The GUI
 ; connects through the installed Server's PUI instead of carrying a runtime.
-Source: "{#BuildRoot}\resources\workbench-windows\*"; DestDir: "{app}\resources\workbench-windows"; Flags: ignoreversion
+; Explicit files make ISCC reject an incomplete staging directory.
+Source: "{#BuildRoot}\resources\workbench-windows\PuiReadBridge.cs"; DestDir: "{app}\resources\workbench-windows"; Flags: ignoreversion
+Source: "{#BuildRoot}\resources\workbench-windows\WorkbenchModel.cs"; DestDir: "{app}\resources\workbench-windows"; Flags: ignoreversion
+Source: "{#BuildRoot}\resources\workbench-windows\WorkbenchHost.cs"; DestDir: "{app}\resources\workbench-windows"; Flags: ignoreversion
+Source: "{#BuildRoot}\resources\workbench-windows\WorkbenchLifecycle.psm1"; DestDir: "{app}\resources\workbench-windows"; Flags: ignoreversion
+Source: "{#BuildRoot}\resources\workbench-windows\workbench.ps1"; DestDir: "{app}\resources\workbench-windows"; Flags: ignoreversion
 #if AppId == "com.papercusp.gui"
 ; D-004 / P-007: fail-closed thin GUI. The shell carries the shared bootstrap
 ; SPA and no Server/runtime sibling. Do not widen this to sidecar\* or resources\*.
