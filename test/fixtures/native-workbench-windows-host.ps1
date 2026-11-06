@@ -1,7 +1,68 @@
-param([Parameter(Mandatory=$true)][string]$SourceDirectory)
+param(
+    [Parameter(Mandatory=$true)][string]$SourceDirectory,
+    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows')][string]$Phase = 'all',
+    [switch]$Interactive
+)
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') { throw 'Native WPF fixture requires -STA' }
+foreach ($source in @('PuiReadBridge.cs', 'WorkbenchModel.cs', 'WorkbenchHost.cs')) {
+    if (-not [IO.File]::Exists((Join-Path $SourceDirectory $source))) { throw "Missing native fixture source: $source" }
+}
+if ($Interactive) {
+    # Reuse vm-smoke-windows.sh's owned InteractiveToken task pattern. SSH is
+    # only the control transport; global shortcuts must run on the user desktop.
+    $name = 'Papercusp-WorkbenchFixture-' + [Guid]::NewGuid().ToString('N')
+    $directory = Join-Path $env:TEMP $name
+    [IO.Directory]::CreateDirectory($directory) | Out-Null
+    $receipt = Join-Path $directory 'exit.json'
+    $stdout = Join-Path $directory 'stdout.txt'
+    $stderr = Join-Path $directory 'stderr.txt'
+    $fixtureCommand = "$" + "ProgressPreference='SilentlyContinue'; & '" + $PSCommandPath.Replace("'", "''") + "' -SourceDirectory '" +
+        $SourceDirectory.Replace("'", "''") + "' -Phase '" + $Phase + "'"
+    $encodedFixture = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($fixtureCommand))
+    $runner = @'
+param($EncodedFixture, $OutputDirectory)
+$ErrorActionPreference = 'Stop'
+try {
+    $child = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @(
+        '-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $EncodedFixture
+    ) -WindowStyle Hidden -RedirectStandardOutput (Join-Path $OutputDirectory 'stdout.txt') -RedirectStandardError (Join-Path $OutputDirectory 'stderr.txt') -Wait -PassThru
+    $result = @{ exitCode = $child.ExitCode; sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId }
+} catch { $result = @{ exitCode = 1; error = $_.Exception.ToString() } }
+$target = Join-Path $OutputDirectory 'exit.json'
+[IO.File]::WriteAllText(($target + '.tmp'), ($result | ConvertTo-Json -Compress))
+Move-Item -LiteralPath ($target + '.tmp') -Destination $target
+'@
+    try {
+        $runnerPath = Join-Path $directory 'run.ps1'
+        [IO.File]::WriteAllText($runnerPath, $runner)
+        $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument (
+            '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -EncodedFixture {1} -OutputDirectory "{2}"' -f $runnerPath, $encodedFixture, $directory)
+        $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
+        Register-ScheduledTask -TaskName $name -Action $action -Principal $principal | Out-Null
+        Start-ScheduledTask -TaskName $name
+        $deadline = [DateTime]::UtcNow.AddSeconds(35)
+        while (-not [IO.File]::Exists($receipt) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+        if (-not [IO.File]::Exists($receipt)) { throw 'Interactive fixture produced no terminal receipt; verify the signed-in user desktop' }
+        $result = [IO.File]::ReadAllText($receipt) | ConvertFrom-Json
+        if ([IO.File]::Exists($stderr)) { [Console]::Error.Write([IO.File]::ReadAllText($stderr)) }
+        if ($result.PSObject.Properties['error']) { throw $result.error }
+        if ($result.exitCode -ne 0) { throw "Interactive fixture exited $($result.exitCode)" }
+        if ($result.sessionId -le 0) { throw 'Interactive fixture ran in service Session 0' }
+        [Console]::Write([IO.File]::ReadAllText($stdout))
+    } finally {
+        $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        if ($task) {
+            if ($task.State -eq 'Running') { Stop-ScheduledTask -TaskName $name }
+            Unregister-ScheduledTask -TaskName $name -Confirm:$false
+        }
+        Remove-Item -LiteralPath $directory -Recurse -Force
+    }
+    return
+}
+[Console]::Error.WriteLine("PHASE compile: loading the production WPF source and full assembly references")
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml, System.Web.Extensions
 $references = @('System.dll','System.Core.dll','System.Xaml.dll','System.Web.Extensions.dll',
     [Windows.Window].Assembly.Location, [Windows.Media.Brushes].Assembly.Location,
@@ -36,7 +97,7 @@ public static class WorkbenchNativeHostFixture
         timer.Tick += (s, e) => { timer.Stop(); frame.Continue = false; };
         timer.Start(); Dispatcher.PushFrame(frame);
     }
-    public static string Run()
+    private static void Model()
     {
         var state = new PanelState(); var g = state.BeginRefresh();
         state.Settle("plans", g, Json("{\"rows\":[{\"harness\":\"one\",\"slug\":\"same\",\"title\":\"Shared title\"},{\"harness\":\"two\",\"slug\":\"same\",\"title\":\"Shared title\"}],\"version\":\"canonical\"}"), null);
@@ -64,10 +125,14 @@ public static class WorkbenchNativeHostFixture
         Check(state.Escape() == "detail" && state.Visible && state.Escape() == "panel" && !state.Visible, "Escape closes detail before panel");
         var plan = PanelState.Result("plans", Json("{\"harness\":\"selected\",\"slug\":\"literal +/=\"}"));
         Check(PanelState.DetailArgs(plan)["harness"].Equals("selected") && PanelState.DetailArgs(plan)["slug"].Equals("literal +/="), "detail routes exact harness and literal identity");
+    }
+    private static void Native(bool windows)
+    {
         using (var host = new WorkbenchHost("C:\\nonexistent-workbench-fixture-pui.exe"))
         using (var collision = new WorkbenchHost("C:\\nonexistent-workbench-fixture-pui.exe"))
         {
-            var keys = new Dictionary<string, Hotkey> { { "quick-access", new Hotkey(7, 0x7A) }, { "goals", new Hotkey(7, 0x7B) } };
+            var keys = new Dictionary<string, Hotkey> { { "quick-access", new Hotkey(7, 0x79) }, { "goals", new Hotkey(7, 0x7A) } };
+            Console.Error.WriteLine("STAGE initial shortcut registration");
             host.Configure(keys);
             var refused = false;
             try { collision.Configure(keys); } catch (InvalidOperationException) { refused = true; }
@@ -76,6 +141,22 @@ public static class WorkbenchNativeHostFixture
             try { host.Configure(new Dictionary<string, Hotkey> { { "quick-access", new Hotkey(7, 0x7A) }, { "goals", new Hotkey(7, 0x7A) } }); }
             catch (ArgumentException) { duplicate = true; }
             Check(duplicate && host.BindingCount == 2, "duplicate shortcut edit preserves both prior bindings");
+            var reserved = false;
+            try { host.Configure(new Dictionary<string, Hotkey> { { "quick-access", new Hotkey(7, 0x7B) } }); }
+            catch (ArgumentException) { reserved = true; }
+            Check(reserved && host.BindingCount == 2, "reserved F12 is rejected before replacing live shortcuts");
+            refused = false;
+            try { collision.Configure(new Dictionary<string, Hotkey> {
+                { "quick-access", new Hotkey(7, 0x78) }, { "goals", keys["quick-access"] } }); }
+            catch (InvalidOperationException) { refused = true; }
+            using (var probe = new WorkbenchHost("C:\\nonexistent-workbench-fixture-pui.exe"))
+            {
+                probe.Configure(new Dictionary<string, Hotkey> { { "quick-access", new Hotkey(7, 0x78) } });
+                Check(refused && collision.BindingCount == 0 && host.BindingCount == 2 && probe.BindingCount == 1,
+                    "failed multi-shortcut edit releases newly acquired keys and retains prior owner");
+            }
+            if (windows)
+            {
             host.Toggle("quick-access"); Pump();
             var panel = host.Panel("quick-access"); var hwnd = new WindowInteropHelper(panel).Handle;
             Check(panel.IsVisible && panel.WindowStyle == WindowStyle.None && !panel.ShowInTaskbar &&
@@ -87,14 +168,37 @@ public static class WorkbenchNativeHostFixture
             Check(host.Panel("quick-access") == panel && host.State("quick-access").Query == "draft", "shortcut toggle retains resident window and query");
             host.State("quick-access").Pinned = true; host.Toggle("goals"); Pump();
             Check(host.State("quick-access").Visible && host.State("goals").Visible, "independent pin permits both surfaces");
+            }
+            Console.Error.WriteLine("STAGE swap shortcut registration");
             host.Configure(new Dictionary<string, Hotkey> { { "goals", keys["quick-access"] }, { "quick-access", keys["goals"] } });
             Check(host.BindingCount == 2, "atomic shortcut swap reuses native registrations");
             host.Configure(new Dictionary<string, Hotkey>());
+            Console.Error.WriteLine("STAGE registration after disable");
             collision.Configure(keys);
             Check(host.BindingCount == 0 && collision.BindingCount == 2, "disable releases shortcuts for another native owner");
         }
-        return new JavaScriptSerializer().Serialize(new { ok = true, platform = "windows", cases = cases.ToArray(), count = cases.Count,
-            processSessionId = System.Diagnostics.Process.GetCurrentProcess().SessionId, scope = "native-model-and-WPF-HWND-fixture" });
+    }
+    public static string Run(string phase)
+    {
+        cases.Clear();
+        if (phase == "preflight")
+        {
+            if (!WorkbenchHost.HasInteractiveDesktop)
+            {
+                var refused = false;
+                try { using (var host = new WorkbenchHost("C:\\nonexistent-workbench-fixture-pui.exe")) {} }
+                catch (InvalidOperationException error) { refused = error.Message.Contains("interactive Windows desktop"); }
+                Check(refused, "service station is refused before creating windows or acquiring shortcuts");
+            }
+            else Check(WorkbenchHost.HasInteractiveDesktop, "visible user desktop satisfies native host precondition");
+        }
+        if (phase == "all" || phase == "model") { Console.Error.WriteLine("PHASE model"); Model(); }
+        if (phase == "all" || phase == "hotkeys" || phase == "windows")
+        { Console.Error.WriteLine("PHASE " + (phase == "all" ? "windows" : phase)); Native(phase != "hotkeys"); }
+        return new JavaScriptSerializer().Serialize(new { ok = true, platform = "windows", phase = phase, cases = cases.ToArray(), count = cases.Count,
+            processSessionId = System.Diagnostics.Process.GetCurrentProcess().SessionId,
+            interactiveDesktop = WorkbenchHost.HasInteractiveDesktop,
+            scope = phase == "all" ? "native-model-and-WPF-HWND-fixture" : "native-" + phase + "-fixture" });
     }
 }
 '@
@@ -104,5 +208,5 @@ try {
     Add-Type -Path @((Join-Path $SourceDirectory 'PuiReadBridge.cs'),
         (Join-Path $SourceDirectory 'WorkbenchModel.cs'), (Join-Path $SourceDirectory 'WorkbenchHost.cs'), $fixtureFile) -ReferencedAssemblies $references
 } finally { if (Test-Path -LiteralPath $fixtureFile) { Remove-Item -LiteralPath $fixtureFile -Force } }
-try { [WorkbenchNativeHostFixture]::Run() }
+try { [WorkbenchNativeHostFixture]::Run($Phase) }
 catch { [Console]::Error.WriteLine($_.Exception.ToString()); throw }
