@@ -3,6 +3,12 @@
 export const SOURCES = Object.freeze({ plans: 'plans.list', agents: 'advRoster.list',
     reports: 'reports.list', goals: 'goals.list' });
 
+export function sourceRequests(query = '', scope = 'all') {
+    return Object.entries(SOURCES).filter(([kind]) => scope === 'all' || kind === scope)
+        .map(([kind, name]) => ({kind, name, args: kind === 'reports' ? {query, limit: 200} :
+            kind === 'goals' ? {query, limit: 500} : {}}));
+}
+
 export function readRows(payload) {
     if (!payload || payload.ok === false || payload.error || !Array.isArray(payload.rows))
         throw new Error(payload?.error || 'The operator returned no row envelope');
@@ -85,7 +91,7 @@ export function detailRequest(result) {
 export class PanelState {
     constructor() {
         Object.assign(this, { visible: false, pinned: false, query: '', scope: 'all',
-            selection: null, detail: null, sources: {}, generation: 0 });
+            selection: null, detail: null, sources: {}, generation: 0, detailGeneration: 0 });
     }
     toggle() { this.visible = !this.visible; return this.visible; }
     outsideFocus() { if (!this.pinned) this.visible = false; }
@@ -93,9 +99,9 @@ export class PanelState {
         if (this.detail) { this.detail = null; return 'detail'; }
         this.visible = false; return 'panel';
     }
-    beginRefresh() {
+    beginRefresh(kinds = Object.keys(SOURCES)) {
         ++this.generation;
-        this.sources = Object.fromEntries(Object.keys(SOURCES).map(kind => [kind, { status: 'loading' }]));
+        this.sources = Object.fromEntries(kinds.map(kind => [kind, { status: 'loading' }]));
         return this.generation;
     }
     settle(kind, generation, payload, error = null) {

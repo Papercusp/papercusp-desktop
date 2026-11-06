@@ -5,7 +5,7 @@ import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import test from 'node:test';
-import {PanelState, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts}
+import {PanelState, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests}
     from '../native/gnome/panel-model.mjs';
 
 const root = resolve(import.meta.dirname, '..');
@@ -34,6 +34,22 @@ test('each canonical source has reserved result capacity including Work on every
     assert.deepEqual(Object.groupBy(searchResults(sources), x=>x.kind).plans.length, 26);
     assert.deepEqual(new Set(searchResults(sources).map(x=>x.kind)), new Set(['plans','agents','reports','goals']));
     assert.equal(searchResults(sources,'work-on-everything')[0].row.id, 'goal-exact');
+});
+
+test('server search follows the query and scoped refreshes never request unrelated sources', () => {
+    const query = 'exact %_ +/= renamed goal';
+    assert.deepEqual(sourceRequests(query, 'goals'),
+        [{kind:'goals',name:'goals.list',args:{query,limit:500}}]);
+    assert.deepEqual(sourceRequests(query, 'reports'),
+        [{kind:'reports',name:'reports.list',args:{query,limit:200}}]);
+    assert.equal(sourceRequests(query).length,4);
+    const state = new PanelState();
+    const old = state.beginRefresh();
+    const generation = state.beginRefresh(['goals']);
+    assert.equal(state.settle('plans',old,envelope([plan()])),false);
+    assert.deepEqual(Object.keys(state.sources),['goals']);
+    state.settle('goals',generation,envelope([{goals:[],totalGoals:0}]));
+    assert.equal(state.sources.goals.status,'ready');
 });
 
 test('canonical aggregate rows distinguish a real empty portfolio from unavailable or malformed data', () => {
