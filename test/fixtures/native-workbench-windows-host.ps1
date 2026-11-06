@@ -90,6 +90,68 @@ public static class WorkbenchNativeHostFixture
         if (!ok) throw new Exception(name);
         cases.Add(name); Console.Error.WriteLine("PASS " + name);
     }
+    private static void Refuses(Action action, string name)
+    {
+        var refused = false;
+        try { action(); } catch (InvalidOperationException) { refused = true; }
+        Check(refused, name);
+    }
+    private static Dictionary<string, object> Roster(params PanelResult[] rows)
+    {
+        return new Dictionary<string, object> { { "rows", new object[] {
+            new Dictionary<string, object> { { "active", rows.Select(row => row.Row).ToArray() },
+                { "ended", new object[0] }, { "pending", new object[0] }, { "starting", new object[0] } } } } };
+    }
+    private static PanelResult Agent(string json) { return PanelState.Result("agents", Json(json)); }
+    private static void Agents()
+    {
+        var live = Agent("{\"advSessionId\":41,\"ownerId\":\"owner\",\"host\":\"desktop\",\"sessionState\":\"live\",\"windowId\":\"0x10\"}");
+        var current = PanelState.AgentTarget(Roster(live), live, "DESKTOP", false);
+        Check(current.Key == live.Key, "focus revalidates exact owner session host and recorded window");
+        var changed = Agent("{\"advSessionId\":42,\"ownerId\":\"owner\",\"host\":\"desktop\",\"sessionState\":\"live\"}");
+        Refuses(() => PanelState.AgentTarget(Roster(changed), live, "desktop", false), "same owner with a different session cannot steal focus");
+        Refuses(() => PanelState.AgentTarget(Roster(live), live, "another-host", false), "operator locality cannot authorize a remote desktop focus");
+        changed = Agent("{\"advSessionId\":41,\"ownerId\":\"another-owner\",\"host\":\"desktop\",\"sessionState\":\"live\",\"windowId\":\"0x10\"}");
+        Refuses(() => PanelState.AgentTarget(Roster(changed), live, "desktop", false), "recycled session identity with another owner is refused");
+        Refuses(() => PanelState.AgentTarget(Roster(live, live), live, "desktop", false), "ambiguous canonical session rows are refused");
+        Refuses(() => PanelState.AgentTarget(Roster(live), live, "desktop", true), "live session cannot be resumed");
+        var ended = Agent("{\"advSessionId\":41,\"ownerId\":\"owner\",\"host\":\"remote-host\",\"sessionState\":\"ended\"}");
+        var resume = PanelState.AgentTarget(Roster(ended), ended, "desktop", true);
+        Check(PanelState.ResumeArguments(resume).SequenceEqual(new[] { "workbench", "resume", "41", "remote-host", "owner" }),
+            "ended remote resume uses canonical PUI command and exact saved identity");
+        Refuses(() => PanelState.AgentTarget(Roster(ended), live, "desktop", true), "changed recorded host cannot authorize resume");
+        changed = Agent("{\"advSessionId\":42,\"ownerId\":\"owner\",\"host\":\"remote-host\",\"sessionState\":\"parked\"}");
+        Refuses(() => PanelState.AgentTarget(Roster(ended, changed), ended, "desktop", true), "another live session for the owner blocks ended resume");
+        var partial = Roster(live); partial["partial"] = true;
+        Refuses(() => PanelState.AgentTarget(partial, live, "desktop", false), "partial roster cannot authorize a terminal action");
+        var anonymous = Agent("{\"ownerId\":\"owner\",\"host\":\"desktop\",\"sessionState\":\"live\"}");
+        Refuses(() => PanelState.AgentTarget(Roster(anonymous), anonymous, "desktop", false), "agent label without exact session or window cannot authorize focus");
+        var windows = new Dictionary<IntPtr, string> { { new IntPtr(16), "Terminal [adv:41]" }, { new IntPtr(17), "Terminal [adv:42]" } };
+        Check(PanelState.ExactAgentWindow(current, windows) == new IntPtr(16), "recorded hexadecimal HWND selects the exact terminal");
+        windows[new IntPtr(16)] = "Terminal [adv:42]";
+        Refuses(() => PanelState.ExactAgentWindow(current, windows), "recycled HWND with conflicting session marker is refused");
+        windows.Remove(new IntPtr(16)); windows[new IntPtr(17)] = "Terminal [adv:41]";
+        Refuses(() => PanelState.ExactAgentWindow(current, windows), "missing recorded HWND cannot fall back to another matching title");
+        current = Agent("{\"advSessionId\":41,\"ownerId\":\"owner\",\"host\":\"desktop\",\"sessionState\":\"live\"}");
+        windows[new IntPtr(18)] = "Second terminal [adv:41]";
+        Refuses(() => PanelState.ExactAgentWindow(current, windows), "duplicate session window markers cannot choose an arbitrary terminal");
+        var area = new Rect(-500, 40, 320, 240);
+        var first = WorkbenchHost.PanelBounds(area, 2, 0); var second = WorkbenchHost.PanelBounds(area, 2, 1);
+        Check(area.Contains(first) && area.Contains(second) && !first.IntersectsWith(second),
+            "pinned geometry fits a narrow work area with negative monitor coordinates");
+        var argv = new[] { "", "space and ' apostrophe", "shell $() & | ;", "trailing\\", "embedded\"quote", "slashes\\\\\"quote", "Unicode \u03bb\u4e2d" };
+        var start = new System.Diagnostics.ProcessStartInfo {
+            FileName = Environment.GetEnvironmentVariable("WORKBENCH_ARGV_FIXTURE"),
+            Arguments = PanelState.CommandLine(argv), UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardOutput = true, StandardOutputEncoding = new System.Text.UTF8Encoding(false, true) };
+        using (var process = System.Diagnostics.Process.Start(start))
+        {
+            var output = process.StandardOutput.ReadToEnd();
+            Check(process.WaitForExit(5000) && process.ExitCode == 0 &&
+                new JavaScriptSerializer().Deserialize<string[]>(output).SequenceEqual(argv),
+                "Windows native argv roundtrip preserves empty Unicode shell-looking quotes and trailing slashes");
+        }
+    }
     private static void Pump()
     {
         var frame = new DispatcherFrame();
@@ -168,6 +230,13 @@ public static class WorkbenchNativeHostFixture
             Check(host.Panel("quick-access") == panel && host.State("quick-access").Query == "draft", "shortcut toggle retains resident window and query");
             host.State("quick-access").Pinned = true; host.Toggle("goals"); Pump();
             Check(host.State("quick-access").Visible && host.State("goals").Visible, "independent pin permits both surfaces");
+            var quickBounds = new Rect(panel.Left, panel.Top, panel.Width, panel.Height);
+            var goals = host.Panel("goals"); var goalBounds = new Rect(goals.Left, goals.Top, goals.Width, goals.Height);
+            Check(!quickBounds.IntersectsWith(goalBounds) && SystemParameters.WorkArea.Contains(quickBounds) &&
+                SystemParameters.WorkArea.Contains(goalBounds), "real pinned WPF panels remain separate inside the desktop work area");
+            host.Toggle("goals"); Pump();
+            Check(panel.Width == WorkbenchHost.PanelBounds(SystemParameters.WorkArea, 1, 0).Width && !goals.IsVisible,
+                "dismissing a pinned companion returns its slot to the remaining panel");
             }
             Console.Error.WriteLine("STAGE swap shortcut registration");
             host.Configure(new Dictionary<string, Hotkey> { { "goals", keys["quick-access"] }, { "quick-access", keys["goals"] } });
@@ -192,7 +261,7 @@ public static class WorkbenchNativeHostFixture
             }
             else Check(WorkbenchHost.HasInteractiveDesktop, "visible user desktop satisfies native host precondition");
         }
-        if (phase == "all" || phase == "model") { Console.Error.WriteLine("PHASE model"); Model(); }
+        if (phase == "all" || phase == "model") { Console.Error.WriteLine("PHASE model"); Model(); Agents(); }
         if (phase == "all" || phase == "hotkeys" || phase == "windows")
         { Console.Error.WriteLine("PHASE " + (phase == "all" ? "windows" : phase)); Native(phase != "hotkeys"); }
         return new JavaScriptSerializer().Serialize(new { ok = true, platform = "windows", phase = phase, cases = cases.ToArray(), count = cases.Count,
@@ -203,10 +272,27 @@ public static class WorkbenchNativeHostFixture
 }
 '@
 $fixtureFile = Join-Path ([IO.Path]::GetTempPath()) ('workbench-host-' + [Guid]::NewGuid().ToString('N') + '.cs')
+$argvFixture = Join-Path ([IO.Path]::GetTempPath()) ('workbench-argv-' + [Guid]::NewGuid().ToString('N') + '.exe')
 try {
+    Add-Type -OutputAssembly $argvFixture -OutputType ConsoleApplication -ReferencedAssemblies System.Web.Extensions -TypeDefinition @'
+using System;
+using System.Text;
+using System.Web.Script.Serialization;
+public static class WorkbenchArgvFixture {
+    public static void Main(string[] args) {
+        var bytes = new UTF8Encoding(false).GetBytes(new JavaScriptSerializer().Serialize(args));
+        Console.OpenStandardOutput().Write(bytes, 0, bytes.Length);
+    }
+}
+'@
+    $env:WORKBENCH_ARGV_FIXTURE = $argvFixture
     [IO.File]::WriteAllText($fixtureFile, $fixture)
     Add-Type -Path @((Join-Path $SourceDirectory 'PuiReadBridge.cs'),
         (Join-Path $SourceDirectory 'WorkbenchModel.cs'), (Join-Path $SourceDirectory 'WorkbenchHost.cs'), $fixtureFile) -ReferencedAssemblies $references
-} finally { if (Test-Path -LiteralPath $fixtureFile) { Remove-Item -LiteralPath $fixtureFile -Force } }
-try { [WorkbenchNativeHostFixture]::Run($Phase) }
-catch { [Console]::Error.WriteLine($_.Exception.ToString()); throw }
+    [WorkbenchNativeHostFixture]::Run($Phase)
+} catch { [Console]::Error.WriteLine($_.Exception.ToString()); throw }
+finally {
+    if (Test-Path -LiteralPath $fixtureFile) { Remove-Item -LiteralPath $fixtureFile -Force }
+    if (Test-Path -LiteralPath $argvFixture) { Remove-Item -LiteralPath $argvFixture -Force }
+    Remove-Item Env:WORKBENCH_ARGV_FIXTURE -ErrorAction SilentlyContinue
+}

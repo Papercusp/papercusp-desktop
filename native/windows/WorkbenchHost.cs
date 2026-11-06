@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
@@ -31,6 +33,11 @@ namespace Papercusp.Workbench
         [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr h);
         [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr h);
+        private delegate bool EnumWindow(IntPtr hwnd, IntPtr parameter);
+        [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindow callback, IntPtr parameter);
+        [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int count);
+        [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr hwnd, int command);
         [DllImport("user32.dll")] private static extern IntPtr GetProcessWindowStation();
         [DllImport("user32.dll", SetLastError = true)] private static extern bool GetUserObjectInformation(
             IntPtr handle, int index, out UserObjectFlags flags, int length, out int required);
@@ -60,12 +67,42 @@ namespace Papercusp.Workbench
             var args = new HwndSourceParameters("Papercusp resident Workbench shortcuts")
             { ParentWindow = new IntPtr(-3), WindowStyle = 0, Width = 0, Height = 0 };
             messages = new HwndSource(args); messages.AddHook(Message);
-            panels.Add("quick-access", new NativePanel(pui, "Quick Access", "all"));
-            panels.Add("goals", new NativePanel(pui, "Goals", "goals"));
+            panels.Add("quick-access", new NativePanel(pui, "Quick Access", "all", Relayout));
+            panels.Add("goals", new NativePanel(pui, "Goals", "goals", Relayout));
         }
         public Window Panel(string name) { return panels[name]; }
         public PanelState State(string name) { return panels[name].State; }
         public int BindingCount { get { return bindings.Count; } }
+        public static Rect PanelBounds(Rect area, int count, int index)
+        {
+            if (count < 1 || index < 0 || index >= count || area.Width <= 0 || area.Height <= 0)
+                throw new ArgumentOutOfRangeException("count");
+            var gap = Math.Min(12, area.Width / (count * 4 + 2));
+            var width = Math.Min(440, (area.Width - gap * (count + 1)) / count);
+            var verticalGap = Math.Min(12, area.Height / 4);
+            return new Rect(area.Right - gap - width - index * (width + gap),
+                area.Top + verticalGap, width, area.Height - 2 * verticalGap);
+        }
+        private void Relayout()
+        {
+            var visible = new[] { "quick-access", "goals" }.Where(name => panels[name].State.Visible).ToArray();
+            for (var i = 0; i < visible.Length; ++i)
+                panels[visible[i]].Position(PanelBounds(SystemParameters.WorkArea, visible.Length, i));
+        }
+        private static Dictionary<IntPtr, string> DesktopWindows()
+        {
+            var windows = new Dictionary<IntPtr, string>();
+            if (!EnumWindows((hwnd, parameter) =>
+            {
+                if (IsWindowVisible(hwnd))
+                {
+                    var text = new StringBuilder(32768); GetWindowText(hwnd, text, text.Capacity);
+                    windows[hwnd] = text.ToString();
+                }
+                return true;
+            }, IntPtr.Zero)) throw new InvalidOperationException("Could not inspect desktop terminals");
+            return windows;
+        }
         public void Configure(Dictionary<string, Hotkey> desired)
         {
             if (disposed) throw new ObjectDisposedException("WorkbenchHost");
@@ -139,25 +176,27 @@ namespace Papercusp.Workbench
             private readonly TextBlock status;
             private readonly ListBox results;
             private readonly Button more;
+            private readonly Button resume;
+            private readonly Action relayout;
             private readonly DispatcherTimer debounce;
             private CancellationTokenSource refresh, detailRead;
             private IntPtr priorWindow;
             private bool shuttingDown, ready;
-            internal NativePanel(string executable, string title, string scope)
+            internal NativePanel(string executable, string title, string scope, Action layoutChanged)
             {
-                pui = executable; State.Scope = scope;
+                pui = executable; State.Scope = scope; relayout = layoutChanged;
                 Title = "Papercusp Workbench " + title;
                 AutomationProperties.SetName(this, Title);
                 WindowStyle = WindowStyle.None; ResizeMode = ResizeMode.NoResize;
                 ShowInTaskbar = false; Topmost = true;
                 Background = Brushes.WhiteSmoke; Foreground = Brushes.Black;
-                Width = 440; MinWidth = 200;
+                Width = 440;
                 var layout = new DockPanel { Margin = new Thickness(16) }; Content = layout;
                 var header = new StackPanel { Orientation = Orientation.Horizontal };
                 DockPanel.SetDock(header, Dock.Top); layout.Children.Add(header);
                 header.Children.Add(new TextBlock { Text = title, FontSize = 22, Margin = new Thickness(0, 0, 12, 12) });
                 var pin = new Button { Content = "Pin", Margin = new Thickness(4) };
-                pin.Click += (s, e) => { State.Pinned = !State.Pinned; pin.Content = State.Pinned ? "Unpin" : "Pin"; };
+                pin.Click += (s, e) => { State.Pinned = !State.Pinned; pin.Content = State.Pinned ? "Unpin" : "Pin"; relayout(); };
                 header.Children.Add(pin);
                 var reload = new Button { Content = "Refresh", Margin = new Thickness(4) };
                 reload.Click += (s, e) => Refresh(); header.Children.Add(reload);
@@ -177,10 +216,20 @@ namespace Papercusp.Workbench
                 more = new Button { Content = "Show more results", Visibility = Visibility.Collapsed };
                 more.Click += (s, e) => { State.ResultLimit += 26; Render(); };
                 DockPanel.SetDock(more, Dock.Bottom); layout.Children.Add(more);
+                resume = new Button { Content = "Resume selected session", Visibility = Visibility.Collapsed };
+                AutomationProperties.SetName(resume, "Resume selected session");
+                resume.Click += (s, e) => { var row = results.SelectedItem as PanelResult; if (row != null) ActivateAgent(row, true); };
+                DockPanel.SetDock(resume, Dock.Bottom); layout.Children.Add(resume);
                 var body = new Grid(); layout.Children.Add(body);
                 results = new ListBox { FontSize = 15 }; body.Children.Add(results);
                 AutomationProperties.SetName(results, "Workbench results");
-                results.SelectionChanged += (s, e) => { var row = results.SelectedItem as PanelResult; if (row != null) State.Selection = row.Key; };
+                results.SelectionChanged += (s, e) =>
+                {
+                    var row = results.SelectedItem as PanelResult;
+                    if (row != null) State.Selection = row.Key;
+                    resume.Visibility = row != null && row.Kind == "agents" && PanelState.Text(row.Row, "sessionState") == "ended" ?
+                        Visibility.Visible : Visibility.Collapsed;
+                };
                 results.MouseDoubleClick += (s, e) => OpenSelected();
                 detail = new TextBox { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
                     VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Visibility = Visibility.Collapsed };
@@ -215,16 +264,14 @@ namespace Papercusp.Workbench
                 ready = true;
             }
             private void SystemChanged(object sender, System.ComponentModel.PropertyChangedEventArgs e)
-            { if (State.Visible) Dispatcher.BeginInvoke(new Action(Position)); }
-            private void Position()
+            { if (State.Visible) Dispatcher.BeginInvoke(relayout); }
+            internal void Position(Rect bounds)
             {
-                var area = SystemParameters.WorkArea;
-                Width = Math.Min(440, Math.Max(200, area.Width - 24));
-                Height = Math.Max(160, area.Height - 24); Left = area.Right - Width - 12; Top = area.Top + 12;
+                Width = bounds.Width; Height = bounds.Height; Left = bounds.Left; Top = bounds.Top;
             }
             internal void Summon()
             {
-                priorWindow = GetForegroundWindow(); State.Visible = true; Position(); Show(); Activate(); search.Focus(); Refresh();
+                priorWindow = GetForegroundWindow(); State.Visible = true; relayout(); Show(); Activate(); search.Focus(); Refresh();
             }
             internal void Dismiss(bool restore)
             {
@@ -232,6 +279,7 @@ namespace Papercusp.Workbench
                 if (refresh != null) { refresh.Cancel(); refresh.Dispose(); refresh = null; }
                 ++State.Generation; CancelDetail();
                 var ownedFocus = IsActive; Hide();
+                relayout();
                 if (restore && ownedFocus && IsWindow(priorWindow)) SetForegroundWindow(priorWindow);
             }
             private void Schedule() { if (ready && State.Visible) { debounce.Stop(); debounce.Start(); } }
@@ -271,6 +319,7 @@ namespace Papercusp.Workbench
                 detail.Text = State.Detail ?? "";
                 detail.Visibility = State.Detail == null ? Visibility.Collapsed : Visibility.Visible;
                 results.Visibility = State.Detail == null ? Visibility.Visible : Visibility.Collapsed;
+                if (State.Detail != null) resume.Visibility = Visibility.Collapsed;
                 more.Visibility = State.Detail == null && State.Results(true).Count > rows.Count ? Visibility.Visible : Visibility.Collapsed;
             }
             private void CancelDetail()
@@ -285,8 +334,7 @@ namespace Papercusp.Workbench
                 CancelDetail(); var generation = State.DetailGeneration;
                 if (row.Kind == "agents")
                 {
-                    State.Detail = "Exact terminal focus/resume is not yet available in this Windows host.\n" + row.Title;
-                    Render(); return;
+                    ActivateAgent(row, false); return;
                 }
                 detailRead = new CancellationTokenSource(); var token = detailRead.Token;
                 State.Detail = "Loading…"; Render();
@@ -309,6 +357,41 @@ namespace Papercusp.Workbench
                     State.Detail = "Unavailable · " + error.Message;
                 }
                 Render();
+            }
+            private async void ActivateAgent(PanelResult selected, bool resumeSession)
+            {
+                CancelDetail(); var generation = State.DetailGeneration;
+                detailRead = new CancellationTokenSource(); var token = detailRead.Token;
+                State.Detail = "Checking selected session…"; Render();
+                try
+                {
+                    var payload = await PuiReadBridge.ReadAsync(pui, "advRoster.list", new Dictionary<string, object>(), token);
+                    if (generation != State.DetailGeneration || token.IsCancellationRequested || !State.Visible) return;
+                    var row = PanelState.AgentTarget(payload, selected, Environment.MachineName, resumeSession);
+                    if (resumeSession)
+                    {
+                        // Direct executable launch: each argument uses Windows argv quoting;
+                        // no command interpreter, credentials or parallel resume implementation.
+                        var process = Process.Start(new ProcessStartInfo {
+                            FileName = pui, Arguments = PanelState.CommandLine(PanelState.ResumeArguments(row)),
+                            UseShellExecute = true, WindowStyle = ProcessWindowStyle.Normal });
+                        if (process == null) throw new InvalidOperationException("Could not open the selected session in a terminal");
+                        process.Dispose();
+                    }
+                    else
+                    {
+                        var hwnd = PanelState.ExactAgentWindow(row, DesktopWindows());
+                        ShowWindowAsync(hwnd, 9);
+                        if (!SetForegroundWindow(hwnd) || GetForegroundWindow() != hwnd)
+                            throw new InvalidOperationException("Could not verify focus on the selected terminal");
+                    }
+                    State.Detail = null; Dismiss(false);
+                }
+                catch (Exception error)
+                {
+                    if (generation != State.DetailGeneration || token.IsCancellationRequested) return;
+                    State.Detail = "Unavailable · " + error.Message; Render();
+                }
             }
             internal void Shutdown()
             {

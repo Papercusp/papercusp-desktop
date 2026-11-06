@@ -44,6 +44,6 @@ test('Windows resident Workbench uses canonical identities, native shortcut owne
         assert.equal(result.phase, 'all');
         assert.equal(result.interactiveDesktop, true);
         assert.ok(result.processSessionId > 0);
-        assert.equal(result.count, 23);
+        assert.equal(result.count, 42);
         assert.equal(new Set(result.cases).size, result.count);
     });
