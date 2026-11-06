@@ -195,6 +195,86 @@ print('GTK_RESIDENT_PASS');
         } finally {rmSync(temp,{recursive:true,force:true});}
     });
 
+test('production GNOME installation reports real reload state and survives private Shell login restarts',
+    {skip:process.platform!=='linux',timeout:90000}, async () => {
+        const temp=mkdtempSync(join(tmpdir(),'workbench-login-'));
+        try {
+            const bundle=packageNativeWorkbench(join(temp,'bundle'));
+            const upgradedSource=join(temp,'upgraded');
+            cpSync(join(root,'native/gnome'),upgradedSource,{recursive:true});
+            const metadata=JSON.parse(readFileSync(join(upgradedSource,'metadata.json'),'utf8'));
+            metadata.name+=' upgrade lifecycle fixture';
+            writeFileSync(join(upgradedSource,'metadata.json'),JSON.stringify(metadata));
+            const upgrade=packageNativeWorkbench(join(temp,'upgrade'),{sourceDirectory:upgradedSource});
+            const runtime=join(temp,'runtime');mkdirSync(runtime,{mode:0o700});
+            const env={...process.env,XDG_DATA_HOME:join(temp,'data'),XDG_CONFIG_HOME:join(temp,'config'),
+                XDG_CACHE_HOME:join(temp,'cache'),XDG_RUNTIME_DIR:runtime,GSETTINGS_BACKEND:'keyfile',
+                GTK_A11Y:'none',LIBGL_ALWAYS_SOFTWARE:'1',GIO_USE_VFS:'local',GNOME_SHELL_SESSION_MODE:'user'};
+            const install=join(temp,'install.mjs'),info=join(temp,'info.mjs');
+            writeFileSync(install,`import {installWorkbench} from ${JSON.stringify(pathToFileURL(join(root,'native/linux/install-workbench.js')).href)};
+print(JSON.stringify(installWorkbench(ARGV[0])));`);
+            writeFileSync(info,`import Gio from 'gi://Gio';import GLib from 'gi://GLib';
+const reply=Gio.DBus.session.call_sync('org.gnome.Shell','/org/gnome/Shell',
+ 'org.gnome.Shell.Extensions','GetExtensionInfo',new GLib.Variant('(s)',['workbench@papercusp.ai']),
+ null,Gio.DBusCallFlags.NONE,1000,null);
+const [values]=reply.deepUnpack();const result={};for(const [key,value] of Object.entries(values))result[key]=value.deepUnpack();
+print(JSON.stringify(result));`);
+            const driver=join(temp,'driver.mjs'),resultFile=join(temp,'result.json');
+            writeFileSync(driver,`import {spawn,spawnSync} from 'node:child_process';
+import {writeFileSync} from 'node:fs';
+const evidence={phase:'prelogin',assertions:[],boots:[],installs:[]};let shell=null,closed=null;
+const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+function check(value,name){if(!value)throw Error(name);evidence.assertions.push(name);}
+function run(file,...args){const r=spawnSync('gjs',['-m',file,...args],{encoding:'utf8',timeout:8000});
+ if(r.status!==0)throw Error(r.stderr||r.stdout||String(r.error));return JSON.parse(r.stdout.trim());}
+function snapshot(){try{return run(${JSON.stringify(info)});}catch(error){return {unavailable:String(error)};}}
+async function waitFor(predicate){const end=Date.now()+15000;do{const value=snapshot();evidence.lastInfo=value;
+ if(predicate(value))return value;if(shell.exitCode!==null)throw Error('Shell exited before '+evidence.phase);
+ await delay(100);}while(Date.now()<end);throw Error('Shell convergence deadline: '+evidence.phase);}
+async function stop(){if(!shell)return;shell.kill('SIGTERM');await Promise.race([closed,delay(3000)]);
+ if(shell.exitCode===null&&shell.signalCode===null){shell.kill('SIGKILL');await closed;}shell=null;}
+async function boot(expectedState=1){const boot={stdout:'',stderr:''};evidence.boots.push(boot);
+ shell=spawn('gnome-shell',['--headless','--wayland','--no-x11','--virtual-monitor','1280x800','--wayland-display','workbench-login'],{stdio:['ignore','pipe','pipe']});
+ shell.stdout.on('data',c=>{boot.stdout=(boot.stdout+c).slice(-12000);});shell.stderr.on('data',c=>{boot.stderr=(boot.stderr+c).slice(-12000);});
+ closed=new Promise(resolve=>shell.once('close',(code,signal)=>{boot.code=code;boot.signal=signal;resolve();}));
+ return waitFor(value=>value.state===expectedState);}
+try{
+ const first=run(${JSON.stringify(install)},${JSON.stringify(bundle.archive)});evidence.installs.push(first);
+ check(first.changed&&first.firstInstall&&first.loginRequired,'prelogin install registers next login without claiming live activation');
+ evidence.phase='first login';const initial=await boot();
+ check(initial.name==='Papercusp Workbench','first login enables unchanged production extension');
+ evidence.phase='live upgrade';const upgraded=run(${JSON.stringify(install)},${JSON.stringify(upgrade.archive)});evidence.installs.push(upgraded);
+ const live=snapshot();evidence.upgradeInfo=live;
+ check(upgraded.changed&&!upgraded.firstInstall,'production upgrade replaces installed archive');
+ check(!/ServiceUnknown|UnknownObject|UnknownMethod/.test(upgraded.reloadError||''),'live installer addresses the actual Shell reload API');
+ check(upgraded.loginRequired||live.state===1&&live.name===${JSON.stringify(metadata.name)},'reload success must correspond to the enabled upgraded extension');
+ evidence.phase='second login';await stop();const second=await boot();
+ check(second.name===${JSON.stringify(metadata.name)},'fresh Shell login loads persisted upgrade');
+ evidence.phase='disable';const disabled=spawnSync('gnome-extensions',['disable','workbench@papercusp.ai'],{encoding:'utf8',timeout:8000});
+ check(disabled.status===0,'GNOME disables production extension');await waitFor(value=>value.state===2);
+ evidence.phase='disabled login';await stop();
+ // A disabled extension is listed but must stay inactive across login.
+ const disabledLogin=await boot(6);
+ check(disabledLogin.state===6&&!disabledLogin.enabled,'disabled production extension remains disabled at next login');
+ evidence.ok=true;
+}catch(error){evidence.ok=false;evidence.error=String(error)+'; '+String(error.stack||'');}
+finally{await stop();writeFileSync(${JSON.stringify(resultFile)},JSON.stringify(evidence,null,2));}
+process.exitCode=evidence.ok?0:1;`);
+            for(const file of [install,info,driver])checkScript(file);
+            const result=await runOwned('dbus-run-session',[privateBus(temp),'--',process.execPath,driver],env,75000);
+            const evidence=existsSync(resultFile)?JSON.parse(readFileSync(resultFile,'utf8')):null;
+            if(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR){
+                mkdirSync(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,{recursive:true});
+                writeFileSync(join(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,'gnome-login-lifecycle.json'),
+                    JSON.stringify({evidence,...result,plane:'private production GNOME extension and real Shell lifecycle; no installed desktop artifact'},null,2)+'\n');
+            }
+            assert.equal(evidence?.ok,true,JSON.stringify({evidence,...result}));
+            assert.equal(result.status,0,JSON.stringify(result));
+            assert.equal(result.error,null,JSON.stringify(result));
+            console.log('GNOME_LOGIN_LIFECYCLE_PASS '+JSON.stringify(evidence.assertions));
+        } finally {rmSync(temp,{recursive:true,force:true});}
+    });
+
 test('private GNOME Shell renders actors and handles real seat keyboard, pointer and nested dismissal',
     {skip:process.platform!=='linux',timeout:60000}, async () => {
         const temp=mkdtempSync(join(tmpdir(),'workbench-shell-'));
