@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$SourceDirectory,
-    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows')][string]$Phase = 'all',
+    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle')][string]$Phase = 'all',
     [switch]$Interactive
 )
 $ErrorActionPreference = 'Stop'
@@ -60,6 +60,10 @@ Move-Item -LiteralPath ($target + '.tmp') -Destination $target
         }
         Remove-Item -LiteralPath $directory -Recurse -Force
     }
+    return
+}
+if ($Phase -eq 'lifecycle') {
+    & (Join-Path $PSScriptRoot 'native-workbench-windows-lifecycle.ps1') -SourceDirectory $SourceDirectory -Resident
     return
 }
 [Console]::Error.WriteLine("PHASE compile: loading the production WPF source and full assembly references")
