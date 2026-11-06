@@ -31,6 +31,11 @@ namespace Papercusp.Workbench
         [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr h);
         [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr h);
+        [DllImport("user32.dll")] private static extern IntPtr GetProcessWindowStation();
+        [DllImport("user32.dll", SetLastError = true)] private static extern bool GetUserObjectInformation(
+            IntPtr handle, int index, out UserObjectFlags flags, int length, out int required);
+        [StructLayout(LayoutKind.Sequential)] private struct UserObjectFlags
+        { public int Inherit, Reserved; public uint Flags; }
         [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] private static extern int GetWindowLong(IntPtr h, int index);
         [DllImport("user32.dll", EntryPoint = "SetWindowLongW")] private static extern int SetWindowLong(IntPtr h, int index, int value);
         private readonly HwndSource messages;
@@ -39,8 +44,19 @@ namespace Papercusp.Workbench
         private int serial;
         private bool disposed;
         private sealed class Binding { public int Id; public Hotkey Key; }
+        public static bool HasInteractiveDesktop
+        {
+            get
+            {
+                UserObjectFlags flags; int required;
+                return GetUserObjectInformation(GetProcessWindowStation(), 1, out flags,
+                    Marshal.SizeOf(typeof(UserObjectFlags)), out required) && (flags.Flags & 1) != 0;
+            }
+        }
         public WorkbenchHost(string pui)
         {
+            if (!HasInteractiveDesktop)
+                throw new InvalidOperationException("Workbench needs a signed-in interactive Windows desktop. Launch it in the user login session; service and SSH window stations cannot own global shortcuts.");
             var args = new HwndSourceParameters("Papercusp resident Workbench shortcuts")
             { ParentWindow = new IntPtr(-3), WindowStyle = 0, Width = 0, Height = 0 };
             messages = new HwndSource(args); messages.AddHook(Message);
@@ -54,6 +70,9 @@ namespace Papercusp.Workbench
         {
             if (disposed) throw new ObjectDisposedException("WorkbenchHost");
             if (desired.Keys.Any(name => !panels.ContainsKey(name))) throw new ArgumentException("Unsupported Workbench panel");
+            if (desired.Values.Any(key => key == null || key.Key == 0 || key.Key > 0xFE ||
+                key.Key == 0x7B || (key.Modifiers & ~15u) != 0))
+                throw new ArgumentException("Choose a valid shortcut. F12 is reserved by Windows for debuggers.");
             if (desired.Values.Select(key => key.Identity).Distinct().Count() != desired.Count)
                 throw new ArgumentException("Each Workbench panel needs a different shortcut");
             var next = new Dictionary<string, Binding>();
