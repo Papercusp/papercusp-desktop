@@ -1746,14 +1746,14 @@ fi
 # The in-leg checks all stay regardless: build-windows-cross.sh must remain safe to invoke
 # directly, outside a cut. This is defence in depth, not relocation.
 if [[ "$WITH_WINDOWS" == "1" && "${PAPERCUSP_REUSE_WIN:-0}" != "1" ]]; then
-  # Mirror build-windows-cross.sh's own derivations EXACTLY (:94, :121, :128-129). If these
-  # drift apart, this preflight would happily verify a DIFFERENT path than the leg later uses
-  # — a guard that passes while the leg dies, which is worse than no guard. A test pins the
-  # two files' defaults together so the drift fails loudly instead.
+  # Mirror build-windows-cross.sh's ISCC path derivation exactly. The producer's runtime
+  # WINEPREFIX is private per build by default; this preflight checks the installed compiler.
+  # If the explicit override behavior drifts, this could verify a DIFFERENT executable than
+  # the leg later uses — a guard that passes while the leg dies, which is worse than no guard.
   win_target="x86_64-pc-windows-msvc"
   win_key_file="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
-  win_wineprefix_inno="${PAPERCUSP_WINE_INNO_PREFIX:-$HOME/.papercusp/wine-inno}"
-  win_iscc_exe="${PAPERCUSP_ISCC_EXE:-$win_wineprefix_inno/drive_c/InnoSetup6/ISCC.exe}"
+  win_wine_install_prefix="${PAPERCUSP_WINE_INNO_PREFIX:-$HOME/.papercusp/wine-inno}"
+  win_iscc_exe="${PAPERCUSP_ISCC_EXE:-$win_wine_install_prefix/drive_c/InnoSetup6/ISCC.exe}"
 
   win_missing=()
   command -v cargo >/dev/null 2>&1 || win_missing+=("cargo not on PATH")
@@ -1773,7 +1773,7 @@ if [[ "$WITH_WINDOWS" == "1" && "${PAPERCUSP_REUSE_WIN:-0}" != "1" ]]; then
   command -v xvfb-run >/dev/null 2>&1 \
     || win_missing+=("xvfb-run not installed — apt install xvfb (ISCC runs headless under it)")
   [[ -f "$win_iscc_exe" ]] \
-    || win_missing+=("ISCC not found at $win_iscc_exe — provision Inno Setup under WINEPREFIX=$win_wineprefix_inno")
+    || win_missing+=("ISCC not found at $win_iscc_exe — provision Inno Setup under WINEPREFIX=$win_wine_install_prefix")
   [[ -f "$win_key_file" ]] \
     || win_missing+=("updater signing key not found at $win_key_file — bin/setup-signing-key.sh")
 
@@ -1867,10 +1867,14 @@ release_run_unmanaged() { # <cmd...> — run cmd with the managed-release identi
   env "${unset_args[@]}" "$@"
 }
 release_verify_contract_regressions() {
+  # These contracts exercise the current cutter and its helpers. A frozen
+  # product checkout owns build inputs, not the orchestrator's test fixtures.
+  local contract_root
+  contract_root="$(cd "$ORCHESTRATOR_HERE/.." && pwd)" || return $?
   echo "==> checking release scanner and Linux collector contracts"
-  ( cd "$ROOT" && release_run_unmanaged node --test --test-global-setup=test/monorepo-host-preflight.mjs \
+  ( cd "$contract_root" && release_run_unmanaged node --test --test-global-setup=test/monorepo-host-preflight.mjs \
       test/release-gitleaks.test.js test/release-local-linux-reuse.test.js ) || return $?
-  ( cd "$ROOT/.." && release_run_unmanaged npm run test:file -- \
+  ( cd "$contract_root/.." && release_run_unmanaged npm run test:file -- \
       packages/operator-core/lib/code-intelligence/reuse-source-population.test.ts ) || return $?
 }
 release_verify_contract_regressions || {
