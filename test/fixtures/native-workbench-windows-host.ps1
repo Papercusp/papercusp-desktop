@@ -1,6 +1,10 @@
 param(
     [Parameter(Mandatory=$true)][string]$SourceDirectory,
-    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts')][string]$Phase = 'all',
+    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'operator')][string]$Phase = 'all',
+    [string]$PuiExecutable,
+    [string]$OperatorUrl,
+    [string]$ExpectedWorkspace,
+    [string]$ExpectedPlan,
     [switch]$Interactive
 )
 $ErrorActionPreference = 'Stop'
@@ -21,6 +25,12 @@ if ($Interactive) {
     $stderr = Join-Path $directory 'stderr.txt'
     $fixtureCommand = "$" + "ProgressPreference='SilentlyContinue'; & '" + $PSCommandPath.Replace("'", "''") + "' -SourceDirectory '" +
         $SourceDirectory.Replace("'", "''") + "' -Phase '" + $Phase + "'"
+    if ($Phase -eq 'operator') {
+        foreach ($nameValue in @(@('PuiExecutable', $PuiExecutable), @('OperatorUrl', $OperatorUrl),
+            @('ExpectedWorkspace', $ExpectedWorkspace), @('ExpectedPlan', $ExpectedPlan))) {
+            $fixtureCommand += " -" + $nameValue[0] + " '" + $nameValue[1].Replace("'", "''") + "'"
+        }
+    }
     $encodedFixture = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($fixtureCommand))
     $runner = @'
 param($EncodedFixture, $OutputDirectory)
@@ -43,7 +53,7 @@ Move-Item -LiteralPath ($target + '.tmp') -Destination $target
         $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
         Register-ScheduledTask -TaskName $name -Action $action -Principal $principal | Out-Null
         Start-ScheduledTask -TaskName $name
-        $deadline = [DateTime]::UtcNow.AddSeconds(35)
+        $deadline = [DateTime]::UtcNow.AddSeconds($(if ($Phase -eq 'operator') { 90 } else { 35 }))
         while (-not [IO.File]::Exists($receipt) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
         if (-not [IO.File]::Exists($receipt)) { throw 'Interactive fixture produced no terminal receipt; verify the signed-in user desktop' }
         $result = [IO.File]::ReadAllText($receipt) | ConvertFrom-Json
@@ -68,6 +78,14 @@ Move-Item -LiteralPath ($target + '.tmp') -Destination $target
 if ($Phase -eq 'lifecycle') {
     & (Join-Path $PSScriptRoot 'native-workbench-windows-lifecycle.ps1') -SourceDirectory $SourceDirectory -Resident
     return
+}
+if ($Phase -eq 'operator') {
+    if (-not [IO.File]::Exists($PuiExecutable) -or -not $OperatorUrl -or -not $ExpectedWorkspace -or -not $ExpectedPlan) {
+        throw 'Operator phase requires actual PUI, explicit operator URL, expected workspace and plan'
+    }
+    $env:PUI_OPERATOR = $OperatorUrl; $env:PAPERCUSP_OPERATOR_URL = $OperatorUrl
+    $env:WORKBENCH_REAL_PUI = $PuiExecutable
+    $env:WORKBENCH_EXPECTED_WORKSPACE = $ExpectedWorkspace; $env:WORKBENCH_EXPECTED_PLAN = $ExpectedPlan
 }
 [Console]::Error.WriteLine("PHASE compile: loading the production WPF source and full assembly references")
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml, System.Web.Extensions
@@ -295,11 +313,45 @@ public static class WorkbenchNativeHostFixture
         { var found = Find<T>(child, name); if (found != null) return found; }
         return null;
     }
-    private static void Until(Func<bool> condition)
+    private static void Until(Func<bool> condition, int seconds = 10)
     {
-        var deadline = DateTime.UtcNow.AddSeconds(10);
+        var deadline = DateTime.UtcNow.AddSeconds(seconds);
         do { Pump(); if (condition()) return; } while (DateTime.UtcNow < deadline);
-        throw new Exception("Native account UI did not settle");
+        throw new Exception("Native UI did not settle within " + seconds + " seconds");
+    }
+    private static void OperatorNative()
+    {
+        var pui = Environment.GetEnvironmentVariable("WORKBENCH_REAL_PUI");
+        var identity = AccountState.One(PuiReadBridge.ReadAsync(pui, "operator.identity", null, CancellationToken.None).GetAwaiter().GetResult());
+        Check(PanelState.Text(identity, "workspaceId") == Environment.GetEnvironmentVariable("WORKBENCH_EXPECTED_WORKSPACE") &&
+            PanelState.Text(identity, "endpoint").TrimEnd('/') == Environment.GetEnvironmentVariable("PUI_OPERATOR").TrimEnd('/'),
+            "actual WPF helper selects the expected operator workspace");
+        using (var host = new WorkbenchHost(pui))
+        {
+            host.Toggle("quick-access");
+            var state = host.State("quick-access"); var panel = host.Panel("quick-access");
+            Until(() => state.Sources.Count == 4 && state.Sources.Values.All(source => source.Status != "loading"), 25);
+            foreach (var kind in PanelState.Kinds)
+                Check(state.Sources[kind].Status == "ready", "actual WPF " + kind + " canonical rows loaded: " + state.Sources[kind].Error);
+            var list = Find<System.Windows.Controls.ListBox>(panel, "Workbench results");
+            Check(panel.IsVisible && new WindowInteropHelper(panel).Handle != IntPtr.Zero && list != null,
+                "actual canonical results are rendered in the resident WPF HWND");
+            Check(list.Items.Cast<PanelResult>().Select(row => row.Key).SequenceEqual(state.Results().Select(row => row.Key)),
+                "actual WPF list retains the canonical result identities");
+            Check(state.Sources["plans"].Rows.Any(row => PanelState.Text(row.Row, "slug") == Environment.GetEnvironmentVariable("WORKBENCH_EXPECTED_PLAN")),
+                "actual Workbench plan is present in the canonical native results");
+            state.Pinned = true; host.Toggle("goals");
+            var goals = host.State("goals");
+            Until(() => goals.Sources.Count == 1 && goals.Sources["goals"].Status != "loading", 25);
+            Check(goals.Sources["goals"].Status == "ready" && host.Panel("goals").IsVisible,
+                "actual Goals portfolio loads in its independent native panel");
+            var goalList = Find<System.Windows.Controls.ListBox>(host.Panel("goals"), "Workbench results");
+            Check(goalList.Items.Cast<PanelResult>().Select(row => row.Key).SequenceEqual(goals.Results().Select(row => row.Key)),
+                "actual Goals rows retain canonical identities including valid empty results");
+            host.Toggle("quick-access"); host.Toggle("quick-access"); Pump();
+            Check(host.Panel("quick-access") == panel && state.Pinned,
+                "actual native read panel retains its resident window and pin across toggles");
+        }
     }
     private static void AccountsNative()
     {
@@ -371,6 +423,7 @@ public static class WorkbenchNativeHostFixture
         }
         if (phase == "all" || phase == "model") { Console.Error.WriteLine("PHASE model"); Model(); Agents(); }
         if (phase == "accounts") { AccountsModel(); AccountsNative(); }
+        if (phase == "operator") { OperatorNative(); }
         if (phase == "all" || phase == "hotkeys" || phase == "windows")
         { Console.Error.WriteLine("PHASE " + (phase == "all" ? "windows" : phase)); Native(phase != "hotkeys"); }
         return new JavaScriptSerializer().Serialize(new { ok = true, platform = "windows", phase = phase, cases = cases.ToArray(), count = cases.Count,

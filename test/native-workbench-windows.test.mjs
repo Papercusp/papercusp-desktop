@@ -132,6 +132,31 @@ test('Windows native Accounts controls preserve exact identity, confirmed state 
         assert.equal(new Set(result.cases).size, result.count);
     });
 
+for (const fixture of ['bridge', 'host']) {
+    test('Windows actual PUI and canonical operator read integration: ' + fixture, {
+        skip: process.platform !== 'win32' || process.env.PAPERCUSP_TEST_REAL_PUI !== '1'
+            ? 'native Windows leg: select PAPERCUSP_TEST_REAL_PUI=1 with explicit PUI/operator/workspace/plan' : false,
+        timeout: 120000,
+    }, () => {
+        for (const key of ['PAPERCUSP_TEST_PUI_EXE', 'PAPERCUSP_TEST_OPERATOR_URL',
+            'PAPERCUSP_TEST_WORKSPACE', 'PAPERCUSP_TEST_WORKBENCH_PLAN']) assert.ok(process.env[key], key);
+        const args = ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', resolve(root, 'test/fixtures/native-workbench-windows-' + fixture + '.ps1'),
+            '-Phase', 'operator', '-PuiExecutable', process.env.PAPERCUSP_TEST_PUI_EXE,
+            '-OperatorUrl', process.env.PAPERCUSP_TEST_OPERATOR_URL,
+            '-ExpectedWorkspace', process.env.PAPERCUSP_TEST_WORKSPACE];
+        if (fixture === 'bridge') args.push('-BridgeSource', resolve(root, 'native/windows/PuiReadBridge.cs'));
+        else args.push('-SourceDirectory', resolve(root, 'native/windows'),
+            '-ExpectedPlan', process.env.PAPERCUSP_TEST_WORKBENCH_PLAN, '-Interactive');
+        const run = spawnSync('powershell.exe', args, {encoding:'utf8', timeout:110000, windowsHide:true});
+        assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
+        const result = JSON.parse(run.stdout.trim());
+        assert.equal(result.ok, true); assert.equal(result.phase, 'operator');
+        assert.equal(result.count, fixture === 'bridge' ? 6 : 11);
+        assert.equal(new Set(result.cases).size, result.count);
+    });
+}
+
 test('Windows native Workbench checks the window station before creating its resident host',
     {skip: process.platform !== 'win32', timeout: 60000}, () => {
         const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
