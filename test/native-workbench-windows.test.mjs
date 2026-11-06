@@ -85,7 +85,7 @@ test('Windows per-account login lifecycle preserves shortcuts and explicit disab
         assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
         const result = JSON.parse(run.stdout.trim());
         assert.equal(result.ok, true);
-        assert.equal(result.count, 22);
+        assert.equal(result.count, 26);
         assert.equal(new Set(result.cases).size, result.count);
     });
 
@@ -99,7 +99,7 @@ test('Windows actual resident lifecycle and native settings work in the signed-i
         const result = JSON.parse(run.stdout.trim());
         assert.equal(result.ok, true);
         assert.equal(result.resident, true);
-        assert.equal(result.count, 32);
+        assert.equal(result.count, 36);
         assert.equal(new Set(result.cases).size, result.count);
     });
 
@@ -114,6 +114,21 @@ test('Windows native read adapter preserves canonical envelopes and reaps failed
         assert.equal(result.ok, true);
         assert.equal(result.platform, 'windows');
         assert.equal(result.count, 12);
+        assert.equal(new Set(result.cases).size, result.count);
+    });
+
+test('Windows native Accounts controls preserve exact identity, confirmed state and independent axes',
+    {skip:process.platform !== 'win32', timeout:60000}, () => {
+        const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
+            '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'accounts', '-Interactive'],
+        {encoding:'utf8', timeout:55000, windowsHide:true});
+        assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
+        const result = JSON.parse(run.stdout.trim());
+        assert.equal(result.ok, true);
+        assert.equal(result.phase, 'accounts');
+        assert.equal(result.interactiveDesktop, true);
+        assert.equal(result.count, 16);
         assert.equal(new Set(result.cases).size, result.count);
     });
 

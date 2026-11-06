@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$SourceDirectory,
-    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle')][string]$Phase = 'all',
+    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts')][string]$Phase = 'all',
     [switch]$Interactive
 )
 $ErrorActionPreference = 'Stop'
@@ -48,6 +48,9 @@ Move-Item -LiteralPath ($target + '.tmp') -Destination $target
         if (-not [IO.File]::Exists($receipt)) { throw 'Interactive fixture produced no terminal receipt; verify the signed-in user desktop' }
         $result = [IO.File]::ReadAllText($receipt) | ConvertFrom-Json
         if ([IO.File]::Exists($stderr)) { [Console]::Error.Write([IO.File]::ReadAllText($stderr)) }
+        if ($result.exitCode -ne 0 -and [IO.File]::Exists($stdout)) {
+            [Console]::Error.WriteLine('FAILED CHILD STDOUT: ' + [IO.File]::ReadAllText($stdout))
+        }
         if ($result.PSObject.Properties['error']) { throw $result.error }
         if ($result.exitCode -ne 0) { throw "Interactive fixture exited $($result.exitCode)" }
         if ($result.sessionId -le 0) { throw 'Interactive fixture ran in service Session 0' }
@@ -251,6 +254,87 @@ public static class WorkbenchNativeHostFixture
             Check(host.BindingCount == 0 && collision.BindingCount == 2, "disable releases shortcuts for another native owner");
         }
     }
+    private static string EnvironmentJson = "{\"endpoint\":\"http://fixture.invalid:3170\",\"workspaceId\":\"isolated\",\"store\":{\"id\":\"fixture\"},\"agentChat\":{\"scope\":\"workspace:isolated\"}}";
+    private static Dictionary<string, object> Envelope(string row)
+    { return Json("{\"rows\":[" + row + "]}"); }
+    private static void AccountsModel()
+    {
+        var environment = Json(EnvironmentJson);
+        var pool = Json("{\"rows\":[{\"id\":\"literal +/=& \\u03bb\",\"label\":\"Same\"},{\"id\":\"other\",\"label\":\"Same\"}]}");
+        var steering = Envelope("{\"defaultAccountId\":\"other\",\"forcedAccounts\":[],\"excludeAccounts\":[\"other\"]}");
+        var state = new AccountState(); var generation = state.Begin();
+        state.Settle(generation, environment, pool, steering, null);
+        Check(state.Ready && state.Accounts.Count == 2 && PanelState.Text(state.Accounts[0], "id") == "literal +/=& \u03bb", "Accounts preserves distinct exact ids with duplicate labels");
+        Check(!state.Settle(generation - 1, null, null, null, new Exception("old")) && state.Ready, "stale account refresh cannot replace confirmed state");
+        var partial = Json("{\"rows\":[],\"partial\":true}");
+        state.Settle(state.Begin(), environment, partial, steering, null);
+        Check(!state.Ready && state.Error != null, "partial account pool disables steering");
+        state.Settle(state.Begin(), environment, Json("{\"rows\":[{\"id\":\"one\"},{\"id\":\"one\"}]}"), steering, null);
+        Check(!state.Ready, "duplicate account identity fails closed");
+        state.Settle(state.Begin(), Json("{\"endpoint\":\"http://fixture.invalid\",\"workspaceId\":\"isolated\"}"), pool, steering, null);
+        Check(!state.Ready, "missing selected store identity fails closed");
+        state.Settle(state.Begin(), environment, pool, steering, null);
+        var confirmed = state.Override;
+        state.Applied(++state.Generation, environment, null, new Exception("write denied"));
+        Check(state.Override == confirmed && !state.Ready, "failed account write preserves confirmed state and requires refresh");
+        state.Settle(state.Begin(), environment, pool, steering, null);
+        var wrong = Envelope("{\"defaultAccountId\":\"changed\",\"forcedAccounts\":[],\"excludeAccounts\":[]}");
+        wrong["environment"] = Json(EnvironmentJson.Replace("isolated", "another"));
+        state.Applied(++state.Generation, environment, wrong, null);
+        Check(PanelState.Text(state.Override, "defaultAccountId") == "other" && !state.Ready, "wrong environment acknowledgement cannot update account controls");
+        state.Settle(state.Begin(), environment, pool, steering, null);
+        var applied = Envelope("{\"defaultAccountId\":\"literal +/=& \\u03bb\",\"forcedAccounts\":[],\"excludeAccounts\":[\"other\"]}");
+        applied["environment"] = environment;
+        state.Applied(++state.Generation, environment, applied, null);
+        Check(state.Ready && state.Contains("excludeAccounts", "other") && PanelState.Text(state.Override, "defaultAccountId") == "literal +/=& \u03bb", "confirmed account response preserves independent steering axes");
+    }
+    private static T Find<T>(DependencyObject parent, string name) where T : DependencyObject
+    {
+        if (parent is T && System.Windows.Automation.AutomationProperties.GetName(parent) == name) return (T)parent;
+        foreach (var child in LogicalTreeHelper.GetChildren(parent).OfType<DependencyObject>())
+        { var found = Find<T>(child, name); if (found != null) return found; }
+        return null;
+    }
+    private static void Until(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        do { Pump(); if (condition()) return; } while (DateTime.UtcNow < deadline);
+        throw new Exception("Native account UI did not settle");
+    }
+    private static void AccountsNative()
+    {
+        using (var host = new WorkbenchHost(Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_FIXTURE")))
+        {
+            host.Toggle("accounts"); var panel = host.Panel("accounts");
+            var scope = Find<System.Windows.Controls.TextBlock>(panel, "Account environment");
+            var summary = Find<System.Windows.Controls.TextBlock>(panel, "Account steering");
+            var force = Find<System.Windows.Controls.Button>(panel, "Account force");
+            var exclude = Find<System.Windows.Controls.Button>(panel, "Account exclude");
+            var normal = Find<System.Windows.Controls.Button>(panel, "Account default");
+            var auto = Find<System.Windows.Controls.Button>(panel, "Account auto");
+            Until(() => force.IsEnabled);
+            Check(panel.IsVisible && scope.Text.Contains("fixture.invalid:3170") && scope.Text.Contains("isolated") &&
+                normal.IsEnabled && exclude.IsEnabled && auto.IsEnabled, "native Accounts displays selected environment and four separate controls");
+            force.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            Until(() => force.IsEnabled);
+            Check(summary.Text.Contains("Force: literal +/=& \u03bb") && summary.Text.Contains("Default: other") && summary.Text.Contains("Exclude: other"), "WPF Force sends exact selected identity and preserves Default and Exclude");
+            normal.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent)); Until(() => normal.IsEnabled);
+            Check(summary.Text.Contains("Default: literal +/=& \u03bb") && summary.Text.Contains("Force: literal +/=& \u03bb"), "WPF Default preserves Force");
+            exclude.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent)); Until(() => exclude.IsEnabled);
+            Check(summary.Text.Contains("Exclude: other, literal +/=& \u03bb") && summary.Text.Contains("Force: literal +/=& \u03bb"), "WPF Exclude preserves independent Force");
+            auto.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent)); Until(() => auto.IsEnabled);
+            Check(summary.Text.Contains("Default: literal +/=& \u03bb") && !summary.Text.Contains("Force: literal") && !summary.Text.Contains("Exclude: other"), "WPF Auto clears Force and Exclude while preserving Default");
+            var before = summary.Text;
+            System.IO.File.WriteAllText(Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE") + ".deny", "deny");
+            force.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            Until(() => Find<System.Windows.Controls.TextBlock>(panel, "Workbench status").Text.StartsWith("Unavailable"));
+            Check(summary.Text == before, "failed native account write keeps the last confirmed steering visible");
+            Check(!force.IsEnabled && !normal.IsEnabled && !exclude.IsEnabled && !auto.IsEnabled, "failed native account write disables further controls until refresh");
+            var search = Find<System.Windows.Controls.TextBox>(panel, "Search Workbench"); search.Text = "literal";
+            host.Toggle("accounts"); host.Toggle("accounts"); Pump();
+            Check(host.Panel("accounts") == panel && search.Text == "literal", "resident Accounts retains its query across toggles");
+        }
+    }
     public static string Run(string phase)
     {
         cases.Clear();
@@ -266,6 +350,7 @@ public static class WorkbenchNativeHostFixture
             else Check(WorkbenchHost.HasInteractiveDesktop, "visible user desktop satisfies native host precondition");
         }
         if (phase == "all" || phase == "model") { Console.Error.WriteLine("PHASE model"); Model(); Agents(); }
+        if (phase == "accounts") { AccountsModel(); AccountsNative(); }
         if (phase == "all" || phase == "hotkeys" || phase == "windows")
         { Console.Error.WriteLine("PHASE " + (phase == "all" ? "windows" : phase)); Native(phase != "hotkeys"); }
         return new JavaScriptSerializer().Serialize(new { ok = true, platform = "windows", phase = phase, cases = cases.ToArray(), count = cases.Count,
@@ -276,6 +361,8 @@ public static class WorkbenchNativeHostFixture
 }
 '@
 $fixtureFile = Join-Path ([IO.Path]::GetTempPath()) ('workbench-host-' + [Guid]::NewGuid().ToString('N') + '.cs')
+$accountFixture = $fixtureFile + '.accounts.exe'
+$accountState = $accountFixture + '.json'
 $argvFixture = Join-Path ([IO.Path]::GetTempPath()) ('workbench-argv-' + [Guid]::NewGuid().ToString('N') + '.exe')
 try {
     Add-Type -OutputAssembly $argvFixture -OutputType ConsoleApplication -ReferencedAssemblies System.Web.Extensions -TypeDefinition @'
@@ -290,6 +377,50 @@ public static class WorkbenchArgvFixture {
 }
 '@
     $env:WORKBENCH_ARGV_FIXTURE = $argvFixture
+    if ($Phase -eq 'accounts') {
+        $env:WORKBENCH_ACCOUNT_FIXTURE = $accountFixture; $env:WORKBENCH_ACCOUNT_STATE = $accountState
+        Add-Type -OutputAssembly $accountFixture -OutputType ConsoleApplication -ReferencedAssemblies System.Web.Extensions, System.Core -TypeDefinition @'
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Web.Script.Serialization;
+public static class NativeAccountsFixture {
+    public static int Main(string[] args) {
+        var json = new JavaScriptSerializer(); var utf8 = new UTF8Encoding(false, true);
+        var request = json.Deserialize<Dictionary<string, object>>(new StreamReader(Console.OpenStandardInput(), utf8).ReadToEnd());
+        var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
+        var environment = json.DeserializeObject("{\"endpoint\":\"http://fixture.invalid:3170\",\"workspaceId\":\"isolated\",\"store\":{\"id\":\"fixture\"},\"agentChat\":{\"scope\":\"workspace:isolated\"}}");
+        var state = json.Deserialize<Dictionary<string, object>>(File.Exists(path) ? File.ReadAllText(path) :
+            "{\"defaultAccountId\":\"other\",\"forcedAccounts\":[],\"excludeAccounts\":[\"other\"]}");
+        object rows; var scoped = false;
+        if (args.Length != 1) return 23;
+        if (args[0] == "native-account") {
+            if (File.Exists(path + ".deny")) { Console.Error.Write("isolated write denied"); return 7; }
+            if (json.Serialize(request["environment"]) != json.Serialize(environment)) return 24;
+            var action = (string)request["action"]; var id = request["accountId"] as string;
+            if (action == "auto") { state["forcedAccounts"] = new string[0]; state["excludeAccounts"] = new string[0]; }
+            else if (action == "default") state["defaultAccountId"] = Object.Equals(state["defaultAccountId"], id) ? null : id;
+            else {
+                var field = action == "force" ? "forcedAccounts" : "excludeAccounts";
+                var values = ((IList)state[field]).Cast<string>().ToList();
+                if (!values.Remove(id)) values.Add(id); state[field] = values;
+            }
+            File.WriteAllText(path, json.Serialize(state)); rows = new object[] { state }; scoped = true;
+        } else if (args[0] == "native-read") {
+            var name = (string)request["name"];
+            rows = name == "operator.identity" ? new object[] { environment } : name == "accounts.pool" ? new object[] {
+                new { id = "literal +/=& \u03bb", label = "Same", provider = "fixture", available = true },
+                new { id = "other", label = "Same", provider = "fixture", available = true } } : new object[] { state };
+        } else return 25;
+        var result = new Dictionary<string, object> { { "rows", rows } }; if (scoped) result["environment"] = environment;
+        var bytes = utf8.GetBytes(json.Serialize(result)); Console.OpenStandardOutput().Write(bytes, 0, bytes.Length); return 0;
+    }
+}
+'@
+    }
     [IO.File]::WriteAllText($fixtureFile, $fixture)
     Add-Type -Path @((Join-Path $SourceDirectory 'PuiReadBridge.cs'),
         (Join-Path $SourceDirectory 'WorkbenchModel.cs'), (Join-Path $SourceDirectory 'WorkbenchHost.cs'), $fixtureFile) -ReferencedAssemblies $references
@@ -299,4 +430,8 @@ finally {
     if (Test-Path -LiteralPath $fixtureFile) { Remove-Item -LiteralPath $fixtureFile -Force }
     if (Test-Path -LiteralPath $argvFixture) { Remove-Item -LiteralPath $argvFixture -Force }
     Remove-Item Env:WORKBENCH_ARGV_FIXTURE -ErrorAction SilentlyContinue
+    foreach ($path in @($accountFixture, $accountState, ($accountState + '.deny'))) {
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+    }
+    Remove-Item Env:WORKBENCH_ACCOUNT_FIXTURE, Env:WORKBENCH_ACCOUNT_STATE -ErrorAction SilentlyContinue
 }
