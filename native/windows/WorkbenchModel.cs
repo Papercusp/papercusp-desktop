@@ -2,6 +2,8 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 
 namespace Papercusp.Workbench
@@ -192,6 +194,82 @@ namespace Papercusp.Workbench
             if (row.Kind == "reports") return new Dictionary<string, object> { { "reportId", Required(row.Row, "report_id") } };
             if (row.Kind == "goals") return new Dictionary<string, object> { { "goalId", Required(row.Row, "id") } };
             throw new InvalidOperationException("Use the exact agent terminal route");
+        }
+        public static PanelResult AgentTarget(Dictionary<string, object> payload, PanelResult selected, string localHost, bool resume)
+        {
+            if (selected.Kind != "agents" || String.IsNullOrWhiteSpace(localHost))
+                throw new ArgumentException("Select an exact agent session");
+            object id;
+            var hasId = selected.Row.TryGetValue("advSessionId", out id) && PositiveId(id);
+            var owner = Text(selected.Row, "ownerId"); var window = Text(selected.Row, "windowId");
+            if ((!hasId && (resume || window == "")) || (!resume && owner == ""))
+                throw new InvalidOperationException("The selected row has no exact session identity; refresh the results");
+            var state = new PanelState(); var generation = state.BeginRefresh();
+            state.Settle("agents", generation, payload, null);
+            var source = state.Sources["agents"];
+            if (source.Status != "ready" || source.Partial) throw new InvalidOperationException("Agent roster is unavailable or incomplete");
+            var matches = source.Rows.Where(row => hasId ?
+                row.Row.ContainsKey("advSessionId") && PositiveId(row.Row["advSessionId"]) &&
+                    Convert.ToInt64(row.Row["advSessionId"]) == Convert.ToInt64(id) :
+                Text(row.Row, "ownerId") == owner && Text(row.Row, "windowId") == window).ToArray();
+            if (matches.Length != 1) throw new InvalidOperationException("The selected session is unavailable or ambiguous");
+            var target = matches[0];
+            var host = Text(target.Row, "host"); if (host == "") host = Text(target.Row, "hostname");
+            var selectedHost = Text(selected.Row, "host"); if (selectedHost == "") selectedHost = Text(selected.Row, "hostname");
+            if (host == "" || host != selectedHost || Text(target.Row, "ownerId") != owner ||
+                Text(target.Row, "revoked") == "True" || Text(target.Row, "stale") == "True")
+                throw new InvalidOperationException("The selected session changed; refresh the results");
+            var status = Text(target.Row, "sessionState");
+            if (resume)
+            {
+                if (status != "ended" || Text(target.Row, "pidAlive") == "True" ||
+                    source.Rows.Any(row => row != target && owner != "" && Text(row.Row, "ownerId") == owner &&
+                        new[] { "live", "parked", "starting" }.Contains(Text(row.Row, "sessionState"))))
+                    throw new InvalidOperationException("The selected session is running or cannot be resumed; refresh the results");
+            }
+            else if (!new[] { "live", "parked" }.Contains(status) || Text(selected.Row, "sessionState") == "ended" ||
+                Text(selected.Row, "endedAt") != "" || Text(target.Row, "isLocal") == "False" ||
+                !String.Equals(host, localHost, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("The selected session is ended or on another machine; use its saved connection to resume it");
+            if (!resume && window != "" && Text(target.Row, "windowId") != window)
+                throw new InvalidOperationException("The selected terminal window changed; refresh the results");
+            return target;
+        }
+        public static string[] ResumeArguments(PanelResult target)
+        {
+            object id;
+            if (!target.Row.TryGetValue("advSessionId", out id) || !PositiveId(id)) throw new ArgumentException("Missing session identity");
+            var host = Text(target.Row, "host"); if (host == "") host = Text(target.Row, "hostname");
+            if (!Regex.IsMatch(host, @"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")) throw new ArgumentException("Invalid session host");
+            return new[] { "workbench", "resume", Convert.ToInt64(id).ToString(), host, Text(target.Row, "ownerId") };
+        }
+        public static string CommandLine(IEnumerable<string> arguments)
+        {
+            return String.Join(" ", arguments.Select(value =>
+            {
+                var quoted = new StringBuilder("\""); var slashes = 0;
+                foreach (var c in value)
+                {
+                    if (c == '\\') { ++slashes; continue; }
+                    quoted.Append('\\', c == '"' ? slashes * 2 + 1 : slashes); quoted.Append(c); slashes = 0;
+                }
+                quoted.Append('\\', slashes * 2); quoted.Append('"'); return quoted.ToString();
+            }));
+        }
+        public static IntPtr ExactAgentWindow(PanelResult target, IDictionary<IntPtr, string> windows)
+        {
+            var recorded = Text(target.Row, "windowId");
+            var marker = Text(target.Row, "advSessionId"); marker = marker == "" ? null : "[adv:" + marker + "]";
+            long handle; var numeric = recorded.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ?
+                Int64.TryParse(recorded.Substring(2), System.Globalization.NumberStyles.HexNumber, null, out handle) :
+                Int64.TryParse(recorded, out handle);
+            var matches = windows.Where(pair => recorded != "" ?
+                (numeric ? pair.Key.ToInt64() == handle : pair.Value == recorded) :
+                marker != null && pair.Value.Contains(marker)).ToArray();
+            if (matches.Length != 1) throw new InvalidOperationException("The exact terminal window is unavailable or ambiguous");
+            if (marker != null && Regex.IsMatch(matches[0].Value, @"\[adv:\d+\]") && !matches[0].Value.Contains(marker))
+                throw new InvalidOperationException("The recorded terminal handle conflicts with the selected session");
+            return matches[0].Key;
         }
     }
 }
