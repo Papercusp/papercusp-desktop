@@ -10,8 +10,12 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { createHash } = require('node:crypto');
+const { createRequire } = require('node:module');
+const { pathToFileURL } = require('node:url');
 
 const desktopRoot = path.resolve(__dirname, '..');
+const runtimePackaging = import(pathToFileURL(path.join(desktopRoot, 'bin/lib/handler-runtime-package.mjs')).href);
 const builderPath = process.env.PROBE_SCRIPT
   || path.join(desktopRoot, 'bin/build-desktop-sidecar.sh');
 const builder = fs.readFileSync(builderPath, 'utf8') + '\n'
@@ -583,4 +587,108 @@ test('closure follows installed optional peers and their own runtime dependencie
   } finally {
     fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true });
   }
+});
+
+// Real ELF inspection and a relocated guest exercise the packaging extension.
+// This is development component proof, not signed installed-artifact approval.
+function handlerPackageFixture(t) {
+  assert.equal(process.platform, 'linux', 'Linux packaging test needs its Linux runner');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-handler-package-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const loader = createRequire(path.join(desktopRoot, '../packages/plugin-loader/package.json'));
+  const koffi = path.dirname(loader.resolve('koffi'));
+  const addon = path.join(path.dirname(loader.resolve('@koromix/koffi-linux-' + process.arch)),
+    'linux_' + process.arch, 'koffi.node');
+  const triplet = process.arch === 'x64' ? 'x86_64-linux-gnu' : 'aarch64-linux-gnu';
+  const bootstrap = path.join(root, 'bootstrap.cjs');
+  fs.writeFileSync(bootstrap, `const k = require('koffi');
+    const arch = k.load('libseccomp.so.2').func('seccomp_arch_native', 'uint32_t', []);
+    console.log('RUNTIME_READY:' + arch());`);
+  return { root, node: process.execPath, bootstrap, koffi, addon, arch: process.arch,
+    output: path.join(root, 'package'), libraryDirs: ['/lib/' + triplet, '/usr/lib/' + triplet] };
+}
+
+test('handler runtime package executes Node and Koffi from only its relocated library closure', async t => {
+  const f = handlerPackageFixture(t);
+  const { stageHandlerRuntime } = await runtimePackaging;
+  const inventory = stageHandlerRuntime(f);
+  const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+  assert.equal(inventory.sha256, digest(JSON.stringify(inventory.files)));
+  assert.equal(inventory.bootstrapSha256, digest(fs.readFileSync(f.bootstrap)));
+  for (const file of inventory.files) {
+    const packaged = path.join(f.output, file.path.slice(1));
+    assert.equal(digest(fs.readFileSync(packaged)), file.sha256, file.path);
+    assert.equal(fs.statSync(packaged).mode & 0o777, file.executable ? 0o555 : 0o444);
+  }
+  const relocated = path.join(f.root, 'relocated');
+  fs.renameSync(f.output, relocated);
+  const mounts = ['runtime', 'lib', 'lib64'].filter(dir => fs.existsSync(path.join(relocated, dir)))
+    .flatMap(dir => ['--ro-bind', path.join(relocated, dir), '/' + dir]);
+  const result = spawnSync('/usr/bin/bwrap', ['--unshare-all', '--die-with-parent', '--clearenv',
+    '--tmpfs', '/', ...mounts, '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
+    '--chdir', '/tmp', '--', '/runtime/node', '--no-global-search-paths', '/runtime/bootstrap.cjs'],
+  { encoding: 'utf8', timeout: 10000, env: { PATH: '/usr/bin:/bin' } });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.stdout.trim(), 'RUNTIME_READY:' + (process.arch === 'x64' ? 0xc000003e : 0xc00000b7));
+  assert.doesNotMatch(JSON.stringify(inventory), new RegExp(f.root));
+  assert.equal(inventory.files.some(file => file.path.includes('static.cjs')), true);
+});
+
+test('handler runtime package refuses a missing transitive ELF edge without running constructors or publishing', async t => {
+  const f = handlerPackageFixture(t);
+  const libs = path.join(f.root, 'libs'); fs.mkdirSync(libs);
+  const marker = path.join(f.root, 'EXECUTED');
+  const dep = path.join(f.root, 'dep.c'), shim = path.join(f.root, 'shim.c');
+  fs.writeFileSync(dep, 'int dep(void) { return 7; }');
+  fs.writeFileSync(shim, `#include <stdio.h>\nextern int dep(void);
+    __attribute__((constructor)) void start(void) { fclose(fopen("${marker}", "w")); }
+    int wrapper(void) { return dep(); }`);
+  for (const args of [
+    ['-shared', '-fPIC', dep, '-Wl,-soname,libhandlerdep.so.1', '-o', path.join(libs, 'libhandlerdep.so.1')],
+    ['-shared', '-fPIC', shim, '-L' + libs, '-l:libhandlerdep.so.1', '-Wl,-soname,libseccomp.so.2', '-o', path.join(libs, 'libseccomp.so.2')],
+  ]) {
+    const compiled = spawnSync('/usr/bin/gcc', args, { encoding: 'utf8' });
+    assert.equal(compiled.status, 0, compiled.stderr);
+  }
+  fs.unlinkSync(path.join(libs, 'libhandlerdep.so.1'));
+  const { stageHandlerRuntime } = await runtimePackaging;
+  assert.throws(() => stageHandlerRuntime({ ...f, libraryDirs: [libs, ...f.libraryDirs] }), /missing target ELF dependency: libhandlerdep.so.1/);
+  assert.equal(fs.existsSync(marker), false, 'candidate constructor ran during inspection');
+  assert.equal(fs.existsSync(f.output), false, 'incomplete closure was published');
+  assert.deepEqual(fs.readdirSync(f.root).filter(name => name.startsWith('.handler-runtime-')), []);
+});
+
+test('handler runtime package refuses target substitution and leaves a prior package intact', async t => {
+  const f = handlerPackageFixture(t);
+  const { stageHandlerRuntime } = await runtimePackaging;
+  const wrong = path.join(f.root, 'wrong.node');
+  const bytes = fs.readFileSync(f.node); bytes.writeUInt16LE(process.arch === 'x64' ? 183 : 62, 18);
+  fs.writeFileSync(wrong, bytes);
+  assert.throws(() => stageHandlerRuntime({ ...f, node: wrong }), /ELF target mismatch/);
+  assert.equal(fs.existsSync(f.output), false);
+  stageHandlerRuntime(f);
+  const original = fs.readFileSync(path.join(f.output, 'inventory.json'));
+  assert.throws(() => stageHandlerRuntime(f), /destination already exists/);
+  assert.deepEqual(fs.readFileSync(path.join(f.output, 'inventory.json')), original);
+});
+
+test('handler runtime package refuses library symlinks outside the explicit roots', async t => {
+  const f = handlerPackageFixture(t);
+  const libs = path.join(f.root, 'libs'); fs.mkdirSync(libs);
+  const outside = path.join(f.root, 'outside.so'); fs.writeFileSync(outside, 'untrusted');
+  fs.symlinkSync(outside, path.join(libs, 'libseccomp.so.2'));
+  const { stageHandlerRuntime } = await runtimePackaging;
+  assert.throws(() => stageHandlerRuntime({ ...f, libraryDirs: [libs] }), /escapes explicit target roots/);
+  assert.equal(fs.existsSync(f.output), false);
+});
+
+test('handler runtime package refuses an origin-dependent ELF graph', async t => {
+  const f = handlerPackageFixture(t);
+  const source = path.join(f.root, 'main.c'), candidate = path.join(f.root, 'candidate');
+  fs.writeFileSync(source, 'int main(void) { return 0; }');
+  const compiled = spawnSync('/usr/bin/gcc', [source, '-Wl,-rpath,$ORIGIN/private', '-o', candidate], { encoding: 'utf8' });
+  assert.equal(compiled.status, 0, compiled.stderr);
+  const { stageHandlerRuntime } = await runtimePackaging;
+  assert.throws(() => stageHandlerRuntime({ ...f, node: candidate }), /unsupported runtime ELF search path/);
+  assert.equal(fs.existsSync(f.output), false);
 });

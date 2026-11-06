@@ -2334,6 +2334,13 @@ if ! node "$HERE/check-ptool-sdk-bundle.mjs" "$SIDECAR_DIR/scripts/ptool.mjs" --
   exit 1
 fi
 for np in "${NATIVE_PKGS[@]}"; do copy_pkg_closure "$np"; done
+# Reuse the existing target-specific npm fetch for Koffi's optional native addon.
+_koffi_target="@koromix/koffi-${_bare_node_platform}-${TARGET_ARCH}"
+if [[ ! -d "$SIDECAR_DIR/node_modules/$_koffi_target" ]]; then
+  _koffi_version="$(opt_dep_version "$SIDECAR_DIR/node_modules/koffi/package.json" "$_koffi_target")"
+  [[ -n "$_koffi_version" ]] || { echo "ERROR: Koffi target pin missing" >&2; exit 1; }
+  fetch_cross_npm_pkg "$_koffi_target@$_koffi_version" "$SIDECAR_DIR/node_modules" || exit 1
+fi
 copy_host_external_closures || exit 1
 echo "  copied $nat_copied package(s) ($nat_missing missing)"
 
@@ -4597,6 +4604,20 @@ fi
 if [[ -z "$node_dst" || ! -s "$node_dst" ]]; then
   echo "ERROR: packaged Node runtime is missing or empty; refusing incomplete sidecar" >&2
   exit 1
+fi
+
+# Measure one target-specific guest closure. Installer approval remains separate.
+if [[ "$target_os" == linux ]]; then
+  case "$target_arch" in
+    x64) _handler_triplet=x86_64-linux-gnu ;;
+    arm64) _handler_triplet=aarch64-linux-gnu ;;
+    *) echo "ERROR: unsupported Linux handler runtime architecture" >&2; exit 1 ;;
+  esac
+  _handler_library_dirs=()
+  for _handler_dir in "/lib/$_handler_triplet" "/usr/lib/$_handler_triplet" "/usr/$_handler_triplet/lib"; do
+    [[ ! -d "$_handler_dir" ]] || _handler_library_dirs+=("$_handler_dir")
+  done
+  stage_handler_runtime "$node_dst" "$target_arch" "$SIDECAR_DIR/handler-runtime" "${_handler_library_dirs[@]}" || exit 1
 fi
 
 # Bun is a packaged candidate; the runtime selector continues to default to Node.

@@ -269,6 +269,17 @@ prune_gyp_build_intermediates() {
 # also carries top-level posthog-node@5.x. The old name-only lookup read 5.x's
 # manifest, missed 3.5.0's rusha dependency, and produced a signed Server bundle
 # that installed successfully but died on clean-machine boot.
+stage_handler_runtime() {
+  # Inspect private copies statically; candidate executables never run here.
+  local node_file="$1" arch="$2" output="$3"
+  shift 3
+  node "$HOST_RUNTIME_CLOSURE_POLICY_DIR/handler-runtime-package.mjs" \
+    "$node_file" "$SIDECAR_DIR/handler-bootstrap.cjs" \
+    "$SIDECAR_DIR/node_modules/koffi" \
+    "$SIDECAR_DIR/node_modules/@koromix/koffi-linux-$arch/linux_$arch/koffi.node" \
+    "$arch" "$output" "$@"
+}
+
 resolve_pkg_source() {
   local pkg="$1" requester="${2:-}" probe parent candidate base
   if [[ -n "$requester" ]]; then
