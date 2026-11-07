@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 
 namespace Papercusp.Workbench
@@ -110,7 +111,8 @@ namespace Papercusp.Workbench
             var signature = new JavaScriptSerializer().Serialize(new[] { Query, Scope });
             if (signature != resultQuery) { ResultLimit = 26; resultQuery = signature; }
             ++Generation; Sources.Clear();
-            foreach (var kind in Kinds.Where(k => Scope == "all" || Scope == k)) Sources[kind] = new PanelSource();
+            foreach (var kind in Kinds.Where(k => Scope == "all" || Scope == k ||
+                Scope == "organizer" && (k == "agents" || k == "goals"))) Sources[kind] = new PanelSource();
             return Generation;
         }
         public bool Settle(string kind, int generation, Dictionary<string, object> payload, Exception error)
@@ -270,6 +272,156 @@ namespace Papercusp.Workbench
             if (marker != null && Regex.IsMatch(matches[0].Value, @"\[adv:\d+\]") && !matches[0].Value.Contains(marker))
                 throw new InvalidOperationException("The recorded terminal handle conflicts with the selected session");
             return matches[0].Key;
+        }
+    }
+
+    public sealed class OrganizerGroup
+    {
+        public string Kind, Id, Slug, Harness, Key, Label;
+        public List<PanelResult> Rows = new List<PanelResult>();
+    }
+    public sealed class OrganizerRect
+    {
+        public int X, Y, Width, Height;
+        public bool Matches(OrganizerRect other)
+        { return other != null && Math.Abs((long)X - other.X) <= 2 && Math.Abs((long)Y - other.Y) <= 2 &&
+            Math.Abs((long)Width - other.Width) <= 2 && Math.Abs((long)Height - other.Height) <= 2; }
+    }
+    public sealed class OrganizerWindow
+    {
+        public IntPtr Handle, Monitor;
+        public string Title, Desktop, Unsupported;
+        public OrganizerRect Area, Bounds;
+    }
+    public sealed class OrganizerReceipt
+    {
+        public string OwnerId, SessionId, Host, Desktop, Monitor, Status = "failed", Error;
+        public OrganizerRect Requested, Observed;
+    }
+    // Projection of the same canonical grouping and receipts as the GNOME model.
+    // Native adapters own window inspection/mutation; no parallel roster is kept.
+    public static class OrganizerState
+    {
+        private static string Text(Dictionary<string, object> row, string key) { return InboxState.Text(row, key); }
+        private static string Harness(PanelResult row)
+        { var value = Text(row.Row, "potSlug"); return value == "" ? Text(row.Row, "harnessSlug") : value; }
+        private static List<Dictionary<string, object>> Rows(object value)
+        {
+            var list = value as IList;
+            if (list == null || list.Cast<object>().Any(row => !(row is Dictionary<string, object>)))
+                throw new InvalidOperationException("Canonical links are unavailable");
+            return list.Cast<Dictionary<string, object>>().ToList();
+        }
+        private static List<PanelResult> Roster(Dictionary<string, object> payload)
+        {
+            var state = new PanelState { Scope = "agents" }; var generation = state.BeginRefresh();
+            state.Settle("agents", generation, payload, null); var source = state.Sources["agents"];
+            if (source.Status != "ready" || source.Partial)
+                throw new InvalidOperationException("Canonical terminal roster is incomplete; refresh before arranging");
+            return source.Rows;
+        }
+        public static List<OrganizerGroup> Groups(IEnumerable<PanelResult> agents, string kind, IEnumerable<PanelResult> goals)
+        {
+            if (kind == "goal") return goals.Select(row => new OrganizerGroup { Kind = kind,
+                Id = Text(row.Row, "id"), Key = row.Key, Label = row.Title }).ToList();
+            if (kind != "plan" && kind != "fleet") throw new InvalidOperationException("Unknown organization grouping");
+            var groups = new Dictionary<string, OrganizerGroup>();
+            foreach (var row in agents)
+            {
+                var slug = Text(row.Row, kind == "plan" ? "currentPlanSlug" : "fleetSlug");
+                var harness = kind == "plan" ? Harness(row) : "";
+                if (slug == "" || kind == "plan" && harness == "") continue;
+                var key = new JavaScriptSerializer().Serialize(new[] { kind, harness, slug });
+                if (!groups.ContainsKey(key)) groups[key] = new OrganizerGroup { Kind = kind, Key = key,
+                    Slug = slug, Harness = harness, Label = kind == "plan" ? harness + " / " + slug : slug };
+                groups[key].Rows.Add(row);
+            }
+            return groups.Values.ToList();
+        }
+        public static List<PanelResult> Members(OrganizerGroup group, Dictionary<string, object> roster,
+            Dictionary<string, object> goalPayload = null)
+        {
+            var rows = Roster(roster);
+            if (group.Kind == "goal")
+            {
+                var detail = InboxState.One(goalPayload);
+                var goal = InboxState.Value(detail, "goal") as Dictionary<string, object>;
+                if (Text(goal, "id") != group.Id || String.IsNullOrWhiteSpace(group.Id))
+                    throw new InvalidOperationException("Canonical goal links changed; refresh before arranging");
+                var agents = Rows(InboxState.Value(detail, "agents")); var plans = Rows(InboxState.Value(detail, "plans"));
+                return rows.Where(row => agents.Any(agent => Text(agent, "ownerId") != "" &&
+                    Text(agent, "ownerId") == Text(row.Row, "ownerId") && Object.Equals(InboxState.Value(agent, "live"), true)) ||
+                    plans.Any(plan => Text(plan, "planSlug") != "" && Text(plan, "harnessSlug") != "" &&
+                        Text(plan, "planSlug") == Text(row.Row, "currentPlanSlug") && Text(plan, "harnessSlug") == Harness(row))).ToList();
+            }
+            if (group.Kind != "plan" && group.Kind != "fleet") throw new InvalidOperationException("Unknown organization grouping");
+            return rows.Where(row => group.Kind == "plan" ? Text(row.Row, "currentPlanSlug") == group.Slug && Harness(row) == group.Harness :
+                Text(row.Row, "fleetSlug") == group.Slug).ToList();
+        }
+        public static async Task<List<OrganizerReceipt>> ArrangeAsync(OrganizerGroup group, Dictionary<string, object> roster,
+            string host, IList<OrganizerWindow> windows, Func<OrganizerWindow, OrganizerRect, Task<OrganizerWindow>> place,
+            Dictionary<string, object> goalPayload = null)
+        {
+            var current = Members(group, roster, goalPayload);
+            var selected = group.Kind == "goal" ? current : group.Rows;
+            if (selected.Count == 0) throw new InvalidOperationException("No canonical terminals in this group");
+            var receipts = new List<OrganizerReceipt>();
+            var resolved = new List<Tuple<OrganizerWindow, OrganizerReceipt>>();
+            var titles = windows.ToDictionary(window => window.Handle, window => window.Title);
+            foreach (var row in selected)
+            {
+                var receipt = new OrganizerReceipt { OwnerId = Text(row.Row, "ownerId"), SessionId = Text(row.Row, "advSessionId"),
+                    Host = Text(row.Row, "host") == "" ? Text(row.Row, "hostname") : Text(row.Row, "host") };
+                receipts.Add(receipt);
+                try
+                {
+                    var target = PanelState.AgentTarget(roster, row, host, false);
+                    if (!current.Any(candidate => candidate.Key == target.Key && Text(candidate.Row, "ownerId") == receipt.OwnerId &&
+                        Text(candidate.Row, "windowId") == Text(row.Row, "windowId")))
+                        throw new InvalidOperationException("The selected terminal changed group; refresh before arranging");
+                    var handle = PanelState.ExactAgentWindow(target, titles); var window = windows.Single(value => value.Handle == handle);
+                    receipt.Desktop = window.Desktop; receipt.Monitor = window.Monitor.ToInt64().ToString();
+                    if (window.Unsupported != null) { receipt.Status = "unsupported"; throw new InvalidOperationException(window.Unsupported); }
+                    if (String.IsNullOrWhiteSpace(window.Desktop) || window.Monitor == IntPtr.Zero || window.Area == null ||
+                        window.Area.Width < 1 || window.Area.Height < 1) throw new InvalidOperationException("Desktop work area is unavailable");
+                    resolved.Add(Tuple.Create(window, receipt));
+                }
+                catch (Exception error)
+                {
+                    if (receipt.Host != "" && !String.Equals(receipt.Host, host, StringComparison.OrdinalIgnoreCase)) receipt.Status = "unsupported";
+                    else if (Text(row.Row, "sessionState") == "ended" || Text(row.Row, "stale") == "True" || Text(row.Row, "revoked") == "True") receipt.Status = "offline";
+                    receipt.Error = error.Message;
+                }
+            }
+            var unique = resolved.Where(entry => resolved.Count(other => other.Item1.Handle == entry.Item1.Handle) == 1).ToArray();
+            foreach (var entry in resolved.Except(unique)) entry.Item2.Error = "Several selected sessions share this terminal window";
+            foreach (var desktop in unique.GroupBy(entry => new { entry.Item1.Desktop, entry.Item1.Monitor }))
+            {
+                var entries = desktop.ToArray(); var area = entries[0].Item1.Area;
+                var columns = Math.Min(entries.Length, Math.Max(1, (int)Math.Ceiling(Math.Sqrt(entries.Length * (double)area.Width / area.Height))));
+                var rows = (int)Math.Ceiling(entries.Length / (double)columns);
+                for (var index = 0; index < entries.Length; ++index)
+                {
+                    var window = entries[index].Item1; var receipt = entries[index].Item2;
+                    var column = index % columns; var row = index / columns;
+                    var x = area.X + (int)Math.Round(column * (double)area.Width / columns);
+                    var y = area.Y + (int)Math.Round(row * (double)area.Height / rows);
+                    var rect = new OrganizerRect { X = x + 12, Y = y + 12,
+                        Width = area.X + (int)Math.Round((column + 1) * (double)area.Width / columns) - x - 24,
+                        Height = area.Y + (int)Math.Round((row + 1) * (double)area.Height / rows) - y - 24 };
+                    receipt.Requested = rect;
+                    try
+                    {
+                        if (rect.Width < 1 || rect.Height < 1) throw new InvalidOperationException("Too many terminals for this desktop");
+                        var actual = await place(window, rect); receipt.Observed = actual == null ? null : actual.Bounds;
+                        if (actual == null || actual.Desktop != window.Desktop || actual.Monitor != window.Monitor || !rect.Matches(actual.Bounds))
+                            throw new InvalidOperationException("The terminal did not reach its requested layout within its desktop");
+                        receipt.Status = "moved";
+                    }
+                    catch (Exception error) { receipt.Error = error.Message; }
+                }
+            }
+            return receipts;
         }
     }
 

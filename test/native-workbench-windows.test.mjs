@@ -85,21 +85,30 @@ test('Windows per-account login lifecycle preserves shortcuts and explicit disab
         assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
         const result = JSON.parse(run.stdout.trim());
         assert.equal(result.ok, true);
-        assert.equal(result.count, 30);
+        assert.equal(result.count, 35);
         assert.equal(new Set(result.cases).size, result.count);
     });
 
 test('Windows actual resident lifecycle and native settings work in the signed-in account',
-    {skip:process.platform !== 'win32', timeout:60000}, () => {
+    {skip:process.platform !== 'win32', timeout:180000}, () => {
+        const contract = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
+            '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'lifecycle', '-BudgetOnly'],
+        {encoding:'utf8', timeout:10000, windowsHide:true});
+        assert.equal(contract.status, 0, contract.stderr || contract.stdout || String(contract.error));
+        const budget = JSON.parse(contract.stdout.trim());
+        assert.deepEqual(budget.controllerOperations, ['Install', 'Install', 'Settings', 'Run', 'Enable', 'Disable', 'Uninstall']);
+        assert.equal(budget.fixtureTimeoutMs, budget.baseTimeoutMs + budget.controllerOperations.length * budget.controllerTimeoutMs + 2 * budget.settingsTimeoutMs);
+        assert.ok(budget.clientTimeoutMs > budget.fixtureTimeoutMs && budget.clientTimeoutMs < 180000);
         const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
             '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
             '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'lifecycle', '-Interactive'],
-        {encoding:'utf8', timeout:55000, windowsHide:true});
+        {encoding:'utf8', timeout:budget.clientTimeoutMs, windowsHide:true});
         assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
         const result = JSON.parse(run.stdout.trim());
         assert.equal(result.ok, true);
         assert.equal(result.resident, true);
-        assert.equal(result.count, 40);
+        assert.equal(result.count, 45);
         assert.equal(new Set(result.cases).size, result.count);
     });
 
@@ -146,6 +155,29 @@ test('Windows native Goals controls confirm actions and preserve server state an
         assert.equal(new Set(result.cases).size, result.count);
     });
 
+test('Windows Organizer arranges exact canonical groups within each desktop and retains failure receipts',
+    {skip:process.platform !== 'win32', timeout:60000}, () => {
+        const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
+            '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'organizer', '-Interactive'],
+        {encoding:'utf8', timeout:55000, windowsHide:true});
+        assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
+        const result = JSON.parse(run.stdout.trim());
+        assert.equal(result.ok, true); assert.equal(result.phase, 'organizer');
+        assert.equal(result.interactiveDesktop, true);
+        assert.ok(result.count >= 30);
+        assert.equal(new Set(result.cases).size, result.count);
+        assert.deepEqual(result.organizerRuns.map(run => run.group), ['plan', 'fleet', 'goal']);
+        for (const run of result.organizerRuns) {
+            assert.deepEqual(run.receipts.map(row => row.Status), ['moved', 'moved', 'unsupported', 'offline', 'failed']);
+            for (const row of run.receipts.filter(row => row.Status === 'moved')) {
+                assert.ok(row.Desktop && row.Monitor);
+                for (const key of ['X', 'Y', 'Width', 'Height'])
+                    assert.ok(Math.abs(row.Requested[key] - row.Observed[key]) <= 2);
+            }
+        }
+    });
+
 test('Windows Inbox freezes visible confirmations, reconciles saved runs and retains native lifecycle',
     {skip:process.platform !== 'win32', timeout:60000}, () => {
         const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
@@ -179,15 +211,24 @@ test('Windows standalone PUI starts before any operator request', {
 });
 
 test('Windows interactive fixture retains failure diagnostics and terminates its timed out child',
-    {skip:process.platform !== 'win32', timeout:90000}, () => {
+    {skip:process.platform !== 'win32', timeout:120000}, () => {
+        const contract = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
+            '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'fixture-diagnostics', '-BudgetOnly'],
+        {encoding:'utf8', timeout:10000, windowsHide:true});
+        assert.equal(contract.status, 0, contract.stderr || contract.stdout || String(contract.error));
+        const budget = JSON.parse(contract.stdout.trim());
+        assert.deepEqual(budget.children.map(child => child.phase), ['fixture-failure', 'fixture-timeout']);
+        assert.equal(budget.fixtureTimeoutMs, budget.children.reduce((sum, child) => sum + child.clientTimeoutMs, 10000));
+        assert.ok(budget.clientTimeoutMs > budget.fixtureTimeoutMs && budget.clientTimeoutMs < 120000);
         const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
             '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
             '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'fixture-diagnostics'],
-        {encoding:'utf8', timeout:85000, windowsHide:true});
+        {encoding:'utf8', timeout:budget.clientTimeoutMs, windowsHide:true});
         assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
         const result = JSON.parse(run.stdout.trim());
         assert.equal(result.ok, true); assert.equal(result.phase, 'fixture-diagnostics');
-        assert.equal(result.count, 15); assert.equal(new Set(result.cases).size, result.count);
+        assert.equal(result.count, 19); assert.equal(new Set(result.cases).size, result.count);
     });
 
 test('Windows native environment refusal oracle distinguishes commands and rejects success, unrelated errors and timeouts', {

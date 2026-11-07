@@ -168,6 +168,115 @@ export function exactAgentWindow(target, windows) {
     return matches[0];
 }
 
+// Reuse roster plan/fleet identities and goals.detail's stamped/derived plan
+// rail and live holders. A project's membership in a goal is not an agent link.
+const agentHarness = row => row.potSlug || row.harnessSlug || null;
+export function organizerGroups(rows, kind, goals = []) {
+    if (kind === 'goal') return goals.map(row => ({kind, id: row.id,
+        key: JSON.stringify([kind, required(row.id, 'goal id')]), label: row.title || row.id}));
+    if (!['plan', 'fleet'].includes(kind)) throw new Error('Unknown organization grouping');
+    const groups = new Map();
+    for (const row of rows) {
+        const slug = kind === 'plan' ? row.currentPlanSlug : row.fleetSlug;
+        const harness = kind === 'plan' ? agentHarness(row) : null;
+        if (!slug || (kind === 'plan' && !harness)) continue;
+        const key = JSON.stringify([kind, harness, slug]);
+        if (!groups.has(key)) groups.set(key, {key, kind, slug, harness,
+            label: kind === 'plan' ? `${harness} / ${slug}` : slug, rows: []});
+        groups.get(key).rows.push(row);
+    }
+    return [...groups.values()];
+}
+
+export function organizerMembers(group, roster, goalPayload = null) {
+    const aggregate = oneRow(roster);
+    if (aggregate.partial || aggregate.truncatedByLimit ||
+        (aggregate.degradedFields && Object.keys(aggregate.degradedFields).length))
+        throw new Error('Canonical terminal roster is incomplete; refresh before arranging');
+    const rows = sourceRows('agents', roster);
+    if (group.kind === 'goal') {
+        const detail = oneRow(goalPayload);
+        if (detail.goal?.id !== group.id || !Array.isArray(detail.agents) || !Array.isArray(detail.plans))
+            throw new Error('Canonical goal links are unavailable or changed');
+        return rows.filter(row => detail.agents.some(agent => agent.ownerId === row.ownerId && agent.live === true) ||
+            detail.plans.some(plan => plan.planSlug === row.currentPlanSlug &&
+                plan.harnessSlug === agentHarness(row)));
+    }
+    return rows.filter(row => group.kind === 'plan' ?
+        row.currentPlanSlug === group.slug && agentHarness(row) === group.harness :
+        group.kind === 'fleet' && row.fleetSlug === group.slug);
+}
+
+// Resolve all exact windows before any mutation; one missing/offline desktop
+// remains an explicit receipt while independently resolvable desktops proceed.
+// The adapter owns native mutation and must verify its observed geometry.
+export async function arrangeOrganizerGroup(group, roster, host, windows, place, goalPayload = null) {
+    const current = organizerMembers(group, roster, goalPayload);
+    const selected = group.kind === 'goal' ? current : group.rows;
+    if (!Array.isArray(selected) || !selected.length) throw new Error('No canonical terminals in this group');
+    const receipts = [], resolved = [];
+    for (const row of selected) {
+        const receipt = {ownerId: row.ownerId, advSessionId: row.advSessionId,
+            host: row.host || row.hostname || null, desktop: null, status: 'failed'};
+        receipts.push(receipt);
+        try {
+            const target = agentFocusTarget(roster, row, host);
+            if (!current.some(candidate => candidate.ownerId === target.ownerId &&
+                candidate.advSessionId === row.advSessionId && candidate.windowId === row.windowId))
+                throw new Error('The selected terminal changed group; refresh before arranging');
+            const window = exactAgentWindow(target, windows);
+            receipt.desktop = window.desktop;
+            receipt.monitor = window.monitor;
+            if (window.unsupported) { receipt.status = 'unsupported'; throw new Error(window.unsupported); }
+            const area = window.area;
+            if (!Number.isInteger(window.desktop) || !Number.isInteger(window.monitor) ||
+                !area || ![area.x, area.y, area.width, area.height].every(Number.isFinite) ||
+                area.width < 1 || area.height < 1)
+                throw new Error('Desktop work area is unavailable');
+            resolved.push({window, receipt});
+        } catch (error) {
+            if (receipt.host && receipt.host !== host) receipt.status = 'unsupported';
+            else if (row.sessionState === 'ended' || row.stale || row.revoked) receipt.status = 'offline';
+            receipt.error = String(error.message || error);
+        }
+    }
+    const desktops = new Map();
+    for (const entry of resolved) {
+        if (resolved.some(other => other !== entry && other.window === entry.window)) {
+            entry.receipt.error = 'Several selected sessions share this terminal window';
+            continue;
+        }
+        const key = JSON.stringify([entry.window.desktop, entry.window.monitor]);
+        if (!desktops.has(key)) desktops.set(key, []);
+        desktops.get(key).push(entry);
+    }
+    for (const entries of desktops.values()) {
+        const area = entries[0].window.area;
+        const columns = Math.min(entries.length, Math.max(1,
+            Math.ceil(Math.sqrt(entries.length * area.width / area.height))));
+        const rows = Math.ceil(entries.length / columns), gap = 12;
+        for (const [index, {window, receipt}] of entries.entries()) {
+            const column = index % columns, row = Math.floor(index / columns);
+            const x = Math.round(area.x + column * area.width / columns);
+            const y = Math.round(area.y + row * area.height / rows);
+            const rect = {x: x + gap, y: y + gap,
+                width: Math.round(area.x + (column + 1) * area.width / columns) - x - 2 * gap,
+                height: Math.round(area.y + (row + 1) * area.height / rows) - y - 2 * gap};
+            receipt.requested = rect;
+            try {
+                if (rect.width < 1 || rect.height < 1) throw new Error('Too many terminals for this desktop');
+                const actual = await place(window, rect);
+                receipt.observed = actual;
+                if (!actual || actual.desktop !== window.desktop || actual.monitor !== window.monitor ||
+                    !Object.keys(rect).every(key => Number.isFinite(actual[key]) && Math.abs(actual[key] - rect[key]) <= 2))
+                    throw new Error('The terminal did not reach its requested layout within its desktop');
+                receipt.status = 'moved';
+            } catch (error) { receipt.error = String(error.message || error); }
+        }
+    }
+    return receipts;
+}
+
 // One instance per surface. Dismissal retains drafts and canonical selections;
 // stale transport completions cannot overwrite a newer refresh or detail.
 export class PanelState {

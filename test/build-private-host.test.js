@@ -229,6 +229,25 @@ test('unknown dynamic imports remain required instead of being silently omitted'
   assert.equal(r.status,0,r.stdout+r.stderr);
   assert.match(r.stdout,/^required\t@vendor\/dynamic$/m);
 });
+test('only the compiler empty-catch PnP probe is optional; mandatory occurrences still win',t=>{
+  const f=graphFixture(t),compiler=path.join(f.donor,'node_modules/@papercusp/host-esbuild/lib/main.js');
+  fs.mkdirSync(path.dirname(compiler),{recursive:true});
+  const guarded="let pnp; try { pnp = require('pnpapi'); } catch {} if (pnp) pnp.setup();";
+  fs.writeFileSync(compiler,guarded);
+  const inputs={'node_modules/@papercusp/host-esbuild/lib/main.js':{imports:[edge('pnpapi')]}};
+  let r=graph(f,inputs);
+  assert.equal(r.status,0,r.stdout+r.stderr);
+  assert.match(r.stdout,/^optional\tpnpapi$/m);
+  fs.writeFileSync(compiler,guarded.replace('catch {}','catch (error) { throw error; }'));
+  r=graph(f,inputs);
+  assert.equal(r.status,0,r.stdout+r.stderr);
+  assert.match(r.stdout,/^required\tpnpapi$/m);
+  fs.writeFileSync(compiler,guarded);
+  fs.writeFileSync(path.join(f.donor,'entry.js'),"try { require('pnpapi'); } catch {}");
+  r=graph(f,{...inputs,'entry.js':{imports:[edge('pnpapi')]}});
+  assert.equal(r.status,0,r.stdout+r.stderr);
+  assert.match(r.stdout,/^required\tpnpapi$/m);
+});
 test('DBOS lazy graph edges require the measured context and the actual OTLP early-return guard',t=>{
   const f=graphFixture(t),sdk=path.join(f.donor,'node_modules/@dbos-inc/dbos-sdk/dist/src/telemetry');
   // Committed donor shadows link installed third-party packages to their

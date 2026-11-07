@@ -58,6 +58,7 @@ else if(r.name==='plans.attentionBulkRun')rows=[{run:{runId:'run+/=&',phase:'rev
 else if(r.name==='plans.list')rows=[{harness:'exact-harness',slug:'same',title:'Plan'}];
 else if(r.name==='advRoster.list'){const fs=require('node:fs');const path=${JSON.stringify(join(temp,'roster.json'))};rows=[fs.existsSync(path)?JSON.parse(fs.readFileSync(path,'utf8')):{active:[],ended:[]}];}
 else if(r.name==='goals.list')rows=[{goals:[{id:'goal-id',title:'Goal '+(r.args.query||'')}],totalGoals:1}];
+else if(r.name==='goals.detail')rows=[{goal:{id:r.args.goalId},agents:[],plans:[{harnessSlug:'exact-harness',planSlug:'same'}]}];
 else if(r.name==='reports.list')rows=[{report_id:'exact+/=&',title:'Report '+(r.args.query||'')}];
 else if(r.name==='reports.get')rows=[{body_md:'# Exact report '+r.args.reportId}];
 else rows=[r];
@@ -365,11 +366,11 @@ process.exitCode=evidence.ok?0:1;`);
     }));
 
 const selectedJourney=process.env.PAPERCUSP_GNOME_JOURNEY||'all';
-assert.ok(['all','inbox','input','focus','resume'].includes(selectedJourney),'Unknown PAPERCUSP_GNOME_JOURNEY');
+assert.ok(['all','inbox','input','focus','resume','organizer'].includes(selectedJourney),'Unknown PAPERCUSP_GNOME_JOURNEY');
 // Preserve every scenario while bounding each independent desktop lifetime.
 // The input journey includes the controller and Inbox cases; focus and Resume
 // start from a fresh Shell and cannot spend each other's deadline budget.
-for(const journey of selectedJourney==='all'?['input','focus','resume']:[selectedJourney]){
+for(const journey of selectedJourney==='all'?['input','focus','resume','organizer']:[selectedJourney]){
 test('private GNOME Shell renders actors and handles real seat keyboard, pointer and nested dismissal ['+journey+']',
     {skip:process.platform!=='linux',timeout:75000}, () => withNativeFixture('workbench-shell-',async temp=>{
             const evidenceDirectory=process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR&&
@@ -389,7 +390,7 @@ test('private GNOME Shell renders actors and handles real seat keyboard, pointer
             writeFileSync(focusDriver,`import Gtk from 'gi://Gtk?version=4.0';
 import Gio from 'gi://Gio';
 const app=new Gtk.Application({application_id:'ai.papercusp.Workbench.FocusFixture',flags:Gio.ApplicationFlags.NON_UNIQUE});
-app.connect('activate',()=>{for(const title of ['Needle agent [adv:4242]','Needle agent [adv:42420]']){
+app.connect('activate',()=>{for(const title of ['Needle agent [adv:4242]','Needle agent [adv:42420]','Unselected terminal [adv:99]']){
  const window=new Gtk.ApplicationWindow({application:app,title,default_width:320,default_height:200});window.present();}});
 app.run(['focus-fixture']);`);
             checkScript(focusDriver);
@@ -415,7 +416,7 @@ export default class Probe extends Workbench {
  async finish(error){progress();if(error||!GLib.file_test(${JSON.stringify(screenshot)},GLib.FileTest.EXISTS)){try{await captureScreen();}catch(cause){inputLog.push({screenshotError:String(cause)});error||=cause;}}GLib.file_set_contents(${JSON.stringify(resultFile)},JSON.stringify({ok:!error,error:error?String(error)+'; '+String(error.stack||''):null,phase,journey,inputLog,actionMode:Main.actionMode,overview:Main.overview.visible,windows:global.get_window_actors().map(actor=>({title:actor.meta_window.get_title(),minimized:actor.meta_window.minimized,focused:actor.meta_window===global.display.focus_window})),states:[...this._states].map(([surface,s])=>({surface,visible:s.visible,pinned:s.pinned,selection:s.selection,detail:s.detail})),assertions}));if(this._focusFixture){this._focusFixture.force_exit();await new Promise(resolve=>this._focusFixture.wait_async(null,(child,result)=>{child.wait_finish(result);resolve();}));}if(this._inputCapture)global.stage.disconnect(this._inputCapture);global.stage.disconnect(this._pointerCapture);this.disable();global.context.terminate();}
  async probe(){
   this._settings.set_string('pui-path',${JSON.stringify(pui)});
-  check(this._bindings.size===3,'native shortcut acquisition');
+  check(this._bindings.size===4,'native shortcut acquisition');
   const qa=this._states.get('quick-access'),goals=this._states.get('goals');
   const seat=Clutter.get_default_backend().get_default_seat();
   check(typeof seat.create_virtual_device==='function','native seat supports input injection');
@@ -447,7 +448,7 @@ export default class Probe extends Workbench {
   await waitFor(()=>Main.actionMode===Shell.ActionMode.NORMAL);
   check(!Main.overview.visible,'desktop ready for normal shortcuts');
   if(journey!=='resume'){
-  if(journey!=='focus'){
+  if(!['focus','organizer'].includes(journey)){
   setPhase('controller');
   this._toggle('quick-access');
   await waitFor(()=>Object.values(this._states.get('quick-access').sources).every(s=>s.status!=='loading'));
@@ -560,6 +561,44 @@ export default class Probe extends Workbench {
   focusSnapshot('distractor focus verified');
   const agent={ownerId:'exact-local-agent',label:'Needle agent',host:GLib.get_host_name(),
     sessionState:'live',advSessionId:4242,pid:Number(this._focusFixture.get_identifier())};
+  if(journey==='organizer'){
+   setPhase('native Organizer placement');
+   const otherDesktop=global.workspace_manager.append_new_workspace(false,global.get_current_time());
+   distractor.change_workspace(otherDesktop);
+   const untouched=global.get_window_actors().find(actor=>actor.meta_window.get_title()==='Unselected terminal [adv:99]').meta_window;
+   const before=untouched.get_frame_rect(), beforeDesktop=untouched.get_workspace().index();
+   const first={...agent,potSlug:'exact-harness',currentPlanSlug:'same',fleetSlug:'exact-fleet'};
+   const second={...first,ownerId:'other-desktop-agent',advSessionId:42420};
+   const remote={...first,ownerId:'remote-agent',advSessionId:8,host:'remote-host'};
+   const offline={...first,ownerId:'offline-agent',advSessionId:9,stale:true};
+   const missing={...first,ownerId:'missing-agent',advSessionId:10};
+   GLib.file_set_contents(${JSON.stringify(join(temp,'roster.json'))},JSON.stringify({active:[first,second,remote,offline,missing],ended:[]}));
+   await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_o]);
+   const organizer=this._states.get('organizer');
+   await waitFor(()=>organizer.visible&&organizer.sources.agents?.status==='ready');
+   check(this._views.get('organizer').panel.get_parent()!==null,'Organizer shortcut summons a native actor');
+   const arrange=async text=>{
+    await click(()=>this._views.get('organizer')?.content.get_children().find(actor=>actor.label===text));
+    await waitFor(()=>!organizer.organizing&&organizer.organizerReceipts?.length===5);
+    check(organizer.organizerReceipts.map(row=>row.status).join(',')==='moved,moved,unsupported,offline,failed',
+     text+' verifies exact placement and partial failures');
+   };
+   await arrange('Arrange exact-harness / same');
+   check(new Set(organizer.organizerReceipts.filter(row=>row.status==='moved').map(row=>row.desktop)).size===2,
+    'selected terminals remain on two distinct desktops');
+   const after=untouched.get_frame_rect();
+   check(['x','y','width','height'].every(key=>before[key]===after[key])&&untouched.get_workspace().index()===beforeDesktop,
+    'unselected terminal sharing the process remains unchanged');
+   organizer.organizerKind='fleet';this._renderOrganizer();await arrange('Arrange exact-fleet');
+   await waitFor(()=>organizer.sources.goals?.status==='ready');
+   organizer.organizerKind='goal';this._renderOrganizer();await arrange('Arrange Goal ');
+   check(organizer.organizerReceipts.filter(row=>row.status==='moved').every(row=>row.observed&&row.requested),
+    'native receipts retain requested and observed geometry');
+   check(this._views.get('organizer').content.get_children().some(actor=>actor.text?.includes('remote-host')&&actor.text.includes('unsupported')),
+    'native panel exposes remote desktop failure');
+   this._hide('organizer',false);check(!organizer.visible,'Organizer dismisses independently');
+   return this.finish(null);
+  }
   GLib.file_set_contents(${JSON.stringify(join(temp,'roster.json'))},JSON.stringify({active:[agent],ended:[]}));
   setPhase('focus roster loaded');
   qa.pinned=false;this._toggle('quick-access');
@@ -688,7 +727,7 @@ export default class Probe extends Workbench {
             assert.equal(evidence?.ok,true,JSON.stringify({evidence,progress,...result}));
             assert.equal(result.status,0,JSON.stringify(result));
             assert.equal(result.error,null,JSON.stringify(result));
-            const minimumAssertions={inbox:25,input:36,focus:11,resume:16};
+            const minimumAssertions={inbox:25,input:36,focus:11,resume:16,organizer:13};
             assert.ok(evidence.assertions.length>=minimumAssertions[journey],JSON.stringify(evidence));
             assert.deepEqual([...readFileSync(screenshot).subarray(0,8)], [137,80,78,71,13,10,26,10]);
             if(evidenceDirectory){

@@ -1,12 +1,13 @@
 param(
     [Parameter(Mandatory=$true)][string]$SourceDirectory,
-    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'inbox', 'operator', 'operator-inbox', 'environment-refusal', 'fixture-diagnostics', 'fixture-failure', 'fixture-timeout')][string]$Phase = 'all',
+    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'inbox', 'organizer', 'operator', 'operator-inbox', 'environment-refusal', 'fixture-diagnostics', 'fixture-failure', 'fixture-timeout')][string]$Phase = 'all',
     [string]$PuiExecutable,
     [string]$OperatorUrl,
     [string]$ExpectedWorkspace,
     [string]$ExpectedPlan,
     [string]$ExpectedGoal,
-    [switch]$Interactive
+    [switch]$Interactive,
+    [switch]$BudgetOnly
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -15,7 +16,25 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') { throw 'Native 
 foreach ($source in @('PuiReadBridge.cs', 'WorkbenchModel.cs', 'WorkbenchHost.cs')) {
     if (-not [IO.File]::Exists((Join-Path $SourceDirectory $source))) { throw "Missing native fixture source: $source" }
 }
+if ($Phase -eq 'lifecycle') {
+    $budget = & (Join-Path $PSScriptRoot 'native-workbench-windows-lifecycle.ps1') -SourceDirectory $SourceDirectory -BudgetOnly | ConvertFrom-Json
+} elseif ($Phase -eq 'fixture-diagnostics') {
+    $children = @([pscustomobject]@{phase='fixture-failure';clientTimeoutMs=45000},
+        [pscustomobject]@{phase='fixture-timeout';clientTimeoutMs=22000})
+    $milliseconds = ($children | Measure-Object -Property clientTimeoutMs -Sum).Sum + 10000
+    $budget = [pscustomobject]@{ fixtureTimeoutMs=$milliseconds; clientTimeoutMs=($milliseconds + 10000); children=$children }
+} else {
+    $milliseconds = if ($Phase -in @('operator', 'operator-inbox')) { 90000 } elseif ($Phase -eq 'fixture-timeout') { 12000 } else { 35000 }
+    $budget = [pscustomobject]@{ fixtureTimeoutMs=$milliseconds; clientTimeoutMs=($milliseconds + 10000) }
+}
+if ($BudgetOnly) { $budget | ConvertTo-Json -Compress; return }
+function Restore-FixtureRegistration($Context, $PriorCommand, [string]$ScriptPath) {
+    # A killed fixture cannot execute its finally block. Remove only a value
+    # absent before this run and still pointing at this exact test controller.
+    if ($null -eq $PriorCommand) { Remove-WorkbenchRegistration $Context (Get-Item -LiteralPath $ScriptPath).FullName }
+}
 if ($Phase -eq 'fixture-diagnostics') {
+    Import-Module (Join-Path $SourceDirectory 'WorkbenchLifecycle.psm1') -Force
     $priorEvidence = $env:PAPERCUSP_NATIVE_EVIDENCE_DIR
     $directory = Join-Path $env:TEMP ('WorkbenchDiagnostics-' + [Guid]::NewGuid().ToString('N'))
     [void][IO.Directory]::CreateDirectory($directory)
@@ -26,7 +45,9 @@ if ($Phase -eq 'fixture-diagnostics') {
         $cases.Add($Name)
     }
     try {
-        foreach ($diagnosticPhase in @('fixture-failure', 'fixture-timeout')) {
+        foreach ($childBudget in $budget.children) {
+            $diagnosticPhase = $childBudget.phase
+            [Console]::Error.WriteLine('PHASE diagnostics begin ' + $diagnosticPhase)
             $out = Join-Path $directory ($diagnosticPhase + '.out')
             $err = Join-Path $directory ($diagnosticPhase + '.err')
             $command = "& '" + $PSCommandPath.Replace("'", "''") + "' -SourceDirectory '" +
@@ -38,7 +59,8 @@ if ($Phase -eq 'fixture-diagnostics') {
             # Windows PowerShell loses ExitCode after redirected child exit
             # unless the native process handle is retained before waiting.
             $null = $process.Handle
-            if (-not $process.WaitForExit(40000)) { throw 'Diagnostic wrapper did not enforce its deadline' }
+            if (-not $process.WaitForExit($childBudget.clientTimeoutMs)) { throw ('Diagnostic wrapper exceeded its composed child budget: ' + $diagnosticPhase) }
+            [Console]::Error.WriteLine('PHASE diagnostics completed ' + $diagnosticPhase)
             Check ($process.ExitCode -eq 1) ($diagnosticPhase + ' rejects the injected failure')
             $process.Dispose()
             Check ([IO.File]::ReadAllText($err).Contains('WORKBENCH_FIXTURE_EVIDENCE ')) ($diagnosticPhase + ' returns retained evidence location')
@@ -55,10 +77,27 @@ if ($Phase -eq 'fixture-diagnostics') {
             Check ($null -eq (Get-ScheduledTask -TaskName $manifest.taskName -ErrorAction SilentlyContinue)) ($diagnosticPhase + ' unregisters its task')
             if ($diagnosticPhase -eq 'fixture-timeout') { Check ($null -ne $manifest.stoppedChild) 'timeout cleanup verifies and terminates the owned child tree' }
         }
+        $context = New-WorkbenchContext (Join-Path $directory 'registration') ('HKCU:\Software\Papercusp\Fixture-' + [Guid]::NewGuid().ToString('N'))
+        [void](New-Item -Path $context.RunKey -Force)
+        $controller = (Get-Item -LiteralPath (Join-Path $SourceDirectory 'workbench.ps1')).FullName
+        $expected = Get-WorkbenchLoginCommand $controller
+        try {
+            [void](New-ItemProperty -Path $context.RunKey -Name $context.RunName -Value $expected -PropertyType String)
+            Restore-FixtureRegistration $context $expected $controller
+            Check ((Get-ItemProperty -Path $context.RunKey).($context.RunName) -eq $expected) 'failed fixture preserves a pre-existing registration'
+            Set-ItemProperty -Path $context.RunKey -Name $context.RunName -Value 'another installation'
+            Restore-FixtureRegistration $context $null $controller
+            Check ((Get-ItemProperty -Path $context.RunKey).($context.RunName) -eq 'another installation') 'failed fixture preserves a replacement registration'
+            [void](New-ItemProperty -Path $context.RunKey -Name 'unrelated' -Value 'keep' -PropertyType String)
+            Set-ItemProperty -Path $context.RunKey -Name $context.RunName -Value $expected
+            Restore-FixtureRegistration $context $null $controller.Replace('\', '/')
+            Check (-not (Get-Item -Path $context.RunKey).GetValueNames().Contains($context.RunName)) 'failed fixture removes its exact orphan registration across path separators'
+            Check ((Get-ItemProperty -Path $context.RunKey).unrelated -eq 'keep') 'failed fixture cleanup preserves unrelated login values'
+        } finally { Remove-Item -LiteralPath $context.RunKey -Recurse -Force }
         @{ok=$true; platform='windows'; phase=$Phase; count=$cases.Count; cases=$cases.ToArray()} | ConvertTo-Json -Depth 4 -Compress
     } finally {
         $env:PAPERCUSP_NATIVE_EVIDENCE_DIR = $priorEvidence
-        if ($cases.Count -eq 15) { Remove-Item -LiteralPath $directory -Recurse -Force }
+        if ($cases.Count -eq 19) { Remove-Item -LiteralPath $directory -Recurse -Force }
         else { [Console]::Error.WriteLine('Diagnostic self-test evidence: ' + $directory) }
     }
     return
@@ -69,6 +108,13 @@ if ($Interactive) {
     $name = 'Papercusp-WorkbenchFixture-' + [Guid]::NewGuid().ToString('N')
     $evidenceRoot = if ($env:PAPERCUSP_NATIVE_EVIDENCE_DIR) { $env:PAPERCUSP_NATIVE_EVIDENCE_DIR } else { $env:TEMP }
     $directory = Join-Path $evidenceRoot $name
+    $lifecycleContext = $null; $priorRunCommand = $null
+    if ($Phase -eq 'lifecycle') {
+        Import-Module (Join-Path $SourceDirectory 'WorkbenchLifecycle.psm1') -Force
+        $lifecycleContext = New-WorkbenchContext (Join-Path $directory 'registration-custody')
+        $priorEntry = Get-ItemProperty -Path $lifecycleContext.RunKey -Name $lifecycleContext.RunName -ErrorAction SilentlyContinue
+        if ($null -ne $priorEntry) { $priorRunCommand = $priorEntry.($lifecycleContext.RunName) }
+    }
     [IO.Directory]::CreateDirectory($directory) | Out-Null
     $receipt = Join-Path $directory 'exit.json'
     $stdout = Join-Path $directory 'stdout.txt'
@@ -113,9 +159,9 @@ Move-Item -LiteralPath ($target + '.tmp') -Destination $target
         $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
         Register-ScheduledTask -TaskName $name -Action $action -Principal $principal | Out-Null
         Start-ScheduledTask -TaskName $name
-        $deadline = [DateTime]::UtcNow.AddSeconds($(if ($Phase -in @('operator', 'operator-inbox')) { 90 } elseif ($Phase -eq 'fixture-timeout') { 12 } else { 35 }))
+        $deadline = [DateTime]::UtcNow.AddMilliseconds($budget.fixtureTimeoutMs)
         while (-not [IO.File]::Exists($receipt) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
-        if (-not [IO.File]::Exists($receipt)) { throw 'Interactive fixture produced no terminal receipt; verify the signed-in user desktop' }
+        if (-not [IO.File]::Exists($receipt)) { throw ('Interactive ' + $Phase + ' fixture exceeded its ' + $budget.fixtureTimeoutMs + 'ms phase budget; inspect retained progress and child identity') }
         $result = [IO.File]::ReadAllText($receipt) | ConvertFrom-Json
         if ([IO.File]::Exists($stderr)) { [Console]::Error.Write([IO.File]::ReadAllText($stderr)) }
         if ($result.exitCode -ne 0 -and [IO.File]::Exists($stdout)) {
@@ -145,10 +191,13 @@ Move-Item -LiteralPath ($target + '.tmp') -Destination $target
             if ($task.State -eq 'Running') { Stop-ScheduledTask -TaskName $name }
             Unregister-ScheduledTask -TaskName $name -Confirm:$false
         }
+        if (-not $completed -and $null -ne $lifecycleContext) {
+            Restore-FixtureRegistration $lifecycleContext $priorRunCommand (Join-Path $SourceDirectory 'workbench.ps1')
+        }
         if ($completed -and -not $env:PAPERCUSP_NATIVE_EVIDENCE_DIR) {
             Remove-Item -LiteralPath $directory -Recurse -Force
         } else {
-            $diagnostic = @{ ok=$completed; phase=$Phase; startedAt=$startedAt; finishedAt=[DateTime]::UtcNow.ToString('o');
+            $diagnostic = @{ ok=$completed; phase=$Phase; budget=$budget; startedAt=$startedAt; finishedAt=[DateTime]::UtcNow.ToString('o');
                 error=$failure; stoppedChild=$stoppedChild; directory=$directory; taskName=$name }
             [IO.File]::WriteAllText((Join-Path $directory 'diagnostic.json'), ($diagnostic | ConvertTo-Json -Compress))
             if (-not $completed) {
@@ -193,6 +242,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows;
 using System.Windows.Interop;
@@ -203,6 +253,7 @@ public static class WorkbenchNativeHostFixture
     [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] private static extern int Style(IntPtr h, int n);
     [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr h, uint msg, IntPtr a, IntPtr b);
     private static readonly List<string> cases = new List<string>();
+    private static readonly List<object> organizerRuns = new List<object>();
     private static Dictionary<string, object> Json(string text)
     { return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(text); }
     private static void Check(bool ok, string name)
@@ -318,6 +369,123 @@ public static class WorkbenchNativeHostFixture
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
         timer.Tick += (s, e) => { timer.Stop(); frame.Continue = false; };
         timer.Start(); Dispatcher.PushFrame(frame);
+    }
+    private static PanelResult OrganizerAgent(int id, string host, string harness = "one")
+    {
+        return Agent(new JavaScriptSerializer().Serialize(new { advSessionId = id, ownerId = "owner-" + id,
+            host = host, sessionState = "live", currentPlanSlug = "same", potSlug = harness, fleetSlug = "fleet",
+            windowId = "0x" + id.ToString("x") }));
+    }
+    private static OrganizerWindow OrganizerTerminal(int id, string desktop, int monitor)
+    { return new OrganizerWindow { Handle = new IntPtr(id), Title = "Terminal [adv:" + id + "]", Desktop = desktop,
+        Monitor = new IntPtr(monitor), Area = new OrganizerRect { X = monitor * 1000, Y = 0, Width = 1000, Height = 800 } }; }
+    private static List<OrganizerReceipt> Arrange(OrganizerGroup group, Dictionary<string, object> roster,
+        IList<OrganizerWindow> windows, Func<OrganizerWindow, OrganizerRect, Task<OrganizerWindow>> place)
+    { return OrganizerState.ArrangeAsync(group, roster, "desktop", windows, place).GetAwaiter().GetResult(); }
+    private static void OrganizerModel()
+    {
+        var a = OrganizerAgent(101, "desktop"); var b = OrganizerAgent(102, "desktop");
+        var other = OrganizerAgent(103, "desktop", "two"); var remote = OrganizerAgent(104, "remote");
+        var ended = OrganizerAgent(105, "desktop"); ended.Row["sessionState"] = "ended";
+        var missing = OrganizerAgent(106, "desktop");
+        var agents = new[] { a, b, other, remote, ended, missing };
+        var groups = OrganizerState.Groups(agents, "plan", new PanelResult[0]); var group = groups.Single(value => value.Harness == "one");
+        Check(groups.Count == 2 && group.Rows.Count == 5, "Organizer qualifies identical plan slugs by their canonical harness");
+        Check(OrganizerState.Groups(agents, "fleet", new PanelResult[0]).Single().Rows.Count == 6, "Organizer uses canonical fleet identity");
+        var roster = Roster(agents);
+        var goal = OrganizerState.Groups(agents, "goal", new[] { PanelState.Result("goals", Json("{\"id\":\"goal\",\"title\":\"Goal\"}")) }).Single();
+        var links = Json("{\"rows\":[{\"goal\":{\"id\":\"goal\"},\"agents\":[],\"plans\":[{\"harnessSlug\":\"one\",\"planSlug\":\"same\"}],\"projects\":[\"two\"]}]}");
+        Check(OrganizerState.Members(goal, roster, links).Count == 5, "Organizer goal links use the canonical plan rail rather than project membership");
+        links = Json("{\"rows\":[{\"goal\":{\"id\":\"goal\"},\"agents\":[{\"ownerId\":\"owner-103\",\"live\":true},{\"ownerId\":\"owner-101\",\"live\":false}],\"plans\":[]}]}");
+        Check(OrganizerState.Members(goal, roster, links).Single().Key == other.Key, "Organizer goal links include only canonical live holders");
+        Refuses(() => OrganizerState.Members(goal, roster, Json("{\"rows\":[{\"goal\":{\"id\":\"changed\"},\"agents\":[],\"plans\":[]}]}")), "Organizer refuses a changed goal identity");
+        var windows = new[] { OrganizerTerminal(101, "desktop-a", 1), OrganizerTerminal(102, "desktop-b", 2), OrganizerTerminal(103, "desktop-a", 1) };
+        var moved = new List<IntPtr>();
+        Func<OrganizerWindow, OrganizerRect, Task<OrganizerWindow>> place = (window, rect) => {
+            moved.Add(window.Handle); return Task.FromResult(new OrganizerWindow { Desktop = window.Desktop, Monitor = window.Monitor, Bounds = rect }); };
+        var receipts = Arrange(group, roster, windows, place);
+        Check(String.Join(",", receipts.Select(row => row.Status)) == "moved,moved,unsupported,offline,failed", "Organizer preserves independent remote stale and missing terminal receipts");
+        Check(moved.SequenceEqual(new[] { new IntPtr(101), new IntPtr(102) }), "Organizer leaves an unselected terminal in the same process unchanged");
+        Check(receipts.Take(2).Select(row => row.Desktop).Distinct().Count() == 2, "Organizer preserves separate desktops rather than collecting windows on the active desktop");
+        Check(receipts[0].Requested.X == 1012 && receipts[1].Requested.X == 2012 && receipts[0].Requested.Width == 976,
+            "Organizer tiles within each existing monitor work area");
+        Check(receipts.Take(2).All(row => row.Requested.Matches(row.Observed)), "Organizer keeps requested and observed native geometry in its receipts");
+        moved.Clear(); var partial = Roster(agents); partial["partial"] = true;
+        Refuses(() => Arrange(group, partial, windows, place), "Organizer refuses a partial roster before any mutation");
+        Check(moved.Count == 0, "Organizer partial roster refusal moves no windows");
+        partial = Roster(agents); ((Dictionary<string, object>)((object[])partial["rows"])[0])["degradedFields"] = new[] { "windowId" };
+        Refuses(() => Arrange(group, partial, windows, place), "Organizer refuses degraded canonical window identity");
+        var changed = OrganizerAgent(101, "desktop"); changed.Row["currentPlanSlug"] = "different";
+        Check(Arrange(group, Roster(changed, b, other, remote, ended, missing), windows, place)[0].Status == "failed", "Organizer refuses a terminal that left the selected group");
+        changed = OrganizerAgent(101, "desktop"); changed.Row["windowId"] = "0x777";
+        Check(Arrange(group, Roster(changed, b, other, remote, ended, missing), windows, place)[0].Status == "failed", "Organizer refuses a replaced recorded window");
+        var only = OrganizerState.Groups(new[] { a }, "plan", new PanelResult[0]).Single();
+        Check(Arrange(only, Roster(a), windows, (window, rect) => Task.FromResult(new OrganizerWindow {
+            Desktop = "changed", Monitor = window.Monitor, Bounds = rect })).Single().Status == "failed", "Organizer refuses a placement receipt on a different desktop");
+        Check(Arrange(only, Roster(a), windows, (window, rect) => Task.FromResult(new OrganizerWindow {
+            Desktop = window.Desktop, Monitor = window.Monitor, Bounds = new OrganizerRect() })).Single().Status == "failed", "Organizer cannot claim a moved terminal from an unchanged rectangle");
+        var shared = OrganizerAgent(107, "desktop"); shared.Row["windowId"] = a.Row["windowId"];
+        var sharedWindow = OrganizerTerminal(101, "desktop-a", 1); sharedWindow.Title = "Shared terminal";
+        var sharedGroup = OrganizerState.Groups(new[] { a, shared }, "plan", new PanelResult[0]).Single(); moved.Clear();
+        Check(Arrange(sharedGroup, Roster(a, shared), new[] { sharedWindow }, place).All(row => row.Status == "failed") && moved.Count == 0,
+            "Organizer refuses multiple sessions sharing one exact native window");
+    }
+    private static void OrganizerNative()
+    {
+        var a = new Window { Title = "Organizer A [adv:201]", Width = 300, Height = 200, Left = 20, Top = 20 };
+        var b = new Window { Title = "Organizer B [adv:202]", Width = 300, Height = 200, Left = 350, Top = 30 };
+        var control = new Window { Title = "Unselected [adv:299]", Width = 300, Height = 200, Left = 40, Top = 250 };
+        try
+        {
+            a.Show(); b.Show(); control.Show(); Pump();
+            var ah = new WindowInteropHelper(a).Handle; var bh = new WindowInteropHelper(b).Handle;
+            var before = WorkbenchHost.InspectOrganizerWindow(new WindowInteropHelper(control).Handle);
+            var first = OrganizerAgent(201, Environment.MachineName); first.Row["windowId"] = "0x" + ah.ToInt64().ToString("x");
+            var second = OrganizerAgent(202, Environment.MachineName); second.Row["windowId"] = "0x" + bh.ToInt64().ToString("x");
+            var remote = OrganizerAgent(203, "remote-host"); var stale = OrganizerAgent(204, Environment.MachineName); stale.Row["stale"] = true;
+            var missing = OrganizerAgent(205, Environment.MachineName);
+            var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
+            System.IO.File.WriteAllText(path, new JavaScriptSerializer().Serialize(Roster(first, second, remote, stale, missing)));
+            Check(before.Unsupported == null && before.Desktop != null, "native Windows adapter observes the documented virtual desktop identity");
+            using (var host = new WorkbenchHost(Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_FIXTURE")))
+            {
+                host.State("organizer").Pinned = true; host.Toggle("organizer"); var panel = host.Panel("organizer");
+                Until(() => Find<System.Windows.Controls.Button>(panel, "Arrange one / same") != null);
+                Check(panel.IsVisible && host.State("organizer").Visible, "Organizer summons a resident native WPF panel");
+                var field = panel.GetType().GetField("organizerReceipts", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Func<List<OrganizerReceipt>> receipts = () => (List<OrganizerReceipt>)field.GetValue(panel);
+                Action<string> arrange = label => {
+                    Find<System.Windows.Controls.Button>(panel, label).RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+                    Until(() => receipts() != null);
+                    Check(String.Join(",", receipts().Select(row => row.Status)) == "moved,moved,unsupported,offline,failed", label + " reports exact placements and partial failures"); };
+                Action<string> retain = label => organizerRuns.Add(new { group = label, receipts = receipts().ToArray() });
+                arrange("Arrange one / same");
+                retain("plan");
+                Check(receipts().Take(2).All(row => row.Requested.Matches(row.Observed)), "native Windows placement is measured rather than inferred from SetWindowPos");
+                var after = WorkbenchHost.InspectOrganizerWindow(before.Handle);
+                Check(after.Desktop == before.Desktop && after.Monitor == before.Monitor && before.Bounds.Matches(after.Bounds), "native Organizer leaves an unselected same-process window unchanged");
+                var grouping = Find<System.Windows.Controls.ComboBox>(panel, "Organizer grouping"); grouping.SelectedItem = "fleet";
+                arrange("Arrange fleet"); retain("fleet"); grouping.SelectedItem = "goal";
+                arrange("Arrange Goal"); retain("goal");
+                Check(receipts().Take(2).All(row => row.Desktop == WorkbenchHost.InspectOrganizerWindow(row.SessionId == "201" ? ah : bh).Desktop), "native Organizer preserves the observed desktop for each window");
+                var cancelled = WorkbenchHost.PlaceOrganizerWindowAsync(WorkbenchHost.InspectOrganizerWindow(ah), before.Bounds, () => false);
+                Until(() => cancelled.IsCompleted);
+                Check(cancelled.IsFaulted && cancelled.Exception.InnerException.Message.Contains("cancelled"), "native arrangement cancellation refuses mutation");
+                var previous = WorkbenchHost.InspectOrganizerWindow(ah); var calls = 0;
+                cancelled = WorkbenchHost.PlaceOrganizerWindowAsync(previous, before.Bounds, () => ++calls == 1);
+                Until(() => cancelled.IsCompleted);
+                Check(calls == 2 && cancelled.IsFaulted && previous.Bounds.Matches(WorkbenchHost.InspectOrganizerWindow(ah).Bounds),
+                    "native late cancellation after restore prevents geometry mutation");
+                calls = 0;
+                cancelled = WorkbenchHost.PlaceOrganizerWindowAsync(previous, before.Bounds, () => { if (++calls == 2) a.Title = "Replaced terminal [adv:999]"; return true; });
+                Until(() => cancelled.IsCompleted);
+                Check(calls == 2 && cancelled.IsFaulted && previous.Bounds.Matches(WorkbenchHost.InspectOrganizerWindow(ah).Bounds),
+                    "native late terminal identity replacement cannot move a recycled handle");
+                a.Title = previous.Title;
+                host.Toggle("organizer"); Check(!panel.IsVisible && !host.State("organizer").Visible, "Organizer dismisses independently and retains its native resident");
+            }
+        }
+        finally { a.Close(); b.Close(); control.Close(); }
     }
     private static void Model()
     {
@@ -777,6 +945,7 @@ public static class WorkbenchNativeHostFixture
     public static string Run(string phase)
     {
         cases.Clear();
+        organizerRuns.Clear();
         AppDomain.CurrentDomain.UnhandledException += (s, e) =>
             Console.Error.WriteLine("UNHANDLED thread=" + Thread.CurrentThread.ManagedThreadId + ": " + e.ExceptionObject);
         AppDomain.CurrentDomain.FirstChanceException += (s, e) =>
@@ -806,11 +975,13 @@ public static class WorkbenchNativeHostFixture
         if (phase == "accounts") { AccountsModel(); AccountsNative(); }
         if (phase == "goals") { GoalsNative(); }
         if (phase == "inbox") { InboxModel(); InboxNative(); }
+        if (phase == "organizer") { OrganizerModel(); OrganizerNative(); }
         if (phase == "operator") { OperatorNative(); }
         if (phase == "operator-inbox") { OperatorInboxNative(); }
         if (phase == "all" || phase == "hotkeys" || phase == "windows")
         { Console.Error.WriteLine("PHASE " + (phase == "all" ? "windows" : phase)); Native(phase != "hotkeys"); }
         return new JavaScriptSerializer().Serialize(new { ok = true, platform = "windows", phase = phase, cases = cases.ToArray(), count = cases.Count,
+            organizerRuns = organizerRuns.ToArray(),
             processSessionId = System.Diagnostics.Process.GetCurrentProcess().SessionId,
             interactiveDesktop = WorkbenchHost.HasInteractiveDesktop,
             scope = phase == "all" ? "native-model-and-WPF-HWND-fixture" : "native-" + phase + "-fixture" });
@@ -834,7 +1005,7 @@ public static class WorkbenchArgvFixture {
 }
 '@
     $env:WORKBENCH_ARGV_FIXTURE = $argvFixture
-    if ($Phase -in @('accounts', 'goals', 'inbox')) {
+    if ($Phase -in @('accounts', 'goals', 'inbox', 'organizer')) {
         $env:WORKBENCH_ACCOUNT_FIXTURE = $accountFixture; $env:WORKBENCH_ACCOUNT_STATE = $accountState
         $env:WORKBENCH_CONTROL_PHASE = $Phase
         Add-Type -OutputAssembly $accountFixture -OutputType ConsoleApplication -ReferencedAssemblies System.Web.Extensions, System.Core -TypeDefinition @'
@@ -932,6 +1103,17 @@ public static class NativeAccountsFixture {
         var request = json.Deserialize<Dictionary<string, object>>(new StreamReader(Console.OpenStandardInput(), utf8).ReadToEnd());
         var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
         var environment = json.DeserializeObject("{\"endpoint\":\"http://fixture.invalid:3170\",\"workspaceId\":\"isolated\",\"store\":{\"id\":\"fixture\"},\"agentChat\":{\"scope\":\"workspace:isolated\"}}");
+        if (Environment.GetEnvironmentVariable("WORKBENCH_CONTROL_PHASE") == "organizer") {
+            if (args.Length != 1 || args[0] != "native-read") return 50;
+            var name = (string)request["name"]; object organizerRows;
+            if (name == "operator.identity") organizerRows = new object[] { environment };
+            else if (name == "advRoster.list") organizerRows = json.Deserialize<Dictionary<string, object>>(File.ReadAllText(path))["rows"];
+            else if (name == "goals.list") organizerRows = new object[] { new { goals = new[] { new { id = "goal", title = "Goal" } } } };
+            else if (name == "goals.detail") organizerRows = new object[] { new { goal = new { id = "goal" }, agents = new object[0],
+                plans = new[] { new { harnessSlug = "one", planSlug = "same" } } } };
+            else return 51;
+            Console.Write(json.Serialize(new { rows = organizerRows, environment = environment, version = "organizer-fixture" })); return 0;
+        }
         if (Environment.GetEnvironmentVariable("WORKBENCH_CONTROL_PHASE") == "goals") return Goals(args, request, json, utf8, path, environment);
         if (Environment.GetEnvironmentVariable("WORKBENCH_CONTROL_PHASE") == "inbox") return Inbox(args, request, json, utf8, path, environment);
         var state = json.Deserialize<Dictionary<string, object>>(File.Exists(path) ? File.ReadAllText(path) :

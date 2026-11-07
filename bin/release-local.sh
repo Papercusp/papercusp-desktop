@@ -1925,7 +1925,9 @@ if [[ "${PAPERCUSP_SKIP_MIGRATION_BOOTSMOKE:-0}" != "1" ]]; then
   # setup, and teardown so it cannot kill a still-progressing proof at 10 minutes.
   migration_sql_count="$(find "$ROOT/../libs/papercusp/libs/db/sql" -maxdepth 1 -name '*.sql' -type f | wc -l)"
   migration_file_timeout_ms="$((600000 + migration_sql_count * 2100))"
-  ( cd "$ROOT/.." && VITEST_INTEGRATION_HOOK_TIMEOUT_MS="${VITEST_INTEGRATION_HOOK_TIMEOUT_MS:-180000}" PAPERCUSP_TEST_FILE_TIMEOUT_MS="${PAPERCUSP_TEST_FILE_TIMEOUT_MS:-$migration_file_timeout_ms}" release_run_unmanaged node --import tsx scripts/with-test-pg.mjs -- node scripts/test-files.mjs packages/operator-core/lib/release-preflight-migration-boot-smoke.integration.test.ts ) \
+  # EI-28144496337606350: retain the remaining-resource evidence on an intermittent
+  # Vitest close timeout; a later clean replay cannot reconstruct the original leak.
+  ( cd "$ROOT/.." && VITEST_INTEGRATION_HOOK_TIMEOUT_MS="${VITEST_INTEGRATION_HOOK_TIMEOUT_MS:-180000}" PAPERCUSP_TEST_FILE_TIMEOUT_MS="${PAPERCUSP_TEST_FILE_TIMEOUT_MS:-$migration_file_timeout_ms}" release_run_unmanaged node --import tsx scripts/with-test-pg.mjs -- node scripts/test-files.mjs packages/operator-core/lib/release-preflight-migration-boot-smoke.integration.test.ts --reporter=default --reporter=hanging-process ) \
     || { echo "ERROR: migration boot-smoke failed (above) — a migration may crash on a from-scratch replay. Fix it, or independently prove the exact source and use release:cut's audited migrationBootSmokeOverride (direct shell skip remains for Docker-less boxes)."; exit 1; }
 fi
 

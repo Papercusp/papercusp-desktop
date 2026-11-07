@@ -65,7 +65,7 @@ try {
     $hostInstance = [Papercusp.Workbench.WorkbenchHost]::new($settings.pui)
     function Get-Bindings($value) {
         $bindings = [Collections.Generic.Dictionary[string,Papercusp.Workbench.Hotkey]]::new()
-        foreach ($name in @('quick-access', 'goals', 'accounts', 'inbox')) {
+        foreach ($name in @('quick-access', 'goals', 'accounts', 'inbox', 'organizer')) {
             if ($value.enabled -and $value.bindings.$name.enabled) {
                 $bindings.Add($name, [Papercusp.Workbench.Hotkey]::new($value.bindings.$name.modifiers, $value.bindings.$name.key))
             }
@@ -83,9 +83,9 @@ try {
         $enabled = [Windows.Controls.CheckBox]::new(); $enabled.Content = 'Enable Workbench at login'; $enabled.IsChecked = $settings.enabled
         [void]$layout.Children.Add($enabled)
         $entries = @{}
-        foreach ($name in @('quick-access', 'goals', 'accounts', 'inbox')) {
+        foreach ($name in @('quick-access', 'goals', 'accounts', 'inbox', 'organizer')) {
             $label = [Windows.Controls.CheckBox]::new()
-            $label.Content = if ($name -eq 'quick-access') { 'Quick Access shortcut' } elseif ($name -eq 'goals') { 'Goals shortcut' } elseif ($name -eq 'inbox') { 'Inbox shortcut' } else { 'Accounts shortcut' }
+            $label.Content = if ($name -eq 'quick-access') { 'Quick Access shortcut' } elseif ($name -eq 'goals') { 'Goals shortcut' } elseif ($name -eq 'inbox') { 'Inbox shortcut' } elseif ($name -eq 'organizer') { 'Organizer shortcut' } else { 'Accounts shortcut' }
             $label.IsChecked = $settings.bindings.$name.enabled; $label.Margin = [Windows.Thickness]::new(0, 12, 0, 4)
             [void]$layout.Children.Add($label)
             $entry = [Windows.Controls.TextBox]::new(); $entry.MinWidth = 340; $entry.IsReadOnly = $true
@@ -113,7 +113,7 @@ try {
             try {
                 $next = $settings | ConvertTo-Json -Depth 8 | ConvertFrom-Json
                 $next.enabled = [bool]$enabled.IsChecked
-                foreach ($name in @('quick-access', 'goals', 'accounts', 'inbox')) {
+                foreach ($name in @('quick-access', 'goals', 'accounts', 'inbox', 'organizer')) {
                     $next.bindings.$name.enabled = [bool]$entries[$name].enabled.IsChecked
                     $next.bindings.$name.modifiers = $entries[$name].shortcut.Tag.modifiers
                     $next.bindings.$name.key = $entries[$name].shortcut.Tag.key

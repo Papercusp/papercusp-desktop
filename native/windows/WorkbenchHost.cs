@@ -38,6 +38,23 @@ namespace Papercusp.Workbench
         [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int count);
         [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr hwnd, int command);
+        [DllImport("user32.dll", SetLastError = true)] private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after,
+            int x, int y, int width, int height, uint flags);
+        [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out NativeRect rect);
+        [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+        [StructLayout(LayoutKind.Sequential)] private struct NativeRect { public int Left, Top, Right, Bottom; }
+        [StructLayout(LayoutKind.Sequential)] private struct MonitorInfo
+        { public int Size; public NativeRect Bounds, Work; public uint Flags; }
+        // Windows' documented read-only desktop identity seam. Arrangement never
+        // invokes MoveWindowToDesktop or an undocumented desktop-manager API.
+        [ComImport, Guid("A5CD92FF-29BE-454C-8D04-D82879FB3F1B"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IVirtualDesktopManager
+        {
+            [PreserveSig] int IsWindowOnCurrentVirtualDesktop(IntPtr hwnd, [MarshalAs(UnmanagedType.Bool)] out bool current);
+            [PreserveSig] int GetWindowDesktopId(IntPtr hwnd, out Guid desktop);
+            [PreserveSig] int MoveWindowToDesktop(IntPtr hwnd, [In] ref Guid desktop);
+        }
         [DllImport("user32.dll")] private static extern IntPtr GetProcessWindowStation();
         [DllImport("user32.dll", SetLastError = true)] private static extern bool GetUserObjectInformation(
             IntPtr handle, int index, out UserObjectFlags flags, int length, out int required);
@@ -71,6 +88,7 @@ namespace Papercusp.Workbench
             panels.Add("goals", new NativePanel(pui, "Goals", "goals", Relayout));
             panels.Add("accounts", new NativePanel(pui, "Accounts", "accounts", Relayout));
             panels.Add("inbox", new NativePanel(pui, "Inbox", "inbox", Relayout));
+            panels.Add("organizer", new NativePanel(pui, "Organizer", "organizer", Relayout));
         }
         public Window Panel(string name) { return panels[name]; }
         public PanelState State(string name) { return panels[name].State; }
@@ -87,7 +105,7 @@ namespace Papercusp.Workbench
         }
         private void Relayout()
         {
-            var visible = new[] { "quick-access", "goals", "accounts", "inbox" }.Where(name => panels[name].State.Visible).ToArray();
+            var visible = new[] { "quick-access", "goals", "accounts", "inbox", "organizer" }.Where(name => panels[name].State.Visible).ToArray();
             for (var i = 0; i < visible.Length; ++i)
                 panels[visible[i]].Position(PanelBounds(SystemParameters.WorkArea, visible.Length, i));
         }
@@ -104,6 +122,58 @@ namespace Papercusp.Workbench
                 return true;
             }, IntPtr.Zero)) throw new InvalidOperationException("Could not inspect desktop terminals");
             return windows;
+        }
+        private static OrganizerRect Rectangle(NativeRect rect)
+        { return new OrganizerRect { X = rect.Left, Y = rect.Top, Width = rect.Right - rect.Left, Height = rect.Bottom - rect.Top }; }
+        public static OrganizerWindow InspectOrganizerWindow(IntPtr handle)
+        {
+            var record = new OrganizerWindow { Handle = handle };
+            object manager = null;
+            try
+            {
+                if (!IsWindow(handle)) throw new InvalidOperationException("The exact terminal window is unavailable");
+                var title = new StringBuilder(32768); GetWindowText(handle, title, title.Capacity); record.Title = title.ToString();
+                NativeRect bounds;
+                if (!GetWindowRect(handle, out bounds)) throw new InvalidOperationException("Terminal geometry is unavailable");
+                record.Bounds = Rectangle(bounds);
+                record.Monitor = MonitorFromWindow(handle, 0);
+                var monitor = new MonitorInfo { Size = Marshal.SizeOf(typeof(MonitorInfo)) };
+                if (record.Monitor == IntPtr.Zero || !GetMonitorInfo(record.Monitor, ref monitor))
+                    throw new InvalidOperationException("Terminal monitor work area is unavailable");
+                record.Area = Rectangle(monitor.Work);
+                manager = Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("AA509086-5CA9-4C25-8F95-589D3C07B48A")));
+                Guid desktop;
+                Marshal.ThrowExceptionForHR(((IVirtualDesktopManager)manager).GetWindowDesktopId(handle, out desktop));
+                if (desktop == Guid.Empty) throw new InvalidOperationException("Terminal desktop identity is unsupported");
+                record.Desktop = desktop.ToString();
+            }
+            catch (Exception error) { record.Unsupported = error.Message; }
+            finally { if (manager != null && Marshal.IsComObject(manager)) Marshal.FinalReleaseComObject(manager); }
+            return record;
+        }
+        public static async Task<OrganizerWindow> PlaceOrganizerWindowAsync(OrganizerWindow window, OrganizerRect rect,
+            Func<bool> current)
+        {
+            Action verify = () =>
+            {
+                if (!current()) throw new InvalidOperationException("Arrangement cancelled; refresh the group");
+                var actual = InspectOrganizerWindow(window.Handle);
+                if (actual.Unsupported != null || actual.Desktop != window.Desktop || actual.Monitor != window.Monitor || actual.Title != window.Title)
+                    throw new InvalidOperationException("Terminal changed desktop, monitor or identity; refresh the group");
+            };
+            verify();
+            if (!ShowWindowAsync(window.Handle, 4)) throw new InvalidOperationException("Terminal could not be restored without activation");
+            await Task.Delay(40);
+            verify();
+            if (!SetWindowPos(window.Handle, IntPtr.Zero, rect.X, rect.Y, rect.Width, rect.Height, 0x14))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "Terminal arrangement failed");
+            OrganizerWindow observed = null;
+            for (var attempt = 0; attempt < 40; ++attempt)
+            {
+                await Task.Delay(25); verify(); observed = InspectOrganizerWindow(window.Handle);
+                if (rect.Matches(observed.Bounds)) break;
+            }
+            return observed;
         }
         public void Configure(Dictionary<string, Hotkey> desired)
         {
@@ -190,6 +260,12 @@ namespace Papercusp.Workbench
             private readonly DispatcherTimer inboxTimer;
             private readonly List<Button> inboxControls = new List<Button>();
             private Dictionary<string, object> inboxEnvironment;
+            private readonly StackPanel organizerContent;
+            private readonly ComboBox organizerGrouping;
+            private Dictionary<string, object> organizerEnvironment;
+            private List<OrganizerReceipt> organizerReceipts;
+            private bool organizing;
+            private string organizerError;
             private List<Dictionary<string, object>> inboxConfirmation;
             private string inboxRunId, inboxListKey, inboxContextKey, inboxBulkKey;
             internal Func<string, bool> ConfirmGoal;
@@ -230,6 +306,12 @@ namespace Papercusp.Workbench
                 status = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 8) };
                 AutomationProperties.SetName(status, "Workbench status");
                 controls.Children.Add(status);
+                if (scope == "organizer")
+                {
+                    organizerGrouping = new ComboBox { ItemsSource = new[] { "plan", "fleet", "goal" }, SelectedIndex = 0 };
+                    AutomationProperties.SetName(organizerGrouping, "Organizer grouping"); controls.Children.Add(organizerGrouping);
+                    organizerGrouping.SelectionChanged += (s, e) => { organizerReceipts = null; RenderOrganizer(); };
+                }
                 if (scope == "accounts")
                 {
                     accounts = new AccountState();
@@ -268,6 +350,12 @@ namespace Papercusp.Workbench
                 ConfirmGoal = message => MessageBox.Show(this, message, "Confirm goal action", MessageBoxButton.YesNo,
                     MessageBoxImage.Question, MessageBoxResult.No) == MessageBoxResult.Yes;
                 var body = new Grid(); layout.Children.Add(body);
+                if (scope == "organizer")
+                {
+                    organizerContent = new StackPanel();
+                    var scroll = new ScrollViewer { Content = organizerContent, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+                    AutomationProperties.SetName(scroll, "Organizer groups and placement receipts"); body.Children.Add(scroll);
+                }
                 if (scope == "inbox")
                 {
                     inbox = new InboxState(); inboxContent = new StackPanel();
@@ -292,7 +380,7 @@ namespace Papercusp.Workbench
                     inboxTimer.Tick += async (s, e) => { inboxTimer.Stop(); await FollowInboxRun(); };
                 }
                 results = new ListBox { FontSize = 15 }; body.Children.Add(results);
-                if (inbox != null) results.Visibility = Visibility.Collapsed;
+                if (inbox != null || organizerContent != null) results.Visibility = Visibility.Collapsed;
                 AutomationProperties.SetName(results, "Workbench results");
                 results.SelectionChanged += (s, e) =>
                 {
@@ -323,7 +411,7 @@ namespace Papercusp.Workbench
                         if (State.Escape() == "panel") Dismiss(true); else Render();
                         e.Handled = true;
                     }
-                    else if (e.Key == Key.Enter && State.Detail == null && inbox == null) { OpenSelected(); e.Handled = true; }
+                    else if (e.Key == Key.Enter && State.Detail == null && inbox == null && organizerContent == null) { OpenSelected(); e.Handled = true; }
                     else if ((e.Key == Key.Down || e.Key == Key.Up) && search.IsKeyboardFocusWithin)
                     {
                         var count = results.Items.Count;
@@ -363,25 +451,39 @@ namespace Papercusp.Workbench
                 if (restore && ownedFocus && IsWindow(priorWindow)) SetForegroundWindow(priorWindow);
             }
             private void Schedule()
-            { if (ready && State.Visible) { if (accounts != null) RenderAccounts(); else if (inbox != null) { inboxConfirmation = null; inbox.RetainVisibleSelection(State.Query); RenderInbox(); } else { debounce.Stop(); debounce.Start(); } } }
+            { if (ready && State.Visible) { if (organizerContent != null) RenderOrganizer(); else if (accounts != null) RenderAccounts(); else if (inbox != null) { inboxConfirmation = null; inbox.RetainVisibleSelection(State.Query); RenderInbox(); } else { debounce.Stop(); debounce.Start(); } } }
             private async void Refresh()
             {
                 if (!State.Visible) return;
                 if (inbox != null && inbox.Pending) return;
+                if (organizing) return;
                 CancelDetail(); State.Detail = null;
                 if (refresh != null) { refresh.Cancel(); refresh.Dispose(); }
                 refresh = new CancellationTokenSource();
                 if (accounts != null) { await RefreshAccounts(refresh.Token); return; }
                 if (inbox != null) { await RefreshInbox(refresh.Token); return; }
                 var token = refresh.Token; var generation = State.BeginRefresh();
+                if (organizerContent != null)
+                {
+                    organizerEnvironment = null; organizerError = null; organizerReceipts = null;
+                    try
+                    {
+                        var environment = InboxState.One(await PuiReadBridge.ReadAsync(pui, "operator.identity", null, token));
+                        if (!AccountState.SameEnvironment(environment, environment)) throw new InvalidOperationException("Selected environment is unavailable");
+                        if (token.IsCancellationRequested || generation != State.Generation || !State.Visible) return;
+                        organizerEnvironment = environment;
+                    }
+                    catch (Exception error) { if (!token.IsCancellationRequested) { organizerError = error.Message; RenderOrganizer(); } return; }
+                }
                 Render();
                 var tasks = State.Sources.Keys.ToArray().Select(async kind =>
                 {
                     Dictionary<string, object> payload = null; Exception failure = null;
                     var args = new Dictionary<string, object>();
                     if (kind == "reports" || kind == "goals")
-                    { args["query"] = State.Query; args["limit"] = kind == "goals" ? 500 : 200; }
-                    try { payload = await PuiReadBridge.ReadAsync(pui, PanelState.Models[kind], args, token); }
+                    { args["query"] = organizerContent != null ? "" : State.Query; args["limit"] = kind == "goals" ? 500 : 200; }
+                    try { payload = await PuiReadBridge.ReadAsync(pui, PanelState.Models[kind], args, token, 22000,
+                        organizerContent != null ? organizerEnvironment : null); }
                     catch (Exception error) { failure = error; }
                     if (!token.IsCancellationRequested && State.Settle(kind, generation, payload, failure)) Render();
                 }).ToArray();
@@ -390,6 +492,7 @@ namespace Papercusp.Workbench
             private void Render()
             {
                 if (shuttingDown) return;
+                if (organizerContent != null) { RenderOrganizer(); return; }
                 if (accounts != null) { RenderAccounts(); return; }
                 if (inbox != null) { RenderInbox(); return; }
                 status.Text = String.Join("\n", PanelState.Kinds.Where(k => State.Sources.ContainsKey(k)).Select(k =>
@@ -409,6 +512,56 @@ namespace Papercusp.Workbench
                 if (State.Detail != null) resume.Visibility = Visibility.Collapsed;
                 more.Visibility = State.Detail == null && State.Results(true).Count > rows.Count ? Visibility.Visible : Visibility.Collapsed;
                 RenderGoalControls();
+            }
+            private void RenderOrganizer()
+            {
+                if (organizerContent == null || shuttingDown) return;
+                organizerContent.Children.Clear();
+                organizerGrouping.IsEnabled = !organizing;
+                status.Text = organizing ? "Arranging exact terminals…" : organizerError ??
+                    "Arrange a group within each existing desktop and monitor.";
+                if (organizerReceipts != null) foreach (var receipt in organizerReceipts)
+                    InboxText(organizerContent, (receipt.OwnerId == "" ? receipt.SessionId : receipt.OwnerId) + " · " + receipt.Host +
+                        " · desktop " + (receipt.Desktop ?? "unavailable") + " · " + receipt.Status +
+                        (receipt.Error == null ? "" : " · " + receipt.Error));
+                PanelSource agents, goals;
+                if (!State.Sources.TryGetValue("agents", out agents) || agents.Status != "ready" || agents.Partial || organizerEnvironment == null)
+                { InboxText(organizerContent, agents == null || agents.Status == "loading" ? "Loading canonical terminals…" : "Canonical terminals unavailable or incomplete · " + agents.Error); return; }
+                var kind = (string)organizerGrouping.SelectedItem;
+                if (kind == "goal" && (!State.Sources.TryGetValue("goals", out goals) || goals.Status != "ready" || goals.Partial))
+                { InboxText(organizerContent, "Canonical goals unavailable or incomplete"); return; }
+                State.Sources.TryGetValue("goals", out goals);
+                var groups = OrganizerState.Groups(agents.Rows, kind, goals == null ? new List<PanelResult>() : goals.Rows);
+                var terms = State.Query.Split(new[] { ' ', '\t', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (var group in groups.Where(group => terms.All(term => group.Label.IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0)))
+                {
+                    var selected = group;
+                    InboxButton(organizerContent, "Arrange " + group.Label, "Arrange " + group.Label, () => ArrangeGroup(selected), !organizing);
+                }
+                if (groups.Count == 0) InboxText(organizerContent, "No canonical groups");
+            }
+            private async void ArrangeGroup(OrganizerGroup group)
+            {
+                if (organizing || !State.Visible || organizerEnvironment == null) return;
+                organizing = true; organizerError = null; organizerReceipts = null;
+                var generation = ++State.DetailGeneration; var environment = organizerEnvironment;
+                var token = refresh.Token;
+                Func<bool> current = () => !shuttingDown && State.Visible && !token.IsCancellationRequested &&
+                    generation == State.DetailGeneration && Object.ReferenceEquals(environment, organizerEnvironment);
+                RenderOrganizer();
+                try
+                {
+                    var roster = await PuiReadBridge.ReadAsync(pui, "advRoster.list", null, token, 22000, environment);
+                    var goalPayload = group.Kind == "goal" ? await PuiReadBridge.ReadAsync(pui, "goals.detail",
+                        new Dictionary<string, object> { { "goalId", group.Id } }, token, 22000, environment) : null;
+                    if (!current()) return;
+                    var windows = DesktopWindows().Select(pair => InspectOrganizerWindow(pair.Key)).ToList();
+                    var receipts = await OrganizerState.ArrangeAsync(group, roster, Environment.MachineName, windows,
+                        (window, rect) => PlaceOrganizerWindowAsync(window, rect, current), goalPayload);
+                    if (current()) organizerReceipts = receipts;
+                }
+                catch (Exception error) { if (current()) organizerError = error.Message; }
+                finally { organizing = false; RenderOrganizer(); }
             }
             private void CancelDetail()
             {

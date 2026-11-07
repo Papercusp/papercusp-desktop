@@ -6,12 +6,77 @@ import {pathToFileURL} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import test from 'node:test';
 import {PanelState, InboxState, sameEnvironment, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests,
-    agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow}
+    agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow,
+    organizerGroups, organizerMembers, arrangeOrganizerGroup}
     from '../native/gnome/panel-model.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const plan = (harness = 'one', slug = 'same') => ({harness, slug, title: 'Shared title', status: 'active'});
 const envelope = rows => ({rows, version: 'canonical-version'});
+
+const organizerAgent = (id, patch = {}) => ({ownerId:`owner-${id}`, advSessionId:id,
+    host:'desktop',sessionState:'live',potSlug:'one',currentPlanSlug:'same',fleetSlug:'fleet',...patch});
+const organizerRoster = rows => envelope([{active:rows,ended:[]}]);
+const organizerWindow = (id, desktop = 0, monitor = 0) => ({title:`Terminal [adv:${id}]`,desktop,monitor,
+    area:{x:monitor*1200,y:desktop*20,width:1200,height:800}});
+test('Organizer uses qualified plans, fleet identities and canonical goal links', () => {
+    const rows=[organizerAgent(1),organizerAgent(2,{potSlug:'two'}),organizerAgent(3,{currentPlanSlug:null})];
+    const groups=organizerGroups(rows,'plan');
+    assert.equal(groups.length,2); assert.notEqual(groups[0].key,groups[1].key);
+    assert.deepEqual(organizerMembers(groups[0],organizerRoster(rows)),[rows[0]]);
+    assert.equal(organizerGroups(rows,'fleet')[0].rows.length,3);
+    const goal=organizerGroups(rows,'goal',[{id:'exact-goal',title:'Shared title'}])[0];
+    const detail=envelope([{goal:{id:goal.id},plans:[{harnessSlug:'two',planSlug:'same'}],
+        agents:[{ownerId:'owner-3',live:true},{ownerId:'owner-1',live:false}],pots:[{harnessSlug:'one'}]}]);
+    assert.deepEqual(organizerMembers(goal,organizerRoster(rows),detail),[rows[1],rows[2]]);
+    assert.throws(()=>organizerMembers({...goal,id:'other'},organizerRoster(rows),detail),/changed/);
+    assert.throws(()=>organizerMembers(goal,organizerRoster(rows),{...detail,partial:true}),/incomplete/);
+    assert.equal(organizerGroups([organizerAgent(1,{potSlug:null,harnessSlug:null})],'plan').length,0);
+    for (const roster of [{...organizerRoster(rows),partial:true},
+        envelope([{active:rows,ended:[],degradedFields:[{field:'active',reason:'offline'}]}])])
+        assert.throws(()=>organizerMembers(groups[0],roster),/incomplete/);
+});
+test('Organizer tiles exact terminals independently within each desktop and monitor', async () => {
+    const rows=[1,2,3,4].map(id=>organizerAgent(id));
+    const windows=[organizerWindow(1),organizerWindow(2),organizerWindow(3,1),organizerWindow(4,0,1)];
+    const placements=[];
+    const receipts=await arrangeOrganizerGroup(organizerGroups(rows,'plan')[0],organizerRoster(rows),'desktop',windows,
+        async (window,rect)=>{placements.push({window,rect});return {...rect,desktop:window.desktop,monitor:window.monitor};});
+    assert.deepEqual(receipts.map(r=>r.status),['moved','moved','moved','moved']);
+    assert.equal(placements[0].rect.width,576); assert.equal(placements[1].rect.x,612);
+    assert.equal(placements[2].rect.width,1176); assert.equal(placements[3].rect.x,1212);
+    for(const {window,rect} of placements){
+        assert.ok(rect.x>=window.area.x&&rect.y>=window.area.y);
+        assert.ok(rect.x+rect.width<=window.area.x+window.area.width);
+        assert.ok(rect.y+rect.height<=window.area.y+window.area.height);
+    }
+});
+test('Organizer reports remote, stale and shared windows without moving them', async () => {
+    const selected=[organizerAgent(1),organizerAgent(2,{host:'remote'}),organizerAgent(3,{stale:true}),
+        organizerAgent(4),organizerAgent(5),organizerAgent(6)];
+    const current=selected.map(row=>row.advSessionId===4?{...row,currentPlanSlug:'changed'}:row);
+    const shared={...organizerWindow(5),title:'Terminal [adv:5] [adv:6]'};
+    const moved=[];
+    const receipts=await arrangeOrganizerGroup(organizerGroups(selected,'fleet')[0],organizerRoster(current),'desktop',
+        [organizerWindow(1),shared],async (window,rect)=>{moved.push(window);return {...rect,desktop:window.desktop,monitor:window.monitor};});
+    assert.deepEqual(receipts.map(r=>r.status),['moved','unsupported','offline','failed','failed','failed']);
+    assert.deepEqual(moved.map(w=>w.title),['Terminal [adv:1]']);
+    assert.match(receipts[4].error,/share/); assert.match(receipts[5].error,/share/);
+    const changed=await arrangeOrganizerGroup(organizerGroups(selected,'plan')[0],organizerRoster(current),'desktop',[],()=>assert.fail('No valid windows'));
+    assert.match(changed[3].error,/changed group/);
+});
+test('Organizer refuses changed sessions and unverified placement receipts', async () => {
+    const rows=[organizerAgent(1),organizerAgent(2),organizerAgent(3),organizerAgent(4)];
+    const windows=rows.map(row=>organizerWindow(row.advSessionId));
+    windows[3].unsupported='Pinned to every desktop';
+    const roster=organizerRoster(rows.map(row=>row.advSessionId===1?{...row,advSessionId:99}:row));
+    const receipts=await arrangeOrganizerGroup(organizerGroups(rows,'plan')[0],roster,'desktop',windows,
+        async (window,rect)=>{if(window===windows[1])throw Error('Native permission denied');return {...rect,desktop:99,monitor:0};});
+    assert.deepEqual(receipts.map(r=>r.status),['failed','failed','failed','unsupported']);
+    assert.match(receipts[0].error,/changed/); assert.match(receipts[1].error,/permission/);
+    assert.match(receipts[2].error,/within its desktop/);
+    await assert.rejects(arrangeOrganizerGroup(organizerGroups(rows,'plan')[0],{error:'ACL refused',rows:[]},'desktop',windows,()=>{}),/ACL/);
+});
 
 const environment = {endpoint:'http://selected',workspaceId:'exact',store:{id:'store'},agentChat:{scope:'workspace'}};
 const question = {id:'question+/=&',kind:'escalation',title:'Literal %_ question',body:'Context',ref:{kind:'coord-escalation',conversationId:'conversation+/=&'},actions:[{id:'resolve'}]};

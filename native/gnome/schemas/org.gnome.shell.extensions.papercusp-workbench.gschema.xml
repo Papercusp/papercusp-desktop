@@ -6,6 +6,7 @@
     <key name="quick-access" type="as"><default>['&lt;Super&gt;&lt;Alt&gt;space']</default><summary>Quick Access shortcut</summary></key>
     <key name="goals" type="as"><default>['&lt;Super&gt;&lt;Shift&gt;g']</default><summary>Goals shortcut</summary></key>
     <key name="inbox" type="as"><default>['&lt;Super&gt;&lt;Shift&gt;i']</default><summary>Inbox shortcut</summary></key>
+    <key name="organizer" type="as"><default>['&lt;Super&gt;&lt;Shift&gt;o']</default><summary>Organizer shortcut</summary></key>
     <key name="panel-width" type="i"><range min="360" max="1200"/><default>640</default><summary>Native panel width</summary></key>
   </schema>
 </schemalist>

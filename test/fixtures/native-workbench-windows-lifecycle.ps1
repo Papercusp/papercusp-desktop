@@ -1,8 +1,36 @@
-param([Parameter(Mandatory=$true)][string]$SourceDirectory, [switch]$Resident)
+param([Parameter(Mandatory=$true)][string]$SourceDirectory, [switch]$Resident, [switch]$BudgetOnly)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $SourceDirectory 'WorkbenchLifecycle.psm1') -Force
+$controllerOperations = @('Install', 'Install', 'Settings', 'Run', 'Enable', 'Disable', 'Uninstall')
+$controllerTimeoutMs = 12000
+$settingsTimeoutMs = 5000
+# The wrapper must contain every bounded child phase, two settings waits and
+# settings/cleanup work. The same contract is read by the Node client.
+$fixtureTimeoutMs = 35000 + $controllerOperations.Count * $controllerTimeoutMs + 2 * $settingsTimeoutMs
+if ($BudgetOnly) {
+    @{ fixtureTimeoutMs=$fixtureTimeoutMs; clientTimeoutMs=($fixtureTimeoutMs + 10000);
+        controllerTimeoutMs=$controllerTimeoutMs; settingsTimeoutMs=$settingsTimeoutMs;
+        controllerOperations=$controllerOperations; baseTimeoutMs=35000 } | ConvertTo-Json -Compress
+    return
+}
+if ($Resident) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class NativeWorkbenchFixtureDesktop {
+    [StructLayout(LayoutKind.Sequential)] private struct Flags { public int Inherit, Reserved; public uint Value; }
+    [DllImport("user32.dll")] private static extern IntPtr GetProcessWindowStation();
+    [DllImport("user32.dll")] private static extern bool GetUserObjectInformation(IntPtr h, int index, out Flags flags, int length, out int required);
+    public static bool Interactive() { Flags flags; int required; return GetUserObjectInformation(GetProcessWindowStation(), 1,
+        out flags, Marshal.SizeOf(typeof(Flags)), out required) && (flags.Value & 1) != 0; }
+}
+'@
+    if (-not [NativeWorkbenchFixtureDesktop]::Interactive()) {
+        throw 'Resident lifecycle requires the signed-in desktop. Use native-workbench-windows-host.ps1 -Phase lifecycle -Interactive; no fixture state has been written.'
+    }
+}
 $directory = Join-Path $env:TEMP ('Workbench fixture ' + [Guid]::NewGuid().ToString('N') + " ' dollars `$ spaces")
 $registry = 'HKCU:\Software\Papercusp\WorkbenchFixture-' + [Guid]::NewGuid().ToString('N')
 $cases = [Collections.Generic.List[string]]::new()
@@ -51,6 +79,20 @@ try {
     Check (-not (Read-WorkbenchSettings $context $pui).bindings.inbox.enabled) 'upgrade preserves explicitly disabled Inbox'
     [void](Save-WorkbenchSettings $context $settings $script)
     $legacy = $settings | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    Check ($settings.bindings.organizer.enabled -and $settings.bindings.organizer.key -eq 79) 'first install enables Organizer on Ctrl Alt O'
+    $oldOrganizer = $settings | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $oldOrganizer.bindings.PSObject.Properties.Remove('organizer'); $oldOrganizer.bindings.'quick-access'.key = 79
+    [IO.File]::WriteAllText($context.File, ($oldOrganizer | ConvertTo-Json -Depth 8))
+    $newOrganizer = Read-WorkbenchSettings $context $pui
+    Check ($newOrganizer.bindings.organizer.key -eq 67 -and $newOrganizer.bindings.'quick-access'.key -eq 79) 'Organizer migration avoids existing shortcuts'
+    [void](Save-WorkbenchSettings $context $settings $script -PreserveExisting)
+    Check ((Read-WorkbenchSettings $context $pui).bindings.organizer.key -eq 67) 'installer persists the migrated Organizer shortcut'
+    $newOrganizer.bindings.organizer.enabled = $false
+    [void](Save-WorkbenchSettings $context $newOrganizer $script)
+    [void](Save-WorkbenchSettings $context $settings $script -PreserveExisting)
+    Check (-not (Read-WorkbenchSettings $context $pui).bindings.organizer.enabled) 'upgrade preserves explicitly disabled Organizer'
+    Check ((Read-WorkbenchSettings $context $pui).bindings.'quick-access'.key -eq 79) 'Organizer upgrade retains the prior Quick Access shortcut'
+    [void](Save-WorkbenchSettings $context $settings $script)
     $legacy.bindings.PSObject.Properties.Remove('accounts')
     $legacy.enabled = $false; $legacy.bindings.'quick-access'.key = 65; $legacy.bindings.goals.enabled = $false
     [IO.File]::WriteAllText($context.File, ($legacy | ConvertTo-Json -Depth 8))
@@ -122,12 +164,17 @@ try {
         # The fixture can exercise the real Run key only when its OWN product
         # value is absent. Never replace a real account's existing registration.
         Check ($null -eq (Login $residentContext)) 'resident fixture refuses to overwrite an existing Workbench login registration'
+        $script:controllerIndex = 0
         function Run-Controller([string]$Operation) {
+            if ($script:controllerIndex -ge $controllerOperations.Count -or $Operation -ne $controllerOperations[$script:controllerIndex]) {
+                throw 'Controller sequence changed; update the shared lifecycle deadline contract before running it'
+            }
+            $script:controllerIndex++
             Trace ('controller begin ' + $Operation)
             $arguments = '-STA -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $controller + '" -Action ' + $Operation
             $child = Start-Process $exe -ArgumentList $arguments -WindowStyle Hidden -PassThru
             try {
-                if (-not $child.WaitForExit(12000)) { $child.Kill(); throw ('Owned controller timed out: ' + $Operation) }
+                if (-not $child.WaitForExit($controllerTimeoutMs)) { $child.Kill(); throw ('Owned controller timed out: ' + $Operation) }
                 if ($child.ExitCode -ne 0) {
                     $log = Join-Path $residentContext.Directory 'workbench-windows-error.log'
                     $diagnostic = if (Test-Path $log) { [IO.File]::ReadAllText($log) } else { 'no resident error log' }
@@ -150,7 +197,7 @@ try {
             Check ($first.Count -eq 1 -and $second.Count -eq 1 -and $first[0].ProcessId -eq $second[0].ProcessId) 'unchanged desktop preparation preserves the same resident process'
             Run-Controller Settings
             $condition = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, 'Papercusp Workbench settings')
-            $deadline = [DateTime]::UtcNow.AddSeconds(5); $window = $null
+            $deadline = [DateTime]::UtcNow.AddMilliseconds($settingsTimeoutMs); $window = $null
             while ($null -eq $window -and [DateTime]::UtcNow -lt $deadline) {
                 $window = [Windows.Automation.AutomationElement]::RootElement.FindFirst([Windows.Automation.TreeScope]::Children, $condition)
                 if ($null -eq $window) { Start-Sleep -Milliseconds 100 }
@@ -163,7 +210,7 @@ try {
             $saveControl = $window.FindFirst([Windows.Automation.TreeScope]::Descendants,
                 [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, 'Save'))
             $saveControl.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
-            $deadline = [DateTime]::UtcNow.AddSeconds(5)
+            $deadline = [DateTime]::UtcNow.AddMilliseconds($settingsTimeoutMs)
             while ((Test-WorkbenchReady $residentContext) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
             Check (-not (Test-WorkbenchReady $residentContext) -and $null -eq (Login $residentContext)) 'saving native disable releases the resident and removes login registration'
             Check (-not (Read-WorkbenchSettings $residentContext $pui).enabled) 'native settings persist explicit disable'
@@ -174,6 +221,7 @@ try {
             Run-Controller Disable
             Check (-not (Test-WorkbenchReady $residentContext)) 'explicit disable waits for resident shutdown'
             Run-Controller Uninstall
+            if ($script:controllerIndex -ne $controllerOperations.Count) { throw 'Lifecycle did not execute its complete controller sequence' }
             Check ($null -eq (Login $residentContext) -and [IO.File]::Exists($residentContext.File)) 'controller uninstall leaves no owned login entry and retains account choices'
         } finally {
             Stop-Workbench $residentContext

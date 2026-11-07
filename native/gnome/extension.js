@@ -8,7 +8,8 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {ResidentBridge} from './bridge.js';
 import {PanelState, InboxState, sameEnvironment, oneRow, SOURCES, sourceRequests, detailRequest, readRows, rebindShortcuts,
-    agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow} from './panel-model.mjs';
+    agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow,
+    organizerGroups, arrangeOrganizerGroup} from './panel-model.mjs';
 
 function label(text, style = '') {
     const actor = new St.Label({text: String(text), style_class: style, x_expand: true});
@@ -26,7 +27,8 @@ function button(text, callback) {
 export default class Workbench extends Extension {
     enable() {
         this._settings = this.getSettings();
-        this._states = new Map(['quick-access', 'goals', 'inbox'].map(name => [name, new PanelState()]));
+        this._states = new Map(['quick-access', 'goals', 'inbox', 'organizer'].map(name => [name, new PanelState()]));
+        this._states.get('organizer').organizerKind = 'plan';
         this._inbox = new InboxState(); this._inboxRunId = null;
         this._states.get('goals').scope = 'goals';
         this._views = new Map();
@@ -39,6 +41,7 @@ export default class Workbench extends Extension {
         this._settingsSignal = this._settings.connect('changed', () => this._configure());
         this._focusSignal = global.display.connect('notify::focus-window', () => {
             for (const [surface, state] of this._states) {
+                if (surface === 'organizer' && state.organizing) continue;
                 state.outsideFocus();
                 if (!state.visible) this._hide(surface, false);
             }
@@ -128,7 +131,8 @@ export default class Workbench extends Extension {
         const view = {panel, priorWindow: global.display.focus_window, searchTimer: null};
         this._views.set(surface, view);
         const header = new St.BoxLayout({style_class: 'papercusp-panel-header'});
-        header.add_child(label(surface === 'goals' ? 'Goals' : surface === 'inbox' ? 'Inbox' : 'Quick Access', 'papercusp-panel-title'));
+        header.add_child(label(surface === 'goals' ? 'Goals' : surface === 'inbox' ? 'Inbox' :
+            surface === 'organizer' ? 'Organizer' : 'Quick Access', 'papercusp-panel-title'));
         const pin = button(state.pinned ? 'Unpin' : 'Pin', () => {
             state.pinned = !state.pinned;
             pin.label = state.pinned ? 'Unpin' : 'Pin';
@@ -144,7 +148,7 @@ export default class Workbench extends Extension {
         view.search.clutter_text.connect('activate', () => {
             if (surface === 'inbox') {
                 const row = this._inbox.results(state.query)[0]; if (row) this._loadInboxContext(row.id);
-            } else if (!state.detail) this._activate(surface, state.selected());
+            } else if (surface !== 'organizer' && !state.detail) this._activate(surface, state.selected());
         });
         view.search.clutter_text.connect('text-changed', () => {
             state.query = view.search.get_text();
@@ -152,6 +156,7 @@ export default class Workbench extends Extension {
                 this._inbox.retainVisibleSelection(state.query); view.confirmRequests = null;
                 this._renderInbox(); return;
             }
+            if (surface === 'organizer') { this._renderOrganizer(); return; }
             // Invalidate old completions immediately, before the debounce.
             ++state.generation;
             state.detail = null; ++state.detailGeneration;
@@ -162,6 +167,15 @@ export default class Workbench extends Extension {
             });
         });
         panel.add_child(view.search);
+        if (surface === 'organizer') {
+            view.search.hint_text = 'Search goal, plan or fleet groups';
+            const modes = new St.BoxLayout({style_class: 'papercusp-panel-scopes'});
+            for (const kind of ['goal', 'plan', 'fleet']) modes.add_child(button(kind, () => {
+                if (state.organizing) return;
+                state.organizerKind = kind; state.organizerReceipts = null; this._renderOrganizer();
+            }));
+            panel.add_child(modes);
+        }
         if (surface === 'quick-access') {
             const scopes = new St.BoxLayout({style_class: 'papercusp-panel-scopes'});
             for (const scope of ['all', ...Object.keys(SOURCES)])
@@ -178,9 +192,9 @@ export default class Workbench extends Extension {
         panel.connect('key-press-event', (_actor, event) => {
             const key = event.get_key_symbol();
             if (key === Clutter.KEY_Escape) this._escape(surface);
-            else if (surface !== 'inbox' && !state.detail && (key === Clutter.KEY_Down || key === Clutter.KEY_Up)) {
+            else if (!['inbox', 'organizer'].includes(surface) && !state.detail && (key === Clutter.KEY_Down || key === Clutter.KEY_Up)) {
                 state.move(key === Clutter.KEY_Down ? 1 : -1); this._render(surface);
-            } else if (surface !== 'inbox' && !state.detail && (key === Clutter.KEY_Return || key === Clutter.KEY_KP_Enter))
+            } else if (!['inbox', 'organizer'].includes(surface) && !state.detail && (key === Clutter.KEY_Return || key === Clutter.KEY_KP_Enter))
                 this._activate(surface, state.selected());
             else return Clutter.EVENT_PROPAGATE;
             return Clutter.EVENT_STOP;
@@ -203,8 +217,10 @@ export default class Workbench extends Extension {
         const view = this._views.get(surface), state = this._states.get(surface);
         if (!view || !state.visible) return;
         if (surface === 'inbox') { this._refreshInbox(); return; }
+        if (surface === 'organizer' && state.organizing) return;
         if (view.searchTimer) { GLib.source_remove(view.searchTimer); view.searchTimer = null; }
-        const requests = sourceRequests(state.query, state.scope);
+        const requests = surface === 'organizer' ? [...sourceRequests('', 'agents'), ...sourceRequests('', 'goals')] :
+            sourceRequests(state.query, state.scope);
         const generation = state.beginRefresh(requests.map(request => request.kind));
         this._render(surface);
         for (const {kind, name, args} of requests) {
@@ -216,6 +232,7 @@ export default class Workbench extends Extension {
     }
     _render(surface) {
         if (surface === 'inbox') { this._renderInbox(); return; }
+        if (surface === 'organizer') { this._renderOrganizer(); return; }
         const view = this._views.get(surface);
         if (!view) return;
         const state = this._states.get(surface); view.content.destroy_all_children();
@@ -251,6 +268,82 @@ export default class Workbench extends Extension {
         if (state.hasMoreResults()) view.content.add_child(button('Show more results', () => {
             state.showMoreResults(); this._render(surface);
         }));
+    }
+    _renderOrganizer() {
+        const view = this._views.get('organizer'), state = this._states.get('organizer');
+        if (!view) return;
+        view.content.destroy_all_children();
+        view.status.set_text(state.organizing ? 'Arranging exact terminals…' :
+            state.organizerError || 'Arrange a group within each current desktop and monitor.');
+        for (const [kind, source] of Object.entries(state.sources))
+            if (source.status !== 'ready' || source.partial || source.unavailable)
+                view.content.add_child(label(`${kind}: ${source.error || source.status}` +
+                    (source.partial || source.unavailable ? ' (partial)' : '')));
+        if (state.organizerReceipts) for (const receipt of state.organizerReceipts)
+            view.content.add_child(label(`${receipt.host || 'Unknown host'} · desktop ${receipt.desktop ?? 'unavailable'} · ` +
+                `${receipt.ownerId}: ${receipt.status}${receipt.error ? ' — ' + receipt.error : ''}`));
+        const groups = organizerGroups(state.sources.agents?.rows || [], state.organizerKind,
+            state.sources.goals?.rows || []);
+        const query = state.query.trim().toLocaleLowerCase();
+        for (const group of groups.filter(group => group.label.toLocaleLowerCase().includes(query))) {
+            const control = button('Arrange ' + group.label, () => this._arrangeGroup(group));
+            control.reactive = !state.organizing; control.can_focus = !state.organizing;
+            view.content.add_child(control);
+        }
+        if (!groups.length) view.content.add_child(label('No canonical groups available'));
+    }
+    _desktopWindows() {
+        return global.get_window_actors().map(actor => {
+            const window = actor.meta_window, workspace = window.get_workspace(), monitor = window.get_monitor();
+            return {window, title: window.get_title(),
+                id: window.get_description().match(/^0x[0-9a-f]+/i)?.[0],
+                desktop: workspace?.index(), monitor,
+                area: workspace?.get_work_area_for_monitor(monitor),
+                unsupported: window.is_on_all_workspaces() ? 'Terminal is pinned to all desktops' :
+                    window.is_fullscreen() ? 'Leave fullscreen before arranging this terminal' : null};
+        });
+    }
+    async _arrangeGroup(group) {
+        const state = this._states.get('organizer');
+        if (state.organizing || !state.visible) return;
+        const generation = ++state.detailGeneration, pui = this._settings.get_string('pui-path');
+        state.organizing = true; state.organizerError = null; state.organizerReceipts = null;
+        this._renderOrganizer();
+        const current = () => generation === state.detailGeneration && state.visible &&
+            pui === this._settings.get_string('pui-path');
+        try {
+            const roster = await this._bridge.read(pui, {name: 'advRoster.list', args: {}});
+            const goal = group.kind === 'goal' ? await this._bridge.read(pui,
+                {name: 'goals.detail', args: {goalId: group.id}}) : null;
+            if (!current()) return;
+            const receipts = await arrangeOrganizerGroup(group, roster, GLib.get_host_name(), this._desktopWindows(),
+                async (record, rect) => {
+                    if (!current()) throw new Error('Arrangement cancelled; refresh the group');
+                    const window = record.window;
+                    if (window.get_workspace()?.index() !== record.desktop || window.get_monitor() !== record.monitor)
+                        throw new Error('Terminal changed desktop or monitor; refresh the group');
+                    if (window.minimized) window.unminimize();
+                    window.unmaximize(Meta.MaximizeFlags.BOTH);
+                    await new Promise(resolve => GLib.timeout_add(GLib.PRIORITY_DEFAULT, 40,
+                        () => { resolve(); return GLib.SOURCE_REMOVE; }));
+                    if (!current()) throw new Error('Arrangement cancelled; refresh the group');
+                    window.move_resize_frame(true, rect.x, rect.y, rect.width, rect.height);
+                    return new Promise(resolve => {
+                        let attempts = 0;
+                        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 25, () => {
+                            const actual = window.get_frame_rect();
+                            if (++attempts < 40 && current() &&
+                                !Object.keys(rect).every(key => Math.abs(actual[key] - rect[key]) <= 2))
+                                return GLib.SOURCE_CONTINUE;
+                            resolve({x: actual.x, y: actual.y, width: actual.width, height: actual.height,
+                                desktop: window.get_workspace()?.index(), monitor: window.get_monitor()});
+                            return GLib.SOURCE_REMOVE;
+                        });
+                    });
+                }, goal);
+            state.organizerReceipts = receipts;
+        } catch (error) { state.organizerError = String(error.message || error); }
+        finally { state.organizing = false; this._renderOrganizer(); }
     }
     _launchResume(argv) {
         // GLib quotes each argv cell, including spaces/apostrophes in an

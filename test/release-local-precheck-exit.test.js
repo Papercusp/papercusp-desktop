@@ -151,7 +151,11 @@ test('migration preflight uses private PG for the selected source and preserves 
     assert.equal(result.status, childExit === 0 ? 0 : 1, result.stderr || result.stdout);
     const observed = JSON.parse(fs.readFileSync(receipt, 'utf8'));
     assert.equal(observed.cwd, selected);
-    assert.deepEqual(observed.args, ['packages/operator-core/lib/release-preflight-migration-boot-smoke.integration.test.ts']);
+    assert.deepEqual(observed.args, [
+      'packages/operator-core/lib/release-preflight-migration-boot-smoke.integration.test.ts',
+      '--reporter=default',
+      '--reporter=hanging-process',
+    ]);
     assert.equal(observed.admin, 'postgres://fixture@127.0.0.1:12345/postgres');
     assert.equal(observed.hookTimeout, '180000');
     assert.equal(observed.fileTimeout, '604200');
