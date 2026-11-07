@@ -4,6 +4,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -27,8 +28,20 @@ namespace Papercusp.Workbench
 
         private static void Stop(Process process)
         {
-            try { if (!process.HasExited) process.Kill(); }
+            StopIfRunning(() => process.HasExited, () => process.Kill());
+        }
+
+        private static void StopIfRunning(Func<bool> hasExited, Action kill)
+        {
+            try { if (!hasExited()) kill(); }
             catch (InvalidOperationException) { /* exited between the two calls */ }
+            catch (Win32Exception error)
+            {
+                // TerminateProcess returns access denied for an already-exited
+                // process on .NET Framework. Re-check the owned process after
+                // that failure; an actual live-process denial must still surface.
+                if (error.NativeErrorCode != 5 || !hasExited()) throw;
+            }
         }
 
         private static async Task<string> ReadOutput(Stream stream, Process process)

@@ -83,6 +83,7 @@ using System.Threading;
 using System.Web.Script.Serialization;
 public static class NativeFixture {
     public static int Main(string[] argv) {
+        if (argv.Length == 1 && argv[0] == "stop-fixture") { Console.ReadLine(); return 0; }
         if (argv.Length != 1 || argv[0] != "native-read") return 23;
         var utf8 = new UTF8Encoding(false, true);
         Console.OutputEncoding = Encoding.GetEncoding(437);
@@ -106,6 +107,77 @@ public static class NativeFixture {
     }
 }
 '@
+    # Force the real .NET Framework termination race at the OS boundary, then
+    # inject the same denial while a real owned helper remains alive. This
+    # distinguishes safe exit-race recovery from swallowing a cleanup failure.
+    Add-Type -ReferencedAssemblies System.Core -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Reflection;
+using System.Runtime.InteropServices;
+public static class NativeStopFixture {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+    public static string[] Run(Type bridge, string executable) {
+        var stop = bridge.GetMethod("Stop", BindingFlags.NonPublic | BindingFlags.Static);
+        var guarded = bridge.GetMethod("StopIfRunning", BindingFlags.NonPublic | BindingFlags.Static);
+        var cases = new List<string>();
+        using (var child = new Process()) {
+            child.StartInfo = new ProcessStartInfo(executable, "stop-fixture") {
+                UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true
+            };
+            child.Start();
+            try {
+                if (child.HasExited) throw new Exception("Owned helper did not stay alive");
+                var refused = false;
+                try {
+                    guarded.Invoke(null, new object[] { (Func<bool>)(() => child.HasExited),
+                        (Action)(() => { throw new Win32Exception(5); }) });
+                } catch (TargetInvocationException error) {
+                    var failure = error.InnerException as Win32Exception;
+                    refused = failure != null && failure.NativeErrorCode == 5;
+                }
+                if (!refused || child.HasExited) throw new Exception("Live helper termination failure was hidden");
+                cases.Add("live owned helper access-denied remains a failure");
+                var actualCode = 0;
+                var handle = child.Handle;
+                guarded.Invoke(null, new object[] { (Func<bool>)(() => child.HasExited), (Action)(() => {
+                    child.StandardInput.WriteLine("exit"); child.StandardInput.Close();
+                    if (!child.WaitForExit(5000)) throw new Exception("Owned helper did not exit");
+                    // Process.Kill returns early once .NET has cached an exit.
+                    // Call its native termination primitive with the retained
+                    // owned handle to force the post-check OS race instead.
+                    if (!TerminateProcess(handle, 0)) {
+                        actualCode = Marshal.GetLastWin32Error();
+                        throw new Win32Exception(actualCode);
+                    }
+                }) });
+                if (actualCode != 5 || !child.HasExited)
+                    throw new Exception("Expected actual exited-helper Win32 error 5, got " + actualCode);
+                cases.Add("actual exited-helper Win32 error 5 is confirmed and safely reaped");
+                stop.Invoke(null, new object[] { child });
+                cases.Add("already-exited owned helper shutdown is idempotent");
+                var unrelated = false;
+                try {
+                    guarded.Invoke(null, new object[] { (Func<bool>)(() => false),
+                        (Action)(() => { throw new Win32Exception(6); }) });
+                } catch (TargetInvocationException error) {
+                    var failure = error.InnerException as Win32Exception;
+                    unrelated = failure != null && failure.NativeErrorCode == 6;
+                }
+                if (!unrelated) throw new Exception("Unrelated termination failure was hidden");
+                cases.Add("unrelated native termination failure remains visible");
+            } finally {
+                if (!child.HasExited) { child.Kill(); child.WaitForExit(5000); }
+            }
+        }
+        return cases.ToArray();
+    }
+}
+'@
+    foreach ($case in [NativeStopFixture]::Run([Papercusp.Workbench.PuiReadBridge], $pui)) { $passed.Add($case) }
     $payload = (Read-Fixture 'unicode').GetAwaiter().GetResult()
     $row = $payload['rows'][0]
     Assert-True ($row['name'] -ceq 'reports.get') 'Read model changed'
