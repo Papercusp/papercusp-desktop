@@ -33,9 +33,18 @@ final class Sidebar: NSPanel {
     private var messages: [WorkbenchSurface: NSTextField] = [:]
     private var details: [WorkbenchSurface: NSTextView] = [:]
     private var tasks: [WorkbenchSurface: [Task<Void, Never>]] = [:]
+    private var queryTasks: [WorkbenchSurface: Task<Void, Never>] = [:]
     private var detailGeneration: [WorkbenchSurface: Int] = [:]
     private var workspaceObserver: NSObjectProtocol?
-    private var environment: JSONValue = .null
+    private var environments: [WorkbenchSurface: JSONValue] = [:]
+    private var accountState = AccountState()
+    private var goalStates: [WorkbenchSurface: GoalState] = [:]
+    private var accountButtons: [NSButton] = []
+    private var accountScope: NSTextField?
+    private var accountSummary: NSTextField?
+    private var goalControls: [WorkbenchSurface: NSStackView] = [:]
+    private var goalStatus: [WorkbenchSurface: NSTextField] = [:]
+    private var rendering = false
     private var changingEnabled = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -153,7 +162,7 @@ final class Sidebar: NSPanel {
         do {
             try next.save(to: settingsURL)
             for surface in WorkbenchSurface.allCases { cancelReads(surface); models[surface] = PanelModel() }
-            environment = .null; settings = next
+            environments = [:]; accountState.invalidate(); goalStates = [:]; settings = next
             for (surface, panel) in panels where panel.isVisible { models[surface]?.visible = true; refresh(surface) }
         } catch { showError("Could not save the selected PUI. The previous connection is retained.") }
     }
@@ -209,12 +218,36 @@ final class Sidebar: NSPanel {
         search.identifier = NSUserInterfaceItemIdentifier(surface.rawValue); search.delegate = self
         root.addArrangedSubview(search); searches[surface] = search
         let message = NSTextField(wrappingLabelWithString: "Loading…"); root.addArrangedSubview(message); messages[surface] = message
+        if surface == .accounts {
+            let scope = NSTextField(wrappingLabelWithString: "Environment unavailable")
+            let summary = NSTextField(wrappingLabelWithString: "Steering unavailable")
+            root.addArrangedSubview(scope); root.addArrangedSubview(summary)
+            accountScope = scope; accountSummary = summary
+            let controls = NSStackView(); controls.orientation = .horizontal
+            for action in ["default", "force", "exclude", "auto"] {
+                let button = NSButton(title: action.capitalized, target: self, action: #selector(applyAccount(_:)))
+                button.identifier = NSUserInterfaceItemIdentifier(action); button.isEnabled = false
+                controls.addArrangedSubview(button); accountButtons.append(button)
+            }
+            root.addArrangedSubview(controls)
+        }
         let table = NSTableView(); table.identifier = NSUserInterfaceItemIdentifier(surface.rawValue)
         table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("result")))
         table.headerView = nil; table.rowHeight = 58; table.delegate = self; table.dataSource = self
         table.target = self; table.doubleAction = #selector(openSelection(_:))
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true
         root.addArrangedSubview(scroll); tables[surface] = table
+        if surface == .quickAccess || surface == .goals {
+            let status = NSTextField(wrappingLabelWithString: ""); status.isHidden = true
+            root.addArrangedSubview(status); goalStatus[surface] = status
+            let controls = NSStackView(); controls.orientation = .horizontal; controls.isHidden = true
+            for action in ["start", "pause", "resume", "reopen", "achieve", "kill"] {
+                let button = NSButton(title: action.capitalized, target: self, action: #selector(applyGoal(_:)))
+                button.identifier = NSUserInterfaceItemIdentifier(surface.rawValue + ":" + action)
+                controls.addArrangedSubview(button)
+            }
+            root.addArrangedSubview(controls); goalControls[surface] = controls
+        }
         let detail = NSTextView(); detail.isEditable = false; detail.isSelectable = true
         detail.textContainer?.widthTracksTextView = true; detail.autoresizingMask = [.width]
         let detailScroll = NSScrollView(); detailScroll.documentView = detail; detailScroll.hasVerticalScroller = true
@@ -234,52 +267,84 @@ final class Sidebar: NSPanel {
         if let raw = button.identifier?.rawValue, let surface = WorkbenchSurface(rawValue: raw) { refresh(surface) }
     }
     private func cancelReads(_ surface: WorkbenchSurface) {
+        queryTasks[surface]?.cancel(); queryTasks[surface] = nil
         for task in tasks[surface] ?? [] { task.cancel() }; tasks[surface] = []
         detailGeneration[surface, default: 0] += 1
+        if surface == .accounts { accountState.invalidate() }
     }
     private func refresh(_ surface: WorkbenchSurface) {
         cancelReads(surface)
+        goalStates[surface] = GoalState()
+        if surface == .accounts { refreshAccounts(); return }
         guard surface == .quickAccess || surface == .goals else {
             messages[surface]?.stringValue = "This native surface is not available in this build."; return
         }
         let generation = models[surface]?.beginRefresh() ?? 0
         let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
-        let environment = self.environment
+        let query = models[surface]?.query ?? ""
         let kinds: [SourceKind] = surface == .goals ? [.goals] : SourceKind.allCases
-        for kind in kinds {
-            let task = Task { [weak self] in
-                do {
-                    let payload = try await bridge.read(kind.model, environment: environment)
-                    guard let self, !Task.isCancelled else { return }
-                    self.models[surface]?.settle(kind, generation: generation, payload: payload); self.render(surface)
-                } catch {
-                    guard let self, !Task.isCancelled else { return }
-                    self.models[surface]?.settle(kind, generation: generation, payload: nil, error: error); self.render(surface)
+        let task = Task { [weak self] in
+            do {
+                let environment = try NativeEnvironment.identity(await bridge.read("operator.identity"))
+                guard let self, !Task.isCancelled, self.models[surface]?.generation == generation else { return }
+                self.environments[surface] = environment
+                for kind in kinds {
+                    let read = Task { [weak self] in
+                        do {
+                            let args: [String: JSONValue] = kind == .reports || kind == .goals ?
+                                ["query": .string(query), "limit": .number(kind == .goals ? 500 : 200), "workspaceId": environment["workspaceId"]] : [:]
+                            let payload = try await bridge.read(kind.model, args: args, environment: environment)
+                            guard let self, !Task.isCancelled else { return }
+                            self.models[surface]?.settle(kind, generation: generation, payload: payload); self.render(surface)
+                        } catch {
+                            guard let self, !Task.isCancelled else { return }
+                            self.models[surface]?.settle(kind, generation: generation, payload: nil, error: error); self.render(surface)
+                        }
+                    }
+                    self.tasks[surface, default: []].append(read)
                 }
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                for kind in kinds { self.models[surface]?.settle(kind, generation: generation, payload: nil, error: error) }
+                self.render(surface)
             }
-            tasks[surface, default: []].append(task)
         }
+        tasks[surface, default: []].append(task)
         render(surface)
     }
     private func render(_ surface: WorkbenchSurface) {
+        if surface == .accounts { renderAccounts(); return }
         guard let model = models[surface], let table = tables[surface] else { return }
+        rendering = true; defer { rendering = false }
         table.reloadData()
         if let selected = model.selection, let index = model.results().firstIndex(where: { $0.identity == selected }) {
             table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
-        }
+        } else { table.deselectAll(nil) }
         let kinds: [SourceKind] = surface == .goals ? [.goals] : SourceKind.allCases
         messages[surface]?.stringValue = kinds.map { kind in
             guard let source = model.sources[kind] else { return kind.rawValue + ": unavailable" }
             let state = source.status == .ready ? (source.rows.isEmpty ? "no results" : "ready") : source.status.rawValue
             return kind.rawValue + ": " + state + (source.partial ? " (partial)" : "") + (source.error.map { " — " + $0 } ?? "")
         }.joined(separator: "\n")
-        details[surface]?.string = model.detail?.formatted ?? ""
+        let content = model.detail.map { NativeDocument.markdown($0) } ?? ""
+        if let markdown = try? AttributedString(markdown: content, options: .init(interpretedSyntax: .full)) {
+            details[surface]?.textStorage?.setAttributedString(NSAttributedString(markdown))
+        } else { details[surface]?.string = content }
         details[surface]?.enclosingScrollView?.isHidden = model.detail == nil
+        renderGoalControls(surface)
     }
     func controlTextDidChange(_ notification: Notification) {
         guard let search = notification.object as? NSSearchField, let raw = search.identifier?.rawValue,
               let surface = WorkbenchSurface(rawValue: raw) else { return }
         models[surface]?.query = search.stringValue; render(surface)
+        if surface == .quickAccess || surface == .goals {
+            queryTasks[surface]?.cancel()
+            queryTasks[surface] = Task { [weak self] in
+                do { try await Task.sleep(nanoseconds: 180_000_000) } catch { return }
+                guard let self, !Task.isCancelled, self.models[surface]?.visible == true else { return }
+                self.queryTasks[surface] = nil; self.refresh(surface)
+            }
+        }
     }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         guard let raw = control.identifier?.rawValue, let surface = WorkbenchSurface(rawValue: raw), let table = tables[surface] else { return false }
@@ -293,33 +358,66 @@ final class Sidebar: NSPanel {
         }
         return false
     }
-    func numberOfRows(in tableView: NSTableView) -> Int { surface(tableView).flatMap { models[$0]?.results().count } ?? 0 }
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        if surface(tableView) == .accounts { return accountState.results(query: models[.accounts]?.query ?? "").count }
+        return surface(tableView).flatMap { models[$0]?.results().count } ?? 0
+    }
     private func surface(_ table: NSTableView) -> WorkbenchSurface? { table.identifier.flatMap { WorkbenchSurface(rawValue: $0.rawValue) } }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if surface(tableView) == .accounts {
+            let rows = accountState.results(query: models[.accounts]?.query ?? "")
+            guard rows.indices.contains(row) else { return nil }
+            let item = rows[row], id = item["id"].text
+            let label = item["label"].text.isEmpty ? id : item["label"].text
+            let axes = (accountState.steering["defaultAccountId"].text == id ? " · Default" : "") +
+                (accountState.contains("forcedAccounts", id: id) ? " · Forced" : "") +
+                (accountState.contains("excludeAccounts", id: id) ? " · Excluded" : "")
+            return NSTextField(wrappingLabelWithString: label + " (" + id + ")\n" + item["provider"].text +
+                " · " + (item["available"].isTrue ? "Available" : "Unavailable") + axes)
+        }
         guard let surface = surface(tableView), let results = models[surface]?.results(), results.indices.contains(row) else { return nil }
         let result = results[row]
         return NSTextField(wrappingLabelWithString: result.kind.rawValue.capitalized + " · " + result.title + "\n" + result.subtitle)
     }
     func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !rendering else { return }
+        if let table = notification.object as? NSTableView, surface(table) == .accounts {
+            let rows = accountState.results(query: models[.accounts]?.query ?? "")
+            accountState.selection = rows.indices.contains(table.selectedRow) ? rows[table.selectedRow]["id"].text : nil
+            updateAccountControls(); return
+        }
         guard let table = notification.object as? NSTableView, let surface = surface(table),
               let results = models[surface]?.results(), results.indices.contains(table.selectedRow) else { return }
         models[surface]?.selection = results[table.selectedRow].identity
         detailGeneration[surface, default: 0] += 1
+        goalStates[surface]?.clear(); models[surface]?.detail = nil
+        details[surface]?.string = ""; details[surface]?.enclosingScrollView?.isHidden = true
+        renderGoalControls(surface)
     }
     @objc private func openSelection(_ table: NSTableView) {
+        if surface(table) == .accounts { return }
         guard let surface = surface(table), let results = models[surface]?.results(), results.indices.contains(table.selectedRow) else { return }
         let selected = results[table.selectedRow]
+        models[surface]?.selection = selected.identity
         guard let (name, args) = selected.detailRequest else {
             messages[surface]?.stringValue = "Exact terminal focus is unavailable in this build."; return
         }
         detailGeneration[surface, default: 0] += 1
         let generation = detailGeneration[surface]
-        let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui)), environment = self.environment
+        let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
+        let environment = environments[surface] ?? .null
         let task = Task { [weak self] in
             do {
+                var args = args
+                if selected.kind == .plans { args["mode"] = .string("full"); args["includeRaw"] = .bool(true) }
+                if selected.kind == .goals { args["workspaceId"] = environment["workspaceId"] }
                 let payload = try await bridge.read(name, args: args, environment: environment)
                 guard let self, !Task.isCancelled, self.detailGeneration[surface] == generation,
                       self.models[surface]?.selection == selected.identity else { return }
+                self.goalStates[surface] = GoalState()
+                if selected.kind == .goals {
+                    try self.goalStates[surface]?.load(environment: environment, payload: payload, goalID: selected.row["id"].text)
+                }
                 self.models[surface]?.detail = payload; self.render(surface)
             } catch {
                 guard let self, !Task.isCancelled, self.detailGeneration[surface] == generation else { return }
@@ -330,6 +428,7 @@ final class Sidebar: NSPanel {
     }
     private func escape(_ surface: WorkbenchSurface) {
         detailGeneration[surface, default: 0] += 1; models[surface]?.escape()
+        goalStates[surface]?.clear()
         if models[surface]?.visible != true { panels[surface]?.orderOut(nil); cancelReads(surface) }; render(surface)
     }
     private func outsideFocus() {
@@ -337,6 +436,105 @@ final class Sidebar: NSPanel {
             models[surface]?.outsideFocus()
             if models[surface]?.visible != true { panels[surface]?.orderOut(nil); cancelReads(surface) }
         }
+    }
+    private func refreshAccounts() {
+        let generation = accountState.begin(); renderAccounts()
+        let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
+        let task = Task { [weak self] in
+            var environment: JSONValue = .null, pool: JSONValue?, steering: JSONValue?, failure: Error?
+            do {
+                environment = try NativeEnvironment.identity(await bridge.read("operator.identity"))
+                async let poolRead = bridge.read("accounts.pool", args: ["workspace": environment["workspaceId"]], environment: environment)
+                async let steeringRead = bridge.read("accounts.sessionOverride", args: ["workspaceId": environment["workspaceId"]], environment: environment)
+                (pool, steering) = try await (poolRead, steeringRead)
+            } catch { failure = error }
+            guard let self, !Task.isCancelled, self.models[.accounts]?.visible == true else { return }
+            if self.accountState.settle(generation, environment: environment, pool: pool, steering: steering, failure: failure) {
+                self.renderAccounts()
+            }
+        }
+        tasks[.accounts, default: []].append(task)
+    }
+    private func updateAccountControls() {
+        let selected = accountState.results(query: models[.accounts]?.query ?? "").contains { $0["id"].text == accountState.selection }
+        for button in accountButtons {
+            button.isEnabled = accountState.ready && !accountState.busy && (button.identifier?.rawValue == "auto" || selected)
+        }
+    }
+    private func renderAccounts() {
+        guard let table = tables[.accounts] else { return }
+        rendering = true; defer { rendering = false }
+        table.reloadData()
+        let rows = accountState.results(query: models[.accounts]?.query ?? "")
+        if let index = rows.firstIndex(where: { $0["id"].text == accountState.selection }) {
+            table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        } else { table.deselectAll(nil) }
+        messages[.accounts]?.stringValue = accountState.busy ? "Checking account state…" :
+            accountState.error.map { "Unavailable · " + $0 } ?? (accountState.accounts.isEmpty ? "No accounts" : "Accounts ready")
+        accountScope?.stringValue = accountState.environment == .null ? "Environment unavailable" :
+            accountState.environment["endpoint"].text + "\nWorkspace: " + accountState.environment["workspaceId"].text
+        let steering = accountState.steering
+        accountSummary?.stringValue = steering == .null ? "Steering unavailable" :
+            "Default: " + (steering["defaultAccountId"].text.isEmpty ? "This machine’s login" : steering["defaultAccountId"].text) +
+            "\nForce: " + (steering["forcedAccounts"].rows ?? []).map { $0.text }.joined(separator: ", ") +
+            "\nExclude: " + (steering["excludeAccounts"].rows ?? []).map { $0.text }.joined(separator: ", ") +
+            "\nAuto clears Force and Exclude; it preserves Default."
+        updateAccountControls()
+    }
+    @objc private func applyAccount(_ button: NSButton) {
+        guard let action = button.identifier?.rawValue else { return }
+        do {
+            let id = action == "auto" ? nil : accountState.selection
+            let generation = try accountState.beginAction(action, accountID: id)
+            let environment = accountState.environment
+            let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui)); renderAccounts()
+            let task = Task { [weak self] in
+                var payload: JSONValue?, failure: Error?
+                do { payload = try await bridge.account(action, accountID: id, environment: environment) } catch { failure = error }
+                guard let self, !Task.isCancelled, self.models[.accounts]?.visible == true else { return }
+                if self.accountState.applied(generation, expected: environment, payload: payload, failure: failure) { self.renderAccounts() }
+            }
+            tasks[.accounts, default: []].append(task)
+        } catch { messages[.accounts]?.stringValue = error.localizedDescription }
+    }
+    private func renderGoalControls(_ surface: WorkbenchSurface) {
+        let goal = goalStates[surface] ?? GoalState()
+        let visible = goal.detail != .null && models[surface]?.detail != nil
+        goalControls[surface]?.isHidden = !visible; goalStatus[surface]?.isHidden = !visible
+        guard visible else { return }
+        goalStatus[surface]?.stringValue = "Workspace: " + goal.environment["workspaceId"].text + " · " + goal.environment["endpoint"].text +
+            "\nStatus: " + goal.detail["goal"]["status"].text + " · Effective state: " + goal.detail["effectiveStatus"].text +
+            " · Holder: " + goal.detail["holderLiveness"].text +
+            (goal.busy ? "\nChecking goal action…" : goal.error.map { "\nUnavailable · " + $0 } ?? goal.warning.map { "\n" + $0 } ?? "")
+        for case let button as NSButton in goalControls[surface]?.arrangedSubviews ?? [] {
+            let action = button.identifier?.rawValue.split(separator: ":").last.map(String.init) ?? ""
+            button.isHidden = !goal.actions.contains(action); button.isEnabled = !goal.busy && goal.error == nil
+        }
+    }
+    @objc private func applyGoal(_ button: NSButton) {
+        guard let parts = button.identifier?.rawValue.split(separator: ":"), parts.count == 2,
+              let surface = WorkbenchSurface(rawValue: String(parts[0])), var goal = goalStates[surface] else { return }
+        let action = String(parts[1]); guard goal.actions.contains(action) else { return }
+        let alert = NSAlert(); alert.messageText = action.capitalized + " “" + goal.detail["goal"]["title"].text + "”?"
+        alert.informativeText = action == "pause" ? "Placement stops and attributed sessions are paused. Unattributed activity may remain." :
+            "Apply this goal control in workspace “" + goal.environment["workspaceId"].text + "” on " + goal.environment["endpoint"].text + "."
+        alert.addButton(withTitle: action.capitalized); alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let generation = detailGeneration[surface]
+        do {
+            try goal.beginAction(action); goalStates[surface] = goal; renderGoalControls(surface)
+            let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
+            let detail = goal.detail, environment = goal.environment
+            let task = Task { [weak self] in
+                var payload: JSONValue?, failure: Error?
+                do { payload = try await bridge.goal(action, detail: detail, confirmed: true, environment: environment) } catch { failure = error }
+                guard let self, !Task.isCancelled, self.detailGeneration[surface] == generation, self.models[surface]?.visible == true else { return }
+                self.goalStates[surface]?.applied(payload, failure: failure)
+                if self.goalStates[surface]?.error == nil, let payload { self.models[surface]?.detail = payload }
+                self.render(surface)
+            }
+            tasks[surface, default: []].append(task)
+        } catch { messages[surface]?.stringValue = error.localizedDescription }
     }
     private func showError(_ message: String) {
         let alert = NSAlert(); alert.messageText = "Workbench"; alert.informativeText = message; alert.runModal()

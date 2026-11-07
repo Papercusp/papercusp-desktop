@@ -41,7 +41,7 @@ public struct PanelResult: Equatable, Sendable {
     }
     public var detailRequest: (String, [String: JSONValue])? {
         switch kind {
-        case .plans: return ("plans.get", ["harness": row["harness"], "slug": row["slug"]])
+        case .plans: return ("plans.get", ["harness": row["harness"], "slug": row["slug"], "mode": .string("full"), "includeRaw": .bool(true)])
         case .reports: return ("reports.get", ["reportId": row["report_id"]])
         case .goals: return ("goals.detail", ["goalId": row["id"]])
         case .agents: return nil
@@ -67,6 +67,7 @@ public struct PanelModel {
     public init() {}
     @discardableResult public mutating func beginRefresh() -> Int {
         generation += 1
+        detail = nil
         sources = Dictionary(uniqueKeysWithValues: SourceKind.allCases.map { ($0, PanelSource()) })
         return generation
     }
@@ -169,5 +170,188 @@ public struct PanelModel {
             throw WorkbenchError("Missing exact session identity")
         }
         return ["workbench", "resume", String(Int64(id)), host, target.row["ownerId"].text]
+    }
+}
+
+/// Match PUI's BackendIdentity.same_rendezvous. A rebuild can change build.sha
+/// without changing the selected store; a different store must never inherit controls.
+public enum NativeEnvironment {
+    public static func same(_ a: JSONValue, _ b: JSONValue) -> Bool {
+        let pairs = [(a["endpoint"], b["endpoint"]), (a["workspaceId"], b["workspaceId"]),
+                     (a["store"]["id"], b["store"]["id"]), (a["agentChat"]["scope"], b["agentChat"]["scope"])]
+        return pairs.allSatisfy { !$0.0.text.isEmpty && $0.0 == $0.1 }
+    }
+    public static func one(_ payload: JSONValue) throws -> JSONValue {
+        guard payload["ok"] != .bool(false), [.null, .bool(false), .string("")].contains(payload["error"]),
+              !payload["partial"].isTrue, let rows = payload["rows"].rows, rows.count == 1,
+              case .object = rows[0] else { throw WorkbenchError("Canonical state is unavailable or incomplete") }
+        return rows[0]
+    }
+    public static func identity(_ payload: JSONValue) throws -> JSONValue {
+        let value = try one(payload)
+        guard same(value, value) else { throw WorkbenchError("Selected environment is unavailable") }
+        return value
+    }
+}
+
+public struct AccountState {
+    public private(set) var generation = 0
+    public private(set) var busy = false
+    public private(set) var environment: JSONValue = .null
+    public private(set) var steering: JSONValue = .null
+    public private(set) var accounts: [JSONValue] = []
+    public private(set) var error: String?
+    public var selection: String?
+    public var ready: Bool { NativeEnvironment.same(environment, environment) && steering != .null && error == nil }
+    public init() {}
+    @discardableResult public mutating func begin() -> Int {
+        generation += 1; busy = true; error = nil; environment = .null; steering = .null; accounts = []
+        return generation
+    }
+    public mutating func invalidate() { _ = begin(); busy = false }
+    private static func validate(_ steering: JSONValue) throws {
+        for field in ["forcedAccounts", "excludeAccounts"] {
+            guard let items = steering[field].rows, items.allSatisfy({ if case .string = $0 { return true }; return false }) else {
+                throw WorkbenchError("Canonical account steering is unavailable")
+            }
+        }
+        guard steering["defaultAccountId"] == .null || { if case .string = steering["defaultAccountId"] { return true }; return false }() else {
+            throw WorkbenchError("Canonical default account is unavailable")
+        }
+    }
+    @discardableResult public mutating func settle(_ token: Int, environment: JSONValue,
+                                                  pool: JSONValue?, steering: JSONValue?, failure: Error? = nil) -> Bool {
+        guard token == generation, busy else { return false }
+        busy = false
+        do {
+            if let failure { throw failure }
+            guard NativeEnvironment.same(environment, environment), let pool, let steering,
+                  pool["ok"] != .bool(false), [.null, .bool(false), .string("")].contains(pool["error"]),
+                  !pool["partial"].isTrue, let accounts = pool["rows"].rows,
+                  accounts.allSatisfy({ !$0["id"].text.isEmpty }),
+                  Set(accounts.map { $0["id"].text }).count == accounts.count else {
+                throw WorkbenchError("Account pool is unavailable, incomplete or ambiguous")
+            }
+            let current = try NativeEnvironment.one(steering); try Self.validate(current)
+            self.environment = environment; self.accounts = accounts; self.steering = current; error = nil
+        } catch { self.environment = .null; self.steering = .null; accounts = []; self.error = error.localizedDescription }
+        return true
+    }
+    public mutating func beginAction(_ action: String, accountID: String?) throws -> Int {
+        guard ready, !busy, ["default", "force", "exclude", "auto"].contains(action),
+              action == "auto" ? accountID == nil : accounts.filter({ $0["id"].text == accountID }).count == 1 else {
+            throw WorkbenchError("Refresh Accounts and select an exact account control")
+        }
+        generation += 1; busy = true; return generation
+    }
+    @discardableResult public mutating func applied(_ token: Int, expected: JSONValue,
+                                                   payload: JSONValue?, failure: Error? = nil) -> Bool {
+        guard token == generation, busy else { return false }
+        busy = false
+        do {
+            if let failure { throw failure }
+            guard let payload, NativeEnvironment.same(expected, payload["environment"]),
+                  NativeEnvironment.same(environment, expected) else {
+                throw WorkbenchError("Account environment changed; refresh before applying another control")
+            }
+            let current = try NativeEnvironment.one(payload); try Self.validate(current)
+            steering = current; error = nil
+        } catch { self.error = error.localizedDescription + " · Refresh Accounts to verify server state" }
+        return true
+    }
+    public func contains(_ field: String, id: String) -> Bool { steering[field].rows?.contains(.string(id)) == true }
+    public func results(query: String) -> [JSONValue] {
+        let terms = query.lowercased().split(whereSeparator: { $0.isWhitespace })
+        return accounts.filter { row in
+            let text = ["id", "label", "provider"].map { row[$0].text }.joined(separator: " ").lowercased()
+            return terms.allSatisfy { text.contains($0) }
+        }
+    }
+}
+
+public struct GoalState {
+    public private(set) var detail: JSONValue = .null
+    public private(set) var environment: JSONValue = .null
+    public private(set) var busy = false
+    public private(set) var error: String?
+    public private(set) var warning: String?
+    private var expectedStatus: String?
+    public init() {}
+    public mutating func clear() { self = GoalState() }
+    public static func one(_ payload: JSONValue, goalID: String) throws -> JSONValue {
+        let detail = try NativeEnvironment.one(payload)
+        guard !goalID.isEmpty, detail["goal"]["id"].text == goalID,
+              ["active", "paused", "achieved", "killed"].contains(detail["goal"]["status"].text),
+              !detail["effectiveStatus"].text.isEmpty,
+              ["held", "unheld", "lost", "unknown"].contains(detail["holderLiveness"].text) else {
+            throw WorkbenchError("Selected goal is unavailable or changed")
+        }; return detail
+    }
+    public mutating func load(environment: JSONValue, payload: JSONValue, goalID: String) throws {
+        clear()
+        guard NativeEnvironment.same(environment, environment) else { throw WorkbenchError("Selected goal environment is unavailable") }
+        let detail = try Self.one(payload, goalID: goalID)
+        self.detail = detail; self.environment = environment
+    }
+    public var actions: [String] {
+        guard !busy, error == nil, detail != .null, NativeEnvironment.same(environment, environment),
+              detail["holderLiveness"].text != "unknown", detail["effectiveStatus"].text != "unknown" else { return [] }
+        let status = detail["goal"]["status"].text
+        if ["achieved", "killed"].contains(status) { return ["reopen"] }
+        if status == "paused" { return ["resume", "achieve", "kill"] }
+        let dormant = detail["effectiveStatus"].text == "dormant" || ["unheld", "lost"].contains(detail["holderLiveness"].text)
+        return [dormant ? "start" : "pause", "achieve", "kill"]
+    }
+    public mutating func beginAction(_ action: String) throws {
+        guard actions.contains(action) else { throw WorkbenchError("Refresh the selected goal before applying this control") }
+        expectedStatus = ["pause":"paused", "resume":"active", "start":"active", "reopen":"active", "achieve":"achieved", "kill":"killed"][action]
+        busy = true
+    }
+    public mutating func applied(_ payload: JSONValue?, failure: Error? = nil) {
+        guard busy, let expectedStatus else { return }
+        busy = false
+        self.expectedStatus = nil
+        do {
+            if let failure { throw failure }
+            guard let payload, NativeEnvironment.same(environment, payload["environment"]) else {
+                throw WorkbenchError("Goal environment changed")
+            }
+            let next = try Self.one(payload, goalID: detail["goal"]["id"].text)
+            guard next["goal"]["status"].text == expectedStatus else {
+                throw WorkbenchError("The goal request returned without a confirmed resulting state")
+            }
+            detail = next; error = nil
+            warning = payload["degraded"].isTrue ? "Goal action was incomplete. " +
+                (payload["degradedReasons"].rows ?? []).map { $0.text }.joined(separator: " · ") : nil
+        } catch { self.error = error.localizedDescription + " · Refresh Goals to verify server state" }
+    }
+}
+
+/// Preserve canonical prose instead of exposing transport envelopes in the reader.
+public enum NativeDocument {
+    public static func markdown(_ payload: JSONValue) -> String {
+        guard let rows = payload["rows"].rows else { return "Content unavailable" }
+        return rows.map { row in
+            for field in ["body_md", "content", "markdown", "body"] { if case .string(let text) = row[field] { return text } }
+            if row["goal"] != .null {
+                let goal = row["goal"]
+                let title = goal["title"].text.isEmpty ? goal["id"].text : goal["title"].text
+                var lines = [title, "Status: " + goal["status"].text, "Effective state: " + row["effectiveStatus"].text,
+                             "Holder: " + row["holderLiveness"].text]
+                // Missing measurements stay unknown, never zero.
+                for (field, label) in [("spentCents", "Goal-attributed spend"), ("budgetCents", "Cap")] {
+                    let value = goal[field]
+                    let amount: String
+                    if case .number(let cents) = value, cents.isFinite { amount = String(format: "$%.2f", cents / 100) }
+                    else { amount = "Unknown" }
+                    lines.append(label + ": " + amount)
+                }
+                if !goal["spentCentsScope"].text.isEmpty { lines.append("Spend scope: " + goal["spentCentsScope"].text) }
+                if !row["spendNote"].text.isEmpty { lines.append(row["spendNote"].text) }
+                if !goal["description"].text.isEmpty { lines.append(goal["description"].text) }
+                return lines.joined(separator: "\n\n")
+            }
+            return "Content unavailable"
+        }.joined(separator: "\n\n")
     }
 }

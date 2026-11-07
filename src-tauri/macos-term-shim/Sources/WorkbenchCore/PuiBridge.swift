@@ -62,7 +62,7 @@ public struct PuiBridge {
             "args": .object(args), "environment": environment]), timeout: timeout)
     }
     public func account(_ action: String, accountID: String?, environment: JSONValue) async throws -> JSONValue {
-        guard environment != .null, ["default", "force", "exclude", "auto"].contains(action),
+        guard NativeEnvironment.same(environment, environment), ["default", "force", "exclude", "auto"].contains(action),
               (action == "auto" ? accountID == nil : !(accountID ?? "").isEmpty) else {
             throw WorkbenchError("Select an environment and exact account control")
         }
@@ -70,7 +70,7 @@ public struct PuiBridge {
             "action": .string(action), "accountId": accountID.map(JSONValue.string) ?? .null]))
     }
     public func goal(_ action: String, detail: JSONValue, confirmed: Bool, environment: JSONValue) async throws -> JSONValue {
-        guard confirmed, environment != .null, !detail["goal"]["id"].text.isEmpty,
+        guard confirmed, NativeEnvironment.same(environment, environment), !detail["goal"]["id"].text.isEmpty,
               ["pause", "resume", "start", "reopen", "achieve", "kill"].contains(action) else {
             throw WorkbenchError("Select a goal and confirm its control")
         }
