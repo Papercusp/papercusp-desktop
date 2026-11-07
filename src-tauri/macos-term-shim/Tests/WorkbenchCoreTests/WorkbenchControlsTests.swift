@@ -92,6 +92,30 @@ final class WorkbenchControlsTests: XCTestCase {
         state.invalidate(); XCTAssertFalse(state.settleContext(current, id: "b", payload: envelope([b])))
         XCTAssertThrowsError(try state.select("b"))
     }
+    func testInboxFilteredSelectionAndNestedEscapeRejectLateContext() throws {
+        var state = InboxState(); let token = state.begin(), a = question("a"), b = question("b")
+        state.settleList(token, payload: inboxList([a, b]))
+        let selected = try state.select("a")
+        state.retainVisibleSelection(query: "b")
+        XCTAssertNil(state.selection)
+        XCTAssertFalse(state.settleContext(selected, id: "a", payload: envelope([a])))
+        XCTAssertFalse(state.dismissContext())
+        let current = try state.select("b")
+        state.settleContext(current, id: "b", payload: envelope([b]))
+        XCTAssertTrue(state.dismissContext()); XCTAssertNil(state.context)
+        XCTAssertFalse(state.settleContext(current, id: "b", payload: envelope([b])))
+    }
+    func testInboxSameIdChangedReferenceInvalidatesSelectedContext() throws {
+        var state = InboxState(); let token = state.begin(), a = question()
+        state.settleList(token, payload: inboxList([a]))
+        let selected = try state.select(a["id"].text)
+        state.settleContext(selected, id: a["id"].text, payload: envelope([a]))
+        guard case .object(var changed) = a else { return XCTFail() }
+        changed["ref"] = .object(["msgId": .number(900)])
+        state.settleList(token, payload: inboxList([.object(changed)]))
+        XCTAssertNil(state.context)
+        XCTAssertFalse(state.settleContext(selected, id: a["id"].text, payload: envelope([a])))
+    }
     func testInboxProgressUsesItemOutcomesAndPersistedPartialDeliveryTotal() throws {
         let items = [outcome("a", "auto_resolved"), outcome("b", "recommended", "recommended"),
                      outcome("c", "recommended", "owner_action"), outcome("d", "failed", "retry_needed"),

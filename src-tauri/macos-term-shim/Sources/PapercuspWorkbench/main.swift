@@ -39,6 +39,9 @@ final class Sidebar: NSPanel {
     private var workspaceObserver: NSObjectProtocol?
     private var environments: [WorkbenchSurface: JSONValue] = [:]
     private var accountState = AccountState()
+    private var inboxState = InboxState()
+    private var inboxBulkStatus: NSTextField?, inboxRunField: NSTextField?
+    private var inboxRunID: String?
     private var chatState = ChatState()
     private var chatEarlier: NSButton?
     private var chatComposer: NSTextView?
@@ -212,8 +215,9 @@ final class Sidebar: NSPanel {
         let point = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main
         if let frame = screen?.visibleFrame {
-            panel.setFrame(NSRect(x: frame.maxX - min(520, frame.width), y: frame.minY,
-                width: min(520, frame.width), height: frame.height), display: true)
+            let width = min(surface == .inbox ? 840 : 520, frame.width)
+            panel.setFrame(NSRect(x: frame.maxX - width, y: frame.minY,
+                width: width, height: frame.height), display: true)
         }
         panel.makeKeyAndOrderFront(nil); panel.makeFirstResponder(searches[surface]); refresh(surface)
     }
@@ -276,13 +280,39 @@ final class Sidebar: NSPanel {
         detail.textContainer?.widthTracksTextView = true; detail.autoresizingMask = [.width]
         let detailScroll = NSScrollView(); detailScroll.documentView = detail; detailScroll.hasVerticalScroller = true
         detailScroll.isHidden = true; root.addArrangedSubview(detailScroll); details[surface] = detail
-        for view in [search, message, scroll, detailScroll] { view.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true }
+        for view in [search, message] { view.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true }
+        if surface == .inbox {
+            // B: the question list and its independently scrollable context
+            // remain siblings, including when no question is selected.
+            root.removeArrangedSubview(scroll); scroll.removeFromSuperview()
+            root.removeArrangedSubview(detailScroll); detailScroll.removeFromSuperview()
+            let split = NSStackView(views: [scroll, detailScroll]); split.orientation = .horizontal
+            split.alignment = .top; split.distribution = .fillEqually; split.spacing = 12
+            root.addArrangedSubview(split); detailScroll.isHidden = false
+            split.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
+            scroll.heightAnchor.constraint(equalTo: split.heightAnchor).isActive = true
+            detailScroll.heightAnchor.constraint(equalTo: split.heightAnchor).isActive = true
+            split.heightAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+            split.setContentHuggingPriority(.defaultLow, for: .vertical)
+            table.setAccessibilityLabel("Inbox questions"); detail.setAccessibilityLabel("Selected question context")
+            let bulk = NSTextField(wrappingLabelWithString: "Loading saved run…")
+            root.addArrangedSubview(bulk); inboxBulkStatus = bulk
+            bulk.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
+            let run = NSTextField(); run.placeholderString = "Saved run ID (empty opens latest)"
+            run.setAccessibilityLabel("Saved Inbox run ID"); inboxRunField = run
+            let open = NSButton(title: "Open saved run", target: self, action: #selector(openInboxRun))
+            let controls = NSStackView(views: [run, open]); controls.orientation = .horizontal
+            root.addArrangedSubview(controls)
+            controls.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
+        } else {
+            for view in [scroll, detailScroll] { view.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true }
+        }
         scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
         if surface == .papercup {
             scroll.isHidden = true; detailScroll.isHidden = false
             detailScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
             detailScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
-        } else { detailScroll.heightAnchor.constraint(equalToConstant: 260).isActive = true }
+        } else if surface != .inbox { detailScroll.heightAnchor.constraint(equalToConstant: 260).isActive = true }
         if surface == .papercup {
             let cardStatus = NSTextField(wrappingLabelWithString: "Connecting questions…")
             root.addArrangedSubview(cardStatus); cardMessage = cardStatus
@@ -333,6 +363,7 @@ final class Sidebar: NSPanel {
         for task in tasks[surface] ?? [] { task.cancel() }; tasks[surface] = []
         detailGeneration[surface, default: 0] += 1
         if surface == .accounts { accountState.invalidate() }
+        if surface == .inbox { inboxState.invalidate() }
         if surface == .papercup {
             cancelVoice()
             cardsTask?.cancel(); cardsTask = nil
@@ -365,6 +396,7 @@ final class Sidebar: NSPanel {
         goalStates[surface] = GoalState()
         if surface == .accounts { refreshAccounts(); return }
         if surface == .papercup { refreshChat(); return }
+        if surface == .inbox { refreshInbox(); return }
         guard surface == .quickAccess || surface == .goals else {
             messages[surface]?.stringValue = "This native surface is not available in this build."; return
         }
@@ -404,6 +436,7 @@ final class Sidebar: NSPanel {
     private func render(_ surface: WorkbenchSurface) {
         if surface == .accounts { renderAccounts(); return }
         if surface == .papercup { renderChat(); return }
+        if surface == .inbox { renderInbox(); return }
         guard let model = models[surface], let table = tables[surface] else { return }
         rendering = true; defer { rendering = false }
         table.reloadData()
@@ -450,10 +483,18 @@ final class Sidebar: NSPanel {
     }
     func numberOfRows(in tableView: NSTableView) -> Int {
         if surface(tableView) == .accounts { return accountState.results(query: models[.accounts]?.query ?? "").count }
+        if surface(tableView) == .inbox { return inboxState.results(query: models[.inbox]?.query ?? "").count }
         return surface(tableView).flatMap { models[$0]?.results().count } ?? 0
     }
     private func surface(_ table: NSTableView) -> WorkbenchSurface? { table.identifier.flatMap { WorkbenchSurface(rawValue: $0.rawValue) } }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if surface(tableView) == .inbox {
+            let rows = inboxState.results(query: models[.inbox]?.query ?? "")
+            guard rows.indices.contains(row) else { return nil }
+            let item = rows[row]
+            return NSTextField(wrappingLabelWithString: item["title"].text + "\n" +
+                [item["kind"].text, item["harnessSlug"].text, item["planSlug"].text].filter { !$0.isEmpty }.joined(separator: " · "))
+        }
         if surface(tableView) == .accounts {
             let rows = accountState.results(query: models[.accounts]?.query ?? "")
             guard rows.indices.contains(row) else { return nil }
@@ -471,6 +512,9 @@ final class Sidebar: NSPanel {
     }
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !rendering else { return }
+        if let table = notification.object as? NSTableView, surface(table) == .inbox {
+            loadInboxContext(table); return
+        }
         if let table = notification.object as? NSTableView, surface(table) == .accounts {
             let rows = accountState.results(query: models[.accounts]?.query ?? "")
             accountState.selection = rows.indices.contains(table.selectedRow) ? rows[table.selectedRow]["id"].text : nil
@@ -486,6 +530,7 @@ final class Sidebar: NSPanel {
     }
     @objc private func openSelection(_ table: NSTableView) {
         if surface(table) == .accounts { return }
+        if surface(table) == .inbox { loadInboxContext(table); return }
         guard let surface = surface(table), let results = models[surface]?.results(), results.indices.contains(table.selectedRow) else { return }
         let selected = results[table.selectedRow]
         models[surface]?.selection = selected.identity
@@ -549,6 +594,7 @@ final class Sidebar: NSPanel {
         tasks[surface, default: []].append(task)
     }
     private func escape(_ surface: WorkbenchSurface) {
+        if surface == .inbox, inboxState.dismissContext() { renderInbox(); return }
         detailGeneration[surface, default: 0] += 1; models[surface]?.escape()
         goalStates[surface]?.clear()
         if models[surface]?.visible != true { panels[surface]?.orderOut(nil); cancelReads(surface) }; render(surface)
@@ -557,6 +603,100 @@ final class Sidebar: NSPanel {
         for surface in WorkbenchSurface.allCases {
             models[surface]?.outsideFocus()
             if models[surface]?.visible != true { panels[surface]?.orderOut(nil); cancelReads(surface) }
+        }
+    }
+    @objc private func openInboxRun() {
+        let id = inboxRunField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        inboxRunID = id.isEmpty ? nil : id; refresh(.inbox)
+    }
+    private func refreshInbox() {
+        let generation = inboxState.begin(), runID = inboxRunID
+        let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
+        let task = Task { [weak self] in
+            do {
+                let environment = try NativeEnvironment.identity(await bridge.read("operator.identity"))
+                guard let self, !Task.isCancelled, self.inboxState.generation == generation else { return }
+                self.environments[.inbox] = environment
+                for name in ["plans.attention", "plans.attentionBulkRun"] {
+                    let read = Task { [weak self] in
+                        do {
+                            let args: [String: JSONValue] = name == "plans.attentionBulkRun" ? runID.map { ["runId": .string($0)] } ?? [:] : [:]
+                            let payload = try await bridge.read(name, args: args, environment: environment)
+                            guard let self, !Task.isCancelled else { return }
+                            if name == "plans.attention" {
+                                guard self.inboxState.settleList(generation, payload: payload) else { return }
+                                self.renderInbox()
+                                if let id = self.inboxState.selection { self.loadInboxContext(id: id) }
+                            } else {
+                                self.inboxState.settleBulk(generation, payload: payload, expectedRunID: runID); self.renderInbox()
+                            }
+                        } catch {
+                            guard let self, !Task.isCancelled else { return }
+                            if name == "plans.attention" { self.inboxState.settleList(generation, payload: nil, failure: error) }
+                            else { self.inboxState.settleBulk(generation, payload: nil, expectedRunID: runID, failure: error) }
+                            self.renderInbox()
+                        }
+                    }
+                    self.tasks[.inbox, default: []].append(read)
+                }
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                self.inboxState.settleList(generation, payload: nil, failure: error)
+                self.inboxState.settleBulk(generation, payload: nil, failure: error); self.renderInbox()
+            }
+        }
+        tasks[.inbox, default: []].append(task); renderInbox()
+    }
+    private func loadInboxContext(_ table: NSTableView) {
+        let rows = inboxState.results(query: models[.inbox]?.query ?? "")
+        guard rows.indices.contains(table.selectedRow) else { _ = inboxState.dismissContext(); renderInbox(); return }
+        loadInboxContext(id: rows[table.selectedRow]["id"].text)
+    }
+    private func loadInboxContext(id: String) {
+        guard let generation = try? inboxState.select(id) else { return }
+        let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui)), environment = environments[.inbox] ?? .null
+        let task = Task { [weak self] in
+            do {
+                let payload = try await bridge.read("plans.attentionItem", args: ["id": .string(id)], environment: environment)
+                guard let self, !Task.isCancelled else { return }
+                self.inboxState.settleContext(generation, id: id, payload: payload); self.renderInbox()
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                self.inboxState.settleContext(generation, id: id, payload: nil, failure: error); self.renderInbox()
+            }
+        }
+        tasks[.inbox, default: []].append(task); renderInbox()
+    }
+    private func renderInbox() {
+        guard let table = tables[.inbox] else { return }
+        rendering = true; defer { rendering = false }
+        let query = models[.inbox]?.query ?? ""
+        inboxState.retainVisibleSelection(query: query)
+        let rows = inboxState.results(query: query); table.reloadData()
+        if let id = inboxState.selection, let index = rows.firstIndex(where: { $0["id"].text == id }) {
+            table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        } else { table.deselectAll(nil) }
+        messages[.inbox]?.stringValue = inboxState.listError.map { "Inbox unavailable — " + $0 } ??
+            (inboxState.listReady ? (rows.isEmpty ? "No matching questions" : "\(rows.count) questions") +
+                (inboxState.listPartial ? " · Partial list — refresh to check for more" : "") : "Loading questions…")
+        let content: String
+        if let context = inboxState.context {
+            content = context["title"].text + "\n\n" + NativeDocument.markdown(.object(["rows": .array([context])]))
+        } else {
+            content = inboxState.contextError.map { "Context unavailable — " + $0 } ??
+                (inboxState.selection == nil ? "Select a question to view its context." : "Loading selected question…")
+        }
+        if let markdown = try? AttributedString(markdown: content, options: .init(interpretedSyntax: .full)) {
+            details[.inbox]?.textStorage?.setAttributedString(NSAttributedString(markdown))
+        } else { details[.inbox]?.string = content }
+        details[.inbox]?.enclosingScrollView?.isHidden = false
+        if let error = inboxState.bulkError { inboxBulkStatus?.stringValue = "Saved run unavailable — " + error }
+        else if !inboxState.bulkReady { inboxBulkStatus?.stringValue = "Loading saved run…" }
+        else if inboxState.run == .null { inboxBulkStatus?.stringValue = "No saved bulk run" }
+        else if let counts = try? InboxState.counts(run: inboxState.run, items: inboxState.items) {
+            inboxBulkStatus?.stringValue = "Run " + inboxState.run["runId"].text + " · " + inboxState.run["phase"].text +
+                "\n\(counts["decided", default: 0])/\(counts["total", default: 0]) decided · \(counts["percent", default: 0])% · " +
+                "\(counts["resolved", default: 0]) resolved · \(counts["unresolved", default: 0]) need attention · \(counts["left", default: 0]) left"
         }
     }
     private func refreshChat() {

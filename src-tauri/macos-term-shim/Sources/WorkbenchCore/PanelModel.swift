@@ -90,6 +90,9 @@ public struct InboxState {
                     } else { seen[id] = row; ordered.append(row) }
                 }
             }
+            if let selected = rows.first(where: { $0["id"].text == selection }),
+               let next = ordered.first(where: { $0["id"] == selected["id"] }),
+               next["kind"] != selected["kind"] || next["ref"] != selected["ref"] { clearContext() }
             rows = ordered; listPartial = partial; listReady = true; listError = nil
             if !rows.contains(where: { $0["id"].text == selection }) { selection = nil; clearContext() }
         } catch { rows = []; listReady = false; listError = error.localizedDescription; clearContext() }
@@ -103,6 +106,17 @@ public struct InboxState {
         }
     }
     public mutating func clearContext() { contextGeneration += 1; context = nil; contextError = nil }
+    /// A search must not leave an invisible question's context/action selected.
+    public mutating func retainVisibleSelection(query: String) {
+        if let selection, !results(query: query).contains(where: { $0["id"].text == selection }) {
+            self.selection = nil; clearContext()
+        }
+    }
+    /// Nested Escape closes the question before the resident panel itself.
+    @discardableResult public mutating func dismissContext() -> Bool {
+        guard selection != nil else { return false }
+        selection = nil; clearContext(); return true
+    }
     public mutating func select(_ id: String) throws -> Int {
         guard listReady, rows.contains(where: { $0["id"].text == id }) else { throw WorkbenchError("Select a current Inbox item") }
         selection = id; clearContext(); return contextGeneration
