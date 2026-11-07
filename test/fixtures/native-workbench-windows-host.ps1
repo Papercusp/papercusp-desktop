@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$SourceDirectory,
-    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'operator')][string]$Phase = 'all',
+    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'inbox', 'operator', 'fixture-diagnostics', 'fixture-failure', 'fixture-timeout')][string]$Phase = 'all',
     [string]$PuiExecutable,
     [string]$OperatorUrl,
     [string]$ExpectedWorkspace,
@@ -15,16 +15,66 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') { throw 'Native 
 foreach ($source in @('PuiReadBridge.cs', 'WorkbenchModel.cs', 'WorkbenchHost.cs')) {
     if (-not [IO.File]::Exists((Join-Path $SourceDirectory $source))) { throw "Missing native fixture source: $source" }
 }
+if ($Phase -eq 'fixture-diagnostics') {
+    $priorEvidence = $env:PAPERCUSP_NATIVE_EVIDENCE_DIR
+    $directory = Join-Path $env:TEMP ('WorkbenchDiagnostics-' + [Guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($directory)
+    $env:PAPERCUSP_NATIVE_EVIDENCE_DIR = $directory
+    $cases = [Collections.Generic.List[string]]::new()
+    function Check([bool]$Value, [string]$Name) {
+        if (-not $Value) { throw $Name }
+        $cases.Add($Name)
+    }
+    try {
+        foreach ($diagnosticPhase in @('fixture-failure', 'fixture-timeout')) {
+            $out = Join-Path $directory ($diagnosticPhase + '.out')
+            $err = Join-Path $directory ($diagnosticPhase + '.err')
+            $command = "& '" + $PSCommandPath.Replace("'", "''") + "' -SourceDirectory '" +
+                $SourceDirectory.Replace("'", "''") + "' -Phase '" + $diagnosticPhase + "' -Interactive"
+            $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+            $process = Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @(
+                '-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded
+            ) -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+            # Windows PowerShell loses ExitCode after redirected child exit
+            # unless the native process handle is retained before waiting.
+            $null = $process.Handle
+            if (-not $process.WaitForExit(40000)) { throw 'Diagnostic wrapper did not enforce its deadline' }
+            Check ($process.ExitCode -eq 1) ($diagnosticPhase + ' rejects the injected failure')
+            $process.Dispose()
+            Check ([IO.File]::ReadAllText($err).Contains('WORKBENCH_FIXTURE_EVIDENCE ')) ($diagnosticPhase + ' returns retained evidence location')
+            $manifests = @(Get-ChildItem -LiteralPath $directory -Filter diagnostic.json -Recurse | ForEach-Object {
+                [IO.File]::ReadAllText($_.FullName) | ConvertFrom-Json
+            } | Where-Object { $_.phase -eq $diagnosticPhase })
+            Check ($manifests.Count -eq 1 -and -not $manifests[0].ok) ($diagnosticPhase + ' records failed phase')
+            $manifest = $manifests[0]
+            Check ([IO.File]::ReadAllText((Join-Path $manifest.directory 'stdout.txt')).Contains('diagnostic child entered')) ($diagnosticPhase + ' retains child stdout')
+            Check ([IO.File]::ReadAllText((Join-Path $manifest.directory 'stderr.txt')).Contains('diagnostic stderr retained')) ($diagnosticPhase + ' retains child stderr')
+            $identity = [IO.File]::ReadAllText((Join-Path $manifest.directory 'child.json')) | ConvertFrom-Json
+            $childProcess = Get-Process -Id $identity.id -ErrorAction SilentlyContinue
+            Check (-not $childProcess -or $childProcess.StartTime.ToUniversalTime().Ticks -ne $identity.startTicks) ($diagnosticPhase + ' leaves no owned child')
+            Check ($null -eq (Get-ScheduledTask -TaskName $manifest.taskName -ErrorAction SilentlyContinue)) ($diagnosticPhase + ' unregisters its task')
+            if ($diagnosticPhase -eq 'fixture-timeout') { Check ($null -ne $manifest.stoppedChild) 'timeout cleanup verifies and terminates the owned child tree' }
+        }
+        @{ok=$true; platform='windows'; phase=$Phase; count=$cases.Count; cases=$cases.ToArray()} | ConvertTo-Json -Depth 4 -Compress
+    } finally {
+        $env:PAPERCUSP_NATIVE_EVIDENCE_DIR = $priorEvidence
+        if ($cases.Count -eq 15) { Remove-Item -LiteralPath $directory -Recurse -Force }
+        else { [Console]::Error.WriteLine('Diagnostic self-test evidence: ' + $directory) }
+    }
+    return
+}
 if ($Interactive) {
     # Reuse vm-smoke-windows.sh's owned InteractiveToken task pattern. SSH is
     # only the control transport; global shortcuts must run on the user desktop.
     $name = 'Papercusp-WorkbenchFixture-' + [Guid]::NewGuid().ToString('N')
-    $directory = Join-Path $env:TEMP $name
+    $evidenceRoot = if ($env:PAPERCUSP_NATIVE_EVIDENCE_DIR) { $env:PAPERCUSP_NATIVE_EVIDENCE_DIR } else { $env:TEMP }
+    $directory = Join-Path $evidenceRoot $name
     [IO.Directory]::CreateDirectory($directory) | Out-Null
     $receipt = Join-Path $directory 'exit.json'
     $stdout = Join-Path $directory 'stdout.txt'
     $stderr = Join-Path $directory 'stderr.txt'
-    $fixtureCommand = "$" + "ProgressPreference='SilentlyContinue'; & '" + $PSCommandPath.Replace("'", "''") + "' -SourceDirectory '" +
+    $fixtureCommand = "$" + "ProgressPreference='SilentlyContinue'; " + '$env:PAPERCUSP_NATIVE_FIXTURE_PROGRESS=' +
+        "'" + (Join-Path $directory 'progress.log').Replace("'", "''") + "'; & '" + $PSCommandPath.Replace("'", "''") + "' -SourceDirectory '" +
         $SourceDirectory.Replace("'", "''") + "' -Phase '" + $Phase + "'"
     if ($Phase -eq 'operator') {
         foreach ($nameValue in @(@('PuiExecutable', $PuiExecutable), @('OperatorUrl', $OperatorUrl),
@@ -39,13 +89,22 @@ $ErrorActionPreference = 'Stop'
 try {
     $child = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @(
         '-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $EncodedFixture
-    ) -WindowStyle Hidden -RedirectStandardOutput (Join-Path $OutputDirectory 'stdout.txt') -RedirectStandardError (Join-Path $OutputDirectory 'stderr.txt') -Wait -PassThru
+    ) -WindowStyle Hidden -RedirectStandardOutput (Join-Path $OutputDirectory 'stdout.txt') -RedirectStandardError (Join-Path $OutputDirectory 'stderr.txt') -PassThru
+    $null = $child.Handle
+    [IO.File]::WriteAllText((Join-Path $OutputDirectory 'child.json'), (@{
+        id = $child.Id; startTicks = $child.StartTime.ToUniversalTime().Ticks
+    } | ConvertTo-Json -Compress))
+    $child.WaitForExit()
     $result = @{ exitCode = $child.ExitCode; sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId }
+    $child.Dispose()
 } catch { $result = @{ exitCode = 1; error = $_.Exception.ToString() } }
 $target = Join-Path $OutputDirectory 'exit.json'
 [IO.File]::WriteAllText(($target + '.tmp'), ($result | ConvertTo-Json -Compress))
 Move-Item -LiteralPath ($target + '.tmp') -Destination $target
 '@
+    $completed = $false
+    $failure = $null
+    $startedAt = [DateTime]::UtcNow.ToString('o')
     try {
         $runnerPath = Join-Path $directory 'run.ps1'
         [IO.File]::WriteAllText($runnerPath, $runner)
@@ -54,7 +113,7 @@ Move-Item -LiteralPath ($target + '.tmp') -Destination $target
         $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
         Register-ScheduledTask -TaskName $name -Action $action -Principal $principal | Out-Null
         Start-ScheduledTask -TaskName $name
-        $deadline = [DateTime]::UtcNow.AddSeconds($(if ($Phase -eq 'operator') { 90 } else { 35 }))
+        $deadline = [DateTime]::UtcNow.AddSeconds($(if ($Phase -eq 'operator') { 90 } elseif ($Phase -eq 'fixture-timeout') { 12 } else { 35 }))
         while (-not [IO.File]::Exists($receipt) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
         if (-not [IO.File]::Exists($receipt)) { throw 'Interactive fixture produced no terminal receipt; verify the signed-in user desktop' }
         $result = [IO.File]::ReadAllText($receipt) | ConvertFrom-Json
@@ -66,15 +125,49 @@ Move-Item -LiteralPath ($target + '.tmp') -Destination $target
         if ($result.exitCode -ne 0) { throw "Interactive fixture exited $($result.exitCode)" }
         if ($result.sessionId -le 0) { throw 'Interactive fixture ran in service Session 0' }
         [Console]::Write([IO.File]::ReadAllText($stdout))
+        $completed = $true
+    } catch {
+        $failure = $_.Exception.Message
+        throw
     } finally {
+        $stoppedChild = $null
+        if (-not $completed -and [IO.File]::Exists((Join-Path $directory 'child.json'))) {
+            $owned = [IO.File]::ReadAllText((Join-Path $directory 'child.json')) | ConvertFrom-Json
+            $childProcess = Get-Process -Id $owned.id -ErrorAction SilentlyContinue
+            if ($childProcess -and $childProcess.StartTime.ToUniversalTime().Ticks -eq $owned.startTicks) {
+                # Verify creation identity before terminating only this fixture's tree.
+                & "$env:SystemRoot\System32\taskkill.exe" /PID $owned.id /T /F 2>&1 | Out-Null
+                $stoppedChild = $owned.id
+            }
+        }
         $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         if ($task) {
             if ($task.State -eq 'Running') { Stop-ScheduledTask -TaskName $name }
             Unregister-ScheduledTask -TaskName $name -Confirm:$false
         }
-        Remove-Item -LiteralPath $directory -Recurse -Force
+        if ($completed -and -not $env:PAPERCUSP_NATIVE_EVIDENCE_DIR) {
+            Remove-Item -LiteralPath $directory -Recurse -Force
+        } else {
+            $diagnostic = @{ ok=$completed; phase=$Phase; startedAt=$startedAt; finishedAt=[DateTime]::UtcNow.ToString('o');
+                error=$failure; stoppedChild=$stoppedChild; directory=$directory; taskName=$name }
+            [IO.File]::WriteAllText((Join-Path $directory 'diagnostic.json'), ($diagnostic | ConvertTo-Json -Compress))
+            if (-not $completed) {
+                foreach ($log in @('progress.log', 'stdout.txt', 'stderr.txt')) {
+                    $logPath = Join-Path $directory $log
+                    if ([IO.File]::Exists($logPath)) { [Console]::Error.WriteLine($log + ': ' + [IO.File]::ReadAllText($logPath)) }
+                }
+            }
+            [Console]::Error.WriteLine('WORKBENCH_FIXTURE_EVIDENCE ' + (Join-Path $directory 'diagnostic.json'))
+        }
     }
     return
+}
+if ($Phase -in @('fixture-failure', 'fixture-timeout')) {
+    [Console]::Out.WriteLine('fixture diagnostic child entered ' + $Phase)
+    [Console]::Error.WriteLine('fixture diagnostic stderr retained')
+    if ($Phase -eq 'fixture-failure') { throw 'injected native fixture failure' }
+    Start-Sleep -Seconds 30
+    throw 'fixture timeout was not enforced'
 }
 if ($Phase -eq 'lifecycle') {
     & (Join-Path $PSScriptRoot 'native-workbench-windows-lifecycle.ps1') -SourceDirectory $SourceDirectory -Resident
@@ -478,6 +571,114 @@ public static class WorkbenchNativeHostFixture
             Check(host.Panel("goals") == panel, "Goals controls retain the same resident native panel across toggles");
         }
     }
+    private static string InboxQuestion = "{\"id\":\"question +/=& \\u03bb\",\"kind\":\"question\",\"title\":\"Alpha literal question\",\"body\":\"Question body\",\"contextMarkdown\":\"Exact context\",\"ref\":{\"kind\":\"coord-escalation\",\"conversationId\":\"thread-a\",\"options\":[{\"id\":\"yes\",\"label\":\"Yes\"}]},\"actions\":[{\"id\":\"resolve\"}]}";
+    private static string InboxReview = "{\"runId\":\"run-1\",\"itemId\":\"question +/=& \\u03bb\",\"kind\":\"question\",\"title\":\"Review Alpha\",\"ref\":{\"kind\":\"coord-escalation\",\"conversationId\":\"thread-a\"},\"outcome\":\"recommended\",\"actionId\":\"answer\",\"draftAnswer\":\"draft\",\"recommendation\":{\"kind\":\"recommended\"}}";
+    private static InboxState InboxLoaded()
+    {
+        var state = new InboxState(); var token = state.Begin();
+        state.SettleList(token, Envelope("{\"items\":[" + InboxQuestion + "]}"));
+        state.SettleBulk(token, Envelope("{\"run\":null,\"items\":[]}")); return state;
+    }
+    private static void InboxModel()
+    {
+        var environment = Json(EnvironmentJson); var state = InboxLoaded(); var id = "question +/=& \u03bb";
+        Check(state.ListReady && state.BulkReady && state.Results("Alpha literal").Count == 1, "Inbox reads and filters canonical attention groups");
+        var frozen = state.Request("start", environment, "Alpha");
+        ((Dictionary<string, object>)state.Rows[0]["ref"])["conversationId"] = "changed";
+        Check(new JavaScriptSerializer().Serialize(frozen).Contains("thread-a"), "visible batch freezes nested references before confirmation");
+        state = InboxLoaded(); var token = state.Select(id);
+        state.SettleContext(token, id, Envelope(InboxQuestion));
+        Check(state.Context != null && InboxState.Actions(state.Context).Single()["id"].Equals("yes"), "context uses exact question identity and offered escalation option");
+        Check(!state.SettleContext(token - 1, id, Envelope(InboxQuestion)), "late context generation is rejected");
+        state.SettleContext(token, id, Envelope(InboxQuestion.Replace("thread-a", "thread-b")));
+        Check(state.Context == null && state.ContextError != null, "changed reference cannot resolve a recycled question identity");
+        token = state.Select(id); state.SettleContext(token, id, Envelope(InboxQuestion));
+        Refuses(() => state.Request("resolve", environment, actionId: "unoffered"), "manual resolution refuses unoffered actions");
+        var request = state.Request("resolve", environment, actionId: "yes");
+        var action = state.BeginAction(new[] { request });
+        Refuses(() => state.Request("resolve", environment, actionId: "yes"), "pending action suppresses duplicate invocation");
+        var receipt = Envelope("{\"ok\":true,\"resolved\":true,\"recorded\":false,\"itemId\":\"question +/=& \\u03bb\"}"); receipt["environment"] = environment;
+        Refuses(() => state.RecordAction(action, request, receipt), "unrecorded terminal effect is surfaced for reconciliation");
+        state.FinishAction(action);
+        Check(state.Applied.Contains(id), "confirmed terminal effect cannot repeat when bookkeeping fails");
+        Refuses(() => state.Request("resolve", environment, actionId: "yes"), "locally confirmed question cannot be applied twice");
+        state = InboxLoaded();
+        var bulk = Envelope("{\"run\":{\"runId\":\"run-1\",\"phase\":\"review\",\"totalItems\":5},\"items\":[" + InboxReview + "," + InboxReview.Replace("question +/=& \\u03bb", "owner-only").Replace("recommended\\\"}", "owner_action\\\"}") + "]}");
+        // Explicit manual disposition is never an applicable recommendation.
+        var items = (System.Collections.IList)((Dictionary<string, object>)((System.Collections.IList)bulk["rows"])[0])["items"];
+        ((Dictionary<string, object>)((Dictionary<string, object>)items[1])["recommendation"])["kind"] = "owner_action";
+        state.SettleBulk(state.Generation, bulk, "run-1");
+        Check(state.BulkReady && state.CanSelect(id) && !state.CanSelect("owner-only"), "owner action stays outside Apply selected");
+        var counts = InboxState.Counts(state.Run, state.Items);
+        Check(counts["total"] == 5 && counts["decided"] == 2 && counts["percent"] == 40 && counts["left"] == 3, "partial delivery uses persisted total as the progress denominator");
+        state.SelectedReviews.Add(id); state.Drafts[id] = "edited \u03bb";
+        request = state.Request("apply", environment, itemId:id);
+        Check(request["answer"].Equals("edited \u03bb") && request["runId"].Equals("run-1"), "Apply freezes the edited draft and saved run identity");
+        Refuses(() => state.Request("apply", environment, itemId:"owner-only"), "owner-only row cannot enter a bulk apply request");
+        action = state.BeginAction(new[] { request }); var other = Json(EnvironmentJson); other["workspaceId"] = "other";
+        receipt["environment"] = other;
+        Refuses(() => state.RecordAction(action, request, receipt), "action receipt from another workspace is rejected");
+        Check(!state.SettleLiveBulk(state.Generation, "run-1", bulk), "live saved run refresh cannot overwrite a pending action"); state.FinishAction(action);
+        Check(!state.SettleLiveBulk(state.Generation, "different", bulk), "live refresh cannot replace the selected saved run");
+        var duplicate = new List<Dictionary<string, object>> { state.Items[0], state.Items[0] };
+        Refuses(() => InboxState.Counts(state.Run, duplicate), "duplicate bulk identities fail closed");
+        state.Run["phase"] = "complete"; state.Items[0]["outcome"] = "failed";
+        request = state.Request("resume", environment);
+        Check(((System.Collections.IList)request["itemIds"]).Count == 1, "resume submits only retryable saved item identities");
+        Refuses(() => state.Request("stop", environment), "stop refuses a terminal run");
+        state.Run["phase"] = "running"; Check(state.Request("stop", environment)["runId"].Equals("run-1"), "stop targets the exact active saved run");
+        Refuses(() => state.Request("start", environment), "active saved run prevents a second batch");
+        state = InboxLoaded(); token = state.Select(id); state.SettleContext(token, id, Envelope(InboxQuestion)); state.RetainVisibleSelection("no match");
+        Check(state.Selection == null && state.Context == null && !state.SettleContext(token, id, Envelope(InboxQuestion)), "filtering out a question dismisses context and fences its late response");
+        var partial = Envelope("{\"run\":null,\"items\":[]}"); partial["partial"] = true; state.SettleBulk(state.Generation, partial);
+        Check(!state.BulkReady && state.BulkError != null, "incomplete canonical run blocks actions");
+        state.SettleList(state.Generation, Envelope("{\"items\":[" + InboxQuestion + "," + InboxQuestion.Replace("thread-a", "thread-b") + "]}"));
+        Check(!state.ListReady && state.ListError != null, "conflicting attention identities are surfaced instead of silently merged");
+    }
+    private static void InboxNative()
+    {
+        var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
+        using (var host = new WorkbenchHost(Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_FIXTURE")))
+        {
+            host.Toggle("inbox"); var panel = host.Panel("inbox");
+            var status = Find<System.Windows.Controls.TextBlock>(panel, "Workbench status");
+            Until(() => status.Text.Contains("2 questions") && status.Text.Contains("No saved bulk run"));
+            Check(panel.IsVisible && status.Text.Contains("fixture.invalid:3170"), "native Inbox renders canonical attention and selected environment");
+            var search = Find<System.Windows.Controls.TextBox>(panel, "Search Workbench"); search.Text = "Alpha";
+            Find<System.Windows.Controls.Button>(panel, "Inbox start").RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            var confirm = Find<System.Windows.Controls.Button>(panel, "Inbox confirm action");
+            Check(confirm != null && !System.IO.File.Exists(path + ".writes"), "native visible batch waits for explicit confirmation without writes");
+            search.Text = "Beta"; Check(Find<System.Windows.Controls.Button>(panel, "Inbox confirm action") == null, "query edit cancels a frozen batch confirmation");
+            search.Text = "Alpha";
+            Find<System.Windows.Controls.Button>(panel, "Inbox question question +/=& \u03bb").RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            Until(() => Find<System.Windows.Controls.Button>(panel, "Inbox resolve yes") != null);
+            Check(Find<System.Windows.Controls.TextBox>(panel, "Answer selected question") != null, "native question context exposes offered actions and answer control");
+            Find<System.Windows.Controls.Button>(panel, "Inbox resolve yes").RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            Check(!System.IO.File.Exists(path + ".writes"), "manual offered action also waits for confirmation");
+            Find<System.Windows.Controls.Button>(panel, "Inbox cancel action").RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            Find<System.Windows.Controls.Button>(panel, "Inbox start").RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            Find<System.Windows.Controls.Button>(panel, "Inbox confirm action").RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            Until(() => status.Text.Contains("run-1") && status.Text.Contains("review"));
+            var written = System.IO.File.ReadAllLines(path + ".writes"); var start = Json(written[0]);
+            Check(written.Length == 1 && ((System.Collections.IList)start["items"]).Count == 1, "confirmed batch submits exactly the one filtered visible question");
+            var pick = Find<System.Windows.Controls.CheckBox>(panel, "Inbox review question +/=& \u03bb");
+            Check(pick != null && pick.IsEnabled && status.Text.Contains("1/1 decided"), "saved run polling renders authoritative review progress");
+            pick.IsChecked = true; pick.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            var draft = Find<System.Windows.Controls.TextBox>(panel, "Inbox draft question +/=& \u03bb"); draft.Text = "edited native answer \u03bb";
+            Pump(); Check(Find<System.Windows.Controls.TextBox>(panel, "Inbox draft question +/=& \u03bb") == draft && draft.Text.Contains("edited"), "saved run refresh preserves the live draft control and edited text");
+            Find<System.Windows.Controls.Button>(panel, "Inbox apply").RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            Check(System.IO.File.ReadAllLines(path + ".writes").Length == 1, "selected recommendation is never auto-applied");
+            Find<System.Windows.Controls.Button>(panel, "Inbox confirm action").RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            Until(() => status.Text.Contains("1 resolved") && status.Text.Contains("complete"));
+            written = System.IO.File.ReadAllLines(path + ".writes"); var apply = Json(written[1]);
+            Check(written.Length == 2 && apply["answer"].Equals("edited native answer \u03bb") && ((Dictionary<string, object>)apply["expected"])["id"].Equals("question +/=& \u03bb"), "native Apply sends the exact selected identity and edited Unicode draft");
+            host.State("inbox").Pinned = true; host.Toggle("goals"); Pump();
+            var goals = host.Panel("goals");
+            Check(panel.IsVisible && goals.IsVisible && !new Rect(panel.Left, panel.Top, panel.Width, panel.Height).IntersectsWith(new Rect(goals.Left, goals.Top, goals.Width, goals.Height)), "Inbox pins alongside independent panels within separate native slots");
+            host.Toggle("goals"); host.Toggle("inbox"); host.Toggle("inbox"); Pump();
+            Check(host.Panel("inbox") == panel && search.Text == "Alpha", "native Inbox retains its resident HWND and query across toggles");
+        }
+    }
     public static string Run(string phase)
     {
         cases.Clear();
@@ -508,6 +709,7 @@ public static class WorkbenchNativeHostFixture
         if (phase == "all" || phase == "model") { Console.Error.WriteLine("PHASE model"); Model(); Agents(); }
         if (phase == "accounts") { AccountsModel(); AccountsNative(); }
         if (phase == "goals") { GoalsNative(); }
+        if (phase == "inbox") { InboxModel(); InboxNative(); }
         if (phase == "operator") { OperatorNative(); }
         if (phase == "all" || phase == "hotkeys" || phase == "windows")
         { Console.Error.WriteLine("PHASE " + (phase == "all" ? "windows" : phase)); Native(phase != "hotkeys"); }
@@ -535,7 +737,7 @@ public static class WorkbenchArgvFixture {
 }
 '@
     $env:WORKBENCH_ARGV_FIXTURE = $argvFixture
-    if ($Phase -eq 'accounts' -or $Phase -eq 'goals') {
+    if ($Phase -in @('accounts', 'goals', 'inbox')) {
         $env:WORKBENCH_ACCOUNT_FIXTURE = $accountFixture; $env:WORKBENCH_ACCOUNT_STATE = $accountState
         $env:WORKBENCH_CONTROL_PHASE = $Phase
         Add-Type -OutputAssembly $accountFixture -OutputType ConsoleApplication -ReferencedAssemblies System.Web.Extensions, System.Core -TypeDefinition @'
@@ -547,6 +749,58 @@ using System.Linq;
 using System.Text;
 using System.Web.Script.Serialization;
 public static class NativeAccountsFixture {
+    private static int Inbox(string[] args, Dictionary<string, object> request, JavaScriptSerializer json, UTF8Encoding utf8, string path, object environment) {
+        const string question = "{\"id\":\"question +/=& \\u03bb\",\"kind\":\"question\",\"title\":\"Alpha literal question\",\"body\":\"Question body\",\"contextMarkdown\":\"Exact context\",\"ref\":{\"kind\":\"coord-escalation\",\"conversationId\":\"thread-a\",\"options\":[{\"id\":\"yes\",\"label\":\"Yes\"}]},\"actions\":[{\"id\":\"resolve\"}]}";
+        const string review = "{\"runId\":\"run-1\",\"itemId\":\"question +/=& \\u03bb\",\"kind\":\"question\",\"title\":\"Review Alpha\",\"ref\":{\"kind\":\"coord-escalation\",\"conversationId\":\"thread-a\"},\"outcome\":\"recommended\",\"actionId\":\"answer\",\"draftAnswer\":\"draft\",\"recommendation\":{\"kind\":\"recommended\"}}";
+        var current = json.Deserialize<Dictionary<string, object>>(File.Exists(path) ? File.ReadAllText(path) : "{\"run\":null,\"items\":[]}");
+        object[] rows;
+        if (args.Length != 1) return 40;
+        if (args[0] == "native-inbox") {
+            if (File.Exists(path + ".deny")) { Console.Error.Write("isolated Inbox action denied"); return 7; }
+            if (json.Serialize(request["environment"]) != json.Serialize(environment) || !Object.Equals(request["confirmed"], true)) return 41;
+            var operation = (string)request["operation"];
+            var receipt = new Dictionary<string, object> { { "ok", true }, { "recorded", true } };
+            if (operation == "start") {
+                var batch = (IList)request["items"];
+                if (batch.Count != 1 || !Object.Equals(((Dictionary<string, object>)batch[0])["itemId"], "question +/=& \u03bb")) return 42;
+                current = json.Deserialize<Dictionary<string, object>>("{\"run\":{\"runId\":\"run-1\",\"phase\":\"running\",\"totalItems\":1},\"items\":[" + review.Replace("recommended", "pending") + "]}");
+                receipt["runId"] = "run-1";
+            } else if (operation == "apply" || operation == "resolve") {
+                var expected = (Dictionary<string, object>)request["expected"];
+                if (!Object.Equals(expected["id"], "question +/=& \u03bb")) return 43;
+                if (operation == "apply") {
+                    if (!Object.Equals(request["runId"], "run-1") || !Object.Equals(request["actionId"], "answer")) return 44;
+                    current = json.Deserialize<Dictionary<string, object>>("{\"run\":{\"runId\":\"run-1\",\"phase\":\"complete\",\"totalItems\":1},\"items\":[" + review.Replace("recommended", "auto_resolved") + "]}");
+                } else if (!Object.Equals(request["actionId"], "yes")) return 45;
+                receipt["resolved"] = true; receipt["itemId"] = "question +/=& \u03bb";
+            } else if (operation == "stop" || operation == "resume") {
+                if (!Object.Equals(request["runId"], "run-1") || current["run"] == null) return 46;
+                ((Dictionary<string, object>)current["run"])["phase"] = operation == "stop" ? "complete" : "running";
+            } else return 47;
+            File.WriteAllText(path, json.Serialize(current)); File.AppendAllText(path + ".writes", json.Serialize(request) + "\n"); rows = new object[] { receipt };
+        } else if (args[0] == "native-read") {
+            var name = (string)request["name"];
+            if (name != "operator.identity" && (!request.ContainsKey("environment") || json.Serialize(request["environment"]) != json.Serialize(environment))) return 48;
+            if (name == "operator.identity") rows = new object[] { environment };
+            else if (name == "plans.attention") rows = new object[] { new { items = new object[] {
+                json.DeserializeObject(question), json.DeserializeObject(question.Replace("question +/=& \\u03bb", "question-b").Replace("Alpha", "Beta").Replace("thread-a", "thread-b")) } } };
+            else if (name == "plans.attentionItem") {
+                var query = (Dictionary<string, object>)request["args"];
+                if (!Object.Equals(query["itemId"], "question +/=& \u03bb")) return 49;
+                rows = new object[] { json.DeserializeObject(question) };
+            } else if (name == "plans.attentionBulkRun") {
+                rows = new object[] { current };
+                var run = current["run"] as Dictionary<string, object>;
+                if (run != null && Object.Equals(run["phase"], "running")) {
+                    // Return a real intermediate snapshot; the next one-second
+                    // refresh must observe review from the persisted fixture.
+                    File.WriteAllText(path, "{\"run\":{\"runId\":\"run-1\",\"phase\":\"review\",\"totalItems\":1},\"items\":[" + review + "]}");
+                }
+            } else if (name == "goals.list") rows = new object[] { new { goals = new object[0] } };
+            else return 50;
+        } else return 51;
+        var bytes = utf8.GetBytes(json.Serialize(new { rows = rows, environment = environment })); Console.OpenStandardOutput().Write(bytes, 0, bytes.Length); return 0;
+    }
     private static int Goals(string[] args, Dictionary<string, object> request, JavaScriptSerializer json, UTF8Encoding utf8, string path, object environment) {
         var state = json.Deserialize<Dictionary<string, object>>(File.Exists(path) ? File.ReadAllText(path) :
             "{\"goal\":{\"id\":\"literal +/=& \\u03bb\",\"title\":\"Same goal\",\"status\":\"active\"},\"effectiveStatus\":\"active\",\"holderLiveness\":\"held\",\"evidence\":[\"retained-evidence\"]}");
@@ -582,6 +836,7 @@ public static class NativeAccountsFixture {
         var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
         var environment = json.DeserializeObject("{\"endpoint\":\"http://fixture.invalid:3170\",\"workspaceId\":\"isolated\",\"store\":{\"id\":\"fixture\"},\"agentChat\":{\"scope\":\"workspace:isolated\"}}");
         if (Environment.GetEnvironmentVariable("WORKBENCH_CONTROL_PHASE") == "goals") return Goals(args, request, json, utf8, path, environment);
+        if (Environment.GetEnvironmentVariable("WORKBENCH_CONTROL_PHASE") == "inbox") return Inbox(args, request, json, utf8, path, environment);
         var state = json.Deserialize<Dictionary<string, object>>(File.Exists(path) ? File.ReadAllText(path) :
             "{\"defaultAccountId\":\"other\",\"forcedAccounts\":[],\"excludeAccounts\":[\"other\"]}");
         object rows; var scoped = false;

@@ -85,7 +85,7 @@ test('Windows per-account login lifecycle preserves shortcuts and explicit disab
         assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
         const result = JSON.parse(run.stdout.trim());
         assert.equal(result.ok, true);
-        assert.equal(result.count, 26);
+        assert.equal(result.count, 30);
         assert.equal(new Set(result.cases).size, result.count);
     });
 
@@ -99,7 +99,7 @@ test('Windows actual resident lifecycle and native settings work in the signed-i
         const result = JSON.parse(run.stdout.trim());
         assert.equal(result.ok, true);
         assert.equal(result.resident, true);
-        assert.equal(result.count, 36);
+        assert.equal(result.count, 40);
         assert.equal(new Set(result.cases).size, result.count);
     });
 
@@ -146,6 +146,20 @@ test('Windows native Goals controls confirm actions and preserve server state an
         assert.equal(new Set(result.cases).size, result.count);
     });
 
+test('Windows Inbox freezes visible confirmations, reconciles saved runs and retains native lifecycle',
+    {skip:process.platform !== 'win32', timeout:60000}, () => {
+        const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
+            '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'inbox', '-Interactive'],
+        {encoding:'utf8', timeout:55000, windowsHide:true});
+        assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
+        const result = JSON.parse(run.stdout.trim());
+        assert.equal(result.ok, true); assert.equal(result.phase, 'inbox');
+        assert.equal(result.interactiveDesktop, true);
+        assert.ok(result.count >= 30);
+        assert.equal(new Set(result.cases).size, result.count);
+    });
+
 test('Windows standalone PUI starts before any operator request', {
     skip: process.platform !== 'win32' || process.env.PAPERCUSP_TEST_REAL_PUI !== '1'
         ? 'native Windows leg: select PAPERCUSP_TEST_REAL_PUI=1 and PAPERCUSP_TEST_PUI_EXE' : false,
@@ -163,6 +177,18 @@ test('Windows standalone PUI starts before any operator request', {
     assert.equal(result.count, 2); assert.equal(new Set(result.cases).size, result.count);
     assert.match(result.puiSha256, /^[a-f0-9]{64}$/);
 });
+
+test('Windows interactive fixture retains failure diagnostics and terminates its timed out child',
+    {skip:process.platform !== 'win32', timeout:90000}, () => {
+        const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
+            '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'fixture-diagnostics'],
+        {encoding:'utf8', timeout:85000, windowsHide:true});
+        assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
+        const result = JSON.parse(run.stdout.trim());
+        assert.equal(result.ok, true); assert.equal(result.phase, 'fixture-diagnostics');
+        assert.equal(result.count, 15); assert.equal(new Set(result.cases).size, result.count);
+    });
 
 for (const fixture of ['bridge', 'host']) {
     test('Windows actual PUI and canonical operator read integration: ' + fixture, {

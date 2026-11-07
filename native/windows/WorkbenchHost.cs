@@ -70,6 +70,7 @@ namespace Papercusp.Workbench
             panels.Add("quick-access", new NativePanel(pui, "Quick Access", "all", Relayout));
             panels.Add("goals", new NativePanel(pui, "Goals", "goals", Relayout));
             panels.Add("accounts", new NativePanel(pui, "Accounts", "accounts", Relayout));
+            panels.Add("inbox", new NativePanel(pui, "Inbox", "inbox", Relayout));
         }
         public Window Panel(string name) { return panels[name]; }
         public PanelState State(string name) { return panels[name].State; }
@@ -86,7 +87,7 @@ namespace Papercusp.Workbench
         }
         private void Relayout()
         {
-            var visible = new[] { "quick-access", "goals", "accounts" }.Where(name => panels[name].State.Visible).ToArray();
+            var visible = new[] { "quick-access", "goals", "accounts", "inbox" }.Where(name => panels[name].State.Visible).ToArray();
             for (var i = 0; i < visible.Length; ++i)
                 panels[visible[i]].Position(PanelBounds(SystemParameters.WorkArea, visible.Length, i));
         }
@@ -184,6 +185,13 @@ namespace Papercusp.Workbench
             private readonly GoalState goal = new GoalState();
             private readonly WrapPanel goalControls;
             private readonly TextBlock goalStatus;
+            private readonly InboxState inbox;
+            private readonly StackPanel inboxContent, inboxList, inboxContext, inboxBulk, inboxConfirm;
+            private readonly DispatcherTimer inboxTimer;
+            private readonly List<Button> inboxControls = new List<Button>();
+            private Dictionary<string, object> inboxEnvironment;
+            private List<Dictionary<string, object>> inboxConfirmation;
+            private string inboxRunId, inboxListKey, inboxContextKey, inboxBulkKey;
             internal Func<string, bool> ConfirmGoal;
             private readonly Action relayout;
             private readonly DispatcherTimer debounce;
@@ -260,7 +268,31 @@ namespace Papercusp.Workbench
                 ConfirmGoal = message => MessageBox.Show(this, message, "Confirm goal action", MessageBoxButton.YesNo,
                     MessageBoxImage.Question, MessageBoxResult.No) == MessageBoxResult.Yes;
                 var body = new Grid(); layout.Children.Add(body);
+                if (scope == "inbox")
+                {
+                    inbox = new InboxState(); inboxContent = new StackPanel();
+                    var scroll = new ScrollViewer { Content = inboxContent, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+                    AutomationProperties.SetName(scroll, "Inbox questions and saved run"); body.Children.Add(scroll);
+                    var actions = new WrapPanel(); inboxContent.Children.Add(actions);
+                    foreach (var operation in new[] { "start", "stop", "resume", "apply" })
+                    {
+                        var value = operation;
+                        var label = operation == "start" ? "Resolve visible" : operation == "apply" ? "Apply selected" : operation == "stop" ? "Stop" : "Resume";
+                        inboxControls.Add(InboxButton(actions, label, "Inbox " + operation, () => PrepareInbox(value)));
+                    }
+                    var runField = new TextBox { Margin = new Thickness(0, 8, 0, 4) };
+                    AutomationProperties.SetName(runField, "Saved Inbox run ID"); inboxContent.Children.Add(runField);
+                    runField.TextChanged += (s, e) => { inboxConfirmation = null; RenderInboxConfirmation(); };
+                    inboxControls.Add(InboxButton(inboxContent, "Open saved run", "Inbox open saved run", () => { inboxRunId = String.IsNullOrWhiteSpace(runField.Text) ? null : runField.Text.Trim(); Refresh(); }));
+                    inboxConfirm = new StackPanel(); inboxContent.Children.Add(inboxConfirm);
+                    inboxList = new StackPanel(); inboxContent.Children.Add(inboxList);
+                    inboxContext = new StackPanel(); inboxContent.Children.Add(inboxContext);
+                    inboxBulk = new StackPanel(); inboxContent.Children.Add(inboxBulk);
+                    inboxTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+                    inboxTimer.Tick += async (s, e) => { inboxTimer.Stop(); await FollowInboxRun(); };
+                }
                 results = new ListBox { FontSize = 15 }; body.Children.Add(results);
+                if (inbox != null) results.Visibility = Visibility.Collapsed;
                 AutomationProperties.SetName(results, "Workbench results");
                 results.SelectionChanged += (s, e) =>
                 {
@@ -281,11 +313,17 @@ namespace Papercusp.Workbench
                 {
                     if (e.Key == Key.Escape)
                     {
+                        if (inbox != null)
+                        {
+                            if (inboxConfirmation != null) { inboxConfirmation = null; RenderInboxConfirmation(); }
+                            else if (inbox.DismissContext()) RenderInbox(); else Dismiss(true);
+                            e.Handled = true; return;
+                        }
                         CancelDetail();
                         if (State.Escape() == "panel") Dismiss(true); else Render();
                         e.Handled = true;
                     }
-                    else if (e.Key == Key.Enter && State.Detail == null) { OpenSelected(); e.Handled = true; }
+                    else if (e.Key == Key.Enter && State.Detail == null && inbox == null) { OpenSelected(); e.Handled = true; }
                     else if ((e.Key == Key.Down || e.Key == Key.Up) && search.IsKeyboardFocusWithin)
                     {
                         var count = results.Items.Count;
@@ -317,6 +355,7 @@ namespace Papercusp.Workbench
             {
                 State.Visible = false; debounce.Stop();
                 if (accounts != null) { ++accounts.Generation; accounts.Busy = false; }
+                if (inbox != null) { ++inbox.Generation; inbox.ClearContext(); inboxConfirmation = null; inboxTimer.Stop(); }
                 if (refresh != null) { refresh.Cancel(); refresh.Dispose(); refresh = null; }
                 ++State.Generation; CancelDetail();
                 var ownedFocus = IsActive; Hide();
@@ -324,14 +363,16 @@ namespace Papercusp.Workbench
                 if (restore && ownedFocus && IsWindow(priorWindow)) SetForegroundWindow(priorWindow);
             }
             private void Schedule()
-            { if (ready && State.Visible) { if (accounts != null) RenderAccounts(); else { debounce.Stop(); debounce.Start(); } } }
+            { if (ready && State.Visible) { if (accounts != null) RenderAccounts(); else if (inbox != null) { inboxConfirmation = null; inbox.RetainVisibleSelection(State.Query); RenderInbox(); } else { debounce.Stop(); debounce.Start(); } } }
             private async void Refresh()
             {
                 if (!State.Visible) return;
+                if (inbox != null && inbox.Pending) return;
                 CancelDetail(); State.Detail = null;
                 if (refresh != null) { refresh.Cancel(); refresh.Dispose(); }
                 refresh = new CancellationTokenSource();
                 if (accounts != null) { await RefreshAccounts(refresh.Token); return; }
+                if (inbox != null) { await RefreshInbox(refresh.Token); return; }
                 var token = refresh.Token; var generation = State.BeginRefresh();
                 Render();
                 var tasks = State.Sources.Keys.ToArray().Select(async kind =>
@@ -350,6 +391,7 @@ namespace Papercusp.Workbench
             {
                 if (shuttingDown) return;
                 if (accounts != null) { RenderAccounts(); return; }
+                if (inbox != null) { RenderInbox(); return; }
                 status.Text = String.Join("\n", PanelState.Kinds.Where(k => State.Sources.ContainsKey(k)).Select(k =>
                 {
                     var source = State.Sources[k];
@@ -374,8 +416,203 @@ namespace Papercusp.Workbench
                 goal.Clear();
                 if (detailRead != null) { detailRead.Cancel(); detailRead.Dispose(); detailRead = null; }
             }
+            private static Button InboxButton(Panel parent, string label, string name, Action action, bool enabled = true)
+            {
+                var button = new Button { Content = label, Margin = new Thickness(4), IsEnabled = enabled };
+                AutomationProperties.SetName(button, name); button.Click += (s, e) => action(); parent.Children.Add(button); return button;
+            }
+            private static void InboxText(Panel parent, string text)
+            { parent.Children.Add(new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 5, 0, 5) }); }
+            private bool InboxCurrent(int generation, CancellationToken token)
+            { return !shuttingDown && State.Visible && !token.IsCancellationRequested && generation == inbox.Generation; }
+            private void CheckInboxEnvironment(Dictionary<string, object> payload, Dictionary<string, object> expected)
+            {
+                if (!AccountState.SameEnvironment(expected, InboxState.Value(payload, "environment") as Dictionary<string, object>))
+                    throw new InvalidOperationException("Selected environment changed; refresh Inbox");
+            }
+            private async Task RefreshInbox(CancellationToken token)
+            {
+                inboxTimer.Stop(); inboxConfirmation = null; inboxEnvironment = null;
+                var generation = inbox.Begin(); var runId = inboxRunId; RenderInbox();
+                try
+                {
+                    var environment = InboxState.One(await PuiReadBridge.ReadAsync(pui, "operator.identity", null, token));
+                    if (!AccountState.SameEnvironment(environment, environment)) throw new InvalidOperationException("Selected environment is unavailable");
+                    if (!InboxCurrent(generation, token)) return;
+                    inboxEnvironment = environment;
+                    await Task.WhenAll(new[] { "plans.attention", "plans.attentionBulkRun" }.Select(async name =>
+                    {
+                        Dictionary<string, object> payload = null; Exception failure = null;
+                        try
+                        {
+                            var args = new Dictionary<string, object>(); if (name == "plans.attentionBulkRun" && runId != null) args["runId"] = runId;
+                            payload = await PuiReadBridge.ReadAsync(pui, name, args, token, 22000, environment);
+                            CheckInboxEnvironment(payload, environment);
+                        }
+                        catch (Exception error) { failure = error; }
+                        if (!InboxCurrent(generation, token)) return;
+                        if (name == "plans.attention") inbox.SettleList(generation, payload, failure);
+                        else inbox.SettleBulk(generation, payload, runId, failure);
+                        RenderInbox();
+                    }));
+                    if (InboxCurrent(generation, token))
+                    {
+                        if (inbox.Selection != null) LoadInboxContext(inbox.Selection);
+                        if (inbox.SavedRunId != null) inboxTimer.Start();
+                    }
+                }
+                catch (Exception error)
+                {
+                    if (!InboxCurrent(generation, token)) return;
+                    inbox.SettleList(generation, null, error); inbox.SettleBulk(generation, null, runId, error); RenderInbox();
+                }
+            }
+            private async Task FollowInboxRun()
+            {
+                if (refresh == null || !State.Visible || inbox.SavedRunId == null) return;
+                var token = refresh.Token; var generation = inbox.Generation; var runId = inbox.SavedRunId;
+                try
+                {
+                    if (!inbox.Pending)
+                    {
+                        var payload = await PuiReadBridge.ReadAsync(pui, "plans.attentionBulkRun", new Dictionary<string, object> { { "runId", runId } }, token, 22000, inboxEnvironment);
+                        CheckInboxEnvironment(payload, inboxEnvironment);
+                        if (InboxCurrent(generation, token)) inbox.SettleLiveBulk(generation, runId, payload);
+                    }
+                }
+                catch (Exception error) { if (InboxCurrent(generation, token)) inbox.SettleLiveBulk(generation, runId, null, error); }
+                if (InboxCurrent(generation, token)) { RenderInbox(); if (inbox.SavedRunId != null) inboxTimer.Start(); }
+            }
+            private async void LoadInboxContext(string id)
+            {
+                if (refresh == null || inbox.Pending) return;
+                CancelDetail(); inboxConfirmation = null;
+                var contextToken = inbox.Select(id); var generation = inbox.Generation;
+                detailRead = CancellationTokenSource.CreateLinkedTokenSource(refresh.Token); var token = detailRead.Token;
+                var environment = inboxEnvironment; RenderInbox();
+                try
+                {
+                    var payload = await PuiReadBridge.ReadAsync(pui, "plans.attentionItem", new Dictionary<string, object> { { "itemId", id } }, token, 22000, environment);
+                    CheckInboxEnvironment(payload, environment);
+                    if (InboxCurrent(generation, token)) inbox.SettleContext(contextToken, id, payload);
+                }
+                catch (Exception error) { if (InboxCurrent(generation, token)) inbox.SettleContext(contextToken, id, null, error); }
+                if (InboxCurrent(generation, token)) RenderInbox();
+            }
+            private void PrepareInbox(string operation, string actionId = null)
+            {
+                try
+                {
+                    var requests = operation == "apply" ? inbox.Items.Where(row => inbox.SelectedReviews.Contains(InboxState.Text(row, "itemId")))
+                        .Select(row => inbox.Request("apply", inboxEnvironment, itemId: InboxState.Text(row, "itemId"))).ToList() :
+                        new List<Dictionary<string, object>> { inbox.Request(operation, inboxEnvironment, State.Query, actionId: actionId, answer: inbox.Answer) };
+                    if (requests.Count == 0) throw new InvalidOperationException("Select recommendations first");
+                    inboxConfirmation = requests;
+                }
+                catch (Exception error) { inbox.ActionNotice = error.Message; inboxConfirmation = null; }
+                RenderInbox();
+            }
+            private async void ConfirmInbox()
+            {
+                var requests = inboxConfirmation; if (requests == null || refresh == null) return;
+                inboxConfirmation = null; var actionToken = 0;
+                try
+                {
+                    if (!AccountState.SameEnvironment(inboxEnvironment, InboxState.Value(requests[0], "environment") as Dictionary<string, object>))
+                        throw new InvalidOperationException("Selected environment changed; review again");
+                    actionToken = inbox.BeginAction(requests); RenderInbox();
+                    foreach (var request in requests)
+                    {
+                        var payload = await PuiReadBridge.InboxAsync(pui, request, refresh.Token);
+                        var admitted = inbox.RecordAction(actionToken, request, payload); if (admitted != null) inboxRunId = admitted;
+                    }
+                    inbox.FinishAction(actionToken);
+                }
+                catch (Exception error) { if (actionToken != 0) inbox.FinishAction(actionToken, error); else inbox.ActionNotice = error.Message; }
+                if (State.Visible) Refresh();
+            }
+            private void RenderInboxConfirmation()
+            {
+                if (inboxConfirm == null) return;
+                inboxConfirm.Children.Clear(); if (inboxConfirmation == null) return;
+                var first = inboxConfirmation[0]; var items = InboxState.Value(first, "items") as System.Collections.IList;
+                var expected = InboxState.Value(first, "expected") as Dictionary<string, object>;
+                InboxText(inboxConfirm, "Confirm " + InboxState.Text(first, "operation") + ": " +
+                    (items != null ? items.Count + " visible questions" : inboxConfirmation.Count > 1 ? inboxConfirmation.Count + " recommendations" : expected != null ? InboxState.Text(expected, "id") : InboxState.Text(first, "runId")));
+                InboxButton(inboxConfirm, "Confirm action", "Inbox confirm action", ConfirmInbox, !inbox.Pending);
+                InboxButton(inboxConfirm, "Cancel", "Inbox cancel action", () => { inboxConfirmation = null; RenderInboxConfirmation(); });
+            }
+            private void RenderInbox()
+            {
+                if (shuttingDown) return;
+                inbox.RetainVisibleSelection(State.Query); var rows = inbox.Results(State.Query);
+                var runStatus = inbox.BulkError != null ? "Saved run unavailable · " + inbox.BulkError : !inbox.BulkReady ? "Loading saved run…" : "No saved bulk run";
+                if (inbox.BulkReady && inbox.Run != null)
+                {
+                    var c = InboxState.Counts(inbox.Run, inbox.Items);
+                    runStatus = "Run " + InboxState.Text(inbox.Run, "runId") + " · " + InboxState.Text(inbox.Run, "phase") + "\n" +
+                        c["decided"] + "/" + c["total"] + " decided · " + c["percent"] + "% · " + c["resolved"] + " resolved · " + c["unresolved"] + " need attention · " + c["left"] + " left";
+                }
+                status.Text = (inbox.ListError != null ? "Inbox unavailable · " + inbox.ListError : inbox.ListReady ? rows.Count + " questions" + (inbox.ListPartial ? " · Partial list" : "") : "Loading questions…") +
+                    "\n" + InboxState.Text(inboxEnvironment, "endpoint") + " · " + InboxState.Text(inboxEnvironment, "workspaceId") + "\n" + runStatus +
+                    (inbox.Pending ? "\nApplying action…" : "") + (inbox.ActionNotice == null ? "" : "\n" + inbox.ActionNotice);
+                foreach (var button in inboxControls) button.IsEnabled = !inbox.Pending;
+                RenderInboxConfirmation();
+                var json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
+                var listKey = json.Serialize(new object[] { rows, inbox.Selection, inbox.Pending });
+                if (listKey != inboxListKey)
+                {
+                    inboxListKey = listKey; inboxList.Children.Clear();
+                    foreach (var row in rows)
+                    {
+                        var id = InboxState.Text(row, "id");
+                        InboxButton(inboxList, InboxState.Text(row, "title") == "" ? id : InboxState.Text(row, "title"), "Inbox question " + id, () => LoadInboxContext(id), !inbox.Pending);
+                    }
+                }
+                var contextKey = json.Serialize(new object[] { inbox.Context, inbox.Selection, inbox.ContextError, inbox.Pending });
+                if (contextKey != inboxContextKey)
+                {
+                    inboxContextKey = contextKey; inboxContext.Children.Clear(); var row = inbox.Context;
+                    InboxText(inboxContext, row == null ? inbox.ContextError ?? (inbox.Selection == null ? "Select a question to view context." : "Loading selected question…") :
+                        String.Join("\n", new[] { "title", "body", "contextMarkdown" }.Select(key => InboxState.Text(row, key))));
+                    if (row != null)
+                    {
+                        var answer = new TextBox { Text = inbox.Answer, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, IsEnabled = !inbox.Pending };
+                        AutomationProperties.SetName(answer, "Answer selected question");
+                        answer.TextChanged += (s, e) => { inbox.Answer = answer.Text; inboxConfirmation = null; RenderInboxConfirmation(); }; inboxContext.Children.Add(answer);
+                        foreach (var action in InboxState.Actions(row))
+                        {
+                            var id = InboxState.Text(action, "id");
+                            InboxButton(inboxContext, InboxState.Text(action, "label") == "" ? id : InboxState.Text(action, "label"), "Inbox resolve " + id, () => PrepareInbox("resolve", id), !inbox.Pending);
+                        }
+                    }
+                }
+                var bulkKey = json.Serialize(new object[] { inbox.Items, InboxState.Text(inbox.Run, "phase"), inbox.Pending });
+                if (bulkKey != inboxBulkKey)
+                {
+                    inboxBulkKey = bulkKey; inboxBulk.Children.Clear(); string previous = null;
+                    foreach (var row in inbox.Items.Where(item => !new[] { "auto_resolved", "dismissed" }.Contains(InboxState.Text(item, "outcome"))))
+                    {
+                        var disposition = InboxState.Disposition(row); if (previous != disposition) { InboxText(inboxBulk, disposition.Replace('_', ' ')); previous = disposition; }
+                        var id = InboxState.Text(row, "itemId"); var title = InboxState.Text(row, "title"); if (title == "") title = id;
+                        var pick = new CheckBox { Content = title, IsChecked = inbox.SelectedReviews.Contains(id), IsEnabled = inbox.CanSelect(id), Margin = new Thickness(4) };
+                        AutomationProperties.SetName(pick, "Inbox review " + id);
+                        pick.Click += (s, e) => { if (pick.IsChecked == true) inbox.SelectedReviews.Add(id); else inbox.SelectedReviews.Remove(id); inboxConfirmation = null; RenderInboxConfirmation(); }; inboxBulk.Children.Add(pick);
+                        var recommendation = InboxState.Value(row, "recommendation") as Dictionary<string, object>;
+                        InboxText(inboxBulk, String.Join("\n", new[] { InboxState.Text(row, "rationale"), InboxState.Text(recommendation, "rationale"), InboxState.Text(row, "error"), InboxState.Text(row, "retryCondition") }));
+                        if (InboxState.Reviewable(row) && InboxState.Text(row, "actionId") == "answer")
+                        {
+                            var draft = new TextBox { Text = inbox.Draft(row), AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, IsEnabled = !inbox.Pending };
+                            AutomationProperties.SetName(draft, "Inbox draft " + id);
+                            draft.TextChanged += (s, e) => { inbox.Drafts[id] = draft.Text; inboxConfirmation = null; RenderInboxConfirmation(); }; inboxBulk.Children.Add(draft);
+                        }
+                        else if (!InboxState.Reviewable(row)) InboxText(inboxBulk, "Manual review required; excluded from Apply.");
+                    }
+                }
+            }
             private async void OpenSelected()
             {
+                if (inbox != null) return;
                 if (accounts != null) return;
                 var row = results.SelectedItem as PanelResult;
                 if (row == null) return;
