@@ -6,9 +6,14 @@ Import-Module (Join-Path $SourceDirectory 'WorkbenchLifecycle.psm1') -Force
 $directory = Join-Path $env:TEMP ('Workbench fixture ' + [Guid]::NewGuid().ToString('N') + " ' dollars `$ spaces")
 $registry = 'HKCU:\Software\Papercusp\WorkbenchFixture-' + [Guid]::NewGuid().ToString('N')
 $cases = [Collections.Generic.List[string]]::new()
+function Trace([string]$Message) {
+    $entry = [DateTime]::UtcNow.ToString('o') + ' ' + $Message
+    [Console]::Error.WriteLine($entry)
+    if ($env:PAPERCUSP_NATIVE_FIXTURE_PROGRESS) { [IO.File]::AppendAllText($env:PAPERCUSP_NATIVE_FIXTURE_PROGRESS, $entry + [Environment]::NewLine) }
+}
 function Check([bool]$Value, [string]$Name) {
     if (-not $Value) { throw $Name }
-    $cases.Add($Name); [Console]::Error.WriteLine('PASS ' + $Name)
+    $cases.Add($Name); Trace ('PASS ' + $Name)
 }
 function Refuses([scriptblock]$Block, [string]$Name) {
     $refused = $false
@@ -118,6 +123,7 @@ try {
         # value is absent. Never replace a real account's existing registration.
         Check ($null -eq (Login $residentContext)) 'resident fixture refuses to overwrite an existing Workbench login registration'
         function Run-Controller([string]$Operation) {
+            Trace ('controller begin ' + $Operation)
             $arguments = '-STA -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $controller + '" -Action ' + $Operation
             $child = Start-Process $exe -ArgumentList $arguments -WindowStyle Hidden -PassThru
             try {
@@ -127,6 +133,7 @@ try {
                     $diagnostic = if (Test-Path $log) { [IO.File]::ReadAllText($log) } else { 'no resident error log' }
                     throw ('Controller ' + $Operation + ' exited ' + $child.ExitCode + ': ' + $diagnostic)
                 }
+                Trace ('controller completed ' + $Operation)
             } finally { $child.Dispose() }
         }
         try {
