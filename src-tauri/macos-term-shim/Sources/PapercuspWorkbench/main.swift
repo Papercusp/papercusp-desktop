@@ -45,7 +45,7 @@ final class Sidebar: NSPanel {
     private var inboxButtons: [String: NSButton] = [:]
     private var inboxReviewStack: NSStackView?, inboxActionChoice: NSPopUpButton?, inboxAnswer: NSTextField?
     private var inboxWrite: Task<Void, Never>?
-    private var renderedInboxReview: [JSONValue] = []
+    private var renderedInboxReview: [JSONValue]?
     private var chatState = ChatState()
     private var chatEarlier: NSButton?
     private var chatComposer: NSTextView?
@@ -760,7 +760,7 @@ final class Sidebar: NSPanel {
                         let pick = NSButton(checkboxWithTitle: row["title"].text.isEmpty ? id : row["title"].text,
                             target: self, action: #selector(selectInboxReview(_:)))
                         pick.identifier = NSUserInterfaceItemIdentifier(id); pick.state = inboxState.selectedReviews.contains(id) ? .on : .off
-                        pick.isEnabled = !inboxState.pending && InboxState.reviewable(row) && inboxState.run["phase"].text == "review"
+                        pick.isEnabled = inboxState.canSelectReview(id)
                         stack.addArrangedSubview(pick)
                         let rationale = [row["rationale"].text, row["recommendation"]["rationale"].text, row["error"].text,
                             row["retryCondition"].text].filter { !$0.isEmpty }.joined(separator: "\n")
@@ -818,7 +818,7 @@ final class Sidebar: NSPanel {
                     }
                     self.inboxState.finishAction(token)
                 } catch { self.inboxState.finishAction(token, failure: error) }
-                self.inboxWrite = nil; self.renderedInboxReview = []; self.refresh(.inbox)
+                self.inboxWrite = nil; self.renderedInboxReview = nil; self.refresh(.inbox)
             }
         } catch { inboxBulkStatus?.stringValue = error.localizedDescription }
     }

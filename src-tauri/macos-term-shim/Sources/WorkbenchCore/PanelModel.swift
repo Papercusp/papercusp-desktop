@@ -63,6 +63,7 @@ public struct InboxState {
     public var reviewDrafts: [String: String] = [:]
     private var actionGeneration = 0
     private var applied = Set<String>()
+    private var savedRunID: JSONValue = .null
     public init() {}
     @discardableResult public mutating func begin() -> Int {
         generation += 1; rows = []; items = []; listReady = false; listPartial = false; bulkReady = false
@@ -156,7 +157,8 @@ public struct InboxState {
                     throw WorkbenchError("The saved bulk run has changed identity or phase")
                 }; _ = try Self.counts(run: run, items: items)
             }
-            if self.run["runId"] != run["runId"] { selectedReviews = []; reviewDrafts = [:] }
+            if savedRunID != run["runId"] { selectedReviews = []; reviewDrafts = [:] }
+            savedRunID = run["runId"]
             self.run = run; self.items = items; bulkReady = true; bulkError = nil
             selectedReviews.formIntersection(Set(items.filter(Self.reviewable).map { $0["itemId"].text }))
         } catch { run = .null; items = []; bulkReady = false; bulkError = error.localizedDescription }
@@ -186,8 +188,11 @@ public struct InboxState {
         return order.map { ($0, groups[$0]!) }
     }
     public mutating func setReviewSelected(_ id: String, selected: Bool) {
-        guard !pending, items.contains(where: { $0["itemId"].text == id && Self.reviewable($0) }), !applied.contains(id) else { return }
+        guard canSelectReview(id) else { return }
         if selected { selectedReviews.insert(id) } else { selectedReviews.remove(id) }
+    }
+    public func canSelectReview(_ id: String) -> Bool {
+        !pending && !applied.contains(id) && run["phase"].text == "review" && items.contains(where: { $0["itemId"].text == id && Self.reviewable($0) })
     }
     public func draft(_ row: JSONValue) -> String { reviewDrafts[row["itemId"].text] ?? row["draftAnswer"].text }
     public var activeRun: Bool { ["pending", "running"].contains(run["phase"].text) }
@@ -222,7 +227,7 @@ public struct InboxState {
                 guard !text.isEmpty else { throw WorkbenchError("Edit a nonempty answer before Apply") }; body["answer"] = .string(text)
             }
         case "resolve":
-            guard let context, context["id"].text == selection, let actionID,
+            guard let context, context["id"].text == selection, !applied.contains(context["id"].text), let actionID,
                   context["actions"].rows?.contains(where: { $0["id"].text == actionID }) == true else { throw WorkbenchError("Select a current question and offered action") }
             body["expected"] = .object(["id": context["id"], "kind": context["kind"], "ref": context["ref"]]); body["actionId"] = .string(actionID)
             if actionID == "answer" {
