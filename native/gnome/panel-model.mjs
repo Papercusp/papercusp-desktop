@@ -477,7 +477,7 @@ export class ChatReply {
 }
 
 export class ChatState {
-    constructor() { this.generation = 0; this.drafts = new Map(); this.begin(); this.loading = false; }
+    constructor() { this.generation = 0; this.drafts = new Map(); this.referenceContexts = new Map(); this.begin(); this.loading = false; }
     get conversationId() { return this.conversation?.id || ''; }
     get ready() { return this.loaded && this.conversationId && sameEnvironment(this.environment, this.environment); }
     get draftKey() { return this.conversationId && sameEnvironment(this.environment, this.environment) ?
@@ -488,7 +488,7 @@ export class ChatState {
     begin() {
         ++this.generation;
         Object.assign(this, {environment: null, conversation: null, turns: [], loading: true,
-            loaded: false, hasMoreEarlier: false, reply: null, error: null});
+            loaded: false, hasMoreEarlier: false, reply: null, error: null, referencePlans: [], referenceError: null});
         return this.generation;
     }
     invalidate() { this.begin(); this.loading = false; }
@@ -530,6 +530,26 @@ export class ChatState {
         this.hasMoreEarlier = page.hasMoreEarlier; this.loading = false; this.loaded = true; this.error = null; return true;
     }
     fail(token, error) { if (token === this.generation) { this.loading = false; this.error = String(error.message || error); } }
+    settleReferencePlans(token, environment, payload, error = null) {
+        if (token !== this.generation || !sameEnvironment(this.environment, environment)) return false;
+        try {
+            if (error) throw error;
+            if (!sameEnvironment(environment, payload?.environment)) throw new Error('Work link environment changed');
+            const plans = sourceRows('plans', payload).map(row => resultFor('plans', row));
+            if (new Set(plans.map(plan => plan.key)).size !== plans.length) throw new Error('Duplicate work link context');
+            this.referencePlans = plans; this.referenceError = null;
+        } catch (cause) { this.referencePlans = []; this.referenceError = String(cause.message || cause); }
+        return true;
+    }
+    selectReferencePlan(key) {
+        if (!this.ready || (key !== null && !this.referencePlans.some(plan => plan.key === key)))
+            throw new Error('Choose an available work link context');
+        if (key === null) this.referenceContexts.delete(this.draftKey); else this.referenceContexts.set(this.draftKey, key);
+    }
+    get referenceContext() {
+        const plan = this.referencePlans.find(row => row.key === this.referenceContexts.get(this.draftKey));
+        return plan ? {endpoint: this.environment.endpoint, harness: plan.row.harness, planSlug: plan.row.slug} : {};
+    }
     get canSend() { return Boolean(this.ready && !this.loading && (!this.reply || this.reply.complete) &&
         this.draft.trim() && new TextEncoder().encode(this.draft).length <= 32 * 1024); }
     send(userTurnId) {

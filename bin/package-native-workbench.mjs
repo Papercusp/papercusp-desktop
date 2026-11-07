@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Use GNOME's maintained archive/schema compiler rather than a second packer.
-import {mkdirSync, readFileSync, copyFileSync, writeFileSync, statSync, chmodSync, rmSync} from 'node:fs';
+import {mkdirSync, mkdtempSync, cpSync, readFileSync, copyFileSync, writeFileSync, statSync, chmodSync, rmSync} from 'node:fs';
 import {resolve, join, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
+import {buildSync} from 'esbuild';
 
 export function packageNativeWorkbench(outputDirectory, {
     sourceDirectory = resolve(import.meta.dirname, '../native/gnome'),
@@ -13,16 +14,26 @@ export function packageNativeWorkbench(outputDirectory, {
     const metadata = JSON.parse(readFileSync(join(sourceDirectory, 'metadata.json'), 'utf8'));
     if (metadata.uuid !== 'workbench@papercusp.ai') throw new Error('Unexpected Workbench extension identity');
     mkdirSync(outputDirectory, {recursive: true});
+    const prepared = mkdtempSync(join(resolve(outputDirectory), 'workbench-source-'));
+    try {
+    cpSync(sourceDirectory, prepared, {recursive: true});
+    // Reuse the operator's maintained Markdown and work-ref modules. A closed
+    // ESM bundle lets GJS run without npm, Node or TypeScript at runtime.
+    buildSync({entryPoints: [join(sourceDirectory, 'chat-content.mjs')], bundle: true,
+        format: 'esm', platform: 'neutral', target: 'es2022',
+        outfile: join(prepared, 'chat-content.js'), logLevel: 'silent'});
     const result = spawnSync('gnome-extensions', ['pack', '--force',
-        '--extra-source=bridge.js', '--extra-source=helper.js', '--extra-source=panel-model.mjs',
-        '--out-dir', resolve(outputDirectory), resolve(sourceDirectory)],
+        '--extra-source=bridge.js', '--extra-source=helper.js', '--extra-source=panel-model.mjs', '--extra-source=chat-content.js',
+        '--out-dir', resolve(outputDirectory), prepared],
     {encoding: 'utf8', timeout: 30000});
     if (result.error || result.status !== 0)
         throw new Error('GNOME Workbench packaging failed: ' +
             (result.error?.message || result.stderr || result.stdout || result.status));
     const archive = join(resolve(outputDirectory), metadata.uuid + '.shell-extension.zip');
     const sha256 = createHash('sha256').update(readFileSync(archive)).digest('hex');
-    return {archive, uuid: metadata.uuid, sha256};
+    return {archive, uuid: metadata.uuid, sha256,
+        chatContentSha256: createHash('sha256').update(readFileSync(join(prepared, 'chat-content.js'))).digest('hex')};
+    } finally { rmSync(prepared, {recursive: true, force: true}); }
 }
 
 // Both Linux products consume resources/*; the GUI's platform overlay names

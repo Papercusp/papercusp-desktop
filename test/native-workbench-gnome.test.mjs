@@ -5,6 +5,7 @@ import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import test from 'node:test';
+import {nativeChatBlocks, nativeWorkRefLinks, safeChatLink} from '../native/gnome/chat-content.mjs';
 import {PanelState, InboxState, ChatState, ChatReply, sameEnvironment, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests,
     agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow,
     organizerGroups, organizerMembers, arrangeOrganizerGroup}
@@ -13,6 +14,52 @@ import {PanelState, InboxState, ChatState, ChatReply, sameEnvironment, readRows,
 const root = resolve(import.meta.dirname, '..');
 const plan = (harness = 'one', slug = 'same') => ({harness, slug, title: 'Shared title', status: 'active'});
 const envelope = rows => ({rows, version: 'canonical-version'});
+
+test('native Markdown uses styled native text, copyable literal code, GFM tables and inert HTML', () => {
+    const source = '# Heading\n\n**Bold** and *emphasis* with `a < b` and ~~old~~.\n\n'
+        + '```js\nconst x = "<b>WI-99</b>";\n```\n\n- [x] Done\n\n| Key | Value |\n| --- | --- |\n| A | B |\n\n<script>bad()</script>';
+    const blocks = nativeChatBlocks(source, {endpoint:'http://fixture',harness:'h',planSlug:'p'});
+    assert.equal(blocks[0].markup,'<b>Heading</b>');
+    assert.match(blocks[1].markup,/<b>Bold<\/b>.*<i>emphasis<\/i>.*<tt>a &lt; b<\/tt>.*<s>old<\/s>/);
+    assert.deepEqual(blocks.find(row=>row.kind==='code'),{kind:'code',code:'const x = "<b>WI-99</b>";',language:'js',links:[]});
+    assert.ok(blocks.some(row=>row.markup?.includes('☑ Done')));
+    assert.ok(blocks.some(row=>row.text==='A  │  B'));
+    assert.ok(blocks.some(row=>row.markup?.includes('&lt;script&gt;bad()&lt;/script&gt;')));
+    assert.equal(blocks.flatMap(row=>row.links).length,0);
+});
+test('native work links reuse exact popup grammar, omit unscoped refs and skip Markdown code and links', () => {
+    const text='WI-42 P-007 `EI-99` [F-8](https://example.test)\n\n```\nWI-88\n```';
+    const context={endpoint:'http://localhost:3170/api/trpc',harness:'team+/=&',planSlug:'plan+/=&'};
+    assert.deepEqual(nativeWorkRefLinks(text,context).map(row=>[row.text,row.href]),[
+        ['WI-42','http://localhost:3170/?wpop='+encodeURIComponent('team+/=&::WI-42')],
+        ['P-007','http://localhost:3170/?wppop='+encodeURIComponent('team+/=&::plan+/=&')]]);
+    assert.deepEqual(nativeWorkRefLinks(text),[]);
+    assert.deepEqual(nativeWorkRefLinks('P-007',{...context,planSlug:null}),[]);
+    assert.deepEqual(nativeWorkRefLinks('WI-42',{...context,harness:null}),[]);
+    assert.deepEqual(nativeWorkRefLinks(text,{...context,endpoint:'https://user@untrusted.test'}),[]);
+    for(const bad of ['javascript:bad()','data:text/html,bad','https://example.test/\nnext','//example.test'])assert.equal(safeChatLink(bad),null);
+    const blocks=nativeChatBlocks('[Good](https://example.test) [Bad](javascript:bad)',context);
+    assert.deepEqual(blocks.flatMap(row=>row.links),[{text:'Good',href:'https://example.test',kind:'link'}]);
+});
+test('work link selection is conversation isolated and never changes send identity or the draft', () => {
+    const {state,token}=loadedChat();state.draft='Keep this';
+    const plans=chatEnvelope([plan('exact')]);
+    assert.equal(state.settleReferencePlans(token,chatEnvironment,plans),true);
+    state.selectReferencePlan(state.referencePlans[0].key);
+    assert.deepEqual(state.referenceContext,{endpoint:'http://fixture',harness:'exact',planSlug:'same'});
+    const request=state.send(userId);
+    assert.equal(request.conversationId,'conversation');assert.deepEqual(request.environment,chatEnvironment);
+    assert.equal(request.text,'Keep this');assert.equal(state.draft,'Keep this');
+    const next=state.begin();state.bind(next,chatEnvironment,chatEnvelope([conversation('other')]));
+    state.settle(next,chatEnvironment,'other',chatEnvelope([{turns:[],hasMoreEarlier:false}]));
+    state.settleReferencePlans(next,chatEnvironment,plans);assert.deepEqual(state.referenceContext,{});
+    assert.equal(state.settleReferencePlans(token,chatEnvironment,plans),false);
+    const back=state.begin();state.bind(back,chatEnvironment,chatEnvelope([conversation()]));
+    state.settle(back,chatEnvironment,'conversation',chatEnvelope([{turns:[],hasMoreEarlier:false}]));
+    state.settleReferencePlans(back,chatEnvironment,plans);assert.equal(state.referenceContext.planSlug,'same');
+    state.settleReferencePlans(back,chatEnvironment,null,new Error('ACL refusal'));
+    assert.match(state.referenceError,/ACL/);assert.deepEqual(state.referenceContext,{});assert.equal(state.draft,'Keep this');
+});
 
 const chatEnvironment = {endpoint:'http://fixture',workspaceId:'workspace',store:{id:'store'},agentChat:{scope:'workspace'}};
 const userId='00000000-0000-4000-8000-000000000001', replyId='00000000-0000-4000-8000-000000000002';
