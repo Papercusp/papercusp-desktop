@@ -9,6 +9,9 @@ import test from 'node:test';
 import {packageNativeWorkbench, stageNativeWorkbench} from '../bin/package-native-workbench.mjs';
 
 const root = resolve(import.meta.dirname, '..');
+const chatCode = 'const literal = "<&> WI-999";';
+const chatMarkdown = '# Native heading\n\n**Native bold** and `literal <&>`.\n\n```js\n' +
+    chatCode + '\n```\n\nSee WI-123 and P-007. [Docs](https://example.test/docs?x=1&y=2)';
 async function withNativeFixture(prefix, action) {
     const temp=mkdtempSync(join(tmpdir(),prefix));
     try {
@@ -49,7 +52,7 @@ const environment={endpoint:'http://fixture',workspaceId:'exact',store:{id:'stor
 const fs=require('node:fs'),dir=${JSON.stringify(temp)};
 const chatId=()=>fs.existsSync(dir+'/conversation-id')?fs.readFileSync(dir+'/conversation-id','utf8'):'conversation+/=&';
 const chatHistory=()=>fs.existsSync(dir+'/chat-history.json')?JSON.parse(fs.readFileSync(dir+'/chat-history.json','utf8')):
- [{id:'saved-five',conversationId:chatId(),seq:5,role:'assistant',text:'Saved conversation'}];
+ [{id:'saved-five',conversationId:chatId(),seq:5,role:'assistant',text:${JSON.stringify(chatMarkdown)}}];
 if(process.argv[2]==='native-chat'){
  const actions=fs.existsSync(dir+'/chat-actions.json')?JSON.parse(fs.readFileSync(dir+'/chat-actions.json','utf8')):[];
  actions.push(r);fs.writeFileSync(dir+'/chat-actions.json',JSON.stringify(actions));
@@ -209,6 +212,8 @@ test('GNOME archive installs all runtime sources and preserves private preferenc
             for(const file of ['metadata.json','extension.js','stylesheet.css','prefs.js',
                 'bridge.js','helper.js','panel-model.mjs'])
                 assert.deepEqual(readFileSync(join(extension,file)),readFileSync(join(root,'native/gnome',file)),file);
+            assert.equal(createHash('sha256').update(readFileSync(join(extension,'chat-content.js'))).digest('hex'),bundle.chatContentSha256);
+            assert.doesNotMatch(readFileSync(join(extension,'chat-content.js'),'utf8'),/from ['"]marked['"]|from ['"].*\.ts['"]/);
             assert.ok(readFileSync(join(extension,'schemas/gschemas.compiled')).length>0);
             const settingsEnv={...env,GSETTINGS_SCHEMA_DIR:join(extension,'schemas')};
             const settings=(...args)=>spawnSync('gsettings',args,{env:settingsEnv,encoding:'utf8',timeout:10000});
@@ -434,6 +439,7 @@ app.run(['focus-fixture']);`);
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import Shell from 'gi://Shell';
+import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import Workbench from './workbench.js';
 const assertions=[];
@@ -492,6 +498,42 @@ export default class Probe extends Workbench {
     'Papercup shortcut opens native Shell actor');
    check(chat.turns.length===1&&chat.turns[0].seq===5,'saved transcript reaches native chat');
    check(this._views.get('papercup').panel.contains(global.stage.get_key_focus()),'canonical history completion focuses native composer');
+   setPhase('chat native Markdown and literal code');
+   await waitFor(()=>chat.referencePlans.length===1);
+   const descendants=actor=>[actor,...(actor.get_children?.()||[]).flatMap(descendants)];
+   const contentActors=()=>descendants(this._views.get('papercup').content);
+   const contentButton=name=>contentActors().find(actor=>actor instanceof St.Button&&actor.get_label()===name);
+   const bold=contentActors().find(actor=>actor instanceof St.Label&&actor.text==='Native bold and literal <&>.');
+   check(Boolean(bold)&&bold.clutter_text.get_use_markup()&&Boolean(bold.clutter_text.get_attributes()),
+    'Markdown renders styled native text without literal Markdown delimiters');
+   const codeActor=contentActors().find(actor=>actor instanceof St.Label&&actor.text===${JSON.stringify(chatCode)});
+   check(Boolean(codeActor),
+    'fenced code preserves literal markup characters in a native actor');
+   await tick();
+   const codeViewport=codeActor.get_parent().get_parent();
+   const codeHeight=codeActor.get_transformed_size()[1],viewportHeight=codeViewport.get_transformed_size()[1];
+   check(codeActor.mapped&&codeHeight>0&&viewportHeight>=codeHeight,
+    'native code scroll viewport allocates visible height for its literal text');
+   check(!contentButton('WI-999')&&!contentButton('P-007'),'code references and unscoped plan references remain inert');
+   const opened=[];this._launchChatUri=uri=>opened.push(uri);
+   await click(()=>contentButton('Copy code'));
+   const clipboard=await new Promise(resolve=>St.Clipboard.get_default().get_text(St.ClipboardType.CLIPBOARD,(_clipboard,text)=>resolve(text)));
+   check(clipboard===${JSON.stringify(chatCode)},'native Copy code writes exact literal code to the clipboard');
+   setPhase('chat native plan-context selection and links');
+   this._views.get('papercup').compose.set_text('Retained draft');
+   const conversationBefore=chat.conversationId;
+   await click(()=>this._views.get('papercup').referenceChoice);
+   await click(()=>this._views.get('papercup').referenceOptions.get_children().find(actor=>actor.get_label()==='exact-harness / same'));
+   check(chat.referenceContext.harness==='exact-harness'&&chat.referenceContext.planSlug==='same'&&
+    chat.conversationId===conversationBefore&&chat.draft==='Retained draft',
+    'native plan context changes work links while preserving conversation and draft');
+   await click(()=>contentButton('WI-123'));
+   await click(()=>contentButton('P-007'));
+   await click(()=>contentButton('Docs'));
+   check(JSON.stringify(opened)===JSON.stringify(['http://fixture/?wpop=exact-harness%3A%3AWI-123',
+    'http://fixture/?wppop=exact-harness%3A%3Asame','https://example.test/docs?x=1&y=2']),
+    'native links activate exact shared work-item and plan-item popup grammar and external URL');
+   await captureScreen();
    await click(()=>this._views.get('papercup')?.earlier);
    await waitFor(()=>!chat.loading&&chat.turns[0]?.seq===1);
    check(chat.turns.length===2&&!chat.hasMoreEarlier,'Earlier messages prepends canonical page');
@@ -803,7 +845,7 @@ export default class Probe extends Workbench {
 `);
             checkScript(join(extension,'extension.js'));
             const sourceCustody={archiveSha256:bundle.sha256,journey,
-                files:Object.fromEntries(['extension.js','workbench.js','panel-model.mjs','bridge.js','helper.js',
+                files:Object.fromEntries(['extension.js','workbench.js','panel-model.mjs','bridge.js','helper.js','chat-content.js',
                     'schemas/org.gnome.shell.extensions.papercusp-workbench.gschema.xml'].map(file=>
                     [file,createHash('sha256').update(readFileSync(join(extension,file))).digest('hex')])),
                 testSha256:createHash('sha256').update(readFileSync(import.meta.filename)).digest('hex')};
@@ -832,7 +874,7 @@ export default class Probe extends Workbench {
             assert.equal(evidence?.ok,true,JSON.stringify({evidence,progress,...result}));
             assert.equal(result.status,0,JSON.stringify(result));
             assert.equal(result.error,null,JSON.stringify(result));
-            const minimumAssertions={inbox:25,input:36,focus:11,resume:16,organizer:13,chat:22};
+            const minimumAssertions={inbox:25,input:36,focus:11,resume:16,organizer:13,chat:31};
             assert.ok(evidence.assertions.length>=minimumAssertions[journey],JSON.stringify(evidence));
             assert.deepEqual([...readFileSync(screenshot).subarray(0,8)], [137,80,78,71,13,10,26,10]);
             if(evidenceDirectory){

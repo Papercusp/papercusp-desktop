@@ -5,7 +5,9 @@ import GLib from 'gi://GLib';
 // No shell, bearer file, local server or second authorization implementation.
 export function nativeRead(pui, request, cancellable = null, command = 'native-read') {
     if (typeof pui !== 'string' || !pui.trim()) return Promise.reject(new Error('PUI is not configured'));
-    if (!['native-read', 'native-inbox'].includes(command)) return Promise.reject(new Error('Unsupported native operation'));
+    if (!['native-read', 'native-inbox', 'native-cards'].includes(command) ||
+        (command === 'native-cards' && request.operation !== 'respond'))
+        return Promise.reject(new Error('Unsupported native operation'));
     const body = JSON.stringify(request);
     if (new TextEncoder().encode(body).length > 64 * 1024) return Promise.reject(new Error('Native request exceeds its limit'));
     return new Promise((resolve, reject) => {
@@ -111,8 +113,9 @@ export class ResidentBridge {
     _request(pui, request, command, onFrame = null) {
         const refused = message => ({done: Promise.reject(new Error(message)), cancel() {}});
         if (this._closed) return refused('Workbench has stopped');
-        const streaming = ['native-chat', 'native-cards'].includes(command);
-        if ((!streaming && !['native-read', 'native-inbox'].includes(command)) ||
+        const streaming = command === 'native-chat' || (command === 'native-cards' && request.operation === 'subscribe');
+        if ((!streaming && !['native-read', 'native-inbox', 'native-cards'].includes(command)) ||
+            (command === 'native-cards' && !['subscribe', 'respond'].includes(request.operation)) ||
             (streaming && typeof onFrame !== 'function') || (!streaming && onFrame))
             return refused('Unsupported native operation');
         const bytes = new TextEncoder().encode(JSON.stringify({request, command}));

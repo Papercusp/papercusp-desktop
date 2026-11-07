@@ -7,6 +7,7 @@ import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {ResidentBridge} from './bridge.js';
+import {nativeChatBlocks, safeChatLink, NativeCardsState} from './chat-content.js';
 import {PanelState, InboxState, ChatState, sameEnvironment, oneRow, SOURCES, sourceRequests, detailRequest, readRows, rebindShortcuts,
     agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow,
     organizerGroups, arrangeOrganizerGroup} from './panel-model.mjs';
@@ -31,6 +32,7 @@ export default class Workbench extends Extension {
         this._states.get('organizer').organizerKind = 'plan';
         this._inbox = new InboxState(); this._inboxRunId = null;
         this._chat = new ChatState(); this._chatStream = null;
+        this._cards = new NativeCardsState(); this._cardStream = null; this._cardDrafts = new Map();
         this._states.get('goals').scope = 'goals';
         this._views = new Map();
         this._bridge = new ResidentBridge(this.path + '/helper.js');
@@ -462,6 +464,18 @@ export default class Workbench extends Extension {
         view.reconnect = button('Reconnect reply', () => this._controlChat('reconnect')); controls.add_child(view.reconnect);
         view.cancelReply = button('Cancel reply', () => this._controlChat('cancel')); controls.add_child(view.cancelReply);
         panel.add_child(controls);
+        view.referenceChoice = button('Work links: choose a plan context', () => {
+            view.referenceMenu.visible = !view.referenceMenu.visible;
+        });
+        panel.add_child(view.referenceChoice);
+        view.referenceMenu = new St.ScrollView({visible: false, height: 180, x_expand: true});
+        view.referenceOptions = new St.BoxLayout({vertical: true, x_expand: true});
+        view.referenceMenu.set_child(view.referenceOptions); panel.add_child(view.referenceMenu);
+        view.cardStatus = label('', 'papercusp-panel-status'); panel.add_child(view.cardStatus);
+        view.cardReconnect = button('Reconnect questions', () => this._connectCards()); panel.add_child(view.cardReconnect);
+        view.cardScroll = new St.ScrollView({visible: false, height: 260, x_expand: true});
+        view.cardsContent = new St.BoxLayout({vertical: true, x_expand: true, style_class: 'papercusp-detail'});
+        view.cardScroll.set_child(view.cardsContent); panel.add_child(view.cardScroll);
         view.scroll = new St.ScrollView({x_expand: true, y_expand: true});
         view.content = new St.BoxLayout({vertical: true, x_expand: true, style_class: 'papercusp-detail'});
         view.scroll.set_child(view.content); panel.add_child(view.scroll);
@@ -479,7 +493,7 @@ export default class Workbench extends Extension {
             this._hide('papercup', true); return Clutter.EVENT_STOP;
         });
         Main.layoutManager.addChrome(panel, {affectsStruts: false, trackFullscreen: false});
-        this._position(); this._renderChat(); view.compose.grab_key_focus();
+        this._position(); this._renderChat(); this._renderCards(); view.compose.grab_key_focus();
     }
     _updateChatControls(view) {
         const chat = this._chat, reply = chat.reply;
@@ -495,25 +509,160 @@ export default class Workbench extends Extension {
         const chat = this._chat; view.content.destroy_all_children();
         view.status.set_text(chat.error || (chat.loading ? 'Loading conversation…' :
             chat.reply ? 'Reply · ' + chat.reply.phase : chat.ready ? 'Papercup · ready' : 'Conversation unavailable'));
+        const context = chat.referenceContext;
+        view.referenceChoice.set_label(chat.referenceError ? 'Work link contexts unavailable' :
+            context.planSlug ? 'Work links: ' + context.harness + ' / ' + context.planSlug : 'Work links: choose a plan context');
+        view.referenceChoice.reactive = Boolean(chat.ready && chat.referencePlans.length);
+        view.referenceOptions.destroy_all_children();
+        const choose = key => { chat.selectReferencePlan(key); view.referenceMenu.hide(); this._renderChat(); };
+        view.referenceOptions.add_child(button('No plan context', () => choose(null)));
+        for (const plan of chat.referencePlans)
+            view.referenceOptions.add_child(button(plan.row.harness + ' / ' + plan.row.slug, () => choose(plan.key)));
         for (const turn of chat.turns) {
             view.content.add_child(label(turn.role === 'user' ? 'You' : turn.role === 'assistant' ? 'Papercup' : turn.role,
                 'papercusp-result-title'));
-            view.content.add_child(label(turn.text));
+            this._appendChatContent(view, turn.text);
         }
         if (chat.reply) {
             view.content.add_child(label('Papercup · ' + chat.reply.phase, 'papercusp-result-title'));
-            if (chat.reply.displayText) view.content.add_child(label(chat.reply.displayText));
+            if (chat.reply.displayText) this._appendChatContent(view, chat.reply.displayText);
             for (const activity of chat.reply.tools) view.content.add_child(label(activity, 'papercusp-panel-status'));
         }
         if (chat.ready && !chat.turns.length && !chat.reply) view.content.add_child(label('Start a conversation with Papercup.'));
         if (view.compose.get_text() !== chat.draft) view.compose.set_text(chat.draft);
         this._updateChatControls(view);
     }
+    _appendChatContent(view, text) {
+        for (const block of nativeChatBlocks(text, this._chat.referenceContext)) {
+            if (block.kind === 'code') {
+                const box = new St.BoxLayout({vertical: true, x_expand: true, style_class: 'papercusp-chat-code'});
+                box.add_child(label(block.language || 'Code', 'papercusp-panel-status'));
+                const code = label(block.code); code.clutter_text.set_selectable(true);
+                code.clutter_text.set_ellipsize(0); code.clutter_text.set_line_wrap(false);
+                const codeContent = new St.BoxLayout({vertical: true, x_expand: true}); codeContent.add_child(code);
+                // A scrollable Shell actor otherwise has zero minimum height.
+                // Reserve space for short snippets and bound longer blocks.
+                const lineCount = block.code.split('\n').length;
+                const scroll = new St.ScrollView({x_expand: true, height: Math.min(320, Math.max(60, lineCount * 22 + 18))});
+                scroll.set_child(codeContent); box.add_child(scroll);
+                box.add_child(button('Copy code', () => St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, block.code)));
+                view.content.add_child(box);
+            } else {
+                const actor = label(block.text); actor.clutter_text.set_markup(block.markup);
+                actor.clutter_text.set_selectable(true); actor.clutter_text.set_ellipsize(0);
+                view.content.add_child(actor);
+            }
+            for (const link of block.links) view.content.add_child(button(link.text, () => {
+                const uri = safeChatLink(link.href); if (!uri) return;
+                try { this._launchChatUri(uri); }
+                catch (error) { view.status.set_text('Could not open link: ' + error.message); }
+            }));
+        }
+    }
+    _launchChatUri(uri) { Gio.AppInfo.launch_default_for_uri(uri, null); }
+    _stopCards() {
+        const stream = this._cardStream; this._cardStream = null; stream?.cancel();
+        this._cards.begin(null, ''); this._cardDrafts.clear();
+    }
+    _connectCards() {
+        this._stopCards();
+        const view = this._views.get('papercup'), chat = this._chat;
+        if (!view || !chat.ready) return;
+        const state = this._cards, token = state.begin(chat.environment, chat.conversationId);
+        const stream = this._bridge.stream(this._settings.get_string('pui-path'), state.subscription, frame => {
+            if (state.receive(token, frame)) this._renderCards();
+        }, 'native-cards');
+        this._cardStream = stream; this._renderCards();
+        stream.done.then(() => {
+            if (this._cardStream === stream) state.failed(token, new Error('Questions disconnected; reconnect before answering'));
+        }, error => { if (this._cardStream === stream) state.failed(token, error); }).finally(() => {
+            if (this._cardStream === stream) { this._cardStream = null; this._renderCards(); }
+        });
+    }
+    _renderCards() {
+        const view = this._views.get('papercup'); if (!view) return;
+        const state = this._cards;
+        view.cardStatus.set_text(state.error || (state.pending ? 'Saving answer…' :
+            state.connected ? '' : this._chat.ready ? 'Connecting questions…' : ''));
+        view.cardReconnect.visible = Boolean(this._chat.ready && !state.connected && state.error);
+        const cards = state.cards;
+        view.cardScroll.visible = Boolean(cards.length);
+        const renderKey = JSON.stringify([cards.map(card => card.raw), state.pending, state.connected]);
+        if (view.cardRenderKey === renderKey) return;
+        view.cardRenderKey = renderKey; view.cardsContent.destroy_all_children();
+        for (const card of cards) {
+            const box = new St.BoxLayout({vertical: true, x_expand: true, style_class: 'papercusp-detail'});
+            view.cardsContent.add_child(box);
+            this._appendChatContent({content: box, status: view.cardStatus}, card.prose);
+            const signature = JSON.stringify(card.raw);
+            let draft = this._cardDrafts.get(card.id);
+            if (!draft || draft.signature !== signature) {
+                draft = {signature, picks: [], value: ''}; this._cardDrafts.set(card.id, draft);
+            }
+            const active = state.connected && !state.pending && !card.expired;
+            const choiceButtons = [];
+            for (const option of card.options) {
+                const choice = new St.Button({label: option.label + (option.hint ? ' · ' + option.hint : ''),
+                    can_focus: active, reactive: active, toggle_mode: true, checked: draft.picks.includes(option.id), style_class: 'button'});
+                choiceButtons.push([choice, option.id]);
+                choice.connect('clicked', () => {
+                    if (card.kind !== 'checkbox') draft.picks = choice.checked ? [option.id] : [];
+                    else draft.picks = choice.checked ? [...draft.picks.filter(id => id !== option.id), option.id] :
+                        draft.picks.filter(id => id !== option.id);
+                    for (const [other, id] of choiceButtons) other.checked = draft.picks.includes(id);
+                });
+                box.add_child(choice);
+                if (option.description) box.add_child(label(option.description));
+            }
+            if (['text', 'date', 'slider'].includes(card.kind)) {
+                const hint = card.kind === 'date' ? 'YYYY-MM-DD' : card.kind === 'slider' ?
+                    String(card.presentation.min) + ' to ' + String(card.presentation.max) + ' · step ' + (card.presentation.step ?? 1) :
+                    card.presentation.placeholder || 'Your answer';
+                const entry = new St.Entry({text: draft.value, hint_text: hint, can_focus: active, reactive: active,
+                    accessible_name: 'Answer: ' + card.raw.prompt, x_expand: true});
+                if (card.presentation.sensitive) entry.clutter_text.set_password_char('•');
+                if (card.presentation.multiline) { entry.clutter_text.set_single_line_mode(false); entry.clutter_text.set_line_wrap(true); }
+                entry.clutter_text.connect('text-changed', () => { draft.value = entry.get_text(); }); box.add_child(entry);
+            }
+            const action = (title, kind) => {
+                const control = button(title, () => this._answerCard(card, kind, draft));
+                control.reactive = active; control.can_focus = active; box.add_child(control);
+            };
+            if (card.canSubmit) action('Submit answer', 'submit');
+            if (card.raw.allowDecline !== false) action('Decline question', 'decline');
+            action('Cancel question', 'cancel');
+            const link = card.secureLink(state.environment);
+            if (link) {
+                const open = button('Open secure link', () => {
+                    try { this._launchChatUri(link); } catch (error) { view.cardStatus.set_text(error.message); }
+                });
+                open.reactive = active; open.can_focus = active; box.add_child(open);
+            }
+            if (card.raw.details) {
+                const details = label(card.raw.details); details.hide(); box.add_child(button('Show details', () => {
+                    details.visible = !details.visible;
+                })); box.add_child(details);
+            }
+            if (card.expired) box.add_child(label('This question has expired.'));
+        }
+    }
+    async _answerCard(card, action, draft) {
+        const state = this._cards, token = state.generation;
+        let request;
+        try { request = state.request(card, action, action === 'submit' ? card.answer(draft.picks, draft.value) : undefined); }
+        catch (error) { state.error = error.message; this._renderCards(); return; }
+        try {
+            this._renderCards();
+            const receipt = await this._bridge.read(this._settings.get_string('pui-path'), request, 'native-cards');
+            if (state.responded(token, card.id, receipt)) this._cardDrafts.delete(card.id);
+        } catch (error) { state.failed(token, error); }
+        finally { this._renderCards(); }
+    }
     _stopChatStream() {
         const stream = this._chatStream; this._chatStream = null; stream?.cancel();
     }
     async _refreshChat() {
-        this._stopChatStream(); const token = this._chat.begin(), view = this._views.get('papercup');
+        this._stopChatStream(); this._stopCards(); const token = this._chat.begin(), view = this._views.get('papercup');
         if (!view) return;
         const pui = this._settings.get_string('pui-path'); this._renderChat();
         const current = () => token === this._chat.generation && this._views.get('papercup') === view &&
@@ -527,7 +676,15 @@ export default class Workbench extends Extension {
             const id = this._chat.conversationId;
             const page = await this._bridge.read(pui, {name: 'operatorTurns.page',
                 args: {conversationId: id, limit: 200}, environment});
-            if (current()) this._chat.settle(token, environment, id, page);
+            if (current()) {
+                this._chat.settle(token, environment, id, page); this._renderChat();
+                this._connectCards();
+                if (!global.stage.get_key_focus()) view.compose.grab_key_focus();
+            }
+            try {
+                const plans = await this._bridge.read(pui, {name: 'plans.list', args: {}, environment});
+                if (current()) this._chat.settleReferencePlans(token, environment, plans);
+            } catch (error) { if (current()) this._chat.settleReferencePlans(token, environment, null, error); }
         } catch (error) { if (current()) this._chat.fail(token, error); }
         finally {
             if (current()) {
@@ -733,7 +890,7 @@ export default class Workbench extends Extension {
     _hide(surface, restoreFocus) {
         const view = this._views.get(surface), state = this._states.get(surface);
         if (surface === 'inbox') { ++this._inbox.generation; this._inbox.clearContext(); }
-        if (surface === 'papercup') { this._stopChatStream(); this._chat.invalidate(); }
+        if (surface === 'papercup') { this._stopChatStream(); this._stopCards(); this._chat.invalidate(); }
         if (state) { state.visible = false; ++state.generation; ++state.detailGeneration; }
         this._destroyActors(surface); this._position();
         if (restoreFocus && view?.priorWindow &&

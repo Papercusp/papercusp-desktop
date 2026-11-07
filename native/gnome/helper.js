@@ -34,7 +34,8 @@ function readNext() {
                 throw new Error('Malformed native helper request');
             const cancel = new Gio.Cancellable(); pending.set(message.id, cancel);
             const command = message.command || 'native-read';
-            const streaming = ['native-chat', 'native-cards'].includes(command);
+            const streaming = command === 'native-chat' ||
+                (command === 'native-cards' && message.request.operation === 'subscribe');
             const operation = streaming ? nativeStream(pui, message.request,
                 frame => { if (!stopping) print(JSON.stringify({id: message.id, frame})); }, cancel, command) :
                 nativeRead(pui, message.request, cancel, command);

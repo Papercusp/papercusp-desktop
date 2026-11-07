@@ -5,13 +5,19 @@ import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import test from 'node:test';
-import {nativeChatBlocks, nativeWorkRefLinks, safeChatLink} from '../native/gnome/chat-content.mjs';
+import {buildSync} from 'esbuild';
 import {PanelState, InboxState, ChatState, ChatReply, sameEnvironment, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests,
     agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow,
     organizerGroups, organizerMembers, arrangeOrganizerGroup}
     from '../native/gnome/panel-model.mjs';
 
 const root = resolve(import.meta.dirname, '..');
+// The shared protocol uses TypeScript's .js source specifiers. Exercise the
+// same closed ESM source graph produced for GJS, without Node-specific loaders.
+const contentBundle = buildSync({entryPoints:[join(root,'native/gnome/chat-content.mjs')],
+    bundle:true,format:'esm',platform:'neutral',target:'es2022',write:false,logLevel:'silent'});
+const {nativeChatBlocks, nativeWorkRefLinks, safeChatLink, NativeCard, NativeCardsState} =
+    await import('data:text/javascript;base64,' + Buffer.from(contentBundle.outputFiles[0].contents).toString('base64'));
 const plan = (harness = 'one', slug = 'same') => ({harness, slug, title: 'Shared title', status: 'active'});
 const envelope = rows => ({rows, version: 'canonical-version'});
 
@@ -73,6 +79,71 @@ function loadedChat(rows=[],hasMoreEarlier=false) {
     return {state,token};
 }
 const chatFrame = (event,data,environment=chatEnvironment) => ({event,data,environment});
+const cardRow = (patch={}) => ({correlationId:'question-1',conversationId:'conversation',createdAt:1,prompt:'Choose a route',
+    presentation:{kind:'radio',options:[{id:'a',label:'Route A'},{id:'b',label:'Route B'}]},...patch});
+const cardSnapshot = (rows=[cardRow()],version=1,runId='run') => chatFrame('snapshot',
+    {workspaceId:'workspace',runId,version,snapshot:{openCards:rows}});
+function loadedCards() {
+    const state=new NativeCardsState(),token=state.begin(chatEnvironment,'conversation');
+    state.receive(token,cardSnapshot());return {state,token,card:state.cards[0]};
+}
+test('canonical card snapshots replace one run, reject foreign identity and ignore stale generations',()=>{
+    const {state,token}=loadedCards();
+    assert.equal(state.receive(token,cardSnapshot()),false);
+    assert.equal(state.receive(token,cardSnapshot([],0)),false);
+    assert.throws(()=>state.receive(token,cardSnapshot([cardRow({prompt:'Conflict'})])),/Conflicting/);
+    assert.throws(()=>state.receive(token,cardSnapshot([cardRow({conversationId:'foreign'})],2)),/foreign/);
+    assert.throws(()=>state.receive(token,{...cardSnapshot([],2),environment:{...chatEnvironment,store:{id:'foreign'}}}),/environment/);
+    assert.throws(()=>state.receive(token,cardSnapshot([cardRow()],2,'other')),/multiple runs/);
+    assert.equal(state.cards.length,1);
+    assert.equal(state.receive(token,cardSnapshot([],2)),true);assert.equal(state.cards.length,0);
+    state.begin(chatEnvironment,'other');assert.equal(state.receive(token,cardSnapshot()),false);
+});
+test('card choices, free text, dates and numeric steps validate before a native submission',()=>{
+    const card=new NativeCard('run',cardRow());
+    assert.deepEqual(card.answer(['b']),{picks:['b']});
+    for(const picks of [[],['a','b'],['a','a'],['foreign']])assert.throws(()=>card.answer(picks),/available/);
+    const withPresentation=p=>new NativeCard('run',cardRow({presentation:p}));
+    assert.deepEqual(withPresentation({kind:'checkbox',allowEmpty:true,options:card.options}).answer([]),{picks:[]});
+    assert.throws(()=>withPresentation({kind:'radio',options:[{id:'a',label:'A'},{id:'a',label:'B'}]}),/incomplete/);
+    const text=withPresentation({kind:'text'});assert.deepEqual(text.answer([],'Exact λ'),{value:'Exact λ'});
+    for(const value of ['', 'λ'.repeat(17000)])assert.throws(()=>text.answer([],value),/bounded/);
+    const date=withPresentation({kind:'date',min:'2026-01-01',max:'2026-12-31'});
+    assert.deepEqual(date.answer([],'2026-11-07'),{value:'2026-11-07'});
+    for(const value of ['2026-02-30','2025-11-07','next week'])assert.throws(()=>date.answer([],value),/date/);
+    const slider=withPresentation({kind:'slider',min:1,max:5,step:0.5});
+    assert.deepEqual(slider.answer([],'2.5'),{value:2.5});
+    for(const value of ['', 'NaN','2.2','9'])assert.throws(()=>slider.answer([],value),/steps/);
+});
+test('a card remains pending until its exact environment and canonical response receipt arrive',()=>{
+    const {state,token,card}=loadedCards();const request=state.request(card,'submit',card.answer(['a']));
+    assert.deepEqual(request,{environment:chatEnvironment,conversationId:'conversation',operation:'respond',
+        correlationId:'question-1',action:'submit',payload:{picks:['a']}});
+    assert.throws(()=>state.request(card,'cancel'),/changed/);assert.equal(state.cards.length,1);
+    const receipt=chatEnvelope([{responded:true,conversationId:'conversation',correlationId:card.id}]);
+    assert.throws(()=>state.responded(token,card.id,{...receipt,environment:{...chatEnvironment,workspaceId:'foreign'}}),/reconciliation/);
+    assert.throws(()=>state.responded(token,card.id,chatEnvelope([{...receipt.rows[0],correlationId:'foreign'}])),/reconciliation/);
+    assert.equal(state.cards.length,1);assert.equal(state.responded(token,card.id,receipt),true);
+    assert.equal(state.cards.length,0);assert.equal(state.pending,null);
+    state.receive(token,cardSnapshot([cardRow()],2));assert.equal(state.cards.length,0,'ack tombstone prevents stale resurrection');
+});
+test('failed card responses require reconciliation and cannot affect another conversation',()=>{
+    const {state,token,card}=loadedCards();state.request(card,'decline');state.failed(token,new Error('lost acknowledgement'));
+    assert.equal(state.cards.length,1);assert.equal(state.connected,false);
+    assert.throws(()=>state.request(card,'submit',card.answer(['a'])),/reconnect/);
+    state.begin(chatEnvironment,'other');state.failed(token,new Error('late failure'));
+    assert.equal(state.error,null);assert.equal(state.responded(token,card.id,{}),false);
+});
+test('expired and unsupported cards cannot submit; secure links stay on the selected origin',()=>{
+    const {state}=loadedCards();state.receive(state.generation,cardSnapshot([cardRow({timeoutMs:1,allowDecline:false})],2));
+    const expired=state.cards[0];assert.equal(expired.expired,true);assert.throws(()=>state.request(expired,'cancel'),/changed/);
+    const card=new NativeCard('run',cardRow({presentation:{kind:'browser',link:'/api/ui/cards/question-1/link'},
+        report:{title:'Review',plans:[{title:'Plan',items:[{id:'P-001',text:'Verify it'}]}]}}));
+    assert.equal(card.canSubmit,false);assert.match(card.prose,/Review.*Plan.*Verify it/s);
+    assert.equal(card.secureLink(chatEnvironment),'http://fixture/api/ui/cards/question-1/link');
+    assert.equal(card.secureLink({...chatEnvironment,endpoint:'https://user@foreign'}),null);
+    assert.equal(new NativeCard('run',cardRow({presentation:{link:'https://foreign'}})).secureLink(chatEnvironment),null);
+});
 const savedEvent = (n,event,patch={}) => chatFrame('chat-event', {schemaVersion:1,conversationId:'conversation',
     turnId:replyId,sequence:n,eventId:'event-'+n,event,...patch});
 const replyState = phase => ({schemaVersion:1,conversationId:'conversation',turnId:replyId,revision:1,lastSequence:1,phase,
@@ -577,7 +648,8 @@ function streamFixture(temp) {
 import fs from 'node:fs';
 let input='';process.stdin.on('data',c=>input+=c);process.stdin.on('end',()=>{
  const r=JSON.parse(input), command=process.argv[2];
- if(command==='native-read'){console.log(JSON.stringify({rows:[r],version:'exact'}));return;}
+ if(command==='native-read'||command==='native-cards'&&r.operation==='respond'){
+  console.log(JSON.stringify({rows:[r],environment:r.environment,version:'exact'}));return;}
  const emit=event=>console.log(JSON.stringify({environment:r.environment,event,data:{request:r,pid:process.pid}}));
  if(r.mode==='empty')return;
  if(r.mode==='failure'){process.stderr.write('canonical ACL refusal\\n'.repeat(5000));process.exitCode=1;return;}
@@ -649,10 +721,14 @@ const read=bridge.read(pui,{name:'reports.get',args:{id:'B +/=&'}});let cancelle
 try{await stream.done;}catch(e){cancelled=e.message.includes('stopped');}
 print('STREAM_PHASE cancelled');
 const result=await read;if(!cancelled||frames!==1||result.rows[0].args.id!=='B +/=&')throw Error('request isolation failed');
+const cardReceipt=await bridge.read(pui,{environment,conversationId:'exact-card-chat',operation:'respond',
+ correlationId:'exact-card',action:'submit',payload:{value:'private answer'}},'native-cards');
+if(cardReceipt.rows[0].correlationId!=='exact-card'||cardReceipt.rows[0].payload.value!=='private answer')
+ throw Error('native card response used the streaming route or lost identity');
 print('STREAM_PHASE read');
 if(GLib.file_test('/proc/'+child,GLib.FileTest.EXISTS))throw Error('helper did not reap cancelled PUI');
 const ack=${JSON.stringify(join(temp,'cards-ack'))};let cards=0;
-const good=bridge.stream(pui,{environment,ack},f=>{++cards;if(f.event==='first')GLib.file_set_contents(ack,'received');},'native-cards');
+const good=bridge.stream(pui,{environment,ack,operation:'subscribe'},f=>{++cards;if(f.event==='first')GLib.file_set_contents(ack,'received');},'native-cards');
 const bad=bridge.stream(pui,request,()=>{throw Error('foreign conversation');});let refused=false;
 try{await bad.done;}catch(e){refused=e.message==='foreign conversation';}await good.done;
 print('STREAM_PHASE cards');
