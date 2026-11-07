@@ -171,6 +171,22 @@ public struct PanelModel {
         }
         return ["workbench", "resume", String(Int64(id)), host, target.row["ownerId"].text]
     }
+    public static func resumeCommand(executable: URL, target: PanelResult, environment: JSONValue) throws -> String {
+        guard executable.isFileURL, executable.path.hasPrefix("/"),
+              FileManager.default.isExecutableFile(atPath: executable.path),
+              NativeEnvironment.same(environment, environment) else {
+            throw WorkbenchError("Select an installed PUI and refresh the selected environment")
+        }
+        func quote(_ value: String) throws -> String {
+            guard !value.utf8.contains(0) else { throw WorkbenchError("Invalid terminal argument") }
+            return "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+        }
+        let identity = String(decoding: try JSONEncoder().encode(environment), as: UTF8.self)
+        let argv = ["/usr/bin/env", "PUI_OPERATOR=" + environment["endpoint"].text,
+            "PAPERCUSP_OPERATOR_URL=" + environment["endpoint"].text,
+            "PUI_WORKBENCH_EXPECTED_IDENTITY=" + identity, executable.path] + (try resumeArguments(target))
+        return "exec " + (try argv.map(quote)).joined(separator: " ")
+    }
 }
 
 /// Match PUI's BackendIdentity.same_rendezvous. A rebuild can change build.sha

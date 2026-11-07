@@ -399,6 +399,7 @@ final class Sidebar: NSPanel {
         guard let surface = surface(table), let results = models[surface]?.results(), results.indices.contains(table.selectedRow) else { return }
         let selected = results[table.selectedRow]
         models[surface]?.selection = selected.identity
+        if selected.kind == .agents { activateAgent(selected, surface: surface); return }
         guard let (name, args) = selected.detailRequest else {
             messages[surface]?.stringValue = "Exact terminal focus is unavailable in this build."; return
         }
@@ -419,6 +420,37 @@ final class Sidebar: NSPanel {
                     try self.goalStates[surface]?.load(environment: environment, payload: payload, goalID: selected.row["id"].text)
                 }
                 self.models[surface]?.detail = payload; self.render(surface)
+            } catch {
+                guard let self, !Task.isCancelled, self.detailGeneration[surface] == generation else { return }
+                self.messages[surface]?.stringValue = error.localizedDescription
+            }
+        }
+        tasks[surface, default: []].append(task)
+    }
+    private func activateAgent(_ selected: PanelResult, surface: WorkbenchSurface) {
+        let resume = selected.row["sessionState"].text == "ended"
+        if resume {
+            let alert = NSAlert(); alert.messageText = "Resume “" + selected.title + "”?"
+            alert.informativeText = "Open this exact ended session in Terminal using its saved local or remote connection."
+            alert.addButton(withTitle: "Resume session"); alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        detailGeneration[surface, default: 0] += 1
+        let generation = detailGeneration[surface], environment = environments[surface] ?? .null
+        let pui = settings.pui, bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
+        messages[surface]?.stringValue = "Checking selected session…"
+        let task = Task { [weak self] in
+            do {
+                let roster = try await bridge.read("advRoster.list", environment: environment)
+                guard let self, !Task.isCancelled, self.detailGeneration[surface] == generation,
+                      self.models[surface]?.selection == selected.identity, self.models[surface]?.visible == true,
+                      self.settings.pui == pui else { return }
+                let target = try PanelModel.agentTarget(selected, roster: roster,
+                    localHost: ProcessInfo.processInfo.hostName, resume: resume)
+                if resume { try await bridge.resume(target, environment: environment) }
+                else { _ = try await bridge.focus(target, environment: environment) }
+                guard !Task.isCancelled, self.detailGeneration[surface] == generation else { return }
+                self.models[surface]?.visible = false; self.panels[surface]?.orderOut(nil)
             } catch {
                 guard let self, !Task.isCancelled, self.detailGeneration[surface] == generation else { return }
                 self.messages[surface]?.stringValue = error.localizedDescription

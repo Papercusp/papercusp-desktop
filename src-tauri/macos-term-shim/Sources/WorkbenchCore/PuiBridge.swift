@@ -79,6 +79,29 @@ public struct PuiBridge {
             "expectedStatus": detail["goal"]["status"], "expectedEffectiveStatus": detail["effectiveStatus"],
             "expectedHolderLiveness": detail["holderLiveness"]]))
     }
+    public func focus(_ target: PanelResult, environment: JSONValue) async throws -> JSONValue {
+        guard NativeEnvironment.same(environment, environment), let id = target.row["advSessionId"].positiveID,
+              !target.row["ownerId"].text.isEmpty else { throw WorkbenchError("Select an exact local agent session") }
+        let host = target.row["host"].text.isEmpty ? target.row["hostname"] : target.row["host"]
+        let payload = try await invoke("native-agent-focus", body: .object(["environment": environment,
+            "advSessionId": .number(id), "ownerId": target.row["ownerId"], "host": host,
+            "windowId": .string(target.row["windowId"].text)]))
+        let receipt = try NativeEnvironment.one(payload)
+        guard NativeEnvironment.same(environment, payload["environment"]), receipt["focused"].isTrue,
+              receipt["advSessionId"].positiveID == id else { throw WorkbenchError("Focus on the selected terminal was not verified") }
+        return payload
+    }
+    public func resume(_ target: PanelResult, environment: JSONValue) async throws {
+        let command = try PanelModel.resumeCommand(executable: executable, target: target, environment: environment)
+        // Constant AppleScript; all dynamic content is one argv value, then
+        // independently shell-quoted by resumeCommand for Terminal's shell.
+        let script = "on run argv\ntell application \"Terminal\"\nactivate\ndo script (item 1 of argv)\nend tell\nend run"
+        let result = try await BoundedNativeProcess.run(executable: URL(fileURLWithPath: "/usr/bin/osascript"),
+            arguments: ["-e", script, command], timeout: 10)
+        guard result.status == 0 else { throw WorkbenchError("Could not open the selected session in Terminal") }
+        // This confirms terminal launch only. PUI validates the environment and
+        // selected ended session again before invoking psu in the terminal.
+    }
     private func invoke(_ command: String, body: JSONValue, timeout: TimeInterval = 22) async throws -> JSONValue {
         let request = try JSONEncoder().encode(body)
         guard executable.isFileURL, executable.path.hasPrefix("/"),
