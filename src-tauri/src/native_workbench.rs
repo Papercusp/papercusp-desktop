@@ -1,5 +1,59 @@
-//! GNOME owns resident/login lifecycle after the desktop installs its bundle.
+//! Each native host owns resident/login lifecycle after desktop installation.
 //! No Server startup preference, real shortcut or global user file is reset.
+#[cfg(any(test, target_os = "macos"))]
+fn macos_install_command(
+    resources: &std::path::Path,
+    server_resources: &std::path::Path,
+) -> std::io::Result<std::process::Command> {
+    let helper = resources.join("resources/PapercuspWorkbench.app/Contents/MacOS/PapercuspWorkbench");
+    if !helper.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "The installed native Workbench bundle is missing",
+        ));
+    }
+    let pui = [resources, server_resources]
+        .into_iter()
+        .map(|root| root.join("sidecar/bin/pui"))
+        .find(|path| path.is_file())
+        .ok_or_else(|| std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Install Papercusp Server's native PUI to enable Workbench",
+        ))?;
+    let mut command = std::process::Command::new(helper);
+    command.arg("--install-resident").arg("--pui").arg(pui);
+    Ok(command)
+}
+
+#[cfg(target_os = "macos")]
+pub fn prepare(
+    _app: tauri::AppHandle,
+    resource_root: std::path::PathBuf,
+    _user_data: std::path::PathBuf,
+) {
+    std::thread::spawn(move || {
+        let install = || -> std::io::Result<()> {
+            let mut command = macos_install_command(
+                &resource_root,
+                std::path::Path::new("/Applications/Papercusp Server.app/Contents/Resources"),
+            )?;
+            let output = crate::wsl_sidecar_staging::run_bounded_output(
+                &mut command,
+                std::time::Duration::from_secs(30),
+            )?;
+            if !output.status.success() {
+                return Err(std::io::Error::other(
+                    String::from_utf8_lossy(&output.stderr).into_owned(),
+                ));
+            }
+            Ok(())
+        };
+        if let Err(error) = install() {
+            eprintln!("[workbench] Native installation unavailable: {error}");
+        }
+    });
+}
+
 #[cfg(target_os = "windows")]
 pub fn prepare(
     _app: tauri::AppHandle,
@@ -136,7 +190,33 @@ pub fn prepare(
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::login_notice;
+    use super::{login_notice, macos_install_command};
+
+    #[test]
+    fn macos_install_uses_the_bundled_helper_and_exact_installed_pui() {
+        let directory = std::env::temp_dir().join(format!("workbench-install-{}", uuid::Uuid::new_v4()));
+        let gui = directory.join("Papercusp GUI/Contents/Resources");
+        let server = directory.join("Papercusp Server/Contents/Resources");
+        assert!(macos_install_command(&gui, &server).is_err());
+        let helper = gui.join("resources/PapercuspWorkbench.app/Contents/MacOS/PapercuspWorkbench");
+        std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        std::fs::write(&helper, b"fixture helper").unwrap();
+        assert!(macos_install_command(&gui, &server).is_err());
+        let server_pui = server.join("sidecar/bin/pui");
+        std::fs::create_dir_all(server_pui.parent().unwrap()).unwrap();
+        std::fs::write(&server_pui, b"fixture pui").unwrap();
+        let command = macos_install_command(&gui, &server).unwrap();
+        assert_eq!(command.get_program(), helper.as_os_str());
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, [std::ffi::OsStr::new("--install-resident"),
+            std::ffi::OsStr::new("--pui"), server_pui.as_os_str()]);
+        let bundled_pui = gui.join("sidecar/bin/pui");
+        std::fs::create_dir_all(bundled_pui.parent().unwrap()).unwrap();
+        std::fs::write(&bundled_pui, b"fixture pui").unwrap();
+        assert_eq!(macos_install_command(&gui, &server).unwrap().get_args().last(),
+            Some(bundled_pui.as_os_str()));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn restart_requirement_reaches_the_account_with_install_or_upgrade_context() {

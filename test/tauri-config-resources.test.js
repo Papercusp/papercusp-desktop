@@ -32,7 +32,7 @@ test('Linux GUI and Server carry the same native Workbench without adding Server
   assert.match(build, /CARGO_CFG_TARGET_OS/);
   assert.match(build, /package-native-workbench\.mjs/);
   assert.match(build, /--stage-bundle/);
-  assert.match(readText('src-tauri', 'src', 'main.rs'), /native_workbench::prepare\(resources, data\)/);
+  assert.match(readText('src-tauri', 'src', 'main.rs'), /native_workbench::prepare\(app.handle\(\).clone\(\), resources, data\)/);
 });
 
 test('Mac producer strips Swift debug paths before signing the vendored terminal shim', () => {
@@ -159,10 +159,12 @@ test('GUI/Server distribution contract is fail-closed and archive-aware', () => 
 
   const guiGlobs = contract.gui.resourceAllowlist.map(({ glob }) => glob);
   assert.deepEqual(guiGlobs, [
+    'resources/workbench-windows/*',
     'resources/workbench@papercusp.ai.shell-extension.zip',
     'resources/workbench-install.js',
     'sidecar/spa/**/*',
     'resources/libPapercuspTermShim.dylib',
+    'resources/PapercuspWorkbench.app/**/*',
   ]);
   for (const forbiddenBroadGlob of ['sidecar/**/*', 'resources/*', 'seed/**/*', 'doc-vector-seed/**/*']) {
     assert(!guiGlobs.includes(forbiddenBroadGlob), `GUI allowlist widened to ${forbiddenBroadGlob}`);
@@ -459,7 +461,7 @@ test('Tauri seed bundle is server-only, not duplicated into the GUI bundle', () 
   assert.deepEqual(
     guiMac.bundle.resources,
     contract.gui.resourceAllowlist.filter(row => row.platforms.includes('macos')).map(({ glob }) => glob),
-    'the macOS GUI overlay may add only the reviewed native terminal shim',
+    'the macOS GUI overlay may add only the reviewed native terminal shim and Workbench',
   );
   assert(!baseResources.some((resource) => resource.includes('seed')), 'GUI/base resources must not include the multi-GB seed');
 

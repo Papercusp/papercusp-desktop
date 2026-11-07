@@ -10832,7 +10832,7 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
                 app.config().identifier
             );
             let is_dev = cfg!(debug_assertions);
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             if let (Ok(resources), Ok(data)) = (app.path().resource_dir(), app.path().data_dir()) {
                 native_workbench::prepare(app.handle().clone(), resources, data);
             }
