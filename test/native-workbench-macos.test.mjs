@@ -1,16 +1,124 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {spawnSync} from 'node:child_process';
-import {mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, rmSync} from 'node:fs';
+import {spawn, spawnSync} from 'node:child_process';
+import {appendFileSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, rmSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createHash} from 'node:crypto';
 import {stageNativeWorkbench} from '../bin/package-native-workbench.mjs';
+import {processGroupLifetime} from '@papercusp/operator-core/lib/fleet/process-group-lifetime';
 
 const root = resolve(import.meta.dirname, '..');
 const packagePath = join(root, 'src-tauri/macos-term-shim');
 const swift = process.env.SWIFT || 'swift';
 const swiftAvailable = spawnSync(swift, ['--version'], {encoding:'utf8', timeout:10000}).status === 0;
+
+async function withSwiftFixture(prefix, action) {
+    const scratch = mkdtempSync(join(tmpdir(), prefix));
+    try {
+        const result = await action(scratch);
+        rmSync(scratch, {recursive:true, force:true});
+        return result;
+    } catch (error) {
+        writeFileSync(join(scratch, 'failure.json'), JSON.stringify({error:String(error), stack:error.stack}, null, 2) + '\n');
+        console.error('SWIFT_NATIVE_FAILURE_EVIDENCE ' + scratch);
+        throw error;
+    }
+}
+
+// Reuse the shared process-group exit fence: a closed Swift driver alone does
+// not prove its compiler helpers stopped. Keep the deadline until that fence.
+async function runSwift(command, args, scratch, timeoutMs) {
+    const child = spawn(command, args, {detached:process.platform !== 'win32', stdio:['ignore', 'pipe', 'pipe']});
+    let stdout = '', stderr = '', error = null, groupExited = false;
+    const lifetime = processGroupLifetime(child, message => appendFileSync(join(scratch, 'cleanup.log'), message + '\n'));
+    for (const [stream, file, capture] of [
+        [child.stdout, 'stdout.log', data => { stdout = (stdout + data).slice(-1024 * 1024); }],
+        [child.stderr, 'stderr.log', data => { stderr = (stderr + data).slice(-1024 * 1024); }],
+    ]) {
+        writeFileSync(join(scratch, file), '');
+        stream.on('data', data => { appendFileSync(join(scratch, file), data); capture(data); });
+    }
+    const closed = new Promise(resolveResult => {
+        child.once('error', cause => { error = cause; });
+        child.once('close', (status, signal) => resolveResult({status, signal}));
+    });
+    let drain;
+    const deadline = Date.now() + timeoutMs;
+    const timer = setTimeout(() => {
+        error ||= new Error('Swift process-group deadline exceeded');
+        lifetime.signal('SIGKILL');
+        drain = setTimeout(() => { child.stdout.destroy(); child.stderr.destroy(); }, 3000);
+    }, timeoutMs);
+    let result;
+    try {
+        result = await closed;
+        if (child.pid !== undefined) {
+            await lifetime.waitForExit({timeoutMs:Math.max(1, deadline - Date.now() + 3500)});
+            groupExited = true;
+        }
+    } catch (cause) {
+        error ||= cause;
+        lifetime.signal('SIGKILL');
+    } finally {
+        clearTimeout(timer); clearTimeout(drain);
+    }
+    const receipt = {...result, command, args, pid:child.pid, groupExited,
+        error:error ? {message:error.message, code:error.code, stack:error.stack} : null, stdout, stderr};
+    writeFileSync(join(scratch, 'process.json'), JSON.stringify(receipt, null, 2) + '\n');
+    return receipt;
+}
+
+for (const leader of ['running', 'exited']) test('Swift harness reaps compiler descendants and retains evidence with leader ' + leader,
+    {skip:process.platform === 'win32', timeout:15000}, async () => {
+        let retained;
+        try {
+            await assert.rejects(withSwiftFixture('workbench-swift-harness-', async scratch => {
+                retained = scratch;
+                const grandchild = 'setInterval(()=>{},100);process.send("ready");';
+                const driver = `const {spawn}=require('node:child_process');
+const child=spawn(process.execPath,['-e',${JSON.stringify(grandchild)}],{stdio:['ignore','ignore','ignore','ipc']});
+child.once('message',()=>{require('node:fs').writeFileSync(${JSON.stringify('CHILD_RECEIPT')},String(child.pid));
+console.log('compiler started');console.error('compiler diagnostic');
+${leader === 'exited' ? 'process.exit(0);' : 'setInterval(()=>{},100);'}});`;
+                const result = await runSwift(process.execPath, ['-e', driver.replace('CHILD_RECEIPT', join(scratch, 'compiler.pid'))], scratch, 2500);
+                assert.equal(result.groupExited, true, JSON.stringify(result));
+                assert.match(result.error?.message ?? '', /deadline exceeded/);
+                const pid = Number(readFileSync(join(scratch, 'compiler.pid'), 'utf8'));
+                const state = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], {encoding:'utf8', timeout:3000});
+                assert.ifError(state.error);
+                assert.ok(state.status === 1 || /^Z/.test(state.stdout.trim()), 'compiler descendant must be absent or dead: ' + state.stdout);
+                throw new Error('fixture assertion after timeout');
+            }), /fixture assertion after timeout/);
+            assert.match(readFileSync(join(retained, 'stdout.log'), 'utf8'), /compiler started/);
+            assert.match(readFileSync(join(retained, 'stderr.log'), 'utf8'), /compiler diagnostic/);
+            assert.match(readFileSync(join(retained, 'failure.json'), 'utf8'), /fixture assertion after timeout/);
+            const receipt = JSON.parse(readFileSync(join(retained, 'process.json'), 'utf8'));
+            assert.equal(receipt.groupExited, true);
+            assert.match(receipt.error.message, /deadline exceeded/);
+        } finally { if (retained) rmSync(retained, {recursive:true, force:true}); }
+    });
+
+test('Swift harness records spawn failure before assertion and cleans successful scratch', {timeout:10000}, async () => {
+    let failed, succeeded;
+    try {
+        await assert.rejects(withSwiftFixture('workbench-swift-missing-', async scratch => {
+            failed = scratch;
+            const result = await runSwift(join(scratch, 'missing-swift'), [], scratch, 2000);
+            assert.equal(result.error?.code, 'ENOENT');
+            throw new Error('missing compiler');
+        }), /missing compiler/);
+        assert.equal(JSON.parse(readFileSync(join(failed, 'process.json'), 'utf8')).error.code, 'ENOENT');
+        await withSwiftFixture('workbench-swift-success-', async scratch => {
+            succeeded = scratch;
+            const result = await runSwift(process.execPath, ['-e', 'console.log("complete")'], scratch, 2000);
+            assert.equal(result.status, 0);
+            assert.equal(result.error, null);
+            assert.equal(result.groupExited, true);
+        });
+        assert.throws(() => statSync(succeeded), /ENOENT/);
+    } finally { if (failed) rmSync(failed, {recursive:true, force:true}); }
+});
 
 test('macOS staging consumes the native product with accessory identity and refuses missing inputs', () => {
     const fixture = mkdtempSync(join(tmpdir(), 'workbench-macos-package-'));
@@ -51,17 +159,14 @@ test('macOS staging consumes the native product with accessory identity and refu
 test('Swift Workbench canonical model, shortcut transaction and real bounded subprocess regressions', {
     skip: !swiftAvailable && process.platform !== 'darwin' ? 'Swift toolchain is required for the portable XCTest leg' : false,
     timeout: 120000,
-}, t => {
-    const scratch = mkdtempSync(join(tmpdir(), 'workbench-swift-tests-'));
-    try {
-        const result = spawnSync(swift, ['test', '--package-path', packagePath, '--scratch-path', scratch,
-            '--filter', 'Workbench'], {encoding:'utf8', timeout:110000, maxBuffer:8*1024*1024});
-        assert.ifError(result.error);
+}, t => withSwiftFixture('workbench-swift-tests-', async scratch => {
+        const result = await runSwift(swift, ['test', '--package-path', packagePath, '--scratch-path', scratch,
+            '--filter', 'Workbench'], scratch, 110000);
+        assert.equal(result.error, null, result.stdout + result.stderr + JSON.stringify(result.error));
         assert.equal(result.status, 0, result.stdout + result.stderr);
         assert.match(result.stdout + result.stderr, /Executed \d+ tests?, with 0 failures/);
         t.diagnostic(result.stdout.trim());
-    } finally { rmSync(scratch, {recursive:true, force:true}); }
-});
+}));
 
 function shellFunction(source, name) {
     const start = source.indexOf(name + '() {');
@@ -184,13 +289,10 @@ test('native producer strips, checks target slices and verifies helper signing b
 test('macOS builds the actual AppKit accessory product from the same maintained package', {
     skip:process.platform !== 'darwin' ? 'native AppKit compiler leg requires macOS' : false,
     timeout:180000,
-}, () => {
-    const scratch = mkdtempSync(join(tmpdir(), 'workbench-appkit-build-'));
-    try {
-        const result = spawnSync(swift, ['build', '--package-path', packagePath, '--scratch-path', scratch,
-            '--product', 'PapercuspWorkbench'], {encoding:'utf8', timeout:170000, maxBuffer:8*1024*1024});
-        assert.ifError(result.error);
+}, () => withSwiftFixture('workbench-appkit-build-', async scratch => {
+        const result = await runSwift(swift, ['build', '--package-path', packagePath, '--scratch-path', scratch,
+            '--product', 'PapercuspWorkbench'], scratch, 170000);
+        assert.equal(result.error, null, result.stdout + result.stderr + JSON.stringify(result.error));
         assert.equal(result.status, 0, result.stdout + result.stderr);
         assert.ok(statSync(join(scratch, 'debug/PapercuspWorkbench')).mode & 0o111);
-    } finally { rmSync(scratch, {recursive:true, force:true}); }
-});
+}));
