@@ -663,6 +663,8 @@ const packageName = value => value.startsWith('@') ? value.split('/').slice(0,2)
 const bare = imp => imp.external && imp.path !== '<runtime>' && !isBuiltin(imp.path) && !imp.path.startsWith('.') && !imp.path.startsWith('/');
 const traceFile = path.join(run, 'trace-context.json');
 const trace = fs.existsSync(traceFile) ? JSON.parse(fs.readFileSync(traceFile)) : null;
+const compilerSources = ['esbuild', '@papercusp/host-esbuild'].map(name => path.join(root, 'node_modules', name, 'lib/main.js'))
+  .filter(file => fs.existsSync(file)).map(file => fs.realpathSync(file));
 function optional(source, imp) {
   if (!['require-call','dynamic-import'].includes(imp.kind)) return false;
   let dir = path.dirname(source);
@@ -680,7 +682,8 @@ function optional(source, imp) {
   }
   const logicalSdk = path.join(root, 'node_modules/@dbos-inc/dbos-sdk/dist/src/telemetry');
   const sdk = fs.existsSync(logicalSdk) ? fs.realpathSync(logicalSdk) + path.sep : null;
-  if (imp.kind !== 'require-call' || !sdk || !fs.realpathSync(source).startsWith(sdk) || !imp.path.startsWith('@opentelemetry/')) return false;
+  const optionalPnp = imp.path === 'pnpapi' && compilerSources.includes(fs.realpathSync(source));
+  if (imp.kind !== 'require-call' || !optionalPnp && (!sdk || !fs.realpathSync(source).startsWith(sdk) || !imp.path.startsWith('@opentelemetry/'))) return false;
   if (!parsed.has(source)) parsed.set(source, ts.createSourceFile(source, fs.readFileSync(source, 'utf8'), ts.ScriptTarget.Latest, true));
   const file = parsed.get(source), calls = [];
   function visit(node) {
@@ -691,6 +694,15 @@ function optional(source, imp) {
   visit(file);
   return calls.length > 0 && calls.every(call => {
     for (let node = call; node.parent; node = node.parent) {
+      // The compiler probes Yarn's zip loader and continues when it is absent.
+      // Keep this exception on the actual compiler source and an empty catch;
+      // an unguarded occurrence or a catch that rethrows remains mandatory.
+      if (optionalPnp) {
+        if (ts.isTryStatement(node.parent) && node.parent.tryBlock === node
+            && node.parent.catchClause?.block.statements.length === 0) return true;
+        if (ts.isFunctionLike(node)) return false;
+        continue;
+      }
       if (imp.path === '@opentelemetry/sdk-trace-base' && ts.isFunctionDeclaration(node)
           && node.name?.text === 'installTraceContextManager' && trace?.schemaVersion === 'private-default-trace-context-v1'
           && trace.registered === true && trace.contextWorking === true && trace.otlp === false) return true;
