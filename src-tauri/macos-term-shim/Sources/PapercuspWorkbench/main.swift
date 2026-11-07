@@ -12,7 +12,7 @@ final class Sidebar: NSPanel {
 
 /// A native resident accessory. The per-agent HUD remains in PUI/Zellij;
 /// this process owns only desktop panels and their global summon shortcuts.
-@MainActor final class WorkbenchHost: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
+@MainActor final class WorkbenchHost: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSTextViewDelegate {
     private let settingsURL: URL = {
         let arguments = CommandLine.arguments
         if let index = arguments.firstIndex(of: "--settings"), arguments.indices.contains(index + 1), arguments[index + 1].hasPrefix("/") {
@@ -38,6 +38,12 @@ final class Sidebar: NSPanel {
     private var workspaceObserver: NSObjectProtocol?
     private var environments: [WorkbenchSurface: JSONValue] = [:]
     private var accountState = AccountState()
+    private var chatState = ChatState()
+    private var chatEarlier: NSButton?
+    private var chatComposer: NSTextView?
+    private var chatSend: NSButton?, chatCancel: NSButton?, chatRecover: NSButton?
+    private var chatTask: Task<Void, Never>?
+    private var chatOperation = UUID()
     private var goalStates: [WorkbenchSurface: GoalState] = [:]
     private var accountButtons: [NSButton] = []
     private var accountScope: NSTextField?
@@ -217,7 +223,12 @@ final class Sidebar: NSPanel {
         let search = NSSearchField(); search.placeholderString = "Search " + surface.title
         search.identifier = NSUserInterfaceItemIdentifier(surface.rawValue); search.delegate = self
         root.addArrangedSubview(search); searches[surface] = search
+        search.isHidden = surface == .papercup
         let message = NSTextField(wrappingLabelWithString: "Loading…"); root.addArrangedSubview(message); messages[surface] = message
+        if surface == .papercup {
+            let earlier = NSButton(title: "Load earlier messages", target: self, action: #selector(loadEarlierChat))
+            earlier.isEnabled = false; root.addArrangedSubview(earlier); chatEarlier = earlier
+        }
         if surface == .accounts {
             let scope = NSTextField(wrappingLabelWithString: "Environment unavailable")
             let summary = NSTextField(wrappingLabelWithString: "Steering unavailable")
@@ -254,7 +265,26 @@ final class Sidebar: NSPanel {
         detailScroll.isHidden = true; root.addArrangedSubview(detailScroll); details[surface] = detail
         for view in [search, message, scroll, detailScroll] { view.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true }
         scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
-        detailScroll.heightAnchor.constraint(equalToConstant: 260).isActive = true
+        if surface == .papercup {
+            scroll.isHidden = true; detailScroll.isHidden = false
+            detailScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 300).isActive = true
+            detailScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
+        } else { detailScroll.heightAnchor.constraint(equalToConstant: 260).isActive = true }
+        if surface == .papercup {
+            let composer = NSTextView(); composer.isRichText = false; composer.delegate = self
+            composer.setAccessibilityLabel("Message Papercup")
+            let composeScroll = NSScrollView(); composeScroll.documentView = composer; composeScroll.hasVerticalScroller = true
+            root.addArrangedSubview(composeScroll); chatComposer = composer
+            composeScroll.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
+            composeScroll.heightAnchor.constraint(equalToConstant: 80).isActive = true
+            composer.textContainer?.widthTracksTextView = true; composer.autoresizingMask = [.width]
+            let controls = NSStackView(); controls.orientation = .horizontal
+            let send = NSButton(title: "Send", target: self, action: #selector(sendChat))
+            let cancel = NSButton(title: "Cancel reply", target: self, action: #selector(cancelChat))
+            let recover = NSButton(title: "Recover reply", target: self, action: #selector(recoverChat))
+            for button in [send, cancel, recover] { button.isEnabled = false; controls.addArrangedSubview(button) }
+            chatSend = send; chatCancel = cancel; chatRecover = recover; root.addArrangedSubview(controls)
+        }
         scroll.setContentHuggingPriority(.defaultLow, for: .vertical)
         models[surface] = PanelModel(); panels[surface] = panel
         if surface == .goals { models[surface]?.scope = .goals }
@@ -271,11 +301,35 @@ final class Sidebar: NSPanel {
         for task in tasks[surface] ?? [] { task.cancel() }; tasks[surface] = []
         detailGeneration[surface, default: 0] += 1
         if surface == .accounts { accountState.invalidate() }
+        if surface == .papercup {
+            chatState.draft = chatComposer?.string ?? chatState.draft
+            // The operator owns execution after admission. Cancel through its
+            // canonical control route; killing the pipe alone is insufficient.
+            if let request = try? chatState.reply?.control("cancel") {
+                let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
+                let reply = chatState.reply
+                let cancelledEnvironment = chatState.environment
+                Task {
+                    do {
+                        var receipt = reply
+                        for try await frame in bridge.chat(request) { try receipt?.receive(frame) }
+                        guard receipt?.phase == "cancelled" else { throw WorkbenchError("Reply cancellation needs reconciliation") }
+                    } catch {
+                        if NativeEnvironment.same(self.chatState.environment, cancelledEnvironment),
+                           self.chatState.conversationID == reply?.conversationID {
+                            self.messages[.papercup]?.stringValue = error.localizedDescription
+                        }
+                    }
+                }
+            }
+            chatOperation = UUID(); chatTask?.cancel(); chatTask = nil; chatState.invalidate()
+        }
     }
     private func refresh(_ surface: WorkbenchSurface) {
         cancelReads(surface)
         goalStates[surface] = GoalState()
         if surface == .accounts { refreshAccounts(); return }
+        if surface == .papercup { refreshChat(); return }
         guard surface == .quickAccess || surface == .goals else {
             messages[surface]?.stringValue = "This native surface is not available in this build."; return
         }
@@ -314,6 +368,7 @@ final class Sidebar: NSPanel {
     }
     private func render(_ surface: WorkbenchSurface) {
         if surface == .accounts { renderAccounts(); return }
+        if surface == .papercup { renderChat(); return }
         guard let model = models[surface], let table = tables[surface] else { return }
         rendering = true; defer { rendering = false }
         table.reloadData()
@@ -468,6 +523,108 @@ final class Sidebar: NSPanel {
             models[surface]?.outsideFocus()
             if models[surface]?.visible != true { panels[surface]?.orderOut(nil); cancelReads(surface) }
         }
+    }
+    private func refreshChat() {
+        let generation = chatState.begin(); renderChat()
+        let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
+        let task = Task { [weak self] in
+            do {
+                let environment = try NativeEnvironment.identity(await bridge.read("operator.identity"))
+                let conversation = try await bridge.read("operatorConversations.current",
+                    args: ["workspaceId": environment["workspaceId"]], environment: environment)
+                guard let self, !Task.isCancelled, self.models[.papercup]?.visible == true,
+                      try self.chatState.bind(generation, environment: environment, payload: conversation) else { return }
+                let id = self.chatState.conversationID
+                let page = try await bridge.read("operatorTurns.page",
+                    args: ["conversationId": .string(id), "limit": .number(200)], environment: environment)
+                guard !Task.isCancelled, self.models[.papercup]?.visible == true else { return }
+                if try self.chatState.settle(generation, environment: environment, conversationID: id, payload: page) { self.renderChat() }
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                self.chatState.fail(generation, error); self.renderChat()
+            }
+        }
+        tasks[.papercup, default: []].append(task)
+    }
+    @objc private func loadEarlierChat() {
+        do {
+            let cursor = try chatState.beginEarlier(), generation = chatState.generation
+            let environment = chatState.environment, id = chatState.conversationID
+            let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui)); renderChat()
+            let task = Task { [weak self] in
+                do {
+                    let page = try await bridge.read("operatorTurns.page", args: ["conversationId": .string(id),
+                        "beforeSeq": .number(cursor), "limit": .number(200)], environment: environment)
+                    guard let self, !Task.isCancelled, self.models[.papercup]?.visible == true else { return }
+                    if try self.chatState.settle(generation, environment: environment, conversationID: id,
+                                                beforeSeq: cursor, payload: page) { self.renderChat() }
+                } catch {
+                    guard let self, !Task.isCancelled else { return }
+                    self.chatState.fail(generation, error); self.renderChat()
+                }
+            }
+            tasks[.papercup, default: []].append(task)
+        } catch { messages[.papercup]?.stringValue = error.localizedDescription }
+    }
+    func textDidChange(_ notification: Notification) {
+        guard (notification.object as? NSTextView) === chatComposer else { return }
+        chatState.draft = chatComposer?.string ?? ""; chatSend?.isEnabled = chatState.canSend
+    }
+    @objc private func sendChat() {
+        do {
+            chatState.draft = chatComposer?.string ?? ""
+            let request = try chatState.send(); streamChat(request)
+        } catch { messages[.papercup]?.stringValue = error.localizedDescription }
+    }
+    @objc private func cancelChat() { controlChat("cancel") }
+    @objc private func recoverChat() { controlChat("reconnect") }
+    private func controlChat(_ operation: String) {
+        do {
+            guard let reply = chatState.reply else { return }
+            streamChat(try reply.control(operation))
+        } catch { messages[.papercup]?.stringValue = error.localizedDescription }
+    }
+    private func streamChat(_ request: JSONValue) {
+        chatTask?.cancel(); let operation = UUID(); chatOperation = operation
+        let generation = chatState.generation, bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
+        chatTask = Task { [weak self] in
+            do {
+                for try await frame in bridge.chat(request) {
+                    guard let self, !Task.isCancelled, self.chatOperation == operation,
+                          self.models[.papercup]?.visible == true else { return }
+                    if try self.chatState.receive(generation, frame) { self.renderChat() }
+                }
+                guard let self, !Task.isCancelled, self.chatOperation == operation else { return }
+                guard self.chatState.reply?.complete == true else { throw WorkbenchError("Reply disconnected; recover before sending again") }
+                self.chatTask = nil
+                if self.chatState.reply?.phase == "completed" { self.refreshChat() } else { self.renderChat() }
+            } catch {
+                guard let self, !Task.isCancelled, self.chatOperation == operation else { return }
+                self.chatTask = nil; self.chatState.replyFailed(generation, error); self.renderChat()
+            }
+        }
+        renderChat()
+    }
+    private func renderChat() {
+        chatEarlier?.isEnabled = chatState.ready && !chatState.loading && chatState.reply == nil && chatState.hasMoreEarlier
+        chatComposer?.isEditable = chatState.ready
+        if chatComposer?.string != chatState.draft { chatComposer?.string = chatState.draft }
+        chatSend?.isEnabled = chatState.canSend
+        chatCancel?.isEnabled = chatState.reply.map { !$0.turnID.isEmpty && !$0.complete } ?? false
+        chatRecover?.isEnabled = chatTask == nil && (chatState.reply.map { !$0.turnID.isEmpty && !$0.complete } ?? false)
+        let scope = chatState.environment == .null ? "" : "\n" + chatState.environment["endpoint"].text +
+            " · " + chatState.environment["workspaceId"].text
+        messages[.papercup]?.stringValue = (chatState.error.map { "Unavailable · " + $0 } ??
+            (chatState.loading ? "Loading messages…" : chatState.reply?.phase ?? (chatState.ready ? "Papercup" : "Conversation unavailable"))) + scope
+        var content = chatState.ready && chatState.turns.isEmpty ? "No messages yet." : chatState.markdown
+        if let reply = chatState.reply {
+            if !reply.displayText.isEmpty { content += "\n\n### Papercup\n\n" + reply.displayText }
+            if !reply.tools.isEmpty { content += "\n\n" + reply.tools.joined(separator: "\n\n") }
+        }
+        if let markdown = try? AttributedString(markdown: content, options: .init(interpretedSyntax: .full)) {
+            details[.papercup]?.textStorage?.setAttributedString(NSAttributedString(markdown))
+        } else { details[.papercup]?.string = content }
+        details[.papercup]?.enclosingScrollView?.isHidden = false
     }
     private func refreshAccounts() {
         let generation = accountState.begin(); renderAccounts()

@@ -52,9 +52,31 @@ public struct WorkbenchError: LocalizedError, Equatable {
 public struct PuiBridge {
     public static let models: Set<String> = ["plans.list", "plans.get", "advRoster.list", "reports.list",
         "reports.get", "goals.list", "goals.detail", "planSessions.list", "operator.identity",
-        "accounts.pool", "accounts.sessionOverride"]
+        "accounts.pool", "accounts.sessionOverride", "operatorConversations.current", "operatorTurns.page"]
     public let executable: URL
     public init(executable: URL) { self.executable = executable }
+    /// Incremental delivery over the same bounded child transport as reads.
+    public func chat(_ body: JSONValue) -> AsyncThrowingStream<JSONValue, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let input = try JSONEncoder().encode(body)
+                    guard input.count <= 64 * 1024, FileManager.default.isExecutableFile(atPath: executable.path) else {
+                        throw WorkbenchError("Select an installed PUI and a bounded message")
+                    }
+                    let decoder = NativeChatLines { continuation.yield($0) }
+                    let result = try await BoundedNativeProcess.run(executable: executable, arguments: ["native-chat"],
+                        input: input, timeout: 615, onOutput: { try decoder.push($0) })
+                    try decoder.finish()
+                    guard result.status == 0 else {
+                        throw WorkbenchError("The reply connection ended; recover the saved reply or refresh before sending again")
+                    }
+                    continuation.finish()
+                } catch { continuation.finish(throwing: error) }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
     public func read(_ name: String, args: [String: JSONValue] = [:], environment: JSONValue = .null,
                      timeout: TimeInterval = 22) async throws -> JSONValue {
         guard Self.models.contains(name) else { throw WorkbenchError("Unsupported native read model") }
@@ -133,11 +155,12 @@ struct NativeProcessOutput: Sendable {
     let diagnostic: Data
 }
 enum BoundedNativeProcess {
-    static func run(executable: URL, arguments: [String], input: Data = Data(), timeout: TimeInterval = 10) async throws -> NativeProcessOutput {
+    static func run(executable: URL, arguments: [String], input: Data = Data(), timeout: TimeInterval = 10,
+                    onOutput: (@Sendable (Data) throws -> Void)? = nil) async throws -> NativeProcessOutput {
         guard executable.isFileURL, executable.path.hasPrefix("/"), timeout > 0, timeout.isFinite else {
             throw WorkbenchError("Invalid native command")
         }
-        let invocation = PuiInvocation(executable: executable, arguments: arguments, request: input, timeout: timeout)
+        let invocation = PuiInvocation(executable: executable, arguments: arguments, request: input, timeout: timeout, onOutput: onOutput)
         return try await withTaskCancellationHandler(operation: {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { invocation.start($0) }
@@ -152,15 +175,17 @@ private final class PuiInvocation: @unchecked Sendable {
     private let process = Process()
     private let request: Data
     private let timeout: TimeInterval
+    private let onOutput: (@Sendable (Data) throws -> Void)?
     private var continuation: CheckedContinuation<NativeProcessOutput, Error>?
     private var channels: [DispatchIO] = []
     private var timer: DispatchSourceTimer?
     private var output = Data(), diagnostic = Data()
     private var inputDone = false, outputDone = false, diagnosticDone = false, exited = false
     private var finished = false, cancelled = false, launched = false
-    init(executable: URL, arguments: [String], request: Data, timeout: TimeInterval) {
+    init(executable: URL, arguments: [String], request: Data, timeout: TimeInterval,
+         onOutput: (@Sendable (Data) throws -> Void)? = nil) {
         process.executableURL = executable; process.arguments = arguments
-        self.request = request; self.timeout = timeout
+        self.request = request; self.timeout = timeout; self.onOutput = onOutput
     }
     func cancel() { queue.async { self.cancelled = true; self.finish(.failure(CancellationError())) } }
     func start(_ continuation: CheckedContinuation<NativeProcessOutput, Error>) {
@@ -209,7 +234,10 @@ private final class PuiInvocation: @unchecked Sendable {
                 guard data.count <= 16 * 1024 * 1024 - count else {
                     self.finish(.failure(WorkbenchError("PUI output exceeds the native panel limit"))); return
                 }
-                if diagnostic { self.diagnostic.append(contentsOf: data) } else { self.output.append(contentsOf: data) }
+                if diagnostic { self.diagnostic.append(contentsOf: data) }
+                else if let onOutput = self.onOutput {
+                    do { try onOutput(Data(data)) } catch { self.finish(.failure(error)); return }
+                } else { self.output.append(contentsOf: data) }
             }
             if done {
                 channel.close()
@@ -231,5 +259,26 @@ private final class PuiInvocation: @unchecked Sendable {
         if launched && !exited && process.isRunning { _ = kill(process.processIdentifier, SIGKILL) }
         // Foundation reaps this child; never target its agent/terminal group.
         continuation.resume(with: result)
+    }
+}
+
+/// UTF-8 may split anywhere; decode only complete, bounded JSON lines.
+/// The process IO queue serializes push; finish follows its EOF receipt.
+final class NativeChatLines: @unchecked Sendable {
+    private var pending = Data()
+    private let emit: @Sendable (JSONValue) -> Void
+    init(_ emit: @escaping @Sendable (JSONValue) -> Void) { self.emit = emit }
+    func push(_ bytes: Data) throws {
+        pending.append(bytes)
+        while let end = pending.firstIndex(of: 10) {
+            let line = pending[..<end]
+            guard line.count <= 1024 * 1024 else { throw WorkbenchError("Reply frame is too large") }
+            if !line.isEmpty { emit(try JSONDecoder().decode(JSONValue.self, from: line)) }
+            pending.removeSubrange(...end)
+        }
+        guard pending.count <= 1024 * 1024 else { throw WorkbenchError("Reply frame is too large") }
+    }
+    func finish() throws {
+        guard pending.isEmpty else { throw WorkbenchError("The reply ended with an incomplete frame") }
     }
 }
