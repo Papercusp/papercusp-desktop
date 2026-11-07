@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$BridgeSource,
-    [ValidateSet('fixture', 'operator')][string]$Phase = 'fixture',
+    [ValidateSet('fixture', 'operator', 'startup')][string]$Phase = 'fixture',
     [string]$PuiExecutable,
     [string]$OperatorUrl,
     [string]$ExpectedWorkspace
@@ -40,6 +40,20 @@ function Assert-Reaped([string]$Mode) {
     Assert-True ($null -eq (Get-Process -Id $childId -ErrorAction SilentlyContinue)) ('Helper survived: ' + $childId)
 }
 try {
+    if ($Phase -eq 'startup') {
+        Assert-True ([IO.File]::Exists($PuiExecutable)) 'Startup phase requires the actual PUI executable'
+        # Exercise the native loader before any network request. A successful
+        # cross-build can still depend on an absent Visual C++ redistributable.
+        $version = & $PuiExecutable --version 2>&1
+        Assert-True ($LASTEXITCODE -eq 0) ('PUI failed before startup: native exit ' + $LASTEXITCODE)
+        $passed.Add('standalone PUI starts on the native Windows installation')
+        Assert-True (($version -join "`n") -match '^pui\s+\d+\.\d+\.\d+') 'PUI did not return its version'
+        $passed.Add('standalone PUI returns its version without an operator request')
+        [pscustomobject]@{ok=$true; platform='windows'; phase='startup'; cases=$passed.ToArray();
+            count=$passed.Count; puiSha256=(Get-FileHash -LiteralPath $PuiExecutable -Algorithm SHA256).Hash.ToLowerInvariant();
+            version=($version -join "`n")} | ConvertTo-Json -Depth 8 -Compress
+        return
+    }
     Add-Type -Path $BridgeSource -ReferencedAssemblies System.Web.Extensions
     if ($Phase -eq 'operator') {
         if (-not [IO.File]::Exists($PuiExecutable) -or -not $OperatorUrl -or -not $ExpectedWorkspace) {
