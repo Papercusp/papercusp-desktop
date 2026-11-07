@@ -190,6 +190,26 @@ test('Windows interactive fixture retains failure diagnostics and terminates its
         assert.equal(result.count, 15); assert.equal(new Set(result.cases).size, result.count);
     });
 
+test('Windows actual PUI renders canonical Inbox and rejects a changed workspace before run control', {
+    skip: process.platform !== 'win32' || process.env.PAPERCUSP_TEST_REAL_PUI !== '1'
+        ? 'native Windows leg: select current PUI with explicit operator/workspace/plan' : false,
+    timeout: 120000,
+}, () => {
+    for (const key of ['PAPERCUSP_TEST_PUI_EXE', 'PAPERCUSP_TEST_OPERATOR_URL',
+        'PAPERCUSP_TEST_WORKSPACE', 'PAPERCUSP_TEST_WORKBENCH_PLAN']) assert.ok(process.env[key], key);
+    const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
+        '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'operator-inbox', '-Interactive',
+        '-PuiExecutable', process.env.PAPERCUSP_TEST_PUI_EXE, '-OperatorUrl', process.env.PAPERCUSP_TEST_OPERATOR_URL,
+        '-ExpectedWorkspace', process.env.PAPERCUSP_TEST_WORKSPACE, '-ExpectedPlan', process.env.PAPERCUSP_TEST_WORKBENCH_PLAN],
+    {encoding:'utf8', timeout:110000, windowsHide:true});
+    assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
+    const result = JSON.parse(run.stdout.trim());
+    assert.equal(result.ok, true); assert.equal(result.phase, 'operator-inbox');
+    assert.equal(result.interactiveDesktop, true);
+    assert.equal(result.count, 12); assert.equal(new Set(result.cases).size, result.count);
+});
+
 for (const fixture of ['bridge', 'host']) {
     test('Windows actual PUI and canonical operator read integration: ' + fixture, {
         skip: process.platform !== 'win32' || process.env.PAPERCUSP_TEST_REAL_PUI !== '1'

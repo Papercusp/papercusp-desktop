@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$SourceDirectory,
-    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'inbox', 'operator', 'fixture-diagnostics', 'fixture-failure', 'fixture-timeout')][string]$Phase = 'all',
+    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'inbox', 'operator', 'operator-inbox', 'fixture-diagnostics', 'fixture-failure', 'fixture-timeout')][string]$Phase = 'all',
     [string]$PuiExecutable,
     [string]$OperatorUrl,
     [string]$ExpectedWorkspace,
@@ -76,7 +76,7 @@ if ($Interactive) {
     $fixtureCommand = "$" + "ProgressPreference='SilentlyContinue'; " + '$env:PAPERCUSP_NATIVE_FIXTURE_PROGRESS=' +
         "'" + (Join-Path $directory 'progress.log').Replace("'", "''") + "'; & '" + $PSCommandPath.Replace("'", "''") + "' -SourceDirectory '" +
         $SourceDirectory.Replace("'", "''") + "' -Phase '" + $Phase + "'"
-    if ($Phase -eq 'operator') {
+    if ($Phase -in @('operator', 'operator-inbox')) {
         foreach ($nameValue in @(@('PuiExecutable', $PuiExecutable), @('OperatorUrl', $OperatorUrl),
             @('ExpectedWorkspace', $ExpectedWorkspace), @('ExpectedPlan', $ExpectedPlan), @('ExpectedGoal', $ExpectedGoal))) {
             $fixtureCommand += " -" + $nameValue[0] + " '" + $nameValue[1].Replace("'", "''") + "'"
@@ -113,7 +113,7 @@ Move-Item -LiteralPath ($target + '.tmp') -Destination $target
         $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
         Register-ScheduledTask -TaskName $name -Action $action -Principal $principal | Out-Null
         Start-ScheduledTask -TaskName $name
-        $deadline = [DateTime]::UtcNow.AddSeconds($(if ($Phase -eq 'operator') { 90 } elseif ($Phase -eq 'fixture-timeout') { 12 } else { 35 }))
+        $deadline = [DateTime]::UtcNow.AddSeconds($(if ($Phase -in @('operator', 'operator-inbox')) { 90 } elseif ($Phase -eq 'fixture-timeout') { 12 } else { 35 }))
         while (-not [IO.File]::Exists($receipt) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
         if (-not [IO.File]::Exists($receipt)) { throw 'Interactive fixture produced no terminal receipt; verify the signed-in user desktop' }
         $result = [IO.File]::ReadAllText($receipt) | ConvertFrom-Json
@@ -173,7 +173,7 @@ if ($Phase -eq 'lifecycle') {
     & (Join-Path $PSScriptRoot 'native-workbench-windows-lifecycle.ps1') -SourceDirectory $SourceDirectory -Resident
     return
 }
-if ($Phase -eq 'operator') {
+if ($Phase -in @('operator', 'operator-inbox')) {
     if (-not [IO.File]::Exists($PuiExecutable) -or -not $OperatorUrl -or -not $ExpectedWorkspace -or -not $ExpectedPlan) {
         throw 'Operator phase requires actual PUI, explicit operator URL, expected workspace and plan'
     }
@@ -413,6 +413,61 @@ public static class WorkbenchNativeHostFixture
         var deadline = DateTime.UtcNow.AddSeconds(seconds);
         do { Pump(); if (condition()) return; } while (DateTime.UtcNow < deadline);
         throw new Exception("Native UI did not settle within " + seconds + " seconds");
+    }
+    private static void OperatorInboxNative()
+    {
+        var pui = Environment.GetEnvironmentVariable("WORKBENCH_REAL_PUI");
+        var identity = InboxState.One(PuiReadBridge.ReadAsync(pui, "operator.identity", null, CancellationToken.None).GetAwaiter().GetResult());
+        Check(PanelState.Text(identity, "workspaceId") == Environment.GetEnvironmentVariable("WORKBENCH_EXPECTED_WORKSPACE") &&
+            PanelState.Text(identity, "endpoint").TrimEnd('/') == Environment.GetEnvironmentVariable("PUI_OPERATOR").TrimEnd('/'),
+            "actual Inbox PUI selects the explicit operator workspace");
+        using (var host = new WorkbenchHost(pui))
+        {
+            host.Toggle("inbox"); var panel = host.Panel("inbox");
+            var inbox = (InboxState)panel.GetType().GetField("inbox",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(panel);
+            Until(() => (inbox.ListReady || inbox.ListError != null) && (inbox.BulkReady || inbox.BulkError != null), 30);
+            Check(inbox.ListReady && inbox.ListError == null, "actual PUI loads canonical Inbox groups: " + inbox.ListError);
+            Check(inbox.BulkReady && inbox.BulkError == null, "actual PUI restores the canonical saved run or explicit absence: " + inbox.BulkError);
+            var status = Find<System.Windows.Controls.TextBlock>(panel, "Workbench status");
+            var hwnd = new WindowInteropHelper(panel).Handle;
+            Check(panel.IsVisible && hwnd != IntPtr.Zero && panel.WindowStyle == WindowStyle.None && !panel.ShowInTaskbar &&
+                (Style(hwnd, -16) & 0xC00000) == 0, "actual Inbox renders in a chrome-free resident native HWND");
+            Check(status.Text.Contains(PanelState.Text(identity, "endpoint")) && status.Text.Contains(PanelState.Text(identity, "workspaceId")),
+                "actual Inbox displays the selected operator and workspace");
+            var rows = inbox.Results("");
+            Check(status.Text.StartsWith(rows.Count + " questions") && rows.All(row =>
+                Find<System.Windows.Controls.Button>(panel, "Inbox question " + InboxState.Text(row, "id")) != null),
+                "actual Inbox renders each canonical question identity and visible count");
+            Check(new[] { "start", "stop", "resume", "apply" }.All(operation =>
+                Find<System.Windows.Controls.Button>(panel, "Inbox " + operation) != null),
+                "actual Inbox exposes the native batch and selected review controls");
+            if (inbox.Run == null)
+                Check(status.Text.Contains("No saved bulk run"), "actual Inbox distinguishes canonical saved-run absence from failure");
+            else
+            {
+                var counts = InboxState.Counts(inbox.Run, inbox.Items);
+                Check(status.Text.Contains("Run " + InboxState.Text(inbox.Run, "runId")) &&
+                    status.Text.Contains(counts["decided"] + "/" + counts["total"] + " decided"),
+                    "actual Inbox uses saved identity and item outcomes with the persisted total");
+            }
+            var wrong = new Dictionary<string, object>(identity);
+            wrong["workspaceId"] = PanelState.Text(identity, "workspaceId") + "-not-selected";
+            Refuses(() => PuiReadBridge.ReadAsync(pui, "plans.attention", null, CancellationToken.None, 22000, wrong)
+                .GetAwaiter().GetResult(), "actual Inbox read refuses a changed selected workspace");
+            var request = new Dictionary<string, object> { { "environment", wrong }, { "operation", "stop" },
+                { "confirmed", true }, { "runId", "native-integration-must-never-write" } };
+            Refuses(() => PuiReadBridge.InboxAsync(pui, request, CancellationToken.None).GetAwaiter().GetResult(),
+                "actual native-inbox command refuses a changed workspace before run control");
+            var search = Find<System.Windows.Controls.TextBox>(panel, "Search Workbench");
+            search.Text = "native-integration-no-match-" + Guid.NewGuid().ToString("N");
+            Check(inbox.Results(search.Text).Count == 0 && status.Text.StartsWith("0 questions"),
+                "actual Inbox filters the canonical list without replacing its source");
+            var query = search.Text;
+            host.Toggle("inbox"); host.Toggle("inbox"); Pump();
+            Check(host.Panel("inbox") == panel && new WindowInteropHelper(panel).Handle == hwnd && search.Text == query,
+                "actual Inbox retains its native HWND and query across toggles");
+        }
     }
     private static void OperatorNative()
     {
@@ -711,6 +766,7 @@ public static class WorkbenchNativeHostFixture
         if (phase == "goals") { GoalsNative(); }
         if (phase == "inbox") { InboxModel(); InboxNative(); }
         if (phase == "operator") { OperatorNative(); }
+        if (phase == "operator-inbox") { OperatorInboxNative(); }
         if (phase == "all" || phase == "hotkeys" || phase == "windows")
         { Console.Error.WriteLine("PHASE " + (phase == "all" ? "windows" : phase)); Native(phase != "hotkeys"); }
         return new JavaScriptSerializer().Serialize(new { ok = true, platform = "windows", phase = phase, cases = cases.ToArray(), count = cases.Count,
