@@ -288,7 +288,8 @@ export default class Workbench extends Extension {
         const state = this._states.get(surface);
         state.selection = result.key;
         const generation = ++state.detailGeneration;
-        state.detail = {title: result.title, text: 'Loading…'}; this._render(surface);
+        const loadingDetail = {title: result.title, text: 'Loading…'};
+        state.detail = loadingDetail; this._render(surface);
         try {
             if (result.kind === 'agents') {
                 const roster = await this._bridge.read(this._settings.get_string('pui-path'),
@@ -315,6 +316,11 @@ export default class Workbench extends Extension {
                         return GLib.SOURCE_CONTINUE;
                     });
                 });
+                // Verified focus itself emits notify::focus-window and hides
+                // an unpinned panel, which invalidates detailGeneration. Clear
+                // only this activation's transient object after verification;
+                // a newer selection's detail must survive that callback.
+                if (state.detail === loadingDetail) state.detail = null;
                 if (generation === state.detailGeneration) this._hide(surface, false);
                 return;
             }

@@ -1,13 +1,28 @@
 import assert from 'node:assert/strict';
-import {cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+import {appendFileSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {spawn, spawnSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
 import test from 'node:test';
 import {packageNativeWorkbench, stageNativeWorkbench} from '../bin/package-native-workbench.mjs';
 
 const root = resolve(import.meta.dirname, '..');
+async function withNativeFixture(prefix, action) {
+    const temp=mkdtempSync(join(tmpdir(),prefix));
+    try {
+        const result=await action(temp);
+        rmSync(temp,{recursive:true,force:true});
+        return result;
+    } catch(error) {
+        // Keep generated drivers, installed sources, progress and process output
+        // even when no optional export directory was requested.
+        writeFileSync(join(temp,'failure.json'),JSON.stringify({error:String(error),stack:error.stack},null,2)+'\n');
+        console.error('GNOME_NATIVE_FAILURE_EVIDENCE '+temp);
+        throw error;
+    }
+}
 function checkScript(file) {
     const syntax=spawnSync(process.execPath,['--check',file],{encoding:'utf8',timeout:10000});
     assert.equal(syntax.status,0,'Generated native driver must parse before starting a desktop: '+syntax.stderr);
@@ -50,12 +65,14 @@ console.log(JSON.stringify({rows,environment,version:'native-fixture'}));});
 `, {mode:0o700});
     return file;
 }
-function runOwned(command, args, env, timeout = 35000) {
+function runOwned(command, args, env, timeout = 35000, evidenceDir = null) {
     return new Promise(resolveResult => {
         const child=spawn(command,args,{env,detached:true,stdio:['ignore','pipe','pipe']});
         let stdout='',stderr='',error=null;
-        child.stdout.on('data',data=>{stdout=(stdout+data).slice(-20000);});
-        child.stderr.on('data',data=>{stderr=(stderr+data).slice(-20000);});
+        child.stdout.on('data',data=>{stdout=(stdout+data).slice(-20000);
+            if(evidenceDir)appendFileSync(join(evidenceDir,'stdout.log'),data);});
+        child.stderr.on('data',data=>{stderr=(stderr+data).slice(-20000);
+            if(evidenceDir)appendFileSync(join(evidenceDir,'stderr.log'),data);});
         const timer=setTimeout(()=>{error=new Error('Native fixture deadline exceeded');
             try{process.kill(-child.pid,'SIGKILL');}catch(cause){if(cause.code!=='ESRCH')throw cause;}},timeout);
         let drain;
@@ -66,14 +83,81 @@ function runOwned(command, args, env, timeout = 35000) {
         });
         child.on('error',cause=>{error=cause;});
         child.on('close',(status,signal)=>{clearTimeout(timer);clearTimeout(drain);
+            if(evidenceDir)writeFileSync(join(evidenceDir,'process.json'),JSON.stringify({command,args,status,signal,
+                error:error?{message:error.message,stack:error.stack}:null,stdout,stderr},null,2)+'\n');
             resolveResult({status,signal,error,stdout,stderr});});
     });
 }
 
+async function terminalPreflight(temp, env) {
+    const directory=join(temp,'terminal-preflight');mkdirSync(directory);
+    const pui=fixturePui(directory),receipt=join(directory,'terminal-launch.json');
+    const driver=join(directory,'driver.mjs');
+    writeFileSync(driver,`import Gio from 'gi://Gio';import GLib from 'gi://GLib';
+const argv=[${JSON.stringify(pui)},'workbench','resume','preflight+/=&'];
+const app=Gio.AppInfo.create_from_commandline(argv.map(value=>GLib.shell_quote(value)).join(' '),
+ 'Workbench terminal preflight',Gio.AppInfoCreateFlags.NEEDS_TERMINAL);
+if(!app.launch([],null))throw Error('GIO refused terminal launch');
+const loop=new GLib.MainLoop(null,false);let tries=0,ok=false;
+GLib.timeout_add(GLib.PRIORITY_DEFAULT,50,()=>{
+ if(GLib.file_test(${JSON.stringify(receipt)},GLib.FileTest.EXISTS)){ok=true;loop.quit();return GLib.SOURCE_REMOVE;}
+ if(++tries>=180){loop.quit();return GLib.SOURCE_REMOVE;}return GLib.SOURCE_CONTINUE;});
+loop.run();if(!ok)throw Error('Private GIO terminal did not execute its command');
+print('GIO_TERMINAL_PREFLIGHT_PASS');`);
+    checkScript(driver);
+    // Exercise the real default terminal on a separate private X display and
+    // the same service-free session bus before paying for a Shell boot.
+    const terminalEnv={...env,GDK_BACKEND:'x11'};delete terminalEnv.WAYLAND_DISPLAY;
+    const result=await runOwned('xvfb-run',['-a','-s','-screen 0 1280x800x24 -nolisten tcp',
+        'dbus-run-session',privateBus(directory),'--','gjs','-m',driver],terminalEnv,15000,directory);
+    assert.equal(result.status,0,'Terminal preflight failed before Shell boot: '+JSON.stringify(result));
+    assert.equal(result.error,null,JSON.stringify(result));
+    const launched=JSON.parse(readFileSync(receipt,'utf8'));
+    assert.deepEqual(launched.argv,['workbench','resume','preflight+/=&']);
+    assert.ok(launched.tty.every(Boolean),'Default terminal must supply three PTY descriptors');
+    return {argv:launched.argv,tty:launched.tty,plane:'real default GIO terminal; private X11 and service-free D-Bus; fixture command'};
+}
+
+test('native harness retains generated source, progress and output after a process deadline', async () => {
+    let retained;
+    try {
+        await assert.rejects(withNativeFixture('workbench-harness-',async temp=>{
+            retained=temp;
+            const driver=join(temp,'driver.mjs');
+            writeFileSync(driver,`import {writeFileSync} from 'node:fs';
+writeFileSync(${JSON.stringify(join(temp,'progress.json'))},JSON.stringify({phase:'terminal',assertions:['before timeout']}));
+console.log('driver started');setInterval(()=>{},100);`);
+            const result=await runOwned(process.execPath,[driver],process.env,1000,temp);
+            assert.equal(result.status,0,result.error?.message);
+        }),/Native fixture deadline exceeded/);
+        assert.equal(existsSync(join(retained,'driver.mjs')),true);
+        assert.equal(JSON.parse(readFileSync(join(retained,'progress.json'))).phase,'terminal');
+        const result=JSON.parse(readFileSync(join(retained,'process.json')));
+        assert.equal(result.signal,'SIGKILL');
+        assert.match(result.error.message,/deadline/);
+        assert.match(readFileSync(join(retained,'stdout.log'),'utf8'),/driver started/);
+        assert.match(readFileSync(join(retained,'failure.json'),'utf8'),/deadline/);
+        assert.equal(existsSync(join(retained,'result.json')),false,'A hard timeout must not fabricate a completed result');
+    } finally {if(retained)rmSync(retained,{recursive:true,force:true});}
+});
+
+test('native harness deletes successful fixtures',async () => {
+    let completed;
+    await withNativeFixture('workbench-harness-',async temp=>{completed=temp;writeFileSync(join(temp,'result.json'),'{}');});
+    assert.equal(existsSync(completed),false);
+});
+
+test('private GIO terminal preflight preserves quoted argv and real PTYs without service activation',
+    {skip:process.platform!=='linux',timeout:25000},()=>withNativeFixture('workbench-terminal-',async temp=>{
+        const env={...process.env,XDG_DATA_HOME:join(temp,'data'),XDG_CONFIG_HOME:join(temp,'config'),
+            XDG_CACHE_HOME:join(temp,'cache'),XDG_RUNTIME_DIR:join(temp,'runtime'),
+            GSETTINGS_BACKEND:'keyfile',GIO_USE_VFS:'local',GTK_A11Y:'none'};
+        mkdirSync(env.XDG_RUNTIME_DIR,{mode:0o700});
+        console.log('GIO_TERMINAL_PREFLIGHT '+JSON.stringify(await terminalPreflight(temp,env)));
+    }));
+
 test('GNOME archive installs all runtime sources and preserves private preferences across upgrade',
-    {skip:process.platform!=='linux',timeout:45000}, () => {
-        const temp=mkdtempSync(join(tmpdir(),'workbench-install-'));
-        try {
+    {skip:process.platform!=='linux',timeout:45000}, () => withNativeFixture('workbench-install-',async temp=>{
             const bundle=packageNativeWorkbench(join(temp,'bundle'));
             const env={...process.env,XDG_DATA_HOME:join(temp,'data'),
                 XDG_CONFIG_HOME:join(temp,'config'),XDG_CACHE_HOME:join(temp,'cache'),
@@ -106,13 +190,10 @@ test('GNOME archive installs all runtime sources and preserves private preferenc
                         plane:'GNOME CLI archive and private install/upgrade; desktop distribution not verified'},null,2)+'\n');
             }
             console.log('GNOME_PACKAGE_UPGRADE_PASS '+JSON.stringify({uuid:bundle.uuid,sha256:bundle.sha256}));
-        } finally {rmSync(temp,{recursive:true,force:true});}
-    });
+    }));
 
 test('bundled production installer preserves login, disabled and shortcut choices through upgrade and repair',
-    {skip:process.platform!=='linux',timeout:45000}, () => {
-        const temp=mkdtempSync(join(tmpdir(),'workbench-distribution-'));
-        try {
+    {skip:process.platform!=='linux',timeout:45000}, () => withNativeFixture('workbench-distribution-',async temp=>{
             const desktop=join(temp,'desktop');
             cpSync(join(root,'native'),join(desktop,'native'),{recursive:true});
             const original=stageNativeWorkbench(desktop);
@@ -172,13 +253,10 @@ print(JSON.stringify({first,laterServer,enabled,bundledPui,upgrade,preserved,unc
                     JSON.stringify({...evidence,plane:'production bundle staging and private XDG installation; no desktop login restart or final artifact'},null,2)+'\n');
             }
             console.log('GNOME_DISTRIBUTION_INSTALL_PASS '+JSON.stringify(evidence));
-        } finally {rmSync(temp,{recursive:true,force:true});}
-    });
+    }));
 
 test('real GTK4 resident helper correlates concurrent reads, preserves identity and exits on parent EOF',
-    {skip:process.platform!=='linux',timeout:45000}, async () => {
-        const temp=mkdtempSync(join(tmpdir(),'workbench-helper-'));
-        try {
+    {skip:process.platform!=='linux',timeout:45000}, () => withNativeFixture('workbench-helper-',async temp=>{
             const pui=fixturePui(temp), driver=join(temp,'driver.mjs');
             writeFileSync(driver, `import {ResidentBridge} from ${JSON.stringify(pathToFileURL(join(root,'native/gnome/bridge.js')).href)};
 const bridge=new ResidentBridge(${JSON.stringify(join(root,'native/gnome/helper.js'))});
@@ -200,18 +278,15 @@ print('GTK_RESIDENT_PASS');
             const env={...process.env,GSETTINGS_BACKEND:'memory',GTK_A11Y:'none',
                 XDG_RUNTIME_DIR:runtime,GIO_USE_VFS:'local',LIBGL_ALWAYS_SOFTWARE:'1'};
             const result=await runOwned('xvfb-run',['-a','-s','-screen 0 1280x800x24 -nolisten tcp',
-                'dbus-run-session',privateBus(temp),'--','gjs','-m',driver],env);
+                'dbus-run-session',privateBus(temp),'--','gjs','-m',driver],env,35000,temp);
             assert.equal(result.status,0,JSON.stringify(result));
             assert.equal(result.error,null,JSON.stringify(result));
             assert.match(result.stdout,/GTK_RESIDENT_PASS/);
             assert.doesNotMatch(result.stderr,/Gjs-CRITICAL|JS ERROR|GLib-CRITICAL/);
-        } finally {rmSync(temp,{recursive:true,force:true});}
-    });
+    }));
 
 test('production GNOME installation reports real reload state and survives private Shell login restarts',
-    {skip:process.platform!=='linux',timeout:90000}, async () => {
-        const temp=mkdtempSync(join(tmpdir(),'workbench-login-'));
-        try {
+    {skip:process.platform!=='linux',timeout:90000}, () => withNativeFixture('workbench-login-',async temp=>{
             const bundle=packageNativeWorkbench(join(temp,'bundle'));
             const upgradedSource=join(temp,'upgraded');
             cpSync(join(root,'native/gnome'),upgradedSource,{recursive:true});
@@ -236,12 +311,14 @@ print(JSON.stringify(result));`);
             writeFileSync(driver,`import {spawn,spawnSync} from 'node:child_process';
 import {writeFileSync} from 'node:fs';
 const evidence={phase:'prelogin',assertions:[],boots:[],installs:[]};let shell=null,closed=null;
+function progress(){writeFileSync(${JSON.stringify(join(temp,'progress.json'))},JSON.stringify(evidence,null,2));}
+function setPhase(phase){evidence.phase=phase;progress();}
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-function check(value,name){if(!value)throw Error(name);evidence.assertions.push(name);}
+function check(value,name){if(!value)throw Error(name);evidence.assertions.push(name);progress();}
 function run(file,...args){const r=spawnSync('gjs',['-m',file,...args],{encoding:'utf8',timeout:8000});
  if(r.status!==0)throw Error(r.stderr||r.stdout||String(r.error));return JSON.parse(r.stdout.trim());}
 function snapshot(){try{return run(${JSON.stringify(info)});}catch(error){return {unavailable:String(error)};}}
-async function waitFor(predicate){const end=Date.now()+15000;do{const value=snapshot();evidence.lastInfo=value;
+async function waitFor(predicate){const end=Date.now()+15000;do{const value=snapshot();evidence.lastInfo=value;progress();
  if(predicate(value))return value;if(shell.exitCode!==null)throw Error('Shell exited before '+evidence.phase);
  await delay(100);}while(Date.now()<end);throw Error('Shell convergence deadline: '+evidence.phase);}
 async function stop(){if(!shell)return;shell.kill('SIGTERM');await Promise.race([closed,delay(3000)]);
@@ -254,18 +331,18 @@ async function boot(expectedState=1){const boot={stdout:'',stderr:''};evidence.b
 try{
  const first=run(${JSON.stringify(install)},${JSON.stringify(bundle.archive)});evidence.installs.push(first);
  check(first.changed&&first.firstInstall&&first.loginRequired,'prelogin install registers next login without claiming live activation');
- evidence.phase='first login';const initial=await boot();
+ setPhase('first login');const initial=await boot();
  check(initial.name==='Papercusp Workbench','first login enables unchanged production extension');
- evidence.phase='live upgrade';const upgraded=run(${JSON.stringify(install)},${JSON.stringify(upgrade.archive)});evidence.installs.push(upgraded);
+ setPhase('live upgrade');const upgraded=run(${JSON.stringify(install)},${JSON.stringify(upgrade.archive)});evidence.installs.push(upgraded);
  const live=snapshot();evidence.upgradeInfo=live;
  check(upgraded.changed&&!upgraded.firstInstall,'production upgrade replaces installed archive');
  check(!/ServiceUnknown|UnknownObject|UnknownMethod/.test(upgraded.reloadError||''),'live installer addresses the actual Shell reload API');
  check(upgraded.loginRequired||live.state===1&&live.name===${JSON.stringify(metadata.name)},'reload success must correspond to the enabled upgraded extension');
- evidence.phase='second login';await stop();const second=await boot();
+ setPhase('second login');await stop();const second=await boot();
  check(second.name===${JSON.stringify(metadata.name)},'fresh Shell login loads persisted upgrade');
- evidence.phase='disable';const disabled=spawnSync('gnome-extensions',['disable','workbench@papercusp.ai'],{encoding:'utf8',timeout:8000});
+ setPhase('disable');const disabled=spawnSync('gnome-extensions',['disable','workbench@papercusp.ai'],{encoding:'utf8',timeout:8000});
  check(disabled.status===0,'GNOME disables production extension');await waitFor(value=>value.state===2);
- evidence.phase='disabled login';await stop();
+ setPhase('disabled login');await stop();
  // A disabled extension is listed but must stay inactive across login.
  const disabledLogin=await boot(6);
  check(disabledLogin.state===6&&!disabledLogin.enabled,'disabled production extension remains disabled at next login');
@@ -274,7 +351,7 @@ try{
 finally{await stop();writeFileSync(${JSON.stringify(resultFile)},JSON.stringify(evidence,null,2));}
 process.exitCode=evidence.ok?0:1;`);
             for(const file of [install,info,driver])checkScript(file);
-            const result=await runOwned('dbus-run-session',[privateBus(temp),'--',process.execPath,driver],env,75000);
+            const result=await runOwned('dbus-run-session',[privateBus(temp),'--',process.execPath,driver],env,75000,temp);
             const evidence=existsSync(resultFile)?JSON.parse(readFileSync(resultFile,'utf8')):null;
             if(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR){
                 mkdirSync(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,{recursive:true});
@@ -285,13 +362,18 @@ process.exitCode=evidence.ok?0:1;`);
             assert.equal(result.status,0,JSON.stringify(result));
             assert.equal(result.error,null,JSON.stringify(result));
             console.log('GNOME_LOGIN_LIFECYCLE_PASS '+JSON.stringify(evidence.assertions));
-        } finally {rmSync(temp,{recursive:true,force:true});}
-    });
+    }));
 
-test('private GNOME Shell renders actors and handles real seat keyboard, pointer and nested dismissal',
-    {skip:process.platform!=='linux',timeout:60000}, async () => {
-        const temp=mkdtempSync(join(tmpdir(),'workbench-shell-'));
-        try {
+const selectedJourney=process.env.PAPERCUSP_GNOME_JOURNEY||'all';
+assert.ok(['all','inbox','input','focus','resume'].includes(selectedJourney),'Unknown PAPERCUSP_GNOME_JOURNEY');
+// Preserve every scenario while bounding each independent desktop lifetime.
+// The input journey includes the controller and Inbox cases; focus and Resume
+// start from a fresh Shell and cannot spend each other's deadline budget.
+for(const journey of selectedJourney==='all'?['input','focus','resume']:[selectedJourney]){
+test('private GNOME Shell renders actors and handles real seat keyboard, pointer and nested dismissal ['+journey+']',
+    {skip:process.platform!=='linux',timeout:75000}, () => withNativeFixture('workbench-shell-',async temp=>{
+            const evidenceDirectory=process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR&&
+                join(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,'gnome-native-'+journey);
             const data=join(temp,'data'), config=join(temp,'config'), runtime=join(temp,'runtime');
             for(const dir of [data,config,runtime,join(temp,'cache')])mkdirSync(dir,{recursive:true,mode:0o700});
             const extension=join(data,'gnome-shell/extensions/workbench@papercusp.ai');
@@ -319,20 +401,56 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import Workbench from './workbench.js';
 const assertions=[];
 const inputLog=[];
+const journey=${JSON.stringify(journey)};
+const started=GLib.get_monotonic_time(),phases=[];
 let phase='controller';
-function check(value,name){if(!value)throw Error(name);assertions.push(name);}
-function waitFor(predicate){return new Promise((resolve,reject)=>{let n=0;GLib.timeout_add(GLib.PRIORITY_DEFAULT,50,()=>{if(predicate()){resolve();return GLib.SOURCE_REMOVE;}if(++n>180){reject(Error('native state deadline: '+phase));return GLib.SOURCE_REMOVE;}return GLib.SOURCE_CONTINUE;});});}
+function progress(){GLib.file_set_contents(${JSON.stringify(join(temp,'progress.json'))},JSON.stringify({phase,journey,elapsedMs:(GLib.get_monotonic_time()-started)/1000,phases,assertions,inputLog}));}
+function setPhase(value){phase=value;phases.push({phase,elapsedMs:(GLib.get_monotonic_time()-started)/1000});progress();}
+function check(value,name){if(!value)throw Error(name);assertions.push(name);progress();}
+function waitFor(predicate){return new Promise((resolve,reject)=>{let n=0;GLib.timeout_add(GLib.PRIORITY_DEFAULT,50,()=>{try{progress();if(predicate()){resolve();return GLib.SOURCE_REMOVE;}if(++n>180)throw Error('native state deadline: '+phase);return GLib.SOURCE_CONTINUE;}catch(error){reject(error);return GLib.SOURCE_REMOVE;}});});}
 function tick(){return new Promise(resolve=>GLib.timeout_add(GLib.PRIORITY_DEFAULT,40,()=>{resolve();return GLib.SOURCE_REMOVE;}));}
 async function captureScreen(){const stream=Gio.File.new_for_path(${JSON.stringify(screenshot)}).replace(null,false,Gio.FileCreateFlags.REPLACE_DESTINATION,null);const shooter=new Shell.Screenshot();let timer;try{await Promise.race([new Promise((resolve,reject)=>shooter.screenshot(false,stream,(object,result)=>{try{object.screenshot_finish(result);resolve();}catch(error){reject(error);}})),new Promise((_,reject)=>{timer=GLib.timeout_add(GLib.PRIORITY_DEFAULT,3000,()=>{timer=null;reject(Error('Screenshot deadline'));return GLib.SOURCE_REMOVE;});})]);}finally{if(timer)GLib.source_remove(timer);stream.close(null);}}
 export default class Probe extends Workbench {
  enable(){this._pointerCapture=global.stage.connect('captured-event',(_stage,event)=>{if(event.type()===Clutter.EventType.BUTTON_PRESS){const [x,y]=event.get_coords();const picked=global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE,x,y);inputLog.push({button:event.get_button(),x,y,source:String(event.get_source()),picked:String(picked),inside:[...this._views].map(([surface,v])=>({surface,contains:v.panel.contains(picked)}))});}return Clutter.EVENT_PROPAGATE;});super.enable();GLib.timeout_add(GLib.PRIORITY_DEFAULT,500,()=>{this.probe().catch(error=>this.finish(error));return GLib.SOURCE_REMOVE;});}
- async finish(error){if(error){try{await captureScreen();}catch(cause){inputLog.push({screenshotError:String(cause)});}}GLib.file_set_contents(${JSON.stringify(resultFile)},JSON.stringify({ok:!error,error:error?String(error)+'; '+String(error.stack||''):null,phase,inputLog,actionMode:Main.actionMode,overview:Main.overview.visible,windows:global.get_window_actors().map(actor=>({title:actor.meta_window.get_title(),minimized:actor.meta_window.minimized,focused:actor.meta_window===global.display.focus_window})),states:[...this._states].map(([surface,s])=>({surface,visible:s.visible,pinned:s.pinned,selection:s.selection,detail:s.detail})),assertions}));if(this._focusFixture){this._focusFixture.force_exit();await new Promise(resolve=>this._focusFixture.wait_async(null,(child,result)=>{child.wait_finish(result);resolve();}));}if(this._inputCapture)global.stage.disconnect(this._inputCapture);global.stage.disconnect(this._pointerCapture);this.disable();global.context.terminate();}
+ async finish(error){progress();if(error||!GLib.file_test(${JSON.stringify(screenshot)},GLib.FileTest.EXISTS)){try{await captureScreen();}catch(cause){inputLog.push({screenshotError:String(cause)});error||=cause;}}GLib.file_set_contents(${JSON.stringify(resultFile)},JSON.stringify({ok:!error,error:error?String(error)+'; '+String(error.stack||''):null,phase,journey,inputLog,actionMode:Main.actionMode,overview:Main.overview.visible,windows:global.get_window_actors().map(actor=>({title:actor.meta_window.get_title(),minimized:actor.meta_window.minimized,focused:actor.meta_window===global.display.focus_window})),states:[...this._states].map(([surface,s])=>({surface,visible:s.visible,pinned:s.pinned,selection:s.selection,detail:s.detail})),assertions}));if(this._focusFixture){this._focusFixture.force_exit();await new Promise(resolve=>this._focusFixture.wait_async(null,(child,result)=>{child.wait_finish(result);resolve();}));}if(this._inputCapture)global.stage.disconnect(this._inputCapture);global.stage.disconnect(this._pointerCapture);this.disable();global.context.terminate();}
  async probe(){
   this._settings.set_string('pui-path',${JSON.stringify(pui)});
   check(this._bindings.size===3,'native shortcut acquisition');
+  const qa=this._states.get('quick-access'),goals=this._states.get('goals');
+  const seat=Clutter.get_default_backend().get_default_seat();
+  check(typeof seat.create_virtual_device==='function','native seat supports input injection');
+  const keyboard=seat.create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
+  const pointer=seat.create_virtual_device(Clutter.InputDeviceType.POINTER_DEVICE);
+  check(typeof keyboard.notify_keyval==='function'&&typeof pointer.notify_absolute_motion==='function','native input methods exist');
+  this._inputCapture=global.stage.connect('captured-event',(_stage,event)=>{if(event.type()===Clutter.EventType.KEY_PRESS)inputLog.push({key:event.get_key_symbol(),mode:Main.actionMode});return Clutter.EVENT_PROPAGATE;});
+  const time=()=>GLib.get_monotonic_time();
+  const key=async symbol=>{keyboard.notify_keyval(time(),symbol,Clutter.KeyState.PRESSED);await tick();keyboard.notify_keyval(time(),symbol,Clutter.KeyState.RELEASED);await tick();};
+  const chord=async symbols=>{for(const symbol of symbols){keyboard.notify_keyval(time(),symbol,Clutter.KeyState.PRESSED);await tick();}for(const symbol of [...symbols].reverse()){keyboard.notify_keyval(time(),symbol,Clutter.KeyState.RELEASED);await tick();}};
+  const primaryButton=Clutter.BUTTON_PRIMARY;
+  const click=async findActor=>{
+   const deadline=GLib.get_monotonic_time()+2000000;
+   do{
+    await tick();const actor=findActor();if(!actor)continue;
+    const [x,y]=actor.get_transformed_position(),[w,h]=actor.get_transformed_size();
+    pointer.notify_absolute_motion(time(),x+w/2,y+h/2);await tick();
+    // A canonical source may settle and replace the result controls while
+    // the pointer is moving. Never inspect or click the disposed old actor.
+    if(findActor()!==actor){inputLog.push({replacedActor:phase});continue;}
+    pointer.notify_button(time(),primaryButton,Clutter.ButtonState.PRESSED);await tick();
+    pointer.notify_button(time(),primaryButton,Clutter.ButtonState.RELEASED);await tick();return;
+   }while(GLib.get_monotonic_time()<deadline);
+   throw Error('No stable current native control: '+phase);
+  };
+  setPhase('desktop startup');
+  await waitFor(()=>!Main.layoutManager._startingUp);
+  if(Main.overview.visible)await key(Clutter.KEY_Escape);
+  await waitFor(()=>Main.actionMode===Shell.ActionMode.NORMAL);
+  check(!Main.overview.visible,'desktop ready for normal shortcuts');
+  if(journey!=='resume'){
+  if(journey!=='focus'){
+  setPhase('controller');
   this._toggle('quick-access');
   await waitFor(()=>Object.values(this._states.get('quick-access').sources).every(s=>s.status!=='loading'));
-  const qa=this._states.get('quick-access'),goals=this._states.get('goals');
   check(qa.results().some(r=>r.row.harness==='exact-harness'),'qualified plan reached native actor model');
   check(this._views.get('quick-access').panel.get_parent()!==null,'Shell actor is attached');
   check(this._views.get('quick-access').content.get_children().length===3,'native result controls rendered');
@@ -357,7 +475,7 @@ export default class Probe extends Workbench {
   check(!qa.visible&&goals.visible,'outside dismissal preserves another pinned surface');
   this._toggle('goals');
   check(this._views.size===0&&!goals.visible,'repeated shortcut toggles pinned surface');
-  phase='inbox';this._toggle('inbox');
+  setPhase('inbox');this._toggle('inbox');
   await waitFor(()=>this._inbox.listReady&&this._inbox.bulkReady);
   check(this._inbox.rows[0].id==='question+/=&','Inbox canonical list reaches native actor');
   check(this._views.get('inbox').bulkStatus.text.includes('1/8 decided'),'Inbox persisted denominator reaches native status');
@@ -370,35 +488,20 @@ export default class Probe extends Workbench {
   check(global.get_window_actors().length===0,'Inbox adds no application window');
   this._hide('inbox',false);
   check(!this._views.has('inbox'),'Inbox dismissal removes native actors and run refresh');
+  if(journey==='inbox')return this.finish(null);
   // These go through Mutter's virtual seat and the actual event dispatch path.
   // No Workbench controller or synthetic signal is called for this phase.
-  const seat=Clutter.get_default_backend().get_default_seat();
-  check(typeof seat.create_virtual_device==='function','native seat supports input injection');
-  const keyboard=seat.create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
-  const pointer=seat.create_virtual_device(Clutter.InputDeviceType.POINTER_DEVICE);
-  check(typeof keyboard.notify_keyval==='function'&&typeof pointer.notify_absolute_motion==='function','native input methods exist');
-  this._inputCapture=global.stage.connect('captured-event',(_stage,event)=>{if(event.type()===Clutter.EventType.KEY_PRESS)inputLog.push({key:event.get_key_symbol(),mode:Main.actionMode});return Clutter.EVENT_PROPAGATE;});
-  const time=()=>GLib.get_monotonic_time();
-  const key=async symbol=>{keyboard.notify_keyval(time(),symbol,Clutter.KeyState.PRESSED);await tick();keyboard.notify_keyval(time(),symbol,Clutter.KeyState.RELEASED);await tick();};
-  const chord=async symbols=>{for(const symbol of symbols){keyboard.notify_keyval(time(),symbol,Clutter.KeyState.PRESSED);await tick();}for(const symbol of [...symbols].reverse()){keyboard.notify_keyval(time(),symbol,Clutter.KeyState.RELEASED);await tick();}};
-  const primaryButton=Clutter.BUTTON_PRIMARY;
-  const click=async actor=>{await tick();const [x,y]=actor.get_transformed_position();const [w,h]=actor.get_transformed_size();pointer.notify_absolute_motion(time(),x+w/2,y+h/2);await tick();pointer.notify_button(time(),primaryButton,Clutter.ButtonState.PRESSED);await tick();pointer.notify_button(time(),primaryButton,Clutter.ButtonState.RELEASED);await tick();};
-  phase='desktop startup';
-  await waitFor(()=>!Main.layoutManager._startingUp);
-  if(Main.overview.visible)await key(Clutter.KEY_Escape);
-  await waitFor(()=>Main.actionMode===Shell.ActionMode.NORMAL);
-  check(!Main.overview.visible,'desktop ready for normal shortcuts');
   qa.pinned=false;goals.pinned=false;
-  phase='shortcut';
+  setPhase('shortcut');
   await chord([Clutter.KEY_Super_L,Clutter.KEY_Alt_L,Clutter.KEY_space]);
   await waitFor(()=>qa.visible&&qa.sources.reports?.status==='ready');
   check(this._views.has('quick-access'),'seat shortcut opens panel');
-  phase='typing';
+  setPhase('typing');
   await chord([Clutter.KEY_Control_L,Clutter.KEY_a]);
   for(const symbol of [Clutter.KEY_n,Clutter.KEY_e,Clutter.KEY_e,Clutter.KEY_d,Clutter.KEY_l,Clutter.KEY_e])await key(symbol);
   await waitFor(()=>qa.query==='needle'&&qa.sources.reports?.rows?.[0]?.title==='Report needle');
   check(this._views.get('quick-access').search.get_text()==='needle','seat typing reaches focused native search');
-  phase='navigation';
+  setPhase('navigation');
   // Each source completes independently. A report response alone does not
   // establish the two-result population that this navigation case exercises.
   await waitFor(()=>Object.values(qa.sources).every(source=>source.status==='ready')&&
@@ -413,38 +516,40 @@ export default class Probe extends Workbench {
   check(entryActivated,'focused search consumes Enter through native activate signal');
   await waitFor(()=>qa.detail?.text==='# Exact report exact+/=&');
   check(qa.visible,'seat Enter opens exact selected detail');
-  phase='detail escape';
+  setPhase('detail escape');
   await key(Clutter.KEY_Escape);
   await waitFor(()=>!qa.detail);
   check(qa.visible,'seat Escape dismisses detail before surface');
-  phase='pin click';
+  setPhase('pin click');
   const pin=this._views.get('quick-access').panel.get_first_child().get_children()[1];
-  await click(pin);
+  await click(()=>this._views.get('quick-access')?.panel.get_first_child().get_children()[1]);
   check(qa.pinned&&pin.label==='Unpin','seat click pins native panel');
-  phase='second shortcut';
+  setPhase('second shortcut');
   await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_g]);
   await waitFor(()=>goals.visible&&goals.sources.goals?.status==='ready');
   check(qa.visible&&this._views.size===2,'seat second shortcut preserves independent pin');
   await tick();
   await captureScreen();
   check(global.get_window_actors().length===0,'seat journey keeps native surfaces outside application windows');
-  phase='outside click';
+  setPhase('outside click');
   pointer.notify_absolute_motion(time(),5,450);await tick();
   pointer.notify_button(time(),primaryButton,Clutter.ButtonState.PRESSED);await tick();
   pointer.notify_button(time(),primaryButton,Clutter.ButtonState.RELEASED);await tick();
   await waitFor(()=>!goals.visible);
   check(qa.visible&&qa.pinned,'seat outside click closes unpinned panel and preserves pin');
-  phase='final toggle';
+  setPhase('final toggle');
   await chord([Clutter.KEY_Super_L,Clutter.KEY_Alt_L,Clutter.KEY_space]);
   await waitFor(()=>!qa.visible);
   check(this._views.size===0,'seat shortcut toggles pinned panel closed');
-  phase='focus fixture mapping';
+  if(journey==='input')return this.finish(null);
+  }
+  setPhase('focus fixture mapping');
   this._focusFixture=Gio.Subprocess.new(['gjs','-m',${JSON.stringify(focusDriver)}],Gio.SubprocessFlags.NONE);
   await waitFor(()=>{
    const actors=global.get_window_actors().filter(actor=>actor.meta_window.get_title()?.startsWith('Needle agent [adv:'));
    return actors.length===2&&actors.every(actor=>actor.mapped);
   });
-  phase='focus fixture ready';
+  setPhase('focus fixture ready');
   const distractor=global.get_window_actors().find(actor=>actor.meta_window.get_title()==='Needle agent [adv:42420]').meta_window;
   const focusSnapshot=step=>inputLog.push({focusStep:step,currentTime:global.get_current_time(),
    windows:global.get_window_actors().map(actor=>({title:actor.meta_window.get_title(),mapped:actor.mapped,
@@ -456,11 +561,11 @@ export default class Probe extends Workbench {
   const agent={ownerId:'exact-local-agent',label:'Needle agent',host:GLib.get_host_name(),
     sessionState:'live',advSessionId:4242,pid:Number(this._focusFixture.get_identifier())};
   GLib.file_set_contents(${JSON.stringify(join(temp,'roster.json'))},JSON.stringify({active:[agent],ended:[]}));
-  phase='focus roster loaded';
+  setPhase('focus roster loaded');
   qa.pinned=false;this._toggle('quick-access');
   await waitFor(()=>qa.results().some(row=>row.kind==='agents'));
   const selectedAgent=qa.results().find(row=>row.kind==='agents');
-  phase='stale native agent focus';
+  setPhase('stale native agent focus');
   const priorFocus=global.display.focus_window;
   GLib.file_set_contents(${JSON.stringify(join(temp,'roster.json'))},JSON.stringify({active:[{...agent,advSessionId:4243}],ended:[]}));
   await this._activate('quick-access',selectedAgent);
@@ -469,18 +574,26 @@ export default class Probe extends Workbench {
   check(global.display.focus_window===priorFocus,
     'stale selection leaves the previously focused terminal unchanged');
   GLib.file_set_contents(${JSON.stringify(join(temp,'roster.json'))},JSON.stringify({active:[agent],ended:[]}));
-  phase='exact native agent focus';
+  setPhase('exact native agent focus');
   await this._activate('quick-access',selectedAgent);
   check(global.display.focus_window?.get_title()==='Needle agent [adv:4242]',
     'native activation observes exact launch window despite shared process and similar titles');
   check(!qa.visible,'verified terminal focus dismisses its native launcher');
-  phase='native explicit resume';
+  check(qa.detail===null,'verified terminal focus clears transient loading detail');
+  this._toggle('quick-access');
+  await waitFor(()=>Object.values(qa.sources).every(source=>source.status==='ready'));
+  check(qa.visible&&!qa.detail,'reopened native launcher shows results after verified focus');
+  check(this._views.get('quick-access').content.get_children().some(actor=>actor.accessible_name==='agents: Needle agent'),
+    'reopened native launcher renders a current agent control');
+  return this.finish(null);
+  }
+  setPhase('native explicit resume');
   const ended={id:4241,coordOwnerId:'ended-owner',agent:'codex',label:'Needle ended session',
     hostname:GLib.get_host_name()};
   const writeRoster=value=>GLib.file_set_contents(${JSON.stringify(join(temp,'roster.json'))},JSON.stringify(value));
   writeRoster({active:[],ended:[ended]});
   this._toggle('quick-access');
-  await waitFor(()=>qa.results().some(row=>row.row.advSessionId===4241));
+  await waitFor(()=>Object.values(qa.sources).every(source=>source.status==='ready')&&qa.results().some(row=>row.row.advSessionId===4241));
   const selectedEnded=qa.results().find(row=>row.row.advSessionId===4241);
   const handoffs=[];
   const launchResume=this._launchResume;
@@ -499,29 +612,39 @@ export default class Probe extends Workbench {
   const resumeButton=this._views.get('quick-access').content.get_children()
     .find(actor=>actor.accessible_name==='Resume session: Needle ended session');
   check(Boolean(resumeButton),'ended result exposes an explicit native Resume button');
-  await click(resumeButton);
+  let replaceControl=true;
+  await click(()=>{
+    const actor=this._views.get('quick-access')?.content.get_children()
+      .find(actor=>actor.accessible_name==='Resume session: Needle ended session');
+    if(actor&&replaceControl){replaceControl=false;GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE,()=>{
+      this._render('quick-access');return GLib.SOURCE_REMOVE;});}
+    return actor;
+  });
+  check(inputLog.some(row=>row.replacedActor===phase),
+    'native click reacquires a result replaced during pointer motion');
   await waitFor(()=>handoffs.length===1);
   check(JSON.stringify(handoffs[0])===JSON.stringify([${JSON.stringify(pui)},'workbench','resume',
     '4241',GLib.get_host_name(),'ended-owner']),
     'seat Resume passes the exact ID, host and owner through the configured PUI argv');
   check(!qa.visible,'accepted terminal handoff dismisses its native launcher');
-  phase='native saved remote resume';
+  setPhase('native saved remote resume');
   writeRoster({active:[],ended:[{...ended,hostname:'saved-remote'}]});
   this._toggle('quick-access');
-  await waitFor(()=>qa.sources.agents?.status==='ready');
+  await waitFor(()=>Object.values(qa.sources).every(source=>source.status==='ready'));
   await this._resume('quick-access',qa.results().find(row=>row.row.advSessionId===4241));
   check(handoffs.length===2&&handoffs[1][4]==='saved-remote',
     'native remote Resume preserves the saved host for terminal-side connection selection');
   check(qa.detail===null,'accepted Resume clears transient checking detail before reopen');
-  phase='real GIO terminal launch';
+  setPhase('real GIO terminal launch');
   this._launchResume=launchResume;
   writeRoster({active:[],ended:[ended]});
   this._toggle('quick-access');
-  await waitFor(()=>qa.sources.agents?.status==='ready');
+  await waitFor(()=>Object.values(qa.sources).every(source=>source.status==='ready'));
   const realResume=this._views.get('quick-access').content.get_children()
     .find(actor=>actor.accessible_name==='Resume session: Needle ended session');
   check(Boolean(realResume),'real terminal journey exposes the selected Resume button');
-  await click(realResume);
+  await click(()=>this._views.get('quick-access')?.content.get_children()
+    .find(actor=>actor.accessible_name==='Resume session: Needle ended session'));
   await waitFor(()=>GLib.file_test(${JSON.stringify(join(temp,'terminal-launch.json'))},GLib.FileTest.EXISTS));
   const launched=JSON.parse(new TextDecoder().decode(GLib.file_get_contents(
     ${JSON.stringify(join(temp,'terminal-launch.json'))})[1]));
@@ -535,6 +658,12 @@ export default class Probe extends Workbench {
 }
 `);
             checkScript(join(extension,'extension.js'));
+            const sourceCustody={archiveSha256:bundle.sha256,journey,
+                files:Object.fromEntries(['extension.js','workbench.js','panel-model.mjs','bridge.js','helper.js',
+                    'schemas/org.gnome.shell.extensions.papercusp-workbench.gschema.xml'].map(file=>
+                    [file,createHash('sha256').update(readFileSync(join(extension,file))).digest('hex')])),
+                testSha256:createHash('sha256').update(readFileSync(import.meta.filename)).digest('hex')};
+            writeFileSync(join(temp,'source-custody.json'),JSON.stringify(sourceCustody,null,2)+'\n');
             const env={...process.env,XDG_DATA_HOME:data,XDG_CONFIG_HOME:config,XDG_CACHE_HOME:join(temp,'cache'),
                 XDG_RUNTIME_DIR:runtime,GSETTINGS_BACKEND:'keyfile',GTK_A11Y:'none',
                 LIBGL_ALWAYS_SOFTWARE:'1',GIO_USE_VFS:'local',GNOME_SHELL_SESSION_MODE:'user',WAYLAND_DISPLAY:'workbench-test'};
@@ -542,28 +671,32 @@ export default class Probe extends Workbench {
             const settings=spawnSync('gsettings',['set','org.gnome.shell','enabled-extensions',
                 "['workbench@papercusp.ai']"],{env,encoding:'utf8'});
             assert.equal(settings.status,0,settings.stderr);
+            if(journey==='resume')await terminalPreflight(temp,env);
+            writeFileSync(join(temp,'progress.json'),JSON.stringify({phase:'Shell boot',journey,assertions:[]}));
             const result=await runOwned('dbus-run-session',[privateBus(temp),'--','gnome-shell','--headless','--wayland','--no-x11',
-                '--virtual-monitor','1440x900','--wayland-display','workbench-test'],env,45000);
+                '--virtual-monitor','1440x900','--wayland-display','workbench-test'],env,45000,temp);
             const evidence=existsSync(resultFile)?JSON.parse(readFileSync(resultFile,'utf8')):null;
+            const progress=JSON.parse(readFileSync(join(temp,'progress.json'),'utf8'));
             // Retain failure evidence before assertions or cleanup, so a failed
             // journey is diagnosable without another expensive desktop boot.
-            if(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR){
-                mkdirSync(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,{recursive:true});
-                writeFileSync(join(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,'gnome-native-process.json'),
-                    JSON.stringify({evidence,...result},null,2)+'\n');
-                if(existsSync(screenshot))cpSync(screenshot,join(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,'gnome-native-input.png'));
+            if(evidenceDirectory){
+                mkdirSync(evidenceDirectory,{recursive:true});
+                writeFileSync(join(evidenceDirectory,'gnome-native-process.json'),
+                    JSON.stringify({evidence,progress,sourceCustody,...result},null,2)+'\n');
+                if(existsSync(screenshot))cpSync(screenshot,join(evidenceDirectory,'gnome-native-input.png'));
             }
-            assert.equal(evidence?.ok,true,JSON.stringify({evidence,...result}));
+            assert.equal(evidence?.ok,true,JSON.stringify({evidence,progress,...result}));
             assert.equal(result.status,0,JSON.stringify(result));
             assert.equal(result.error,null,JSON.stringify(result));
-            assert.ok(evidence.assertions.length>=24,JSON.stringify(evidence));
+            const minimumAssertions={inbox:25,input:36,focus:11,resume:16};
+            assert.ok(evidence.assertions.length>=minimumAssertions[journey],JSON.stringify(evidence));
             assert.deepEqual([...readFileSync(screenshot).subarray(0,8)], [137,80,78,71,13,10,26,10]);
-            if(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR){
-                mkdirSync(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,{recursive:true});
-                cpSync(screenshot,join(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,'gnome-native-input.png'));
-                writeFileSync(join(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,'gnome-native-input.json'),
-                    JSON.stringify({...evidence,plane:'private GNOME virtual seat; fixture PUI; current build'},null,2)+'\n');
+            if(evidenceDirectory){
+                mkdirSync(evidenceDirectory,{recursive:true});
+                cpSync(screenshot,join(evidenceDirectory,'gnome-native-input.png'));
+                writeFileSync(join(evidenceDirectory,'gnome-native-input.json'),
+                    JSON.stringify({...evidence,sourceCustody,plane:'private GNOME virtual seat; fixture PUI; current build'},null,2)+'\n');
             }
-            console.log('GNOME_NATIVE_PASS '+JSON.stringify(evidence));
-        } finally {rmSync(temp,{recursive:true,force:true});}
-    });
+            console.log('GNOME_NATIVE_PASS '+JSON.stringify({...evidence,sourceCustody}));
+    }));
+}
