@@ -45,6 +45,7 @@ final class Sidebar: NSPanel {
     private var inboxButtons: [String: NSButton] = [:]
     private var inboxReviewStack: NSStackView?, inboxActionChoice: NSPopUpButton?, inboxAnswer: NSTextField?
     private var inboxWrite: Task<Void, Never>?
+    private var inboxUpdates: Task<Void, Never>?
     private var renderedInboxReview: [JSONValue]?
     private var chatState = ChatState()
     private var chatEarlier: NSButton?
@@ -388,7 +389,7 @@ final class Sidebar: NSPanel {
         for task in tasks[surface] ?? [] { task.cancel() }; tasks[surface] = []
         detailGeneration[surface, default: 0] += 1
         if surface == .accounts { accountState.invalidate() }
-        if surface == .inbox { inboxState.invalidate() }
+        if surface == .inbox { inboxUpdates?.cancel(); inboxUpdates = nil; inboxState.invalidate() }
         if surface == .papercup {
             cancelVoice()
             cardsTask?.cancel(); cardsTask = nil
@@ -657,6 +658,7 @@ final class Sidebar: NSPanel {
                                 if let id = self.inboxState.selection { self.loadInboxContext(id: id) }
                             } else {
                                 self.inboxState.settleBulk(generation, payload: payload, expectedRunID: runID); self.renderInbox()
+                                if self.inboxState.bulkReady { self.followInboxRun(generation: generation, environment: environment) }
                             }
                         } catch {
                             guard let self, !Task.isCancelled else { return }
@@ -674,6 +676,26 @@ final class Sidebar: NSPanel {
             }
         }
         tasks[.inbox, default: []].append(task); renderInbox()
+    }
+    private func followInboxRun(generation: Int, environment: JSONValue) {
+        guard inboxUpdates == nil else { return }
+        let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
+        inboxUpdates = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+                guard let self, self.models[.inbox]?.visible == true, self.inboxState.generation == generation,
+                      NativeEnvironment.same(self.environments[.inbox] ?? .null, environment) else { return }
+                guard !self.inboxState.pending, let runID = self.inboxState.refreshRunID else { continue }
+                do {
+                    let payload = try await bridge.read("plans.attentionBulkRun", args: ["runId": .string(runID)], environment: environment)
+                    guard !Task.isCancelled else { return }
+                    if self.inboxState.settleLiveBulk(generation, runID: runID, payload: payload) { self.renderInbox() }
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    if self.inboxState.settleLiveBulk(generation, runID: runID, payload: nil, failure: error) { self.renderInbox() }
+                }
+            }
+        }
     }
     private func loadInboxContext(_ table: NSTableView) {
         let rows = inboxState.results(query: models[.inbox]?.query ?? "")
@@ -736,7 +758,7 @@ final class Sidebar: NSPanel {
         inboxButtons["apply"]?.isEnabled = !inboxState.pending && inboxState.run["phase"].text == "review" && !inboxState.selectedReviews.isEmpty
         let prior = inboxActionChoice?.selectedItem?.representedObject as? String
         inboxActionChoice?.removeAllItems()
-        for action in inboxState.context?["actions"].rows ?? [] {
+        for action in inboxState.context.map(InboxState.actions) ?? [] {
             let id = action["id"].text
             guard !["chat", "discuss", "view-log", "open", "message-owner"].contains(id), !id.isEmpty else { continue }
             inboxActionChoice?.addItem(withTitle: action["label"].text.isEmpty ? id : action["label"].text)

@@ -196,6 +196,27 @@ public struct InboxState {
     }
     public func draft(_ row: JSONValue) -> String { reviewDrafts[row["itemId"].text] ?? row["draftAnswer"].text }
     public var activeRun: Bool { ["pending", "running"].contains(run["phase"].text) }
+    public var refreshRunID: String? { savedRunID.text.isEmpty ? nil : savedRunID.text }
+    /// Background reads keep the selected run and its editors intact. A read
+    /// that overlaps a write or a different panel generation cannot apply.
+    @discardableResult public mutating func settleLiveBulk(_ token: Int, runID: String, payload: JSONValue?, failure: Error? = nil) -> Bool {
+        guard token == generation, !pending, refreshRunID == runID else { return false }
+        return settleBulk(token, payload: payload, expectedRunID: runID, failure: failure)
+    }
+    /// Same projection as attentionItemToCardSpec. A source Resolve is required
+    /// before ref.options or a linked conversation can offer an action.
+    public static func actions(_ row: JSONValue) -> [JSONValue] {
+        let options = (row["ref"]["options"].rows ?? []).filter { !$0["id"].text.isEmpty }
+        return (row["actions"].rows ?? []).flatMap { action -> [JSONValue] in
+            let id = action["id"].text
+            guard row["ref"]["kind"].text == "coord-escalation", ["resolve", "mark-done"].contains(id) else { return [action] }
+            if !options.isEmpty { return options }
+            if !row["ref"]["conversationId"].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return [.object(["id": .string("answer"), "label": .string("Answer")])]
+            }
+            return [action]
+        }
+    }
     public func request(_ operation: String, environment: JSONValue, query: String = "",
                         itemID: String? = nil, actionID: String? = nil, answer: String? = nil) throws -> JSONValue {
         guard !pending, NativeEnvironment.same(environment, environment) else { throw WorkbenchError("Wait for the current action and select an environment") }
@@ -228,7 +249,7 @@ public struct InboxState {
             }
         case "resolve":
             guard let context, context["id"].text == selection, !applied.contains(context["id"].text), let actionID,
-                  context["actions"].rows?.contains(where: { $0["id"].text == actionID }) == true else { throw WorkbenchError("Select a current question and offered action") }
+                  Self.actions(context).contains(where: { $0["id"].text == actionID }) else { throw WorkbenchError("Select a current question and offered action") }
             body["expected"] = .object(["id": context["id"], "kind": context["kind"], "ref": context["ref"]]); body["actionId"] = .string(actionID)
             if actionID == "answer" {
                 let text = (answer ?? "").trimmingCharacters(in: .whitespacesAndNewlines)

@@ -229,6 +229,64 @@ final class WorkbenchControlsTests: XCTestCase {
         XCTAssertThrowsError(try state.recordAction(action, request: request, payload: envelope([.object(["ok": .bool(true), "resolved": .bool(true), "itemId": .string("wrong")])], environment: environment)))
         state.finishAction(action, failure: WorkbenchError("Refresh before retrying")); XCTAssertFalse(state.pending)
     }
+    func testInboxEscalationChoicesAndLinkedAnswerPreserveExactReferences() throws {
+        let choice = "pick +/=& ' $() λ"
+        func escalation(options: [JSONValue], linked: String = "conversation +/=& λ", actions: [JSONValue]? = nil) -> JSONValue {
+            .object(["id": .string("escalation +/=& λ"), "kind": .string("coord-escalation"), "title": .string("Choose"),
+                "ref": .object(["kind": .string("coord-escalation"), "msgId": .string("message +/=& λ"),
+                    "conversationId": .string(linked), "options": .array(options)]),
+                "actions": .array(actions ?? [.object(["id": .string("resolve"), "label": .string("Resolve")])])])
+        }
+        let named = escalation(options: [.object(["id": .string(choice), "label": .string("Use the exact choice")])])
+        XCTAssertEqual(InboxState.actions(named).map { $0["id"].text }, [choice])
+        XCTAssertEqual(InboxState.actions(named).first?["label"], .string("Use the exact choice"))
+        var state = InboxState(); let token = state.begin()
+        state.settleList(token, payload: inboxList([named]))
+        let selected = try state.select(named["id"].text)
+        state.settleContext(selected, id: named["id"].text, payload: envelope([named]))
+        let request = try state.request("resolve", environment: environment, actionID: choice)
+        XCTAssertEqual(request["expected"]["ref"], named["ref"]); XCTAssertEqual(request["actionId"], .string(choice))
+        for rejected in ["resolve", "answer", "unoffered"] {
+            XCTAssertThrowsError(try state.request("resolve", environment: environment, actionID: rejected, answer: "text"))
+        }
+        let linked = escalation(options: [])
+        XCTAssertEqual(InboxState.actions(linked).map { $0["id"].text }, ["answer"])
+        state.settleList(token, payload: inboxList([linked])); XCTAssertNil(state.context)
+        XCTAssertThrowsError(try state.request("resolve", environment: environment, actionID: choice))
+        let next = try state.select(linked["id"].text)
+        state.settleContext(next, id: linked["id"].text, payload: envelope([linked]))
+        XCTAssertThrowsError(try state.request("resolve", environment: environment, actionID: "answer", answer: "  "))
+        let answer = try state.request("resolve", environment: environment, actionID: "answer", answer: "  literal answer λ  ")
+        XCTAssertEqual(answer["answer"], .string("literal answer λ")); XCTAssertEqual(answer["expected"]["ref"], linked["ref"])
+        XCTAssertEqual(InboxState.actions(escalation(options: [], linked: "")).map { $0["id"].text }, ["resolve"])
+        XCTAssertTrue(InboxState.actions(escalation(options: [named["ref"]["options"].rows![0]], actions: [])).isEmpty)
+    }
+    func testInboxLiveRunRefreshRejectsLateReadsAndKeepsReviewEditsAcrossFailure() throws {
+        var state = InboxState(); let token = state.begin(), id = savedRun()["runId"].text
+        XCTAssertNil(state.refreshRunID)
+        let pending = envelope([.object(["run": savedRun(), "items": .array([outcome("a", "pending")])])])
+        state.settleBulk(token, payload: pending)
+        XCTAssertEqual(state.refreshRunID, id)
+        let row = outcome("a", "recommended", "recommended")
+        let review = envelope([.object(["run": savedRun(phase: "review"), "items": .array([row])])])
+        XCTAssertTrue(state.settleLiveBulk(token, runID: id, payload: review))
+        XCTAssertEqual(state.run["phase"], .string("review"))
+        XCTAssertEqual(try InboxState.counts(run: state.run, items: state.items)["forReview"], 1)
+        state.setReviewSelected("a", selected: true); state.reviewDrafts["a"] = "owner edit λ"
+        XCTAssertFalse(state.settleLiveBulk(token, runID: "foreign", payload: pending))
+        let action = try state.beginAction([.object([:])])
+        XCTAssertFalse(state.settleLiveBulk(token, runID: id, payload: pending))
+        XCTAssertEqual(state.run["phase"], .string("review")); state.finishAction(action)
+        XCTAssertTrue(state.settleLiveBulk(token, runID: id, payload: nil, failure: WorkbenchError("offline")))
+        XCTAssertFalse(state.bulkReady); XCTAssertNotNil(state.bulkError); XCTAssertEqual(state.refreshRunID, id)
+        XCTAssertTrue(state.settleLiveBulk(token, runID: id, payload: review)); XCTAssertTrue(state.bulkReady)
+        XCTAssertEqual(state.draft(row), "owner edit λ"); XCTAssertTrue(state.selectedReviews.contains("a"))
+        var foreign = savedRun(phase: "review"); if case .object(var fields) = foreign { fields["runId"] = .string("foreign"); foreign = .object(fields) }
+        state.settleLiveBulk(token, runID: id, payload: envelope([.object(["run": foreign, "items": .array([])])]))
+        XCTAssertFalse(state.bulkReady); XCTAssertEqual(state.refreshRunID, id)
+        _ = state.begin()
+        XCTAssertFalse(state.settleLiveBulk(token, runID: id, payload: review))
+    }
     func testAccountsKeepDistinctAxesAndOnlyApplyConfirmedCurrentResponse() throws {
         var state = accounts(); state.selection = "two"
         XCTAssertEqual(state.results(query: "same").count, 2)
