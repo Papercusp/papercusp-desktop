@@ -598,7 +598,11 @@ copy_host_external_closures() {
     # Platform-only optional externals may be absent from the source install.
     # Required imports are still enforced by the final isolated boot probe.
     if resolve_pkg_source "$package" "" >/dev/null 2>&1; then
-      copy_pkg_closure "$package" || return 1
+      if declare -F bundle_host_run_step >/dev/null 2>&1; then
+        bundle_host_run_step "closure-package:$package" copy_pkg_closure "$package" || return 1
+      else
+        copy_pkg_closure "$package" || return 1
+      fi
     fi
   done
 }
