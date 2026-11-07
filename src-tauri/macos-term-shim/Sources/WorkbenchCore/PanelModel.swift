@@ -58,6 +58,11 @@ public struct InboxState {
     public private(set) var run: JSONValue = .null
     public private(set) var context: JSONValue?
     public var selection: String?
+    public private(set) var pending = false, actionNotice: String?
+    public private(set) var selectedReviews = Set<String>()
+    public var reviewDrafts: [String: String] = [:]
+    private var actionGeneration = 0
+    private var applied = Set<String>()
     public init() {}
     @discardableResult public mutating func begin() -> Int {
         generation += 1; rows = []; items = []; listReady = false; listPartial = false; bulkReady = false
@@ -151,9 +156,112 @@ public struct InboxState {
                     throw WorkbenchError("The saved bulk run has changed identity or phase")
                 }; _ = try Self.counts(run: run, items: items)
             }
+            if self.run["runId"] != run["runId"] { selectedReviews = []; reviewDrafts = [:] }
             self.run = run; self.items = items; bulkReady = true; bulkError = nil
+            selectedReviews.formIntersection(Set(items.filter(Self.reviewable).map { $0["itemId"].text }))
         } catch { run = .null; items = []; bulkReady = false; bulkError = error.localizedDescription }
         return true
+    }
+    /// A typed recommendation overrides the legacy disposition column, as in
+    /// canonicalInboxDisposition. Owner-only work is never ordinary Apply.
+    public static func disposition(_ row: JSONValue) -> String {
+        if row["outcome"].text == "recommended", !row["recommendation"]["kind"].text.isEmpty {
+            return row["recommendation"]["kind"].text
+        }
+        return row["disposition"].text.isEmpty ? row["outcome"].text : row["disposition"].text
+    }
+    public static func reviewable(_ row: JSONValue) -> Bool {
+        row["outcome"].text == "recommended" && disposition(row) == "recommended"
+    }
+    public static func retryable(_ row: JSONValue) -> Bool {
+        ["pending", "failed"].contains(row["outcome"].text) ||
+            (row["outcome"].text == "skipped" && ["", "retry_needed"].contains(row["disposition"].text))
+    }
+    public var reviewGroups: [(String, [JSONValue])] {
+        var order: [String] = [], groups: [String: [JSONValue]] = [:]
+        for row in items where row["outcome"].text != "auto_resolved" && row["outcome"].text != "dismissed" {
+            let key = Self.disposition(row)
+            if groups[key] == nil { order.append(key) }; groups[key, default: []].append(row)
+        }
+        return order.map { ($0, groups[$0]!) }
+    }
+    public mutating func setReviewSelected(_ id: String, selected: Bool) {
+        guard !pending, items.contains(where: { $0["itemId"].text == id && Self.reviewable($0) }), !applied.contains(id) else { return }
+        if selected { selectedReviews.insert(id) } else { selectedReviews.remove(id) }
+    }
+    public func draft(_ row: JSONValue) -> String { reviewDrafts[row["itemId"].text] ?? row["draftAnswer"].text }
+    public var activeRun: Bool { ["pending", "running"].contains(run["phase"].text) }
+    public func request(_ operation: String, environment: JSONValue, query: String = "",
+                        itemID: String? = nil, actionID: String? = nil, answer: String? = nil) throws -> JSONValue {
+        guard !pending, NativeEnvironment.same(environment, environment) else { throw WorkbenchError("Wait for the current action and select an environment") }
+        var body: [String: JSONValue] = ["environment": environment, "operation": .string(operation), "confirmed": .bool(true)]
+        switch operation {
+        case "start":
+            let visible = results(query: query)
+            guard listReady, bulkReady, !["pending", "running", "review"].contains(run["phase"].text),
+                  !visible.isEmpty, visible.count <= 2000 else { throw WorkbenchError("Load a nonempty visible batch and finish the current run first") }
+            body["items"] = .array(visible.map { row in .object(["itemId": row["id"], "kind": row["kind"],
+                "title": row["title"], "ref": row["ref"], "ownerAgentId": row["ownerAgentId"]]) })
+            body["filter"] = .object(["tier": .null, "kinds": .array([]), "query": .string(query), "shownCount": .number(Double(visible.count))])
+        case "stop", "resume":
+            guard bulkReady, !run["runId"].text.isEmpty, operation == "stop" ? activeRun : !activeRun else { throw WorkbenchError("Load a saved run in the appropriate phase") }
+            body["runId"] = run["runId"]
+            if operation == "resume" {
+                let ids = items.filter(Self.retryable).map { $0["itemId"] }
+                guard !ids.isEmpty else { throw WorkbenchError("No retryable items remain") }; body["itemIds"] = .array(ids)
+            }
+        case "apply":
+            guard bulkReady, run["phase"].text == "review", let itemID, selectedReviews.contains(itemID), !applied.contains(itemID),
+                  let row = items.first(where: { $0["itemId"].text == itemID && Self.reviewable($0) }),
+                  !row["actionId"].text.isEmpty else { throw WorkbenchError("Select a current recommendation for review") }
+            body["runId"] = run["runId"]
+            body["expected"] = .object(["id": row["itemId"], "kind": row["kind"], "ref": row["ref"]])
+            body["actionId"] = row["actionId"]
+            if row["actionId"].text == "answer" {
+                let text = draft(row).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { throw WorkbenchError("Edit a nonempty answer before Apply") }; body["answer"] = .string(text)
+            }
+        case "resolve":
+            guard let context, context["id"].text == selection, let actionID,
+                  context["actions"].rows?.contains(where: { $0["id"].text == actionID }) == true else { throw WorkbenchError("Select a current question and offered action") }
+            body["expected"] = .object(["id": context["id"], "kind": context["kind"], "ref": context["ref"]]); body["actionId"] = .string(actionID)
+            if actionID == "answer" {
+                let text = (answer ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { throw WorkbenchError("Write an answer first") }; body["answer"] = .string(text)
+            }
+        default: throw WorkbenchError("Unknown Inbox operation")
+        }
+        return .object(body)
+    }
+    /// Freeze every selected request before the first write. No list refresh or
+    /// draft edit can silently change the remainder of this batch.
+    public mutating func beginAction(_ requests: [JSONValue]) throws -> Int {
+        guard !pending, !requests.isEmpty else { throw WorkbenchError("An Inbox action is already pending") }
+        pending = true; actionNotice = nil; actionGeneration += 1; return actionGeneration
+    }
+    @discardableResult public mutating func recordAction(_ token: Int, request: JSONValue, payload: JSONValue) throws -> String? {
+        guard pending, token == actionGeneration, NativeEnvironment.same(request["environment"], payload["environment"]) else {
+            throw WorkbenchError("Action environment changed; refresh to verify the result before retrying")
+        }
+        let receipt = try NativeEnvironment.one(payload)
+        guard receipt["ok"].isTrue else { throw WorkbenchError("Action was not confirmed; refresh before retrying") }
+        if ["apply", "resolve"].contains(request["operation"].text) {
+            guard receipt["resolved"].isTrue, receipt["itemId"] == request["expected"]["id"] else { throw WorkbenchError("Question resolution was not confirmed") }
+            let id = receipt["itemId"].text; applied.insert(id); selectedReviews.remove(id)
+        }
+        if receipt["recorded"] == .bool(false) {
+            actionNotice = "Action succeeded; run bookkeeping is unconfirmed. Refresh and reconcile; do not repeat the action."
+            throw WorkbenchError(actionNotice!)
+        }
+        if request["operation"].text == "start" {
+            guard !receipt["runId"].text.isEmpty else { throw WorkbenchError("Run admission was not confirmed; refresh before retrying") }
+            return receipt["runId"].text
+        }
+        return nil
+    }
+    public mutating func finishAction(_ token: Int, failure: Error? = nil) {
+        guard token == actionGeneration else { return }
+        pending = false; actionNotice = failure?.localizedDescription ?? "Action confirmed. Refreshing saved state…"
     }
     /// Match use-inbox-bulk-run.ts: outcomes supply numerators; the persisted
     /// total supplies the denominator even while individual rows are arriving.
@@ -169,7 +277,7 @@ public struct InboxState {
                   ["pending", "auto_resolved", "recommended", "skipped", "failed", "dismissed"].contains(outcome) else {
                 throw WorkbenchError("Bulk item identity or outcome is invalid")
             }
-            let disposition = item["disposition"].text
+            let disposition = Self.disposition(item)
             if let bucket = ["auto_resolved": "resolved", "pending": "pending", "skipped": "skipped", "failed": "failed", "dismissed": "dismissed"][outcome] {
                 counts[bucket, default: 0] += 1
             }

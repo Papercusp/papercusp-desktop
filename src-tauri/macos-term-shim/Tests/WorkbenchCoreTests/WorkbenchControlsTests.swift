@@ -160,6 +160,70 @@ final class WorkbenchControlsTests: XCTestCase {
             XCTAssertThrowsError(try state.beginAction("auto", accountID: nil))
         }
     }
+    func testInboxStartFreezesOnlyVisibleLiteralCoordinatesAndFilter() throws {
+        var state = InboxState(); let token = state.begin(), row = question("literal +/=& λ")
+        state.settleList(token, payload: inboxList([row, question("other")]))
+        state.settleBulk(token, payload: envelope([.object(["run": .null, "items": .array([])])]))
+        let request = try state.request("start", environment: environment, query: "λ")
+        XCTAssertEqual(request["items"].rows?.count, 1)
+        XCTAssertEqual(request["items"].rows?.first?["itemId"], row["id"])
+        XCTAssertEqual(request["items"].rows?.first?["ref"], row["ref"])
+        XCTAssertEqual(request["filter"]["query"], .string("λ"))
+        XCTAssertThrowsError(try state.request("start", environment: environment, query: "missing"))
+        let action = try state.beginAction([request])
+        XCTAssertThrowsError(try state.request("start", environment: environment))
+        state.begin() // a reload cannot alter the frozen request or release the busy guard
+        XCTAssertTrue(state.pending); XCTAssertEqual(request["items"].rows?.count, 1)
+        XCTAssertEqual(try state.recordAction(action, request: request,
+            payload: envelope([.object(["ok": .bool(true), "runId": .string("new run")])], environment: environment)), "new run")
+        state.finishAction(action); XCTAssertFalse(state.pending)
+    }
+    func testInboxReviewUsesEditedAnswerAndExcludesTypedOwnerOnlyRecommendations() throws {
+        var state = InboxState(); let token = state.begin()
+        let row = JSONValue.object(["runId": savedRun()["runId"], "itemId": .string("a"), "kind": .string("coord-message"),
+            "ref": .object(["kind": .string("coord-message"), "msgId": .number(42)]), "outcome": .string("recommended"),
+            "actionId": .string("answer"), "draftAnswer": .string("original")])
+        guard case .object(var owner) = row else { return XCTFail() }
+        owner["itemId"] = .string("owner"); owner["recommendation"] = .object(["kind": .string("owner_action")])
+        state.settleBulk(token, payload: envelope([.object(["run": savedRun(phase: "review"), "items": .array([row, .object(owner)])])]))
+        XCTAssertEqual(state.reviewGroups.map { $0.0 }, ["recommended", "owner_action"])
+        state.setReviewSelected("owner", selected: true); XCTAssertTrue(state.selectedReviews.isEmpty)
+        state.setReviewSelected("a", selected: true); state.reviewDrafts["a"] = " edited λ "
+        let request = try state.request("apply", environment: environment, itemID: "a")
+        XCTAssertEqual(request["answer"], .string("edited λ")); XCTAssertEqual(request["expected"]["ref"], row["ref"])
+        state.reviewDrafts["a"] = "later change"; XCTAssertEqual(request["answer"], .string("edited λ"))
+        let action = try state.beginAction([request])
+        let receipt = envelope([.object(["ok": .bool(true), "resolved": .bool(true), "itemId": .string("a"), "recorded": .bool(false)])], environment: environment)
+        XCTAssertThrowsError(try state.recordAction(action, request: request, payload: receipt))
+        state.finishAction(action, failure: WorkbenchError("Reconcile the saved run"))
+        state.setReviewSelected("a", selected: true)
+        XCTAssertFalse(state.selectedReviews.contains("a"), "a successful action with failed bookkeeping cannot be repeated")
+        XCTAssertThrowsError(try state.request("apply", environment: environment, itemID: "a"))
+        XCTAssertEqual(try InboxState.counts(run: savedRun(), items: [row, .object(owner)])["ownerAction"], 1)
+    }
+    func testInboxStopContinueAndManualAnswerRequireCurrentStateAndMatchingReceipts() throws {
+        var state = InboxState(); let token = state.begin()
+        let items = [outcome("pending", "pending"), outcome("failed", "failed"), outcome("retry", "skipped", "retry_needed"),
+                     outcome("owner", "skipped", "owner_action"), outcome("done", "auto_resolved"), outcome("review", "recommended")]
+        state.settleBulk(token, payload: envelope([.object(["run": savedRun(), "items": .array(items)])]))
+        XCTAssertEqual(try state.request("stop", environment: environment)["runId"], savedRun()["runId"])
+        XCTAssertThrowsError(try state.request("resume", environment: environment))
+        state.settleBulk(token, payload: envelope([.object(["run": savedRun(phase: "review"), "items": .array(items)])]))
+        XCTAssertEqual(try state.request("resume", environment: environment)["itemIds"], .array([.string("pending"), .string("failed"), .string("retry")]))
+        XCTAssertThrowsError(try state.request("stop", environment: environment))
+        guard case .object(var q) = question() else { return XCTFail() }
+        q["actions"] = .array([.object(["id": .string("answer")])]); let row = JSONValue.object(q)
+        state.settleList(token, payload: inboxList([row])); let selected = try state.select(row["id"].text)
+        state.settleContext(selected, id: row["id"].text, payload: envelope([row]))
+        XCTAssertThrowsError(try state.request("resolve", environment: environment, actionID: "unoffered"))
+        XCTAssertThrowsError(try state.request("resolve", environment: environment, actionID: "answer", answer: "  "))
+        let request = try state.request("resolve", environment: environment, actionID: "answer", answer: " yes ")
+        XCTAssertEqual(request["answer"], .string("yes"))
+        let action = try state.beginAction([request])
+        XCTAssertThrowsError(try state.recordAction(action + 1, request: request, payload: envelope([])))
+        XCTAssertThrowsError(try state.recordAction(action, request: request, payload: envelope([.object(["ok": .bool(true), "resolved": .bool(true), "itemId": .string("wrong")])], environment: environment)))
+        state.finishAction(action, failure: WorkbenchError("Refresh before retrying")); XCTAssertFalse(state.pending)
+    }
     func testAccountsKeepDistinctAxesAndOnlyApplyConfirmedCurrentResponse() throws {
         var state = accounts(); state.selection = "two"
         XCTAssertEqual(state.results(query: "same").count, 2)

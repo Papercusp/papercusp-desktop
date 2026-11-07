@@ -42,6 +42,10 @@ final class Sidebar: NSPanel {
     private var inboxState = InboxState()
     private var inboxBulkStatus: NSTextField?, inboxRunField: NSTextField?
     private var inboxRunID: String?
+    private var inboxButtons: [String: NSButton] = [:]
+    private var inboxReviewStack: NSStackView?, inboxActionChoice: NSPopUpButton?, inboxAnswer: NSTextField?
+    private var inboxWrite: Task<Void, Never>?
+    private var renderedInboxReview: [JSONValue] = []
     private var chatState = ChatState()
     private var chatEarlier: NSButton?
     private var chatComposer: NSTextView?
@@ -304,6 +308,27 @@ final class Sidebar: NSPanel {
             let controls = NSStackView(views: [run, open]); controls.orientation = .horizontal
             root.addArrangedSubview(controls)
             controls.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
+            let operations = NSStackView(); operations.orientation = .horizontal
+            for (id, title) in [("start", "Start visible batch"), ("stop", "Stop"), ("resume", "Continue retryable"), ("apply", "Apply selected")] {
+                let button = NSButton(title: title, target: self, action: #selector(inboxControl(_:)))
+                button.identifier = NSUserInterfaceItemIdentifier(id); operations.addArrangedSubview(button); inboxButtons[id] = button
+            }
+            root.addArrangedSubview(operations)
+            let choice = NSPopUpButton(); inboxActionChoice = choice
+            let answer = NSTextField(); answer.placeholderString = "Your answer to the selected question"
+            answer.setAccessibilityLabel("Answer to selected Inbox question"); inboxAnswer = answer
+            let resolve = NSButton(title: "Resolve selected question", target: self, action: #selector(inboxControl(_:)))
+            resolve.identifier = NSUserInterfaceItemIdentifier("resolve"); inboxButtons["resolve"] = resolve
+            let manual = NSStackView(views: [choice, answer, resolve]); manual.orientation = .horizontal
+            root.addArrangedSubview(manual); manual.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
+            let reviewScroll = NSScrollView(); reviewScroll.hasVerticalScroller = true
+            let review = NSStackView(); review.orientation = .vertical; review.alignment = .leading; review.spacing = 8
+            review.translatesAutoresizingMaskIntoConstraints = false; reviewScroll.documentView = review; inboxReviewStack = review
+            reviewScroll.setAccessibilityLabel("Grouped saved run review")
+            root.addArrangedSubview(reviewScroll)
+            reviewScroll.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
+            reviewScroll.heightAnchor.constraint(equalToConstant: 160).isActive = true
+            review.widthAnchor.constraint(equalTo: reviewScroll.contentView.widthAnchor, constant: -16).isActive = true
         } else {
             for view in [scroll, detailScroll] { view.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true }
         }
@@ -457,6 +482,9 @@ final class Sidebar: NSPanel {
         renderGoalControls(surface)
     }
     func controlTextDidChange(_ notification: Notification) {
+        if let field = notification.object as? NSTextField, let id = field.identifier?.rawValue, id.hasPrefix("inbox-draft:") {
+            inboxState.reviewDrafts[String(id.dropFirst("inbox-draft:".count))] = field.stringValue; return
+        }
         guard let search = notification.object as? NSSearchField, let raw = search.identifier?.rawValue,
               let surface = WorkbenchSurface(rawValue: raw) else { return }
         models[surface]?.query = search.stringValue; render(surface)
@@ -653,6 +681,7 @@ final class Sidebar: NSPanel {
         loadInboxContext(id: rows[table.selectedRow]["id"].text)
     }
     private func loadInboxContext(id: String) {
+        inboxAnswer?.stringValue = ""
         guard let generation = try? inboxState.select(id) else { return }
         let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui)), environment = environments[.inbox] ?? .null
         let task = Task { [weak self] in
@@ -698,6 +727,100 @@ final class Sidebar: NSPanel {
                 "\n\(counts["decided", default: 0])/\(counts["total", default: 0]) decided · \(counts["percent", default: 0])% · " +
                 "\(counts["resolved", default: 0]) resolved · \(counts["unresolved", default: 0]) need attention · \(counts["left", default: 0]) left"
         }
+        if let notice = inboxState.actionNotice { inboxBulkStatus?.stringValue += "\n" + notice }
+        if inboxState.pending { inboxBulkStatus?.stringValue += "\nApplying action…" }
+        let environment = environments[.inbox] ?? .null
+        for operation in ["start", "stop", "resume"] {
+            inboxButtons[operation]?.isEnabled = (try? inboxState.request(operation, environment: environment, query: query)) != nil
+        }
+        inboxButtons["apply"]?.isEnabled = !inboxState.pending && inboxState.run["phase"].text == "review" && !inboxState.selectedReviews.isEmpty
+        let prior = inboxActionChoice?.selectedItem?.representedObject as? String
+        inboxActionChoice?.removeAllItems()
+        for action in inboxState.context?["actions"].rows ?? [] {
+            let id = action["id"].text
+            guard !["chat", "discuss", "view-log", "open", "message-owner"].contains(id), !id.isEmpty else { continue }
+            inboxActionChoice?.addItem(withTitle: action["label"].text.isEmpty ? id : action["label"].text)
+            inboxActionChoice?.lastItem?.representedObject = id
+        }
+        if let prior, let item = inboxActionChoice?.itemArray.first(where: { ($0.representedObject as? String) == prior }) {
+            inboxActionChoice?.select(item)
+        }
+        inboxButtons["resolve"]?.isEnabled = !inboxState.pending && (inboxActionChoice?.numberOfItems ?? 0) > 0
+        inboxAnswer?.isEnabled = !inboxState.pending; inboxActionChoice?.isEnabled = !inboxState.pending
+        // Do not rebuild editors on a checkbox toggle, losing the insertion
+        // point or an owner's partially edited answer.
+        if renderedInboxReview != inboxState.items || inboxState.pending {
+            renderedInboxReview = inboxState.items
+            if let stack = inboxReviewStack {
+                for view in stack.arrangedSubviews { stack.removeArrangedSubview(view); view.removeFromSuperview() }
+                for (group, items) in inboxState.reviewGroups {
+                    stack.addArrangedSubview(NSTextField(labelWithString: group.replacingOccurrences(of: "_", with: " ").capitalized))
+                    for row in items {
+                        let id = row["itemId"].text
+                        let pick = NSButton(checkboxWithTitle: row["title"].text.isEmpty ? id : row["title"].text,
+                            target: self, action: #selector(selectInboxReview(_:)))
+                        pick.identifier = NSUserInterfaceItemIdentifier(id); pick.state = inboxState.selectedReviews.contains(id) ? .on : .off
+                        pick.isEnabled = !inboxState.pending && InboxState.reviewable(row) && inboxState.run["phase"].text == "review"
+                        stack.addArrangedSubview(pick)
+                        let rationale = [row["rationale"].text, row["recommendation"]["rationale"].text, row["error"].text,
+                            row["retryCondition"].text].filter { !$0.isEmpty }.joined(separator: "\n")
+                        if !rationale.isEmpty { stack.addArrangedSubview(NSTextField(wrappingLabelWithString: rationale)) }
+                        if row["actionId"].text == "answer", InboxState.reviewable(row) {
+                            let draft = NSTextField(string: inboxState.draft(row)); draft.placeholderString = "Edit answer before Apply"
+                            draft.identifier = NSUserInterfaceItemIdentifier("inbox-draft:" + id); draft.delegate = self
+                            draft.setAccessibilityLabel("Draft answer for " + pick.title); draft.isEnabled = !inboxState.pending
+                            stack.addArrangedSubview(draft); draft.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+                        } else if !InboxState.reviewable(row) {
+                            stack.addArrangedSubview(NSTextField(wrappingLabelWithString: "Open the question above for manual review. This item is excluded from batch Apply."))
+                        }
+                    }
+                }
+            }
+        }
+    }
+    @objc private func selectInboxReview(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue else { return }
+        inboxState.setReviewSelected(id, selected: sender.state == .on)
+        inboxButtons["apply"]?.isEnabled = !inboxState.pending && !inboxState.selectedReviews.isEmpty
+    }
+    @objc private func inboxControl(_ sender: NSButton) {
+        guard let operation = sender.identifier?.rawValue else { return }
+        do {
+            // Commit the current field editor before freezing drafts.
+            panels[.inbox]?.makeFirstResponder(nil)
+            let environment = environments[.inbox] ?? .null
+            let requests: [JSONValue]
+            if operation == "apply" {
+                requests = try inboxState.items.filter { inboxState.selectedReviews.contains($0["itemId"].text) }.map {
+                    try inboxState.request("apply", environment: environment, itemID: $0["itemId"].text)
+                }
+            } else {
+                requests = [try inboxState.request(operation, environment: environment, query: models[.inbox]?.query ?? "",
+                    actionID: inboxActionChoice?.selectedItem?.representedObject as? String, answer: inboxAnswer?.stringValue)]
+            }
+            let alert = NSAlert(); alert.messageText = sender.title + "?"
+            alert.informativeText = operation == "start" ? "Send exactly \(requests[0]["items"].rows?.count ?? 0) currently visible questions to the resolver with this saved filter?" :
+                (operation == "apply" ? "Apply \(requests.count) selected recommendations with your edited answers?" : "Apply this control to the selected question or saved run?")
+            alert.addButton(withTitle: "Confirm"); alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            let token = try inboxState.beginAction(requests); renderInbox()
+            let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
+            // This write is independent of panel read cancellation: hiding or
+            // refreshing a panel cannot imply that an admitted action stopped.
+            inboxWrite = Task { [weak self] in
+                guard let self else { return }
+                do {
+                    for request in requests {
+                        let receipt = try await bridge.inbox(request)
+                        if let id = try self.inboxState.recordAction(token, request: request, payload: receipt) {
+                            self.inboxRunID = id; self.inboxRunField?.stringValue = id
+                        }
+                    }
+                    self.inboxState.finishAction(token)
+                } catch { self.inboxState.finishAction(token, failure: error) }
+                self.inboxWrite = nil; self.renderedInboxReview = []; self.refresh(.inbox)
+            }
+        } catch { inboxBulkStatus?.stringValue = error.localizedDescription }
     }
     private func refreshChat() {
         cancelVoice()

@@ -105,6 +105,9 @@ public struct PuiBridge {
         return try await invoke("native-account", body: .object(["environment": environment,
             "action": .string(action), "accountId": accountID.map(JSONValue.string) ?? .null]))
     }
+    public func inbox(_ request: JSONValue) async throws -> JSONValue {
+        try await invoke("native-inbox", body: request, timeout: 65)
+    }
     public func goal(_ action: String, detail: JSONValue, confirmed: Bool, environment: JSONValue) async throws -> JSONValue {
         guard confirmed, NativeEnvironment.same(environment, environment), !detail["goal"]["id"].text.isEmpty,
               ["pause", "resume", "start", "reopen", "achieve", "kill"].contains(action) else {
