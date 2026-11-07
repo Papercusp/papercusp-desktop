@@ -5,6 +5,7 @@ param(
     [string]$OperatorUrl,
     [string]$ExpectedWorkspace,
     [string]$ExpectedPlan,
+    [string]$ExpectedGoal,
     [switch]$Interactive
 )
 $ErrorActionPreference = 'Stop'
@@ -27,7 +28,7 @@ if ($Interactive) {
         $SourceDirectory.Replace("'", "''") + "' -Phase '" + $Phase + "'"
     if ($Phase -eq 'operator') {
         foreach ($nameValue in @(@('PuiExecutable', $PuiExecutable), @('OperatorUrl', $OperatorUrl),
-            @('ExpectedWorkspace', $ExpectedWorkspace), @('ExpectedPlan', $ExpectedPlan))) {
+            @('ExpectedWorkspace', $ExpectedWorkspace), @('ExpectedPlan', $ExpectedPlan), @('ExpectedGoal', $ExpectedGoal))) {
             $fixtureCommand += " -" + $nameValue[0] + " '" + $nameValue[1].Replace("'", "''") + "'"
         }
     }
@@ -86,6 +87,7 @@ if ($Phase -eq 'operator') {
     $env:PUI_OPERATOR = $OperatorUrl; $env:PAPERCUSP_OPERATOR_URL = $OperatorUrl
     $env:WORKBENCH_REAL_PUI = $PuiExecutable
     $env:WORKBENCH_EXPECTED_WORKSPACE = $ExpectedWorkspace; $env:WORKBENCH_EXPECTED_PLAN = $ExpectedPlan
+    $env:WORKBENCH_EXPECTED_GOAL = $ExpectedGoal
 }
 [Console]::Error.WriteLine("PHASE compile: loading the production WPF source and full assembly references")
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml, System.Web.Extensions
@@ -348,6 +350,33 @@ public static class WorkbenchNativeHostFixture
             var goalList = Find<System.Windows.Controls.ListBox>(host.Panel("goals"), "Workbench results");
             Check(goalList.Items.Cast<PanelResult>().Select(row => row.Key).SequenceEqual(goals.Results().Select(row => row.Key)),
                 "actual Goals rows retain canonical identities including valid empty results");
+            var expectedGoal = Environment.GetEnvironmentVariable("WORKBENCH_EXPECTED_GOAL");
+            if (!String.IsNullOrWhiteSpace(expectedGoal))
+            {
+                var selected = goalList.Items.Cast<PanelResult>().SingleOrDefault(row => PanelState.Text(row.Row, "id") == expectedGoal);
+                Check(selected != null, "actual Goals portfolio contains the explicitly selected integration goal");
+                goalList.SelectedItem = selected;
+                goalList.RaiseEvent(new System.Windows.Input.MouseButtonEventArgs(System.Windows.Input.Mouse.PrimaryDevice, 0,
+                    System.Windows.Input.MouseButton.Left) { RoutedEvent = System.Windows.Controls.Control.MouseDoubleClickEvent });
+                Until(() => goals.Detail != null && goals.Detail != "Loading…", 25);
+                Check(!goals.Detail.StartsWith("Unavailable"), "actual Windows PUI loads native canonical Goal detail");
+                var detail = Json(goals.Detail);
+                var goal = (Dictionary<string, object>)detail["goal"];
+                Check(PanelState.Text(goal, "id") == expectedGoal && detail.ContainsKey("evidence"),
+                    "actual native Goal detail preserves selected identity and canonical evidence");
+                var controlStatus = Find<System.Windows.Controls.TextBlock>(host.Panel("goals"), "Goal control status");
+                Check(controlStatus.Visibility == Visibility.Visible &&
+                    controlStatus.Text.Contains("Workspace: " + PanelState.Text(identity, "workspaceId")) &&
+                    controlStatus.Text.Contains(PanelState.Text(identity, "endpoint")) &&
+                    controlStatus.Text.Contains("Status: " + PanelState.Text(goal, "status")) &&
+                    controlStatus.Text.Contains(" · " + PanelState.Text(detail, "effectiveStatus") + " · holder " + PanelState.Text(detail, "holderLiveness")),
+                    "actual native Goal controls display confirmed environment status and holder liveness");
+                var wrongEnvironment = new Dictionary<string, object>(identity);
+                wrongEnvironment["workspaceId"] = PanelState.Text(identity, "workspaceId") + "-not-selected";
+                var args = PanelState.DetailArgs(selected); args["workspaceId"] = identity["workspaceId"];
+                Refuses(() => PuiReadBridge.ReadAsync(pui, "goals.detail", args, CancellationToken.None, 22000, wrongEnvironment)
+                    .GetAwaiter().GetResult(), "actual Goal detail refuses a changed selected workspace");
+            }
             host.Toggle("quick-access"); host.Toggle("quick-access"); Pump();
             Check(host.Panel("quick-access") == panel && state.Pinned,
                 "actual native read panel retains its resident window and pin across toggles");

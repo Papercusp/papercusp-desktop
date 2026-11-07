@@ -162,11 +162,13 @@ for (const fixture of ['bridge', 'host']) {
         if (fixture === 'bridge') args.push('-BridgeSource', resolve(root, 'native/windows/PuiReadBridge.cs'));
         else args.push('-SourceDirectory', resolve(root, 'native/windows'),
             '-ExpectedPlan', process.env.PAPERCUSP_TEST_WORKBENCH_PLAN, '-Interactive');
+        if (fixture === 'host' && process.env.PAPERCUSP_TEST_GOAL)
+            args.push('-ExpectedGoal', process.env.PAPERCUSP_TEST_GOAL);
         const run = spawnSync('powershell.exe', args, {encoding:'utf8', timeout:110000, windowsHide:true});
         assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
         const result = JSON.parse(run.stdout.trim());
         assert.equal(result.ok, true); assert.equal(result.phase, 'operator');
-        assert.equal(result.count, fixture === 'bridge' ? 6 : 11);
+        assert.equal(result.count, fixture === 'bridge' ? 6 : process.env.PAPERCUSP_TEST_GOAL ? 16 : 11);
         assert.equal(new Set(result.cases).size, result.count);
     });
 }
