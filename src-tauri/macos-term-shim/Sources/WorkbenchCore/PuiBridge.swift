@@ -65,6 +65,10 @@ public struct PuiBridge {
     public func respondToCard(_ body: JSONValue) async throws -> JSONValue {
         try await invoke("native-cards", body: body)
     }
+    public func voice(_ body: JSONValue) async throws -> JSONValue {
+        let receipt = try await invoke("native-voice", body: body, timeout: 95)
+        return try NativeVoice.receipt(receipt, request: body)
+    }
     private func frames(_ command: String, body: JSONValue) -> AsyncThrowingStream<JSONValue, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -153,6 +157,45 @@ public struct PuiBridge {
             throw WorkbenchError("The operator returned an unavailable or invalid row envelope")
         }
         return payload
+    }
+}
+
+/// Typed requests and exact receipts over the existing PUI bridge. Audio never
+/// enters a shell argument, a conversation draft, or a separate credential store.
+public enum NativeVoice {
+    public static func request(environment: JSONValue, conversationID: String, audio: Data? = nil, text: String? = nil) throws -> JSONValue {
+        guard NativeEnvironment.same(environment, environment), UUID(uuidString: conversationID) != nil,
+              (audio == nil) != (text == nil) else { throw WorkbenchError("Select a voice conversation and one operation") }
+        var body: [String: JSONValue] = ["environment": environment, "conversationId": .string(conversationID),
+            "requestId": .string(UUID().uuidString.lowercased()), "operation": .string(audio == nil ? "speak" : "transcribe")]
+        if let audio {
+            guard !audio.isEmpty, audio.count <= 1_950_000 else { throw WorkbenchError("Record up to 60 seconds of audio") }
+            body["audioBase64"] = .string(audio.base64EncodedString())
+        }
+        if let text {
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.utf8.count <= 32 * 1024 else {
+                throw WorkbenchError("The spoken reply is empty or too large")
+            }
+            body["text"] = .string(text)
+        }
+        return .object(body)
+    }
+    public static func receipt(_ payload: JSONValue, request: JSONValue) throws -> JSONValue {
+        let row = try NativeEnvironment.one(payload)
+        guard NativeEnvironment.same(payload["environment"], request["environment"]),
+              UUID(uuidString: request["requestId"].text) != nil,
+              row["conversationId"] == request["conversationId"], row["requestId"] == request["requestId"],
+              row["operation"] == request["operation"] else { throw WorkbenchError("The voice result belongs to another request or environment") }
+        if request["operation"].text == "transcribe" {
+            guard case .string(let text) = row["text"], text.utf8.count <= 32 * 1024, row["audioBase64"] == .null else {
+                throw WorkbenchError("Invalid voice transcript")
+            }
+        } else if request["operation"].text == "speak" {
+            guard row["text"] == .null, row["audioBase64"].text.utf8.count <= 11_184_812,
+                  let audio = Data(base64Encoded: row["audioBase64"].text), !audio.isEmpty,
+                  audio.count <= 8 * 1024 * 1024 else { throw WorkbenchError("Invalid spoken audio") }
+        } else { throw WorkbenchError("Unsupported voice operation") }
+        return row
     }
 }
 

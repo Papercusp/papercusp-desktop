@@ -3,6 +3,48 @@ import XCTest
 @testable import WorkbenchCore
 
 final class WorkbenchChatTests: XCTestCase {
+    func testVoiceTranscriptCannotOverwriteAnEditOrAnotherConversationAndKeepsProvenance() throws {
+        var state = ChatState(); let token = try bound(&state)
+        _ = try state.settle(token, environment: environment(), conversationID: "conv", payload: page([]))
+        state.draft = "saved draft"
+        XCTAssertThrowsError(try state.transcribed(token, environment: environment(), conversationID: "other", expectedDraft: "saved draft", text: "spoken"))
+        XCTAssertThrowsError(try state.transcribed(token, environment: environment(store: "other"), conversationID: "conv", expectedDraft: "saved draft", text: "spoken"))
+        XCTAssertThrowsError(try state.transcribed(token, environment: environment(), conversationID: "conv", expectedDraft: "older draft", text: "spoken"))
+        XCTAssertThrowsError(try state.transcribed(token, environment: environment(), conversationID: "conv", expectedDraft: "saved draft", text: "  "))
+        XCTAssertEqual(state.draft, "saved draft")
+        XCTAssertTrue(try state.transcribed(token, environment: environment(), conversationID: "conv", expectedDraft: "saved draft", text: "literal ' $() λ"))
+        state.draft = state.draft // Rendering/sending the same draft preserves voice provenance.
+        XCTAssertEqual(try state.send()["modality"], .string("voice"))
+        XCTAssertThrowsError(try state.transcribed(token, environment: environment(), conversationID: "conv", expectedDraft: state.draft, text: "second"))
+        state.invalidate()
+        XCTAssertFalse(try state.transcribed(token, environment: environment(), conversationID: "conv", expectedDraft: "", text: "late"))
+        let next = try bound(&state)
+        _ = try state.settle(next, environment: environment(), conversationID: "conv", payload: page([]))
+        state.draft = "edited transcript"
+        XCTAssertEqual(try state.send()["modality"], .string("text"))
+    }
+    func testVoiceRequestsAndReceiptsRequireTheExactEnvironmentConversationAndOperation() throws {
+        let id = "c88bf103-8399-42ee-93ae-19e73114e3fd"
+        XCTAssertThrowsError(try NativeVoice.request(environment: environment(), conversationID: "active", audio: Data([1])))
+        XCTAssertThrowsError(try NativeVoice.request(environment: environment(), conversationID: id))
+        XCTAssertThrowsError(try NativeVoice.request(environment: environment(), conversationID: id, audio: Data([1]), text: "both"))
+        let request = try NativeVoice.request(environment: environment(), conversationID: id, audio: Data([0, 1, 2]))
+        XCTAssertEqual(request["audioBase64"], .string("AAEC"))
+        let row: [String: JSONValue] = ["conversationId": .string(id), "requestId": request["requestId"],
+            "operation": .string("transcribe"), "text": .string("literal ' $() λ")]
+        let payload = JSONValue.object(["environment": environment(), "rows": .array([.object(row)])])
+        XCTAssertEqual(try NativeVoice.receipt(payload, request: request)["text"], row["text"])
+        for key in ["conversationId", "requestId", "operation"] {
+            var wrong = row; wrong[key] = .string("foreign")
+            XCTAssertThrowsError(try NativeVoice.receipt(.object(["environment": environment(), "rows": .array([.object(wrong)])]), request: request))
+        }
+        XCTAssertThrowsError(try NativeVoice.receipt(.object(["environment": environment(store: "other"), "rows": .array([.object(row)])]), request: request))
+        let speak = try NativeVoice.request(environment: environment(), conversationID: id, text: "Read this")
+        var speech: [String: JSONValue] = ["conversationId": .string(id), "requestId": speak["requestId"], "operation": .string("speak"), "audioBase64": .string("AAEC")]
+        XCTAssertEqual(try NativeVoice.receipt(.object(["environment": environment(), "rows": .array([.object(speech)])]), request: speak)["audioBase64"], .string("AAEC"))
+        speech["audioBase64"] = .string("invalid")
+        XCTAssertThrowsError(try NativeVoice.receipt(.object(["environment": environment(), "rows": .array([.object(speech)])]), request: speak))
+    }
     private func question(_ id: String = "card", conversation: String = "conv", kind: String = "radio") -> JSONValue {
         .object(["correlationId": .string(id), "conversationId": .string(conversation), "prompt": .string("Choose a route"),
             "createdAt": .number(5), "presentation": .object(["kind": .string(kind), "options": .array([

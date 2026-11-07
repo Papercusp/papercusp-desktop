@@ -13,6 +13,7 @@ public struct ChatState {
     public private(set) var error: String?
     public private(set) var reply: NativeChatReply?
     private var drafts: [String: String] = [:]
+    private var draftModalities: [String: String] = [:]
     public init() {}
     public var conversationID: String { conversation["id"].text }
     public var ready: Bool { loaded && !conversationID.isEmpty && NativeEnvironment.same(environment, environment) }
@@ -23,7 +24,12 @@ public struct ChatState {
     }
     public var draft: String {
         get { draftKey.flatMap { drafts[$0] } ?? "" }
-        set { if let key = draftKey { drafts[key] = newValue } }
+        set {
+            if let key = draftKey {
+                if drafts[key] != newValue { draftModalities[key] = "text" }
+                drafts[key] = newValue
+            }
+        }
     }
     @discardableResult public mutating func begin() -> Int {
         generation += 1; loading = true; loaded = false; error = nil
@@ -82,9 +88,23 @@ public struct ChatState {
         loading = false; error = failure.localizedDescription
     }
     public var canSend: Bool { ready && !loading && (reply == nil || reply?.complete == true) && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    /// Late transcription never overwrites another conversation or a newer edit.
+    @discardableResult public mutating func transcribed(_ token: Int, environment: JSONValue, conversationID: String,
+                                                       expectedDraft: String, text: String) throws -> Bool {
+        guard token == generation else { return false }
+        guard ready, !loading, NativeEnvironment.same(self.environment, environment), self.conversationID == conversationID,
+              draft == expectedDraft, reply == nil || reply?.complete == true, let key = draftKey else {
+            throw WorkbenchError("The conversation or draft changed while recording; the transcript was not applied")
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.utf8.count <= 32 * 1024 else {
+            throw WorkbenchError("No speech was recognized; your draft was preserved")
+        }
+        drafts[key] = text; draftModalities[key] = "voice"; return true
+    }
     public mutating func send() throws -> JSONValue {
         guard canSend else { throw WorkbenchError("Load the conversation and enter a message first") }
-        let next = NativeChatReply(environment: environment, conversationID: conversationID, text: draft)
+        let next = NativeChatReply(environment: environment, conversationID: conversationID, text: draft,
+            modality: draftKey.flatMap { draftModalities[$0] } ?? "text")
         reply = next; error = nil; return next.sendRequest
     }
     @discardableResult public mutating func receive(_ token: Int, _ frame: JSONValue) throws -> Bool {
@@ -112,6 +132,7 @@ public struct ChatState {
 /// Native projection of chat-protocol v1. Persistence stays on the operator.
 public struct NativeChatReply {
     public let environment: JSONValue, conversationID: String, text: String
+    public let modality: String
     public let userTurnID: String
     public private(set) var turnID = "", sequence: Double = 0
     public private(set) var savedUser: JSONValue = .null
@@ -119,12 +140,13 @@ public struct NativeChatReply {
     public private(set) var displayText = "", tools: [String] = []
     private var events: [Double: JSONValue] = [:]
     private var raw = ""
-    public init(environment: JSONValue, conversationID: String, text: String) {
+    public init(environment: JSONValue, conversationID: String, text: String, modality: String = "text") {
         self.environment = environment; self.conversationID = conversationID; self.text = text
+        self.modality = modality
         userTurnID = UUID().uuidString.lowercased()
     }
     public var sendRequest: JSONValue { .object(["environment": environment, "conversationId": .string(conversationID),
-        "operation": .string("send"), "text": .string(text), "userTurnId": .string(userTurnID)]) }
+        "operation": .string("send"), "text": .string(text), "userTurnId": .string(userTurnID), "modality": .string(modality)]) }
     public func control(_ operation: String) throws -> JSONValue {
         guard ["reconnect", "cancel"].contains(operation), !turnID.isEmpty, !complete else {
             throw WorkbenchError("The saved reply identity is unavailable; refresh before sending again")
