@@ -9,3 +9,4 @@
 .papercusp-result-title { font-weight: bold; }
 .papercusp-result-subtitle { color: #bbc4d3; font-size: 12px; }
 .papercusp-detail { spacing: 10px; }
+.papercusp-chat-code { background-color: #16191f; border-radius: 6px; padding: 10px; spacing: 8px; font-family: monospace; }
