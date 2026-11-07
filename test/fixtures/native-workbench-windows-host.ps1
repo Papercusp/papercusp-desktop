@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$SourceDirectory,
-    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'inbox', 'operator', 'operator-inbox', 'fixture-diagnostics', 'fixture-failure', 'fixture-timeout')][string]$Phase = 'all',
+    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'inbox', 'operator', 'operator-inbox', 'environment-refusal', 'fixture-diagnostics', 'fixture-failure', 'fixture-timeout')][string]$Phase = 'all',
     [string]$PuiExecutable,
     [string]$OperatorUrl,
     [string]$ExpectedWorkspace,
@@ -215,6 +215,35 @@ public static class WorkbenchNativeHostFixture
         var refused = false;
         try { action(); } catch (InvalidOperationException) { refused = true; }
         Check(refused, name);
+    }
+    private const string EnvironmentRefusal = "Error: selected environment changed; refresh the native panel";
+    private static void RefusesPuiEnvironment(Action action, string name)
+    {
+        var refused = false;
+        try { action(); }
+        catch (System.IO.IOException error)
+        {
+            if (!String.Equals(error.Message, EnvironmentRefusal, StringComparison.Ordinal)) throw;
+            refused = true;
+        }
+        Check(refused, name);
+    }
+    private static void EnvironmentRefusalOracle()
+    {
+        RefusesPuiEnvironment(() => { throw new System.IO.IOException(EnvironmentRefusal); },
+            "native PUI environment refusal is recognized through its process error");
+        var rejected = false;
+        try { RefusesPuiEnvironment(() => {}, "unexpected success"); }
+        catch (Exception error) { rejected = error.Message == "unexpected success"; }
+        Check(rejected, "a successful changed-environment call cannot satisfy the refusal oracle");
+        rejected = false;
+        try { RefusesPuiEnvironment(() => { throw new System.IO.IOException("connection refused"); }, "wrong failure"); }
+        catch (System.IO.IOException error) { rejected = error.Message == "connection refused"; }
+        Check(rejected, "an unrelated process error cannot satisfy the environment refusal oracle");
+        rejected = false;
+        try { RefusesPuiEnvironment(() => { throw new TimeoutException("operator timed out"); }, "wrong exception"); }
+        catch (TimeoutException) { rejected = true; }
+        Check(rejected, "a timeout cannot satisfy the environment refusal oracle");
     }
     private static Dictionary<string, object> Roster(params PanelResult[] rows)
     {
@@ -453,11 +482,11 @@ public static class WorkbenchNativeHostFixture
             }
             var wrong = new Dictionary<string, object>(identity);
             wrong["workspaceId"] = PanelState.Text(identity, "workspaceId") + "-not-selected";
-            Refuses(() => PuiReadBridge.ReadAsync(pui, "plans.attention", null, CancellationToken.None, 22000, wrong)
+            RefusesPuiEnvironment(() => PuiReadBridge.ReadAsync(pui, "plans.attention", null, CancellationToken.None, 22000, wrong)
                 .GetAwaiter().GetResult(), "actual Inbox read refuses a changed selected workspace");
             var request = new Dictionary<string, object> { { "environment", wrong }, { "operation", "stop" },
                 { "confirmed", true }, { "runId", "native-integration-must-never-write" } };
-            Refuses(() => PuiReadBridge.InboxAsync(pui, request, CancellationToken.None).GetAwaiter().GetResult(),
+            RefusesPuiEnvironment(() => PuiReadBridge.InboxAsync(pui, request, CancellationToken.None).GetAwaiter().GetResult(),
                 "actual native-inbox command refuses a changed workspace before run control");
             var search = Find<System.Windows.Controls.TextBox>(panel, "Search Workbench");
             search.Text = "native-integration-no-match-" + Guid.NewGuid().ToString("N");
@@ -522,7 +551,7 @@ public static class WorkbenchNativeHostFixture
                 var wrongEnvironment = new Dictionary<string, object>(identity);
                 wrongEnvironment["workspaceId"] = PanelState.Text(identity, "workspaceId") + "-not-selected";
                 var args = PanelState.DetailArgs(selected); args["workspaceId"] = identity["workspaceId"];
-                Refuses(() => PuiReadBridge.ReadAsync(pui, "goals.detail", args, CancellationToken.None, 22000, wrongEnvironment)
+                RefusesPuiEnvironment(() => PuiReadBridge.ReadAsync(pui, "goals.detail", args, CancellationToken.None, 22000, wrongEnvironment)
                     .GetAwaiter().GetResult(), "actual Goal detail refuses a changed selected workspace");
             }
             host.Toggle("quick-access"); host.Toggle("quick-access"); Pump();
@@ -762,6 +791,7 @@ public static class WorkbenchNativeHostFixture
             else Check(WorkbenchHost.HasInteractiveDesktop, "visible user desktop satisfies native host precondition");
         }
         if (phase == "all" || phase == "model") { Console.Error.WriteLine("PHASE model"); Model(); Agents(); }
+        if (phase == "environment-refusal") { EnvironmentRefusalOracle(); }
         if (phase == "accounts") { AccountsModel(); AccountsNative(); }
         if (phase == "goals") { GoalsNative(); }
         if (phase == "inbox") { InboxModel(); InboxNative(); }
