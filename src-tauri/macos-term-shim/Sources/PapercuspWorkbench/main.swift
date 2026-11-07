@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Carbon
 import Dispatch
 import WorkbenchCore
@@ -12,7 +13,7 @@ final class Sidebar: NSPanel {
 
 /// A native resident accessory. The per-agent HUD remains in PUI/Zellij;
 /// this process owns only desktop panels and their global summon shortcuts.
-@MainActor final class WorkbenchHost: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSTextViewDelegate {
+@MainActor final class WorkbenchHost: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSTextViewDelegate, AVAudioRecorderDelegate, AVAudioPlayerDelegate {
     private let settingsURL: URL = {
         let arguments = CommandLine.arguments
         if let index = arguments.firstIndex(of: "--settings"), arguments.indices.contains(index + 1), arguments[index + 1].hasPrefix("/") {
@@ -44,6 +45,11 @@ final class Sidebar: NSPanel {
     private var chatSend: NSButton?, chatCancel: NSButton?, chatRecover: NSButton?
     private var chatTask: Task<Void, Never>?
     private var chatOperation = UUID()
+    private var voiceRecord: NSButton?, voiceRead: NSButton?, voiceStop: NSButton?, voiceMessage: NSTextField?
+    private var voiceTask: Task<Void, Never>?, voiceID: UUID?
+    private var recorder: AVAudioRecorder?, player: AVAudioPlayer?, voiceDirectory: URL?
+    private var voiceStatus = ""
+    private var captureContext: (generation: Int, environment: JSONValue, conversationID: String, draft: String)?
     private var cardsState = NativeCardsState()
     private var cardsTask: Task<Void, Never>?
     private var cardStack: NSStackView?, cardMessage: NSTextField?
@@ -302,6 +308,14 @@ final class Sidebar: NSPanel {
             let recover = NSButton(title: "Recover reply", target: self, action: #selector(recoverChat))
             for button in [send, cancel, recover] { button.isEnabled = false; controls.addArrangedSubview(button) }
             chatSend = send; chatCancel = cancel; chatRecover = recover; root.addArrangedSubview(controls)
+            let voiceControls = NSStackView(); voiceControls.orientation = .horizontal
+            let record = NSButton(title: "Record message", target: self, action: #selector(recordVoice))
+            let read = NSButton(title: "Read reply", target: self, action: #selector(readVoice))
+            let stop = NSButton(title: "Cancel voice", target: self, action: #selector(cancelVoiceAction))
+            for button in [record, read, stop] { button.isEnabled = false; voiceControls.addArrangedSubview(button) }
+            voiceRecord = record; voiceRead = read; voiceStop = stop; root.addArrangedSubview(voiceControls)
+            let voiceLabel = NSTextField(wrappingLabelWithString: "")
+            root.addArrangedSubview(voiceLabel); voiceMessage = voiceLabel
         }
         scroll.setContentHuggingPriority(.defaultLow, for: .vertical)
         models[surface] = PanelModel(); panels[surface] = panel
@@ -320,6 +334,7 @@ final class Sidebar: NSPanel {
         detailGeneration[surface, default: 0] += 1
         if surface == .accounts { accountState.invalidate() }
         if surface == .papercup {
+            cancelVoice()
             cardsTask?.cancel(); cardsTask = nil
             _ = cardsState.begin(environment: .null, conversationID: ""); renderCards()
             chatState.draft = chatComposer?.string ?? chatState.draft
@@ -545,6 +560,7 @@ final class Sidebar: NSPanel {
         }
     }
     private func refreshChat() {
+        cancelVoice()
         let generation = chatState.begin(); renderChat()
         let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
         let task = Task { [weak self] in
@@ -569,6 +585,7 @@ final class Sidebar: NSPanel {
         tasks[.papercup, default: []].append(task)
     }
     @objc private func loadEarlierChat() {
+        cancelVoice()
         do {
             let cursor = try chatState.beginEarlier(), generation = chatState.generation
             let environment = chatState.environment, id = chatState.conversationID
@@ -590,9 +607,11 @@ final class Sidebar: NSPanel {
     }
     func textDidChange(_ notification: Notification) {
         guard (notification.object as? NSTextView) === chatComposer else { return }
-        chatState.draft = chatComposer?.string ?? ""; chatSend?.isEnabled = chatState.canSend
+        if chatState.draft != chatComposer?.string { cancelVoice() }
+        chatState.draft = chatComposer?.string ?? ""; renderChat()
     }
     @objc private func sendChat() {
+        cancelVoice()
         do {
             chatState.draft = chatComposer?.string ?? ""
             let request = try chatState.send(); streamChat(request)
@@ -634,6 +653,11 @@ final class Sidebar: NSPanel {
         chatSend?.isEnabled = chatState.canSend
         chatCancel?.isEnabled = chatState.reply.map { !$0.turnID.isEmpty && !$0.complete } ?? false
         chatRecover?.isEnabled = chatTask == nil && (chatState.reply.map { !$0.turnID.isEmpty && !$0.complete } ?? false)
+        voiceRecord?.title = chatState.voicePhase == .recording ? "Use recording" : "Record message"
+        voiceRecord?.isEnabled = chatState.voicePhase == .recording || (chatState.canUseVoice && voiceID == nil)
+        voiceRead?.isEnabled = chatState.canUseVoice && voiceID == nil && !chatState.spokenReply.isEmpty
+        voiceStop?.isEnabled = voiceID != nil
+        voiceMessage?.stringValue = voiceStatus
         let scope = chatState.environment == .null ? "" : "\n" + chatState.environment["endpoint"].text +
             " · " + chatState.environment["workspaceId"].text
         messages[.papercup]?.stringValue = (chatState.error.map { "Unavailable · " + $0 } ??
@@ -647,6 +671,128 @@ final class Sidebar: NSPanel {
             details[.papercup]?.textStorage?.setAttributedString(NSAttributedString(markdown))
         } else { details[.papercup]?.string = content }
         details[.papercup]?.enclosingScrollView?.isHidden = false
+    }
+    private func voiceCurrent(_ id: UUID) -> Bool {
+        voiceID == id && chatState.voiceCurrent(id) && models[.papercup]?.visible == true
+    }
+    @objc private func cancelVoiceAction() { cancelVoice(); voiceStatus = "Voice stopped. Your draft was preserved."; renderChat() }
+    private func cancelVoice() {
+        // Retire the identity before stopping devices: their completion callbacks
+        // may arrive after cancellation or after a different conversation opens.
+        voiceID = nil; chatState.cancelVoice(); captureContext = nil
+        voiceTask?.cancel(); voiceTask = nil
+        recorder?.delegate = nil; recorder?.stop(); recorder = nil
+        player?.delegate = nil; player?.stop(); player = nil
+        if let voiceDirectory { try? FileManager.default.removeItem(at: voiceDirectory) }
+        voiceDirectory = nil; voiceStatus = ""
+    }
+    private func voiceFailed(_ id: UUID, _ message: String) {
+        guard voiceID == id else { return }
+        cancelVoice(); voiceStatus = message; renderChat()
+    }
+    @objc private func recordVoice() {
+        if chatState.voicePhase == .recording { finishRecording(success: true); return }
+        do {
+            let id = try chatState.beginVoice(.permission); voiceID = id
+            captureContext = (chatState.generation, chatState.environment, chatState.conversationID, chatState.draft)
+            voiceStatus = "Waiting for microphone permission…"; renderChat()
+            voiceTask = Task { [weak self] in
+                let allowed = await withCheckedContinuation { continuation in
+                    AVCaptureDevice.requestAccess(for: .audio) { continuation.resume(returning: $0) }
+                }
+                guard let self, !Task.isCancelled, self.voiceCurrent(id) else { return }
+                do {
+                    guard allowed else { throw WorkbenchError("Microphone access is unavailable. Allow Papercusp Workbench in System Settings → Privacy & Security → Microphone, then try again.") }
+                    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("papercusp-voice-" + UUID().uuidString, isDirectory: true)
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                        attributes: [.posixPermissions: 0o700])
+                    self.voiceDirectory = directory
+                    let recorder = try AVAudioRecorder(url: directory.appendingPathComponent("message.wav"), settings: [
+                        AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 16000,
+                        AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16,
+                        AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false])
+                    recorder.delegate = self; self.recorder = recorder
+                    guard recorder.prepareToRecord(), self.chatState.advanceVoice(id, to: .recording),
+                          recorder.record(forDuration: 60) else { throw WorkbenchError("The microphone could not start recording.") }
+                    self.voiceTask = nil
+                    self.voiceStatus = "Recording · up to 60 seconds. Use recording to transcribe, or Cancel voice to discard."
+                    self.renderChat()
+                } catch { self.voiceFailed(id, error.localizedDescription) }
+            }
+        } catch { voiceStatus = error.localizedDescription; renderChat() }
+    }
+    private func finishRecording(success: Bool) {
+        guard let id = voiceID, voiceCurrent(id), let context = captureContext, let recorder else { return }
+        recorder.delegate = nil; recorder.stop(); self.recorder = nil
+        do {
+            guard success else { throw WorkbenchError("Recording failed. Your draft was preserved.") }
+            let size = try FileManager.default.attributesOfItem(atPath: recorder.url.path)[.size] as? NSNumber
+            guard let size, size.intValue > 0, size.intValue <= 1_950_000 else { throw WorkbenchError("Record up to 60 seconds of audio.") }
+            let request = try NativeVoice.request(environment: context.environment, conversationID: context.conversationID,
+                audio: Data(contentsOf: recorder.url))
+            if let voiceDirectory { try FileManager.default.removeItem(at: voiceDirectory) }
+            voiceDirectory = nil
+            guard chatState.advanceVoice(id, to: .transcribing) else { cancelVoice(); renderChat(); return }
+            voiceStatus = "Transcribing…"; renderChat()
+            let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
+            voiceTask = Task { [weak self] in
+                do {
+                    let row = try await bridge.voice(request)
+                    guard let self, !Task.isCancelled, self.voiceCurrent(id) else { return }
+                    guard try self.chatState.transcribed(context.generation, environment: context.environment,
+                        conversationID: context.conversationID, expectedDraft: context.draft, text: row["text"].text) else { return }
+                    self.cancelVoice(); self.voiceStatus = "Transcript ready. Review it, then Send."; self.renderChat()
+                } catch { self?.voiceFailed(id, error.localizedDescription) }
+            }
+        } catch { voiceFailed(id, error.localizedDescription) }
+    }
+    @objc private func readVoice() {
+        do {
+            let request = try NativeVoice.request(environment: chatState.environment, conversationID: chatState.conversationID, text: chatState.spokenReply)
+            let id = try chatState.beginVoice(.synthesizing); voiceID = id
+            voiceStatus = "Preparing spoken reply…"; renderChat()
+            let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
+            voiceTask = Task { [weak self] in
+                do {
+                    let row = try await bridge.voice(request)
+                    guard let self, !Task.isCancelled, self.voiceCurrent(id),
+                          let data = Data(base64Encoded: row["audioBase64"].text) else { return }
+                    let player = try AVAudioPlayer(data: data); player.delegate = self; self.player = player
+                    guard player.prepareToPlay(), self.chatState.advanceVoice(id, to: .playing), player.play() else {
+                        throw WorkbenchError("The spoken reply could not be played.")
+                    }
+                    self.voiceTask = nil; self.voiceStatus = "Playing reply…"; self.renderChat()
+                } catch { self?.voiceFailed(id, error.localizedDescription) }
+            }
+        } catch { voiceStatus = error.localizedDescription; renderChat() }
+    }
+    nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+        let identity = ObjectIdentifier(recorder)
+        Task { @MainActor [weak self] in
+            guard let self, self.recorder.map({ ObjectIdentifier($0) }) == identity else { return }
+            self.finishRecording(success: flag)
+        }
+    }
+    nonisolated func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
+        let identity = ObjectIdentifier(recorder), message = error?.localizedDescription ?? "Recording failed."
+        Task { @MainActor [weak self] in
+            guard let self, self.recorder.map({ ObjectIdentifier($0) }) == identity, let id = self.voiceID else { return }
+            self.voiceFailed(id, message)
+        }
+    }
+    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        let identity = ObjectIdentifier(player)
+        Task { @MainActor [weak self] in
+            guard let self, self.player.map({ ObjectIdentifier($0) }) == identity else { return }
+            self.cancelVoice(); self.voiceStatus = flag ? "Playback finished." : "Playback failed."; self.renderChat()
+        }
+    }
+    nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+        let identity = ObjectIdentifier(player), message = error?.localizedDescription ?? "Playback failed."
+        Task { @MainActor [weak self] in
+            guard let self, self.player.map({ ObjectIdentifier($0) }) == identity, let id = self.voiceID else { return }
+            self.voiceFailed(id, message)
+        }
     }
     @objc private func reconnectCards() {
         guard chatState.ready, models[.papercup]?.visible == true else { return }

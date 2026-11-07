@@ -35,6 +35,8 @@ test('macOS staging consumes the native product with accessory identity and refu
         assert.match(plist, /<key>LSUIElement<\/key><true\/>/);
         assert.match(plist, /<key>CFBundleExecutable<\/key><string>PapercuspWorkbench<\/string>/);
         assert.match(plist, /<key>CFBundleIdentifier<\/key><string>ai\.papercusp\.workbench<\/string>/);
+        assert.match(plist, /<key>NSMicrophoneUsageDescription<\/key><string>[^<]+<\/string>/,
+            'the accessory requests microphone access under its own bundle identity');
         const stale = join(bundle.directory, 'Contents/obsolete-resource');
         writeFileSync(stale, 'old generation');
         stageNativeWorkbench(fixture, {platform:'darwin'});

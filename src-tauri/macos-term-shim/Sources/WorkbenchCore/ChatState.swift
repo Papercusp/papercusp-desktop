@@ -12,6 +12,9 @@ public struct ChatState {
     public private(set) var hasMoreEarlier = false
     public private(set) var error: String?
     public private(set) var reply: NativeChatReply?
+    public enum VoicePhase { case permission, recording, transcribing, synthesizing, playing }
+    public private(set) var voicePhase: VoicePhase?
+    private var voice: (id: UUID, generation: Int, environment: JSONValue, conversationID: String, draft: String)?
     private var drafts: [String: String] = [:]
     private var draftModalities: [String: String] = [:]
     public init() {}
@@ -26,12 +29,13 @@ public struct ChatState {
         get { draftKey.flatMap { drafts[$0] } ?? "" }
         set {
             if let key = draftKey {
-                if drafts[key] != newValue { draftModalities[key] = "text" }
+                if drafts[key] != newValue { draftModalities[key] = "text"; cancelVoice() }
                 drafts[key] = newValue
             }
         }
     }
     @discardableResult public mutating func begin() -> Int {
+        cancelVoice()
         generation += 1; loading = true; loaded = false; error = nil
         environment = .null; conversation = .null; turns = []; hasMoreEarlier = false; reply = nil
         return generation
@@ -50,7 +54,7 @@ public struct ChatState {
         guard ready, !loading, reply == nil, hasMoreEarlier, let cursor = turns.first?["seq"].sequence else {
             throw WorkbenchError("Earlier messages are unavailable")
         }
-        loading = true; error = nil; return cursor
+        cancelVoice(); loading = true; error = nil; return cursor
     }
     @discardableResult public mutating func settle(_ token: Int, environment: JSONValue, conversationID: String,
                                                   beforeSeq: Double? = nil, payload: JSONValue) throws -> Bool {
@@ -88,6 +92,35 @@ public struct ChatState {
         loading = false; error = failure.localizedDescription
     }
     public var canSend: Bool { ready && !loading && (reply == nil || reply?.complete == true) && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    public var canUseVoice: Bool { ready && !loading && (reply == nil || reply?.complete == true) }
+    public var spokenReply: String {
+        if let reply, reply.phase == "completed", !reply.displayText.isEmpty { return reply.displayText }
+        return turns.last(where: { $0["role"].text == "assistant" })?["text"].text ?? ""
+    }
+    /// Permission, device and transport callbacks retain one identity. Edits,
+    /// dismissal and reload retire it before any late callback can take effect.
+    public mutating func beginVoice(_ phase: VoicePhase) throws -> UUID {
+        guard canUseVoice, voice == nil, phase == .permission || phase == .synthesizing else {
+            throw WorkbenchError("Load the conversation and finish the current voice operation first")
+        }
+        let id = UUID()
+        voice = (id, generation, environment, conversationID, draft); voicePhase = phase
+        return id
+    }
+    public func voiceCurrent(_ id: UUID) -> Bool {
+        guard let voice else { return false }
+        return voice.id == id && voice.generation == generation && canUseVoice &&
+            NativeEnvironment.same(voice.environment, environment) && voice.conversationID == conversationID && voice.draft == draft
+    }
+    @discardableResult public mutating func advanceVoice(_ id: UUID, to phase: VoicePhase) -> Bool {
+        guard voiceCurrent(id) else { return false }
+        switch (voicePhase, phase) {
+        case (.permission?, .recording), (.recording?, .transcribing), (.synthesizing?, .playing):
+            voicePhase = phase; return true
+        default: return false
+        }
+    }
+    public mutating func cancelVoice() { voice = nil; voicePhase = nil }
     /// Late transcription never overwrites another conversation or a newer edit.
     @discardableResult public mutating func transcribed(_ token: Int, environment: JSONValue, conversationID: String,
                                                        expectedDraft: String, text: String) throws -> Bool {
@@ -103,6 +136,7 @@ public struct ChatState {
     }
     public mutating func send() throws -> JSONValue {
         guard canSend else { throw WorkbenchError("Load the conversation and enter a message first") }
+        cancelVoice()
         let next = NativeChatReply(environment: environment, conversationID: conversationID, text: draft,
             modality: draftKey.flatMap { draftModalities[$0] } ?? "text")
         reply = next; error = nil; return next.sendRequest

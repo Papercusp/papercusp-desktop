@@ -3,6 +3,46 @@ import XCTest
 @testable import WorkbenchCore
 
 final class WorkbenchChatTests: XCTestCase {
+    func testVoicePermissionAndTransportCallbacksCannotSurviveCancellationEditingOrReload() throws {
+        var state = ChatState()
+        XCTAssertThrowsError(try state.beginVoice(.permission))
+        let generation = try bound(&state)
+        _ = try state.settle(generation, environment: environment(), conversationID: "conv", payload: page([]))
+        state.draft = "preserved"
+        let cancelled = try state.beginVoice(.permission)
+        XCTAssertThrowsError(try state.beginVoice(.synthesizing))
+        state.cancelVoice()
+        let active = try state.beginVoice(.permission)
+        XCTAssertFalse(state.advanceVoice(cancelled, to: .recording))
+        XCTAssertFalse(state.advanceVoice(active, to: .playing))
+        XCTAssertTrue(state.advanceVoice(active, to: .recording))
+        XCTAssertTrue(state.advanceVoice(active, to: .transcribing))
+        state.draft = "new edit"
+        XCTAssertFalse(state.voiceCurrent(active)); XCTAssertNil(state.voicePhase)
+        XCTAssertEqual(state.draft, "new edit")
+        let stale = try state.beginVoice(.permission)
+        state.invalidate()
+        XCTAssertFalse(state.advanceVoice(stale, to: .recording)); XCTAssertNil(state.voicePhase)
+        XCTAssertThrowsError(try state.beginVoice(.permission))
+    }
+    func testVoicePlaybackUsesAssistantTextAndOnlyTheCurrentReceiptCanStartPlayback() throws {
+        var state = ChatState(); let generation = try bound(&state)
+        _ = try state.settle(generation, environment: environment(), conversationID: "conv", payload: page([turn(1)]))
+        XCTAssertEqual(state.spokenReply, "Message 1.0")
+        XCTAssertThrowsError(try state.beginVoice(.playing))
+        let first = try state.beginVoice(.synthesizing)
+        state.cancelVoice()
+        let second = try state.beginVoice(.synthesizing)
+        XCTAssertFalse(state.advanceVoice(first, to: .playing))
+        XCTAssertTrue(state.advanceVoice(second, to: .playing))
+        state.cancelVoice(); XCTAssertNil(state.voicePhase)
+        XCTAssertFalse(state.voiceCurrent(second))
+        state.draft = "new message"
+        let pending = try state.beginVoice(.permission)
+        _ = try state.send()
+        XCTAssertFalse(state.voiceCurrent(pending))
+        XCTAssertThrowsError(try state.beginVoice(.permission))
+    }
     func testVoiceTranscriptCannotOverwriteAnEditOrAnotherConversationAndKeepsProvenance() throws {
         var state = ChatState(); let token = try bound(&state)
         _ = try state.settle(token, environment: environment(), conversationID: "conv", payload: page([]))

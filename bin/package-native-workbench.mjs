@@ -67,6 +67,7 @@ export function stageNativeWorkbench(desktopRoot = resolve(import.meta.dirname, 
 <key>CFBundleVersion</key><string>${version}</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSUIElement</key><true/>
+<key>NSMicrophoneUsageDescription</key><string>Record a voice message for the selected Papercup conversation.</string>
 </dict></plist>
 `);
         return {platform:'macos', directory, executable,
