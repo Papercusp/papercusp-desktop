@@ -273,6 +273,56 @@ namespace Papercusp.Workbench
         }
     }
 
+    public sealed class GoalState
+    {
+        public bool Busy;
+        public string Error, Warning;
+        public Dictionary<string, object> Environment, Detail;
+        public void Clear() { Busy = false; Error = null; Warning = null; Environment = null; Detail = null; }
+        public static Dictionary<string, object> One(Dictionary<string, object> payload, string goalId)
+        {
+            object rows, partial, value;
+            if (payload == null || !payload.TryGetValue("rows", out rows) || !(rows is IList) || ((IList)rows).Count != 1 ||
+                (payload.TryGetValue("partial", out partial) && Object.Equals(partial, true)))
+                throw new InvalidOperationException("Canonical goal detail is unavailable or incomplete");
+            var detail = ((IList)rows)[0] as Dictionary<string, object>;
+            var goal = detail != null && detail.TryGetValue("goal", out value) ? value as Dictionary<string, object> : null;
+            if (goal == null || PanelState.Text(goal, "id") != goalId || String.IsNullOrWhiteSpace(goalId) ||
+                !new[] { "active", "paused", "achieved", "killed" }.Contains(PanelState.Text(goal, "status")) ||
+                PanelState.Text(detail, "effectiveStatus") == "" ||
+                !new[] { "held", "unheld", "lost", "unknown" }.Contains(PanelState.Text(detail, "holderLiveness")))
+                throw new InvalidOperationException("Selected goal is unavailable or changed");
+            return detail;
+        }
+        public string[] Actions()
+        {
+            if (Busy || Error != null || Detail == null || !AccountState.SameEnvironment(Environment, Environment) ||
+                PanelState.Text(Detail, "holderLiveness") == "unknown") return new string[0];
+            var goal = (Dictionary<string, object>)Detail["goal"];
+            var status = PanelState.Text(goal, "status");
+            if (status == "achieved" || status == "killed") return new[] { "reopen" };
+            if (status == "paused") return new[] { "resume", "achieve", "kill" };
+            var holder = PanelState.Text(Detail, "holderLiveness");
+            return new[] { PanelState.Text(Detail, "effectiveStatus") == "dormant" || holder == "unheld" || holder == "lost" ? "start" : "pause", "achieve", "kill" };
+        }
+        public void Loaded(Dictionary<string, object> environment, Dictionary<string, object> payload, string goalId)
+        {
+            if (!AccountState.SameEnvironment(environment, environment)) throw new InvalidOperationException("Selected goal environment is unavailable");
+            Detail = One(payload, goalId); Environment = environment; Error = null; Warning = null; Busy = false;
+        }
+        public void Applied(Dictionary<string, object> payload, string goalId)
+        {
+            object environment, degraded, reasons;
+            if (!payload.TryGetValue("environment", out environment) || !AccountState.SameEnvironment(Environment, environment as Dictionary<string, object>))
+                throw new InvalidOperationException("Goal environment changed; refresh before applying another control");
+            var detail = One(payload, goalId);
+            Warning = payload.TryGetValue("degraded", out degraded) && Object.Equals(degraded, true) ?
+                "Goal action was incomplete · " + (payload.TryGetValue("degradedReasons", out reasons) && reasons is IList ?
+                    String.Join(" · ", ((IList)reasons).Cast<object>()) : "Refresh and check goal activity") : null;
+            Detail = detail; Error = null; Busy = false;
+        }
+    }
+
     public sealed class AccountState
     {
         public int Generation;

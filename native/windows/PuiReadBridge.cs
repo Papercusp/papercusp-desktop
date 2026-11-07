@@ -72,6 +72,22 @@ namespace Papercusp.Workbench
             }, cancellation, 22000);
         }
 
+        public static Task<Dictionary<string, object>> GoalAsync(string pui,
+            Dictionary<string, object> environment, Dictionary<string, object> detail,
+            string action, bool confirmed, CancellationToken cancellation)
+        {
+            if (environment == null || detail == null || !confirmed ||
+                !(action == "pause" || action == "resume" || action == "start" || action == "reopen" || action == "achieve" || action == "kill"))
+                throw new ArgumentException("Select a goal and confirm its control");
+            var goal = detail["goal"] as Dictionary<string, object>;
+            if (goal == null) throw new ArgumentException("Canonical goal detail is unavailable");
+            return InvokeAsync(pui, "native-goal", new Dictionary<string, object> {
+                { "environment", environment }, { "goalId", goal["id"] }, { "action", action },
+                { "expectedStatus", goal["status"] }, { "expectedEffectiveStatus", detail["effectiveStatus"] },
+                { "expectedHolderLiveness", detail["holderLiveness"] }, { "confirmed", confirmed }
+            }, cancellation, 22000);
+        }
+
         private static async Task<Dictionary<string, object>> InvokeAsync(string pui, string command,
             Dictionary<string, object> body, CancellationToken cancellation, int timeoutMilliseconds)
         {
