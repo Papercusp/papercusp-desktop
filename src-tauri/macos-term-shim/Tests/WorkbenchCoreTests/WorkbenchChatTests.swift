@@ -83,6 +83,75 @@ final class WorkbenchChatTests: XCTestCase {
         XCTAssertFalse(state.settleReferencePlans(token, environment: environment(), payload: .object(["environment": environment(), "rows": .array([plan])])))
         XCTAssertThrowsError(try state.selectReferencePlan(0))
     }
+    func testWorkReferenceChoiceSurvivesSameConversationRefreshByQualifiedIdentity() throws {
+        var state = ChatState(); let token = try bound(&state)
+        _ = try state.settle(token, environment: environment(), conversationID: "conv", payload: page([]))
+        let chosen: JSONValue = .object(["harness": .string("chosen-pot"), "slug": .string("plan"), "title": .string("Old title")])
+        let other: JSONValue = .object(["harness": .string("other-pot"), "slug": .string("plan")])
+        let plans: JSONValue = .object(["environment": environment(), "rows": .array([chosen, other])])
+        _ = state.settleReferencePlans(token, environment: environment(), payload: plans)
+        try state.selectReferencePlan(0)
+        let next = try bound(&state)
+        XCTAssertNil(state.referencePlan)
+        XCTAssertEqual(state.linkedText("WI-42 P-001"), "WI-42 P-001", "saved choices cannot activate before fresh validation")
+        _ = try state.settle(next, environment: environment(), conversationID: "conv", payload: page([]))
+        XCTAssertFalse(state.settleReferencePlans(token, environment: environment(), payload: nil, failure: WorkbenchError("late failure")))
+        let renamed: JSONValue = .object(["harness": .string("chosen-pot"), "slug": .string("plan"), "title": .string("Renamed")])
+        _ = state.settleReferencePlans(next, environment: environment(), payload: .object(["environment": environment(), "rows": .array([other, renamed])]))
+        XCTAssertEqual(state.referencePlan, 1)
+        XCTAssertTrue(state.linkedText("WI-42 P-001").contains("chosen-pot::plan"))
+        XCTAssertFalse(state.linkedText("WI-42 P-001").contains("other-pot"))
+    }
+    func testWorkReferenceChoiceCannotCrossConversationOrRendezvous() throws {
+        let plan: JSONValue = .object(["harness": .string("pot"), "slug": .string("plan")])
+        for (env, id) in [(environment("http://elsewhere:3170"), "conv"),
+                          (environment(workspace: "foreign"), "conv"), (environment(store: "foreign"), "conv"),
+                          (environment(scope: "foreign"), "conv"), (environment(), "other-conversation")] {
+            var state = ChatState(); let token = try bound(&state)
+            _ = try state.settle(token, environment: environment(), conversationID: "conv", payload: page([]))
+            _ = state.settleReferencePlans(token, environment: environment(), payload: .object(["environment": environment(), "rows": .array([plan])]))
+            try state.selectReferencePlan(0)
+            let next = try bound(&state, environment: env, id: id)
+            _ = try state.settle(next, environment: env, conversationID: id, payload: page([]))
+            _ = state.settleReferencePlans(next, environment: env, payload: .object(["environment": env, "rows": .array([plan])]))
+            XCTAssertNil(state.referencePlan)
+            XCTAssertEqual(state.linkedText("WI-42 P-001"), "WI-42 P-001")
+        }
+    }
+    func testWorkReferenceChoiceIsRetiredWhenPlanDisappearsOrRevalidationFails() throws {
+        let plan: JSONValue = .object(["harness": .string("pot"), "slug": .string("plan")])
+        let valid: JSONValue = .object(["environment": environment(), "rows": .array([plan])])
+        for invalid: JSONValue? in [nil, .object(["environment": environment(), "rows": .array([])]),
+            .object(["environment": environment(), "rows": .array([plan]), "partial": .bool(true)]),
+            .object(["environment": environment(store: "foreign"), "rows": .array([plan])]),
+            .object(["environment": environment(), "rows": .array([plan, plan])])] {
+            var state = ChatState(); let token = try bound(&state)
+            _ = try state.settle(token, environment: environment(), conversationID: "conv", payload: page([]))
+            _ = state.settleReferencePlans(token, environment: environment(), payload: valid)
+            try state.selectReferencePlan(0)
+            let next = try bound(&state)
+            _ = try state.settle(next, environment: environment(), conversationID: "conv", payload: page([]))
+            _ = state.settleReferencePlans(next, environment: environment(), payload: invalid)
+            _ = state.settleReferencePlans(next, environment: environment(), payload: valid)
+            XCTAssertNil(state.referencePlan, "a retired choice needs an explicit selection again")
+        }
+    }
+    func testWorkReferenceDeselectAndDismissRetireChoiceAcrossRefresh() throws {
+        let plan: JSONValue = .object(["harness": .string("pot"), "slug": .string("plan")])
+        let plans: JSONValue = .object(["environment": environment(), "rows": .array([plan])])
+        var state = ChatState()
+        for dismiss in [false, true] {
+            let token = try bound(&state)
+            _ = try state.settle(token, environment: environment(), conversationID: "conv", payload: page([]))
+            _ = state.settleReferencePlans(token, environment: environment(), payload: plans)
+            try state.selectReferencePlan(0)
+            if dismiss { state.invalidate() } else { try state.selectReferencePlan(nil) }
+            let next = try bound(&state)
+            _ = try state.settle(next, environment: environment(), conversationID: "conv", payload: page([]))
+            _ = state.settleReferencePlans(next, environment: environment(), payload: plans)
+            XCTAssertNil(state.referencePlan)
+        }
+    }
     func testVoicePermissionAndTransportCallbacksCannotSurviveCancellationEditingOrReload() throws {
         var state = ChatState()
         XCTAssertThrowsError(try state.beginVoice(.permission))

@@ -15,6 +15,7 @@ public struct ChatState {
     public private(set) var referencePlans: [PanelResult] = []
     public private(set) var referencePlan: Int?
     public private(set) var referenceError: String?
+    private var referenceChoice: (environment: JSONValue, conversationID: String, identity: [JSONValue])?
     public enum VoicePhase { case permission, recording, transcribing, synthesizing, playing }
     public private(set) var voicePhase: VoicePhase?
     private var voice: (id: UUID, generation: Int, environment: JSONValue, conversationID: String, draft: String)?
@@ -44,13 +45,17 @@ public struct ChatState {
         referencePlans = []; referencePlan = nil; referenceError = nil
         return generation
     }
-    public mutating func invalidate() { _ = begin(); loading = false }
+    public mutating func invalidate() { _ = begin(); loading = false; referenceChoice = nil }
     @discardableResult public mutating func bind(_ token: Int, environment: JSONValue, payload: JSONValue) throws -> Bool {
         guard token == generation else { return false }
         let row = try NativeEnvironment.one(payload)
         guard NativeEnvironment.same(environment, environment), !row["id"].text.isEmpty,
               row["workspaceId"] == environment["workspaceId"], row["subjectKind"].text == "global",
               row["status"].text == "active" else { throw WorkbenchError("The active Papercup conversation is unavailable") }
+        if let choice = referenceChoice,
+           !NativeEnvironment.same(choice.environment, environment) || choice.conversationID != row["id"].text {
+            referenceChoice = nil
+        }
         self.environment = environment; conversation = row
         return true
     }
@@ -173,8 +178,18 @@ public struct ChatState {
             guard Set(plans.map { $0.identity.map(\.text) }).count == plans.count else {
                 throw WorkbenchError("Work link contexts contain duplicate plans")
             }
+            // Refreshes (including reply completion) may reorder this list.
+            // Restore only an explicit choice that the new canonical list
+            // still offers in this exact conversation and rendezvous.
             referencePlans = plans; referencePlan = nil; referenceError = nil
-        } catch { referencePlans = []; referencePlan = nil; referenceError = error.localizedDescription }
+            if let choice = referenceChoice,
+               NativeEnvironment.same(choice.environment, environment), choice.conversationID == conversationID {
+                referencePlan = plans.firstIndex { $0.identity == choice.identity }
+            }
+            if referencePlan == nil { referenceChoice = nil }
+        } catch {
+            referencePlans = []; referencePlan = nil; referenceChoice = nil; referenceError = error.localizedDescription
+        }
         return true
     }
     public mutating func selectReferencePlan(_ index: Int?) throws {
@@ -182,6 +197,8 @@ public struct ChatState {
             throw WorkbenchError("Select a current work link context")
         }
         referencePlan = index
+        if let index { referenceChoice = (environment, conversationID, referencePlans[index].identity) }
+        else { referenceChoice = nil }
     }
     public func linkedText(_ text: String, plan: String? = nil) -> String {
         guard ready else { return text }
