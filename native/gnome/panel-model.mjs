@@ -222,6 +222,188 @@ export class PanelState {
     }
 }
 
+// Adapter for canonical attention and persisted bulk-run state; PUI owns all
+// authorization, fresh action validation and terminal effects.
+const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const equal = (a, b) => a === b || (Array.isArray(a) && Array.isArray(b) ?
+    a.length === b.length && a.every((v, i) => equal(v, b[i])) :
+    object(a) && object(b) && Object.keys(a).length === Object.keys(b).length &&
+    Object.keys(a).every(key => Object.hasOwn(b, key) && equal(a[key], b[key])));
+export function sameEnvironment(a, b) {
+    const fields = v => [v?.endpoint, v?.workspaceId, v?.store?.id, v?.agentChat?.scope];
+    const right = fields(b);
+    return fields(a).every((v, i) => typeof v === 'string' && v.length > 0 && v === right[i]);
+}
+export function oneRow(payload) {
+    const rows = readRows(payload);
+    if (payload.partial || rows.length !== 1 || !object(rows[0])) throw new Error('Canonical state is incomplete');
+    return rows[0];
+}
+export class InboxState {
+    constructor() {
+        Object.assign(this, {generation: 0, contextGeneration: 0, actionGeneration: 0,
+            rows: [], items: [], run: null, savedRunId: null, context: null, selection: null,
+            listReady: false, bulkReady: false, listPartial: false, pending: false,
+            listError: null, bulkError: null, contextError: null, actionNotice: null,
+            selectedReviews: new Set(), applied: new Set(), drafts: new Map(), answer: ''});
+    }
+    clearContext() { ++this.contextGeneration; this.context = null; this.contextError = null; }
+    begin() {
+        ++this.generation; this.rows = []; this.items = []; this.run = null;
+        this.listReady = false; this.bulkReady = false; this.listPartial = false;
+        this.listError = null; this.bulkError = null; this.clearContext(); return this.generation;
+    }
+    settleList(token, payload, error = null) {
+        if (token !== this.generation) return false;
+        try {
+            if (error) throw error;
+            const seen = new Map(); let partial = Boolean(payload?.partial);
+            for (const group of readRows(payload)) {
+                if (!Array.isArray(group.items)) throw new Error('Inbox group is unavailable');
+                partial ||= Boolean(group._meta?.hasMore);
+                for (const row of group.items) {
+                    required(row.id, 'item id'); required(row.kind, 'item kind');
+                    if (!object(row.ref)) throw new Error('Missing canonical item reference');
+                    if (seen.has(row.id) && !equal(seen.get(row.id), row)) throw new Error('Conflicting Inbox identities');
+                    seen.set(row.id, row);
+                }
+            }
+            const selected = this.rows.find(row => row.id === this.selection), next = seen.get(this.selection);
+            if (!next || (selected && (!equal(selected.ref, next.ref) || selected.kind !== next.kind))) this.clearContext();
+            this.rows = [...seen.values()]; this.listPartial = partial; this.listReady = true; this.listError = null;
+            if (!next) this.selection = null;
+        } catch (cause) { this.rows = []; this.listReady = false; this.listError = cause.message; this.clearContext(); }
+        return true;
+    }
+    results(query = '') {
+        const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+        return this.rows.filter(row => {
+            const text = ['id', 'title', 'body', 'kind', 'harnessSlug', 'planSlug'].map(key => row[key] || '').join(' ').toLocaleLowerCase();
+            return terms.every(term => text.includes(term));
+        });
+    }
+    retainVisibleSelection(query) { if (this.selection && !this.results(query).some(row => row.id === this.selection)) this.dismissContext(); }
+    dismissContext() { if (!this.selection) return false; this.selection = null; this.clearContext(); return true; }
+    select(id) {
+        if (!this.listReady || !this.rows.some(row => row.id === id)) throw new Error('Select a current Inbox item');
+        if (this.selection !== id) this.answer = '';
+        this.selection = id; this.clearContext(); return this.contextGeneration;
+    }
+    settleContext(token, id, payload, error = null) {
+        if (token !== this.contextGeneration || this.selection !== id) return false;
+        try {
+            if (error) throw error;
+            const detail = oneRow(payload), selected = this.rows.find(row => row.id === id);
+            if (!selected || detail.id !== id || detail.kind !== selected.kind || !equal(detail.ref, selected.ref)) throw new Error('The selected question changed; refresh its context');
+            this.context = detail; this.contextError = null;
+        } catch (cause) { this.context = null; this.contextError = cause.message; }
+        return true;
+    }
+    settleBulk(token, payload, runId = null, error = null) {
+        if (token !== this.generation) return false;
+        try {
+            if (error) throw error;
+            const row = oneRow(payload);
+            if (!Array.isArray(row.items)) throw new Error('Saved run items are unavailable');
+            if (row.run === null) {
+                if (row.items.length || runId) throw new Error('The selected saved run is unavailable');
+            } else {
+                required(row.run?.runId, 'run id');
+                if ((runId && row.run.runId !== runId) || !['pending', 'running', 'review', 'complete', 'failed'].includes(row.run.phase)) throw new Error('Saved run identity or phase changed');
+                InboxState.counts(row.run, row.items);
+            }
+            if (this.savedRunId !== row.run?.runId) { this.selectedReviews.clear(); this.drafts.clear(); }
+            this.savedRunId = row.run?.runId || null; this.run = row.run; this.items = row.items;
+            this.bulkReady = true; this.bulkError = null;
+            const allowed = new Set(this.items.filter(InboxState.reviewable).map(item => item.itemId));
+            for (const id of this.selectedReviews) if (!allowed.has(id)) this.selectedReviews.delete(id);
+        } catch (cause) { this.run = null; this.items = []; this.bulkReady = false; this.bulkError = cause.message; }
+        return true;
+    }
+    settleLiveBulk(token, runId, payload, error = null) {
+        if (this.pending || runId !== this.savedRunId) return false;
+        return this.settleBulk(token, payload, runId, error);
+    }
+    static disposition(row) { return row.outcome === 'recommended' && row.recommendation?.kind || row.disposition || row.outcome; }
+    static reviewable(row) { return row.outcome === 'recommended' && InboxState.disposition(row) === 'recommended'; }
+    static retryable(row) { return ['pending', 'failed'].includes(row.outcome) || row.outcome === 'skipped' && ['', 'retry_needed'].includes(row.disposition || ''); }
+    static actions(row) {
+        return (row.actions || []).flatMap(action => {
+            if (row.ref?.kind !== 'coord-escalation' || !['resolve', 'mark-done'].includes(action.id)) return [action];
+            const options = (row.ref.options || []).filter(option => typeof option.id === 'string' && option.id.trim());
+            return options.length ? options : row.ref.conversationId?.trim() ? [{id: 'answer', label: 'Answer'}] : [action];
+        }).filter(action => action.id && !['chat', 'discuss', 'view-log', 'open', 'message-owner'].includes(action.id));
+    }
+    canSelect(id) { return !this.pending && !this.applied.has(id) && this.run?.phase === 'review' && this.items.some(row => row.itemId === id && InboxState.reviewable(row)); }
+    draft(row) { return this.drafts.get(row.itemId) ?? row.draftAnswer ?? ''; }
+    request(operation, environment, {query = '', itemId, actionId, answer} = {}) {
+        if (this.pending || !sameEnvironment(environment, environment)) throw new Error('Wait for the current action and select an environment');
+        const body = {environment, operation, confirmed: true}, active = ['pending', 'running'].includes(this.run?.phase);
+        if (operation === 'start') {
+            const visible = this.results(query);
+            if (!this.listReady || !this.bulkReady || active || this.run?.phase === 'review' || !visible.length || visible.length > 2000) throw new Error('Load a visible batch and finish the current run first');
+            body.items = visible.map(row => ({itemId: row.id, kind: row.kind, title: row.title, ref: row.ref, ownerAgentId: row.ownerAgentId ?? null}));
+            body.filter = {tier: null, kinds: [], query, shownCount: visible.length};
+        } else if (['stop', 'resume'].includes(operation)) {
+            if (!this.bulkReady || !this.run?.runId || (operation === 'stop' ? !active : active)) throw new Error('Load a saved run in the appropriate phase');
+            body.runId = this.run.runId;
+            if (operation === 'resume') {
+                body.itemIds = this.items.filter(InboxState.retryable).map(row => row.itemId);
+                if (!body.itemIds.length) throw new Error('No retryable items remain');
+            }
+        } else if (operation === 'apply' || operation === 'resolve') {
+            const row = operation === 'apply' ? this.items.find(item => item.itemId === itemId) : this.context;
+            const id = operation === 'apply' ? row?.itemId : row?.id;
+            if (!row || this.applied.has(id)) throw new Error('Select a current question');
+            if (operation === 'apply') {
+                if (!this.bulkReady || !this.canSelect(id) || !this.selectedReviews.has(id) || !row.actionId) throw new Error('Select a current recommendation');
+                body.runId = this.run.runId; actionId = row.actionId; answer = this.draft(row);
+            } else if (id !== this.selection || !InboxState.actions(row).some(action => action.id === actionId)) throw new Error('Select an offered action');
+            body.expected = {id, kind: row.kind, ref: row.ref}; body.actionId = actionId;
+            if (actionId === 'answer') body.answer = required(answer?.trim(), 'answer');
+        } else throw new Error('Unknown Inbox operation');
+        return JSON.parse(JSON.stringify(body));
+    }
+    beginAction(requests) {
+        if (this.pending || !requests.length) throw new Error('An Inbox action is already pending');
+        this.pending = true; this.actionNotice = null; return ++this.actionGeneration;
+    }
+    recordAction(token, request, payload) {
+        if (!this.pending || token !== this.actionGeneration || !sameEnvironment(request.environment, payload?.environment)) throw new Error('Action environment changed; refresh before retrying');
+        const receipt = oneRow(payload);
+        if (receipt.ok !== true) throw new Error('Action was not confirmed; refresh before retrying');
+        if (['apply', 'resolve'].includes(request.operation)) {
+            if (receipt.resolved !== true || receipt.itemId !== request.expected.id) throw new Error('Question resolution was not confirmed');
+            this.applied.add(receipt.itemId); this.selectedReviews.delete(receipt.itemId);
+        }
+        if (receipt.recorded === false) throw new Error('Action succeeded; bookkeeping is unconfirmed. Refresh and reconcile; do not repeat the action.');
+        if (request.operation === 'start') return required(receipt.runId, 'admitted run id');
+        return null;
+    }
+    finishAction(token, error = null) {
+        if (token !== this.actionGeneration) return;
+        this.pending = false; this.actionNotice = error?.message || 'Action confirmed. Refreshing saved state…';
+    }
+    static counts(run, items) {
+        if (!Number.isSafeInteger(run.totalItems) || run.totalItems < 0 || items.length > run.totalItems) throw new Error('Invalid bulk total');
+        const counts = Object.fromEntries(['resolved', 'forReview', 'pending', 'failed', 'skipped', 'dismissed', 'decided', 'ownerAction', 'cleanupCandidate', 'retryNeeded', 'routed', 'investigate'].map(key => [key, 0]));
+        const seen = new Set();
+        for (const item of items) {
+            if (!item.itemId || seen.has(item.itemId) || item.runId !== run.runId || !['pending', 'auto_resolved', 'recommended', 'skipped', 'failed', 'dismissed'].includes(item.outcome)) throw new Error('Invalid bulk item identity or outcome');
+            seen.add(item.itemId);
+            const bucket = {auto_resolved: 'resolved', pending: 'pending', failed: 'failed', skipped: 'skipped', dismissed: 'dismissed'}[item.outcome];
+            if (bucket) ++counts[bucket];
+            if (item.outcome !== 'pending') ++counts.decided;
+            if (InboxState.reviewable(item)) ++counts.forReview;
+            const disposition = {owner_action: 'ownerAction', cleanup_candidate: 'cleanupCandidate', retry_needed: 'retryNeeded', routed: 'routed', investigate: 'investigate'}[InboxState.disposition(item)];
+            if (disposition) ++counts[disposition];
+        }
+        return {...counts, total: run.totalItems, left: run.totalItems - counts.decided,
+            percent: run.totalItems ? Math.round(counts.decided / run.totalItems * 100) : 0,
+            unresolved: ['forReview', 'pending', 'failed', 'ownerAction', 'cleanupCandidate', 'retryNeeded', 'routed', 'investigate'].reduce((n, key) => n + counts[key], 0)};
+    }
+}
+
 // Acquire every replacement before releasing an existing shortcut. The caller
 // persists a failed edit back to the prior values; runtime bindings never go
 // dark during validation, including collisions with another application.

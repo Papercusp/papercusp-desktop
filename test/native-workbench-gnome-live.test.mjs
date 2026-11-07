@@ -30,14 +30,23 @@ argv:process.argv.slice(2),tty:[0,1,2].map(fd=>require('node:tty').isatty(fd))})
 process.exit(0);}
 let text='';process.stdin.on('data',c=>text+=c);process.stdin.on('end',()=>{
 const r=JSON.parse(text);let rows=[];
+const environment={endpoint:'http://fixture',workspaceId:'exact',store:{id:'store'},agentChat:{scope:'workspace'}};
+const question={id:'question+/=&',kind:'escalation',title:'Inbox question',body:'Exact context',ref:{kind:'coord-escalation',conversationId:'conversation+/=&'},actions:[{id:'resolve'}]};
+if(process.argv[2]==='native-inbox'){
+require('node:fs').writeFileSync(${JSON.stringify(join(temp,'inbox-action.json'))},JSON.stringify(r));
+console.log(JSON.stringify({environment,rows:[{ok:true,resolved:true,itemId:r.expected?.id,runId:'run+/=&'}]}));return;}
 if(r.name==='failure'){console.error('canonical ACL refusal');process.exitCode=1;return;}
-if(r.name==='plans.list')rows=[{harness:'exact-harness',slug:'same',title:'Plan'}];
+if(r.name==='operator.identity')rows=[environment];
+else if(r.name==='plans.attention')rows=[{items:[question]}];
+else if(r.name==='plans.attentionItem')rows=[question];
+else if(r.name==='plans.attentionBulkRun')rows=[{run:{runId:'run+/=&',phase:'review',totalItems:8},items:[{itemId:question.id,kind:question.kind,ref:question.ref,runId:'run+/=&',outcome:'recommended',actionId:'answer',draftAnswer:'Draft'}]}];
+else if(r.name==='plans.list')rows=[{harness:'exact-harness',slug:'same',title:'Plan'}];
 else if(r.name==='advRoster.list'){const fs=require('node:fs');const path=${JSON.stringify(join(temp,'roster.json'))};rows=[fs.existsSync(path)?JSON.parse(fs.readFileSync(path,'utf8')):{active:[],ended:[]}];}
 else if(r.name==='goals.list')rows=[{goals:[{id:'goal-id',title:'Goal '+(r.args.query||'')}],totalGoals:1}];
 else if(r.name==='reports.list')rows=[{report_id:'exact+/=&',title:'Report '+(r.args.query||'')}];
 else if(r.name==='reports.get')rows=[{body_md:'# Exact report '+r.args.reportId}];
 else rows=[r];
-console.log(JSON.stringify({rows,version:'native-fixture'}));});
+console.log(JSON.stringify({rows,environment,version:'native-fixture'}));});
 `, {mode:0o700});
     return file;
 }
@@ -320,7 +329,7 @@ export default class Probe extends Workbench {
  async finish(error){if(error){try{await captureScreen();}catch(cause){inputLog.push({screenshotError:String(cause)});}}GLib.file_set_contents(${JSON.stringify(resultFile)},JSON.stringify({ok:!error,error:error?String(error)+'; '+String(error.stack||''):null,phase,inputLog,actionMode:Main.actionMode,overview:Main.overview.visible,windows:global.get_window_actors().map(actor=>({title:actor.meta_window.get_title(),minimized:actor.meta_window.minimized,focused:actor.meta_window===global.display.focus_window})),states:[...this._states].map(([surface,s])=>({surface,visible:s.visible,pinned:s.pinned,selection:s.selection,detail:s.detail})),assertions}));if(this._focusFixture){this._focusFixture.force_exit();await new Promise(resolve=>this._focusFixture.wait_async(null,(child,result)=>{child.wait_finish(result);resolve();}));}if(this._inputCapture)global.stage.disconnect(this._inputCapture);global.stage.disconnect(this._pointerCapture);this.disable();global.context.terminate();}
  async probe(){
   this._settings.set_string('pui-path',${JSON.stringify(pui)});
-  check(this._bindings.size===2,'native shortcut acquisition');
+  check(this._bindings.size===3,'native shortcut acquisition');
   this._toggle('quick-access');
   await waitFor(()=>Object.values(this._states.get('quick-access').sources).every(s=>s.status!=='loading'));
   const qa=this._states.get('quick-access'),goals=this._states.get('goals');
@@ -348,6 +357,19 @@ export default class Probe extends Workbench {
   check(!qa.visible&&goals.visible,'outside dismissal preserves another pinned surface');
   this._toggle('goals');
   check(this._views.size===0&&!goals.visible,'repeated shortcut toggles pinned surface');
+  phase='inbox';this._toggle('inbox');
+  await waitFor(()=>this._inbox.listReady&&this._inbox.bulkReady);
+  check(this._inbox.rows[0].id==='question+/=&','Inbox canonical list reaches native actor');
+  check(this._views.get('inbox').bulkStatus.text.includes('1/8 decided'),'Inbox persisted denominator reaches native status');
+  await this._loadInboxContext('question+/=&');
+  check(this._inbox.context.body==='Exact context','Inbox selected context preserves exact identity');
+  this._inbox.answer=' Native answer ';this._prepareInbox('resolve',{actionId:'answer'});
+  check(this._views.get('inbox').confirmRequests[0].answer==='Native answer','Inbox confirmation freezes edited answer');
+  await this._confirmInbox();await waitFor(()=>this._inbox.listReady&&this._inbox.bulkReady);
+  check(this._inbox.applied.has('question+/=&'),'Inbox write uses helper native-inbox and verifies terminal receipt');
+  check(global.get_window_actors().length===0,'Inbox adds no application window');
+  this._hide('inbox',false);
+  check(!this._views.has('inbox'),'Inbox dismissal removes native actors and run refresh');
   // These go through Mutter's virtual seat and the actual event dispatch path.
   // No Workbench controller or synthetic signal is called for this phase.
   const seat=Clutter.get_default_backend().get_default_seat();

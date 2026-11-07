@@ -5,13 +5,94 @@ import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import test from 'node:test';
-import {PanelState, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests,
+import {PanelState, InboxState, sameEnvironment, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests,
     agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow}
     from '../native/gnome/panel-model.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const plan = (harness = 'one', slug = 'same') => ({harness, slug, title: 'Shared title', status: 'active'});
 const envelope = rows => ({rows, version: 'canonical-version'});
+
+const environment = {endpoint:'http://selected',workspaceId:'exact',store:{id:'store'},agentChat:{scope:'workspace'}};
+const question = {id:'question+/=&',kind:'escalation',title:'Literal %_ question',body:'Context',ref:{kind:'coord-escalation',conversationId:'conversation+/=&'},actions:[{id:'resolve'}]};
+const bulk = (items, run = {runId:'run+/=&',phase:'review',totalItems:8}) => envelope([{run,items}]);
+const recommended = {itemId:question.id,kind:question.kind,ref:question.ref,runId:'run+/=&',outcome:'recommended',actionId:'answer',draftAnswer:'Original'};
+function loadedInbox() {
+    const state = new InboxState(), token = state.begin();
+    state.settleList(token,envelope([{items:[question]}]));
+    state.settleBulk(token,bulk([recommended]));
+    return {state,token};
+}
+test('Inbox context refuses conflicting, partial and stale identities and clears hidden selections', () => {
+    const {state,token} = loadedInbox(), context = state.select(question.id);
+    assert.equal(state.settleContext(context,question.id,envelope([question])),true);
+    assert.equal(state.request('resolve',environment,{actionId:'answer',answer:'  Exact answer  '}).answer,'Exact answer');
+    assert.throws(()=>state.request('resolve',environment,{actionId:'resolve'}),/offered/);
+    assert.throws(()=>state.request('resolve',environment,{actionId:'answer',answer:' '}),/answer/);
+    state.settleContext(context,question.id,{...envelope([question]),partial:true}); assert.equal(state.context,null);
+    state.settleContext(context,question.id,envelope([{...question,ref:{kind:'changed'}}])); assert.equal(state.context,null);
+    state.settleContext(context,question.id,envelope([question]));
+    state.retainVisibleSelection('no such question'); assert.equal(state.selection,null);
+    assert.equal(state.settleContext(context,question.id,envelope([question])),false);
+    state.settleList(token,envelope([{items:[question,{...question,title:'conflicting'}]}]));
+    assert.equal(state.listReady,false); assert.match(state.listError,/Conflicting/);
+    assert.equal(state.settleList(token-1,envelope([{items:[]}])),false);
+});
+test('Inbox named choices require source Resolve and preserve exact option identities', () => {
+    const row={...question,ref:{kind:'coord-escalation',options:[{id:'ship+/=&',label:'Ship'},{id:'wait',label:'Wait'}]}};
+    assert.deepEqual(InboxState.actions(row).map(a=>a.id),['ship+/=&','wait']);
+    assert.deepEqual(InboxState.actions({...row,actions:[]}),[]);
+    const {state,token}=loadedInbox(); state.settleList(token,envelope([{items:[row]}]));
+    const context=state.select(row.id); state.settleContext(context,row.id,envelope([row]));
+    assert.equal(state.request('resolve',environment,{actionId:'ship+/=&'}).actionId,'ship+/=&');
+    assert.throws(()=>state.request('resolve',environment,{actionId:'resolve'}),/offered/);
+});
+test('Inbox saved progress uses the persisted denominator and excludes owner-only work from Apply', () => {
+    const owner={...recommended,itemId:'owner',recommendation:{kind:'owner_action'}}, {state,token}=loadedInbox();
+    state.settleBulk(token,bulk([recommended,owner]));
+    const counts=InboxState.counts(state.run,state.items);
+    assert.equal(counts.total,8); assert.equal(counts.percent,25); assert.equal(counts.forReview,1); assert.equal(counts.ownerAction,1);
+    assert.equal(state.canSelect('owner'),false); state.selectedReviews.add('owner');
+    assert.throws(()=>state.request('apply',environment,{itemId:'owner'}),/recommendation/);
+    state.selectedReviews.add(question.id); state.drafts.set(question.id,' Edited answer ');
+    const frozen=state.request('apply',environment,{itemId:question.id});
+    state.drafts.set(question.id,'Later edit'); assert.equal(frozen.answer,'Edited answer');
+    assert.throws(()=>InboxState.counts(state.run,[recommended,recommended]),/identity/);
+    assert.throws(()=>InboxState.counts(state.run,[{...recommended,runId:'foreign'}]),/identity/);
+    assert.throws(()=>InboxState.counts({...state.run,totalItems:0},[recommended]),/total/);
+});
+test('Inbox run refresh preserves edits, rejects overlapping writes and recovers read failures', () => {
+    const {state,token}=loadedInbox(); state.selectedReviews.add(question.id); state.drafts.set(question.id,'Keep this edit');
+    const request=state.request('apply',environment,{itemId:question.id}), action=state.beginAction([request]);
+    assert.equal(state.settleLiveBulk(token,'run+/=&',bulk([])),false);
+    assert.throws(()=>state.request('stop',environment),/current action/); state.finishAction(action);
+    assert.equal(state.settleLiveBulk(token,'foreign',bulk([])),false);
+    state.settleLiveBulk(token,'run+/=&',null,new Error('Read unavailable')); assert.equal(state.bulkReady,false);
+    state.settleLiveBulk(token,'run+/=&',bulk([recommended])); assert.equal(state.bulkReady,true);
+    assert.equal(state.draft(recommended),'Keep this edit'); assert.equal(state.selectedReviews.has(question.id),true);
+    state.begin(); assert.equal(state.settleLiveBulk(token,'run+/=&',bulk([])),false);
+});
+test('Inbox writes demand exact environment and terminal receipt and never repeat confirmed effects', () => {
+    const {state}=loadedInbox(); state.selectedReviews.add(question.id);
+    const request=state.request('apply',environment,{itemId:question.id}), token=state.beginAction([request]);
+    const receipt={environment,rows:[{ok:true,resolved:true,itemId:question.id}]};
+    assert.equal(sameEnvironment(environment,{...environment,store:{id:'foreign'}}),false);
+    assert.throws(()=>state.recordAction(token,request,{...receipt,environment:{}}),/environment/);
+    assert.throws(()=>state.recordAction(token,request,{...receipt,rows:[{ok:true,resolved:false,itemId:question.id}]}),/resolution/);
+    assert.throws(()=>state.recordAction(token,request,{...receipt,rows:[{ok:true,resolved:true,itemId:'foreign'}]}),/resolution/);
+    assert.throws(()=>state.recordAction(token,request,{...receipt,rows:[{...receipt.rows[0],recorded:false}]}),/do not repeat/);
+    state.finishAction(token); assert.throws(()=>state.request('apply',environment,{itemId:question.id}),/current question/);
+});
+test('Inbox batch admission freezes only visible questions and resumes only retryable items', () => {
+    const {state,token}=loadedInbox(); state.settleBulk(token,bulk([],null));
+    const request=state.request('start',environment,{query:'%_'});
+    assert.equal(request.items.length,1); assert.equal(request.filter.shownCount,1);
+    assert.deepEqual(request.items[0].ref,question.ref);
+    assert.throws(()=>state.request('start',environment,{query:'absent'}),/visible batch/);
+    state.settleBulk(token,bulk([{...recommended,outcome:'failed'},{...recommended,itemId:'owner',recommendation:{kind:'owner_action'}}]));
+    assert.deepEqual(state.request('resume',environment).itemIds,[question.id]);
+    assert.throws(()=>state.request('stop',environment),/phase/);
+});
 
 test('canonical ended session rows retain Agents results and exact launch identities', () => {
     const active = {ownerId:'same-owner',advSessionId:42,label:'Same title',

@@ -3,20 +3,23 @@ import GLib from 'gi://GLib';
 
 // The PUI command owns discovery, IPC/HTTP, credentials and its read allowlist.
 // No shell, bearer file, local server or second authorization implementation.
-export function nativeRead(pui, request, cancellable = null) {
+export function nativeRead(pui, request, cancellable = null, command = 'native-read') {
     if (typeof pui !== 'string' || !pui.trim()) return Promise.reject(new Error('PUI is not configured'));
+    if (!['native-read', 'native-inbox'].includes(command)) return Promise.reject(new Error('Unsupported native operation'));
+    const body = JSON.stringify(request);
+    if (new TextEncoder().encode(body).length > 64 * 1024) return Promise.reject(new Error('Native request exceeds its limit'));
     return new Promise((resolve, reject) => {
         let process;
         try {
-            process = Gio.Subprocess.new([pui, 'native-read'],
+            process = Gio.Subprocess.new([pui, command],
                 Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
         } catch (error) { reject(error); return; }
         let timedOut = false;
-        let timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 22000, () => {
+        let timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, command === 'native-inbox' ? 65000 : 22000, () => {
             timer = null; timedOut = true; process.force_exit(); return GLib.SOURCE_REMOVE;
         });
         const cancel = cancellable?.connect(() => process.force_exit());
-        process.communicate_utf8_async(JSON.stringify(request), cancellable, (child, result) => {
+        process.communicate_utf8_async(body, cancellable, (child, result) => {
             if (timer) GLib.source_remove(timer);
             if (cancel) cancellable.disconnect(cancel);
             try {
@@ -39,8 +42,10 @@ export class ResidentBridge {
         this.helperPath = helperPath; this._serial = 0; this._pending = new Map();
         this._writes = Promise.resolve(); this._closed = false;
     }
-    read(pui, request) {
+    inbox(pui, request) { return this.read(pui, request, 'native-inbox'); }
+    read(pui, request, command = 'native-read') {
         if (this._closed) return Promise.reject(new Error('Workbench has stopped'));
+        if (!['native-read', 'native-inbox'].includes(command)) return Promise.reject(new Error('Unsupported native operation'));
         if (this._child && this._pui !== pui) this._stop(new Error('Selected PUI connection changed'));
         if (!this._child) {
             try {
@@ -54,11 +59,11 @@ export class ResidentBridge {
         }
         const id = ++this._serial, child = this._child, cancel = this._cancel;
         return new Promise((resolve, reject) => {
-            const timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 24000, () => {
+            const timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, command === 'native-inbox' ? 67000 : 24000, () => {
                 this._stop(new Error('Native helper did not respond in time')); return GLib.SOURCE_REMOVE;
             });
             this._pending.set(id, {resolve, reject, timer});
-            const bytes = new TextEncoder().encode(JSON.stringify({id, request}) + '\n');
+            const bytes = new TextEncoder().encode(JSON.stringify({id, request, command}) + '\n');
             this._writes = this._writes.then(() => new Promise((done, fail) => {
                 child.get_stdin_pipe().write_all_async(bytes, GLib.PRIORITY_DEFAULT, cancel, (stream, result) => {
                     try { stream.write_all_finish(result); done(); } catch (error) { fail(error); }

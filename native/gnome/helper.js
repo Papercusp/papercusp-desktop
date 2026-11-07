@@ -28,7 +28,7 @@ function readNext() {
                 !message.request || typeof message.request !== 'object' || Array.isArray(message.request))
                 throw new Error('Malformed native helper request');
             pending.add(message.id);
-            nativeRead(pui, message.request, cancellable)
+            nativeRead(pui, message.request, cancellable, message.command || 'native-read')
                 .then(payload => { if (!stopping) print(JSON.stringify({id: message.id, payload})); })
                 .catch(error => { if (!stopping) print(JSON.stringify({id: message.id, error: String(error.message || error)})); })
                 .finally(() => pending.delete(message.id));
