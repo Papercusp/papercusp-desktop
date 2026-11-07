@@ -46,12 +46,48 @@ process.exit(0);}
 let text='';process.stdin.on('data',c=>text+=c);process.stdin.on('end',()=>{
 const r=JSON.parse(text);let rows=[];
 const environment={endpoint:'http://fixture',workspaceId:'exact',store:{id:'store'},agentChat:{scope:'workspace'}};
+const fs=require('node:fs'),dir=${JSON.stringify(temp)};
+const chatId=()=>fs.existsSync(dir+'/conversation-id')?fs.readFileSync(dir+'/conversation-id','utf8'):'conversation+/=&';
+const chatHistory=()=>fs.existsSync(dir+'/chat-history.json')?JSON.parse(fs.readFileSync(dir+'/chat-history.json','utf8')):
+ [{id:'saved-five',conversationId:chatId(),seq:5,role:'assistant',text:'Saved conversation'}];
+if(process.argv[2]==='native-chat'){
+ const actions=fs.existsSync(dir+'/chat-actions.json')?JSON.parse(fs.readFileSync(dir+'/chat-actions.json','utf8')):[];
+ actions.push(r);fs.writeFileSync(dir+'/chat-actions.json',JSON.stringify(actions));
+ const turnId='00000000-0000-4000-8000-000000000002';
+ const emit=(event,data)=>console.log(JSON.stringify({environment,event,data}));
+ const event=(n,text)=>emit('chat-event',{schemaVersion:1,conversationId:r.conversationId,turnId,sequence:n,
+  eventId:'event-'+n,event:{type:'delta',text}});
+ const done=()=>{const rows=chatHistory(),seq=rows.at(-1).seq+1;
+  rows.push({id:'assistant-'+seq,conversationId:r.conversationId,seq,role:'assistant',text:'Hello from Papercup'});
+  fs.writeFileSync(dir+'/chat-history.json',JSON.stringify(rows));
+  emit('done',{phase:'completed',persistedTurn:{conversationId:r.conversationId,turnId,seq}});};
+ if(r.operation==='cancel'){
+  emit('cancelled',{ok:true,state:{schemaVersion:1,conversationId:r.conversationId,turnId,revision:1,lastSequence:1,phase:'cancelled',
+   capabilities:Object.fromEntries(['connectionReplay','persistedHistory','persistedInteractionDecisions',
+    'completedToolCheckpoints','interruptedTurnRecovery'].map(k=>[k,true]))}});return;}
+ if(r.operation==='send'){
+  const rows=chatHistory(),row={id:r.userTurnId,conversationId:r.conversationId,seq:rows.at(-1).seq+1,role:'user',text:r.text};
+  rows.push(row);fs.writeFileSync(dir+'/chat-history.json',JSON.stringify(rows));
+  emit('user-saved',{conversationId:r.conversationId,turn:row});
+ }
+ emit('turn-meta',{schemaVersion:1,conversationId:r.conversationId,turnId});
+ event(1,'<say>Hello');
+ if(r.operation==='reconnect'){event(2,' from Papercup</say>');done();return;}
+ if(r.text==='recover')return;
+ if(r.text==='cancel'){setInterval(()=>{},1000);return;}
+ const started=Date.now(),timer=setInterval(()=>{
+  if(fs.existsSync(dir+'/chat-release')){clearInterval(timer);event(2,' from Papercup</say>');done();}
+  else if(Date.now()-started>6000){clearInterval(timer);console.error('consumer did not observe partial reply');process.exitCode=1;}
+ },25);return;
+}
 const question={id:'question+/=&',kind:'escalation',title:'Inbox question',body:'Exact context',ref:{kind:'coord-escalation',conversationId:'conversation+/=&'},actions:[{id:'resolve'}]};
 if(process.argv[2]==='native-inbox'){
 require('node:fs').writeFileSync(${JSON.stringify(join(temp,'inbox-action.json'))},JSON.stringify(r));
 console.log(JSON.stringify({environment,rows:[{ok:true,resolved:true,itemId:r.expected?.id,runId:'run+/=&'}]}));return;}
 if(r.name==='failure'){console.error('canonical ACL refusal');process.exitCode=1;return;}
 if(r.name==='operator.identity')rows=[environment];
+else if(r.name==='operatorConversations.current')rows=[{id:chatId(),workspaceId:environment.workspaceId,subjectKind:'global',status:'active'}];
+else if(r.name==='operatorTurns.page')rows=[{turns:r.args.beforeSeq?[{id:'saved-one',conversationId:chatId(),seq:1,role:'user',text:'Earlier message'}]:chatHistory(),hasMoreEarlier:!r.args.beforeSeq&&!fs.existsSync(dir+'/chat-history.json')}];
 else if(r.name==='plans.attention')rows=[{items:[question]}];
 else if(r.name==='plans.attentionItem')rows=[question];
 else if(r.name==='plans.attentionBulkRun')rows=[{run:{runId:'run+/=&',phase:'review',totalItems:8},items:[{itemId:question.id,kind:question.kind,ref:question.ref,runId:'run+/=&',outcome:'recommended',actionId:'answer',draftAnswer:'Draft'}]}];
@@ -366,11 +402,11 @@ process.exitCode=evidence.ok?0:1;`);
     }));
 
 const selectedJourney=process.env.PAPERCUSP_GNOME_JOURNEY||'all';
-assert.ok(['all','inbox','input','focus','resume','organizer'].includes(selectedJourney),'Unknown PAPERCUSP_GNOME_JOURNEY');
+assert.ok(['all','inbox','input','focus','resume','organizer','chat'].includes(selectedJourney),'Unknown PAPERCUSP_GNOME_JOURNEY');
 // Preserve every scenario while bounding each independent desktop lifetime.
 // The input journey includes the controller and Inbox cases; focus and Resume
 // start from a fresh Shell and cannot spend each other's deadline budget.
-for(const journey of selectedJourney==='all'?['input','focus','resume','organizer']:[selectedJourney]){
+for(const journey of selectedJourney==='all'?['input','focus','resume','organizer','chat']:[selectedJourney]){
 test('private GNOME Shell renders actors and handles real seat keyboard, pointer and nested dismissal ['+journey+']',
     {skip:process.platform!=='linux',timeout:75000}, () => withNativeFixture('workbench-shell-',async temp=>{
             const evidenceDirectory=process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR&&
@@ -416,7 +452,7 @@ export default class Probe extends Workbench {
  async finish(error){progress();if(error||!GLib.file_test(${JSON.stringify(screenshot)},GLib.FileTest.EXISTS)){try{await captureScreen();}catch(cause){inputLog.push({screenshotError:String(cause)});error||=cause;}}GLib.file_set_contents(${JSON.stringify(resultFile)},JSON.stringify({ok:!error,error:error?String(error)+'; '+String(error.stack||''):null,phase,journey,inputLog,actionMode:Main.actionMode,overview:Main.overview.visible,windows:global.get_window_actors().map(actor=>({title:actor.meta_window.get_title(),minimized:actor.meta_window.minimized,focused:actor.meta_window===global.display.focus_window})),states:[...this._states].map(([surface,s])=>({surface,visible:s.visible,pinned:s.pinned,selection:s.selection,detail:s.detail})),assertions}));if(this._focusFixture){this._focusFixture.force_exit();await new Promise(resolve=>this._focusFixture.wait_async(null,(child,result)=>{child.wait_finish(result);resolve();}));}if(this._inputCapture)global.stage.disconnect(this._inputCapture);global.stage.disconnect(this._pointerCapture);this.disable();global.context.terminate();}
  async probe(){
   this._settings.set_string('pui-path',${JSON.stringify(pui)});
-  check(this._bindings.size===4,'native shortcut acquisition');
+  check(this._bindings.size===5,'native shortcut acquisition');
   const qa=this._states.get('quick-access'),goals=this._states.get('goals');
   const seat=Clutter.get_default_backend().get_default_seat();
   check(typeof seat.create_virtual_device==='function','native seat supports input injection');
@@ -447,6 +483,75 @@ export default class Probe extends Workbench {
   if(Main.overview.visible)await key(Clutter.KEY_Escape);
   await waitFor(()=>Main.actionMode===Shell.ActionMode.NORMAL);
   check(!Main.overview.visible,'desktop ready for normal shortcuts');
+  if(journey==='chat'){
+   setPhase('chat shortcut and canonical history');
+   await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_p]);
+   const chat=this._chat;
+   await waitFor(()=>chat.ready);
+   check(this._states.get('papercup').visible&&this._views.get('papercup').panel.get_parent()!==null,
+    'Papercup shortcut opens native Shell actor');
+   check(chat.turns.length===1&&chat.turns[0].seq===5,'saved transcript reaches native chat');
+   check(this._views.get('papercup').panel.contains(global.stage.get_key_focus()),'canonical history completion focuses native composer');
+   await click(()=>this._views.get('papercup')?.earlier);
+   await waitFor(()=>!chat.loading&&chat.turns[0]?.seq===1);
+   check(chat.turns.length===2&&!chat.hasMoreEarlier,'Earlier messages prepends canonical page');
+   setPhase('chat draft and conversation isolation');
+   this._views.get('papercup').compose.set_text('Retained draft');
+   check(this._views.get('papercup').panel.contains(global.stage.get_key_focus()),'chat child control owns keyboard focus');
+   setPhase('chat Escape after Earlier action');
+   await key(Clutter.KEY_Escape);await waitFor(()=>!this._views.has('papercup'));
+   check(!this._states.get('papercup').visible,'Escape closes chat without application window');
+   setPhase('chat reopen restores draft');
+   await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_p]);await waitFor(()=>chat.ready);
+   check(this._views.get('papercup').compose.get_text()==='Retained draft','reopen preserves conversation draft');
+   GLib.file_set_contents(${JSON.stringify(join(temp,'conversation-id'))},'different-conversation');
+   setPhase('chat different conversation binding');
+   this._refreshChat();await waitFor(()=>chat.ready&&chat.conversationId==='different-conversation');
+   check(chat.draft===''&&this._views.get('papercup').compose.get_text()==='','another conversation cannot inherit draft');
+   GLib.file_set_contents(${JSON.stringify(join(temp,'conversation-id'))},'conversation+/=&');
+   this._refreshChat();await waitFor(()=>chat.ready&&chat.conversationId==='conversation+/=&');
+   check(chat.draft==='Retained draft','returning to conversation restores only its draft');
+   setPhase('chat progressive native send');
+   this._views.get('papercup').compose.grab_key_focus();
+   await chord([Clutter.KEY_Control_L,Clutter.KEY_a]);
+   for(const symbol of [Clutter.KEY_h,Clutter.KEY_e,Clutter.KEY_l,Clutter.KEY_l,Clutter.KEY_o])await key(symbol);
+   check(chat.draft==='hello','seat typing reaches native chat composer');
+   await key(Clutter.KEY_Return);
+   await waitFor(()=>chat.reply?.displayText==='Hello');
+   check(!chat.reply.complete&&!chat.canSend,'partial reply renders before producer is released and blocks duplicate send');
+   check(chat.draft===''&&chat.turns.at(-1).role==='user','exact saved acknowledgement clears submitted draft');
+   check(this._views.get('papercup').content.get_children().some(actor=>actor.text==='Hello'),
+    'progressive reply is present in actual Shell actor');
+   GLib.file_set_contents(${JSON.stringify(join(temp,'chat-release'))},'consumer observed');
+   await waitFor(()=>chat.ready&&!chat.reply&&chat.turns.at(-1)?.text==='Hello from Papercup');
+   check(chat.turns.filter(row=>row.role==='user'&&row.text==='hello').length===1,
+    'completion reloads persisted transcript without duplicate user turn');
+   setPhase('chat reconnect exact saved turn');
+   this._views.get('papercup').compose.set_text('recover');await click(()=>this._views.get('papercup')?.send);
+   await waitFor(()=>chat.reply?.phase==='needs-reconciliation');
+   check(!chat.canSend&&this._views.get('papercup').reconnect.visible,'disconnect exposes reconciliation without a second send');
+   await click(()=>this._views.get('papercup')?.reconnect);
+   await waitFor(()=>chat.ready&&!chat.reply&&chat.turns.at(-1)?.role==='assistant');
+   let [ok,bytes]=GLib.file_get_contents(${JSON.stringify(join(temp,'chat-actions.json'))});
+   let requests=JSON.parse(new TextDecoder().decode(bytes));
+   check(requests[0].operation==='send'&&requests[0].text==='hello'&&requests[0].environment.workspaceId==='exact'&&
+    requests[0].conversationId==='conversation+/=&'&&typeof requests[0].userTurnId==='string',
+    'Send retains exact selected environment conversation and saved user identity');
+   check(ok&&requests.length===3&&requests[2].operation==='reconnect'&&requests[2].afterSequence===1&&
+    requests[2].turnId==='00000000-0000-4000-8000-000000000002'&&!requests[2].text,
+    'Reconnect passes exact saved turn and cursor without replaying send');
+   setPhase('chat canonical cancellation');
+   this._views.get('papercup').compose.set_text('cancel');await click(()=>this._views.get('papercup')?.send);
+   await waitFor(()=>chat.reply?.displayText==='Hello');
+   await click(()=>this._views.get('papercup')?.cancelReply);
+   await waitFor(()=>chat.reply?.phase==='cancelled');
+   check(chat.reply.complete,'Cancel requires canonical saved cancellation receipt');
+   [ok,bytes]=GLib.file_get_contents(${JSON.stringify(join(temp,'chat-actions.json'))});requests=JSON.parse(new TextDecoder().decode(bytes));
+   check(requests.at(-1).operation==='cancel'&&requests.at(-1).conversationId==='conversation+/=&',
+    'Cancel retains exact conversation identity');
+   check(global.get_window_actors().length===0,'Papercup remains outside Dock taskbar and Alt-Tab application windows');
+   await captureScreen();return this.finish(null);
+  }
   if(journey!=='resume'){
   if(!['focus','organizer'].includes(journey)){
   setPhase('controller');
@@ -727,7 +832,7 @@ export default class Probe extends Workbench {
             assert.equal(evidence?.ok,true,JSON.stringify({evidence,progress,...result}));
             assert.equal(result.status,0,JSON.stringify(result));
             assert.equal(result.error,null,JSON.stringify(result));
-            const minimumAssertions={inbox:25,input:36,focus:11,resume:16,organizer:13};
+            const minimumAssertions={inbox:25,input:36,focus:11,resume:16,organizer:13,chat:22};
             assert.ok(evidence.assertions.length>=minimumAssertions[journey],JSON.stringify(evidence));
             assert.deepEqual([...readFileSync(screenshot).subarray(0,8)], [137,80,78,71,13,10,26,10]);
             if(evidenceDirectory){

@@ -7,7 +7,7 @@ import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {ResidentBridge} from './bridge.js';
-import {PanelState, InboxState, sameEnvironment, oneRow, SOURCES, sourceRequests, detailRequest, readRows, rebindShortcuts,
+import {PanelState, InboxState, ChatState, sameEnvironment, oneRow, SOURCES, sourceRequests, detailRequest, readRows, rebindShortcuts,
     agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow,
     organizerGroups, arrangeOrganizerGroup} from './panel-model.mjs';
 
@@ -27,9 +27,10 @@ function button(text, callback) {
 export default class Workbench extends Extension {
     enable() {
         this._settings = this.getSettings();
-        this._states = new Map(['quick-access', 'goals', 'inbox', 'organizer'].map(name => [name, new PanelState()]));
+        this._states = new Map(['quick-access', 'goals', 'inbox', 'organizer', 'papercup'].map(name => [name, new PanelState()]));
         this._states.get('organizer').organizerKind = 'plan';
         this._inbox = new InboxState(); this._inboxRunId = null;
+        this._chat = new ChatState(); this._chatStream = null;
         this._states.get('goals').scope = 'goals';
         this._views = new Map();
         this._bridge = new ResidentBridge(this.path + '/helper.js');
@@ -69,6 +70,7 @@ export default class Workbench extends Extension {
         if (this._selectedPui !== undefined && this._selectedPui !== pui) {
             this._inbox.begin(); this._inboxEnvironment = null; this._inboxRunId = null;
             this._hide('inbox', false);
+            this._hide('papercup', false);
         }
         this._selectedPui = pui;
         if (!this._settings.get_boolean('enabled')) {
@@ -132,7 +134,7 @@ export default class Workbench extends Extension {
         this._views.set(surface, view);
         const header = new St.BoxLayout({style_class: 'papercusp-panel-header'});
         header.add_child(label(surface === 'goals' ? 'Goals' : surface === 'inbox' ? 'Inbox' :
-            surface === 'organizer' ? 'Organizer' : 'Quick Access', 'papercusp-panel-title'));
+            surface === 'organizer' ? 'Organizer' : surface === 'papercup' ? 'Papercup' : 'Quick Access', 'papercusp-panel-title'));
         const pin = button(state.pinned ? 'Unpin' : 'Pin', () => {
             state.pinned = !state.pinned;
             pin.label = state.pinned ? 'Unpin' : 'Pin';
@@ -141,6 +143,7 @@ export default class Workbench extends Extension {
         header.add_child(button('Refresh', () => this._refresh(surface)));
         header.add_child(button('Close', () => this._hide(surface, true)));
         panel.add_child(header);
+        if (surface === 'papercup') { this._buildChat(view); return; }
         view.search = new St.Entry({text: state.query, hint_text: surface === 'inbox' ? 'Search questions' : 'Search plans, agents, reports and goals',
             can_focus: true, x_expand: true, accessible_name: 'Search Workbench'});
         // Clutter.Text consumes Enter and emits activate instead of bubbling
@@ -217,6 +220,7 @@ export default class Workbench extends Extension {
         const view = this._views.get(surface), state = this._states.get(surface);
         if (!view || !state.visible) return;
         if (surface === 'inbox') { this._refreshInbox(); return; }
+        if (surface === 'papercup') { this._refreshChat(); return; }
         if (surface === 'organizer' && state.organizing) return;
         if (view.searchTimer) { GLib.source_remove(view.searchTimer); view.searchTimer = null; }
         const requests = surface === 'organizer' ? [...sourceRequests('', 'agents'), ...sourceRequests('', 'goals')] :
@@ -231,6 +235,7 @@ export default class Workbench extends Extension {
         }
     }
     _render(surface) {
+        if (surface === 'papercup') { this._renderChat(); return; }
         if (surface === 'inbox') { this._renderInbox(); return; }
         if (surface === 'organizer') { this._renderOrganizer(); return; }
         const view = this._views.get(surface);
@@ -449,6 +454,129 @@ export default class Workbench extends Extension {
         return this._views.get('inbox') === view && this._states.get('inbox').visible &&
             this._inbox.generation === token && this._settings.get_string('pui-path') === pui;
     }
+    _buildChat(view) {
+        const {panel} = view;
+        view.status = label('', 'papercusp-panel-status'); panel.add_child(view.status);
+        const controls = new St.BoxLayout({style_class: 'papercusp-panel-scopes'});
+        view.earlier = button('Earlier messages', () => this._loadEarlierChat()); controls.add_child(view.earlier);
+        view.reconnect = button('Reconnect reply', () => this._controlChat('reconnect')); controls.add_child(view.reconnect);
+        view.cancelReply = button('Cancel reply', () => this._controlChat('cancel')); controls.add_child(view.cancelReply);
+        panel.add_child(controls);
+        view.scroll = new St.ScrollView({x_expand: true, y_expand: true});
+        view.content = new St.BoxLayout({vertical: true, x_expand: true, style_class: 'papercusp-detail'});
+        view.scroll.set_child(view.content); panel.add_child(view.scroll);
+        view.compose = new St.Entry({text: this._chat.draft, hint_text: 'Message Papercup', can_focus: true,
+            x_expand: true, accessible_name: 'Message Papercup'});
+        view.compose.clutter_text.connect('text-changed', () => {
+            this._chat.draft = view.compose.get_text(); this._updateChatControls(view);
+        });
+        view.compose.clutter_text.connect('activate', () => this._sendChat());
+        panel.add_child(view.compose); view.send = button('Send', () => this._sendChat()); panel.add_child(view.send);
+        // Dismiss consistently from every focused descendant control.
+        panel.connect('captured-event', (_actor, event) => {
+            if (event.type() !== Clutter.EventType.KEY_PRESS || event.get_key_symbol() !== Clutter.KEY_Escape)
+                return Clutter.EVENT_PROPAGATE;
+            this._hide('papercup', true); return Clutter.EVENT_STOP;
+        });
+        Main.layoutManager.addChrome(panel, {affectsStruts: false, trackFullscreen: false});
+        this._position(); this._renderChat(); view.compose.grab_key_focus();
+    }
+    _updateChatControls(view) {
+        const chat = this._chat, reply = chat.reply;
+        // Pagination disables send, but must not drop the entry's key focus.
+        view.compose.reactive = Boolean(chat.ready);
+        view.send.reactive = chat.canSend; view.send.can_focus = chat.canSend;
+        view.earlier.reactive = Boolean(chat.ready && !chat.loading && !reply && chat.hasMoreEarlier);
+        view.reconnect.visible = Boolean(reply?.turnId && !reply.complete && !reply.connected);
+        view.cancelReply.visible = Boolean(reply?.turnId && !reply.complete);
+    }
+    _renderChat() {
+        const view = this._views.get('papercup'); if (!view) return;
+        const chat = this._chat; view.content.destroy_all_children();
+        view.status.set_text(chat.error || (chat.loading ? 'Loading conversation…' :
+            chat.reply ? 'Reply · ' + chat.reply.phase : chat.ready ? 'Papercup · ready' : 'Conversation unavailable'));
+        for (const turn of chat.turns) {
+            view.content.add_child(label(turn.role === 'user' ? 'You' : turn.role === 'assistant' ? 'Papercup' : turn.role,
+                'papercusp-result-title'));
+            view.content.add_child(label(turn.text));
+        }
+        if (chat.reply) {
+            view.content.add_child(label('Papercup · ' + chat.reply.phase, 'papercusp-result-title'));
+            if (chat.reply.displayText) view.content.add_child(label(chat.reply.displayText));
+            for (const activity of chat.reply.tools) view.content.add_child(label(activity, 'papercusp-panel-status'));
+        }
+        if (chat.ready && !chat.turns.length && !chat.reply) view.content.add_child(label('Start a conversation with Papercup.'));
+        if (view.compose.get_text() !== chat.draft) view.compose.set_text(chat.draft);
+        this._updateChatControls(view);
+    }
+    _stopChatStream() {
+        const stream = this._chatStream; this._chatStream = null; stream?.cancel();
+    }
+    async _refreshChat() {
+        this._stopChatStream(); const token = this._chat.begin(), view = this._views.get('papercup');
+        if (!view) return;
+        const pui = this._settings.get_string('pui-path'); this._renderChat();
+        const current = () => token === this._chat.generation && this._views.get('papercup') === view &&
+            pui === this._settings.get_string('pui-path');
+        try {
+            const environment = oneRow(await this._bridge.read(pui, {name: 'operator.identity', args: {}}));
+            if (!current()) return;
+            const conversation = await this._bridge.read(pui, {name: 'operatorConversations.current',
+                args: {workspaceId: environment.workspaceId}, environment});
+            if (!current() || !this._chat.bind(token, environment, conversation)) return;
+            const id = this._chat.conversationId;
+            const page = await this._bridge.read(pui, {name: 'operatorTurns.page',
+                args: {conversationId: id, limit: 200}, environment});
+            if (current()) this._chat.settle(token, environment, id, page);
+        } catch (error) { if (current()) this._chat.fail(token, error); }
+        finally {
+            if (current()) {
+                this._renderChat();
+                // The entry was unavailable at construction until canonical
+                // history arrived. Restore focus only if no other actor owns it.
+                if (this._chat.ready && !global.stage.get_key_focus()) view.compose.grab_key_focus();
+            }
+        }
+    }
+    async _loadEarlierChat() {
+        const chat = this._chat, token = chat.generation, environment = chat.environment, id = chat.conversationId;
+        try {
+            const beforeSeq = chat.beginEarlier(); this._renderChat();
+            const page = await this._bridge.read(this._settings.get_string('pui-path'), {name: 'operatorTurns.page',
+                args: {conversationId: id, beforeSeq, limit: 200}, environment});
+            chat.settle(token, environment, id, page, beforeSeq);
+        } catch (error) { chat.fail(token, error); }
+        finally { this._renderChat(); }
+    }
+    _sendChat() {
+        try { this._streamChat(this._chat.send(GLib.uuid_string_random())); }
+        catch (error) { this._chat.fail(this._chat.generation, error); this._renderChat(); }
+    }
+    _controlChat(operation) {
+        try { this._streamChat(this._chat.reply.control(operation)); }
+        catch (error) { this._chat.replyFailed(this._chat.generation, error); this._renderChat(); }
+    }
+    _streamChat(request) {
+        this._stopChatStream();
+        const token = this._chat.generation, reply = this._chat.reply;
+        reply.connected = true;
+        const stream = this._bridge.stream(this._settings.get_string('pui-path'), request, frame => {
+            if (this._chatStream !== stream || token !== this._chat.generation) return;
+            this._chat.receive(token, frame); this._renderChat();
+        });
+        this._chatStream = stream; this._renderChat();
+        stream.done.then(() => {
+            if (this._chatStream === stream && !reply.complete) throw new Error('Reply ended without a saved acknowledgement; reconcile before sending again');
+        }).catch(error => {
+            if (this._chatStream === stream) this._chat.replyFailed(token, error);
+        }).finally(() => {
+            if (this._chatStream === stream) {
+                this._chatStream = null;
+                if (reply.complete && reply.phase === 'completed') this._refreshChat();
+                else this._renderChat();
+            }
+        });
+    }
     async _refreshInbox() {
         const view = this._views.get('inbox'); if (!view) return;
         if (view.runTimer) { GLib.source_remove(view.runTimer); view.runTimer = null; }
@@ -605,6 +733,7 @@ export default class Workbench extends Extension {
     _hide(surface, restoreFocus) {
         const view = this._views.get(surface), state = this._states.get(surface);
         if (surface === 'inbox') { ++this._inbox.generation; this._inbox.clearContext(); }
+        if (surface === 'papercup') { this._stopChatStream(); this._chat.invalidate(); }
         if (state) { state.visible = false; ++state.generation; ++state.detailGeneration; }
         this._destroyActors(surface); this._position();
         if (restoreFocus && view?.priorWindow &&
