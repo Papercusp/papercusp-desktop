@@ -3,6 +3,86 @@ import XCTest
 @testable import WorkbenchCore
 
 final class WorkbenchChatTests: XCTestCase {
+    func testWorkReferencesMatchCanonicalProseGrammarAndUTF16Offsets() {
+        let text = "👋 λWI-12 (EI-42) F-9 P-001 P-1234 XWI-1 WI-2x _F-3 wi-4 P-01 WI-12"
+        let refs = NativeWorkRefs.parse(text)
+        XCTAssertEqual(refs.map(\.id), ["WI-12", "EI-42", "F-9", "P-001", "P-1234", "WI-12"])
+        XCTAssertEqual(refs.first?.range.location, 4)
+        for ref in refs { XCTAssertEqual((text as NSString).substring(with: ref.range), ref.id) }
+        XCTAssertEqual(NativeWorkRefs.parse(""), [])
+    }
+    func testWorkReferencesLeaveCodeFencesInlineCodeLinksAndImagesUntouched() {
+        let text = "WI-1 `EI-2` ``F-3 ` P-004`` [WI-5](https://host/EI-6) ![P-007](F-8)\n```swift\nWI-9\n``` P-010\n```EI-11"
+        XCTAssertEqual(NativeWorkRefs.parse(text).map(\.id), ["WI-1", "P-010"])
+    }
+    func testWorkReferencePopupUsesCanonicalScopedGrammarAndSelectedOrigin() throws {
+        let refs = NativeWorkRefs.parse("WI-42 P-001")
+        let work = try XCTUnwrap(NativeWorkRefs.target(refs[0], environment: environment(), harness: "other-pot", plan: "chosen-plan"))
+        XCTAssertEqual(URLComponents(url: work, resolvingAgainstBaseURL: false)?.queryItems, [URLQueryItem(name: "wpop", value: "other-pot::WI-42")])
+        XCTAssertEqual(work.host, "selected"); XCTAssertEqual(work.port, 3170)
+        let plan = try XCTUnwrap(NativeWorkRefs.target(refs[1], environment: environment(), harness: "other-pot", plan: "chosen-plan"))
+        XCTAssertEqual(URLComponents(url: plan, resolvingAgainstBaseURL: false)?.queryItems, [URLQueryItem(name: "wppop", value: "other-pot::chosen-plan")])
+        XCTAssertNil(NativeWorkRefs.target(refs[0], environment: environment(), harness: nil, plan: "chosen-plan"))
+        XCTAssertNil(NativeWorkRefs.target(refs[1], environment: environment(), harness: "other-pot", plan: nil))
+        XCTAssertNil(NativeWorkRefs.target(refs[0], environment: .null, harness: "other-pot", plan: nil))
+        for endpoint in ["file:///tmp/operator", "https://user:secret@outside.test", "//outside.test"] {
+            XCTAssertNil(NativeWorkRefs.target(refs[0], environment: environment(endpoint), harness: "other-pot", plan: nil))
+        }
+        let bare = try XCTUnwrap(NativeWorkRefs.target(refs[1], environment: environment(), harness: nil, plan: "chosen-plan"))
+        XCTAssertEqual(URLComponents(url: bare, resolvingAgainstBaseURL: false)?.queryItems, [URLQueryItem(name: "wppop", value: "chosen-plan")])
+    }
+    func testWorkReferenceMarkdownKeepsUnicodeExistingLinksAndLiteralContext() throws {
+        let text = "👋 WI-42 `WI-42` [P-001](https://existing.test) P-002"
+        let output = NativeWorkRefs.markdown(text, environment: environment(), harness: "pot +/&=λ", plan: "plan(λ)")
+        XCTAssertTrue(output.hasPrefix("👋 [WI-42](http://selected:3170/"))
+        XCTAssertTrue(output.contains("`WI-42` [P-001](https://existing.test) [P-002]("))
+        XCTAssertFalse(output.contains("plan(λ)"), "a context cannot close the Markdown target")
+        let refs = NativeWorkRefs.parse(text)
+        let work = try XCTUnwrap(NativeWorkRefs.target(refs[0], environment: environment(), harness: "pot +/&=λ", plan: "plan(λ)"))
+        XCTAssertEqual(URLComponents(url: work, resolvingAgainstBaseURL: false)?.queryItems?.first?.value, "pot +/&=λ::WI-42")
+        #if os(macOS)
+        let parsed = try AttributedString(markdown: output, options: .init(interpretedSyntax: .full))
+        let links = parsed.runs.compactMap { $0.link }
+        XCTAssertEqual(links.count, 3)
+        XCTAssertEqual(URLComponents(url: links[2], resolvingAgainstBaseURL: false)?.queryItems?.first?.value, "pot +/&=λ::plan(λ)")
+        #endif
+    }
+    func testWorkReferenceContextRequiresExplicitChoiceAndNeverChangesSendTarget() throws {
+        var state = ChatState(); let token = try bound(&state)
+        let row: JSONValue = .object(["id": .string("m1"), "conversationId": .string("conv"), "seq": .number(1),
+            "role": .string("assistant"), "text": .string("WI-42 P-001")])
+        _ = try state.settle(token, environment: environment(), conversationID: "conv", payload: page([row]))
+        XCTAssertFalse(state.markdown.contains("wpop"))
+        let plans: JSONValue = .object(["environment": environment(), "rows": .array([
+            .object(["harness": .string("chosen-pot"), "slug": .string("chosen-plan"), "title": .string("Chosen")])])])
+        XCTAssertTrue(state.settleReferencePlans(token, environment: environment(), payload: plans))
+        XCTAssertFalse(state.markdown.contains("wpop"), "loading plans must not silently select a scope")
+        try state.selectReferencePlan(0)
+        XCTAssertTrue(state.markdown.contains("chosen-pot::WI-42"))
+        XCTAssertTrue(state.markdown.contains("chosen-pot::chosen-plan"))
+        state.draft = "Draft"; let request = try state.send()
+        XCTAssertEqual(request["conversationId"], .string("conv")); XCTAssertEqual(request["environment"], environment())
+        XCTAssertEqual(request["harness"], .null); XCTAssertEqual(request["planSlug"], .null)
+        try state.selectReferencePlan(nil); XCTAssertFalse(state.markdown.contains("wpop"))
+        XCTAssertThrowsError(try state.selectReferencePlan(8))
+    }
+    func testWorkReferenceContextsRefuseForeignPartialDuplicateAndLateLists() throws {
+        var state = ChatState(); let token = try bound(&state)
+        _ = try state.settle(token, environment: environment(), conversationID: "conv", payload: page([]))
+        let plan: JSONValue = .object(["harness": .string("pot"), "slug": .string("plan")])
+        for payload: JSONValue in [
+            .object(["environment": environment(store: "foreign"), "rows": .array([plan])]),
+            .object(["environment": environment(), "rows": .array([plan]), "partial": .bool(true)]),
+            .object(["environment": environment(), "rows": .array([plan, plan])]),
+            .object(["environment": environment(), "rows": .array([.object(["slug": .string("missing-harness")])])])
+        ] {
+            XCTAssertTrue(state.settleReferencePlans(token, environment: environment(), payload: payload))
+            XCTAssertTrue(state.referencePlans.isEmpty); XCTAssertNotNil(state.referenceError)
+        }
+        state.invalidate()
+        XCTAssertFalse(state.settleReferencePlans(token, environment: environment(), payload: .object(["environment": environment(), "rows": .array([plan])])))
+        XCTAssertThrowsError(try state.selectReferencePlan(0))
+    }
     func testVoicePermissionAndTransportCallbacksCannotSurviveCancellationEditingOrReload() throws {
         var state = ChatState()
         XCTAssertThrowsError(try state.beginVoice(.permission))

@@ -48,6 +48,7 @@ final class Sidebar: NSPanel {
     private var inboxUpdates: Task<Void, Never>?
     private var renderedInboxReview: [JSONValue]?
     private var chatState = ChatState()
+    private var chatReferenceContext: NSPopUpButton?
     private var chatEarlier: NSButton?
     private var chatComposer: NSTextView?
     private var chatSend: NSButton?, chatCancel: NSButton?, chatRecover: NSButton?
@@ -71,6 +72,12 @@ final class Sidebar: NSPanel {
     private var accountSummary: NSTextField?
     private var goalControls: [WorkbenchSurface: NSStackView] = [:]
     private var goalStatus: [WorkbenchSurface: NSTextField] = [:]
+    private var organizerKind = "plan", organizerSelection: String?
+    private var organizerGroups: [OrganizerGroup] = [], organizerReceipts: [OrganizerReceipt] = []
+    private var organizerChoice: NSPopUpButton?, organizerArrange: NSButton?
+    private var organizerTask: Task<Void, Never>?
+    private var organizing = false
+    private var organizerNotice = ""
     private var rendering = false
     private var changingEnabled = false
 
@@ -247,9 +254,21 @@ final class Sidebar: NSPanel {
         root.addArrangedSubview(search); searches[surface] = search
         search.isHidden = surface == .papercup
         let message = NSTextField(wrappingLabelWithString: "Loading…"); root.addArrangedSubview(message); messages[surface] = message
+        if surface == .organizer {
+            let grouping = NSPopUpButton(); grouping.addItems(withTitles: ["Plan", "Fleet", "Goal"])
+            grouping.target = self; grouping.action = #selector(changeOrganizerGrouping)
+            grouping.setAccessibilityLabel("Organize terminals by"); organizerChoice = grouping
+            let arrange = NSButton(title: "Arrange selected group", target: self, action: #selector(arrangeOrganizer))
+            arrange.isEnabled = false; organizerArrange = arrange
+            let controls = NSStackView(views: [grouping, arrange]); controls.orientation = .horizontal
+            root.addArrangedSubview(controls)
+        }
         if surface == .papercup {
             let earlier = NSButton(title: "Load earlier messages", target: self, action: #selector(loadEarlierChat))
             earlier.isEnabled = false; root.addArrangedSubview(earlier); chatEarlier = earlier
+            let context = NSPopUpButton(); context.target = self; context.action = #selector(selectChatReferenceContext(_:))
+            context.setAccessibilityLabel("Work link context; does not change the conversation")
+            root.addArrangedSubview(context); chatReferenceContext = context
         }
         if surface == .accounts {
             let scope = NSTextField(wrappingLabelWithString: "Environment unavailable")
@@ -418,18 +437,20 @@ final class Sidebar: NSPanel {
         }
     }
     private func refresh(_ surface: WorkbenchSurface) {
+        if surface == .organizer && organizing { return }
         cancelReads(surface)
         goalStates[surface] = GoalState()
         if surface == .accounts { refreshAccounts(); return }
         if surface == .papercup { refreshChat(); return }
         if surface == .inbox { refreshInbox(); return }
-        guard surface == .quickAccess || surface == .goals else {
+        guard surface == .quickAccess || surface == .goals || surface == .organizer else {
             messages[surface]?.stringValue = "This native surface is not available in this build."; return
         }
         let generation = models[surface]?.beginRefresh() ?? 0
         let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
         let query = models[surface]?.query ?? ""
-        let kinds: [SourceKind] = surface == .goals ? [.goals] : SourceKind.allCases
+        if surface == .organizer { organizerReceipts = []; organizerNotice = "" }
+        let kinds: [SourceKind] = surface == .goals ? [.goals] : surface == .organizer ? [.agents, .goals] : SourceKind.allCases
         let task = Task { [weak self] in
             do {
                 let environment = try NativeEnvironment.identity(await bridge.read("operator.identity"))
@@ -460,6 +481,7 @@ final class Sidebar: NSPanel {
         render(surface)
     }
     private func render(_ surface: WorkbenchSurface) {
+        if surface == .organizer { renderOrganizer(); return }
         if surface == .accounts { renderAccounts(); return }
         if surface == .papercup { renderChat(); return }
         if surface == .inbox { renderInbox(); return }
@@ -511,12 +533,19 @@ final class Sidebar: NSPanel {
         return false
     }
     func numberOfRows(in tableView: NSTableView) -> Int {
+        if surface(tableView) == .organizer { return organizerGroups.count }
         if surface(tableView) == .accounts { return accountState.results(query: models[.accounts]?.query ?? "").count }
         if surface(tableView) == .inbox { return inboxState.results(query: models[.inbox]?.query ?? "").count }
         return surface(tableView).flatMap { models[$0]?.results().count } ?? 0
     }
     private func surface(_ table: NSTableView) -> WorkbenchSurface? { table.identifier.flatMap { WorkbenchSurface(rawValue: $0.rawValue) } }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if surface(tableView) == .organizer {
+            guard organizerGroups.indices.contains(row) else { return nil }
+            let group = organizerGroups[row]
+            return NSTextField(wrappingLabelWithString: group.label + "\n" +
+                (group.kind == "goal" ? "Canonical linked plans and live holders" : "\(group.members.count) terminal sessions"))
+        }
         if surface(tableView) == .inbox {
             let rows = inboxState.results(query: models[.inbox]?.query ?? "")
             guard rows.indices.contains(row) else { return nil }
@@ -541,6 +570,10 @@ final class Sidebar: NSPanel {
     }
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !rendering else { return }
+        if let table = notification.object as? NSTableView, surface(table) == .organizer {
+            organizerSelection = organizerGroups.indices.contains(table.selectedRow) ? organizerGroups[table.selectedRow].key : nil
+            organizerReceipts = []; renderOrganizer(); return
+        }
         if let table = notification.object as? NSTableView, surface(table) == .inbox {
             loadInboxContext(table); return
         }
@@ -558,6 +591,7 @@ final class Sidebar: NSPanel {
         renderGoalControls(surface)
     }
     @objc private func openSelection(_ table: NSTableView) {
+        if surface(table) == .organizer { arrangeOrganizer(); return }
         if surface(table) == .accounts { return }
         if surface(table) == .inbox { loadInboxContext(table); return }
         guard let surface = surface(table), let results = models[surface]?.results(), results.indices.contains(table.selectedRow) else { return }
@@ -632,6 +666,81 @@ final class Sidebar: NSPanel {
         for surface in WorkbenchSurface.allCases {
             models[surface]?.outsideFocus()
             if models[surface]?.visible != true { panels[surface]?.orderOut(nil); cancelReads(surface) }
+        }
+    }
+    @objc private func changeOrganizerGrouping() {
+        guard !organizing else { return }
+        organizerKind = ["plan", "fleet", "goal"][max(0, organizerChoice?.indexOfSelectedItem ?? 0)]
+        organizerSelection = nil; organizerReceipts = []; organizerNotice = ""; renderOrganizer()
+    }
+    private func renderOrganizer() {
+        guard let model = models[.organizer], let table = tables[.organizer] else { return }
+        let agents = model.sources[.agents], goals = model.sources[.goals]
+        let complete = agents?.status == .ready && agents?.partial == false &&
+            (organizerKind != "goal" || goals?.status == .ready && goals?.partial == false)
+        let query = model.query.trimmingCharacters(in: .whitespacesAndNewlines)
+        organizerGroups = ((try? PanelModel.organizerGroups(kind: organizerKind, agents: agents?.rows ?? [], goals: goals?.rows ?? [])) ?? [])
+            .filter { query.isEmpty || $0.label.localizedCaseInsensitiveContains(query) || $0.slug.localizedCaseInsensitiveContains(query) }
+        rendering = true
+        table.reloadData()
+        if let index = organizerGroups.firstIndex(where: { $0.key == organizerSelection }) {
+            table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        } else { organizerSelection = nil; table.deselectAll(nil) }
+        rendering = false
+        organizerChoice?.isEnabled = !organizing
+        organizerArrange?.isEnabled = complete && organizerSelection != nil && !organizing
+        table.isEnabled = !organizing
+        var lines = ["Arrange within each current Space and monitor. Other Spaces and full-screen windows report unsupported."]
+        for kind: SourceKind in [.agents, .goals] {
+            if let source = model.sources[kind], source.status != .ready || source.partial {
+                lines.append(kind.rawValue + ": " + source.status.rawValue + (source.partial ? " (partial)" : "") +
+                    (source.error.map { " — " + $0 } ?? ""))
+            }
+        }
+        if !organizerNotice.isEmpty { lines.append(organizerNotice) }
+        messages[.organizer]?.stringValue = lines.joined(separator: "\n")
+        let group = organizerGroups.first { $0.key == organizerSelection }
+        details[.organizer]?.string = organizerReceipts.isEmpty ? (group?.members.map {
+            $0.title + " · " + $0.subtitle
+        }.joined(separator: "\n") ?? "") : organizerReceipts.map {
+            $0.selected.title + " · " + $0.status + " · " + ($0.desktop ?? "unknown Space") + " / " +
+                ($0.monitor ?? "unknown monitor") + ($0.error.map { " — " + $0 } ?? "")
+        }.joined(separator: "\n")
+        details[.organizer]?.enclosingScrollView?.isHidden = false
+        table.setAccessibilityLabel("Terminal organization groups")
+        details[.organizer]?.setAccessibilityLabel("Terminal arrangement results")
+    }
+    @objc private func arrangeOrganizer() {
+        guard !organizing, organizerArrange?.isEnabled == true,
+              let group = organizerGroups.first(where: { $0.key == organizerSelection }),
+              let environment = environments[.organizer] else { return }
+        let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui)), pui = settings.pui
+        organizing = true; organizerReceipts = []; organizerNotice = "Checking canonical group and native windows…"; renderOrganizer()
+        organizerTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.organizing = false; self.organizerTask = nil; self.renderOrganizer() }
+            do {
+                let roster = try await bridge.read("advRoster.list", environment: environment)
+                let goal: JSONValue?
+                if group.kind == "goal" {
+                    goal = try await bridge.read("goals.detail", args: ["goalId": .string(group.slug),
+                        "workspaceId": environment["workspaceId"]], environment: environment)
+                } else { goal = nil }
+                guard !Task.isCancelled, self.settings.pui == pui,
+                      NativeEnvironment.same(self.environments[.organizer] ?? .null, environment) else {
+                    throw WorkbenchError("The selected environment changed before arranging")
+                }
+                let native = NativeOrganizer(), windows = try native.snapshot()
+                self.organizerReceipts = try await PanelModel.arrangeOrganizer(group, roster: roster,
+                    localHost: ProcessInfo.processInfo.hostName, windows: windows, goal: goal) { window, rect in
+                    guard self.settings.pui == pui,
+                          NativeEnvironment.same(self.environments[.organizer] ?? .null, environment) else {
+                        throw WorkbenchError("The selected environment changed before moving this terminal")
+                    }
+                    return try await native.place(window, rect: rect)
+                }
+                self.organizerNotice = "Arrangement finished. Each result reports observed native geometry or its failure."
+            } catch { self.organizerNotice = error.localizedDescription }
         }
     }
     @objc private func openInboxRun() {
@@ -861,6 +970,14 @@ final class Sidebar: NSPanel {
                 guard !Task.isCancelled, self.models[.papercup]?.visible == true else { return }
                 if try self.chatState.settle(generation, environment: environment, conversationID: id, payload: page) {
                     self.renderChat(); self.reconnectCards()
+                    do {
+                        let plans = try await bridge.read("plans.list", environment: environment)
+                        guard !Task.isCancelled, self.models[.papercup]?.visible == true else { return }
+                        if self.chatState.settleReferencePlans(generation, environment: environment, payload: plans) { self.renderChat() }
+                    } catch {
+                        guard !Task.isCancelled else { return }
+                        if self.chatState.settleReferencePlans(generation, environment: environment, payload: nil, failure: error) { self.renderChat() }
+                    }
                 }
             } catch {
                 guard let self, !Task.isCancelled else { return }
@@ -931,7 +1048,18 @@ final class Sidebar: NSPanel {
         }
         renderChat()
     }
+    @objc private func selectChatReferenceContext(_ sender: NSPopUpButton) {
+        do {
+            try chatState.selectReferencePlan(sender.indexOfSelectedItem == 0 ? nil : sender.indexOfSelectedItem - 1)
+            renderChat()
+        } catch { messages[.papercup]?.stringValue = error.localizedDescription }
+    }
     private func renderChat() {
+        chatReferenceContext?.removeAllItems()
+        chatReferenceContext?.addItem(withTitle: chatState.referenceError == nil ? "Work links: choose a plan context" : "Work link contexts unavailable")
+        for plan in chatState.referencePlans { chatReferenceContext?.addItem(withTitle: plan.row["harness"].text + " · " + plan.title) }
+        chatReferenceContext?.selectItem(at: chatState.referencePlan.map { $0 + 1 } ?? 0)
+        chatReferenceContext?.isEnabled = chatState.ready && !chatState.referencePlans.isEmpty
         chatEarlier?.isEnabled = chatState.ready && !chatState.loading && chatState.reply == nil && chatState.hasMoreEarlier
         chatComposer?.isEditable = chatState.ready
         if chatComposer?.string != chatState.draft { chatComposer?.string = chatState.draft }
@@ -949,8 +1077,8 @@ final class Sidebar: NSPanel {
             (chatState.loading ? "Loading messages…" : chatState.reply?.phase ?? (chatState.ready ? "Papercup" : "Conversation unavailable"))) + scope
         var content = chatState.ready && chatState.turns.isEmpty ? "No messages yet." : chatState.markdown
         if let reply = chatState.reply {
-            if !reply.displayText.isEmpty { content += "\n\n### Papercup\n\n" + reply.displayText }
-            if !reply.tools.isEmpty { content += "\n\n" + reply.tools.joined(separator: "\n\n") }
+            if !reply.displayText.isEmpty { content += "\n\n### Papercup\n\n" + chatState.linkedText(reply.displayText) }
+            if !reply.tools.isEmpty { content += "\n\n" + reply.tools.map { chatState.linkedText($0) }.joined(separator: "\n\n") }
         }
         if let markdown = try? AttributedString(markdown: content, options: .init(interpretedSyntax: .full)) {
             details[.papercup]?.textStorage?.setAttributedString(NSAttributedString(markdown))

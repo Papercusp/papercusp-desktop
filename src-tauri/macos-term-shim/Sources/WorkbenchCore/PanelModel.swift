@@ -466,6 +466,167 @@ public struct PanelModel {
     }
 }
 
+public struct OrganizerGroup {
+    public let kind: String, slug: String, harness: String, label: String
+    public let members: [PanelResult]
+    public var key: String { JSONValue.array([.string(kind), .string(harness), .string(slug)]).formatted }
+}
+public struct OrganizerRect: Equatable {
+    public let x: Double, y: Double, width: Double, height: Double
+    public init(x: Double, y: Double, width: Double, height: Double) {
+        self.x = x; self.y = y; self.width = width; self.height = height
+    }
+    public var valid: Bool { [x, y, width, height].allSatisfy(\.isFinite) && width > 0 && height > 0 }
+    public func matches(_ other: OrganizerRect) -> Bool {
+        valid && other.valid && zip([x, y, width, height], [other.x, other.y, other.width, other.height])
+            .allSatisfy { abs($0 - $1) <= 2 }
+    }
+}
+public struct OrganizerWindow {
+    public let id: String, title: String, desktop: String?, monitor: String?
+    public let area: OrganizerRect?, bounds: OrganizerRect?
+    public let unsupported: String?
+    public init(id: String, title: String, desktop: String?, monitor: String?, area: OrganizerRect?,
+                bounds: OrganizerRect? = nil, unsupported: String? = nil) {
+        self.id = id; self.title = title; self.desktop = desktop; self.monitor = monitor
+        self.area = area; self.bounds = bounds; self.unsupported = unsupported
+    }
+}
+public struct OrganizerReceipt {
+    public let selected: PanelResult
+    public var desktop: String?, monitor: String?, requested: OrganizerRect?, observed: OrganizerRect?
+    public var status = "failed", error: String?
+}
+extension PanelModel {
+    private static func organizerHarness(_ row: PanelResult) -> String {
+        row.row["potSlug"].text.isEmpty ? row.row["harnessSlug"].text : row.row["potSlug"].text
+    }
+    public static func organizerGroups(kind: String, agents: [PanelResult], goals: [PanelResult]) throws -> [OrganizerGroup] {
+        if kind == "goal" {
+            return goals.map { OrganizerGroup(kind: kind, slug: $0.row["id"].text, harness: "", label: $0.title, members: []) }
+        }
+        guard ["plan", "fleet"].contains(kind) else { throw WorkbenchError("Unknown organization grouping") }
+        var groups: [OrganizerGroup] = []
+        for row in agents {
+            let slug = row.row[kind == "plan" ? "currentPlanSlug" : "fleetSlug"].text
+            let harness = kind == "plan" ? organizerHarness(row) : ""
+            guard !slug.isEmpty, kind != "plan" || !harness.isEmpty else { continue }
+            let index = groups.firstIndex { $0.slug == slug && $0.harness == harness }
+            let members = (index.map { groups[$0].members } ?? []) + [row]
+            let group = OrganizerGroup(kind: kind, slug: slug, harness: harness,
+                label: kind == "plan" ? harness + " / " + slug : slug, members: members)
+            if let index { groups[index] = group } else { groups.append(group) }
+        }
+        return groups
+    }
+    public static func organizerMembers(_ group: OrganizerGroup, roster: JSONValue, goal: JSONValue? = nil) throws -> [PanelResult] {
+        var model = PanelModel(); let token = model.beginRefresh()
+        model.settle(.agents, generation: token, payload: roster)
+        guard let source = model.sources[.agents], source.status == .ready, !source.partial else {
+            throw WorkbenchError("Canonical terminal roster is incomplete; refresh before arranging")
+        }
+        if group.kind == "goal" {
+            let detail = try NativeEnvironment.one(goal ?? .null)
+            guard !group.slug.isEmpty, detail["goal"]["id"].text == group.slug,
+                  let agents = detail["agents"].rows, let plans = detail["plans"].rows else {
+                throw WorkbenchError("Canonical goal links changed; refresh before arranging")
+            }
+            return source.rows.filter { row in
+                agents.contains { !$0["ownerId"].text.isEmpty && $0["ownerId"] == row.row["ownerId"] && $0["live"].isTrue } ||
+                plans.contains { !$0["planSlug"].text.isEmpty && !$0["harnessSlug"].text.isEmpty &&
+                    $0["planSlug"] == row.row["currentPlanSlug"] && $0["harnessSlug"].text == organizerHarness(row) }
+            }
+        }
+        guard ["plan", "fleet"].contains(group.kind) else { throw WorkbenchError("Unknown organization grouping") }
+        return source.rows.filter { row in group.kind == "plan" ?
+            row.row["currentPlanSlug"].text == group.slug && organizerHarness(row) == group.harness :
+            row.row["fleetSlug"].text == group.slug }
+    }
+    public static func exactOrganizerWindow(_ target: PanelResult, windows: [OrganizerWindow]) throws -> OrganizerWindow {
+        let recorded = target.row["windowId"].text
+        let marker = target.row["advSessionId"].positiveID.map { "[adv:\(Int64($0))]" }
+        func number(_ text: String) -> UInt64? {
+            text.lowercased().hasPrefix("0x") ? UInt64(text.dropFirst(2), radix: 16) : UInt64(text)
+        }
+        let matches = windows.filter { window in
+            if !recorded.isEmpty {
+                if let id = number(recorded) { return number(window.id) == id }
+                return window.id == recorded || window.title == recorded
+            }
+            return marker.map { window.title.contains($0) } ?? false
+        }
+        guard matches.count == 1 else { throw WorkbenchError("The exact terminal window is unavailable or ambiguous") }
+        let window = matches[0]
+        if let marker, window.title.range(of: "\\[adv:[0-9]+\\]", options: .regularExpression) != nil,
+           !window.title.contains(marker) { throw WorkbenchError("The recorded terminal handle conflicts with the selected session") }
+        return window
+    }
+    /// Resolve exact identities first, then arrange independently within each
+    /// measured desktop/monitor. Native adapters must return observed geometry.
+    public static func arrangeOrganizer(_ group: OrganizerGroup, roster: JSONValue, localHost: String,
+        windows: [OrganizerWindow], goal: JSONValue? = nil,
+        place: (OrganizerWindow, OrganizerRect) async throws -> OrganizerWindow) async throws -> [OrganizerReceipt] {
+        let current = try organizerMembers(group, roster: roster, goal: goal)
+        let selected = group.kind == "goal" ? current : group.members
+        guard !selected.isEmpty else { throw WorkbenchError("No canonical terminals in this group") }
+        var receipts: [OrganizerReceipt] = [], resolved: [(Int, OrganizerWindow)] = []
+        for row in selected {
+            var receipt = OrganizerReceipt(selected: row)
+            do {
+                let target = try agentTarget(row, roster: roster, localHost: localHost, resume: false)
+                guard current.contains(where: { $0.identity == target.identity && $0.row["ownerId"] == target.row["ownerId"] &&
+                    $0.row["windowId"] == row.row["windowId"] }) else {
+                    throw WorkbenchError("The selected terminal changed group; refresh before arranging")
+                }
+                let window = try exactOrganizerWindow(target, windows: windows)
+                receipt.desktop = window.desktop; receipt.monitor = window.monitor
+                if let unsupported = window.unsupported { receipt.status = "unsupported"; throw WorkbenchError(unsupported) }
+                guard window.desktop?.isEmpty == false, window.monitor?.isEmpty == false, window.area?.valid == true else {
+                    throw WorkbenchError("Desktop work area is unavailable")
+                }
+                resolved.append((receipts.count, window))
+            } catch {
+                let host = row.row["host"].text.isEmpty ? row.row["hostname"].text : row.row["host"].text
+                if !host.isEmpty, host.caseInsensitiveCompare(localHost) != .orderedSame { receipt.status = "unsupported" }
+                else if row.row["sessionState"].text == "ended" || row.row["stale"].isTrue || row.row["revoked"].isTrue { receipt.status = "offline" }
+                receipt.error = error.localizedDescription
+            }
+            receipts.append(receipt)
+        }
+        let unique = resolved.filter { entry in
+            let duplicate = resolved.filter { $0.1.id == entry.1.id }.count > 1
+            if duplicate { receipts[entry.0].error = "Several selected sessions share this terminal window" }
+            return !duplicate
+        }
+        let desktops = Dictionary(grouping: unique) { JSONValue.array([.string($0.1.desktop!), .string($0.1.monitor!)]).formatted }
+        for entries in desktops.values {
+            let area = entries[0].1.area!
+            let columns = min(entries.count, max(1, Int(ceil(sqrt(Double(entries.count) * area.width / area.height)))))
+            let rows = Int(ceil(Double(entries.count) / Double(columns)))
+            for (index, entry) in entries.enumerated() {
+                let x = (area.x + Double(index % columns) * area.width / Double(columns)).rounded()
+                let y = (area.y + Double(index / columns) * area.height / Double(rows)).rounded()
+                let rect = OrganizerRect(x: x + 12, y: y + 12,
+                    width: (area.x + Double(index % columns + 1) * area.width / Double(columns)).rounded() - x - 24,
+                    height: (area.y + Double(index / columns + 1) * area.height / Double(rows)).rounded() - y - 24)
+                receipts[entry.0].requested = rect
+                do {
+                    try Task.checkCancellation()
+                    guard rect.valid else { throw WorkbenchError("Desktop work area is too small") }
+                    let observed = try await place(entry.1, rect)
+                    receipts[entry.0].observed = observed.bounds
+                    guard observed.id == entry.1.id, observed.desktop == entry.1.desktop, observed.monitor == entry.1.monitor,
+                          observed.unsupported == nil, let bounds = observed.bounds, rect.matches(bounds) else {
+                        throw WorkbenchError("The native desktop did not confirm the requested geometry")
+                    }
+                    receipts[entry.0].status = "moved"
+                } catch { receipts[entry.0].error = error.localizedDescription }
+            }
+        }
+        return receipts
+    }
+}
+
 /// Match PUI's BackendIdentity.same_rendezvous. A rebuild can change build.sha
 /// without changing the selected store; a different store must never inherit controls.
 public enum NativeEnvironment {

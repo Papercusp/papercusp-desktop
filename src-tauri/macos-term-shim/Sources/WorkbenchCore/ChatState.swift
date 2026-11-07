@@ -12,6 +12,9 @@ public struct ChatState {
     public private(set) var hasMoreEarlier = false
     public private(set) var error: String?
     public private(set) var reply: NativeChatReply?
+    public private(set) var referencePlans: [PanelResult] = []
+    public private(set) var referencePlan: Int?
+    public private(set) var referenceError: String?
     public enum VoicePhase { case permission, recording, transcribing, synthesizing, playing }
     public private(set) var voicePhase: VoicePhase?
     private var voice: (id: UUID, generation: Int, environment: JSONValue, conversationID: String, draft: String)?
@@ -38,6 +41,7 @@ public struct ChatState {
         cancelVoice()
         generation += 1; loading = true; loaded = false; error = nil
         environment = .null; conversation = .null; turns = []; hasMoreEarlier = false; reply = nil
+        referencePlans = []; referencePlan = nil; referenceError = nil
         return generation
     }
     public mutating func invalidate() { _ = begin(); loading = false }
@@ -155,10 +159,42 @@ public struct ChatState {
         guard token == generation else { return }
         reply?.disconnected(); error = failure.localizedDescription
     }
+    /// Explicit fallback context for ambiguous refs. It changes only link
+    /// routing, never the conversation or send target.
+    @discardableResult public mutating func settleReferencePlans(_ token: Int, environment: JSONValue,
+                                                                payload: JSONValue?, failure: Error? = nil) -> Bool {
+        guard token == generation, ready, NativeEnvironment.same(self.environment, environment) else { return false }
+        do {
+            if let failure { throw failure }
+            guard let payload, payload["ok"] != .bool(false), [.null, .bool(false), .string("")].contains(payload["error"]),
+                  !payload["partial"].isTrue, NativeEnvironment.same(environment, payload["environment"]),
+                  let rows = payload["rows"].rows else { throw WorkbenchError("Work link contexts are unavailable") }
+            let plans = try rows.map { try PanelResult(kind: .plans, row: $0) }
+            guard Set(plans.map { $0.identity.map(\.text) }).count == plans.count else {
+                throw WorkbenchError("Work link contexts contain duplicate plans")
+            }
+            referencePlans = plans; referencePlan = nil; referenceError = nil
+        } catch { referencePlans = []; referencePlan = nil; referenceError = error.localizedDescription }
+        return true
+    }
+    public mutating func selectReferencePlan(_ index: Int?) throws {
+        guard ready, index == nil || referencePlans.indices.contains(index!) else {
+            throw WorkbenchError("Select a current work link context")
+        }
+        referencePlan = index
+    }
+    public func linkedText(_ text: String, plan: String? = nil) -> String {
+        guard ready else { return text }
+        let selected = referencePlan.map { referencePlans[$0] }
+        return NativeWorkRefs.markdown(text, environment: environment,
+            harness: selected?.row["harness"].text ?? conversation["harnessSlug"].text,
+            plan: plan ?? selected?.row["slug"].text)
+    }
     public var markdown: String {
         turns.map { row in
             let title = row["role"].text == "user" ? "You" : row["role"].text.capitalized
-            return "### " + title + "\n\n" + row["text"].text
+            let plan = row["planSlug"].text
+            return "### " + title + "\n\n" + linkedText(row["text"].text, plan: plan.isEmpty ? nil : plan)
         }.joined(separator: "\n\n")
     }
 }
