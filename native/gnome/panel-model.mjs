@@ -348,6 +348,210 @@ export function oneRow(payload) {
     if (payload.partial || rows.length !== 1 || !object(rows[0])) throw new Error('Canonical state is incomplete');
     return rows[0];
 }
+
+const snapshot = value => JSON.parse(JSON.stringify(value));
+const sequence = value => Number.isSafeInteger(value) && value >= 0;
+const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+const replyPhases = ['running', 'awaiting-input', 'completed', 'failed', 'cancelled', 'interrupted', 'needs-reconciliation'];
+function conversationRow(payload, environment) {
+    if (!sameEnvironment(environment, payload?.environment)) throw new Error('The selected conversation environment changed');
+    return oneRow(payload);
+}
+
+// Projection of the canonical chat-protocol v1, shared by Node and real Shell.
+// A transport disconnect is never a durable cancellation or permission to resend.
+export class ChatReply {
+    constructor(environment, conversationId, text, userTurnId) {
+        if (!sameEnvironment(environment, environment) || !conversationId || !uuid(userTurnId))
+            throw new Error('Missing canonical conversation or message identity');
+        Object.assign(this, {environment: snapshot(environment), conversationId, text, userTurnId,
+            turnId: '', sequence: 0, savedUser: null, phase: 'connecting', complete: false,
+            connected: true, displayText: '', raw: '', tools: [], events: new Map()});
+    }
+    get sendRequest() {
+        return {environment: snapshot(this.environment), conversationId: this.conversationId,
+            operation: 'send', text: this.text, userTurnId: this.userTurnId, modality: 'text'};
+    }
+    control(operation) {
+        if (!['reconnect', 'cancel'].includes(operation) || !this.turnId || this.complete)
+            throw new Error('The saved reply identity is unavailable; refresh before sending again');
+        return {environment: snapshot(this.environment), conversationId: this.conversationId,
+            operation, turnId: this.turnId, ...(operation === 'reconnect' ? {afterSequence: this.sequence} : {})};
+    }
+    disconnected() { this.connected = false; if (!this.complete) this.phase = 'needs-reconciliation'; }
+    _matches(value) { return value?.conversationId === this.conversationId && this.turnId && value?.turnId === this.turnId; }
+    _state(value) {
+        const capabilities = ['connectionReplay', 'persistedHistory', 'persistedInteractionDecisions',
+            'completedToolCheckpoints', 'interruptedTurnRecovery'];
+        if (value?.schemaVersion !== 1 || !this._matches(value) || !sequence(value.revision) ||
+            !sequence(value.lastSequence) || !replyPhases.includes(value.phase) ||
+            !capabilities.every(key => typeof value.capabilities?.[key] === 'boolean'))
+            throw new Error('Invalid saved reply state');
+        return value.phase;
+    }
+    receive(frame) {
+        // Refused frames cannot partially mutate text, cursor or saved identity.
+        const next = Object.assign(Object.create(ChatReply.prototype), this,
+            {events: new Map(this.events), tools: [...this.tools]});
+        next._reduce(frame); Object.assign(this, next);
+    }
+    _reduce(frame) {
+        if (!sameEnvironment(this.environment, frame?.environment) || this.complete)
+            throw new Error('The reply belongs to a different environment or is already complete');
+        const data = frame.data;
+        switch (frame.event) {
+        case 'user-saved': {
+            const row = data?.turn;
+            if (data?.conversationId !== this.conversationId || row?.conversationId !== this.conversationId ||
+                row.id !== this.userTurnId || row.role !== 'user' || row.text !== this.text || !sequence(row.seq))
+                throw new Error('Invalid saved message acknowledgement');
+            this.savedUser = snapshot(row); break;
+        }
+        case 'run-meta':
+            if (data?.chatProtocolVersion !== 1 || data.conversationId !== this.conversationId)
+                throw new Error('Unsupported reply protocol or conversation');
+            break;
+        case 'turn-meta':
+            if (data?.schemaVersion !== 1 || data.conversationId !== this.conversationId || !uuid(data.turnId) ||
+                (this.turnId && data.turnId !== this.turnId)) throw new Error('Invalid reply identity');
+            this.turnId = data.turnId; this.phase = 'running'; break;
+        case 'chat-event': {
+            const n = data?.sequence;
+            if (data?.schemaVersion !== 1 || !this._matches(data) || !sequence(n) || n < 1 ||
+                typeof data.eventId !== 'string' || !data.eventId) throw new Error('Invalid saved reply event');
+            if (n <= this.sequence) {
+                if (!equal(this.events.get(n), data)) throw new Error('Conflicting saved reply event');
+                return;
+            }
+            if (n !== this.sequence + 1) throw new Error('The saved reply has a sequence gap');
+            const event = data.event;
+            switch (event?.type) {
+            case 'delta': {
+                if (typeof event.text !== 'string' || new TextEncoder().encode(this.raw + event.text).length > 8 * 1024 * 1024)
+                    throw new Error('Invalid or oversized reply text');
+                this.raw += event.text;
+                const open = /<say>/i.exec(this.raw);
+                if (open) {
+                    let text = this.raw.slice(open.index + open[0].length), close = /<\/say>/i.exec(text);
+                    if (close) text = text.slice(0, close.index);
+                    else for (let n = Math.min(text.length, 5); n > 0; --n)
+                        if (text.toLowerCase().endsWith('</say>'.slice(0, n))) { text = text.slice(0, -n); break; }
+                    this.displayText = text;
+                }
+                break;
+            }
+            case 'tool_call': case 'tool_result':
+                if (!event.name || !event.callId || (event.type === 'tool_result' && typeof event.ok !== 'boolean'))
+                    throw new Error('Invalid tool activity');
+                this.tools.push(event.name + (event.type === 'tool_call' ? ' · running' : event.ok ? ' · complete' : ' · failed'));
+                break;
+            case 'lifecycle':
+                if (!replyPhases.includes(event.phase)) throw new Error('Invalid reply lifecycle');
+                this.phase = event.phase; break;
+            case 'error': throw new Error(event.message || 'Reply failed');
+            case 'done': case 'session': case 'provenance': case 'result': break;
+            default: throw new Error('Unsupported saved reply event');
+            }
+            this.sequence = n; this.events.set(n, snapshot(data));
+            if (this.events.size > 5000) this.events.delete(n - 5000);
+            break;
+        }
+        case 'turn-state': {
+            const phase = this._state(data);
+            if (['failed', 'cancelled', 'interrupted', 'needs-reconciliation'].includes(phase))
+                throw new Error('The saved reply is ' + phase);
+            this.phase = phase; break;
+        }
+        case 'done':
+            if (!this._matches(data?.persistedTurn) || !sequence(data.persistedTurn.seq) ||
+                (data.phase !== undefined && data.phase !== null && data.phase !== 'completed'))
+                throw new Error('The saved reply acknowledgement was lost or does not match');
+            this.complete = true; this.connected = false; this.phase = 'completed'; break;
+        case 'cancelled':
+            if (data?.ok !== true || this._state(data.state) !== 'cancelled') throw new Error('Reply cancellation needs reconciliation');
+            this.complete = true; this.connected = false; this.phase = 'cancelled'; break;
+        case 'error': throw new Error(data?.message || 'Reply failed; reconcile before sending again');
+        default: throw new Error('Unsupported reply frame');
+        }
+    }
+}
+
+export class ChatState {
+    constructor() { this.generation = 0; this.drafts = new Map(); this.begin(); this.loading = false; }
+    get conversationId() { return this.conversation?.id || ''; }
+    get ready() { return this.loaded && this.conversationId && sameEnvironment(this.environment, this.environment); }
+    get draftKey() { return this.conversationId && sameEnvironment(this.environment, this.environment) ?
+        JSON.stringify([this.environment.endpoint, this.environment.workspaceId, this.environment.store.id,
+            this.environment.agentChat.scope, this.conversationId]) : null; }
+    get draft() { return this.drafts.get(this.draftKey) || ''; }
+    set draft(text) { if (this.draftKey) this.drafts.set(this.draftKey, text); }
+    begin() {
+        ++this.generation;
+        Object.assign(this, {environment: null, conversation: null, turns: [], loading: true,
+            loaded: false, hasMoreEarlier: false, reply: null, error: null});
+        return this.generation;
+    }
+    invalidate() { this.begin(); this.loading = false; }
+    bind(token, environment, payload) {
+        if (token !== this.generation) return false;
+        const row = conversationRow(payload, environment);
+        if (!sameEnvironment(environment, environment) || typeof row.id !== 'string' || !row.id ||
+            row.workspaceId !== environment.workspaceId || row.subjectKind !== 'global' || row.status !== 'active')
+            throw new Error('The active Papercup conversation is unavailable');
+        this.environment = snapshot(environment); this.conversation = snapshot(row); return true;
+    }
+    beginEarlier() {
+        if (!this.ready || this.loading || this.reply || !this.hasMoreEarlier || !sequence(this.turns[0]?.seq))
+            throw new Error('Earlier messages are unavailable');
+        this.loading = true; this.error = null; return this.turns[0].seq;
+    }
+    settle(token, environment, conversationId, payload, beforeSeq = null) {
+        if (token !== this.generation) return false;
+        if (!this.loading || !sameEnvironment(this.environment, environment) || this.conversationId !== conversationId || !conversationId)
+            throw new Error('The selected Papercup conversation changed');
+        const page = conversationRow(payload, environment), ids = new Set(); let previous = -1;
+        if (!Array.isArray(page.turns) || typeof page.hasMoreEarlier !== 'boolean' || (page.hasMoreEarlier && !page.turns.length))
+            throw new Error('Papercup history is incomplete');
+        for (const row of page.turns) {
+            if (typeof row.id !== 'string' || !row.id || ids.has(row.id) || row.conversationId !== conversationId ||
+                !sequence(row.seq) || row.seq <= previous || !['user', 'assistant', 'system', 'tool'].includes(row.role) ||
+                typeof row.text !== 'string' || (beforeSeq !== null && row.seq >= beforeSeq))
+                throw new Error('Papercup history contains an invalid or foreign message');
+            ids.add(row.id); previous = row.seq;
+        }
+        if (beforeSeq !== null) {
+            if (!this.loaded || this.turns[0]?.seq !== beforeSeq || this.turns.some(row => ids.has(row.id)))
+                throw new Error('Earlier messages changed; refresh the conversation');
+            this.turns = snapshot(page.turns).concat(this.turns);
+        } else {
+            if (this.loaded) throw new Error('History was already loaded');
+            this.turns = snapshot(page.turns);
+        }
+        this.hasMoreEarlier = page.hasMoreEarlier; this.loading = false; this.loaded = true; this.error = null; return true;
+    }
+    fail(token, error) { if (token === this.generation) { this.loading = false; this.error = String(error.message || error); } }
+    get canSend() { return Boolean(this.ready && !this.loading && (!this.reply || this.reply.complete) &&
+        this.draft.trim() && new TextEncoder().encode(this.draft).length <= 32 * 1024); }
+    send(userTurnId) {
+        if (!this.canSend) throw new Error('Load the conversation and enter a bounded message first');
+        this.reply = new ChatReply(this.environment, this.conversationId, this.draft, userTurnId);
+        this.error = null; return this.reply.sendRequest;
+    }
+    receive(token, frame) {
+        if (token !== this.generation) return false;
+        if (!this.reply) throw new Error('No reply is active');
+        this.reply.receive(frame);
+        const row = this.reply.savedUser;
+        if (row && !this.turns.some(turn => turn.id === row.id)) {
+            this.turns.push(snapshot(row)); if (this.draft === this.reply.text) this.draft = '';
+        }
+        this.error = null; return true;
+    }
+    replyFailed(token, error) {
+        if (token !== this.generation) return;
+        this.reply?.disconnected(); this.error = String(error.message || error);
+    }
+}
 export class InboxState {
     constructor() {
         Object.assign(this, {generation: 0, contextGeneration: 0, actionGeneration: 0,

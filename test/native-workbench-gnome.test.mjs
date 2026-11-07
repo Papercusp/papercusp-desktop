@@ -5,7 +5,7 @@ import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import test from 'node:test';
-import {PanelState, InboxState, sameEnvironment, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests,
+import {PanelState, InboxState, ChatState, ChatReply, sameEnvironment, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests,
     agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow,
     organizerGroups, organizerMembers, arrangeOrganizerGroup}
     from '../native/gnome/panel-model.mjs';
@@ -13,6 +13,113 @@ import {PanelState, InboxState, sameEnvironment, readRows, sourceRows, resultFor
 const root = resolve(import.meta.dirname, '..');
 const plan = (harness = 'one', slug = 'same') => ({harness, slug, title: 'Shared title', status: 'active'});
 const envelope = rows => ({rows, version: 'canonical-version'});
+
+const chatEnvironment = {endpoint:'http://fixture',workspaceId:'workspace',store:{id:'store'},agentChat:{scope:'workspace'}};
+const userId='00000000-0000-4000-8000-000000000001', replyId='00000000-0000-4000-8000-000000000002';
+const chatEnvelope = (rows, environment=chatEnvironment) => ({rows,environment});
+const conversation = (id='conversation', environment=chatEnvironment) => ({id,workspaceId:environment.workspaceId,subjectKind:'global',status:'active'});
+const turn = (seq, patch={}) => ({id:'message-'+seq,conversationId:'conversation',seq,role:'assistant',text:'Message '+seq,...patch});
+function loadedChat(rows=[],hasMoreEarlier=false) {
+    const state=new ChatState(),token=state.begin();
+    state.bind(token,chatEnvironment,chatEnvelope([conversation()]));
+    state.settle(token,chatEnvironment,'conversation',chatEnvelope([{turns:rows,hasMoreEarlier}]));
+    return {state,token};
+}
+const chatFrame = (event,data,environment=chatEnvironment) => ({event,data,environment});
+const savedEvent = (n,event,patch={}) => chatFrame('chat-event', {schemaVersion:1,conversationId:'conversation',
+    turnId:replyId,sequence:n,eventId:'event-'+n,event,...patch});
+const replyState = phase => ({schemaVersion:1,conversationId:'conversation',turnId:replyId,revision:1,lastSequence:1,phase,
+    capabilities:Object.fromEntries(['connectionReplay','persistedHistory','persistedInteractionDecisions',
+        'completedToolCheckpoints','interruptedTurnRecovery'].map(k=>[k,true]))});
+function activeReply() {
+    const reply=new ChatReply(chatEnvironment,'conversation','Hello',userId);
+    reply.receive(chatFrame('turn-meta',{schemaVersion:1,conversationId:'conversation',turnId:replyId}));
+    return reply;
+}
+test('Papercup history rejects foreign, duplicate, unordered and incomplete pages without changing the transcript', () => {
+    for (const rows of [[turn(3),turn(2)],[turn(2),turn(3,{id:'message-2'})],
+        [turn(2,{conversationId:'foreign'})],[turn(2,{seq:NaN})],[turn(2,{role:'unknown'})],[turn(2,{text:null})]]) {
+        const {state,token}=loadedChat([turn(5)],true),cursor=state.beginEarlier();
+        assert.throws(()=>state.settle(token,chatEnvironment,'conversation',chatEnvelope([{turns:rows,hasMoreEarlier:false}]),cursor),/invalid|foreign/);
+        assert.deepEqual(state.turns,[turn(5)]);
+    }
+    const {state,token}=loadedChat([turn(5)],true),cursor=state.beginEarlier();
+    assert.throws(()=>state.settle(token,chatEnvironment,'conversation',chatEnvelope([{turns:[],hasMoreEarlier:true}]),cursor),/incomplete/);
+    assert.throws(()=>state.settle(token,chatEnvironment,'conversation',chatEnvelope([{turns:[turn(4)],hasMoreEarlier:false}],
+        {...chatEnvironment,store:{id:'other'}}),cursor),/environment/);
+    assert.equal(state.settle(token,chatEnvironment,'conversation',chatEnvelope([{turns:[turn(2),turn(3)],hasMoreEarlier:false}]),cursor),true);
+    assert.deepEqual(state.turns.map(r=>r.seq),[2,3,5]); assert.equal(state.hasMoreEarlier,false);
+});
+test('Papercup drafts and late history are isolated by generation, environment and conversation', () => {
+    const {state,token}=loadedChat();state.draft='Keep my draft';
+    const next=state.begin();
+    assert.equal(state.settle(token,chatEnvironment,'conversation',chatEnvelope([{turns:[turn(1)],hasMoreEarlier:false}])),false);
+    state.bind(next,chatEnvironment,chatEnvelope([conversation('other')]));
+    state.settle(next,chatEnvironment,'other',chatEnvelope([{turns:[],hasMoreEarlier:false}]));
+    assert.equal(state.draft,'');state.draft='Other draft';
+    const back=state.begin();state.bind(back,chatEnvironment,chatEnvelope([conversation()]));
+    state.settle(back,chatEnvironment,'conversation',chatEnvelope([{turns:[],hasMoreEarlier:false}]));
+    assert.equal(state.draft,'Keep my draft');
+    const foreign={...chatEnvironment,endpoint:'http://different'},changed=state.begin();
+    state.bind(changed,foreign,chatEnvelope([conversation()],foreign));
+    state.settle(changed,foreign,'conversation',chatEnvelope([{turns:[],hasMoreEarlier:false}],foreign));
+    assert.equal(state.draft,'');
+    assert.throws(()=>state.bind(changed,foreign,chatEnvelope([conversation()],chatEnvironment)),/environment/);
+});
+test('Papercup clears a draft only after the exact saved acknowledgement and refuses duplicate sends', () => {
+    const {state,token}=loadedChat();state.draft='Hello';
+    assert.deepEqual(state.send(userId),{environment:chatEnvironment,conversationId:'conversation',operation:'send',
+        text:'Hello',userTurnId:userId,modality:'text'});
+    assert.equal(state.draft,'Hello');assert.equal(state.canSend,false);
+    assert.throws(()=>state.send(userId),/Load/);
+    assert.throws(()=>state.receive(token,chatFrame('user-saved',{conversationId:'foreign',turn:turn(1,{id:userId,role:'user',text:'Hello'})})),/acknowledgement/);
+    state.receive(token,chatFrame('user-saved',{conversationId:'conversation',turn:turn(1,{id:userId,role:'user',text:'Hello'})}));
+    assert.equal(state.draft,'');assert.equal(state.turns.length,1);
+    state.draft='A newer edit';state.receive(token,chatFrame('user-saved',{conversationId:'conversation',turn:turn(1,{id:userId,role:'user',text:'Hello'})}));
+    assert.equal(state.draft,'A newer edit');assert.equal(state.turns.length,1);
+    state.replyFailed(token,new Error('Lost acknowledgement'));assert.equal(state.canSend,false);
+    assert.equal(state.reply.phase,'needs-reconciliation');
+    state.invalidate();assert.equal(state.receive(token,chatFrame('error',{})),false);
+});
+test('Papercup progressively projects say text and enforces exact event replay and atomic sequence gaps', () => {
+    const reply=activeReply();
+    const first=savedEvent(1,{type:'delta',text:'<think>private</think><say>Hi</sa'});reply.receive(first);
+    assert.equal(reply.displayText,'Hi');
+    reply.receive(first);assert.equal(reply.displayText,'Hi');
+    assert.throws(()=>reply.receive(savedEvent(1,{type:'delta',text:'conflict'})),/Conflicting/);
+    assert.throws(()=>reply.receive(savedEvent(3,{type:'delta',text:'gap'})),/gap/);
+    assert.equal(reply.sequence,1);assert.equal(reply.displayText,'Hi');
+    reply.receive(savedEvent(2,{type:'delta',text:'y><think>hidden</think>'}));assert.equal(reply.displayText,'Hi');
+    reply.receive(savedEvent(3,{type:'tool_call',name:'plans:get',callId:'literal+/=&'}));
+    reply.receive(savedEvent(4,{type:'tool_result',name:'plans:get',callId:'literal+/=&',ok:false}));
+    assert.deepEqual(reply.tools,['plans:get · running','plans:get · failed']);
+    const cursor=reply.sequence;
+    assert.throws(()=>reply.receive(savedEvent(5,{type:'tool_result',name:'plans:get',callId:'literal+/=&'})),/tool/);
+    assert.equal(reply.sequence,cursor);
+});
+test('Papercup reconnect and cancellation require the saved reply identity and terminal canonical receipt', () => {
+    const reply=activeReply();reply.receive(savedEvent(1,{type:'delta',text:'<say>Partial'}));reply.disconnected();
+    assert.deepEqual(reply.control('reconnect'),{environment:chatEnvironment,conversationId:'conversation',
+        operation:'reconnect',turnId:replyId,afterSequence:1});
+    assert.equal(reply.control('cancel').turnId,replyId);
+    assert.throws(()=>reply.receive(chatFrame('cancelled',{ok:true,state:{...replyState('cancelled'),turnId:userId}})),/state/);
+    assert.equal(reply.complete,false);
+    reply.receive(chatFrame('cancelled',{ok:true,state:replyState('cancelled')}));
+    assert.equal(reply.complete,true);assert.equal(reply.phase,'cancelled');
+    assert.throws(()=>reply.control('reconnect'),/identity/);
+    const unbound=new ChatReply(chatEnvironment,'conversation','Hello',userId);
+    assert.throws(()=>unbound.control('cancel'),/identity/);
+});
+test('Papercup completion refuses mismatched persistence and environment while preserving its reply', () => {
+    const reply=activeReply();
+    assert.throws(()=>reply.receive(chatFrame('done',{persistedTurn:{conversationId:'foreign',turnId:replyId,seq:2}})),/acknowledgement/);
+    assert.throws(()=>reply.receive(chatFrame('run-meta',{chatProtocolVersion:1,conversationId:'conversation'},
+        {...chatEnvironment,agentChat:{scope:'other'}})),/environment/);
+    assert.throws(()=>reply.receive(chatFrame('turn-state',replyState('failed'))),/failed/);
+    assert.equal(reply.complete,false);
+    reply.receive(chatFrame('done',{phase:'completed',persistedTurn:{conversationId:'conversation',turnId:replyId,seq:2}}));
+    assert.equal(reply.phase,'completed');assert.equal(reply.complete,true);
+});
 
 const organizerAgent = (id, patch = {}) => ({ownerId:`owner-${id}`, advSessionId:id,
     host:'desktop',sessionState:'live',potSlug:'one',currentPlanSlug:'same',fleetSlug:'fleet',...patch});

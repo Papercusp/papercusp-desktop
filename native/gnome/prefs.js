@@ -15,7 +15,7 @@ export default class WorkbenchPreferences extends ExtensionPreferences {
         const pui = new Adw.EntryRow({ title: 'PUI executable' });
         settings.bind('pui-path', pui, 'text', Gio.SettingsBindFlags.DEFAULT); group.add(pui);
         for (const [key, title] of [['quick-access', 'Quick Access shortcut'], ['goals', 'Goals shortcut'],
-            ['inbox', 'Inbox shortcut'], ['organizer', 'Organizer shortcut']]) {
+            ['inbox', 'Inbox shortcut'], ['organizer', 'Organizer shortcut'], ['papercup', 'Papercup shortcut']]) {
             const entry = new Adw.EntryRow({ title, text: settings.get_strv(key)[0] || '',
                 show_apply_button: true });
             entry.connect('apply', () => {
