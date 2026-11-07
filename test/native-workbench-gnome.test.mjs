@@ -414,3 +414,99 @@ test('actual GJS bridge sends exact stdin through an argv path and rejects faile
             assert.doesNotMatch(result.stderr,/CRITICAL/);
         } finally {rmSync(temp,{recursive:true,force:true});}
     });
+
+// Real subprocess/pipe tests: the producer waits for the consumer's receipt
+// before emitting its final frame, so a buffered bridge cannot pass.
+function streamFixture(temp) {
+    const pui = join(temp, 'pui fixture');
+    writeFileSync(pui, `#!/usr/bin/env node
+import fs from 'node:fs';
+let input='';process.stdin.on('data',c=>input+=c);process.stdin.on('end',()=>{
+ const r=JSON.parse(input), command=process.argv[2];
+ if(command==='native-read'){console.log(JSON.stringify({rows:[r],version:'exact'}));return;}
+ const emit=event=>console.log(JSON.stringify({environment:r.environment,event,data:{request:r,pid:process.pid}}));
+ if(r.mode==='empty')return;
+ if(r.mode==='failure'){process.stderr.write('canonical ACL refusal\\n'.repeat(5000));process.exitCode=1;return;}
+ if(r.mode==='malformed'){console.log('{broken');return;}
+ emit('first');
+ if(r.mode==='wait'){setInterval(()=>{},1000);return;}
+ let attempts=0; const timer=setInterval(()=>{if(fs.existsSync(r.ack)){clearInterval(timer);emit('done');}
+ else if(++attempts>300){clearInterval(timer);console.error('consumer never acknowledged incremental delivery');process.exitCode=9;}},10);
+});
+`, {mode: 0o700});
+    return pui;
+}
+function runStreamDriver(temp, script, helper = false) {
+    const driver = join(temp, 'driver.mjs'); writeFileSync(driver, script);
+    const command = helper ? 'dbus-run-session' : 'gjs';
+    const config = join(temp,'session-bus.conf');
+    // Same no-service-activation boundary as the maintained private Shell
+    // driver: never start the host's keyring, portals or volume monitors.
+    if (helper) writeFileSync(config,'<busconfig><type>session</type><listen>unix:tmpdir=/tmp</listen>'+
+        '<policy context="default"><allow send_destination="*" eavesdrop="true"/>'+
+        '<allow eavesdrop="true"/><allow own="*"/></policy></busconfig>');
+    const args = helper ? ['--config-file='+config, '--', 'xvfb-run', '-a', 'gjs', '-m', driver] : ['-m', driver];
+    const result = spawnSync(command, args, {encoding:'utf8',timeout:22000,
+        env:{...process.env,GIO_USE_VFS:'local',GTK_A11Y:'none',GSETTINGS_BACKEND:'memory'}});
+    writeFileSync(join(temp, 'result.json'), JSON.stringify(result, null, 2));
+    assert.equal(result.status, 0, `Retained ${temp}\n${result.stderr}\n${result.stdout}`);
+    assert.doesNotMatch(result.stderr, /CRITICAL/);
+    assert.match(result.stdout, /NATIVE_STREAM_PASS/);
+    rmSync(temp,{recursive:true,force:true});
+}
+
+test('actual GJS streaming bridge delivers incrementally, drains errors and reaps cancelled children',
+    {skip:process.platform!=='linux',timeout:30000}, () => {
+        const temp=mkdtempSync(join(tmpdir(),"workbench-stream '$-")), pui=streamFixture(temp);
+        const bridge=pathToFileURL(join(root,'native/gnome/bridge.js')).href;
+        runStreamDriver(temp, `import Gio from 'gi://Gio';import GLib from 'gi://GLib';
+import {nativeStream,nativeRead} from ${JSON.stringify(bridge)};
+const pui=${JSON.stringify(pui)}, ack=${JSON.stringify(join(temp,'ack'))};
+const environment={endpoint:'http://selected',workspaceId:'exact',store:{id:'store'},agentChat:{scope:'workspace'}};
+const request={environment,conversationId:'literal +/=& $()',ack};let frames=[];
+await nativeStream(pui,request,frame=>{frames.push(frame);if(frame.event==='first')GLib.file_set_contents(ack,'received');});
+if(frames.length!==2||frames[0].event!=='first'||frames[1].event!=='done'||
+ JSON.stringify(frames[0].data.request)!==JSON.stringify(request))throw Error('stream identity/order changed');
+for(const mode of ['malformed','failure','empty']){let rejected=false;try{await nativeStream(pui,{...request,mode},()=>{});}
+catch(e){rejected=true;if(mode==='failure'&&!e.message.includes('canonical ACL refusal'))throw e;}if(!rejected)throw Error('false success '+mode);}
+let child=0;const cancel=new Gio.Cancellable();let cancelled=false;
+try{await nativeStream(pui,{...request,mode:'wait'},f=>{child=f.data.pid;cancel.cancel();},cancel);}catch(e){cancelled=e.message.includes('stopped');}
+if(!cancelled||!child||GLib.file_test('/proc/'+child,GLib.FileTest.EXISTS))throw Error('cancelled child not reaped');
+for(const command of ['native-read','shell']){let rejected=false;try{await nativeStream(pui,request,()=>{},null,command);}catch(e){rejected=true;}if(!rejected)throw Error('stream allowlist widened');}
+let callbackRejected=false;try{await nativeStream(pui,{...request,mode:'wait'},()=>{throw Error('foreign conversation');});}
+catch(e){callbackRejected=e.message==='foreign conversation';}if(!callbackRejected)throw Error('callback failure lost');
+const already=new Gio.Cancellable();already.cancel();let refused=false;try{await nativeStream(pui,request,()=>{},already);}catch(e){refused=true;}if(!refused)throw Error('cancelled request spawned');
+let oversized=false;try{await nativeStream(pui,{text:'x'.repeat(65536)},()=>{});}catch(e){oversized=true;}if(!oversized)throw Error('oversized request accepted');
+print('NATIVE_STREAM_PASS');
+`);
+    });
+
+test('resident GTK helper isolates concurrent reads, streams, cancellation and callback refusal',
+    {skip:process.platform!=='linux',timeout:30000}, () => {
+        const temp=mkdtempSync(join(tmpdir(),"workbench-resident-stream '$-")), pui=streamFixture(temp);
+        const bridge=pathToFileURL(join(root,'native/gnome/bridge.js')).href;
+        runStreamDriver(temp, `import GLib from 'gi://GLib';import {ResidentBridge} from ${JSON.stringify(bridge)};
+const bridge=new ResidentBridge(${JSON.stringify(join(root,'native/gnome/helper.js'))}),pui=${JSON.stringify(pui)};
+print('STREAM_PHASE start');
+const environment={endpoint:'http://selected',workspaceId:'exact',store:{id:'store'},agentChat:{scope:'workspace'}};
+let stream, frames=0, child=0;const request={environment,conversationId:'A +/=&',mode:'wait'};
+stream=bridge.stream(pui,request,f=>{++frames;child=f.data.pid;stream.cancel();});
+const read=bridge.read(pui,{name:'reports.get',args:{id:'B +/=&'}});let cancelled=false;
+try{await stream.done;}catch(e){cancelled=e.message.includes('stopped');}
+print('STREAM_PHASE cancelled');
+const result=await read;if(!cancelled||frames!==1||result.rows[0].args.id!=='B +/=&')throw Error('request isolation failed');
+print('STREAM_PHASE read');
+if(GLib.file_test('/proc/'+child,GLib.FileTest.EXISTS))throw Error('helper did not reap cancelled PUI');
+const ack=${JSON.stringify(join(temp,'cards-ack'))};let cards=0;
+const good=bridge.stream(pui,{environment,ack},f=>{++cards;if(f.event==='first')GLib.file_set_contents(ack,'received');},'native-cards');
+const bad=bridge.stream(pui,request,()=>{throw Error('foreign conversation');});let refused=false;
+try{await bad.done;}catch(e){refused=e.message==='foreign conversation';}await good.done;
+print('STREAM_PHASE cards');
+if(!refused||cards!==2)throw Error('callback refusal stopped another stream');
+let malformed=false;try{await bridge.stream(pui,{environment,mode:'malformed'},()=>{}).done;}catch(e){malformed=true;}
+if(!malformed||(await bridge.read(pui,{name:'still-ready',args:{}})).rows[0].name!=='still-ready')throw Error('malformed stream poisoned helper');
+bridge.close();await new Promise(resolve=>GLib.timeout_add(GLib.PRIORITY_DEFAULT,150,()=>{resolve();return GLib.SOURCE_REMOVE;}));
+let closed=false;try{await bridge.read(pui,{name:'closed'});}catch(e){closed=true;}if(!closed)throw Error('closed bridge accepted work');
+print('NATIVE_STREAM_PASS');
+`, true);
+    });

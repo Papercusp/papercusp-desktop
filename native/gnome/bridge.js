@@ -35,6 +35,65 @@ export function nativeRead(pui, request, cancellable = null, command = 'native-r
     });
 }
 
+// Canonical PUI newline frames are delivered as they arrive. This is a local
+// pipe lifetime only: cancelling it never claims to cancel a durable chat turn.
+export async function nativeStream(pui, request, onFrame, cancellable = null, command = 'native-chat') {
+    if (typeof pui !== 'string' || !pui.trim()) throw new Error('PUI is not configured');
+    if (!['native-chat', 'native-cards'].includes(command) || typeof onFrame !== 'function')
+        throw new Error('Unsupported native stream');
+    const body = new TextEncoder().encode(JSON.stringify(request));
+    if (body.length > 64 * 1024) throw new Error('Native request exceeds its limit');
+    if (cancellable?.is_cancelled()) throw new Error('Native stream stopped; reconcile the saved reply');
+    const child = Gio.Subprocess.new([pui, command], Gio.SubprocessFlags.STDIN_PIPE |
+        Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
+    let failure = null, stderr = '', frames = 0;
+    const fail = error => { failure ||= error; child.force_exit(); };
+    let timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 615000, () => {
+        timer = null;
+        fail(new Error('Native stream deadline; reconcile the saved reply')); return GLib.SOURCE_REMOVE;
+    });
+    const cancel = cancellable?.connect(() => fail(new Error('Native stream stopped; reconcile the saved reply')));
+    const line = input => new Promise((resolve, reject) => input.read_line_async(GLib.PRIORITY_DEFAULT, null,
+        (stream, result) => { try { resolve(stream.read_line_finish_utf8(result)[0]); } catch (error) { reject(error); } }));
+    const input = new Gio.DataInputStream({base_stream: child.get_stdout_pipe()});
+    const errors = new Gio.DataInputStream({base_stream: child.get_stderr_pipe()});
+    try {
+        const outcomes = await Promise.allSettled([
+            (async () => {
+                for (;;) {
+                    const text = await line(input); if (text === null) return;
+                    if (failure) continue;
+                    if (new TextEncoder().encode(text).length > 1024 * 1024) throw new Error('Native stream frame exceeds its limit');
+                    const frame = JSON.parse(text);
+                    if (!frame || typeof frame !== 'object' || Array.isArray(frame) ||
+                        typeof frame.event !== 'string' || !frame.event || !frame.environment ||
+                        !Object.hasOwn(frame, 'data')) throw new Error('Invalid native stream frame');
+                    ++frames; onFrame(frame);
+                }
+            })().catch(error => { fail(error); throw error; }),
+            (async () => {
+                for (;;) { const text = await line(errors); if (text === null) return; stderr = (stderr + text + '\n').slice(-65536); }
+            })().catch(error => { fail(error); throw error; }),
+            new Promise((resolve, reject) => child.wait_async(null, (process, result) => {
+                try { process.wait_finish(result); resolve(); } catch (error) { fail(error); reject(error); }
+            })),
+            new Promise((resolve, reject) => child.get_stdin_pipe().write_all_async(body, GLib.PRIORITY_DEFAULT, null,
+                (stream, result) => {
+                    try { stream.write_all_finish(result); stream.close(null); resolve(); }
+                    catch (error) { fail(error); reject(error); }
+                })),
+        ]);
+        const rejected = outcomes.find(outcome => outcome.status === 'rejected');
+        if (failure || rejected) throw failure || rejected.reason;
+        if (!child.get_successful()) throw new Error(stderr.trim() || 'PUI stream failed; reconcile before sending again');
+        if (!frames) throw new Error('PUI stream returned no frames');
+    } finally {
+        // The process has been reaped before resolving or rejecting this call.
+        if (timer) GLib.source_remove(timer);
+        if (cancel) cancellable.disconnect(cancel);
+    }
+}
+
 // One GTK helper per Shell extension, with correlated, asynchronous pipe IO.
 // A dead helper rejects outstanding reads; the next refresh starts a new one.
 export class ResidentBridge {
@@ -44,8 +103,20 @@ export class ResidentBridge {
     }
     inbox(pui, request) { return this.read(pui, request, 'native-inbox'); }
     read(pui, request, command = 'native-read') {
-        if (this._closed) return Promise.reject(new Error('Workbench has stopped'));
-        if (!['native-read', 'native-inbox'].includes(command)) return Promise.reject(new Error('Unsupported native operation'));
+        return this._request(pui, request, command).done;
+    }
+    stream(pui, request, onFrame, command = 'native-chat') {
+        return this._request(pui, request, command, onFrame);
+    }
+    _request(pui, request, command, onFrame = null) {
+        const refused = message => ({done: Promise.reject(new Error(message)), cancel() {}});
+        if (this._closed) return refused('Workbench has stopped');
+        const streaming = ['native-chat', 'native-cards'].includes(command);
+        if ((!streaming && !['native-read', 'native-inbox'].includes(command)) ||
+            (streaming && typeof onFrame !== 'function') || (!streaming && onFrame))
+            return refused('Unsupported native operation');
+        const bytes = new TextEncoder().encode(JSON.stringify({request, command}));
+        if (bytes.length > 64 * 1024) return refused('Native request exceeds its limit');
         if (this._child && this._pui !== pui) this._stop(new Error('Selected PUI connection changed'));
         if (!this._child) {
             try {
@@ -55,21 +126,30 @@ export class ResidentBridge {
                     Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE);
                 this._input = new Gio.DataInputStream({base_stream: this._child.get_stdout_pipe()});
                 this._receive(this._child, this._cancel);
-            } catch (error) { this._stop(error); return Promise.reject(error); }
+            } catch (error) { this._stop(error); return {done: Promise.reject(error), cancel() {}}; }
         }
         const id = ++this._serial, child = this._child, cancel = this._cancel;
-        return new Promise((resolve, reject) => {
-            const timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, command === 'native-inbox' ? 67000 : 24000, () => {
+        const done = new Promise((resolve, reject) => {
+            const timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, streaming ? 617000 : command === 'native-inbox' ? 67000 : 24000, () => {
                 this._stop(new Error('Native helper did not respond in time')); return GLib.SOURCE_REMOVE;
             });
-            this._pending.set(id, {resolve, reject, timer});
-            const bytes = new TextEncoder().encode(JSON.stringify({id, request, command}) + '\n');
-            this._writes = this._writes.then(() => new Promise((done, fail) => {
-                child.get_stdin_pipe().write_all_async(bytes, GLib.PRIORITY_DEFAULT, cancel, (stream, result) => {
-                    try { stream.write_all_finish(result); done(); } catch (error) { fail(error); }
-                });
-            })).catch(error => { if (this._child === child) this._stop(error); });
+            this._pending.set(id, {resolve, reject, timer, onFrame, streaming, failure: null});
+            this._write(child, cancel, {id, request, command});
         });
+        return {done, cancel: () => {
+            const pending = this._pending.get(id);
+            if (!pending?.streaming || pending.failure) return;
+            pending.failure = new Error('Native stream stopped; reconcile the saved reply');
+            this._write(child, cancel, {id, cancel: true});
+        }};
+    }
+    _write(child, cancel, message) {
+        const bytes = new TextEncoder().encode(JSON.stringify(message) + '\n');
+        this._writes = this._writes.then(() => new Promise((done, fail) => {
+            child.get_stdin_pipe().write_all_async(bytes, GLib.PRIORITY_DEFAULT, cancel, (stream, result) => {
+                try { stream.write_all_finish(result); done(); } catch (error) { fail(error); }
+            });
+        })).catch(error => { if (this._child === child) this._stop(error); });
     }
     _receive(child, cancel) {
         const input = this._input;
@@ -80,8 +160,18 @@ export class ResidentBridge {
                 if (line === null) throw new Error('Native helper exited; refresh to reconnect');
                 const message = JSON.parse(line), pending = this._pending.get(message.id);
                 if (!pending) throw new Error('Native helper returned an unknown request');
+                if (Object.hasOwn(message, 'frame')) {
+                    if (!pending.streaming) throw new Error('Native helper returned an unexpected stream');
+                    if (!pending.failure) {
+                        try { pending.onFrame(message.frame); }
+                        catch (error) { pending.failure = error; this._write(child, cancel, {id: message.id, cancel: true}); }
+                    }
+                    this._receive(child, cancel); return;
+                }
                 this._pending.delete(message.id); GLib.source_remove(pending.timer);
-                if (message.error) pending.reject(new Error(message.error)); else pending.resolve(message.payload);
+                if (pending.failure || message.error) pending.reject(pending.failure || new Error(message.error));
+                else if (pending.streaming && message.done !== true) pending.reject(new Error('Native stream completion is missing'));
+                else pending.resolve(message.payload);
                 this._receive(child, cancel);
             } catch (error) { this._stop(error); }
         });
