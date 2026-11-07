@@ -48,6 +48,135 @@ public struct PanelResult: Equatable, Sendable {
         }
     }
 }
+/// The GUI's canonical list/detail and saved bulk-run queries, kept separate so
+/// an unavailable run cannot erase an otherwise usable question list.
+public struct InboxState {
+    public private(set) var generation = 0, contextGeneration = 0
+    public private(set) var rows: [JSONValue] = [], items: [JSONValue] = []
+    public private(set) var listReady = false, listPartial = false, bulkReady = false
+    public private(set) var listError: String?, bulkError: String?, contextError: String?
+    public private(set) var run: JSONValue = .null
+    public private(set) var context: JSONValue?
+    public var selection: String?
+    public init() {}
+    @discardableResult public mutating func begin() -> Int {
+        generation += 1; rows = []; items = []; listReady = false; listPartial = false; bulkReady = false
+        listError = nil; bulkError = nil; run = .null; clearContext(); return generation
+    }
+    public mutating func invalidate() { _ = begin() }
+    private static func envelope(_ payload: JSONValue?) throws -> [JSONValue] {
+        guard let payload, payload["ok"] != .bool(false), let rows = payload["rows"].rows,
+              [.null, .bool(false), .string("")].contains(payload["error"]) else {
+            throw WorkbenchError("Inbox data is unavailable")
+        }; return rows
+    }
+    @discardableResult public mutating func settleList(_ token: Int, payload: JSONValue?, failure: Error? = nil) -> Bool {
+        guard token == generation else { return false }
+        do {
+            if let failure { throw failure }
+            let groups = try Self.envelope(payload)
+            var ordered: [JSONValue] = [], seen: [String: JSONValue] = [:]
+            var partial = payload?["partial"].isTrue == true
+            for group in groups {
+                guard let entries = group["items"].rows else { throw WorkbenchError("Inbox group is unavailable") }
+                partial = partial || group["_meta"]["hasMore"].isTrue
+                for row in entries {
+                    let id = row["id"].text
+                    guard !id.isEmpty, !row["kind"].text.isEmpty, case .object = row["ref"] else {
+                        throw WorkbenchError("Inbox item has no canonical identity")
+                    }
+                    if let prior = seen[id] {
+                        guard prior == row else { throw WorkbenchError("Inbox contains conflicting item identities") }
+                    } else { seen[id] = row; ordered.append(row) }
+                }
+            }
+            rows = ordered; listPartial = partial; listReady = true; listError = nil
+            if !rows.contains(where: { $0["id"].text == selection }) { selection = nil; clearContext() }
+        } catch { rows = []; listReady = false; listError = error.localizedDescription; clearContext() }
+        return true
+    }
+    public func results(query: String) -> [JSONValue] {
+        let words = query.lowercased().split(whereSeparator: { $0.isWhitespace })
+        return rows.filter { row in
+            let text = ["id", "title", "body", "kind", "harnessSlug", "planSlug"].map { row[$0].text }.joined(separator: " ").lowercased()
+            return words.allSatisfy { text.contains($0) }
+        }
+    }
+    public mutating func clearContext() { contextGeneration += 1; context = nil; contextError = nil }
+    public mutating func select(_ id: String) throws -> Int {
+        guard listReady, rows.contains(where: { $0["id"].text == id }) else { throw WorkbenchError("Select a current Inbox item") }
+        selection = id; clearContext(); return contextGeneration
+    }
+    @discardableResult public mutating func settleContext(_ token: Int, id: String, payload: JSONValue?, failure: Error? = nil) -> Bool {
+        guard token == contextGeneration, selection == id else { return false }
+        do {
+            if let failure { throw failure }
+            let detail = try Self.envelope(payload)
+            guard payload?["partial"].isTrue != true, detail.count == 1, detail[0]["id"].text == id,
+                  let selected = rows.first(where: { $0["id"].text == id }),
+                  detail[0]["kind"] == selected["kind"], detail[0]["ref"] == selected["ref"] else {
+                throw WorkbenchError("The selected question changed or its context is unavailable")
+            }; context = detail[0]; contextError = nil
+        } catch { context = nil; contextError = error.localizedDescription }
+        return true
+    }
+    @discardableResult public mutating func settleBulk(_ token: Int, payload: JSONValue?, expectedRunID: String? = nil, failure: Error? = nil) -> Bool {
+        guard token == generation else { return false }
+        do {
+            if let failure { throw failure }
+            let envelope = try Self.envelope(payload)
+            guard payload?["partial"].isTrue != true, envelope.count == 1,
+                  case .object(let row) = envelope[0], let run = row["run"], let items = row["items"]?.rows else {
+                throw WorkbenchError("The saved bulk run is unavailable")
+            }
+            if run == .null {
+                guard items.isEmpty, expectedRunID == nil else { throw WorkbenchError("The selected saved run is unavailable") }
+            } else {
+                guard !run["runId"].text.isEmpty, expectedRunID == nil || run["runId"].text == expectedRunID,
+                      ["pending", "running", "review", "complete", "failed"].contains(run["phase"].text) else {
+                    throw WorkbenchError("The saved bulk run has changed identity or phase")
+                }; _ = try Self.counts(run: run, items: items)
+            }
+            self.run = run; self.items = items; bulkReady = true; bulkError = nil
+        } catch { run = .null; items = []; bulkReady = false; bulkError = error.localizedDescription }
+        return true
+    }
+    /// Match use-inbox-bulk-run.ts: outcomes supply numerators; the persisted
+    /// total supplies the denominator even while individual rows are arriving.
+    public static func counts(run: JSONValue, items: [JSONValue]) throws -> [String: Int] {
+        guard case .number(let total) = run["totalItems"], total >= 0, total <= 9_007_199_254_740_991,
+              total.rounded() == total, items.count <= Int(total) else { throw WorkbenchError("Invalid bulk total") }
+        var counts = Dictionary(uniqueKeysWithValues: ["resolved", "forReview", "recommendationTotal", "pending", "skipped", "failed",
+            "legacySkipped", "ownerAction", "cleanupCandidate", "retryNeeded", "routed", "investigate", "dismissed", "decided"].map { ($0, 0) })
+        var seen = Set<String>()
+        for item in items {
+            let id = item["itemId"].text, outcome = item["outcome"].text
+            guard !id.isEmpty, seen.insert(id).inserted, item["runId"] == run["runId"],
+                  ["pending", "auto_resolved", "recommended", "skipped", "failed", "dismissed"].contains(outcome) else {
+                throw WorkbenchError("Bulk item identity or outcome is invalid")
+            }
+            let disposition = item["disposition"].text
+            if let bucket = ["auto_resolved": "resolved", "pending": "pending", "skipped": "skipped", "failed": "failed", "dismissed": "dismissed"][outcome] {
+                counts[bucket, default: 0] += 1
+            }
+            if outcome != "pending" { counts["decided", default: 0] += 1 }
+            if outcome == "recommended" {
+                counts["recommendationTotal", default: 0] += 1
+                if disposition.isEmpty || disposition == "recommended" { counts["forReview", default: 0] += 1 }
+            }
+            if outcome == "skipped", disposition.isEmpty || disposition == "legacy_skipped" || item["legacyDisposition"].text == "legacy_skipped" {
+                counts["legacySkipped", default: 0] += 1
+            }
+            if let bucket = ["owner_action": "ownerAction", "cleanup_candidate": "cleanupCandidate", "retry_needed": "retryNeeded",
+                             "routed": "routed", "investigate": "investigate"][disposition] { counts[bucket, default: 0] += 1 }
+        }
+        counts["total"] = Int(total); counts["left"] = max(0, Int(total) - counts["decided", default: 0])
+        counts["percent"] = total > 0 ? min(100, Int((Double(counts["decided", default: 0]) / total * 100).rounded())) : 0
+        counts["unresolved"] = ["forReview", "pending", "ownerAction", "cleanupCandidate", "retryNeeded", "routed", "investigate", "failed"].reduce(0) { $0 + counts[$1, default: 0] }
+        return counts
+    }
+}
+
 public struct PanelSource: Sendable {
     public enum Status: String, Sendable { case loading, ready, unavailable }
     public var status: Status = .loading

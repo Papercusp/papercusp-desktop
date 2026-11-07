@@ -47,6 +47,80 @@ final class WorkbenchControlsTests: XCTestCase {
         XCTAssertThrowsError(try NativeEnvironment.identity(envelope([])))
         XCTAssertThrowsError(try NativeEnvironment.identity(envelope([environment, environment])))
     }
+    private func question(_ id: String = "question +/=& λ") -> JSONValue {
+        .object(["id": .string(id), "kind": .string("coord-message"), "title": .string("Question"),
+                 "body": .string("matching source context"), "ref": .object(["msgId": .number(42)])])
+    }
+    private func inboxList(_ rows: [JSONValue], more: Bool = false) -> JSONValue {
+        envelope([.object(["items": .array(rows), "_meta": .object(["hasMore": .bool(more)])])])
+    }
+    private func savedRun(total: Int = 10, phase: String = "running") -> JSONValue {
+        .object(["runId": .string("saved +/=& λ"), "phase": .string(phase), "totalItems": .number(Double(total)),
+                 "autoResolved": .number(900), "recommended": .number(900), "failed": .number(900)])
+    }
+    private func outcome(_ id: String, _ outcome: String, _ disposition: String = "") -> JSONValue {
+        .object(["runId": .string("saved +/=& λ"), "itemId": .string(id), "outcome": .string(outcome),
+                 "disposition": .string(disposition)])
+    }
+    func testInboxCanonicalGroupsDeduplicateAndFailClosedOnConflicts() throws {
+        var state = InboxState(); let token = state.begin(), row = question()
+        let group = inboxList([row])["rows"].rows![0]
+        XCTAssertTrue(state.settleList(token, payload: envelope([group, group])))
+        XCTAssertTrue(state.listReady); XCTAssertEqual(state.rows, [row])
+        XCTAssertEqual(state.results(query: "Question λ"), [row])
+        state.settleList(token, payload: inboxList([row], more: true)); XCTAssertTrue(state.listPartial)
+        guard case .object(var conflict) = row else { return XCTFail() }
+        conflict["ref"] = .object(["msgId": .number(43)])
+        state.settleList(token, payload: inboxList([row, .object(conflict)]))
+        XCTAssertFalse(state.listReady); XCTAssertNotNil(state.listError); XCTAssertTrue(state.rows.isEmpty)
+        for payload in [JSONValue.null, .object([:]), envelope([.object([:])])] {
+            state.settleList(token, payload: payload); XCTAssertFalse(state.listReady)
+        }
+        state.settleList(token, payload: envelope([])); XCTAssertTrue(state.listReady); XCTAssertTrue(state.rows.isEmpty)
+        let next = state.begin(); XCTAssertFalse(state.settleList(token, payload: inboxList([row])))
+        XCTAssertTrue(state.settleList(next, payload: inboxList([row])))
+    }
+    func testInboxSelectionContextCannotCrossQuestionOrRefresh() throws {
+        var state = InboxState(); let token = state.begin(), a = question("a"), b = question("b")
+        state.settleList(token, payload: inboxList([a, b]))
+        let old = try state.select("a"), current = try state.select("b")
+        XCTAssertFalse(state.settleContext(old, id: "a", payload: envelope([a])))
+        XCTAssertTrue(state.settleContext(current, id: "b", payload: envelope([a])))
+        XCTAssertNil(state.context); XCTAssertNotNil(state.contextError)
+        XCTAssertTrue(state.settleContext(current, id: "b", payload: envelope([b])))
+        XCTAssertEqual(state.context, b)
+        state.invalidate(); XCTAssertFalse(state.settleContext(current, id: "b", payload: envelope([b])))
+        XCTAssertThrowsError(try state.select("b"))
+    }
+    func testInboxProgressUsesItemOutcomesAndPersistedPartialDeliveryTotal() throws {
+        let items = [outcome("a", "auto_resolved"), outcome("b", "recommended", "recommended"),
+                     outcome("c", "recommended", "owner_action"), outcome("d", "failed", "retry_needed"),
+                     outcome("e", "pending"), outcome("f", "skipped", "legacy_skipped")]
+        let c = try InboxState.counts(run: savedRun(), items: items)
+        XCTAssertEqual(c["total"], 10); XCTAssertEqual(c["decided"], 5); XCTAssertEqual(c["percent"], 50)
+        XCTAssertEqual(c["resolved"], 1); XCTAssertEqual(c["forReview"], 1); XCTAssertEqual(c["recommendationTotal"], 2)
+        XCTAssertEqual(c["ownerAction"], 1); XCTAssertEqual(c["retryNeeded"], 1); XCTAssertEqual(c["failed"], 1)
+        XCTAssertEqual(c["pending"], 1); XCTAssertEqual(c["legacySkipped"], 1); XCTAssertEqual(c["left"], 5)
+        XCTAssertThrowsError(try InboxState.counts(run: savedRun(total: 1), items: items))
+        XCTAssertThrowsError(try InboxState.counts(run: savedRun(), items: [items[0], items[0]]))
+        XCTAssertThrowsError(try InboxState.counts(run: savedRun(), items: [outcome("x", "unknown")]))
+        guard case .object(var foreign) = items[0] else { return XCTFail() }
+        foreign["runId"] = .string("different")
+        XCTAssertThrowsError(try InboxState.counts(run: savedRun(), items: [.object(foreign)]))
+    }
+    func testInboxSavedRunRestoreDistinguishesIdleMissingAndWrongRun() {
+        var state = InboxState(); let token = state.begin()
+        let idle = envelope([.object(["run": .null, "items": .array([])])])
+        state.settleBulk(token, payload: idle); XCTAssertTrue(state.bulkReady); XCTAssertEqual(state.run, .null)
+        state.settleBulk(token, payload: envelope([.object(["items": .array([])])]))
+        XCTAssertFalse(state.bulkReady); XCTAssertNotNil(state.bulkError)
+        let saved = envelope([.object(["run": savedRun(phase: "review"), "items": .array([outcome("a", "recommended")])])])
+        state.settleBulk(token, payload: saved, expectedRunID: "saved +/=& λ")
+        XCTAssertTrue(state.bulkReady); XCTAssertEqual(state.run["phase"], .string("review")); XCTAssertEqual(state.items.count, 1)
+        state.settleBulk(token, payload: saved, expectedRunID: "other"); XCTAssertFalse(state.bulkReady)
+        state.settleBulk(token, payload: idle, expectedRunID: "saved +/=& λ"); XCTAssertFalse(state.bulkReady)
+        _ = state.begin(); XCTAssertFalse(state.settleBulk(token, payload: saved))
+    }
     func testAccountReadRejectsPartialSteeringAndAmbiguousIds() {
         let invalid: [(JSONValue, JSONValue)] = [
             (.object(["rows": pool["rows"], "partial": .bool(true)]), envelope([steering])),

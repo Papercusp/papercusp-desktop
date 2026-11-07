@@ -52,7 +52,8 @@ public struct WorkbenchError: LocalizedError, Equatable {
 public struct PuiBridge {
     public static let models: Set<String> = ["plans.list", "plans.get", "advRoster.list", "reports.list",
         "reports.get", "goals.list", "goals.detail", "planSessions.list", "operator.identity",
-        "accounts.pool", "accounts.sessionOverride", "operatorConversations.current", "operatorTurns.page"]
+        "accounts.pool", "accounts.sessionOverride", "operatorConversations.current", "operatorTurns.page",
+        "plans.attention", "plans.attentionItem", "plans.attentionBulkRun"]
     public let executable: URL
     public init(executable: URL) { self.executable = executable }
     /// Incremental delivery over the same bounded child transport as reads.
