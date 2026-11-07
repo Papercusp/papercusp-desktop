@@ -47,7 +47,7 @@ test('Swift Workbench canonical model, shortcut transaction and real bounded sub
     const scratch = mkdtempSync(join(tmpdir(), 'workbench-swift-tests-'));
     try {
         const result = spawnSync(swift, ['test', '--package-path', packagePath, '--scratch-path', scratch,
-            '--filter', 'WorkbenchCoreTests'], {encoding:'utf8', timeout:110000, maxBuffer:8*1024*1024});
+            '--filter', 'Workbench'], {encoding:'utf8', timeout:110000, maxBuffer:8*1024*1024});
         assert.ifError(result.error);
         assert.equal(result.status, 0, result.stdout + result.stderr);
         assert.match(result.stdout + result.stderr, /Executed \d+ tests?, with 0 failures/);
