@@ -5,7 +5,7 @@
   "description": "Tauri desktop shell for Papercusp. Spawns the Node sidecar and embeds the web UI.",
   "scripts": {
     "test": "npm run test:cargo-patches && npm run test:config && npm run test:native-workbench && npm run test:shell && npm run test:installed-model-inference && npm run test:candidate-install-upgrade && npm run test:mac-minimum-os && npm run test:mac-signing && npm run test:linux-finalize-deb && npm run test:selftests",
-    "test:native-workbench": "node bin/run-node-test-suite.mjs --test-global-setup=test/monorepo-host-preflight.mjs test/native-workbench-gnome.test.mjs test/native-workbench-gnome-live.test.mjs test/native-workbench-windows.test.mjs",
+    "test:native-workbench": "node bin/run-node-test-suite.mjs --test-global-setup=test/monorepo-host-preflight.mjs test/native-workbench-gnome.test.mjs test/native-workbench-gnome-live.test.mjs test/native-workbench-windows.test.mjs test/native-workbench-macos.test.mjs",
     "test:cargo-patches": "node --test --test-global-setup=test/monorepo-host-preflight.mjs test/cargo-patches.test.js && npm run test:runtime-wry",
     "test:runtime-wry": "cargo test --manifest-path src-tauri/Cargo.toml --locked -p tauri-runtime-wry undecorated_resizing::",
     "test:installed-model-inference": "node --test --test-global-setup=test/monorepo-host-preflight.mjs test/installed-local-model-inference.test.js",

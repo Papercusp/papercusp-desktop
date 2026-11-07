@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Use GNOME's maintained archive/schema compiler rather than a second packer.
-import {mkdirSync, readFileSync, copyFileSync} from 'node:fs';
+import {mkdirSync, readFileSync, copyFileSync, writeFileSync, statSync, chmodSync} from 'node:fs';
 import {resolve, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
@@ -31,8 +31,41 @@ export const windowsWorkbenchFiles = Object.freeze([
     'PuiReadBridge.cs', 'WorkbenchModel.cs', 'WorkbenchHost.cs', 'WorkbenchLifecycle.psm1', 'workbench.ps1',
 ]);
 
-export function stageNativeWorkbench(desktopRoot = resolve(import.meta.dirname, '..'), {platform = process.platform} = {}) {
+export function stageNativeWorkbench(desktopRoot = resolve(import.meta.dirname, '..'), {
+    platform = process.platform,
+    macosExecutable = join(desktopRoot, 'src-tauri/macos-term-shim/.build/release/PapercuspWorkbench'),
+} = {}) {
     const resources = join(desktopRoot, 'src-tauri/resources');
+    if (platform === 'darwin' || platform === 'macos') {
+        // Consume the existing SwiftPM product; never silently substitute a
+        // webview or ship a source-only bundle when the native build is absent.
+        const source = statSync(macosExecutable);
+        if (!source.isFile() || !(source.mode & 0o111))
+            throw new Error('Build the native PapercuspWorkbench executable before staging');
+        const version = JSON.parse(readFileSync(join(desktopRoot, 'package.json'), 'utf8')).version;
+        if (!/^\d+\.\d+\.\d+(?:[.-][A-Za-z0-9.-]+)?$/.test(version))
+            throw new Error('Invalid Workbench bundle version');
+        const directory = join(resources, 'PapercuspWorkbench.app');
+        const contents = join(directory, 'Contents');
+        mkdirSync(join(contents, 'MacOS'), {recursive:true});
+        const executable = join(contents, 'MacOS/PapercuspWorkbench');
+        copyFileSync(macosExecutable, executable); chmodSync(executable, 0o755);
+        writeFileSync(join(contents, 'Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>ai.papercusp.workbench</string>
+<key>CFBundleName</key><string>Papercusp Workbench</string>
+<key>CFBundleExecutable</key><string>PapercuspWorkbench</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>${version}</string>
+<key>CFBundleVersion</key><string>${version}</string>
+<key>LSMinimumSystemVersion</key><string>13.0</string>
+<key>LSUIElement</key><true/>
+</dict></plist>
+`);
+        return {platform:'macos', directory, executable,
+            sha256:createHash('sha256').update(readFileSync(executable)).digest('hex')};
+    }
     if (platform === 'windows' || platform === 'win32') {
         const destination = join(resources, 'workbench-windows');
         mkdirSync(destination, {recursive:true});
