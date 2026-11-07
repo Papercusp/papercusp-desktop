@@ -113,7 +113,7 @@ test('Windows native read adapter preserves canonical envelopes and reaps failed
         const result = JSON.parse(run.stdout.trim());
         assert.equal(result.ok, true);
         assert.equal(result.platform, 'windows');
-        assert.equal(result.count, 12);
+        assert.equal(result.count, 16);
         assert.equal(new Set(result.cases).size, result.count);
     });
 
