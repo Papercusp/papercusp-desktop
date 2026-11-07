@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$SourceDirectory,
-    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'operator')][string]$Phase = 'all',
+    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'operator')][string]$Phase = 'all',
     [string]$PuiExecutable,
     [string]$OperatorUrl,
     [string]$ExpectedWorkspace,
@@ -394,6 +394,61 @@ public static class WorkbenchNativeHostFixture
             Check(host.Panel("accounts") == panel && search.Text == "literal", "resident Accounts retains its query across toggles");
         }
     }
+    private static void GoalsNative()
+    {
+        var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
+        using (var host = new WorkbenchHost(Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_FIXTURE")))
+        {
+            host.Toggle("goals"); var panel = host.Panel("goals"); var state = host.State("goals");
+            Until(() => state.Sources.Count == 1 && state.Sources["goals"].Status == "ready");
+            var list = Find<System.Windows.Controls.ListBox>(panel, "Workbench results");
+            Check(list.Items.Count == 1 && ((PanelResult)list.Items[0]).Row["id"].ToString() == "literal +/=& \u03bb", "Goals native portfolio preserves the exact canonical selection");
+            Action open = () => list.RaiseEvent(new System.Windows.Input.MouseButtonEventArgs(System.Windows.Input.Mouse.PrimaryDevice, 0,
+                System.Windows.Input.MouseButton.Left) { RoutedEvent = System.Windows.Controls.Control.MouseDoubleClickEvent });
+            Func<string, System.Windows.Controls.Button> button = action => Find<System.Windows.Controls.Button>(panel, "Goal " + action);
+            var status = Find<System.Windows.Controls.TextBlock>(panel, "Goal control status");
+            open(); Until(() => button("pause").Visibility == Visibility.Visible);
+            Check(status.Text.Contains("isolated") && status.Text.Contains("holder held") && state.Detail.Contains("retained-evidence"),
+                "Goal detail shows environment liveness and canonical evidence before enabling controls");
+            var confirmations = 0;
+            var confirm = panel.GetType().GetField("ConfirmGoal", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            confirm.SetValue(panel, new Func<string, bool>(message => { ++confirmations; return false; }));
+            button("pause").RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent)); Pump();
+            Check(confirmations == 1 && !System.IO.File.Exists(path + ".writes") && status.Text.Contains("Status: active"),
+                "cancelled native confirmation performs no write or optimistic status change");
+            confirm.SetValue(panel, new Func<string, bool>(message => { ++confirmations; return true; }));
+            foreach (var action in new[] { "pause", "resume", "achieve", "reopen", "kill", "reopen" })
+            {
+                button(action).RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+                var expected = action == "pause" ? "paused" : action == "achieve" ? "achieved" : action == "kill" ? "killed" : "active";
+                Until(() => status.Text.Contains("Status: " + expected) && !status.Text.Contains("Checking"));
+                Check(state.Detail.Contains("retained-evidence") && status.Text.Contains("Status: " + expected),
+                    "native Goal " + action + " reads back confirmed status and evidence" + (action == "reopen" ? " " + confirmations : ""));
+            }
+            Check(confirmations == 7 && System.IO.File.ReadAllLines(path + ".writes").Length == 6,
+                "every accepted native Goal transition requires confirmation and exactly one write");
+            Check(status.Text.Contains("incomplete") && status.Text.Contains("unattributed activity remains"),
+                "degraded Goal success remains visible alongside confirmed server status");
+            var before = state.Detail;
+            System.IO.File.WriteAllText(path + ".deny", "deny");
+            button("pause").RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            Until(() => status.Text.Contains("Unavailable"));
+            Check(state.Detail == before && status.Text.Contains("Status: active"), "failed native Goal write preserves the last confirmed detail");
+            Check(new[] { "pause", "resume", "start", "reopen", "achieve", "kill" }.All(action => button(action).Visibility != Visibility.Visible || !button(action).IsEnabled),
+                "failed native Goal action disables controls until refreshed");
+            System.IO.File.Delete(path + ".deny"); System.IO.File.WriteAllText(path + ".unknown", "unknown");
+            open(); Until(() => status.Text.Contains("holder unknown"));
+            Check(new[] { "pause", "start", "achieve", "kill" }.All(action => button(action).Visibility != Visibility.Visible),
+                "unknown Goal holder liveness never becomes permission to start or mutate");
+            System.IO.File.Delete(path + ".unknown"); System.IO.File.WriteAllText(path + ".dormant", "dormant");
+            open(); Until(() => button("start").Visibility == Visibility.Visible);
+            button("start").RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            Until(() => status.Text.Contains("holder held"));
+            Check(System.IO.File.ReadAllLines(path + ".writes").Last() == "start", "holderless native Start follows the composed activation seam");
+            host.Toggle("goals"); host.Toggle("goals"); Pump();
+            Check(host.Panel("goals") == panel, "Goals controls retain the same resident native panel across toggles");
+        }
+    }
     public static string Run(string phase)
     {
         cases.Clear();
@@ -423,6 +478,7 @@ public static class WorkbenchNativeHostFixture
         }
         if (phase == "all" || phase == "model") { Console.Error.WriteLine("PHASE model"); Model(); Agents(); }
         if (phase == "accounts") { AccountsModel(); AccountsNative(); }
+        if (phase == "goals") { GoalsNative(); }
         if (phase == "operator") { OperatorNative(); }
         if (phase == "all" || phase == "hotkeys" || phase == "windows")
         { Console.Error.WriteLine("PHASE " + (phase == "all" ? "windows" : phase)); Native(phase != "hotkeys"); }
@@ -450,8 +506,9 @@ public static class WorkbenchArgvFixture {
 }
 '@
     $env:WORKBENCH_ARGV_FIXTURE = $argvFixture
-    if ($Phase -eq 'accounts') {
+    if ($Phase -eq 'accounts' -or $Phase -eq 'goals') {
         $env:WORKBENCH_ACCOUNT_FIXTURE = $accountFixture; $env:WORKBENCH_ACCOUNT_STATE = $accountState
+        $env:WORKBENCH_CONTROL_PHASE = $Phase
         Add-Type -OutputAssembly $accountFixture -OutputType ConsoleApplication -ReferencedAssemblies System.Web.Extensions, System.Core -TypeDefinition @'
 using System;
 using System.Collections;
@@ -461,11 +518,41 @@ using System.Linq;
 using System.Text;
 using System.Web.Script.Serialization;
 public static class NativeAccountsFixture {
+    private static int Goals(string[] args, Dictionary<string, object> request, JavaScriptSerializer json, UTF8Encoding utf8, string path, object environment) {
+        var state = json.Deserialize<Dictionary<string, object>>(File.Exists(path) ? File.ReadAllText(path) :
+            "{\"goal\":{\"id\":\"literal +/=& \\u03bb\",\"title\":\"Same goal\",\"status\":\"active\"},\"effectiveStatus\":\"active\",\"holderLiveness\":\"held\",\"evidence\":[\"retained-evidence\"]}");
+        var goal = (Dictionary<string, object>)state["goal"]; object rows;
+        var result = new Dictionary<string, object>();
+        if (args.Length != 1) return 30;
+        if (args[0] == "native-goal") {
+            if (File.Exists(path + ".deny")) { Console.Error.Write("isolated goal write denied"); return 7; }
+            if (json.Serialize(request["environment"]) != json.Serialize(environment) || !Object.Equals(request["confirmed"], true) ||
+                !Object.Equals(request["goalId"], goal["id"]) || !Object.Equals(request["expectedStatus"], goal["status"])) return 31;
+            var action = (string)request["action"];
+            goal["status"] = action == "pause" ? "paused" : action == "achieve" ? "achieved" : action == "kill" ? "killed" : "active";
+            state["effectiveStatus"] = goal["status"]; state["holderLiveness"] = "held";
+            File.WriteAllText(path, json.Serialize(state)); File.AppendAllText(path + ".writes", action + "\n"); File.Delete(path + ".dormant");
+            rows = new object[] { state }; result["environment"] = environment;
+            result["degraded"] = true; result["degradedReasons"] = new[] { "unattributed activity remains" };
+        } else if (args[0] == "native-read") {
+            var name = (string)request["name"];
+            if (name == "goals.detail") {
+                var query = (Dictionary<string, object>)request["args"];
+                if (!Object.Equals(query["goalId"], goal["id"]) || !Object.Equals(query["workspaceId"], "isolated")) return 32;
+            }
+            if (File.Exists(path + ".unknown")) state["holderLiveness"] = "unknown";
+            if (File.Exists(path + ".dormant")) { state["holderLiveness"] = "lost"; state["effectiveStatus"] = "dormant"; }
+            rows = name == "operator.identity" ? new object[] { environment } : name == "goals.list" ? new object[] { new { goals = new object[] { goal } } } : new object[] { state };
+        } else return 33;
+        result["rows"] = rows;
+        var bytes = utf8.GetBytes(json.Serialize(result)); Console.OpenStandardOutput().Write(bytes, 0, bytes.Length); return 0;
+    }
     public static int Main(string[] args) {
         var json = new JavaScriptSerializer(); var utf8 = new UTF8Encoding(false, true);
         var request = json.Deserialize<Dictionary<string, object>>(new StreamReader(Console.OpenStandardInput(), utf8).ReadToEnd());
         var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
         var environment = json.DeserializeObject("{\"endpoint\":\"http://fixture.invalid:3170\",\"workspaceId\":\"isolated\",\"store\":{\"id\":\"fixture\"},\"agentChat\":{\"scope\":\"workspace:isolated\"}}");
+        if (Environment.GetEnvironmentVariable("WORKBENCH_CONTROL_PHASE") == "goals") return Goals(args, request, json, utf8, path, environment);
         var state = json.Deserialize<Dictionary<string, object>>(File.Exists(path) ? File.ReadAllText(path) :
             "{\"defaultAccountId\":\"other\",\"forcedAccounts\":[],\"excludeAccounts\":[\"other\"]}");
         object rows; var scoped = false;
@@ -503,8 +590,8 @@ finally {
     if (Test-Path -LiteralPath $fixtureFile) { Remove-Item -LiteralPath $fixtureFile -Force }
     if (Test-Path -LiteralPath $argvFixture) { Remove-Item -LiteralPath $argvFixture -Force }
     Remove-Item Env:WORKBENCH_ARGV_FIXTURE -ErrorAction SilentlyContinue
-    foreach ($path in @($accountFixture, $accountState, ($accountState + '.deny'))) {
+    foreach ($path in @($accountFixture, $accountState, ($accountState + '.deny'), ($accountState + '.writes'), ($accountState + '.unknown'), ($accountState + '.dormant'))) {
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
     }
-    Remove-Item Env:WORKBENCH_ACCOUNT_FIXTURE, Env:WORKBENCH_ACCOUNT_STATE -ErrorAction SilentlyContinue
+    Remove-Item Env:WORKBENCH_ACCOUNT_FIXTURE, Env:WORKBENCH_ACCOUNT_STATE, Env:WORKBENCH_CONTROL_PHASE -ErrorAction SilentlyContinue
 }

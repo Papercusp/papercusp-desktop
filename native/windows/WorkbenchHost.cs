@@ -181,11 +181,15 @@ namespace Papercusp.Workbench
             private readonly AccountState accounts;
             private readonly List<Button> accountControls = new List<Button>();
             private readonly TextBlock accountScope, accountSummary;
+            private readonly GoalState goal = new GoalState();
+            private readonly WrapPanel goalControls;
+            private readonly TextBlock goalStatus;
+            internal Func<string, bool> ConfirmGoal;
             private readonly Action relayout;
             private readonly DispatcherTimer debounce;
             private CancellationTokenSource refresh, detailRead;
             private IntPtr priorWindow;
-            private bool shuttingDown, ready;
+            private bool shuttingDown, ready, confirmingGoal;
             internal NativePanel(string executable, string title, string scope, Action layoutChanged)
             {
                 pui = executable; State.Scope = scope; relayout = layoutChanged;
@@ -241,6 +245,20 @@ namespace Papercusp.Workbench
                 AutomationProperties.SetName(resume, "Resume selected session");
                 resume.Click += (s, e) => { var row = results.SelectedItem as PanelResult; if (row != null) ActivateAgent(row, true); };
                 DockPanel.SetDock(resume, Dock.Bottom); layout.Children.Add(resume);
+                var goalFooter = new StackPanel(); DockPanel.SetDock(goalFooter, Dock.Bottom); layout.Children.Add(goalFooter);
+                goalStatus = new TextBlock { TextWrapping = TextWrapping.Wrap, Visibility = Visibility.Collapsed };
+                AutomationProperties.SetName(goalStatus, "Goal control status"); goalFooter.Children.Add(goalStatus);
+                goalControls = new WrapPanel { Visibility = Visibility.Collapsed }; goalFooter.Children.Add(goalControls);
+                foreach (var action in new[] { "pause", "resume", "start", "reopen", "achieve", "kill" })
+                {
+                    var value = action;
+                    var button = new Button { Content = action == "achieve" ? "Mark achieved" : Char.ToUpper(action[0]) + action.Substring(1),
+                        Margin = new Thickness(4), Tag = action, Visibility = Visibility.Collapsed };
+                    AutomationProperties.SetName(button, "Goal " + action);
+                    button.Click += (s, e) => ApplyGoal(value); goalControls.Children.Add(button);
+                }
+                ConfirmGoal = message => MessageBox.Show(this, message, "Confirm goal action", MessageBoxButton.YesNo,
+                    MessageBoxImage.Question, MessageBoxResult.No) == MessageBoxResult.Yes;
                 var body = new Grid(); layout.Children.Add(body);
                 results = new ListBox { FontSize = 15 }; body.Children.Add(results);
                 AutomationProperties.SetName(results, "Workbench results");
@@ -275,7 +293,7 @@ namespace Papercusp.Workbench
                         e.Handled = true;
                     }
                 };
-                Deactivated += (s, e) => { State.OutsideFocus(); if (!State.Visible) Dismiss(false); };
+                Deactivated += (s, e) => { if (!confirmingGoal) { State.OutsideFocus(); if (!State.Visible) Dismiss(false); } };
                 SourceInitialized += (s, e) =>
                 {
                     var h = new WindowInteropHelper(this).Handle;
@@ -310,6 +328,7 @@ namespace Papercusp.Workbench
             private async void Refresh()
             {
                 if (!State.Visible) return;
+                CancelDetail(); State.Detail = null;
                 if (refresh != null) { refresh.Cancel(); refresh.Dispose(); }
                 refresh = new CancellationTokenSource();
                 if (accounts != null) { await RefreshAccounts(refresh.Token); return; }
@@ -347,10 +366,12 @@ namespace Papercusp.Workbench
                 results.Visibility = State.Detail == null ? Visibility.Visible : Visibility.Collapsed;
                 if (State.Detail != null) resume.Visibility = Visibility.Collapsed;
                 more.Visibility = State.Detail == null && State.Results(true).Count > rows.Count ? Visibility.Visible : Visibility.Collapsed;
+                RenderGoalControls();
             }
             private void CancelDetail()
             {
                 ++State.DetailGeneration;
+                goal.Clear();
                 if (detailRead != null) { detailRead.Cancel(); detailRead.Dispose(); detailRead = null; }
             }
             private async void OpenSelected()
@@ -367,8 +388,16 @@ namespace Papercusp.Workbench
                 State.Detail = "Loading…"; Render();
                 try
                 {
-                    var payload = await PuiReadBridge.ReadAsync(pui, row.Kind + (row.Kind == "goals" ? ".detail" : ".get"), PanelState.DetailArgs(row), token);
+                    Dictionary<string, object> environment = null;
+                    var args = PanelState.DetailArgs(row);
+                    if (row.Kind == "goals")
+                    {
+                        environment = AccountState.One(await PuiReadBridge.ReadAsync(pui, "operator.identity", null, token));
+                        args["workspaceId"] = environment["workspaceId"];
+                    }
+                    var payload = await PuiReadBridge.ReadAsync(pui, row.Kind + (row.Kind == "goals" ? ".detail" : ".get"), args, token, 22000, environment);
                     if (generation != State.DetailGeneration || token.IsCancellationRequested) return;
+                    if (row.Kind == "goals") goal.Loaded(environment, payload, PanelState.Text(row.Row, "id"));
                     // Native selectable text keeps canonical report/plan content intact.
                     var json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
                     State.Detail = String.Join("\n\n", ((System.Collections.IList)payload["rows"]).Cast<object>().Select(item =>
@@ -382,6 +411,54 @@ namespace Papercusp.Workbench
                 {
                     if (generation != State.DetailGeneration || token.IsCancellationRequested) return;
                     State.Detail = "Unavailable · " + error.Message;
+                }
+                Render();
+            }
+            private void RenderGoalControls()
+            {
+                var visible = goal.Detail != null && State.Detail != null;
+                goalControls.Visibility = goalStatus.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+                if (!visible) return;
+                var current = (Dictionary<string, object>)goal.Detail["goal"];
+                goalStatus.Text = "Workspace: " + PanelState.Text(goal.Environment, "workspaceId") + " · " +
+                    PanelState.Text(goal.Environment, "endpoint") + "\nStatus: " + PanelState.Text(current, "status") +
+                    " · " + PanelState.Text(goal.Detail, "effectiveStatus") + " · holder " + PanelState.Text(goal.Detail, "holderLiveness") +
+                    (goal.Busy ? "\nChecking goal action…" : goal.Error != null ? "\nUnavailable · " + goal.Error :
+                        goal.Warning != null ? "\n" + goal.Warning : "");
+                var actions = goal.Actions();
+                foreach (Button button in goalControls.Children)
+                {
+                    button.Visibility = actions.Contains((string)button.Tag) ? Visibility.Visible : Visibility.Collapsed;
+                    button.IsEnabled = !goal.Busy && goal.Error == null;
+                }
+            }
+            private async void ApplyGoal(string action)
+            {
+                if (!goal.Actions().Contains(action)) return;
+                var generation = State.DetailGeneration;
+                var goalId = PanelState.Text((Dictionary<string, object>)goal.Detail["goal"], "id");
+                var message = action == "pause" ? "Pause this goal? Placement stops and attributed sessions are paused. Unattributed activity may remain." :
+                    action == "resume" ? "Resume this goal? Placement reopens. Previously paused sessions are not re-armed; new work may spend money." :
+                    action == "start" || action == "reopen" ? "Start this goal? Placement reopens and a fresh owning agent may launch and spend money." :
+                    action == "achieve" ? "Mark this goal achieved? This is a terminal status change." : "Kill this goal? This is a terminal status change.";
+                bool confirmed;
+                confirmingGoal = true;
+                try { confirmed = ConfirmGoal(message); }
+                finally { confirmingGoal = false; }
+                if (!confirmed || generation != State.DetailGeneration || !State.Visible || detailRead == null) return;
+                var token = detailRead.Token;
+                goal.Busy = true; RenderGoalControls();
+                try
+                {
+                    var payload = await PuiReadBridge.GoalAsync(pui, goal.Environment, goal.Detail, action, true, token);
+                    if (generation != State.DetailGeneration || token.IsCancellationRequested || !State.Visible) return;
+                    goal.Applied(payload, goalId);
+                    State.Detail = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 }.Serialize(goal.Detail);
+                }
+                catch (Exception error)
+                {
+                    if (generation != State.DetailGeneration || token.IsCancellationRequested || !State.Visible) return;
+                    goal.Busy = false; goal.Error = error.Message + " · Refresh Goals to verify server state";
                 }
                 Render();
             }

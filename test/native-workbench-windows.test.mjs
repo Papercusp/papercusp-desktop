@@ -132,6 +132,20 @@ test('Windows native Accounts controls preserve exact identity, confirmed state 
         assert.equal(new Set(result.cases).size, result.count);
     });
 
+test('Windows native Goals controls confirm actions and preserve server state and degraded outcomes',
+    {skip:process.platform !== 'win32', timeout:60000}, () => {
+        const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
+            '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'goals', '-Interactive'],
+        {encoding:'utf8', timeout:55000, windowsHide:true});
+        assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
+        const result = JSON.parse(run.stdout.trim());
+        assert.equal(result.ok, true); assert.equal(result.phase, 'goals');
+        assert.equal(result.interactiveDesktop, true);
+        assert.ok(result.count >= 15);
+        assert.equal(new Set(result.cases).size, result.count);
+    });
+
 for (const fixture of ['bridge', 'host']) {
     test('Windows actual PUI and canonical operator read integration: ' + fixture, {
         skip: process.platform !== 'win32' || process.env.PAPERCUSP_TEST_REAL_PUI !== '1'
