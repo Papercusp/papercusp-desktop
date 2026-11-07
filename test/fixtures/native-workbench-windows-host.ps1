@@ -217,13 +217,14 @@ public static class WorkbenchNativeHostFixture
         Check(refused, name);
     }
     private const string EnvironmentRefusal = "Error: selected environment changed; refresh the native panel";
-    private static void RefusesPuiEnvironment(Action action, string name)
+    private const string InboxEnvironmentRefusal = "Error: selected environment changed; refresh Inbox";
+    private static void RefusesPuiEnvironment(Action action, string name, string expectedMessage = EnvironmentRefusal)
     {
         var refused = false;
         try { action(); }
         catch (System.IO.IOException error)
         {
-            if (!String.Equals(error.Message, EnvironmentRefusal, StringComparison.Ordinal)) throw;
+            if (!String.Equals(error.Message, expectedMessage, StringComparison.Ordinal)) throw;
             refused = true;
         }
         Check(refused, name);
@@ -232,7 +233,17 @@ public static class WorkbenchNativeHostFixture
     {
         RefusesPuiEnvironment(() => { throw new System.IO.IOException(EnvironmentRefusal); },
             "native PUI environment refusal is recognized through its process error");
+        RefusesPuiEnvironment(() => { throw new System.IO.IOException(InboxEnvironmentRefusal); },
+            "native Inbox environment refusal is recognized through its command-specific process error", InboxEnvironmentRefusal);
         var rejected = false;
+        try { RefusesPuiEnvironment(() => { throw new System.IO.IOException(InboxEnvironmentRefusal); }, "wrong read refusal"); }
+        catch (System.IO.IOException error) { rejected = error.Message == InboxEnvironmentRefusal; }
+        Check(rejected, "an Inbox command refusal cannot satisfy the native read refusal oracle");
+        rejected = false;
+        try { RefusesPuiEnvironment(() => { throw new System.IO.IOException(EnvironmentRefusal); }, "wrong Inbox refusal", InboxEnvironmentRefusal); }
+        catch (System.IO.IOException error) { rejected = error.Message == EnvironmentRefusal; }
+        Check(rejected, "a native read refusal cannot satisfy the Inbox command refusal oracle");
+        rejected = false;
         try { RefusesPuiEnvironment(() => {}, "unexpected success"); }
         catch (Exception error) { rejected = error.Message == "unexpected success"; }
         Check(rejected, "a successful changed-environment call cannot satisfy the refusal oracle");
@@ -487,7 +498,7 @@ public static class WorkbenchNativeHostFixture
             var request = new Dictionary<string, object> { { "environment", wrong }, { "operation", "stop" },
                 { "confirmed", true }, { "runId", "native-integration-must-never-write" } };
             RefusesPuiEnvironment(() => PuiReadBridge.InboxAsync(pui, request, CancellationToken.None).GetAwaiter().GetResult(),
-                "actual native-inbox command refuses a changed workspace before run control");
+                "actual native-inbox command refuses a changed workspace before run control", InboxEnvironmentRefusal);
             var search = Find<System.Windows.Controls.TextBox>(panel, "Search Workbench");
             search.Text = "native-integration-no-match-" + Guid.NewGuid().ToString("N");
             Check(inbox.Results(search.Text).Count == 0 && status.Text.StartsWith("0 questions"),

@@ -190,7 +190,7 @@ test('Windows interactive fixture retains failure diagnostics and terminates its
         assert.equal(result.count, 15); assert.equal(new Set(result.cases).size, result.count);
     });
 
-test('Windows native environment refusal oracle rejects success, unrelated process errors and timeouts', {
+test('Windows native environment refusal oracle distinguishes commands and rejects success, unrelated errors and timeouts', {
     skip: process.platform !== 'win32', timeout:60000,
 }, () => {
     const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
@@ -200,7 +200,7 @@ test('Windows native environment refusal oracle rejects success, unrelated proce
     assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
     const result = JSON.parse(run.stdout.trim());
     assert.equal(result.ok, true); assert.equal(result.phase, 'environment-refusal');
-    assert.equal(result.count, 4); assert.equal(new Set(result.cases).size, result.count);
+    assert.equal(result.count, 7); assert.equal(new Set(result.cases).size, result.count);
 });
 
 test('Windows actual PUI renders canonical Inbox and rejects a changed workspace before run control', {
