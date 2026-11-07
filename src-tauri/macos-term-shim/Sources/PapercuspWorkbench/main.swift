@@ -44,6 +44,13 @@ final class Sidebar: NSPanel {
     private var chatSend: NSButton?, chatCancel: NSButton?, chatRecover: NSButton?
     private var chatTask: Task<Void, Never>?
     private var chatOperation = UUID()
+    private var cardsState = NativeCardsState()
+    private var cardsTask: Task<Void, Never>?
+    private var cardStack: NSStackView?, cardMessage: NSTextField?
+    private var renderedCard: NativeCard?
+    private var cardChoices: [NSButton] = [], cardActions: [NSButton] = []
+    private var cardInput: NSTextField?, cardMultiline: NSTextView?, cardSelect: NSPopUpButton?
+    private var cardDate: NSDatePicker?, cardSlider: NSSlider?
     private var goalStates: [WorkbenchSurface: GoalState] = [:]
     private var accountButtons: [NSButton] = []
     private var accountScope: NSTextField?
@@ -267,10 +274,21 @@ final class Sidebar: NSPanel {
         scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
         if surface == .papercup {
             scroll.isHidden = true; detailScroll.isHidden = false
-            detailScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 300).isActive = true
+            detailScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
             detailScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
         } else { detailScroll.heightAnchor.constraint(equalToConstant: 260).isActive = true }
         if surface == .papercup {
+            let cardStatus = NSTextField(wrappingLabelWithString: "Connecting questions…")
+            root.addArrangedSubview(cardStatus); cardMessage = cardStatus
+            let cardScroll = NSScrollView(); cardScroll.hasVerticalScroller = true
+            let cardContent = NSStackView(); cardContent.orientation = .vertical; cardContent.alignment = .leading
+            cardContent.spacing = 8; cardContent.translatesAutoresizingMaskIntoConstraints = false
+            cardScroll.documentView = cardContent; root.addArrangedSubview(cardScroll); cardStack = cardContent
+            cardScroll.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
+            cardScroll.heightAnchor.constraint(equalToConstant: 180).isActive = true
+            cardContent.widthAnchor.constraint(equalTo: cardScroll.contentView.widthAnchor, constant: -16).isActive = true
+            let reconnect = NSButton(title: "Reconnect questions", target: self, action: #selector(reconnectCards))
+            root.addArrangedSubview(reconnect)
             let composer = NSTextView(); composer.isRichText = false; composer.delegate = self
             composer.setAccessibilityLabel("Message Papercup")
             let composeScroll = NSScrollView(); composeScroll.documentView = composer; composeScroll.hasVerticalScroller = true
@@ -302,6 +320,8 @@ final class Sidebar: NSPanel {
         detailGeneration[surface, default: 0] += 1
         if surface == .accounts { accountState.invalidate() }
         if surface == .papercup {
+            cardsTask?.cancel(); cardsTask = nil
+            _ = cardsState.begin(environment: .null, conversationID: ""); renderCards()
             chatState.draft = chatComposer?.string ?? chatState.draft
             // The operator owns execution after admission. Cancel through its
             // canonical control route; killing the pipe alone is insufficient.
@@ -538,7 +558,9 @@ final class Sidebar: NSPanel {
                 let page = try await bridge.read("operatorTurns.page",
                     args: ["conversationId": .string(id), "limit": .number(200)], environment: environment)
                 guard !Task.isCancelled, self.models[.papercup]?.visible == true else { return }
-                if try self.chatState.settle(generation, environment: environment, conversationID: id, payload: page) { self.renderChat() }
+                if try self.chatState.settle(generation, environment: environment, conversationID: id, payload: page) {
+                    self.renderChat(); self.reconnectCards()
+                }
             } catch {
                 guard let self, !Task.isCancelled else { return }
                 self.chatState.fail(generation, error); self.renderChat()
@@ -625,6 +647,139 @@ final class Sidebar: NSPanel {
             details[.papercup]?.textStorage?.setAttributedString(NSAttributedString(markdown))
         } else { details[.papercup]?.string = content }
         details[.papercup]?.enclosingScrollView?.isHidden = false
+    }
+    @objc private func reconnectCards() {
+        guard chatState.ready, models[.papercup]?.visible == true else { return }
+        cardsTask?.cancel()
+        let generation = cardsState.begin(environment: chatState.environment, conversationID: chatState.conversationID)
+        let request = cardsState.subscription, bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
+        renderCards()
+        cardsTask = Task { [weak self] in
+            do {
+                for try await frame in bridge.cards(request) {
+                    guard let self, !Task.isCancelled, self.models[.papercup]?.visible == true else { return }
+                    if try self.cardsState.receive(generation, frame) { self.renderCards() }
+                }
+                throw WorkbenchError("Questions disconnected; reconnect before answering")
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                self.cardsState.disconnected(generation, error); self.renderCards()
+            }
+        }
+    }
+    private func renderCards() {
+        let head = cardsState.cards.first
+        cardMessage?.stringValue = cardsState.error.map { "Questions · " + $0 } ??
+            (cardsState.pending != nil ? "Submitting answer…" : !cardsState.connected ? "Questions disconnected" :
+                head == nil ? "No pending questions" : "Question · \(cardsState.cards.count) pending")
+        if renderedCard != head {
+            renderedCard = head
+            for view in cardStack?.arrangedSubviews ?? [] { cardStack?.removeArrangedSubview(view); view.removeFromSuperview() }
+            cardChoices = []; cardActions = []; cardInput = nil; cardMultiline = nil
+            cardSelect = nil; cardDate = nil; cardSlider = nil
+            if let head, let stack = cardStack {
+                let prompt = NSTextField(wrappingLabelWithString: head.prose)
+                prompt.setAccessibilityLabel("Papercup question"); stack.addArrangedSubview(prompt)
+                if head.secureLink(environment: cardsState.environment) != nil {
+                    stack.addArrangedSubview(NSButton(title: "Open secure link", target: self, action: #selector(openCardLink)))
+                }
+                let presentation = head.raw["presentation"]
+                switch head.kind {
+                case "radio", "checkbox":
+                    for option in head.options {
+                        let button = NSButton(title: option["label"].text + (option["hint"].text.isEmpty ? "" : " · " + option["hint"].text),
+                            target: self, action: #selector(selectCardChoice(_:)))
+                        button.setButtonType(head.kind == "radio" ? .radio : .switch)
+                        button.identifier = NSUserInterfaceItemIdentifier(option["id"].text)
+                        cardChoices.append(button); stack.addArrangedSubview(button)
+                    }
+                case "select":
+                    let select = NSPopUpButton(); select.addItem(withTitle: "Choose an answer")
+                    for option in head.options { select.addItem(withTitle: option["label"].text); select.lastItem?.representedObject = option["id"].text }
+                    cardSelect = select; stack.addArrangedSubview(select)
+                case "text":
+                    if presentation["multiline"].isTrue && !presentation["sensitive"].isTrue {
+                        let scroll = NSScrollView(); scroll.hasVerticalScroller = true
+                        let text = NSTextView(); text.isRichText = false; text.setAccessibilityLabel("Question answer")
+                        scroll.documentView = text; text.autoresizingMask = [.width]; text.textContainer?.widthTracksTextView = true
+                        stack.addArrangedSubview(scroll); scroll.heightAnchor.constraint(equalToConstant: 70).isActive = true
+                        scroll.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true; cardMultiline = text
+                    } else {
+                        let field: NSTextField = presentation["sensitive"].isTrue ? NSSecureTextField() : NSTextField()
+                        field.placeholderString = presentation["placeholder"].text; field.setAccessibilityLabel("Question answer")
+                        cardInput = field; stack.addArrangedSubview(field)
+                    }
+                case "date":
+                    let date = NSDatePicker(); date.datePickerElements = .yearMonthDay; date.datePickerStyle = .textFieldAndStepper
+                    date.timeZone = TimeZone(secondsFromGMT: 0); date.setAccessibilityLabel("Question date")
+                    cardDate = date; stack.addArrangedSubview(date)
+                case "slider":
+                    if case .number(let min) = presentation["min"], case .number(let max) = presentation["max"], min.isFinite, max.isFinite, max >= min {
+                        let slider = NSSlider(value: min, minValue: min, maxValue: max, target: self, action: #selector(stepCardSlider))
+                        slider.setAccessibilityLabel("Question value"); cardSlider = slider; stack.addArrangedSubview(slider)
+                        stack.addArrangedSubview(NSTextField(labelWithString: "Range \(min) – \(max)"))
+                    }
+                default: stack.addArrangedSubview(NSTextField(wrappingLabelWithString: head.raw["fallbackText"].text.isEmpty ?
+                    "This question needs another supported surface." : head.raw["fallbackText"].text))
+                }
+                let buttons = NSStackView(); buttons.orientation = .horizontal
+                for (title, action) in [("Submit answer", "submit"), ("Skip question", "decline"), ("Cancel question", "cancel")] {
+                    if action == "decline" && head.raw["allowDecline"] == .bool(false) { continue }
+                    let button = NSButton(title: title, target: self, action: #selector(respondToCard(_:)))
+                    button.identifier = NSUserInterfaceItemIdentifier(action); cardActions.append(button); buttons.addArrangedSubview(button)
+                }
+                stack.addArrangedSubview(buttons)
+            }
+        }
+        let enabled = cardsState.connected && cardsState.pending == nil
+        for button in cardChoices { button.isEnabled = enabled }
+        for button in cardActions { button.isEnabled = enabled && (button.identifier?.rawValue != "submit" || head?.canSubmit == true) }
+        cardInput?.isEnabled = enabled; cardMultiline?.isEditable = enabled; cardSelect?.isEnabled = enabled
+        cardDate?.isEnabled = enabled; cardSlider?.isEnabled = enabled
+        cardStack?.enclosingScrollView?.isHidden = head == nil
+    }
+    @objc private func selectCardChoice(_ selected: NSButton) {
+        if renderedCard?.kind == "radio" { for button in cardChoices { button.state = button === selected ? .on : .off } }
+    }
+    @objc private func openCardLink() {
+        guard cardsState.connected, let card = renderedCard, cardsState.cards.contains(card),
+              let link = card.secureLink(environment: cardsState.environment) else { return }
+        if !NSWorkspace.shared.open(link) { cardMessage?.stringValue = "Could not open the selected question link" }
+    }
+    @objc private func stepCardSlider() {
+        guard let slider = cardSlider, let card = renderedCard else { return }
+        let step: Double
+        if case .number(let n) = card.raw["presentation"]["step"], n.isFinite, n > 0 { step = n } else { step = 1 }
+        slider.doubleValue = min(slider.maxValue, slider.minValue + ((slider.doubleValue - slider.minValue) / step).rounded() * step)
+    }
+    @objc private func respondToCard(_ button: NSButton) {
+        guard let card = renderedCard else { return }
+        do {
+            let action = button.identifier?.rawValue ?? ""
+            var value = cardMultiline?.string ?? cardInput?.stringValue ?? ""
+            if let date = cardDate {
+                let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX")
+                formatter.calendar = Calendar(identifier: .gregorian); formatter.timeZone = TimeZone(secondsFromGMT: 0)
+                formatter.dateFormat = "yyyy-MM-dd"; value = formatter.string(from: date.dateValue)
+            }
+            if let slider = cardSlider { value = String(slider.doubleValue) }
+            var picks = cardChoices.filter { $0.state == .on }.compactMap { $0.identifier?.rawValue }
+            if let id = cardSelect?.selectedItem?.representedObject as? String { picks = [id] }
+            let payload = action == "submit" ? try card.answer(picks: picks, value: value) : JSONValue.null
+            let request = try cardsState.request(card, action: action, payload: payload), generation = cardsState.generation
+            let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui)); renderCards()
+            let task = Task { [weak self] in
+                do {
+                    let receipt = try await bridge.respondToCard(request)
+                    guard let self, !Task.isCancelled else { return }
+                    if try self.cardsState.responded(generation, id: card.id, receipt: receipt) { self.renderCards() }
+                } catch {
+                    guard let self, !Task.isCancelled else { return }
+                    self.cardsState.responseFailed(generation, error); self.renderCards()
+                }
+            }
+            tasks[.papercup, default: []].append(task)
+        } catch { cardMessage?.stringValue = error.localizedDescription }
     }
     private func refreshAccounts() {
         let generation = accountState.begin(); renderAccounts()

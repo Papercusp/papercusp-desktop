@@ -235,6 +235,162 @@ public struct NativeChatReply {
     }
 }
 
+/// A card is a projection of a canonical snapshot, never a local approval.
+public struct NativeCard: Equatable {
+    public let runID: String, raw: JSONValue
+    public var id: String { raw["correlationId"].text }
+    public var kind: String { raw["presentation"]["kind"].text }
+    public var options: [JSONValue] { raw["presentation"]["options"].rows ?? [] }
+    public var canSubmit: Bool { ["radio", "checkbox", "select", "text", "date", "slider"].contains(kind) }
+    public var prose: String {
+        var parts = [raw["prompt"].text, raw["approval"]["title"].text]
+        parts += raw["approval"]["body"].rows?.map { $0.text } ?? []
+        parts += [raw["approval"]["question"].text, raw["report"]["title"].text]
+        for plan in raw["report"]["plans"].rows ?? [] {
+            parts += [plan["title"].text.isEmpty ? plan["slug"].text : plan["title"].text, plan["status"].text, plan["summary"].text]
+            for item in plan["items"].rows ?? [] {
+                parts.append([item["id"].text, item["text"].text, item["status"].text, item["ref"].text].filter { !$0.isEmpty }.joined(separator: " · "))
+            }
+        }
+        return parts.filter { !$0.isEmpty }.joined(separator: "\n\n")
+    }
+    public func secureLink(environment: JSONValue) -> URL? {
+        let allowed = id.utf8.allSatisfy { (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 46 }
+        let path = "/api/ui/cards/" + id + "/link"
+        guard allowed, !id.isEmpty, raw["presentation"]["link"].text == path,
+              NativeEnvironment.same(environment, environment),
+              var url = URLComponents(string: environment["endpoint"].text),
+              ["http", "https"].contains(url.scheme ?? ""), url.host != nil, url.user == nil, url.password == nil else { return nil }
+        url.path = path; url.query = nil; url.fragment = nil; return url.url
+    }
+    public func answer(picks: [String] = [], value: String = "") throws -> JSONValue {
+        let presentation = raw["presentation"]
+        switch kind {
+        case "radio", "checkbox", "select":
+            let allowed = Set(options.map { $0["id"].text })
+            let minimum = presentation["allowEmpty"].isTrue ? 0 : 1
+            let maximum = kind == "checkbox" ? options.count : 1
+            guard picks.count >= minimum, picks.count <= maximum, Set(picks).count == picks.count,
+                  picks.allSatisfy({ allowed.contains($0) }) else { throw WorkbenchError("Choose the available answers") }
+            return .object(["picks": .array(picks.map(JSONValue.string))])
+        case "text":
+            guard presentation["allowEmpty"].isTrue || !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  value.utf8.count <= 32 * 1024 else { throw WorkbenchError("Enter a bounded answer") }
+            return .object(["value": .string(value)])
+        case "date":
+            let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.calendar = Calendar(identifier: .gregorian); formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = "yyyy-MM-dd"; formatter.isLenient = false
+            let minimum = presentation["min"].text, maximum = presentation["max"].text
+            guard let date = formatter.date(from: value), formatter.string(from: date) == value,
+                  minimum.isEmpty || value >= minimum, maximum.isEmpty || value <= maximum else {
+                throw WorkbenchError("Choose a date within the displayed range")
+            }
+            return .object(["value": .string(value)])
+        case "slider":
+            guard let number = Double(value), number.isFinite,
+                  case .number(let minimum) = presentation["min"], case .number(let maximum) = presentation["max"],
+                  number >= minimum, number <= maximum else { throw WorkbenchError("Choose a value within the displayed range") }
+            let step: Double
+            if case .number(let n) = presentation["step"] { step = n } else { step = 1 }
+            guard step.isFinite, step > 0, abs((number - minimum) / step - ((number - minimum) / step).rounded()) < 0.000001 else {
+                throw WorkbenchError("Choose a value on the displayed steps")
+            }
+            return .object(["value": .number(number)])
+        default: throw WorkbenchError("This question cannot be answered on this surface")
+        }
+    }
+}
+
+public struct NativeCardsState {
+    public private(set) var generation = 0
+    public private(set) var environment: JSONValue = .null
+    public private(set) var conversationID = ""
+    public private(set) var connected = false
+    public private(set) var error: String?
+    public private(set) var pending: String?
+    private var runs: [String: [NativeCard]] = [:]
+    private var snapshots: [String: JSONValue] = [:]
+    private var acknowledged = Set<String>()
+    public init() {}
+    public var cards: [NativeCard] {
+        runs.values.flatMap { $0 }.filter { !acknowledged.contains($0.id) }.sorted {
+            let lhs = $0.raw["createdAt"].sequence ?? 0, rhs = $1.raw["createdAt"].sequence ?? 0
+            return lhs == rhs ? $0.id < $1.id : lhs < rhs
+        }
+    }
+    @discardableResult public mutating func begin(environment: JSONValue, conversationID: String) -> Int {
+        generation += 1; self.environment = environment; self.conversationID = conversationID
+        connected = false; error = nil; pending = nil; runs = [:]; snapshots = [:]; acknowledged = []
+        return generation
+    }
+    public var subscription: JSONValue { .object(["environment": environment, "conversationId": .string(conversationID),
+        "operation": .string("subscribe")]) }
+    @discardableResult public mutating func receive(_ token: Int, _ frame: JSONValue) throws -> Bool {
+        guard token == generation else { return false }
+        guard !conversationID.isEmpty, NativeEnvironment.same(environment, frame["environment"]),
+              frame["data"]["workspaceId"] == environment["workspaceId"] else { throw WorkbenchError("The card environment changed") }
+        let data = frame["data"]
+        if frame["event"].text == "reset" {
+            runs = [:]; snapshots = [:]; connected = true; return true
+        }
+        guard frame["event"].text == "snapshot", !data["runId"].text.isEmpty,
+              let version = data["version"].sequence, let rows = data["snapshot"]["openCards"].rows else {
+            throw WorkbenchError("The card snapshot is unavailable")
+        }
+        let run = data["runId"].text
+        if let prior = snapshots[run], let before = prior["version"].sequence, before >= version {
+            if before == version && prior != data { throw WorkbenchError("Conflicting card snapshot") }
+            return false
+        }
+        var ids = Set<String>(), next: [NativeCard] = []
+        for row in rows {
+            guard row["conversationId"].text == conversationID, !row["correlationId"].text.isEmpty,
+                  ids.insert(row["correlationId"].text).inserted,
+                  !row["prompt"].text.isEmpty else { throw WorkbenchError("A card has an invalid or foreign identity") }
+            let card = NativeCard(runID: run, raw: row)
+            if ["radio", "checkbox", "select"].contains(card.kind) {
+                let options = card.options, optionIDs = options.map { $0["id"].text }
+                guard !options.isEmpty, !optionIDs.contains(""), Set(optionIDs).count == options.count,
+                      options.allSatisfy({ !$0["label"].text.isEmpty }) else { throw WorkbenchError("Card choices are incomplete") }
+            }
+            next.append(card)
+        }
+        let otherIDs = Set(runs.filter { $0.key != run }.values.flatMap { $0 }.map { $0.id })
+        guard otherIDs.isDisjoint(with: ids) else { throw WorkbenchError("A card belongs to multiple runs") }
+        runs[run] = next; snapshots[run] = data; connected = true
+        return true
+    }
+    public mutating func request(_ card: NativeCard, action: String, payload: JSONValue = .null) throws -> JSONValue {
+        guard connected, pending == nil, cards.contains(card), NativeEnvironment.same(environment, environment),
+              ["submit", "decline", "cancel"].contains(action),
+              action != "submit" || card.canSubmit,
+              action != "decline" || card.raw["allowDecline"] != .bool(false) else {
+            throw WorkbenchError("This question changed or is unavailable; reconnect before answering")
+        }
+        pending = card.id; error = nil
+        var body: [String: JSONValue] = ["environment": environment, "conversationId": .string(conversationID),
+            "operation": .string("respond"), "correlationId": .string(card.id), "action": .string(action)]
+        if action == "submit" { body["payload"] = payload }
+        return .object(body)
+    }
+    @discardableResult public mutating func responded(_ token: Int, id: String, receipt: JSONValue) throws -> Bool {
+        guard token == generation else { return false }
+        let row = try NativeEnvironment.one(receipt)
+        guard pending == id, NativeEnvironment.same(environment, receipt["environment"]), row["responded"].isTrue,
+              row["conversationId"].text == conversationID, row["correlationId"].text == id else {
+            throw WorkbenchError("The question response needs reconciliation")
+        }
+        acknowledged.insert(id); pending = nil; error = nil; return true
+    }
+    public mutating func responseFailed(_ token: Int, _ failure: Error) {
+        guard token == generation else { return }; pending = nil; error = failure.localizedDescription
+    }
+    public mutating func disconnected(_ token: Int, _ failure: Error) {
+        guard token == generation else { return }; connected = false; error = failure.localizedDescription
+    }
+}
+
 private extension JSONValue {
     var sequence: Double? {
         if case .number(let value) = self, value.isFinite, value >= 0,

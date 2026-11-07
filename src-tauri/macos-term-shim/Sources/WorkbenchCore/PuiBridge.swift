@@ -57,6 +57,15 @@ public struct PuiBridge {
     public init(executable: URL) { self.executable = executable }
     /// Incremental delivery over the same bounded child transport as reads.
     public func chat(_ body: JSONValue) -> AsyncThrowingStream<JSONValue, Error> {
+        frames("native-chat", body: body)
+    }
+    public func cards(_ body: JSONValue) -> AsyncThrowingStream<JSONValue, Error> {
+        frames("native-cards", body: body)
+    }
+    public func respondToCard(_ body: JSONValue) async throws -> JSONValue {
+        try await invoke("native-cards", body: body)
+    }
+    private func frames(_ command: String, body: JSONValue) -> AsyncThrowingStream<JSONValue, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -65,7 +74,7 @@ public struct PuiBridge {
                         throw WorkbenchError("Select an installed PUI and a bounded message")
                     }
                     let decoder = NativeChatLines { continuation.yield($0) }
-                    let result = try await BoundedNativeProcess.run(executable: executable, arguments: ["native-chat"],
+                    let result = try await BoundedNativeProcess.run(executable: executable, arguments: [command],
                         input: input, timeout: 615, onOutput: { try decoder.push($0) })
                     try decoder.finish()
                     guard result.status == 0 else {
