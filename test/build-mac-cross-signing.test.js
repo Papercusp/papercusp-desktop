@@ -111,6 +111,7 @@ function fixture(t, { inheritedPath = true, password = '', mode = 'sign', stale 
   fs.mkdirSync(bin);
   fs.mkdirSync(path.join(out, 'dmg'), { recursive: true });
   fs.mkdirSync(path.join(app, 'Contents/MacOS'), { recursive: true });
+  fs.mkdirSync(path.join(app, 'Contents/Resources/resources/PapercuspWorkbench.app/Contents/MacOS'), { recursive: true });
   fs.writeFileSync(path.join(app, 'Contents/MacOS/papercusp-desktop'), 'fixture-binary');
   fs.writeFileSync(key, 'fixture-key-content');
   const script = (name, body) => fs.writeFileSync(path.join(bin, name), body, { mode: 0o755 });
@@ -629,7 +630,7 @@ else:
   }
 });
 
-for (const mode of ['normal', 'companion-change', 'shallow-change', 'pre-sign-change', 'generation-change', 'deep-fail', 'shallow-fail']) {
+for (const mode of ['normal', 'companion-change', 'shallow-change', 'pre-sign-change', 'generation-change', 'deep-fail', 'shallow-fail', 'workbench-sign-fail', 'workbench-verify-fail']) {
   test(`app signing seals the final PUI generation and rejects ${mode} corruption`, t => {
     const f = fixture(t);
     const sidecar = path.join(f.app, 'Contents/Resources/sidecar');
@@ -656,6 +657,11 @@ for (const mode of ['normal', 'companion-change', 'shallow-change', 'pre-sign-ch
     fs.writeFileSync(path.join(f.root, 'bin/rcodesign'), `#!/usr/bin/env node
 const fs=require('node:fs'), path=require('node:path'), crypto=require('node:crypto');
 const args=process.argv.slice(2), app=args.at(-1), shallow=args.includes('--shallow');
+if (path.basename(app)==='PapercuspWorkbench.app') {
+  const step=args[0]==='verify'?'workbench-verify':'workbench-sign';
+  if(process.env.PUI_SIGNING_MODE===step+'-fail') process.exit(9);
+  process.exit(0);
+}
 const sidecar=path.join(app,'Contents/Resources/sidecar'), manifest=path.join(sidecar,'pui-install.json');
 fs.appendFileSync(process.env.SIGNING_CALLS, shallow ? 'shallow\\n' : 'deep\\n');
 if (process.env.PUI_SIGNING_MODE===(shallow?'shallow-fail':'deep-fail')) {
@@ -671,6 +677,12 @@ fs.writeFileSync(path.join(app,'Contents/_CodeSignature/CodeResources'),crypto.c
       ENTITLEMENTS: path.join(f.root, 'fixture-entitlements'), PUI_SIGNING_MODE: mode,
       SIGNING_CALLS: path.join(f.root, 'calls') });
     const result = run(f, 'sign_app');
+    if (mode.startsWith('workbench-')) {
+      assert.notEqual(result.status, 0, result.stdout + result.stderr);
+      assert.match(result.stderr, /cannot (sign|verify) native Workbench/);
+      assert.equal(fs.existsSync(path.join(f.root, 'calls')), false, 'outer signing must not proceed');
+      return;
+    }
     if (mode === 'deep-fail' || mode === 'shallow-fail') {
       assert.notEqual(result.status, 0, result.stdout + result.stderr);
       assert.match(result.stderr, /insufficient room to write code signature load command/);

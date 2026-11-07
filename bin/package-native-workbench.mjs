@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Use GNOME's maintained archive/schema compiler rather than a second packer.
-import {mkdirSync, readFileSync, copyFileSync, writeFileSync, statSync, chmodSync} from 'node:fs';
-import {resolve, join} from 'node:path';
+import {mkdirSync, readFileSync, copyFileSync, writeFileSync, statSync, chmodSync, rmSync} from 'node:fs';
+import {resolve, join, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
@@ -46,6 +46,12 @@ export function stageNativeWorkbench(desktopRoot = resolve(import.meta.dirname, 
         if (!/^\d+\.\d+\.\d+(?:[.-][A-Za-z0-9.-]+)?$/.test(version))
             throw new Error('Invalid Workbench bundle version');
         const directory = join(resources, 'PapercuspWorkbench.app');
+        const input = resolve(macosExecutable), output = resolve(directory);
+        if (input === output || input.startsWith(output + sep))
+            throw new Error('The native Workbench input must be outside its staging bundle');
+        // Rebuild this owned output closure, including removal of stale nested
+        // code/signatures left by an earlier product generation.
+        rmSync(directory, {recursive:true, force:true});
         const contents = join(directory, 'Contents');
         mkdirSync(join(contents, 'MacOS'), {recursive:true});
         const executable = join(contents, 'MacOS/PapercuspWorkbench');
@@ -86,6 +92,7 @@ export function stageNativeWorkbench(desktopRoot = resolve(import.meta.dirname, 
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
     try { console.log(JSON.stringify(process.argv[2] === '--stage-bundle'
-        ? stageNativeWorkbench(process.argv[3], {platform:process.argv[4] || process.platform}) : packageNativeWorkbench(process.argv[2]))); }
+        ? stageNativeWorkbench(process.argv[3], {platform:process.argv[4] || process.platform,
+            ...(process.argv[5] ? {macosExecutable:process.argv[5]} : {})}) : packageNativeWorkbench(process.argv[2]))); }
     catch (error) { console.error(error.message); process.exitCode = 1; }
 }

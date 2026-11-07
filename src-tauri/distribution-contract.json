@@ -77,6 +77,11 @@
           "macos"
         ],
         "optional": true
+      },
+      {
+        "glob": "resources/PapercuspWorkbench.app/**/*",
+        "owner": "native-workbench",
+        "platforms": ["macos"]
       }
     ],
     "forbiddenResourcePrefixes": [

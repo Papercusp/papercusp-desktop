@@ -4,7 +4,8 @@
   "bundle": {
     "resources": [
       "sidecar/spa/**/*",
-      "resources/libPapercuspTermShim.dylib"
+      "resources/libPapercuspTermShim.dylib",
+      "resources/PapercuspWorkbench.app/**/*"
     ]
   }
 }

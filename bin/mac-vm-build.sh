@@ -71,6 +71,17 @@ verify_mac_app_signature() { # $1=app
     || { echo "ERROR: strict codesign verification failed for $app" >&2; exit 1; }
 }
 
+stage_native_workbench() { # $1=SwiftPM executable for this target
+  node "$HERE/package-native-workbench.mjs" --stage-bundle "$ROOT" darwin "$1" || exit 1
+  local app="$ROOT/src-tauri/resources/PapercuspWorkbench.app"
+  local binary="$app/Contents/MacOS/PapercuspWorkbench"
+  xcrun strip -x "$binary" || { echo 'FATAL: could not strip Workbench build paths' >&2; exit 1; }
+  assert_shim_slices "$binary" "$MAC_BUILD_TARGET" || exit 1
+  strip_mac_signing_xattrs "$app"
+  codesign --force --options runtime --sign "${APPLE_SIGNING_IDENTITY:--}" "$app" || exit 1
+  verify_mac_app_signature "$app"
+}
+
 # WI-4419 follow-up: mac-vm-build.sh is a RELEASE build entrypoint, so arm
 # build-desktop-sidecar.sh's unconditional identity-scan of the assembled sidecar
 # by default (env does NOT cross the release-local.sh ssh boundary, so it must be
@@ -324,9 +335,10 @@ echo "--- term shim (SwiftPM) ---"
 # execute it without a Mac (mac-shim-arch-guard.test.ts).
 source "$HERE/lib/mac-shim-arch.sh"
 REQUIRED_SHIM_SLICES="$(required_shim_slices "$MAC_BUILD_TARGET")"
-(
+SWIFT_PRODUCTS="$(
   cd src-tauri/macos-term-shim
-  if swift build -c release --arch x86_64 --arch arm64; then
+  if swift build -c release --arch x86_64 --arch arm64 >&2; then
+    swift build -c release --arch x86_64 --arch arm64 --show-bin-path || exit 1
     exit 0
   fi
   # WI-484916: the host-arch retry is only SAFE when the host arch alone can
@@ -338,22 +350,18 @@ REQUIRED_SHIM_SLICES="$(required_shim_slices "$MAC_BUILD_TARGET")"
   # degraded artifact would reach public users unexecuted by anyone.
   case " $REQUIRED_SHIM_SLICES " in
     *" arm64 "*)
-      echo "FATAL: universal term-shim build FAILED and MAC_BUILD_TARGET=$MAC_BUILD_TARGET requires an arm64 slice."
-      echo "       Refusing the host-arch fallback — it would ship an x86_64-only shim to Apple Silicon users (WI-484916)."
+      echo "FATAL: universal term-shim build FAILED and MAC_BUILD_TARGET=$MAC_BUILD_TARGET requires an arm64 slice." >&2
+      echo "       Refusing the host-arch fallback — it would ship an x86_64-only shim to Apple Silicon users (WI-484916)." >&2
       exit 1
       ;;
   esac
-  echo "universal shim build failed; retrying host-arch only (target=$MAC_BUILD_TARGET does not require arm64)"
-  swift build -c release
-) || { echo "FATAL: term shim build failed (target=$MAC_BUILD_TARGET)"; exit 1; }
-SHIM=""
-for p in \
-  src-tauri/macos-term-shim/.build/apple/Products/Release/libPapercuspTermShim.dylib \
-  src-tauri/macos-term-shim/.build/release/libPapercuspTermShim.dylib; do
-  [[ -f "$p" ]] && SHIM="$p" && break
-done
+  echo "universal shim build failed; retrying host-arch only (target=$MAC_BUILD_TARGET does not require arm64)" >&2
+  swift build -c release >&2 || exit 1
+  swift build -c release --show-bin-path
+)" || { echo "FATAL: term shim build failed (target=$MAC_BUILD_TARGET)"; exit 1; }
+SHIM="$SWIFT_PRODUCTS/libPapercuspTermShim.dylib"
 mkdir -p src-tauri/resources
-if [[ -n "$SHIM" ]]; then
+if [[ -f "$SHIM" ]]; then
   cp "$SHIM" src-tauri/resources/libPapercuspTermShim.dylib
   # SwiftPM embeds absolute build paths in the dylib's debug/local symbols.
   # Strip the vendored copy before Tauri signs and packages it; the source
@@ -371,6 +379,12 @@ if [[ -n "$SHIM" ]]; then
 else
   echo "WARN: term shim dylib not produced — embedded terminal will downgrade to NewWindow"
 fi
+
+# SwiftPM builds both native products. Workbench is required even when the
+# optional terminal shim is absent; never package a source-only accessory app.
+WORKBENCH="$SWIFT_PRODUCTS/PapercuspWorkbench"
+[[ -f "$WORKBENCH" ]] || { echo 'FATAL: native Workbench product was not built' >&2; exit 1; }
+stage_native_workbench "$WORKBENCH"
 
 # ── Recurrence guard (EI-12894): fail FAST + legibly on workspace-link drift ──
 # The sidecar build below esbuilds @papercusp/operator-core, which resolves
@@ -632,6 +646,8 @@ for role in $PAPERCUSP_BUILD_ROLES; do
         mkdir -p "$_stage_rel/resources"
         cp "$ROOT/src-tauri/resources/libPapercuspTermShim.dylib" "$_stage_rel/resources/"
       fi
+      mkdir -p "$_stage_rel/resources"
+      cp -R "$ROOT/src-tauri/resources/PapercuspWorkbench.app" "$_stage_rel/resources/"
       strip_mac_signing_xattrs "$_stage_rel/sidecar"
       [[ ! -d "$_stage_rel/resources" ]] || strip_mac_signing_xattrs "$_stage_rel/resources"
       echo "    (P-007 GUI resource-hygiene: rebuilt allowlisted sidecar/spa + optional terminal shim → ${_stage_rel#$PWD/})"
@@ -651,6 +667,7 @@ for role in $PAPERCUSP_BUILD_ROLES; do
   # This is the native recurrence guard: it verifies the exact app Tauri built
   # before the release flow copies its updater artifacts or repacks the DMG.
   verify_mac_app_signature "$role_bundle_dir/macos/$role_label.app"
+  verify_mac_app_signature "$role_bundle_dir/macos/$role_label.app/Contents/Resources/resources/PapercuspWorkbench.app"
   # ── WI-4723: fail-closed identity scan of the ASSEMBLED .app (mac creds-leak gate) ──
   # The fail-closed backstop for the resource-hygiene rsync above: scan the bytes
   # that actually ship. audit-release-bundle.py --scan-dir hunts the build-box

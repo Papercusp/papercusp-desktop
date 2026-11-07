@@ -216,6 +216,7 @@ MAC_TOOLS="${PAPERCUSP_MAC_CROSS_TOOLS:-$HOME/.papercusp/mac-cross-tools}"
 DMG_TOOL="$MAC_TOOLS/dmg"
 HFSPLUS_TOOL="$MAC_TOOLS/hfsplus"
 LIPO_BIN="${PAPERCUSP_LLVM_LIPO:-llvm-lipo-18}"
+STRIP_BIN="${PAPERCUSP_LLVM_STRIP:-llvm-strip-18}"
 KEY_FILE="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.papercusp/signing/papercusp.key}"
 KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 # Pinned tauri CLI, resolved via `npx --yes -p @tauri-apps/cli@VER` — NEVER a bare
@@ -297,6 +298,7 @@ command -v cargo-zigbuild >/dev/null 2>&1 || fail "cargo-zigbuild not installed 
 [[ -d "$SDKROOT" ]] || fail "macOS SDK not found at $SDKROOT (set SDKROOT)"
 command -v rcodesign >/dev/null 2>&1 || fail "rcodesign not installed (cargo install apple-codesign)"
 command -v "$LIPO_BIN" >/dev/null 2>&1 || fail "$LIPO_BIN not found (llvm)"
+command -v "$STRIP_BIN" >/dev/null 2>&1 || fail "$STRIP_BIN not found (llvm)"
 command -v mkfs.hfsplus >/dev/null 2>&1 || fail "mkfs.hfsplus not found (apt install hfsprogs)"
 [[ -x "$DMG_TOOL" && -x "$HFSPLUS_TOOL" ]] || fail "dmg tools missing — expected $DMG_TOOL + $HFSPLUS_TOOL (libdmg-hfsplus)"
 [[ -f "$KEY_FILE" ]] || fail "updater signing key not found at $KEY_FILE (bin/setup-signing-key.sh)"
@@ -497,7 +499,7 @@ assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out $
   fi
 
   # The optional macOS terminal shim is a GUI-shell resource. The Server has no
-  # window and receives no resources/ tree on macOS.
+  # window; both products carry the separate resident native Workbench.
   if [[ "$role" == "gui" ]]; then
     mkdir -p "$app/Contents/Resources/resources"
     if [[ -f "$SRC_TAURI/resources/libPapercuspTermShim.dylib" ]]; then
@@ -507,7 +509,28 @@ assemble_app() { # $1=identifier $2=productName $3=universal_binary $4=app_out $
       echo "    (no libPapercuspTermShim.dylib — embedded terminal degrades to NewWindow; see KNOWN GAPS)"
     fi
   fi
+  stage_workbench "$app"
+}
 
+# AppKit cannot be compiled on this Linux producer. Consume an actual native
+# SwiftPM product and verify every target slice before copying or signing it.
+stage_workbench() { # $1=app
+  local app="$1" binary="${PAPERCUSP_MAC_WORKBENCH_EXECUTABLE:-}" archs
+  if [[ -z "$binary" ]]; then
+    binary="$SRC_TAURI/macos-term-shim/.build/apple/Products/Release/PapercuspWorkbench"
+    [[ -f "$binary" ]] || binary="$SRC_TAURI/macos-term-shim/.build/release/PapercuspWorkbench"
+  fi
+  [[ -x "$binary" && -f "$binary" && ! -L "$binary" ]] || fail "build the native PapercuspWorkbench product on macOS before cross packaging"
+  source "$HERE/lib/mac-shim-arch.sh"
+  archs="$("$LIPO_BIN" -archs "$binary")" || fail "cannot inspect Workbench architectures"
+  [[ -n "$archs" ]] && shim_slices_satisfied "$archs" "$MAC_BUILD_TARGET" \
+    || fail "Workbench is missing required target slices ($MAC_BUILD_TARGET)"
+  node "$HERE/package-native-workbench.mjs" --stage-bundle "$ROOT" darwin "$binary" \
+    || fail "cannot stage native Workbench"
+  "$STRIP_BIN" -x "$SRC_TAURI/resources/PapercuspWorkbench.app/Contents/MacOS/PapercuspWorkbench" \
+    || fail "cannot strip native Workbench build paths"
+  mkdir -p "$app/Contents/Resources/resources"
+  cp -R "$SRC_TAURI/resources/PapercuspWorkbench.app" "$app/Contents/Resources/resources/"
 }
 
 # Stage the fixed-purpose helper as sealed bundle code, never as a caller-selected
@@ -563,6 +586,13 @@ sign_app() { # $1=app
   signing_logs="$(mktemp -d "$OUT_BUNDLE/macos/diagnostics/$(basename "$app").sign.XXXXXX")" \
     || fail "cannot create signing diagnostics for $app"
   echo "    signing $(basename "$app") (rcodesign${MAC_CERT_P12:+, cert})"
+  local workbench="$app/Contents/Resources/resources/PapercuspWorkbench.app"
+  [[ -d "$workbench" ]] || fail "native Workbench bundle missing before signing"
+  if ! rcodesign sign "${args[@]}" "$workbench" >"$signing_logs/workbench.log" 2>&1; then
+    tail -n 40 "$signing_logs/workbench.log" >&2
+    fail "cannot sign native Workbench; diagnostics=$signing_logs/workbench.log"
+  fi
+  rcodesign verify "$workbench" || fail "cannot verify native Workbench signature"
   if ! rcodesign sign "${args[@]}" "$app" >"$signing_logs/deep.log" 2>&1; then
     tail -n 40 "$signing_logs/deep.log" >&2
     fail "rcodesign failed to sign $app; diagnostics=$signing_logs/deep.log"
