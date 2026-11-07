@@ -22,7 +22,7 @@ function Test-WorkbenchSettings {
         throw 'Select an installed PUI executable'
     }
     $seen = @{}
-    foreach ($name in @('quick-access', 'goals', 'accounts')) {
+    foreach ($name in @('quick-access', 'goals', 'accounts', 'inbox')) {
         $binding = $Settings.bindings.$name
         if ($binding.enabled -isnot [bool]) { throw 'Invalid panel enabled value' }
         # Validate disabled bindings too, so re-enabling cannot resurrect an
@@ -44,13 +44,17 @@ function Complete-WorkbenchSettings {
     param($Settings)
     # Add the new panel to existing per-account settings without resetting any
     # shortcut or disable choice. Choose a free accelerator if A is already used.
-    if ($null -eq $Settings.bindings.PSObject.Properties['accounts']) {
-        $used = @($Settings.bindings.PSObject.Properties | Where-Object { $_.Value.enabled } |
-            ForEach-Object { [string]$_.Value.modifiers + ':' + [string]$_.Value.key })
-        $key = @(65..90 | Where-Object { ('3:' + $_) -notin $used })[0]
-        if ($null -eq $key) { throw 'No free default Accounts shortcut; configure existing shortcuts first' }
-        $Settings.bindings | Add-Member -NotePropertyName accounts -NotePropertyValue (
-            [pscustomobject]@{ enabled = $true; modifiers = 3; key = [int]$key })
+    foreach ($name in @('accounts', 'inbox')) {
+        if ($null -eq $Settings.bindings.PSObject.Properties[$name]) {
+            $used = @($Settings.bindings.PSObject.Properties | Where-Object { $_.Value.enabled } |
+                ForEach-Object { [string]$_.Value.modifiers + ':' + [string]$_.Value.key })
+            $preferred = if ($name -eq 'inbox') { 66 } else { 65 }
+            $available = @(@($preferred) + @(65..90 | Where-Object { $_ -ne $preferred }) |
+                Where-Object { ('3:' + $_) -notin $used })
+            if ($available.Count -eq 0) { throw "No free default $name shortcut; configure existing shortcuts first" }
+            $Settings.bindings | Add-Member -NotePropertyName $name -NotePropertyValue (
+                [pscustomobject]@{ enabled = $true; modifiers = 3; key = [int]$available[0] })
+        }
     }
     return $Settings
 }

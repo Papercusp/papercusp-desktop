@@ -23,7 +23,8 @@ namespace Papercusp.Workbench
         {
             "plans.list", "plans.get", "advRoster.list", "reports.list", "reports.get",
             "goals.list", "goals.detail", "planSessions.list", "operator.identity",
-            "accounts.pool", "accounts.sessionOverride"
+            "accounts.pool", "accounts.sessionOverride", "plans.attention",
+            "plans.attentionItem", "plans.attentionBulkRun"
         };
 
         private static void Stop(Process process)
@@ -99,6 +100,18 @@ namespace Papercusp.Workbench
                 { "expectedStatus", goal["status"] }, { "expectedEffectiveStatus", detail["effectiveStatus"] },
                 { "expectedHolderLiveness", detail["holderLiveness"] }, { "confirmed", confirmed }
             }, cancellation, 22000);
+        }
+
+        public static Task<Dictionary<string, object>> InboxAsync(string pui,
+            Dictionary<string, object> request, CancellationToken cancellation)
+        {
+            object confirmed, operation, environment;
+            if (request == null || !request.TryGetValue("confirmed", out confirmed) || !Object.Equals(confirmed, true) ||
+                !request.TryGetValue("operation", out operation) || !(operation is string) ||
+                !new HashSet<string> { "start", "stop", "resume", "apply", "resolve" }.Contains((string)operation) ||
+                !request.TryGetValue("environment", out environment) || !(environment is Dictionary<string, object>))
+                throw new ArgumentException("Select an environment and confirm the Inbox action");
+            return InvokeAsync(pui, "native-inbox", request, cancellation, 22000);
         }
 
         private static async Task<Dictionary<string, object>> InvokeAsync(string pui, string command,

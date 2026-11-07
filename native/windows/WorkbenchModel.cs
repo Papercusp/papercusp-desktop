@@ -323,6 +323,253 @@ namespace Papercusp.Workbench
         }
     }
 
+    // Projection of the canonical attention models. PUI alone authorizes and
+    // executes actions; this state freezes what the person actually reviewed.
+    public sealed class InboxState
+    {
+        public int Generation, ContextGeneration, ActionGeneration;
+        public bool ListReady, BulkReady, ListPartial, Pending;
+        public string Selection, SavedRunId, ListError, BulkError, ContextError, ActionNotice, Answer = "";
+        public Dictionary<string, object> Context, Run;
+        public List<Dictionary<string, object>> Rows = new List<Dictionary<string, object>>(), Items = new List<Dictionary<string, object>>();
+        public readonly HashSet<string> SelectedReviews = new HashSet<string>(), Applied = new HashSet<string>();
+        public readonly Dictionary<string, string> Drafts = new Dictionary<string, string>();
+        public static object Value(Dictionary<string, object> row, string key)
+        { object value; return row != null && row.TryGetValue(key, out value) ? value : null; }
+        public static string Text(Dictionary<string, object> row, string key)
+        { return row == null ? "" : PanelState.Text(row, key); }
+        private static string Required(Dictionary<string, object> row, string key)
+        { var value = Text(row, key); if (String.IsNullOrWhiteSpace(value)) throw new InvalidOperationException("Missing canonical " + key); return value; }
+        public static Dictionary<string, object> Clone(Dictionary<string, object> row)
+        { var json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 }; return json.Deserialize<Dictionary<string, object>>(json.Serialize(row)); }
+        private static bool Equal(object a, object b)
+        {
+            var left = a as Dictionary<string, object>; var right = b as Dictionary<string, object>;
+            if (left != null || right != null) return left != null && right != null && left.Count == right.Count &&
+                left.All(pair => right.ContainsKey(pair.Key) && Equal(pair.Value, right[pair.Key]));
+            var la = a as IList; var ra = b as IList;
+            if (la != null || ra != null) return la != null && ra != null && la.Count == ra.Count &&
+                la.Cast<object>().Zip(ra.Cast<object>(), Equal).All(same => same);
+            return Object.Equals(a, b);
+        }
+        private static List<Dictionary<string, object>> RowList(object value)
+        {
+            var list = value as IList;
+            if (list == null || list.Cast<object>().Any(row => !(row is Dictionary<string, object>)))
+                throw new InvalidOperationException("Canonical rows are unavailable");
+            return list.Cast<Dictionary<string, object>>().ToList();
+        }
+        private static List<Dictionary<string, object>> ReadRows(Dictionary<string, object> payload)
+        {
+            var error = Value(payload, "error");
+            if (payload == null || Object.Equals(Value(payload, "ok"), false) ||
+                (error != null && !Object.Equals(error, false) && !Object.Equals(error, "")))
+                throw new InvalidOperationException("Inbox is unavailable");
+            return RowList(Value(payload, "rows"));
+        }
+        public static Dictionary<string, object> One(Dictionary<string, object> payload)
+        {
+            var rows = ReadRows(payload);
+            if (Object.Equals(Value(payload, "partial"), true) || rows.Count != 1)
+                throw new InvalidOperationException("Canonical Inbox state is incomplete");
+            return rows[0];
+        }
+        public void ClearContext() { ++ContextGeneration; Context = null; ContextError = null; }
+        public int Begin()
+        {
+            Rows.Clear(); Items.Clear(); Run = null; ListReady = BulkReady = ListPartial = false;
+            ListError = BulkError = null; ClearContext(); return ++Generation;
+        }
+        public bool SettleList(int token, Dictionary<string, object> payload, Exception error = null)
+        {
+            if (token != Generation) return false;
+            try
+            {
+                if (error != null) throw error;
+                var seen = new Dictionary<string, Dictionary<string, object>>();
+                var partial = Object.Equals(Value(payload, "partial"), true);
+                foreach (var group in ReadRows(payload))
+                {
+                    partial |= Object.Equals(Value(Value(group, "_meta") as Dictionary<string, object>, "hasMore"), true);
+                    foreach (var row in RowList(Value(group, "items")))
+                    {
+                        var id = Required(row, "id"); Required(row, "kind");
+                        if (!(Value(row, "ref") is Dictionary<string, object>)) throw new InvalidOperationException("Missing canonical item reference");
+                        if (seen.ContainsKey(id) && !Equal(seen[id], row)) throw new InvalidOperationException("Conflicting Inbox identities");
+                        seen[id] = row;
+                    }
+                }
+                var selected = Rows.FirstOrDefault(row => Text(row, "id") == Selection);
+                Dictionary<string, object> next = null;
+                if (Selection != null) seen.TryGetValue(Selection, out next);
+                if (next == null || (selected != null && (!Equal(Value(selected, "ref"), Value(next, "ref")) || Text(selected, "kind") != Text(next, "kind")))) ClearContext();
+                Rows = seen.Values.ToList(); ListReady = true; ListPartial = partial; ListError = null;
+                if (next == null) Selection = null;
+            }
+            catch (Exception cause) { Rows.Clear(); ListReady = false; ListError = cause.Message; ClearContext(); }
+            return true;
+        }
+        public List<Dictionary<string, object>> Results(string query = "")
+        {
+            var terms = query.Trim().ToLowerInvariant().Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+            return Rows.Where(row => { var text = String.Join(" ", new[] { "id", "title", "body", "kind", "harnessSlug", "planSlug" }.Select(key => Text(row, key))).ToLowerInvariant(); return terms.All(text.Contains); }).ToList();
+        }
+        public bool DismissContext() { if (Selection == null) return false; Selection = null; ClearContext(); return true; }
+        public void RetainVisibleSelection(string query)
+        { if (Selection != null && !Results(query).Any(row => Text(row, "id") == Selection)) DismissContext(); }
+        public int Select(string id)
+        {
+            if (!ListReady || !Rows.Any(row => Text(row, "id") == id)) throw new InvalidOperationException("Select a current Inbox item");
+            if (Selection != id) Answer = "";
+            Selection = id; ClearContext(); return ContextGeneration;
+        }
+        public bool SettleContext(int token, string id, Dictionary<string, object> payload, Exception error = null)
+        {
+            if (token != ContextGeneration || Selection != id) return false;
+            try
+            {
+                if (error != null) throw error;
+                var detail = One(payload); var selected = Rows.FirstOrDefault(row => Text(row, "id") == id);
+                if (selected == null || Text(detail, "id") != id || Text(detail, "kind") != Text(selected, "kind") || !Equal(Value(detail, "ref"), Value(selected, "ref")))
+                    throw new InvalidOperationException("The selected question changed; refresh its context");
+                Context = detail; ContextError = null;
+            }
+            catch (Exception cause) { Context = null; ContextError = cause.Message; }
+            return true;
+        }
+        public bool SettleBulk(int token, Dictionary<string, object> payload, string runId = null, Exception error = null)
+        {
+            if (token != Generation) return false;
+            try
+            {
+                if (error != null) throw error;
+                var row = One(payload); var items = RowList(Value(row, "items")); var run = Value(row, "run") as Dictionary<string, object>;
+                if (run == null) { if (items.Count != 0 || runId != null || !row.ContainsKey("run")) throw new InvalidOperationException("The selected saved run is unavailable"); }
+                else
+                {
+                    Required(run, "runId");
+                    if ((runId != null && Text(run, "runId") != runId) || !new[] { "pending", "running", "review", "complete", "failed" }.Contains(Text(run, "phase")))
+                        throw new InvalidOperationException("Saved run identity or phase changed");
+                    Counts(run, items);
+                }
+                var nextId = run == null ? null : Text(run, "runId");
+                if (SavedRunId != nextId) { SelectedReviews.Clear(); Drafts.Clear(); }
+                SavedRunId = nextId; Run = run; Items = items; BulkReady = true; BulkError = null;
+                SelectedReviews.RemoveWhere(id => !Items.Any(item => Text(item, "itemId") == id && Reviewable(item)));
+            }
+            catch (Exception cause) { Run = null; Items.Clear(); BulkReady = false; BulkError = cause.Message; }
+            return true;
+        }
+        public bool SettleLiveBulk(int token, string runId, Dictionary<string, object> payload, Exception error = null)
+        { return !Pending && runId == SavedRunId && SettleBulk(token, payload, runId, error); }
+        public static string Disposition(Dictionary<string, object> row)
+        { var recommendation = Value(row, "recommendation") as Dictionary<string, object>; return Text(row, "outcome") == "recommended" && Text(recommendation, "kind") != "" ? Text(recommendation, "kind") : Text(row, "disposition") != "" ? Text(row, "disposition") : Text(row, "outcome"); }
+        public static bool Reviewable(Dictionary<string, object> row) { return Text(row, "outcome") == "recommended" && Disposition(row) == "recommended"; }
+        public static bool Retryable(Dictionary<string, object> row)
+        { return new[] { "pending", "failed" }.Contains(Text(row, "outcome")) || Text(row, "outcome") == "skipped" && new[] { "", "retry_needed" }.Contains(Text(row, "disposition")); }
+        public static List<Dictionary<string, object>> Actions(Dictionary<string, object> row)
+        {
+            var actions = new List<Dictionary<string, object>>(); var reference = Value(row, "ref") as Dictionary<string, object>;
+            foreach (var action in RowList(Value(row, "actions") ?? new object[0]))
+            {
+                if (Text(reference, "kind") != "coord-escalation" || !new[] { "resolve", "mark-done" }.Contains(Text(action, "id"))) actions.Add(action);
+                else
+                {
+                    var options = RowList(Value(reference, "options") ?? new object[0]).Where(option => !String.IsNullOrWhiteSpace(Text(option, "id"))).ToList();
+                    if (options.Count > 0) actions.AddRange(options);
+                    else if (!String.IsNullOrWhiteSpace(Text(reference, "conversationId"))) actions.Add(new Dictionary<string, object> { { "id", "answer" }, { "label", "Answer" } });
+                    else actions.Add(action);
+                }
+            }
+            return actions.Where(action => Text(action, "id") != "" && !new[] { "chat", "discuss", "view-log", "open", "message-owner" }.Contains(Text(action, "id"))).ToList();
+        }
+        public bool CanSelect(string id)
+        { return !Pending && !Applied.Contains(id) && Text(Run, "phase") == "review" && Items.Any(row => Text(row, "itemId") == id && Reviewable(row)); }
+        public string Draft(Dictionary<string, object> row)
+        { string draft; return Drafts.TryGetValue(Text(row, "itemId"), out draft) ? draft : Text(row, "draftAnswer"); }
+        public Dictionary<string, object> Request(string operation, Dictionary<string, object> environment,
+            string query = "", string itemId = null, string actionId = null, string answer = null)
+        {
+            if (Pending || !AccountState.SameEnvironment(environment, environment)) throw new InvalidOperationException("Wait for the current action and select an environment");
+            var body = new Dictionary<string, object> { { "environment", environment }, { "operation", operation }, { "confirmed", true } };
+            var active = new[] { "pending", "running" }.Contains(Text(Run, "phase"));
+            if (operation == "start")
+            {
+                var visible = Results(query);
+                if (!ListReady || !BulkReady || active || Text(Run, "phase") == "review" || visible.Count == 0 || visible.Count > 2000)
+                    throw new InvalidOperationException("Load a visible batch and finish the current run first");
+                body["items"] = visible.Select(row => new Dictionary<string, object> { { "itemId", row["id"] }, { "kind", row["kind"] }, { "title", Value(row, "title") }, { "ref", row["ref"] }, { "ownerAgentId", Value(row, "ownerAgentId") } }).ToArray();
+                body["filter"] = new Dictionary<string, object> { { "tier", null }, { "kinds", new object[0] }, { "query", query }, { "shownCount", visible.Count } };
+            }
+            else if (operation == "stop" || operation == "resume")
+            {
+                if (!BulkReady || Run == null || (operation == "stop" ? !active : active)) throw new InvalidOperationException("Load a saved run in the appropriate phase");
+                body["runId"] = Required(Run, "runId");
+                if (operation == "resume") { var ids = Items.Where(Retryable).Select(row => Text(row, "itemId")).ToArray(); if (ids.Length == 0) throw new InvalidOperationException("No retryable items remain"); body["itemIds"] = ids; }
+            }
+            else if (operation == "apply" || operation == "resolve")
+            {
+                var row = operation == "apply" ? Items.FirstOrDefault(item => Text(item, "itemId") == itemId) : Context;
+                var id = Text(row, operation == "apply" ? "itemId" : "id");
+                if (row == null || Applied.Contains(id)) throw new InvalidOperationException("Select a current question");
+                if (operation == "apply")
+                {
+                    if (!BulkReady || !CanSelect(id) || !SelectedReviews.Contains(id) || Text(row, "actionId") == "") throw new InvalidOperationException("Select a current recommendation");
+                    body["runId"] = Run["runId"]; actionId = Text(row, "actionId"); answer = Draft(row);
+                }
+                else if (id != Selection || !Actions(row).Any(action => Text(action, "id") == actionId)) throw new InvalidOperationException("Select an offered action");
+                body["expected"] = new Dictionary<string, object> { { "id", id }, { "kind", row["kind"] }, { "ref", row["ref"] } }; body["actionId"] = actionId;
+                if (actionId == "answer") { if (String.IsNullOrWhiteSpace(answer)) throw new InvalidOperationException("Enter an answer"); body["answer"] = answer.Trim(); }
+            }
+            else throw new InvalidOperationException("Unknown Inbox operation");
+            return Clone(body);
+        }
+        public int BeginAction(IList<Dictionary<string, object>> requests)
+        { if (Pending || requests.Count == 0) throw new InvalidOperationException("An Inbox action is already pending"); Pending = true; ActionNotice = null; return ++ActionGeneration; }
+        public string RecordAction(int token, Dictionary<string, object> request, Dictionary<string, object> payload)
+        {
+            if (!Pending || token != ActionGeneration || !AccountState.SameEnvironment(Value(request, "environment") as Dictionary<string, object>, Value(payload, "environment") as Dictionary<string, object>))
+                throw new InvalidOperationException("Action environment changed; refresh before retrying");
+            var receipt = One(payload);
+            if (!Object.Equals(Value(receipt, "ok"), true)) throw new InvalidOperationException("Action was not confirmed; refresh before retrying");
+            if (new[] { "apply", "resolve" }.Contains(Text(request, "operation")))
+            {
+                var id = Text(Value(request, "expected") as Dictionary<string, object>, "id");
+                if (!Object.Equals(Value(receipt, "resolved"), true) || Text(receipt, "itemId") != id) throw new InvalidOperationException("Question resolution was not confirmed");
+                Applied.Add(id); SelectedReviews.Remove(id);
+            }
+            if (Object.Equals(Value(receipt, "recorded"), false)) throw new InvalidOperationException("Action succeeded; bookkeeping is unconfirmed. Refresh and reconcile; do not repeat the action.");
+            return Text(request, "operation") == "start" ? Required(receipt, "runId") : null;
+        }
+        public void FinishAction(int token, Exception error = null)
+        { if (token != ActionGeneration) return; Pending = false; ActionNotice = error == null ? "Action confirmed. Refreshing saved state…" : error.Message; }
+        public static Dictionary<string, int> Counts(Dictionary<string, object> run, IList<Dictionary<string, object>> items)
+        {
+            var value = Value(run, "totalItems");
+            if (!(value is int || value is long || value is decimal || value is double) || Convert.ToDouble(value) < 0 ||
+                Convert.ToDouble(value) > Int32.MaxValue || Convert.ToDouble(value) != Math.Floor(Convert.ToDouble(value)) || items.Count > Convert.ToDouble(value))
+                throw new InvalidOperationException("Invalid bulk total");
+            var counts = new[] { "resolved", "forReview", "pending", "failed", "skipped", "dismissed", "decided", "ownerAction", "cleanupCandidate", "retryNeeded", "routed", "investigate" }.ToDictionary(key => key, key => 0);
+            var seen = new HashSet<string>();
+            foreach (var item in items)
+            {
+                var outcome = Text(item, "outcome");
+                if (!seen.Add(Required(item, "itemId")) || Text(item, "runId") != Required(run, "runId") ||
+                    !new[] { "pending", "auto_resolved", "recommended", "skipped", "failed", "dismissed" }.Contains(outcome)) throw new InvalidOperationException("Invalid bulk item identity or outcome");
+                var bucket = outcome == "auto_resolved" ? "resolved" : outcome;
+                if (counts.ContainsKey(bucket)) ++counts[bucket];
+                if (outcome != "pending") ++counts["decided"];
+                if (Reviewable(item)) ++counts["forReview"];
+                var disposition = Disposition(item); var key = disposition == "owner_action" ? "ownerAction" : disposition == "cleanup_candidate" ? "cleanupCandidate" : disposition == "retry_needed" ? "retryNeeded" : disposition;
+                if (new[] { "ownerAction", "cleanupCandidate", "retryNeeded", "routed", "investigate" }.Contains(key)) ++counts[key];
+            }
+            counts["total"] = Convert.ToInt32(value); counts["left"] = counts["total"] - counts["decided"];
+            counts["percent"] = counts["total"] == 0 ? 0 : (int)Math.Floor(100d * counts["decided"] / counts["total"] + 0.5);
+            counts["unresolved"] = new[] { "forReview", "pending", "failed", "ownerAction", "cleanupCandidate", "retryNeeded", "routed", "investigate" }.Sum(key => counts[key]);
+            return counts;
+        }
+    }
+
     public sealed class AccountState
     {
         public int Generation;

@@ -32,15 +32,28 @@ try {
     Check ($settings.enabled -and $settings.bindings.'quick-access'.key -eq 32 -and $settings.bindings.goals.key -eq 71) 'first install enables native panels with distinct default shortcuts'
     Check ($settings.bindings.accounts.enabled -and $settings.bindings.accounts.modifiers -eq 3 -and $settings.bindings.accounts.key -eq 65) 'first install enables the Accounts shortcut'
     [void](Save-WorkbenchSettings $context $settings $script)
+    Check ($settings.bindings.inbox.enabled -and $settings.bindings.inbox.modifiers -eq 3 -and $settings.bindings.inbox.key -eq 66) 'first install enables Inbox on Ctrl Alt B'
+    $oldInbox = $settings | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $oldInbox.bindings.PSObject.Properties.Remove('inbox'); $oldInbox.bindings.'quick-access'.key = 66
+    [IO.File]::WriteAllText($context.File, ($oldInbox | ConvertTo-Json -Depth 8))
+    $newInbox = Read-WorkbenchSettings $context $pui
+    Check ($newInbox.bindings.inbox.key -eq 67 -and $newInbox.bindings.'quick-access'.key -eq 66 -and $newInbox.bindings.accounts.key -eq 65) 'Inbox migration chooses a free accelerator without resetting existing panels'
+    [void](Save-WorkbenchSettings $context $settings $script -PreserveExisting)
+    Check ((Read-WorkbenchSettings $context $pui).bindings.inbox.key -eq 67) 'installer persists the migrated Inbox shortcut'
+    $newInbox.bindings.inbox.enabled = $false
+    [void](Save-WorkbenchSettings $context $newInbox $script)
+    [void](Save-WorkbenchSettings $context $settings $script -PreserveExisting)
+    Check (-not (Read-WorkbenchSettings $context $pui).bindings.inbox.enabled) 'upgrade preserves explicitly disabled Inbox'
+    [void](Save-WorkbenchSettings $context $settings $script)
     $legacy = $settings | ConvertTo-Json -Depth 8 | ConvertFrom-Json
     $legacy.bindings.PSObject.Properties.Remove('accounts')
     $legacy.enabled = $false; $legacy.bindings.'quick-access'.key = 65; $legacy.bindings.goals.enabled = $false
     [IO.File]::WriteAllText($context.File, ($legacy | ConvertTo-Json -Depth 8))
     $migrated = Read-WorkbenchSettings $context $pui
     Check (-not $migrated.enabled -and -not $migrated.bindings.goals.enabled -and $migrated.bindings.'quick-access'.key -eq 65) 'adding Accounts preserves legacy disable and shortcut choices'
-    Check ($migrated.bindings.accounts.enabled -and $migrated.bindings.accounts.key -eq 66) 'Accounts migration avoids an existing shortcut collision'
+    Check ($migrated.bindings.accounts.enabled -and $migrated.bindings.accounts.key -eq 67) 'Accounts migration avoids existing Quick Access and Inbox shortcuts'
     [void](Save-WorkbenchSettings $context $settings $script -PreserveExisting)
-    Check ((Read-WorkbenchSettings $context $pui).bindings.accounts.key -eq 66) 'preserve-existing installer persists the missing Accounts binding'
+    Check ((Read-WorkbenchSettings $context $pui).bindings.accounts.key -eq 67) 'preserve-existing installer persists the missing Accounts binding'
     [void](Save-WorkbenchSettings $context $settings $script)
     $command = Login $context
     Check ($command -eq (Get-WorkbenchLoginCommand $script)) 'login registration uses the exact installed controller and fixed argv'
@@ -80,7 +93,7 @@ try {
     $broken = $context.Clone(); $broken.RunKey = 'MissingWorkbenchDrive:\Run'
     $settings.enabled = $false
     # Enabling reaches the registry write, which fails; the prior file must survive.
-    $settings.enabled = $true; $settings.bindings.'quick-access'.key = 66
+    $settings.enabled = $true; $settings.bindings.'quick-access'.key = 67
     Refuses { Save-WorkbenchSettings $broken $settings $script } 'registry failure is surfaced instead of accepting a partial settings update'
     Check ([IO.File]::ReadAllText($context.File) -eq $before -and (Login $context) -eq $beforeLogin) 'registry failure restores the previous settings'
     Check (-not (Send-WorkbenchEvent $context settings)) 'missing resident is reported without starting a service or touching another account'
