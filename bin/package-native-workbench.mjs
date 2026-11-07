@@ -19,7 +19,8 @@ export function packageNativeWorkbench(outputDirectory, {
     cpSync(sourceDirectory, prepared, {recursive: true});
     // Reuse the operator's maintained Markdown and work-ref modules. A closed
     // ESM bundle lets GJS run without npm, Node or TypeScript at runtime.
-    buildSync({entryPoints: [join(sourceDirectory, 'chat-content.mjs')], bundle: true,
+    buildSync({stdin: {contents: readFileSync(join(sourceDirectory, 'chat-content.mjs'), 'utf8'),
+        resolveDir: resolve(import.meta.dirname, '../native/gnome'), sourcefile: 'chat-content.mjs', loader: 'js'}, bundle: true,
         format: 'esm', platform: 'neutral', target: 'es2022',
         outfile: join(prepared, 'chat-content.js'), logLevel: 'silent'});
     const result = spawnSync('gnome-extensions', ['pack', '--force',
