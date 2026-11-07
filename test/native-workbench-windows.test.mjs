@@ -146,6 +146,24 @@ test('Windows native Goals controls confirm actions and preserve server state an
         assert.equal(new Set(result.cases).size, result.count);
     });
 
+test('Windows standalone PUI starts before any operator request', {
+    skip: process.platform !== 'win32' || process.env.PAPERCUSP_TEST_REAL_PUI !== '1'
+        ? 'native Windows leg: select PAPERCUSP_TEST_REAL_PUI=1 and PAPERCUSP_TEST_PUI_EXE' : false,
+    timeout: 30000,
+}, () => {
+    assert.ok(process.env.PAPERCUSP_TEST_PUI_EXE, 'PAPERCUSP_TEST_PUI_EXE');
+    const run = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', resolve(root, 'test/fixtures/native-workbench-windows-bridge.ps1'),
+        '-BridgeSource', resolve(root, 'native/windows/PuiReadBridge.cs'), '-Phase', 'startup',
+        '-PuiExecutable', process.env.PAPERCUSP_TEST_PUI_EXE],
+    {encoding:'utf8', timeout:25000, windowsHide:true});
+    assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
+    const result = JSON.parse(run.stdout.trim());
+    assert.equal(result.ok, true); assert.equal(result.phase, 'startup');
+    assert.equal(result.count, 2); assert.equal(new Set(result.cases).size, result.count);
+    assert.match(result.puiSha256, /^[a-f0-9]{64}$/);
+});
+
 for (const fixture of ['bridge', 'host']) {
     test('Windows actual PUI and canonical operator read integration: ' + fixture, {
         skip: process.platform !== 'win32' || process.env.PAPERCUSP_TEST_REAL_PUI !== '1'
