@@ -124,7 +124,7 @@ public struct ChatState {
     @discardableResult public mutating func advanceVoice(_ id: UUID, to phase: VoicePhase) -> Bool {
         guard voiceCurrent(id) else { return false }
         switch (voicePhase, phase) {
-        case (.permission?, .recording), (.recording?, .transcribing), (.synthesizing?, .playing):
+        case (.permission?, .recording), (.recording?, .transcribing), (.synthesizing?, .playing), (.playing?, .synthesizing):
             voicePhase = phase; return true
         default: return false
         }

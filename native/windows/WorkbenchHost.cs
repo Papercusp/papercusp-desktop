@@ -978,17 +978,31 @@ namespace Papercusp.Workbench
                         if (!current() || !chat.AdvanceVoice(id, "transcribing")) return;
                         request["audioBase64"] = Convert.ToBase64String(audio);
                     }
-                    NativeVoice.Validate(request); UpdateChatControls();
-                    var payload = await PuiReadBridge.VoiceAsync(pui, request, source.Token);
-                    if (!current()) return;
                     if (speak)
                     {
-                        var row = NativeVoice.Result(request, payload);
-                        if (!chat.AdvanceVoice(id, "playing")) return;
-                        UpdateChatControls(); await device.PlayAsync(NativeVoice.Audio(PanelState.Text(row, "audioBase64"), 11184812), source.Token);
+                        int? total = null;
+                        for (var index = 0; !total.HasValue || index < total.Value; ++index)
+                        {
+                            if (!current()) return;
+                            if (index > 0 && !chat.AdvanceVoice(id, "synthesizing")) return;
+                            request["chunkIndex"] = index; NativeVoice.Validate(request); UpdateChatControls();
+                            var payload = await PuiReadBridge.VoiceAsync(pui, request, source.Token);
+                            if (!current()) return;
+                            var row = NativeVoice.Result(request, payload);
+                            var receivedTotal = NativeVoice.ChunkNumber(ChatReply.Value(row, "totalChunks"));
+                            if (total.HasValue && total.Value != receivedTotal) throw new InvalidOperationException("Voice chunk total changed; retry the reading");
+                            total = receivedTotal;
+                            if (!chat.AdvanceVoice(id, "playing")) return;
+                            UpdateChatControls(); await device.PlayAsync(NativeVoice.Audio(PanelState.Text(row, "audioBase64"), 11184812), source.Token);
+                        }
                         if (current()) StopVoice();
                     }
-                    else if (chat.Transcribed(id, request, payload)) { voiceNotice = "Transcript ready; review it before sending"; RenderChat(); }
+                    else
+                    {
+                        NativeVoice.Validate(request); UpdateChatControls();
+                        var payload = await PuiReadBridge.VoiceAsync(pui, request, source.Token);
+                        if (current() && chat.Transcribed(id, request, payload)) { voiceNotice = "Transcript ready; review it before sending"; RenderChat(); }
+                    }
                 }
                 catch (Exception error)
                 { if (source == null) voiceNotice = error.Message; else if (voiceCancellation == source && !source.IsCancellationRequested) StopVoice(error.Message + " · your draft was preserved"); }

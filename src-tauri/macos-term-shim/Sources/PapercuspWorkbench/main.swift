@@ -56,6 +56,7 @@ final class Sidebar: NSPanel {
     private var chatOperation = UUID()
     private var voiceRecord: NSButton?, voiceRead: NSButton?, voiceStop: NSButton?, voiceMessage: NSTextField?
     private var voiceTask: Task<Void, Never>?, voiceID: UUID?
+    private var voiceReading: NativeVoice.Reading?
     private var recorder: AVAudioRecorder?, player: AVAudioPlayer?, voiceDirectory: URL?
     private var voiceStatus = ""
     private var captureContext: (generation: Int, environment: JSONValue, conversationID: String, draft: String)?
@@ -1092,7 +1093,7 @@ final class Sidebar: NSPanel {
     private func cancelVoice() {
         // Retire the identity before stopping devices: their completion callbacks
         // may arrive after cancellation or after a different conversation opens.
-        voiceID = nil; chatState.cancelVoice(); captureContext = nil
+        voiceID = nil; voiceReading = nil; chatState.cancelVoice(); captureContext = nil
         voiceTask?.cancel(); voiceTask = nil
         recorder?.delegate = nil; recorder?.stop(); recorder = nil
         player?.delegate = nil; player?.stop(); player = nil
@@ -1161,23 +1162,28 @@ final class Sidebar: NSPanel {
     }
     @objc private func readVoice() {
         do {
-            let request = try NativeVoice.request(environment: chatState.environment, conversationID: chatState.conversationID, text: chatState.spokenReply)
+            let reading = try NativeVoice.Reading(environment: chatState.environment, conversationID: chatState.conversationID, text: chatState.spokenReply)
             let id = try chatState.beginVoice(.synthesizing); voiceID = id
-            voiceStatus = "Preparing spoken reply…"; renderChat()
-            let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
-            voiceTask = Task { [weak self] in
-                do {
-                    let row = try await bridge.voice(request)
-                    guard let self, !Task.isCancelled, self.voiceCurrent(id),
-                          let data = Data(base64Encoded: row["audioBase64"].text) else { return }
-                    let player = try AVAudioPlayer(data: data); player.delegate = self; self.player = player
-                    guard player.prepareToPlay(), self.chatState.advanceVoice(id, to: .playing), player.play() else {
-                        throw WorkbenchError("The spoken reply could not be played.")
-                    }
-                    self.voiceTask = nil; self.voiceStatus = "Playing reply…"; self.renderChat()
-                } catch { self?.voiceFailed(id, error.localizedDescription) }
-            }
+            voiceReading = reading; fetchVoiceChunk(id)
         } catch { voiceStatus = error.localizedDescription; renderChat() }
+    }
+    private func fetchVoiceChunk(_ id: UUID) {
+        guard voiceCurrent(id), let request = voiceReading?.request else { return }
+        voiceStatus = "Preparing spoken reply…"; renderChat()
+        let bridge = PuiBridge(executable: URL(fileURLWithPath: settings.pui))
+        voiceTask = Task { [weak self] in
+            do {
+                let row = try await bridge.voice(request)
+                guard let self, !Task.isCancelled, self.voiceCurrent(id),
+                      self.voiceReading?.request == request, let data = Data(base64Encoded: row["audioBase64"].text) else { return }
+                try self.voiceReading?.accept(row)
+                let player = try AVAudioPlayer(data: data); player.delegate = self; self.player = player
+                guard player.prepareToPlay(), self.chatState.advanceVoice(id, to: .playing), player.play() else {
+                    throw WorkbenchError("The spoken reply could not be played.")
+                }
+                self.voiceTask = nil; self.voiceStatus = "Playing reply…"; self.renderChat()
+            } catch { self?.voiceFailed(id, error.localizedDescription) }
+        }
     }
     nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
         let identity = ObjectIdentifier(recorder)
@@ -1196,8 +1202,15 @@ final class Sidebar: NSPanel {
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         let identity = ObjectIdentifier(player)
         Task { @MainActor [weak self] in
-            guard let self, self.player.map({ ObjectIdentifier($0) }) == identity else { return }
-            self.cancelVoice(); self.voiceStatus = flag ? "Playback finished." : "Playback failed."; self.renderChat()
+            guard let self, self.player.map({ ObjectIdentifier($0) }) == identity, let id = self.voiceID, self.voiceCurrent(id) else { return }
+            self.player?.delegate = nil; self.player = nil
+            guard flag else { self.voiceFailed(id, "Playback failed."); return }
+            if self.voiceReading?.advance() == true {
+                guard self.chatState.advanceVoice(id, to: .synthesizing) else { self.cancelVoice(); self.renderChat(); return }
+                self.fetchVoiceChunk(id)
+            } else {
+                self.cancelVoice(); self.voiceStatus = "Playback finished."; self.renderChat()
+            }
         }
     }
     nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {

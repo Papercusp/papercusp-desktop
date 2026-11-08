@@ -196,6 +196,8 @@ namespace Papercusp.Workbench
             if (!AccountState.SameEnvironment(environment, environment) || !ChatReply.Uuid(PanelState.Text(request, "conversationId")) ||
                 !ChatReply.Uuid(PanelState.Text(request, "requestId")) || !new[] { "transcribe", "speak" }.Contains(operation))
                 throw new InvalidOperationException("Select an exact voice conversation and request");
+            if (request.ContainsKey("chunkIndex") && (operation != "speak" || ChunkNumber(request["chunkIndex"]) < 0 || ChunkNumber(request["chunkIndex"]) >= 32768))
+                throw new InvalidOperationException("Invalid voice chunk index");
             if (operation == "transcribe")
             { if (request.ContainsKey("text")) throw new InvalidOperationException("Recording cannot inject text"); Audio(PanelState.Text(request, "audioBase64"), 2600000); }
             else if (request.ContainsKey("audioBase64") || String.IsNullOrWhiteSpace(PanelState.Text(request, "text")) ||
@@ -215,10 +217,21 @@ namespace Papercusp.Workbench
             foreach (var key in new[] { "conversationId", "requestId", "operation" })
                 if (!Object.Equals(ChatReply.Value(row, key), ChatReply.Value(request, key)))
                     throw new InvalidOperationException("Voice receipt belongs to a different conversation or request");
-            if (PanelState.Text(request, "operation") == "speak") Audio(PanelState.Text(row, "audioBase64"), 11184812);
+            if (PanelState.Text(request, "operation") == "speak") {
+                Audio(PanelState.Text(row, "audioBase64"), 11184812);
+                if (request.ContainsKey("chunkIndex") && (ChunkNumber(ChatReply.Value(row, "chunkIndex")) != ChunkNumber(request["chunkIndex"]) ||
+                    ChunkNumber(ChatReply.Value(row, "totalChunks")) <= ChunkNumber(request["chunkIndex"])))
+                    throw new InvalidOperationException("Voice chunk receipt is incomplete or out of order");
+            }
             else if (String.IsNullOrWhiteSpace(PanelState.Text(row, "text")) || Encoding.UTF8.GetByteCount(PanelState.Text(row, "text")) > 32768)
                 throw new InvalidOperationException("No usable transcript; your draft was preserved");
             return row;
+        }
+        public static int ChunkNumber(object value)
+        {
+            if (!(value is int) && !(value is long)) return -1;
+            var number = Convert.ToInt64(value);
+            return number >= 0 && number <= 32768 ? (int)number : -1;
         }
     }
 
@@ -339,7 +352,7 @@ namespace Papercusp.Workbench
             voiceConversation == ConversationId && AccountState.SameEnvironment(voiceEnvironment, Environment); }
         public bool AdvanceVoice(string id, string phase)
         {
-            if (!VoiceCurrent(id) || !new[] { "permission:recording", "recording:transcribing", "synthesizing:playing" }.Contains(VoicePhase + ":" + phase)) return false;
+            if (!VoiceCurrent(id) || !new[] { "permission:recording", "recording:transcribing", "synthesizing:playing", "playing:synthesizing" }.Contains(VoicePhase + ":" + phase)) return false;
             VoicePhase = phase; return true;
         }
         public void CancelVoice() { VoiceId = null; VoicePhase = null; voiceEnvironment = null; voiceDraft = null; voiceConversation = null; }

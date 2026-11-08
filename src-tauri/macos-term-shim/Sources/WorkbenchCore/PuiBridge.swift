@@ -167,9 +167,11 @@ public struct PuiBridge {
 /// Typed requests and exact receipts over the existing PUI bridge. Audio never
 /// enters a shell argument, a conversation draft, or a separate credential store.
 public enum NativeVoice {
-    public static func request(environment: JSONValue, conversationID: String, audio: Data? = nil, text: String? = nil) throws -> JSONValue {
+    public static func request(environment: JSONValue, conversationID: String, audio: Data? = nil, text: String? = nil, chunkIndex: Int? = nil) throws -> JSONValue {
         guard NativeEnvironment.same(environment, environment), UUID(uuidString: conversationID) != nil,
-              (audio == nil) != (text == nil) else { throw WorkbenchError("Select a voice conversation and one operation") }
+              (audio == nil) != (text == nil), chunkIndex == nil || (audio == nil && (0..<32768).contains(chunkIndex!)) else {
+            throw WorkbenchError("Select a voice conversation, one operation and a valid chunk index")
+        }
         var body: [String: JSONValue] = ["environment": environment, "conversationId": .string(conversationID),
             "requestId": .string(UUID().uuidString.lowercased()), "operation": .string(audio == nil ? "speak" : "transcribe")]
         if let audio {
@@ -182,6 +184,7 @@ public enum NativeVoice {
             }
             body["text"] = .string(text)
         }
+        if let chunkIndex { body["chunkIndex"] = .number(Double(chunkIndex)) }
         return .object(body)
     }
     public static func receipt(_ payload: JSONValue, request: JSONValue) throws -> JSONValue {
@@ -198,8 +201,41 @@ public enum NativeVoice {
             guard row["text"] == .null, row["audioBase64"].text.utf8.count <= 11_184_812,
                   let audio = Data(base64Encoded: row["audioBase64"].text), !audio.isEmpty,
                   audio.count <= 8 * 1024 * 1024 else { throw WorkbenchError("Invalid spoken audio") }
+            if request["chunkIndex"] != .null {
+                guard let index = chunkNumber(request["chunkIndex"]), index < 32768,
+                      chunkNumber(row["chunkIndex"]) == index, let total = chunkNumber(row["totalChunks"]), total > index else {
+                    throw WorkbenchError("Voice chunk receipt is incomplete or out of order")
+                }
+            }
         } else { throw WorkbenchError("Unsupported voice operation") }
         return row
+    }
+    private static func chunkNumber(_ value: JSONValue) -> Int? {
+        guard case .number(let number) = value, number.isFinite, number.rounded() == number,
+              number >= 0, number <= 32768 else { return nil }
+        return Int(number)
+    }
+    // One source/request identity survives the entire reading. The native player
+    // advances this cursor only from its successful playback completion callback.
+    public struct Reading {
+        public private(set) var request: JSONValue
+        private var total: Int?
+        public init(environment: JSONValue, conversationID: String, text: String) throws {
+            request = try NativeVoice.request(environment: environment, conversationID: conversationID, text: text, chunkIndex: 0)
+        }
+        public mutating func accept(_ row: JSONValue) throws {
+            // Reuse the complete receipt validator even with a transport-injected row.
+            let checked = try NativeVoice.receipt(.object(["environment": request["environment"], "rows": .array([row])]), request: request)
+            guard let received = NativeVoice.chunkNumber(checked["totalChunks"]), total == nil || total == received else {
+                throw WorkbenchError("Voice chunk total changed; retry the reading")
+            }
+            total = received
+        }
+        public mutating func advance() -> Bool {
+            guard let total, let index = NativeVoice.chunkNumber(request["chunkIndex"]), index + 1 < total,
+                  case .object(var body) = request else { return false }
+            body["chunkIndex"] = .number(Double(index + 1)); request = .object(body); return true
+        }
     }
 }
 
