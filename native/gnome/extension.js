@@ -10,7 +10,7 @@ import {ResidentBridge} from './bridge.js';
 import {nativeChatBlocks, safeChatLink, NativeCardsState} from './chat-content.js';
 import {PanelState, InboxState, ChatState, AccountState, sameEnvironment, oneRow, SOURCES, sourceRequests, detailRequest, readRows, rebindShortcuts,
     agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow,
-    organizerGroups, arrangeOrganizerGroup, nativeVoiceResult} from './panel-model.mjs';
+    organizerGroups, arrangeOrganizerGroup, readNativeReply} from './panel-model.mjs';
 
 function label(text, style = '') {
     const actor = new St.Label({text: String(text), style_class: style, x_expand: true});
@@ -807,16 +807,26 @@ export default class Workbench extends Extension {
             const {id, pui} = operation, chat = this._chat;
             const request = {environment: chat.voice.environment, conversationId: chat.voice.conversationId,
                 requestId: id, operation: 'speak', text: chat.spokenReply};
-            operation.handle = this._bridge.voice(pui, request);
-            const payload = await operation.handle.done;
-            if (!operation.current()) return;
-            const row = nativeVoiceResult(request, payload);
-            operation.handle = this._bridge.play(pui, row.audioBase64, state => {
-                if (operation.current() && state.phase === 'playing' && chat.advanceVoice(id, 'playing'))
-                    this._updateChatControls(operation.view);
+            const finished = await readNativeReply(request, {
+                current: operation.current,
+                synthesizing: () => {
+                    const advanced = chat.advanceVoice(id, 'synthesizing');
+                    if (advanced) this._updateChatControls(operation.view);
+                    return advanced;
+                },
+                voice: chunk => {
+                    operation.handle = this._bridge.voice(pui, chunk);
+                    return operation.handle.done;
+                },
+                play: audio => {
+                    operation.handle = this._bridge.play(pui, audio, state => {
+                        if (operation.current() && state.phase === 'playing' && chat.advanceVoice(id, 'playing'))
+                            this._updateChatControls(operation.view);
+                    });
+                    return operation.handle.done;
+                },
             });
-            await operation.handle.done;
-            if (operation.current()) this._stopVoice('Reply audio finished');
+            if (finished && operation.current()) this._stopVoice('Reply audio finished');
         } catch (error) { this._voiceFailed(operation, error); }
     }
     async _refreshChat() {

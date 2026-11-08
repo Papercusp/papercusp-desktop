@@ -637,7 +637,7 @@ export class ChatState {
             voice.draft === this.draft);
     }
     advanceVoice(id, phase) {
-        if (!this.voiceCurrent(id) || !['permission:recording', 'recording:transcribing', 'synthesizing:playing']
+        if (!this.voiceCurrent(id) || !['permission:recording', 'recording:transcribing', 'synthesizing:playing', 'playing:synthesizing']
             .includes(this.voicePhase + ':' + phase)) return false;
         this.voicePhase = phase; return true;
     }
@@ -680,6 +680,8 @@ export function nativeVoiceRequest(request) {
         !uuid(request?.requestId) || !['transcribe', 'speak'].includes(request?.operation))
         throw new Error('Select an exact voice conversation and request');
     const bounded = (text, max) => typeof text === 'string' && text.trim() && new TextEncoder().encode(text).length <= max;
+    if (request.chunkIndex !== undefined && (request.operation !== 'speak' || !Number.isSafeInteger(request.chunkIndex) ||
+        request.chunkIndex < 0 || request.chunkIndex >= 32 * 1024)) throw new Error('Invalid voice chunk index');
     if (request.operation === 'speak' ? (!bounded(request.text, 32 * 1024) || request.audioBase64 !== undefined) :
         (request.text !== undefined || !canonicalBase64(request.audioBase64, 2_600_000)))
         throw new Error('Invalid or oversized native voice request');
@@ -695,6 +697,7 @@ export function canonicalBase64(text, limit) {
         !text.endsWith('=') || (alphabet.indexOf(text.at(-2)) & 3) === 0;
 }
 export function nativeVoiceResult(request, payload) {
+    nativeVoiceRequest(request);
     const rows = readRows(payload), row = rows[0];
     if (!sameEnvironment(request.environment, payload.environment) || rows.length !== 1 ||
         row?.conversationId !== request.conversationId || row?.requestId !== request.requestId ||
@@ -703,7 +706,28 @@ export function nativeVoiceResult(request, payload) {
     if (request.operation === 'transcribe' ? (typeof row.text !== 'string' || !row.text.trim() ||
         new TextEncoder().encode(row.text).length > 32 * 1024) : !canonicalBase64(row.audioBase64, 11_184_812))
         throw new Error('No usable voice result; your draft was preserved');
+    if (request.chunkIndex !== undefined && (row.chunkIndex !== request.chunkIndex ||
+        !Number.isSafeInteger(row.totalChunks) || row.totalChunks <= request.chunkIndex || row.totalChunks > 32 * 1024))
+        throw new Error('Voice chunk receipt is incomplete or out of order');
     return snapshot(row);
+}
+// Fetch the next chunk only after playback, keeping one immutable source.
+export async function readNativeReply(request, {voice, play, current, synthesizing}) {
+    const source = nativeVoiceRequest({...request, chunkIndex: 0});
+    let total;
+    for (let index = 0; total === undefined || index < total; ++index) {
+        if (!current()) return false;
+        if (index > 0 && !synthesizing()) return false;
+        const chunk = {...source, chunkIndex: index};
+        const payload = await voice(chunk);
+        if (!current()) return false;
+        const row = nativeVoiceResult(chunk, payload);
+        if (total !== undefined && row.totalChunks !== total) throw new Error('Voice chunk total changed; retry the reading');
+        total = row.totalChunks;
+        await play(row.audioBase64);
+        if (!current()) return false;
+    }
+    return true;
 }
 export class InboxState {
     constructor() {

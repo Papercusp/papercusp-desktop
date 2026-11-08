@@ -6,7 +6,7 @@ import {pathToFileURL} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import test from 'node:test';
 import {buildSync} from 'esbuild';
-import {PanelState, InboxState, ChatState, ChatReply, AccountState, nativeVoiceRequest, nativeVoiceResult, sameEnvironment, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests,
+import {PanelState, InboxState, ChatState, ChatReply, AccountState, nativeVoiceRequest, nativeVoiceResult, readNativeReply, sameEnvironment, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests,
     agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow,
     organizerGroups, organizerMembers, arrangeOrganizerGroup}
     from '../native/gnome/panel-model.mjs';
@@ -226,6 +226,46 @@ test('voice requests and receipts retain exact identity and reject malformed, em
     assert.deepEqual(nativeVoiceRequest(speak),speak);
     assert.equal(nativeVoiceResult(speak,chatEnvelope([{...speak,audioBase64:'AAEC'}])).audioBase64,'AAEC');
     assert.throws(()=>nativeVoiceResult(speak,chatEnvelope([{...speak,audioBase64:'invalid'}])),/usable/);
+});
+test('indexed voice rejects malformed requests and foreign or incomplete chunk receipts', () => {
+    const request = {environment:chatEnvironment,conversationId:replyId,requestId:userId,operation:'speak',text:'λ'.repeat(5000),chunkIndex:1};
+    const row = {...request,audioBase64:'AAEC',totalChunks:3};
+    assert.equal(nativeVoiceResult(request,chatEnvelope([row])).totalChunks,3);
+    for (const chunkIndex of [-1,0.5,'1',null,32768]) assert.throws(()=>nativeVoiceRequest({...request,chunkIndex}),/chunk/);
+    assert.throws(()=>nativeVoiceRequest({...request,operation:'transcribe'}),/chunk/);
+    for (const bad of [{chunkIndex:0},{chunkIndex:undefined},{totalChunks:1},{totalChunks:0},
+        {totalChunks:'3'},{totalChunks:32769},{totalChunks:2.5}])
+        assert.throws(()=>nativeVoiceResult(request,chatEnvelope([{...row,...bad}])),/chunk/);
+});
+test('full native reading waits for each playback and stops on cancellation, changed totals or later failure', async () => {
+    const request = {environment:chatEnvironment,conversationId:replyId,requestId:userId,operation:'speak',text:'λ🙂 literal $() '.repeat(500)};
+    for (const scenario of ['complete','cancel-synthesis','cancel-playback','provider','player','total']) {
+        const events=[]; let active=true, release;
+        const playback = new Promise(resolve=>{release=resolve;});
+        const reading=readNativeReply(request,{
+            current:()=>active,synthesizing:()=>{events.push('synthesizing');return true;},
+            voice:async chunk=>{
+                events.push('fetch'+chunk.chunkIndex); assert.equal(chunk.text,request.text);
+                if(scenario==='cancel-synthesis')active=false;
+                if(scenario==='provider' && chunk.chunkIndex===1)throw Error('provider failed');
+                return chatEnvelope([{...chunk,audioBase64:'AAEC',totalChunks:scenario==='total' && chunk.chunkIndex===1?3:2}]);
+            },
+            play:async ()=>{
+                events.push('play');await playback;
+                if(scenario==='cancel-playback')active=false;
+                if(scenario==='player')throw Error('player failed');
+            },
+        });
+        await Promise.resolve();await Promise.resolve();
+        assert.deepEqual(events,scenario==='cancel-synthesis'?['fetch0']:['fetch0','play']);
+        release();
+        if(['provider','player','total'].includes(scenario))await assert.rejects(reading,/failed|total/);
+        else assert.equal(await reading,scenario==='complete');
+        if(scenario==='complete')assert.deepEqual(events,['fetch0','play','synthesizing','fetch1','play']);
+        else assert.ok(!events.includes('fetch2'));
+        if(scenario.startsWith('cancel') || scenario==='player')assert.ok(!events.includes('fetch1'));
+        if(scenario==='total')assert.equal(events.filter(e=>e==='play').length,1);
+    }
 });
 test('voice transcription requires the live operation and preserves drafts through edits, refresh and cancellation', () => {
     const {state}=loadedChat();state.draft='Original draft';
