@@ -501,8 +501,8 @@ const assertions=[];
 const inputLog=[];
 const journey=${JSON.stringify(journey)};
 const started=GLib.get_monotonic_time(),phases=[];
-let phase='controller';
-function progress(){GLib.file_set_contents(${JSON.stringify(join(temp,'progress.json'))},JSON.stringify({phase,journey,elapsedMs:(GLib.get_monotonic_time()-started)/1000,phases,assertions,inputLog}));}
+let phase='controller',diagnose=()=>null;
+function progress(){GLib.file_set_contents(${JSON.stringify(join(temp,'progress.json'))},JSON.stringify({phase,journey,elapsedMs:(GLib.get_monotonic_time()-started)/1000,phases,assertions,inputLog,diagnostics:diagnose()}));}
 function setPhase(value){phase=value;phases.push({phase,elapsedMs:(GLib.get_monotonic_time()-started)/1000});progress();}
 function check(value,name){if(!value)throw Error(name);assertions.push(name);progress();}
 function waitFor(predicate){return new Promise((resolve,reject)=>{let n=0;GLib.timeout_add(GLib.PRIORITY_DEFAULT,50,()=>{try{progress();if(predicate()){resolve();return GLib.SOURCE_REMOVE;}if(++n>180)throw Error('native state deadline: '+phase);return GLib.SOURCE_CONTINUE;}catch(error){reject(error);return GLib.SOURCE_REMOVE;}});});}
@@ -552,6 +552,8 @@ export default class Probe extends Workbench {
    const write=(name,value)=>GLib.file_set_contents(file(name),value);
    const requests=()=>exists('voice-actions.json')?read('voice-actions.json'):[];
    const chat=this._chat,view=()=>this._views.get('papercup');
+   diagnose=()=>({voicePhase:chat.voicePhase,status:view()?.voiceStatus.text,operationActive:Boolean(this._voiceOperation),
+    pending:[...this._bridge._pending.values()].map(row=>({audio:row.audio,streaming:row.streaming,failure:row.failure?.message}))});
    setPhase('voice canonical conversation and idle controls');
    await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_p]);await waitFor(()=>chat.ready);
    check(chat.conversationId==='00000000-0000-4000-8000-000000000001','voice binds exact canonical UUID conversation');

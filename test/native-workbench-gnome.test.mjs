@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdtempSync, writeFileSync, rmSync, readFileSync} from 'node:fs';
+import {mkdtempSync, writeFileSync, rmSync, readFileSync, cpSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -782,6 +782,38 @@ for(const operation of ['record','play']){let failed=false;
 let malformed=false;try{devices.play('AB==',new Gio.Cancellable(),()=>{});}catch(error){malformed=true;}
 if(!malformed||devices.active)throw Error('noncanonical playback admitted');
 print('NATIVE_STREAM_PASS');
+`,true);
+    });
+
+test('resident audio helper delivers recording state, finalized WAV and playback through its GTK loop',
+    {skip:process.platform!=='linux',timeout:30000}, () => {
+        const temp=mkdtempSync(join(tmpdir(),'workbench-resident-audio-'));
+        const helper=join(temp,'helper');
+        cpSync(join(root,'native/gnome'),helper,{recursive:true});
+        const helperPath=join(helper,'helper.js');
+        writeFileSync(helperPath,readFileSync(helperPath,'utf8').replace('new AudioDevices()',
+            "new AudioDevices({source:'audiotestsrc is-live=true',sink:'fakesink sync=true',durationMs:2000})"));
+        const bridge=pathToFileURL(join(root,'native/gnome/bridge.js')).href;
+        runStreamDriver(temp,`import Gio from 'gi://Gio';import GLib from 'gi://GLib';
+import {ResidentBridge} from ${JSON.stringify(bridge)};
+const bridge=new ResidentBridge(${JSON.stringify(helperPath)});
+let timer=0,recording,phases=[];
+try {
+ const ready=new Promise((resolve,reject)=>{
+  timer=GLib.timeout_add(GLib.PRIORITY_DEFAULT,4000,()=>{timer=0;reject(Error('resident recording state never arrived'));return GLib.SOURCE_REMOVE;});
+  recording=bridge.record('/bin/false',state=>{phases.push(state.phase);if(state.phase==='recording')resolve();});
+ });
+ const result=recording.done;
+ await Promise.race([ready,result.then(()=>{throw Error('capture completed without a recording state');})]);
+ if(timer){GLib.source_remove(timer);timer=0;}
+ await new Promise(resolve=>GLib.timeout_add(GLib.PRIORITY_DEFAULT,100,()=>{resolve();return GLib.SOURCE_REMOVE;}));
+ recording.stop();const audio=await result;
+ const bytes=GLib.base64_decode(audio.audioBase64);
+ if(bytes.length<=44||new TextDecoder().decode(bytes.slice(0,4))!=='RIFF')throw Error('resident capture did not finalize WAV');
+ await bridge.play('/bin/false',audio.audioBase64,state=>phases.push(state.phase)).done;
+ if(phases.join(',')!=='recording,playing')throw Error('resident audio lost or duplicated its state frames');
+ print('NATIVE_STREAM_PASS');
+} finally {if(timer)GLib.source_remove(timer);bridge.close();}
 `,true);
     });
 
