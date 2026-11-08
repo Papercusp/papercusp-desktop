@@ -1079,9 +1079,18 @@ public static class WorkbenchNativeHostFixture
             var activated = new List<string>(); panel.GetType().GetField("LaunchChatUri", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).SetValue(panel, new Action<string>(activated.Add));
             worklinks[0].RaiseEvent(new System.Windows.Navigation.RequestNavigateEventArgs(worklinks[0].NavigateUri, ""));
             Check(activated.Count == 1 && activated[0].Contains("one%3A%3AWI-7"), "native history activates the exact selected harness target");
+            context.SelectedItem = context.Items.Cast<System.Windows.Controls.ComboBoxItem>().First(item => (string)item.Tag == chat.ReferencePlans[1].Key);
+            worklinks[0].RaiseEvent(new System.Windows.Navigation.RequestNavigateEventArgs(worklinks[0].NavigateUri, ""));
+            Check(activated.Count == 1 && chat.ReferenceHarness == "two", "replaced context fences retained document links from the former harness");
             host.Toggle("papercup");
             worklinks[0].RaiseEvent(new System.Windows.Navigation.RequestNavigateEventArgs(worklinks[0].NavigateUri, ""));
             Check(activated.Count == 1, "dismissed native documents cannot activate retained work links");
+            var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
+            System.IO.File.WriteAllText(path + ".other", "other"); host.Toggle("papercup");
+            Until(() => chat.Ready && chat.ReferencePlans.Count == 2);
+            Check(chat.ReferenceKey == "" && chat.ReferenceHarness == "fixture" && chat.Draft == "", "conversation change clears fallback context and keeps the other draft isolated");
+            Check(chat.ReferencePlan("") == "" && chat.ReferencePlan("own-plan") == "own-plan", "new conversation cannot inherit the previous plan fallback");
+            System.IO.File.Delete(path + ".other");
             var generation = chat.Begin();
             Check(!chat.SettleReferencePlans(generation - 1, environment, null), "late context response is fenced by generation");
             Check(chat.ReferencePlans.Count == 0, "conversation reload removes previous interactive context choices");
