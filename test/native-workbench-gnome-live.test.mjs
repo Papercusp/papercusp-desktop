@@ -502,6 +502,7 @@ test('exact installed GNOME preview opens canonical Reports through a private Sh
         // never wrapped, subclassed, patched or replaced by a fixture PUI.
         writeFileSync(join(probe,'extension.js'),`import GLib from 'gi://GLib';
 import Clutter from 'gi://Clutter';
+import Shell from 'gi://Shell';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 const assertions=[];let phase='login';
@@ -530,7 +531,9 @@ export default class Probe extends Extension {
  const key=async(symbol,pressed)=>{keyboard.notify_keyval(GLib.get_monotonic_time(),symbol,
  pressed?Clutter.KeyState.PRESSED:Clutter.KeyState.RELEASED);await tick();};
  async function chord(symbols){for(const symbol of symbols)await key(symbol,true);for(const symbol of [...symbols].reverse())await key(symbol,false);}
- phase='desktop ready';await waitFor(()=>Main.actionMode===1&&!Main.overview.visible);
+ phase='desktop ready';await waitFor(()=>Main.actionMode!==Shell.ActionMode.NONE);
+ if(Main.overview.visible)await chord([Clutter.KEY_Escape]);
+ await waitFor(()=>Main.actionMode===Shell.ActionMode.NORMAL&&!Main.overview.visible);
  phase='native shortcut';await chord([Clutter.KEY_Super_L,Clutter.KEY_Alt_L,Clutter.KEY_space]);
  await waitFor(()=>state.visible&&state.sources.reports?.status==='ready');
  check(target._views.get('quick-access').panel.get_parent()!==null,'seat shortcut opens the installed native actor');
