@@ -139,7 +139,11 @@ if(r.name==='operator.identity')rows=[environment];
 else if(r.name==='operatorConversations.current')rows=[{id:chatId(),workspaceId:environment.workspaceId,subjectKind:'global',status:'active'}];
 else if(r.name==='operatorTurns.page')rows=[{turns:r.args.beforeSeq?[{id:'saved-one',conversationId:chatId(),seq:1,role:'user',text:'Earlier message'}]:chatHistory(),hasMoreEarlier:!r.args.beforeSeq&&!fs.existsSync(dir+'/chat-history.json')}];
 else if(r.name==='plans.attention')rows=[{items:[question]}];
-else if(r.name==='plans.attentionItem')rows=[question];
+else if(r.name==='plans.attentionItem'){
+ fs.writeFileSync(dir+'/inbox-context-read.json',JSON.stringify(r));
+ if(r.args?.id!==question.id||Object.hasOwn(r.args,'itemId')){
+  console.error('plans.attentionItem requires the canonical id');process.exitCode=1;return;}
+ rows=[question];}
 else if(r.name==='plans.attentionBulkRun')rows=[{run:{runId:'run+/=&',phase:'review',totalItems:8},items:[{itemId:question.id,kind:question.kind,ref:question.ref,runId:'run+/=&',outcome:'recommended',actionId:'answer',draftAnswer:'Draft'}]}];
 else if(r.name==='plans.list')rows=[{harness:'exact-harness',slug:'same',title:'Plan'}];
 else if(r.name==='advRoster.list'){const fs=require('node:fs');const path=${JSON.stringify(join(temp,'roster.json'))};rows=[fs.existsSync(path)?JSON.parse(fs.readFileSync(path,'utf8')):{active:[],ended:[]}];}
@@ -520,6 +524,8 @@ export default class Probe extends Extension {
  GLib.file_set_contents(${JSON.stringify(resultFile)},JSON.stringify({ok:!error,error:error?String(error)+'; '+error.stack:null,
  phase,assertions,reportId:this.reportId,bodyChars:this.bodyChars,inboxItemId:this.inboxItemId,
  questions:target?._inbox.rows.length,savedRunId:target?._inbox.savedRunId,
+ inboxState:target?{listReady:target._inbox.listReady,listError:target._inbox.listError,
+ bulkReady:target._inbox.bulkReady,bulkError:target._inbox.bulkError,contextError:target._inbox.contextError}:null,
  sources:target?Object.entries(target._states.get('quick-access').sources)
  .map(([kind,value])=>({kind,status:value.status,error:value.error})):[]}));global.context.terminate();}
  async run(){
@@ -558,7 +564,7 @@ export default class Probe extends Extension {
  view.search.set_text(row.id);
  check(inbox.rows===source&&inbox.results(state.query).some(item=>item.id===row.id),
  'native Inbox search preserves its canonical source and selected identity');
- const detail=await target._bridge.read(${JSON.stringify(pui)},{name:'plans.attentionItem',args:{itemId:row.id},environment:target._inboxEnvironment});
+ const detail=await target._bridge.read(${JSON.stringify(pui)},{name:'plans.attentionItem',args:{id:row.id},environment:target._inboxEnvironment});
  check(detail.rows[0]?.id===row.id&&JSON.stringify(detail.rows[0].ref)===JSON.stringify(row.ref),
  'exact canonical question control preserves its typed reference');
  phase='seat Inbox Enter';await chord([Clutter.KEY_Return]);
@@ -566,7 +572,7 @@ export default class Probe extends Extension {
  check(inbox.context?.id===row.id&&JSON.stringify(inbox.context.ref)===JSON.stringify(row.ref),
  'seat Enter opens the exact canonical question context');
  const foreign={...target._inboxEnvironment,workspaceId:target._inboxEnvironment.workspaceId+'-foreign'};
- let refused=false;try{await target._bridge.read(${JSON.stringify(pui)},{name:'plans.attentionItem',args:{itemId:row.id},environment:foreign});}
+ let refused=false;try{await target._bridge.read(${JSON.stringify(pui)},{name:'plans.attentionItem',args:{id:row.id},environment:foreign});}
  catch(error){refused=/selected environment changed/.test(error.message);}
  check(refused,'installed Inbox refuses a changed workspace before question access');
  check(global.get_window_actors().length===0,'installed Inbox creates no application window');
@@ -1147,6 +1153,8 @@ export default class Probe extends Workbench {
   check(this._views.get('inbox').bulkStatus.text.includes('1/8 decided'),'Inbox persisted denominator reaches native status');
   await this._loadInboxContext('question+/=&');
   check(this._inbox.context.body==='Exact context','Inbox selected context preserves exact identity');
+  check(JSON.stringify(read('inbox-context-read.json').args)===JSON.stringify({id:'question+/=&'}),
+   'Inbox context read uses canonical id without action itemId');
   this._inbox.answer=' Native answer ';this._prepareInbox('resolve',{actionId:'answer'});
   check(this._views.get('inbox').confirmRequests[0].answer==='Native answer','Inbox confirmation freezes edited answer');
   await this._confirmInbox();await waitFor(()=>this._inbox.listReady&&this._inbox.bulkReady);

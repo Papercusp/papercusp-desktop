@@ -885,7 +885,7 @@ export default class Workbench extends Extension {
         const token = inbox.select(id), generation = inbox.generation, environment = this._inboxEnvironment, pui = this._settings.get_string('pui-path');
         this._renderInbox();
         try {
-            const payload = await this._bridge.read(pui, {name: 'plans.attentionItem', args: {itemId: id}, environment});
+            const payload = await this._bridge.read(pui, {name: 'plans.attentionItem', args: {id}, environment});
             if (!this._inboxCurrent(view, generation, pui)) return;
             if (!sameEnvironment(environment, payload.environment)) throw new Error('Selected environment changed');
             inbox.settleContext(token, id, payload);

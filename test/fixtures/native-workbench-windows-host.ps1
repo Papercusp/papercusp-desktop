@@ -1531,7 +1531,7 @@ public static class NativeAccountsFixture {
                 json.DeserializeObject(question), json.DeserializeObject(question.Replace("question +/=& \\u03bb", "question-b").Replace("Alpha", "Beta").Replace("thread-a", "thread-b")) } } };
             else if (name == "plans.attentionItem") {
                 var query = (Dictionary<string, object>)request["args"];
-                if (!Object.Equals(query["itemId"], "question +/=& \u03bb")) return 49;
+                if (!query.ContainsKey("id") || query.ContainsKey("itemId") || !Object.Equals(query["id"], "question +/=& \u03bb")) return 49;
                 rows = new object[] { json.DeserializeObject(question) };
             } else if (name == "plans.attentionBulkRun") {
                 rows = new object[] { current };

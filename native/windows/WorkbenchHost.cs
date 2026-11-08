@@ -1192,7 +1192,7 @@ namespace Papercusp.Workbench
                 var environment = inboxEnvironment; RenderInbox();
                 try
                 {
-                    var payload = await PuiReadBridge.ReadAsync(pui, "plans.attentionItem", new Dictionary<string, object> { { "itemId", id } }, token, 22000, environment);
+                    var payload = await PuiReadBridge.ReadAsync(pui, "plans.attentionItem", new Dictionary<string, object> { { "id", id } }, token, 22000, environment);
                     CheckInboxEnvironment(payload, environment);
                     if (InboxCurrent(generation, token)) inbox.SettleContext(contextToken, id, payload);
                 }
