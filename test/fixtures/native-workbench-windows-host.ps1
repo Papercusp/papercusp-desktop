@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$SourceDirectory,
-    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'inbox', 'organizer', 'chat', 'cards', 'operator', 'operator-inbox', 'environment-refusal', 'fixture-diagnostics', 'fixture-failure', 'fixture-timeout')][string]$Phase = 'all',
+    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'inbox', 'organizer', 'chat', 'content', 'cards', 'operator', 'operator-inbox', 'environment-refusal', 'fixture-diagnostics', 'fixture-failure', 'fixture-timeout')][string]$Phase = 'all',
     [string]$PuiExecutable,
     [string]$OperatorUrl,
     [string]$ExpectedWorkspace,
@@ -233,9 +233,10 @@ if ($Phase -in @('operator', 'operator-inbox')) {
 }
 [Console]::Error.WriteLine("PHASE compile: loading the production WPF source and full assembly references")
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml, System.Web.Extensions
+. (Join-Path $SourceDirectory 'WorkbenchDependencies.ps1')
 $references = @('System.dll','System.Core.dll','System.Xaml.dll','System.Web.Extensions.dll',
     [Windows.Window].Assembly.Location, [Windows.Media.Brushes].Assembly.Location,
-    [Windows.Threading.Dispatcher].Assembly.Location, [Windows.Automation.AutomationProperties].Assembly.Location)
+    [Windows.Threading.Dispatcher].Assembly.Location, [Windows.Automation.AutomationProperties].Assembly.Location) + @(Import-WorkbenchDependencies $SourceDirectory)
 $fixture = @'
 using System;
 using System.Collections.Generic;
@@ -1026,6 +1027,66 @@ public static class WorkbenchNativeHostFixture
             Check(!cards.Connected && cards.ConversationId == "" && cards.Cards.Count == 0, "dismissing native sidebar cancels subscription and invalidates card generation");
         }
     }
+    private static void ContentNative()
+    {
+        using (var host = new WorkbenchHost(Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_FIXTURE")))
+        {
+            host.State("papercup").Pinned = true; host.Toggle("papercup"); var panel = host.Panel("papercup");
+            var chat = (ChatState)panel.GetType().GetField("chat", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).GetValue(panel);
+            Until(() => chat.Ready && chat.ReferencePlans.Count == 2);
+            var environment = chat.Environment;
+            var matches = NativeWorkRefs.Parse("\ud83d\ude00 WI-7 `EI-1` [WI-2](https://x/EI-3) ```F-4``` P-005 WI-7 \u03bbEI-8\u03bb XWI-9 WI-10x P-01");
+            Check(String.Join(",", matches.Select(match => match.Value)) == "WI-7,P-005,WI-7,EI-8", "shared refs mask code and links and preserve repetitions and ASCII boundaries");
+            Check(matches[0].Index == 3, "native ref offsets use UTF16 beside astral text");
+            Check(NativeWorkRefs.Parse("WI-1 ```P-005\nEI-2").Length == 1, "unterminated code fences mask the remaining refs");
+            Check(NativeWorkRefs.Parse("wi-1 P-12 _WI-3 WI-4_ P-1234").Single().Value == "P-1234", "reference shape remains case sensitive and word bounded");
+            Check(NativeWorkRefs.Target("WI-7", environment, "a +/=&", null) == "http://fixture.invalid:3170/?wpop=a%20%2B%2F%3D%26%3A%3AWI-7", "work links encode exact harness on the selected origin");
+            Check(NativeWorkRefs.Target("P-005", environment, "one", "a/b") == "http://fixture.invalid:3170/?wppop=one%3A%3Aa%2Fb", "plan links use the GUI plan popup grammar");
+            Check(NativeWorkRefs.Target("P-005", environment, "one", "") == null && NativeWorkRefs.Target("WI-7", environment, "", "plan") == null, "missing plan or harness stays inert");
+            var bad = new Dictionary<string, object>(environment); bad["endpoint"] = "https://user:secret@example.com";
+            Check(NativeWorkRefs.Target("WI-7", bad, "one", null) == null, "credentialed origins cannot become native links");
+            Check(NativeWorkRefs.Markdown("WI-7 `WI-7`", environment, "one", null).EndsWith(" `WI-7`"), "native link substitution leaves inline code intact");
+            var opened = new List<string>();
+            var view = NativeChatContent.View("# Heading\n\n**bold** *italic* ~~gone~~ `WI-1`\n\n```cs\nvar answer = 42;\n```\n\n3. third\n4. fourth\n\n> quote\n\n| A | B |\n|---|---|\n| cell | value |\n\n[go](https://example.com/path) [bad](javascript:alert) ![alt](https://example.com/pixel)\n\n<script>unsafe()</script>", opened.Add);
+            var text = new System.Windows.Documents.TextRange(view.Document.ContentStart, view.Document.ContentEnd).Text;
+            Check(view.IsReadOnly && view.IsDocumentEnabled, "native Markdown is selectable and enables link activation");
+            Check(view.Document.Blocks.OfType<System.Windows.Documents.Paragraph>().First().FontWeight == FontWeights.Bold, "Markdown heading has native heading emphasis");
+            Check(Elements<System.Windows.Documents.Run>(view.Document).Any(run => run.Text == "bold" && run.FontWeight == FontWeights.Bold), "Markdown strong text uses native bold runs");
+            Check(Elements<System.Windows.Documents.Run>(view.Document).Any(run => run.Text == "italic" && run.FontStyle == FontStyles.Italic), "Markdown emphasis uses native italic runs");
+            Check(Elements<System.Windows.Documents.Run>(view.Document).Any(run => run.Text == "WI-1" && run.FontFamily.Source == "Consolas"), "inline code remains copyable native monospace text");
+            Check(text.Contains("var answer = 42;") && !text.Contains("```"), "fenced code preserves source without Markdown delimiters");
+            Check(view.Document.Blocks.OfType<System.Windows.Documents.List>().Single().StartIndex == 3, "ordered lists retain the canonical starting number");
+            Check(view.Document.Blocks.OfType<System.Windows.Documents.Section>().Any() && text.Contains("quote"), "block quotes render as native document sections");
+            Check(view.Document.Blocks.OfType<System.Windows.Documents.Table>().Single().RowGroups[0].Rows.Count == 2 && text.Contains("cell"), "maintained table AST renders native header and data cells");
+            var links = Elements<System.Windows.Documents.Hyperlink>(view.Document).ToArray();
+            Check(links.Length == 1 && links[0].NavigateUri.AbsoluteUri == "https://example.com/path", "unsafe links and image URLs never become active or fetch content");
+            links[0].RaiseEvent(new System.Windows.Navigation.RequestNavigateEventArgs(links[0].NavigateUri, ""));
+            Check(opened.SequenceEqual(new[] { "https://example.com/path" }), "native hyperlink navigation invokes the host activation seam once");
+            Check(text.Contains("unsafe()") && text.Contains("alt"), "HTML and image alternative text remain visible inert content");
+            var context = Find<System.Windows.Controls.ComboBox>(panel, "Papercup work link context");
+            context.SelectedItem = context.Items.Cast<System.Windows.Controls.ComboBoxItem>().First(item => (string)item.Tag == chat.ReferencePlans[0].Key);
+            Check(chat.ReferenceHarness == "one" && chat.ReferencePlan("") == "same", "explicit context captures canonical harness plus plan identity");
+            Check(chat.ReferencePlan("message-plan") == "message-plan", "message plan takes precedence over selected fallback");
+            var choice = chat.ReferenceKey; chat.Draft = "unsent draft";
+            panel.GetType().GetMethod("Refresh", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).Invoke(panel, null);
+            Until(() => chat.Ready && chat.ReferencePlans.Count == 2);
+            Check(chat.ReferenceKey == choice && chat.Draft == "unsent draft", "same-conversation refresh retains explicit context and unsent draft");
+            chat.Turns[0]["text"] = "WI-7 P-005 `WI-8`"; chat.Turns[0]["planSlug"] = "message-plan";
+            var render = panel.GetType().GetMethod("RenderChat", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic); render.Invoke(panel, null);
+            var history = Find<System.Windows.Controls.RichTextBox>(panel, "Papercup message text");
+            var worklinks = Elements<System.Windows.Documents.Hyperlink>(history.Document).ToArray();
+            Check(worklinks.Length == 2 && worklinks[1].NavigateUri.Query.Contains("message-plan"), "actual native history renders scoped refs while code remains inert");
+            var activated = new List<string>(); panel.GetType().GetField("LaunchChatUri", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).SetValue(panel, new Action<string>(activated.Add));
+            worklinks[0].RaiseEvent(new System.Windows.Navigation.RequestNavigateEventArgs(worklinks[0].NavigateUri, ""));
+            Check(activated.Count == 1 && activated[0].Contains("one%3A%3AWI-7"), "native history activates the exact selected harness target");
+            host.Toggle("papercup");
+            worklinks[0].RaiseEvent(new System.Windows.Navigation.RequestNavigateEventArgs(worklinks[0].NavigateUri, ""));
+            Check(activated.Count == 1, "dismissed native documents cannot activate retained work links");
+            var generation = chat.Begin();
+            Check(!chat.SettleReferencePlans(generation - 1, environment, null), "late context response is fenced by generation");
+            Check(chat.ReferencePlans.Count == 0, "conversation reload removes previous interactive context choices");
+        }
+    }
     private static void ChatNative()
     {
         var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
@@ -1172,6 +1233,7 @@ public static class WorkbenchNativeHostFixture
         if (phase == "inbox") { InboxModel(); InboxNative(); }
         if (phase == "organizer") { OrganizerModel(); OrganizerNative(); }
         if (phase == "chat") { ChatNative(); }
+        if (phase == "content") { ContentNative(); }
         if (phase == "cards") { CardsNative(); }
         if (phase == "operator") { OperatorNative(); }
         if (phase == "operator-inbox") { OperatorInboxNative(); }
@@ -1202,7 +1264,7 @@ public static class WorkbenchArgvFixture {
 }
 '@
     $env:WORKBENCH_ARGV_FIXTURE = $argvFixture
-    if ($Phase -in @('accounts', 'goals', 'inbox', 'organizer', 'chat', 'cards')) {
+    if ($Phase -in @('accounts', 'goals', 'inbox', 'organizer', 'chat', 'content', 'cards')) {
         $env:WORKBENCH_ACCOUNT_FIXTURE = $accountFixture; $env:WORKBENCH_ACCOUNT_STATE = $accountState
         $env:WORKBENCH_CONTROL_PHASE = $Phase
         Add-Type -OutputAssembly $accountFixture -OutputType ConsoleApplication -ReferencedAssemblies System.Web.Extensions, System.Core -TypeDefinition @'
@@ -1258,7 +1320,10 @@ public static class NativeAccountsFixture {
             else {
                 if (json.Serialize(request["environment"]) != json.Serialize(environment)) return 61;
                 var query = (Dictionary<string, object>)request["args"];
-                if (name == "operatorConversations.current") row = new { id = id, workspaceId = "isolated", subjectKind = "global", status = "active" };
+                if (name == "plans.list") {
+                    Console.Write(json.Serialize(new { rows = new[] { new { harness = "one", slug = "same", title = "One plan" }, new { harness = "two", slug = "same", title = "Two plan" } }, environment = environment })); return 0;
+                }
+                if (name == "operatorConversations.current") row = new { id = id, workspaceId = "isolated", subjectKind = "global", status = "active", harnessSlug = "fixture" };
                 else if (name == "operatorTurns.page" && Object.Equals(query["conversationId"], id)) {
                     var earlier = query.ContainsKey("beforeSeq"); var turns = new List<object>();
                     if (earlier && Convert.ToInt32(query["beforeSeq"]) != 10) return 62;
@@ -1384,7 +1449,7 @@ public static class NativeAccountsFixture {
         var request = json.Deserialize<Dictionary<string, object>>(new StreamReader(Console.OpenStandardInput(), utf8).ReadToEnd());
         var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
         var environment = json.DeserializeObject("{\"endpoint\":\"http://fixture.invalid:3170\",\"workspaceId\":\"isolated\",\"store\":{\"id\":\"fixture\"},\"agentChat\":{\"scope\":\"workspace:isolated\"}}");
-        if (new[] { "chat", "cards" }.Contains(Environment.GetEnvironmentVariable("WORKBENCH_CONTROL_PHASE"))) return Chat(args, request, json, path, environment);
+        if (new[] { "chat", "content", "cards" }.Contains(Environment.GetEnvironmentVariable("WORKBENCH_CONTROL_PHASE"))) return Chat(args, request, json, path, environment);
         if (Environment.GetEnvironmentVariable("WORKBENCH_CONTROL_PHASE") == "organizer") {
             if (args.Length != 1 || args[0] != "native-read") return 50;
             var name = (string)request["name"]; object organizerRows;
@@ -1428,7 +1493,7 @@ public static class NativeAccountsFixture {
     }
     [IO.File]::WriteAllText($fixtureFile, $fixture)
     Add-Type -Path @((Join-Path $SourceDirectory 'PuiReadBridge.cs'),
-        (Join-Path $SourceDirectory 'WorkbenchModel.cs'), (Join-Path $SourceDirectory 'WorkbenchHost.cs'), $fixtureFile) -ReferencedAssemblies $references
+        (Join-Path $SourceDirectory 'WorkbenchModel.cs'), (Join-Path $SourceDirectory 'WorkbenchContent.cs'), (Join-Path $SourceDirectory 'WorkbenchHost.cs'), $fixtureFile) -ReferencedAssemblies $references
     [WorkbenchNativeHostFixture]::Run($Phase)
 } catch { [Console]::Error.WriteLine($_.Exception.ToString()); throw }
 finally {
