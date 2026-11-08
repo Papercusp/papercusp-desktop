@@ -28,6 +28,7 @@ export class AudioDevices {
                 file = Gio.File.new_for_path(GLib.build_filenamev([directory, 'audio']));
                 if (kind === 'play') file.replace_contents(GLib.base64_decode(audio), null, false,
                     Gio.FileCreateFlags.PRIVATE, null);
+                else file.create(Gio.FileCreateFlags.PRIVATE, null).close(null);
                 pipeline = Gst.parse_launch(kind === 'record' ?
                     this.source + ' ! audioconvert ! audioresample ! audio/x-raw,format=S16LE,rate=16000,channels=1 ! wavenc ! filesink name=audiofile' :
                     'filesrc name=audiofile ! decodebin ! audioconvert ! audioresample ! ' + this.sink);
