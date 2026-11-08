@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$BridgeSource,
-    [ValidateSet('fixture', 'chat', 'operator', 'startup')][string]$Phase = 'fixture',
+    [ValidateSet('fixture', 'chat', 'cards', 'operator', 'startup')][string]$Phase = 'fixture',
     [string]$PuiExecutable,
     [string]$OperatorUrl,
     [string]$ExpectedWorkspace
@@ -54,13 +54,153 @@ try {
             version=($version -join "`n")} | ConvertTo-Json -Depth 8 -Compress
         return
     }
-    if ($Phase -eq 'chat') {
+    if ($Phase -in @('chat', 'cards')) {
         $nativeAssembly = Join-Path $temp 'native-chat.dll'
         Add-Type -Path @($BridgeSource, (Join-Path (Split-Path -Parent $BridgeSource) 'WorkbenchModel.cs')) -ReferencedAssemblies System.Web.Extensions,System.Core -OutputAssembly $nativeAssembly
         # Load from bytes so .NET Framework does not hold the emitted DLL open
         # past the fixture's finally cleanup. Keep the file for compiler refs.
         [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes($nativeAssembly))
     } else { Add-Type -Path $BridgeSource -ReferencedAssemblies System.Web.Extensions }
+    if ($Phase -eq 'cards') {
+        $pui = Join-Path $temp "cards ' literal.exe"
+        Add-Type -OutputAssembly $pui -OutputType ConsoleApplication -ReferencedAssemblies System.Web.Extensions -TypeDefinition @'
+using System;
+using System.IO;
+using System.Text;
+using System.Collections.Generic;
+using System.Web.Script.Serialization;
+public static class CardChild {
+    public static int Main(string[] argv) {
+        if(argv.Length!=1 || argv[0]!="native-cards") return 23;
+        var json=new JavaScriptSerializer(); var utf8=new UTF8Encoding(false,true);
+        var request=json.Deserialize<Dictionary<string,object>>(new StreamReader(Console.OpenStandardInput(),utf8).ReadToEnd());
+        Console.OutputEncoding=utf8;
+        if(Object.Equals(request["operation"],"subscribe")) {
+            Console.WriteLine(json.Serialize(new {environment=request["environment"], @event="reset", data=new {workspaceId="w"}}));
+            Console.Out.Flush();
+            Console.WriteLine(json.Serialize(new {environment=request["environment"], @event="snapshot", data=new {
+                workspaceId="w",runId="run",version=1,snapshot=new {openCards=new object[0]}}}));
+        } else {
+            Console.Write(json.Serialize(new {environment=request["environment"],rows=new[]{new {responded=true,
+                conversationId=request["conversationId"],correlationId=request["correlationId"]}}}));
+        }
+        return 0;
+    }
+}
+'@
+        Add-Type -ReferencedAssemblies @('System.dll','System.Core.dll','System.Web.Extensions.dll', $nativeAssembly) -TypeDefinition @'
+using System;
+using System.Linq;
+using System.Threading;
+using System.Collections.Generic;
+using System.Web.Script.Serialization;
+using Papercusp.Workbench;
+public static class NativeCardsFixture {
+    static readonly List<string> cases=new List<string>();
+    const string cid="c88bf103-8399-42ee-93ae-19e73114e3fd";
+    const string other="a88bf103-8399-42ee-93ae-19e73114e3fd";
+    static Dictionary<string,object> D(string json) { return new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(json); }
+    static Dictionary<string,object> E() { return D("{\"endpoint\":\"http://selected/path\",\"workspaceId\":\"w\",\"store\":{\"id\":\"s\"},\"agentChat\":{\"scope\":\"workspace:w\"}}"); }
+    static Dictionary<string,object> Row(string id="card",string kind="text") {
+        return new Dictionary<string,object>{{"correlationId",id},{"conversationId",cid},{"prompt","literal ' $() \u03bb\u4e2d"},
+            {"createdAt",1},{"presentation",new Dictionary<string,object>{{"kind",kind}}}};
+    }
+    static Dictionary<string,object> Frame(int version,object[] rows,string run="run") {
+        return D(new JavaScriptSerializer().Serialize(new {environment=E(),@event="snapshot",data=new {workspaceId="w",runId=run,version=version,snapshot=new {openCards=rows}}}));
+    }
+    static void Check(bool ok,string name) {if(!ok) throw new Exception(name);cases.Add(name);}
+    static void Refuse(Action action,string name) {var refused=false;try{action();}catch{refused=true;}Check(refused,name);}
+    static NativeCard Card(string kind) { return new NativeCard("run",Row("card",kind)); }
+    static Dictionary<string,object> Presentation(Dictionary<string,object> row) {return (Dictionary<string,object>)row["presentation"];}
+    public static string Run(string pui) {
+        var state=new NativeCardsState();var token=state.Begin(E(),cid);
+        var frames=new List<Dictionary<string,object>>();
+        PuiReadBridge.CardsAsync(pui,state.Subscription,frame=>frames.Add(frame),CancellationToken.None,5000).GetAwaiter().GetResult();
+        Check(frames.Count==2,"native card transport returns both canonical frames");
+        Check(state.Receive(token,frames[0]) && state.Connected,"canonical card reset opens the connection");
+        Check(state.Receive(token,frames[1]) && state.Cards.Count==0,"empty native card snapshot is observed");
+        Refuse(()=>PuiReadBridge.CardsAsync(pui,new Dictionary<string,object>(),frame=>{},CancellationToken.None),"card stream rejects unscoped input before launching helper");
+        Refuse(()=>PuiReadBridge.RespondToCardAsync(pui,state.Subscription,CancellationToken.None),"card response rejects subscribe operation");
+        var row=Row();var snapshot=Frame(2,new object[]{row});
+        Check(state.Receive(token,snapshot) && state.Cards.Count==1,"native state projects canonical card");
+        var card=state.Cards[0];
+        Check((string)card.Raw["prompt"]=="literal ' $() \u03bb\u4e2d","card prompt preserves Unicode and shell-looking text");
+        Check(!state.Receive(token,snapshot) && Object.ReferenceEquals(card,state.Cards[0]),"identical snapshot replay preserves card and draft identity");
+        Check(!state.Receive(token,Frame(1,new object[0])),"older snapshot cannot remove a newer question");
+        var changed=Row();changed["prompt"]="changed";
+        Refuse(()=>state.Receive(token,Frame(2,new object[]{changed})),"conflicting same-version snapshot is rejected");
+        Check(Object.ReferenceEquals(card,state.Cards[0]),"conflicting snapshot leaves prior card unchanged");
+        var foreign=Row();foreign["conversationId"]=other;
+        Refuse(()=>state.Receive(token,Frame(3,new object[]{foreign})),"foreign conversation card is rejected");
+        var wrong=Frame(3,new object[0]);((Dictionary<string,object>)wrong["environment"])["workspaceId"]="other";
+        Refuse(()=>state.Receive(token,wrong),"foreign backend frame cannot clear cards");
+        Refuse(()=>state.Receive(token,Frame(3,new object[]{row,row})),"duplicate card identity is rejected atomically");
+        Refuse(()=>state.Receive(token,Frame(1,new object[]{row},"second-run")),"one card cannot belong to multiple runs");
+        Refuse(()=>card.Answer(value:" "),"text question rejects empty required answer");
+        Refuse(()=>card.Answer(value:new string('\u03bb',17000)),"text answer uses UTF8 byte bound");
+        Check((string)card.Answer(value:"answer ' $() \u03bb")["value"]=="answer ' $() \u03bb","literal text answer stays data");
+        var request=state.Request(card,"submit",card.Answer(value:"answer"));
+        Check((string)request["correlationId"]=="card" && (string)request["conversationId"]==cid && state.Pending=="card","response binds exact card and conversation");
+        Refuse(()=>state.Request(card,"submit",card.Answer(value:"again")),"pending answer blocks duplicate submission");
+        var receipt=PuiReadBridge.RespondToCardAsync(pui,request,CancellationToken.None).GetAwaiter().GetResult();
+        var badReceipt=ChatReply.Copy(receipt);((Dictionary<string,object>)badReceipt["environment"])["endpoint"]="http://other";
+        Refuse(()=>state.Responded(token,"card",badReceipt),"foreign acknowledgement cannot remove a pending question");
+        Check(state.Pending=="card" && state.Cards.Count==1,"unacknowledged answer remains visible and pending");
+        Check(state.Responded(token,"card",receipt) && state.Cards.Count==0 && state.Pending==null,"only canonical exact acknowledgement removes question");
+        state.Receive(token,Frame(3,new object[]{row}));
+        Check(state.Cards.Count==0,"late pre-response snapshot cannot resurrect answered question");
+        token=state.Begin(E(),cid);state.Receive(token,Frame(1,new object[]{row}));card=state.Cards[0];
+        state.Failed(token,new Exception("disconnected"));
+        Refuse(()=>state.Request(card,"cancel"),"disconnected question cannot be answered without reconciliation");
+        Check(state.Cards.Count==1 && state.Error=="disconnected","disconnect preserves displayed question");
+        state.Receive(token,Frame(2,new object[0]));Check(state.Cards.Count==0 && state.Connected && state.Error==null,"new empty snapshot reconciles removed question");
+        var previous=token;token=state.Begin(E(),other);
+        Check(!state.Receive(previous,snapshot) && state.Cards.Count==0,"late A snapshot cannot enter B");
+        Check(!state.Responded(previous,"card",receipt),"late A response cannot affect B");
+        var choices=Row("choices","radio");Presentation(choices)["options"]=new[]{new{id="a",label="same"},new{id="b",label="same"}};
+        var radio=new NativeCard("run",choices);
+        Check((string)((string[])radio.Answer(new[]{"b"})["picks"])[0]=="b","same-label options preserve canonical option identity");
+        Refuse(()=>radio.Answer(new[]{"a","b"}),"radio rejects multiple answers");
+        Refuse(()=>radio.Answer(new[]{"foreign"}),"choice rejects unknown option identity");
+        Refuse(()=>radio.Answer(new string[0]),"choice enforces required answer");
+        Presentation(choices)["kind"]="checkbox";var check=new NativeCard("run",choices);
+        Check(((string[])check.Answer(new[]{"a","b"})["picks"]).Length==2,"checkbox accepts distinct available answers");
+        Refuse(()=>check.Answer(new[]{"a","a"}),"checkbox rejects duplicate picks");
+        Presentation(choices)["options"]="[{\"id\":\"x\",\"label\":\"encoded\"}]";
+        Check(new NativeCard("run",choices).Options.Count==1,"historical JSON-string options reuse canonical decoder contract");
+        Presentation(choices)["options"]=new[]{new{id="a",label="x"},new{id="a",label="y"}};
+        Refuse(()=>new NativeCard("run",choices),"duplicate option identities are rejected");
+        Refuse(()=>Card("date").Answer(value:"2026-02-30"),"date refuses invalid calendar day");
+        Check((string)Card("date").Answer(value:"2028-02-29")["value"]=="2028-02-29","date accepts valid leap day");
+        var dateRow=Row("date","date");Presentation(dateRow)["min"]="2027-01-01";
+        Refuse(()=>new NativeCard("run",dateRow).Answer(value:"2026-12-31"),"date enforces displayed bound");
+        var sliderRow=Row("slider","slider");var p=Presentation(sliderRow);p["min"]=1;p["max"]=5;p["step"]=2;
+        var slider=new NativeCard("run",sliderRow);
+        Check((double)slider.Answer(value:"3")["value"]==3,"slider accepts displayed step");
+        Refuse(()=>slider.Answer(value:"2"),"slider rejects off-step answer");
+        Refuse(()=>slider.Answer(value:"NaN"),"slider rejects non-finite value");
+        Refuse(()=>slider.Answer(value:"7"),"slider rejects out-of-range value");
+        var secure=Row("token-1");Presentation(secure)["link"]="/api/ui/cards/token-1/link";
+        Check(new NativeCard("run",secure).SecureLink(E())=="http://selected/api/ui/cards/token-1/link","secure link stays on selected operator origin");
+        Presentation(secure)["link"]="https://foreign/steal";
+        Check(new NativeCard("run",secure).SecureLink(E())==null,"foreign secure-link target remains inert");
+        var unsupported=Row("unsupported","unknown");
+        Refuse(()=>new NativeCard("run",unsupported).Answer(value:"yes"),"unsupported question cannot fabricate submit payload");
+        token=state.Begin(E(),cid);var expired=Row("expired");expired["timeoutMs"]=1;
+        state.Receive(token,Frame(1,new object[]{expired}));
+        Refuse(()=>state.Request(state.Cards[0],"cancel"),"expired question cannot send a response");
+        token=state.Begin(E(),cid);var deny=Row("deny");deny["allowDecline"]=false;state.Receive(token,Frame(1,new object[]{deny}));
+        Refuse(()=>state.Request(state.Cards[0],"decline"),"question decline restriction is honored");
+        Refuse(()=>state.Request(state.Cards[0],"submit",new Dictionary<string,object>()),"typed request revalidates fabricated empty payload");
+        var stale=state.Cards[0];state.Receive(token,Frame(2,new object[]{deny}));
+        Refuse(()=>state.Request(stale,"cancel"),"replaced card control cannot submit stale input");
+        return new JavaScriptSerializer().Serialize(new{ok=true,platform="windows",phase="cards",count=cases.Count,cases=cases.ToArray()});
+    }
+}
+'@
+        [NativeCardsFixture]::Run($pui)
+        return
+    }
     if ($Phase -eq 'chat') {
         $pui = Join-Path $temp "chat ' literal.exe"
         Add-Type -OutputAssembly $pui -OutputType ConsoleApplication -ReferencedAssemblies System.Web.Extensions -TypeDefinition @'

@@ -130,6 +130,33 @@ namespace Papercusp.Workbench
             return InvokeAsync(pui, "native-chat", request, cancellation, timeoutMilliseconds, receive);
         }
 
+        // Reuse the same framing, child custody and canonical PUI authority as
+        // chat. A subscription never grants permission to answer a question.
+        public static Task CardsAsync(string pui, Dictionary<string, object> request,
+            Action<Dictionary<string, object>> receive, CancellationToken cancellation,
+            int timeoutMilliseconds = 615000)
+        {
+            ValidateCards(request, "subscribe");
+            if (receive == null) throw new ArgumentNullException("receive");
+            return InvokeAsync(pui, "native-cards", request, cancellation, timeoutMilliseconds, receive);
+        }
+
+        public static Task<Dictionary<string, object>> RespondToCardAsync(string pui,
+            Dictionary<string, object> request, CancellationToken cancellation)
+        {
+            ValidateCards(request, "respond");
+            return InvokeAsync(pui, "native-cards", request, cancellation, 22000);
+        }
+
+        private static void ValidateCards(Dictionary<string, object> request, string operation)
+        {
+            object environment, selected, conversation;
+            if (request == null || !request.TryGetValue("environment", out environment) ||
+                !(environment is Dictionary<string, object>) || !request.TryGetValue("operation", out selected) ||
+                !Object.Equals(selected, operation) || !request.TryGetValue("conversationId", out conversation) ||
+                String.IsNullOrWhiteSpace(conversation as string)) throw new ArgumentException("Select a conversation and card operation");
+        }
+
         private static async Task<string> ReadFrames(Stream stream, Process process,
             Action<Dictionary<string, object>> receive)
         {

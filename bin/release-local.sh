@@ -650,6 +650,8 @@ TAG="$(desktop_release_tag "$VERSION" "$CHANNEL")"
 # half-configured managed cut fails closed; silently dropping one ID would turn
 # a restartable operation back into an unjournaled mutation.
 RELEASE_TASK_JOURNAL_ENABLED=0
+RELEASE_TASK_JOURNAL_NODE=""
+RELEASE_TASK_JOURNAL_LOADER=""
 RELEASE_TASK_BUILD_ACTION=""
 RELEASE_TASK_BUILD_REQUEST_ID=""
 RELEASE_TASK_BUILD_IDENTITY=""
@@ -695,6 +697,32 @@ release_task_journal_configure() {
   if [[ -z "${PAPERCUSP_RELEASE_TASK_JOURNAL_RUNNER:-}" && ! -f "$RELEASE_TASK_JOURNAL_CLI" ]]; then
     echo "ERROR: managed release journal adapter is missing at $RELEASE_TASK_JOURNAL_CLI." >&2
     return 2
+  fi
+  if [[ -n "${PAPERCUSP_RELEASE_TASK_JOURNAL_RUNNER:-}" ]]; then
+    command -v "$PAPERCUSP_RELEASE_TASK_JOURNAL_RUNNER" >/dev/null 2>&1 || {
+      echo "ERROR: managed release journal runner is not executable." >&2
+      return 2
+    }
+  else
+    # Resolve the installed loader once, without npx's package-download fallback.
+    # Import both the adapter and its lazy ledger dependency before any stage
+    # intent or seed work: finding the tsx executable alone does not prove that
+    # its transitive dependencies (for example get-tsconfig) can load.
+    RELEASE_TASK_JOURNAL_NODE="$(command -v node)" || return 2
+    if ! RELEASE_TASK_JOURNAL_LOADER="$(cd "$RELEASE_TASK_JOURNAL_ROOT" && \
+      "$RELEASE_TASK_JOURNAL_NODE" -p 'require.resolve("tsx")')"; then
+      echo "ERROR: managed release journal needs the locally installed tsx loader." >&2
+      return 2
+    fi
+    if ! (cd "$RELEASE_TASK_JOURNAL_ROOT" && "$RELEASE_TASK_JOURNAL_NODE" \
+      --import "$RELEASE_TASK_JOURNAL_LOADER" --input-type=module -e '
+        import { pathToFileURL } from "node:url";
+        await import(pathToFileURL(process.argv[2]).href);
+        await import("@papercusp/operator-core/lib/task-manager/store");
+      ' release-journal-loader-preflight "$RELEASE_TASK_JOURNAL_CLI"); then
+      echo "ERROR: managed release journal cannot load; refusing before release stages or seed work." >&2
+      return 2
+    fi
   fi
   RELEASE_TASK_JOURNAL_ENABLED=1
 }
@@ -746,7 +774,8 @@ release_task_journal_call() {
   if [[ -n "${PAPERCUSP_RELEASE_TASK_JOURNAL_RUNNER:-}" ]]; then
     "$PAPERCUSP_RELEASE_TASK_JOURNAL_RUNNER" "${argv[@]}"
   else
-    (cd "$RELEASE_TASK_JOURNAL_ROOT" && npx tsx "$RELEASE_TASK_JOURNAL_CLI" "${argv[@]}")
+    (cd "$RELEASE_TASK_JOURNAL_ROOT" && "$RELEASE_TASK_JOURNAL_NODE" \
+      --import "$RELEASE_TASK_JOURNAL_LOADER" "$RELEASE_TASK_JOURNAL_CLI" "${argv[@]}")
   fi
 }
 

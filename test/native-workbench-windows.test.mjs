@@ -139,6 +139,19 @@ test('Windows native Papercup transport and state preserve streaming, replay, dr
         assert.equal(new Set(result.cases).size, result.count);
     });
 
+test('Windows native cards validate typed answers and reconcile exact canonical acknowledgements',
+    {skip:process.platform !== 'win32', timeout:60000}, () => {
+        const run = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', resolve(root, 'test/fixtures/native-workbench-windows-bridge.ps1'),
+            '-BridgeSource', resolve(root, 'native/windows/PuiReadBridge.cs'), '-Phase', 'cards'],
+        {encoding:'utf8', timeout:55000, windowsHide:true});
+        assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
+        const result = JSON.parse(run.stdout.trim());
+        assert.equal(result.ok, true); assert.equal(result.phase, 'cards');
+        assert.ok(result.count >= 40);
+        assert.equal(new Set(result.cases).size, result.count);
+    });
+
 test('Windows native Papercup sidebar retains history, streaming, drafts, reconciliation and conversation isolation',
     {skip:process.platform !== 'win32', timeout:60000}, () => {
         const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',

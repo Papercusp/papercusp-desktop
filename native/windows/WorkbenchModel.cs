@@ -48,7 +48,7 @@ namespace Papercusp.Workbench
                 throw new InvalidOperationException("Invalid canonical sequence");
             return Convert.ToInt64(value);
         }
-        private static bool Equal(object a, object b)
+        public static bool Equal(object a, object b)
         {
             var left = a as Dictionary<string, object>; var right = b as Dictionary<string, object>;
             if (left != null && right != null) return left.Count == right.Count && left.All(pair => right.ContainsKey(pair.Key) && Equal(pair.Value, right[pair.Key]));
@@ -256,6 +256,163 @@ namespace Papercusp.Workbench
         }
         public void Fail(int generation, Exception error)
         { if (generation == Generation) { Loading = false; Error = error.Message; if (Reply != null) Reply.Disconnected(); } }
+    }
+
+    // Windows projection of GNOME NativeCard/NativeCardsState and the shared
+    // native-cards contract. The operator owns validation and approval.
+    public sealed class NativeCard
+    {
+        public readonly string RunId, Id, Kind;
+        public readonly Dictionary<string, object> Raw, Presentation;
+        public readonly List<Dictionary<string, object>> Options;
+        public NativeCard(string runId, Dictionary<string, object> raw)
+        {
+            RunId = runId; Raw = ChatReply.Copy(raw); Id = PanelState.Text(Raw, "correlationId");
+            Presentation = ChatReply.Value(Raw, "presentation") as Dictionary<string, object> ?? new Dictionary<string, object>();
+            Kind = PanelState.Text(Presentation, "kind"); Options = new List<Dictionary<string, object>>();
+            var encoded = ChatReply.Value(Presentation, "options");
+            if (encoded is string) encoded = new JavaScriptSerializer().DeserializeObject((string)encoded);
+            var options = encoded as IList;
+            if (options != null) foreach (var option in options) Options.Add(ChatReply.Object(option));
+            if (new[] { "radio", "checkbox", "select" }.Contains(Kind) && (Options.Count == 0 ||
+                Options.Any(option => PanelState.Text(option, "id") == "" || PanelState.Text(option, "label") == "") ||
+                Options.Select(option => PanelState.Text(option, "id")).Distinct().Count() != Options.Count))
+                throw new InvalidOperationException("Card choices are incomplete");
+        }
+        public bool CanSubmit { get { return new[] { "radio", "checkbox", "select", "text", "date", "slider" }.Contains(Kind); } }
+        public bool Expired { get {
+            var timeout = ChatReply.Value(Raw, "timeoutMs");
+            if (timeout == null) return false;
+            var milliseconds = Convert.ToDouble(timeout, System.Globalization.CultureInfo.InvariantCulture);
+            return !Double.IsNaN(milliseconds) && !Double.IsInfinity(milliseconds) && milliseconds > 0 &&
+                (DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds >= ChatReply.Number(Raw["createdAt"]) + milliseconds;
+        } }
+        public string SecureLink(Dictionary<string, object> environment)
+        {
+            Uri origin;
+            if (!Regex.IsMatch(Id, @"\A[A-Za-z0-9.\-]+\z") || !AccountState.SameEnvironment(environment, environment) ||
+                !Uri.TryCreate(PanelState.Text(environment, "endpoint"), UriKind.Absolute, out origin) ||
+                !(origin.Scheme == "http" || origin.Scheme == "https") || origin.UserInfo != "") return null;
+            var path = "/api/ui/cards/" + Uri.EscapeDataString(Id) + "/link";
+            return PanelState.Text(Presentation, "link") == path ? origin.GetLeftPart(UriPartial.Authority) + path : null;
+        }
+        public Dictionary<string, object> Answer(IEnumerable<string> selected = null, string value = "")
+        {
+            value = value ?? ""; var picks = (selected ?? new string[0]).ToArray();
+            if (new[] { "radio", "checkbox", "select" }.Contains(Kind))
+            {
+                var minimum = Object.Equals(ChatReply.Value(Presentation, "allowEmpty"), true) ? 0 : 1;
+                if (picks.Length < minimum || picks.Length > (Kind == "checkbox" ? Options.Count : 1) ||
+                    picks.Distinct().Count() != picks.Length || picks.Any(id => !Options.Any(option => PanelState.Text(option, "id") == id)))
+                    throw new InvalidOperationException("Choose the available answers");
+                return new Dictionary<string, object> { { "picks", picks } };
+            }
+            if (Kind == "text")
+            {
+                if ((!Object.Equals(ChatReply.Value(Presentation, "allowEmpty"), true) && String.IsNullOrWhiteSpace(value)) ||
+                    Encoding.UTF8.GetByteCount(value) > 32768) throw new InvalidOperationException("Enter a bounded answer");
+                return new Dictionary<string, object> { { "value", value } };
+            }
+            if (Kind == "date")
+            {
+                DateTime date; var minimum = PanelState.Text(Presentation, "min"); var maximum = PanelState.Text(Presentation, "max");
+                if (!DateTime.TryParseExact(value, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out date) ||
+                    minimum != "" && String.CompareOrdinal(value, minimum) < 0 || maximum != "" && String.CompareOrdinal(value, maximum) > 0)
+                    throw new InvalidOperationException("Choose a valid date in the displayed range");
+                return new Dictionary<string, object> { { "value", value } };
+            }
+            if (Kind == "slider")
+            {
+                double number; var minimumValue = ChatReply.Value(Presentation, "min"); var maximumValue = ChatReply.Value(Presentation, "max");
+                if (!(minimumValue is ValueType) || !(maximumValue is ValueType) || minimumValue is bool || maximumValue is bool)
+                    throw new InvalidOperationException("The question range is unavailable");
+                var minimum = Convert.ToDouble(minimumValue); var maximum = Convert.ToDouble(maximumValue);
+                var step = Convert.ToDouble(ChatReply.Value(Presentation, "step") ?? 1);
+                if (!Double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out number) ||
+                    Double.IsNaN(number) || Double.IsInfinity(number) || Double.IsNaN(minimum) || Double.IsInfinity(minimum) ||
+                    Double.IsNaN(maximum) || Double.IsInfinity(maximum) || Double.IsNaN(step) || Double.IsInfinity(step) ||
+                    step <= 0 || number < minimum || number > maximum || Math.Abs((number - minimum) / step - Math.Round((number - minimum) / step)) > 0.000001)
+                    throw new InvalidOperationException("Choose a value on the displayed range and steps");
+                return new Dictionary<string, object> { { "value", number } };
+            }
+            throw new InvalidOperationException("This question requires another supported surface");
+        }
+    }
+
+    public sealed class NativeCardsState
+    {
+        public int Generation;
+        public Dictionary<string, object> Environment;
+        public string ConversationId = "", Error, Pending;
+        public bool Connected;
+        private readonly Dictionary<string, List<NativeCard>> runs = new Dictionary<string, List<NativeCard>>();
+        private readonly Dictionary<string, Dictionary<string, object>> snapshots = new Dictionary<string, Dictionary<string, object>>();
+        private readonly HashSet<string> acknowledged = new HashSet<string>();
+        public List<NativeCard> Cards { get { return runs.Values.SelectMany(cards => cards).Where(card => !acknowledged.Contains(card.Id))
+            .OrderBy(card => ChatReply.Number(card.Raw["createdAt"])).ThenBy(card => card.Id, StringComparer.Ordinal).ToList(); } }
+        public int Begin(Dictionary<string, object> environment, string conversationId)
+        {
+            ++Generation; Environment = environment == null ? null : ChatReply.Copy(environment); ConversationId = conversationId ?? "";
+            Connected = false; Error = null; Pending = null; runs.Clear(); snapshots.Clear(); acknowledged.Clear(); return Generation;
+        }
+        public Dictionary<string, object> Subscription { get { return new Dictionary<string, object> {
+            { "environment", Environment }, { "conversationId", ConversationId }, { "operation", "subscribe" } }; } }
+        public bool Receive(int token, Dictionary<string, object> frame)
+        {
+            if (token != Generation) return false;
+            var data = ChatReply.Object(ChatReply.Value(frame, "data"));
+            if (ConversationId == "" || !AccountState.SameEnvironment(Environment, ChatReply.Value(frame, "environment") as Dictionary<string, object>) ||
+                PanelState.Text(data, "workspaceId") != PanelState.Text(Environment, "workspaceId")) throw new InvalidOperationException("The card environment changed");
+            if (PanelState.Text(frame, "event") == "reset") { runs.Clear(); snapshots.Clear(); Connected = true; Error = null; return true; }
+            var run = PanelState.Text(data, "runId"); var snapshot = ChatReply.Object(ChatReply.Value(data, "snapshot"));
+            var rows = ChatReply.Value(snapshot, "openCards") as IList; var version = ChatReply.Number(ChatReply.Value(data, "version"));
+            if (PanelState.Text(frame, "event") != "snapshot" || run == "" || rows == null) throw new InvalidOperationException("The card snapshot is unavailable");
+            Dictionary<string, object> before;
+            if (snapshots.TryGetValue(run, out before) && ChatReply.Number(before["version"]) >= version)
+            {
+                if (ChatReply.Number(before["version"]) == version && !ChatReply.Equal(before, data)) throw new InvalidOperationException("Conflicting card snapshot");
+                return false;
+            }
+            var ids = new HashSet<string>(); var next = new List<NativeCard>();
+            foreach (var item in rows)
+            {
+                var row = ChatReply.Object(item); var id = PanelState.Text(row, "correlationId");
+                if (PanelState.Text(row, "conversationId") != ConversationId || id == "" || !ids.Add(id) || PanelState.Text(row, "prompt") == "")
+                    throw new InvalidOperationException("A card has an invalid or foreign identity");
+                ChatReply.Number(ChatReply.Value(row, "createdAt")); next.Add(new NativeCard(run, row));
+            }
+            if (runs.Any(pair => pair.Key != run && pair.Value.Any(card => ids.Contains(card.Id)))) throw new InvalidOperationException("A card belongs to multiple runs");
+            runs[run] = next; snapshots[run] = ChatReply.Copy(data); Connected = true; Error = null; return true;
+        }
+        public Dictionary<string, object> Request(NativeCard card, string action, Dictionary<string, object> payload = null)
+        {
+            if (!Connected || Pending != null || !Cards.Contains(card) || card.Expired || !new[] { "submit", "decline", "cancel" }.Contains(action) ||
+                action == "submit" && !card.CanSubmit || action == "decline" && Object.Equals(ChatReply.Value(card.Raw, "allowDecline"), false))
+                throw new InvalidOperationException("This card changed; reconnect before answering");
+            // Revalidate the typed value here as well as in the control: a
+            // caller cannot bypass choice/range checks with a fabricated body.
+            if (action == "submit")
+            {
+                if (payload == null) throw new InvalidOperationException("Choose an answer first");
+                var picks = ChatReply.Value(payload, "picks") as IList;
+                payload = card.Answer(picks == null ? null : picks.Cast<object>().Select(value => value as string),
+                    Convert.ToString(ChatReply.Value(payload, "value"), System.Globalization.CultureInfo.InvariantCulture));
+            }
+            var request = Subscription; request["operation"] = "respond"; request["correlationId"] = card.Id; request["action"] = action;
+            if (action == "submit") request["payload"] = payload; Pending = card.Id; Error = null; return request;
+        }
+        public bool Responded(int token, string id, Dictionary<string, object> receipt)
+        {
+            if (token != Generation) return false;
+            var row = AccountState.One(receipt);
+            if (Pending != id || !AccountState.SameEnvironment(Environment, ChatReply.Value(receipt, "environment") as Dictionary<string, object>) ||
+                !Object.Equals(ChatReply.Value(row, "responded"), true) || PanelState.Text(row, "conversationId") != ConversationId || PanelState.Text(row, "correlationId") != id)
+                throw new InvalidOperationException("The card response needs reconciliation");
+            acknowledged.Add(id); Pending = null; Error = null; return true;
+        }
+        public void Failed(int token, Exception error)
+        { if (token == Generation) { Pending = null; Connected = false; Error = error.Message; } }
     }
 
     public sealed class PanelResult
