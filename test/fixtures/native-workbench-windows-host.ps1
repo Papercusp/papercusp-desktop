@@ -1100,7 +1100,8 @@ public static class WorkbenchNativeHostFixture
     {
         public bool Denied, Playing, Cancelled;
         public readonly TaskCompletionSource<byte[]> Recording = new TaskCompletionSource<byte[]>();
-        private readonly TaskCompletionSource<bool> playback = new TaskCompletionSource<bool>();
+        private TaskCompletionSource<bool> playback;
+        public int PlayCount;
         public static byte[] Wave()
         {
             using (var stream = new System.IO.MemoryStream())
@@ -1119,7 +1120,9 @@ public static class WorkbenchNativeHostFixture
         }
         public override void FinishRecording() { Recording.TrySetResult(Wave()); }
         public override Task PlayAsync(byte[] bytes, CancellationToken token)
-        { Playing = true; token.Register(() => { Cancelled = true; playback.TrySetCanceled(); }); return playback.Task; }
+        { Playing = true; ++PlayCount; playback = new TaskCompletionSource<bool>(); var pending = playback;
+            token.Register(() => { Cancelled = true; pending.TrySetCanceled(); }); return pending.Task; }
+        public void FinishPlayback() { playback.TrySetResult(true); }
     }
     private static void VoiceNative()
     {
@@ -1197,6 +1200,32 @@ public static class WorkbenchNativeHostFixture
             click("stop voice"); Check(device.Cancelled && chat.VoiceId==null,"stop spoken reply cancels local playback");
             var read=Json(System.IO.File.ReadAllLines(path+".voice-writes").Last());
             Check(PanelState.Text(read,"operation")=="speak" && PanelState.Text(read,"text")=="public spoken reply","spoken reply uses existing canonical TTS route");
+            Check(NativeVoice.ChunkNumber(read["chunkIndex"])==0,"native playback explicitly requests the canonical first chunk");
+            var longText=String.Concat(Enumerable.Repeat("full reply \u03bb ",700));
+            chat.Turns.Add(new Dictionary<string,object>{{"role","assistant"},{"text",longText}});
+            panel.GetType().GetMethod("RenderChat",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(panel,null);
+            var before=System.IO.File.ReadAllLines(path+".voice-writes").Length;
+            click("read reply"); Until(()=>device.PlayCount==1);
+            Check(System.IO.File.ReadAllLines(path+".voice-writes").Length==before+1,"no second synthesis while first native playback is pending");
+            device.FinishPlayback(); Until(()=>device.PlayCount==2);
+            Check(System.IO.File.ReadAllLines(path+".voice-writes").Length==before+2,"second playback precedes third synthesis");
+            device.FinishPlayback(); Until(()=>device.PlayCount==3); device.FinishPlayback(); Until(()=>chat.VoiceId==null);
+            var chunks=System.IO.File.ReadAllLines(path+".voice-writes").Skip(before).Select(line=>Json(line)).ToArray();
+            Check(chunks.Length==3 && chunks.Select(c=>NativeVoice.ChunkNumber(c["chunkIndex"])).SequenceEqual(new[]{0,1,2}),"full native reading consumes every chunk once in order");
+            Check(chunks.All(c=>PanelState.Text(c,"text")==longText) && chunks.Select(c=>PanelState.Text(c,"requestId")).Distinct().Count()==1,"full source and exact request identity survive every chunk");
+            System.IO.File.WriteAllText(path+".voice-deny-chunk","deny"); before=System.IO.File.ReadAllLines(path+".voice-writes").Length;
+            click("read reply"); Until(()=>device.PlayCount==1); device.FinishPlayback(); Until(()=>chat.VoiceId==null);
+            Check(notice.Text.Contains("voice denied") && device.PlayCount==1 && System.IO.File.ReadAllLines(path+".voice-writes").Length==before+2,"later provider failure stops playback without requesting later chunks");
+            System.IO.File.Delete(path+".voice-deny-chunk");
+            before=System.IO.File.ReadAllLines(path+".voice-writes").Length;
+            click("read reply"); Until(()=>device.PlayCount==1); click("stop voice"); Until(()=>device.Cancelled);
+            Check(chat.VoiceId==null && System.IO.File.ReadAllLines(path+".voice-writes").Length==before+1,"cancellation stops a full reply before the next provider request");
+            var indexed=ChatReply.Copy(read); indexed["chunkIndex"]=0;
+            var speech=new Dictionary<string,object>{{"conversationId",indexed["conversationId"]},{"requestId",indexed["requestId"]},{"operation","speak"},{"audioBase64","AAEC"},{"chunkIndex",0},{"totalChunks",3}};
+            foreach(var badTotal in new object[]{0,"3",32769,2.5}) {
+                speech["totalChunks"]=badTotal;
+                Refuses(()=>NativeVoice.Result(indexed,new Dictionary<string,object>{{"environment",environment},{"rows",new object[]{speech}}}),"native reading rejects malformed chunk total #"+cases.Count);
+            }
         }
     }
     private static void ChatNative()
@@ -1430,11 +1459,11 @@ public static class NativeAccountsFixture {
         if (args.Length == 1 && args[0] == "native-cards") return Cards(args, request, json, path, environment);
         if (args.Length == 1 && args[0] == "native-voice") {
             File.AppendAllText(path+".voice-writes",json.Serialize(request)+"\n");
-            if(File.Exists(path+".voice-deny")) {Console.Error.Write("isolated voice denied");return 7;}
+            if(File.Exists(path+".voice-deny") || (File.Exists(path+".voice-deny-chunk") && request.ContainsKey("chunkIndex") && Convert.ToInt32(request["chunkIndex"])==1)) {Console.Error.Write("isolated voice denied");return 7;}
             if(json.Serialize(request["environment"])!=json.Serialize(environment))return 71;
             var row=new Dictionary<string,object>{{"conversationId",File.Exists(path+".voice-wrong")?ChatB:request["conversationId"]},{"requestId",request["requestId"]},{"operation",request["operation"]}};
             if(Object.Equals(request["operation"],"transcribe"))row["text"]="voice transcript \u03bb";
-            else row["audioBase64"]="SUQz";
+            else {row["audioBase64"]="SUQz"; if(request.ContainsKey("chunkIndex")){row["chunkIndex"]=request["chunkIndex"];row["totalChunks"]=3;}}
             var response=json.Serialize(new{environment=environment,rows=new[]{row}});
             File.WriteAllText(path+".voice-response",response,new UTF8Encoding(false));
             var progress=Environment.GetEnvironmentVariable("PAPERCUSP_NATIVE_FIXTURE_PROGRESS");
