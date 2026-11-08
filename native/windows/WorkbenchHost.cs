@@ -271,6 +271,8 @@ namespace Papercusp.Workbench
             private readonly StackPanel chatHistory;
             private readonly TextBox chatCompose;
             private readonly TextBlock chatScope;
+            private readonly ComboBox chatReference;
+            private readonly TextBlock chatReferenceStatus;
             private readonly Button chatSend, chatEarlier, chatReconnect, chatCancel;
             private CancellationTokenSource chatStream;
             private bool renderingChat;
@@ -379,6 +381,15 @@ namespace Papercusp.Workbench
                     chat = new ChatState();
                     chatScope = new TextBlock { TextWrapping = TextWrapping.Wrap };
                     AutomationProperties.SetName(chatScope, "Papercup conversation environment"); controls.Children.Add(chatScope);
+                    chatReference = new ComboBox();
+                    AutomationProperties.SetName(chatReference, "Papercup work link context"); controls.Children.Add(chatReference);
+                    chatReferenceStatus = new TextBlock { TextWrapping = TextWrapping.Wrap }; controls.Children.Add(chatReferenceStatus);
+                    chatReference.SelectionChanged += (s, e) =>
+                    {
+                        var item = chatReference.SelectedItem as ComboBoxItem;
+                        if (renderingChat || item == null) return;
+                        chat.SelectReferencePlan((string)item.Tag); RenderChat();
+                    };
                     var chatBody = new DockPanel(); body.Children.Add(chatBody);
                     cards = new NativeCardsState();
                     var questions = new StackPanel(); DockPanel.SetDock(questions, Dock.Top); chatBody.Children.Add(questions);
@@ -593,6 +604,15 @@ namespace Papercusp.Workbench
                     var page = await PuiReadBridge.ReadAsync(pui, "operatorTurns.page",
                         new Dictionary<string, object> { { "conversationId", id }, { "limit", 200 } }, token, 22000, environment);
                     if (!token.IsCancellationRequested && State.Visible) chat.Settle(generation, environment, id, page);
+                    if (!token.IsCancellationRequested && State.Visible && chat.Ready)
+                    {
+                        try
+                        {
+                            var plans = await PuiReadBridge.ReadAsync(pui, "plans.list", new Dictionary<string, object> { { "q", "" }, { "limit", 200 } }, token, 22000, environment);
+                            chat.SettleReferencePlans(generation, environment, plans);
+                        }
+                        catch (Exception error) { if (!token.IsCancellationRequested) chat.SettleReferencePlans(generation, environment, null, error); }
+                    }
                 }
                 catch (Exception error) { if (!token.IsCancellationRequested) chat.Fail(generation, error); }
                 finally { if (generation == chat.Generation && State.Visible) { RenderChat(); if (chat.Ready) ConnectCards(); if (IsActive) chatCompose.Focus(); } }
@@ -869,10 +889,15 @@ namespace Papercusp.Workbench
                     status.Text = chat.Error != null ? "Unavailable · " + chat.Error : chat.Loading ? "Loading conversation…" :
                         chat.Reply != null ? "Reply · " + chat.Reply.Phase : chat.Ready ? "Conversation ready" : "Conversation unavailable";
                     chatHistory.Children.Clear();
+                    var contexts = new[] { new ComboBoxItem { Content = "Work links: no fallback plan", Tag = "" } }.Concat(
+                        chat.ReferencePlans.Select(plan => new ComboBoxItem { Content = plan.Title + " · " + PanelState.Text(plan.Row, "harness"), Tag = plan.Key })).ToArray();
+                    chatReference.ItemsSource = contexts; chatReference.SelectedItem = contexts.FirstOrDefault(item => (string)item.Tag == chat.ReferenceKey);
+                    chatReference.IsEnabled = chat.Ready;
+                    chatReferenceStatus.Text = chat.ReferenceError ?? "Work links use each message's plan or your selected fallback context.";
                     foreach (var turn in chat.Turns)
                     {
                         InboxText(chatHistory, PanelState.Text(turn, "role"));
-                        ChatText(PanelState.Text(turn, "text"));
+                        ChatText(PanelState.Text(turn, "text"), PanelState.Text(turn, "planSlug"));
                     }
                     if (chat.Reply != null)
                     {
@@ -883,11 +908,18 @@ namespace Papercusp.Workbench
                 }
                 finally { renderingChat = false; }
             }
-            private void ChatText(string text)
+            private void ChatText(string text, string plan = "")
             {
                 if (text == "") return;
-                var message = new TextBox { Text = text, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
-                    BorderThickness = new Thickness(0), Background = Brushes.Transparent, Margin = new Thickness(0, 4, 0, 12) };
+                var generation = chat.Generation; var environment = chat.Environment; var conversation = chat.ConversationId;
+                var linked = chat.Ready ? NativeWorkRefs.Markdown(text, environment, chat.ReferenceHarness, chat.ReferencePlan(plan)) : text;
+                var message = NativeChatContent.View(linked, uri =>
+                {
+                    // A retained document cannot route a click after its scope
+                    // changed, even if a late routed event reaches the callback.
+                    if (State.Visible && chat.Ready && generation == chat.Generation && conversation == chat.ConversationId &&
+                        AccountState.SameEnvironment(environment, chat.Environment)) LaunchChatUri(uri);
+                });
                 AutomationProperties.SetName(message, "Papercup message text"); chatHistory.Children.Add(message);
             }
             private void RenderOrganizer()

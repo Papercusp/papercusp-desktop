@@ -21,7 +21,7 @@ if ($Action -in @('Install', 'Enable')) {
     $settings = Save-WorkbenchSettings $context $settings $PSCommandPath -PreserveExisting:($Action -eq 'Install')
     # Refresh the resident source on an upgrade. Explicitly disabled accounts
     # remain disabled; installing never flips their choice back on.
-    $bundleHash = ((@('PuiReadBridge.cs', 'WorkbenchModel.cs', 'WorkbenchHost.cs', 'WorkbenchLifecycle.psm1', 'workbench.ps1') |
+    $bundleHash = ((@('PuiReadBridge.cs', 'WorkbenchModel.cs', 'WorkbenchContent.cs', 'WorkbenchHost.cs', 'WorkbenchLifecycle.psm1', 'workbench.ps1', 'WorkbenchDependencies.ps1', 'dependencies.json') |
         ForEach-Object { (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot $_) -Algorithm SHA256).Hash }) -join ':')
     $marker = Join-Path $context.Directory 'workbench-windows.sha256'
     $unchanged = [IO.File]::Exists($marker) -and [IO.File]::ReadAllText($marker) -eq $bundleHash
@@ -55,11 +55,12 @@ $settingsEvent = [Threading.EventWaitHandle]::new($false, [Threading.EventResetM
 $readyEvent = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $context.Identity + '.ready')
 try {
     Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml, System.Web.Extensions
+    . (Join-Path $PSScriptRoot 'WorkbenchDependencies.ps1')
     $references = @('System.dll','System.Core.dll','System.Xaml.dll','System.Web.Extensions.dll',
         [Windows.Window].Assembly.Location, [Windows.Media.Brushes].Assembly.Location,
-        [Windows.Threading.Dispatcher].Assembly.Location, [Windows.Automation.AutomationProperties].Assembly.Location)
+        [Windows.Threading.Dispatcher].Assembly.Location, [Windows.Automation.AutomationProperties].Assembly.Location) + @(Import-WorkbenchDependencies $PSScriptRoot)
     Add-Type -Path @((Join-Path $PSScriptRoot 'PuiReadBridge.cs'),
-        (Join-Path $PSScriptRoot 'WorkbenchModel.cs'), (Join-Path $PSScriptRoot 'WorkbenchHost.cs')) -ReferencedAssemblies $references
+        (Join-Path $PSScriptRoot 'WorkbenchModel.cs'), (Join-Path $PSScriptRoot 'WorkbenchContent.cs'), (Join-Path $PSScriptRoot 'WorkbenchHost.cs')) -ReferencedAssemblies $references
     $application = [Windows.Application]::new()
     $application.ShutdownMode = [Windows.ShutdownMode]::OnExplicitShutdown
     $hostInstance = [Papercusp.Workbench.WorkbenchHost]::new($settings.pui)

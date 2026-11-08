@@ -108,6 +108,16 @@ Source: "{#BuildRoot}\target\release\papercusp-desktop.exe"; DestDir: "{app}"; F
 ; Explicit files make ISCC reject an incomplete staging directory.
 Source: "{#BuildRoot}\resources\workbench-windows\PuiReadBridge.cs"; DestDir: "{app}\resources\workbench-windows"; Flags: ignoreversion
 Source: "{#BuildRoot}\resources\workbench-windows\WorkbenchModel.cs"; DestDir: "{app}\resources\workbench-windows"; Flags: ignoreversion
+Source: "{#BuildRoot}\resources\workbench-windows\WorkbenchContent.cs"; DestDir: "{app}\resources\workbench-windows"; Flags: ignoreversion
+Source: "{#BuildRoot}\resources\workbench-windows\WorkbenchDependencies.ps1"; DestDir: "{app}\resources\workbench-windows"; Flags: ignoreversion
+Source: "{#BuildRoot}\resources\workbench-windows\dependencies.json"; DestDir: "{app}\resources\workbench-windows"; Flags: ignoreversion
+Source: "{#BuildRoot}\resources\workbench-windows\lib\Markdig.dll"; DestDir: "{app}\resources\workbench-windows\lib"; Flags: ignoreversion
+Source: "{#BuildRoot}\resources\workbench-windows\lib\System.Memory.dll"; DestDir: "{app}\resources\workbench-windows\lib"; Flags: ignoreversion
+Source: "{#BuildRoot}\resources\workbench-windows\lib\System.Buffers.dll"; DestDir: "{app}\resources\workbench-windows\lib"; Flags: ignoreversion
+Source: "{#BuildRoot}\resources\workbench-windows\lib\System.Numerics.Vectors.dll"; DestDir: "{app}\resources\workbench-windows\lib"; Flags: ignoreversion
+Source: "{#BuildRoot}\resources\workbench-windows\lib\System.Runtime.CompilerServices.Unsafe.dll"; DestDir: "{app}\resources\workbench-windows\lib"; Flags: ignoreversion
+Source: "{#BuildRoot}\resources\workbench-windows\lib\Markdig.LICENSE.txt"; DestDir: "{app}\resources\workbench-windows\lib"; Flags: ignoreversion
+Source: "{#BuildRoot}\resources\workbench-windows\lib\Microsoft.LICENSE.txt"; DestDir: "{app}\resources\workbench-windows\lib"; Flags: ignoreversion
 Source: "{#BuildRoot}\resources\workbench-windows\WorkbenchHost.cs"; DestDir: "{app}\resources\workbench-windows"; Flags: ignoreversion
 Source: "{#BuildRoot}\resources\workbench-windows\WorkbenchLifecycle.psm1"; DestDir: "{app}\resources\workbench-windows"; Flags: ignoreversion
 Source: "{#BuildRoot}\resources\workbench-windows\workbench.ps1"; DestDir: "{app}\resources\workbench-windows"; Flags: ignoreversion

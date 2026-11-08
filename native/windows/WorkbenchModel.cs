@@ -185,6 +185,10 @@ namespace Papercusp.Workbench
         public Dictionary<string, object> Environment, Conversation;
         public List<Dictionary<string, object>> Turns = new List<Dictionary<string, object>>();
         public ChatReply Reply;
+        public List<PanelResult> ReferencePlans = new List<PanelResult>();
+        public string ReferenceKey = "", ReferenceError;
+        private Dictionary<string, object> referenceEnvironment;
+        private string referenceConversation = "";
         private readonly Dictionary<string, string> drafts = new Dictionary<string, string>();
         public string ConversationId { get { return Conversation == null ? "" : PanelState.Text(Conversation, "id"); } }
         public bool Ready { get { return Loaded && ConversationId != "" && AccountState.SameEnvironment(Environment, Environment); } }
@@ -195,7 +199,7 @@ namespace Papercusp.Workbench
         { get { string text; return DraftKey != null && drafts.TryGetValue(DraftKey, out text) ? text : ""; }
           set { var key = DraftKey; if (key != null) drafts[key] = value ?? ""; } }
         public int Begin()
-        { ++Generation; Environment = null; Conversation = null; Turns.Clear(); Loading = true; Loaded = false; HasMoreEarlier = false; Reply = null; Error = null; return Generation; }
+        { ++Generation; Environment = null; Conversation = null; Turns.Clear(); ReferencePlans.Clear(); ReferenceError = null; Loading = true; Loaded = false; HasMoreEarlier = false; Reply = null; Error = null; return Generation; }
         private static Dictionary<string, object> Row(Dictionary<string, object> payload, Dictionary<string, object> environment)
         {
             if (!AccountState.SameEnvironment(environment, ChatReply.Value(payload, "environment") as Dictionary<string, object>))
@@ -209,8 +213,37 @@ namespace Papercusp.Workbench
             if (!ChatReply.Uuid(PanelState.Text(row, "id")) || PanelState.Text(row, "workspaceId") != PanelState.Text(environment, "workspaceId") ||
                 PanelState.Text(row, "subjectKind") != "global" || PanelState.Text(row, "status") != "active")
                 throw new InvalidOperationException("The active Papercup conversation is unavailable");
+            if (!AccountState.SameEnvironment(referenceEnvironment, environment) || referenceConversation != PanelState.Text(row, "id")) ReferenceKey = "";
             Environment = ChatReply.Copy(environment); Conversation = ChatReply.Copy(row); return true;
         }
+        public bool SettleReferencePlans(int generation, Dictionary<string, object> environment, Dictionary<string, object> payload, Exception failure = null)
+        {
+            if (generation != Generation || !Ready || !AccountState.SameEnvironment(Environment, environment)) return false;
+            try
+            {
+                if (failure != null) throw failure;
+                if (payload == null || Object.Equals(ChatReply.Value(payload, "ok"), false) || Object.Equals(ChatReply.Value(payload, "partial"), true) ||
+                    !String.IsNullOrEmpty(PanelState.Text(payload, "error")) || !AccountState.SameEnvironment(environment, ChatReply.Value(payload, "environment") as Dictionary<string, object>))
+                    throw new InvalidOperationException("Work link contexts are unavailable or incomplete");
+                var rows = ChatReply.Value(payload, "rows") as IList;
+                if (rows == null) throw new InvalidOperationException("Work link contexts are missing");
+                var plans = rows.Cast<object>().Select(row => PanelState.Result("plans", ChatReply.Object(row))).ToList();
+                if (plans.Select(plan => plan.Key).Distinct().Count() != plans.Count) throw new InvalidOperationException("Work link contexts contain duplicate plans");
+                ReferencePlans = plans; ReferenceError = null;
+                if (!plans.Any(plan => plan.Key == ReferenceKey)) ReferenceKey = "";
+            }
+            catch (Exception error) { ReferencePlans.Clear(); ReferenceKey = ""; ReferenceError = error.Message; }
+            return true;
+        }
+        public void SelectReferencePlan(string key)
+        {
+            if (!Ready || key != "" && !ReferencePlans.Any(plan => plan.Key == key)) throw new InvalidOperationException("Select a current work link context");
+            ReferenceKey = key; referenceEnvironment = ChatReply.Copy(Environment); referenceConversation = ConversationId;
+        }
+        public string ReferenceHarness
+        { get { var selected = ReferencePlans.FirstOrDefault(plan => plan.Key == ReferenceKey); return selected == null ? PanelState.Text(Conversation, "harnessSlug") : PanelState.Text(selected.Row, "harness"); } }
+        public string ReferencePlan(string perTurn)
+        { var selected = ReferencePlans.FirstOrDefault(plan => plan.Key == ReferenceKey); return !String.IsNullOrEmpty(perTurn) ? perTurn : selected == null ? "" : PanelState.Text(selected.Row, "slug"); }
         public long BeginEarlier()
         {
             if (!Ready || Loading || Reply != null || !HasMoreEarlier || Turns.Count == 0) throw new InvalidOperationException("Earlier messages are unavailable");
