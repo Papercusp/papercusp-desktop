@@ -4,7 +4,7 @@ import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {spawn, spawnSync} from 'node:child_process';
-import {createHash} from 'node:crypto';
+import {createHash, randomUUID} from 'node:crypto';
 import test from 'node:test';
 import {packageNativeWorkbench, stageNativeWorkbench} from '../bin/package-native-workbench.mjs';
 
@@ -209,6 +209,69 @@ function runOwned(command, args, env, timeout = 35000, evidenceDir = null) {
                 error:error?{message:error.message,stack:error.stack}:null,stdout,stderr},null,2)+'\n');
             resolveResult({status,signal,error,stdout,stderr});});
     });
+}
+
+async function privateVoiceAudio(temp) {
+    const directory=join(temp,'pulse');mkdirSync(directory,{mode:0o700});
+    const server='unix:'+join(directory,'native');
+    // No hardware-discovery modules, host socket, or changes to host defaults.
+    const child=spawn('pulseaudio',['--daemonize=no','--use-pid-file=no','--exit-idle-time=-1',
+        '--disable-shm=true','--log-target=stderr','-n',
+        '--load=module-native-protocol-unix socket='+join(directory,'native')+' auth-anonymous=1',
+        '--load=module-null-sink sink_name=workbench_capture rate=16000 channels=1',
+        '--load=module-null-sink sink_name=workbench_output'],
+        {env:{...process.env,XDG_RUNTIME_DIR:directory,PULSE_RUNTIME_PATH:directory,
+            PULSE_STATE_PATH:directory},stdio:['ignore','ignore','pipe']});
+    let stderr='';child.stderr.on('data',data=>{stderr+=data;});
+    const done=new Promise(resolve=>{child.once('close',(status,signal)=>resolve({status,signal}));
+        child.once('error',error=>resolve({error:String(error)}));});
+    const close=async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGTERM');
+        const receipt=await done;writeFileSync(join(temp,'private-audio-process.json'),
+            JSON.stringify({...receipt,stderr},null,2)+'\n');};
+    try {
+        for(let attempt=0;;attempt++){
+            const ready=spawnSync('pactl',['--server='+server,'info'],{encoding:'utf8',timeout:1000});
+            if(ready.status===0)break;
+            assert.ok(attempt<100&&child.exitCode===null,'Private PulseAudio unavailable: '+stderr);
+            await new Promise(resolve=>setTimeout(resolve,50));
+        }
+        const modules=spawnSync('pactl',['--server='+server,'list','short','modules'],{encoding:'utf8',timeout:5000});
+        assert.equal(modules.status,0,modules.stderr);
+        assert.equal(modules.stdout.trim().split('\n').length,3,'Only private protocol and two null sinks are loaded');
+        return {server,pid:child.pid,output:join(temp,'reply-output.raw'),close,
+            env:{PULSE_SERVER:server,PULSE_SOURCE:'workbench_capture.monitor',PULSE_SINK:'workbench_output'}};
+    } catch(error){await close();throw error;}
+}
+
+function installedSpeechReference(temp,pui,operator) {
+    const env={...process.env,PUI_OPERATOR:operator,PAPERCUSP_OPERATOR_URL:operator};
+    const call=(command,request)=>{
+        const result=spawnSync(pui,[command],{env,input:JSON.stringify(request),encoding:'utf8',
+            timeout:95000,maxBuffer:16*1024*1024});
+        assert.equal(result.status,0,'Canonical speech preflight: '+(result.stderr||result.error));
+        return JSON.parse(result.stdout);
+    };
+    const identity=call('native-read',{name:'operator.identity'}),environment=identity.rows[0];
+    const current=call('native-read',{name:'operatorConversations.current',
+        args:{workspaceId:environment.workspaceId},environment});
+    const conversationId=current.rows[0].id,phrase='The quick brown fox jumps over the lazy dog.';
+    const requestId=randomUUID();
+    const receipt=call('native-voice',{environment,conversationId,requestId,operation:'speak',text:phrase});
+    const row=receipt.rows[0];
+    assert.equal(row.conversationId,conversationId);assert.equal(row.requestId,requestId);
+    assert.equal(row.operation,'speak');assert.deepEqual(receipt.environment,environment);
+    const audio=Buffer.from(row.audioBase64,'base64');assert.ok(audio.length>1000,'Canonical TTS returns real audio');
+    const input=join(temp,'reference-audio'),wav=join(temp,'reference.wav');writeFileSync(input,audio);
+    const converted=spawnSync('ffmpeg',['-v','error','-y','-i',input,'-ar','16000','-ac','1','-c:a','pcm_s16le',wav],
+        {encoding:'utf8',timeout:15000});assert.equal(converted.status,0,converted.stderr);
+    const control=call('native-voice',{environment,conversationId,requestId:randomUUID(),operation:'transcribe',
+        audioBase64:readFileSync(wav).toString('base64')});
+    writeFileSync(join(temp,'speech-control.json'),JSON.stringify(control,null,2)+'\n');
+    assert.ok(/quick brown fox/i.test(control.rows[0]?.text)&&/lazy dog/i.test(control.rows[0]?.text),
+        'Direct canonical STT must recognize the reference before a device-loopback claim: '+JSON.stringify(control));
+    return {wav,phrase,conversationId,requestId,controlTranscript:control.rows[0].text,audioBytes:audio.length,
+        audioSha256:createHash('sha256').update(audio).digest('hex'),
+        wavSha256:createHash('sha256').update(readFileSync(wav)).digest('hex'),environment};
 }
 
 async function terminalPreflight(temp, env) {
@@ -511,14 +574,19 @@ const installedSurfaces={reports:{title:'Reports',flag:'PAPERCUSP_NATIVE_INSTALL
     inbox:{title:'Inbox',flag:'PAPERCUSP_NATIVE_INSTALLED_INBOX',assertions:17},
     goals:{title:'Goals',flag:'PAPERCUSP_NATIVE_INSTALLED_GOALS',assertions:17},
     accounts:{title:'Accounts',flag:'PAPERCUSP_NATIVE_INSTALLED_ACCOUNTS',assertions:20},
-    papercup:{title:'Papercup',flag:'PAPERCUSP_NATIVE_INSTALLED_CHAT',assertions:24}};
+    papercup:{title:'Papercup',flag:'PAPERCUSP_NATIVE_INSTALLED_CHAT',assertions:24},
+    voice:{title:'Papercup voice',flag:'PAPERCUSP_NATIVE_INSTALLED_VOICE',assertions:39}};
 for (const [surface,acceptance] of Object.entries(installedSurfaces)) test('exact installed GNOME preview opens canonical ' +
     acceptance.title + ' through a private Shell shortcut',
-    {skip:process.platform!=='linux'||process.env[acceptance.flag]!=='1',timeout:80000},
+    {skip:process.platform!=='linux'||process.env[acceptance.flag]!=='1',timeout:surface==='voice'?240000:80000},
     () => withNativeFixture('workbench-installed-shell-',async temp=>{
         const installed=process.env.PAPERCUSP_NATIVE_EXTENSION,operator=process.env.PAPERCUSP_NATIVE_OPERATOR;
         const pui=process.env.PAPERCUSP_NATIVE_PUI;
         assert.ok(installed&&operator&&pui,'Select the installed extension, PUI and operator explicitly');
+        const audio=surface==='voice'?await privateVoiceAudio(temp):null;
+        try {
+        const reference=audio?installedSpeechReference(temp,pui,operator):null;
+        const stateSurface=surface==='voice'?'papercup':surface==='reports'?'quick-access':surface;
         const data=join(temp,'data'),config=join(temp,'config'),runtime=join(temp,'runtime');
         for(const dir of [data,config,runtime,join(temp,'cache')])mkdirSync(dir,{recursive:true,mode:0o700});
         const extension=join(data,'gnome-shell/extensions/workbench@papercusp.ai');
@@ -542,14 +610,15 @@ for (const [surface,acceptance] of Object.entries(installedSurfaces)) test('exac
         // The observer is a separate extension. The installed product files are
         // never wrapped, subclassed, patched or replaced by a fixture PUI.
         writeFileSync(join(probe,'extension.js'),`import GLib from 'gi://GLib';
+import Gio from 'gi://Gio';
 import Clutter from 'gi://Clutter';
 import Shell from 'gi://Shell';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 const assertions=[];let phase='login';
 function check(value,name){if(!value)throw Error(name);assertions.push(name);}
-function waitFor(predicate){return new Promise((resolve,reject)=>{let count=0;GLib.timeout_add(GLib.PRIORITY_DEFAULT,50,()=>{
- try{if(predicate()){resolve();return GLib.SOURCE_REMOVE;}if(++count>300)throw Error('Installed Shell deadline: '+phase);
+function waitFor(predicate,limit=300){return new Promise((resolve,reject)=>{let count=0;GLib.timeout_add(GLib.PRIORITY_DEFAULT,50,()=>{
+ try{if(predicate()){resolve();return GLib.SOURCE_REMOVE;}if(++count>limit)throw Error('Installed Shell deadline: '+phase);
  return GLib.SOURCE_CONTINUE;}catch(error){reject(error);return GLib.SOURCE_REMOVE;}});});}
 function tick(){return new Promise(resolve=>GLib.timeout_add(GLib.PRIORITY_DEFAULT,60,()=>{resolve();return GLib.SOURCE_REMOVE;}));}
 export default class Probe extends Extension {
@@ -558,11 +627,13 @@ export default class Probe extends Extension {
  finish(error){const target=Main.extensionManager.lookup('workbench@papercusp.ai')?.stateObj;
  GLib.file_set_contents(${JSON.stringify(resultFile)},JSON.stringify({ok:!error,error:error?String(error)+'; '+error.stack:null,
  phase,assertions,reportId:this.reportId,bodyChars:this.bodyChars,inboxItemId:this.inboxItemId,goalId:this.goalId,accountId:this.accountId,
- chat:this.chatProof,
+ chat:this.chatProof,voice:this.voiceProof,
+ voiceState:target?{phase:target._chat.voicePhase,draft:target._chat.draft,notice:target._voiceNotice,
+ status:target._views.get('papercup')?.voiceStatus.text,operationActive:Boolean(target._voiceOperation)}:null,
  questions:target?._inbox.rows.length,savedRunId:target?._inbox.savedRunId,
  inboxState:target?{listReady:target._inbox.listReady,listError:target._inbox.listError,
  bulkReady:target._inbox.bulkReady,bulkError:target._inbox.bulkError,contextError:target._inbox.contextError}:null,
- sources:target?Object.entries(target._states.get(${JSON.stringify(surface === 'reports' ? 'quick-access' : surface)}).sources)
+ sources:target?Object.entries(target._states.get(${JSON.stringify(stateSurface)}).sources)
  .map(([kind,value])=>({kind,status:value.status,error:value.error,total:value.total,rows:value.rows?.length,
  partial:value.partial})):[]}));global.context.terminate();}
  async run(){
@@ -571,7 +642,7 @@ export default class Probe extends Extension {
  check(target._settings.get_string('pui-path')===${JSON.stringify(pui)},'login loads the exact installed PUI selection');
  check(target._settings.get_string('operator')===${JSON.stringify(operator)},'login retains the selected canonical operator');
  check(target._bindings.size===6,'unmodified installed extension acquires native shortcuts');
- const state=target._states.get(${JSON.stringify(surface === 'reports' ? 'quick-access' : surface)});
+ const state=target._states.get(${JSON.stringify(stateSurface)});
  ${surface === 'reports' ? "state.scope='reports';" : ''}
  const seat=Clutter.get_default_backend().get_default_seat();
  const keyboard=seat.create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
@@ -581,7 +652,7 @@ export default class Probe extends Extension {
  phase='desktop ready';await waitFor(()=>Main.actionMode!==Shell.ActionMode.NONE);
  if(Main.overview.visible)await chord([Clutter.KEY_Escape]);
  await waitFor(()=>Main.actionMode===Shell.ActionMode.NORMAL&&!Main.overview.visible);
- ${surface === 'papercup' ? `phase='native Papercup shortcut';await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_p]);
+ ${surface === 'papercup'||surface === 'voice' ? `phase='native Papercup shortcut';await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_p]);
  const chat=target._chat;
  await waitFor(()=>state.visible&&!chat.loading);
  let view=target._views.get('papercup');
@@ -629,6 +700,59 @@ export default class Probe extends Extension {
  check(chat.ready&&chat.conversationId===conversationId&&chat.draft==='w'&&view.compose.get_text()==='w',
  'reopening the exact canonical conversation restores its local draft');
  await chord([Clutter.KEY_Control_L,Clutter.KEY_a]);await chord([Clutter.KEY_BackSpace]);
+ ${surface === 'voice' ? `
+ const audio=${JSON.stringify(audio&&{server:audio.server,pid:audio.pid,output:audio.output})};
+ const reference=${JSON.stringify(reference)};
+ const pointer=seat.create_virtual_device(Clutter.InputDeviceType.POINTER_DEVICE);
+ async function click(actor){const [x,y]=actor.get_transformed_position(),[width,height]=actor.get_transformed_size();
+ pointer.notify_absolute_motion(GLib.get_monotonic_time(),x+width/2,y+height/2);await tick();
+ pointer.notify_button(GLib.get_monotonic_time(),1,Clutter.ButtonState.PRESSED);await tick();
+ pointer.notify_button(GLib.get_monotonic_time(),1,Clutter.ButtonState.RELEASED);await tick();}
+ const waitChild=child=>new Promise((resolve,reject)=>child.wait_async(null,(process,result)=>{
+ try{process.wait_finish(result);if(!process.get_successful())throw Error('Audio feeder failed');resolve();}catch(error){reject(error);}}));
+ check(reference.conversationId===conversationId,'speech reference uses the same canonical conversation and environment');
+ phase='installed recording cancellation';await click(view.recordVoice);await waitFor(()=>chat.voicePhase==='recording');
+ check(view.useRecording.visible&&view.cancelVoice.visible,'unmodified installed helper captures through the private audio server');
+ await click(view.cancelVoice);await waitFor(()=>!chat.voice&&!target._voiceOperation);
+ check(chat.draft===''&&!chat.reply,'cancelling recording neither transcribes nor sends a turn');
+ phase='installed speech loopback';await click(view.recordVoice);await waitFor(()=>chat.voicePhase==='recording');
+ const requestId=chat.voice.id;
+ const feeder=Gio.Subprocess.new(['paplay','--server='+audio.server,'--device=workbench_capture',reference.wav],Gio.SubprocessFlags.NONE);
+ await waitChild(feeder);await tick();await click(view.useRecording);
+ await waitFor(()=>!chat.voice&&!target._voiceOperation,1800);view=target._views.get('papercup');
+ const transcript=chat.draft;
+ check(/quick brown fox/i.test(transcript)&&/lazy dog/i.test(transcript),'actual canonical STT recognizes the speech captured by the installed helper');
+ check(view.compose.get_text()===transcript&&view.voiceStatus.text.includes('Review')&&view.send.reactive,
+ 'canonical transcript is an editable native draft awaiting explicit Send');
+ check(!chat.reply,'successful transcription does not start a model reply');
+ phase='installed native edit';await chord([Clutter.KEY_x]);const reviewed=chat.draft;
+ check(reviewed!==transcript&&reviewed.includes('x'),'real seat editing changes the recognized draft before any send');
+ check(Boolean(chat.spokenReply)&&view.readReply.reactive,'canonical assistant history offers explicit native reply playback');
+ const launcher=new Gio.SubprocessLauncher({flags:Gio.SubprocessFlags.NONE});launcher.set_stdout_file_path(audio.output);
+ const capture=launcher.spawnv(['parec','--server='+audio.server,'--device=workbench_output.monitor','--raw',
+ '--format=s16le','--rate=16000','--channels=1']);
+ try{
+ phase='installed canonical reply playback';await click(view.readReply);await waitFor(()=>chat.voicePhase==='playing'||!chat.voice,1800);
+ check(chat.voicePhase==='playing','actual canonical TTS reaches the unmodified installed playback device');
+ await new Promise(resolve=>GLib.timeout_add(GLib.PRIORITY_DEFAULT,1200,()=>{resolve();return GLib.SOURCE_REMOVE;}));
+ await click(view.cancelVoice);await waitFor(()=>!chat.voice&&!target._voiceOperation);
+ check(chat.draft===reviewed&&view.voiceStatus.text.includes('stopped'),'stopping real reply playback preserves the reviewed draft');
+ }finally{capture.force_exit();await new Promise(resolve=>capture.wait_async(null,(_process,result)=>{capture.wait_finish(result);resolve();}));}
+ phase='installed audio disconnect';await click(view.recordVoice);await waitFor(()=>chat.voicePhase==='recording');
+ await waitChild(Gio.Subprocess.new(['kill','-TERM',String(audio.pid)],Gio.SubprocessFlags.NONE));
+ await waitFor(()=>!chat.voice&&!target._voiceOperation);
+ check(chat.draft===reviewed&&view.voiceStatus.text.includes('preserved')&&!view.useRecording.visible,
+ 'real device disconnect exposes failure and preserves a retryable draft');
+ check(!chat.reply,'device failure never reports a successful send or starts a model reply');
+ this.voiceProof={conversationId,requestId,transcript,reviewed,spokenReplyChars:chat.spokenReply.length,
+ referenceRequestId:reference.requestId,modelTurnStarted:Boolean(chat.reply),deviceFailure:view.voiceStatus.text};
+ await chord([Clutter.KEY_Escape]);
+ check(!target._voiceOperation&&!chat.voice&&!target._views.has('papercup'),'Escape retires installed voice and its native actor');
+ await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_p]);await waitFor(()=>state.visible&&!chat.loading);
+ view=target._views.get('papercup');
+ check(chat.draft===reviewed&&view.compose.get_text()===reviewed,'reopening the installed conversation retains the reviewed speech draft');
+ check(global.get_window_actors().length===0,'installed voice capture playback and failure create no application window');
+ ` : ''}
  this.chatProof={conversationId,historyTurns:chat.turns.length,hasMoreEarlier:chat.hasMoreEarlier,
  questionSubscriptionConnected:target._cards.connected,modelTurnStarted:Boolean(chat.reply)};
  await chord([Clutter.KEY_Escape]);
@@ -786,7 +910,7 @@ export default class Probe extends Extension {
         checkScript(join(probe,'extension.js'));
         const env={...process.env,XDG_DATA_HOME:data,XDG_CONFIG_HOME:config,XDG_CACHE_HOME:join(temp,'cache'),
             XDG_RUNTIME_DIR:runtime,GSETTINGS_BACKEND:'keyfile',GTK_A11Y:'none',LIBGL_ALWAYS_SOFTWARE:'1',
-            GIO_USE_VFS:'local',GNOME_SHELL_SESSION_MODE:'user',WAYLAND_DISPLAY:'workbench-installed-test'};
+            GIO_USE_VFS:'local',GNOME_SHELL_SESSION_MODE:'user',WAYLAND_DISPLAY:'workbench-installed-test',...audio?.env};
         const settingsDriver=join(temp,'settings.mjs');
         writeFileSync(settingsDriver,`import Gio from 'gi://Gio';
 const source=Gio.SettingsSchemaSource.new_from_directory(${JSON.stringify(join(extension,'schemas'))},Gio.SettingsSchemaSource.get_default(),false);
@@ -799,9 +923,18 @@ new Gio.Settings({schema_id:'org.gnome.shell'}).set_strv('enabled-extensions',
         const configured=spawnSync('gjs',['-m',settingsDriver],{env,encoding:'utf8',timeout:10000});
         assert.equal(configured.status,0,configured.stderr);
         const result=await runOwned('dbus-run-session',[privateBus(temp),'--','gnome-shell','--headless','--wayland',
-            '--no-x11','--virtual-monitor','1440x900','--wayland-display','workbench-installed-test'],env,55000,temp);
+            '--no-x11','--virtual-monitor','1440x900','--wayland-display','workbench-installed-test'],env,surface==='voice'?150000:55000,temp);
         const evidence=existsSync(resultFile)?JSON.parse(readFileSync(resultFile,'utf8')):null;
+        let outputAudio=null;
+        if(audio&&existsSync(audio.output)){
+            const samples=readFileSync(audio.output);let energy=0;
+            for(let offset=0;offset+1<samples.length;offset+=2)energy+=samples.readInt16LE(offset)**2;
+            outputAudio={bytes:samples.length,rms:Math.sqrt(energy/(samples.length/2)),
+                sha256:createHash('sha256').update(samples).digest('hex'),format:'16 kHz mono PCM16'};
+        }
         const proof={evidence,sourceCustody,...result,
+            ...(reference?{speechReference:reference,outputAudio,
+                audioPlane:'private PulseAudio null sinks; actual default GStreamer devices; canonical STT/TTS; no physical microphone/speaker claim'}:{}),
             plane:'exact installed preview files and real PUI/canonical operator in a private GNOME Shell; independent observer; ' + surface + ' scope only'};
         if(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR){
             mkdirSync(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,{recursive:true});
@@ -810,10 +943,15 @@ new Gio.Settings({schema_id:'org.gnome.shell'}).set_strv('enabled-extensions',
         assert.equal(evidence?.ok,true,JSON.stringify(proof));
         assert.equal(result.status,0,JSON.stringify(proof));
         assert.equal(result.error,null,JSON.stringify(proof));
+        if(audio){
+            assert.ok(outputAudio?.bytes>3200&&outputAudio.rms>20,
+                'Independent output monitor must observe non-silent canonical speech before Stop');
+        }
         for(const file of files)assert.deepEqual(readFileSync(join(extension,file)),readFileSync(join(installed,file)),
             'Probe must leave exact installed '+file+' unchanged');
         assert.equal(evidence.assertions.length,acceptance.assertions);
         console.log('INSTALLED_SHELL_'+surface.toUpperCase()+'_PASS '+JSON.stringify(evidence));
+        }finally{await audio?.close();}
     }));
 
 test('production GNOME installation reports real reload state and survives private Shell login restarts',
