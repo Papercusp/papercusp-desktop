@@ -215,7 +215,7 @@ namespace Papercusp.Workbench
             var json = new JavaScriptSerializer { MaxJsonLength = MaxResponseBytes };
             var request = Utf8.GetBytes(json.Serialize(body));
             if (request.Length > (command == "native-voice" ? 2700000 : MaxRequestBytes))
-                throw new ArgumentException("native panel request exceeds its limit", "body");
+                throw new ArgumentException(command == "native-voice" ? "native voice request exceeds 2700000 bytes" : "native panel request exceeds 64 KiB", "body");
 
             using (var process = new Process())
             using (var deadline = new CancellationTokenSource())
