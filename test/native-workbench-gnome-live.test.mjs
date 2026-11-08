@@ -472,6 +472,120 @@ try {
         console.log('INSTALLED_CANONICAL_REPORTS_PASS ' + JSON.stringify(proof));
     }));
 
+test('exact installed GNOME preview opens canonical Reports through a private Shell shortcut',
+    {skip:process.platform!=='linux'||process.env.PAPERCUSP_NATIVE_INSTALLED_SHELL!=='1',timeout:80000},
+    () => withNativeFixture('workbench-installed-shell-',async temp=>{
+        const installed=process.env.PAPERCUSP_NATIVE_EXTENSION,operator=process.env.PAPERCUSP_NATIVE_OPERATOR;
+        const pui=process.env.PAPERCUSP_NATIVE_PUI;
+        assert.ok(installed&&operator&&pui,'Select the installed extension, PUI and operator explicitly');
+        const data=join(temp,'data'),config=join(temp,'config'),runtime=join(temp,'runtime');
+        for(const dir of [data,config,runtime,join(temp,'cache')])mkdirSync(dir,{recursive:true,mode:0o700});
+        const extension=join(data,'gnome-shell/extensions/workbench@papercusp.ai');
+        cpSync(installed,extension,{recursive:true});
+        const files=['extension.js','panel-model.mjs','bridge.js','helper.js','audio.js','chat-content.js',
+            'metadata.json','stylesheet.css','schemas/org.gnome.shell.extensions.papercusp-workbench.gschema.xml',
+            'schemas/gschemas.compiled'];
+        const hashes=Object.fromEntries(files.map(file=>{
+            const original=readFileSync(join(installed,file)),copy=readFileSync(join(extension,file));
+            assert.deepEqual(copy,original,'Private Shell must load the exact installed '+file);
+            return [file,createHash('sha256').update(original).digest('hex')];
+        }));
+        const sourceCustody={files:hashes,puiSha256:createHash('sha256').update(readFileSync(pui)).digest('hex'),
+            testSha256:createHash('sha256').update(readFileSync(import.meta.filename)).digest('hex')};
+        const probe=join(data,'gnome-shell/extensions/workbench-test-probe@example.test');
+        mkdirSync(probe,{recursive:true});
+        writeFileSync(join(probe,'metadata.json'),JSON.stringify({uuid:'workbench-test-probe@example.test',
+            name:'Independent installed Workbench probe',description:'Private acceptance observer',
+            'shell-version':['46']}));
+        const resultFile=join(temp,'result.json');
+        // The observer is a separate extension. The installed product files are
+        // never wrapped, subclassed, patched or replaced by a fixture PUI.
+        writeFileSync(join(probe,'extension.js'),`import GLib from 'gi://GLib';
+import Clutter from 'gi://Clutter';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+const assertions=[];let phase='login';
+function check(value,name){if(!value)throw Error(name);assertions.push(name);}
+function waitFor(predicate){return new Promise((resolve,reject)=>{let count=0;GLib.timeout_add(GLib.PRIORITY_DEFAULT,50,()=>{
+ try{if(predicate()){resolve();return GLib.SOURCE_REMOVE;}if(++count>300)throw Error('Installed Shell deadline: '+phase);
+ return GLib.SOURCE_CONTINUE;}catch(error){reject(error);return GLib.SOURCE_REMOVE;}});});}
+function tick(){return new Promise(resolve=>GLib.timeout_add(GLib.PRIORITY_DEFAULT,60,()=>{resolve();return GLib.SOURCE_REMOVE;}));}
+export default class Probe extends Extension {
+ enable(){this.run().catch(error=>this.finish(error));}
+ disable(){}
+ finish(error){const target=Main.extensionManager.lookup('workbench@papercusp.ai')?.stateObj;
+ GLib.file_set_contents(${JSON.stringify(resultFile)},JSON.stringify({ok:!error,error:error?String(error)+'; '+error.stack:null,
+ phase,assertions,reportId:this.reportId,bodyChars:this.bodyChars,
+ sources:target?Object.entries(target._states.get('quick-access').sources)
+ .map(([kind,value])=>({kind,status:value.status,error:value.error})):[]}));global.context.terminate();}
+ async run(){
+ await waitFor(()=>Main.extensionManager.lookup('workbench@papercusp.ai')?.stateObj?._states);
+ const target=Main.extensionManager.lookup('workbench@papercusp.ai').stateObj;
+ check(target._settings.get_string('pui-path')===${JSON.stringify(pui)},'login loads the exact installed PUI selection');
+ check(target._settings.get_string('operator')===${JSON.stringify(operator)},'login retains the selected canonical operator');
+ check(target._bindings.size===5,'unmodified installed extension acquires native shortcuts');
+ const state=target._states.get('quick-access');state.scope='reports';
+ const seat=Clutter.get_default_backend().get_default_seat();
+ const keyboard=seat.create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
+ const key=async(symbol,pressed)=>{keyboard.notify_keyval(GLib.get_monotonic_time(),symbol,
+ pressed?Clutter.KeyState.PRESSED:Clutter.KeyState.RELEASED);await tick();};
+ async function chord(symbols){for(const symbol of symbols)await key(symbol,true);for(const symbol of [...symbols].reverse())await key(symbol,false);}
+ phase='desktop ready';await waitFor(()=>Main.actionMode===1&&!Main.overview.visible);
+ phase='native shortcut';await chord([Clutter.KEY_Super_L,Clutter.KEY_Alt_L,Clutter.KEY_space]);
+ await waitFor(()=>state.visible&&state.sources.reports?.status==='ready');
+ check(target._views.get('quick-access').panel.get_parent()!==null,'seat shortcut opens the installed native actor');
+ const report=state.results().find(row=>row.kind==='reports');
+ check(Boolean(report?.row.report_id),'actual canonical Reports rows reach the installed panel');
+ this.reportId=report.row.report_id;state.selection=report.key;target._render('quick-access');
+ const canonical=await target._bridge.read(${JSON.stringify(pui)},{name:'reports.get',args:{reportId:this.reportId}});
+ const body=canonical.rows[0]?.body_md;
+ check(canonical.rows[0]?.report_id===this.reportId&&typeof body==='string'&&body.length>0,
+ 'exact canonical detail control returns full Markdown');
+ phase='seat Enter';await chord([Clutter.KEY_Return]);
+ await waitFor(()=>state.detail?.text===body);
+ this.bodyChars=body.length;
+ check(state.detail.text===body,'seat Enter opens the exact selected canonical report body');
+ check(global.get_window_actors().length===0,'installed report UI creates no application window');
+ phase='nested Escape';await chord([Clutter.KEY_Escape]);
+ check(!state.detail&&state.visible,'first seat Escape dismisses only canonical detail');
+ await chord([Clutter.KEY_Escape]);
+ check(!state.visible&&!target._views.has('quick-access'),'second seat Escape dismisses the installed panel');
+ this.finish(null);
+ }
+}`);
+        checkScript(join(probe,'extension.js'));
+        const env={...process.env,XDG_DATA_HOME:data,XDG_CONFIG_HOME:config,XDG_CACHE_HOME:join(temp,'cache'),
+            XDG_RUNTIME_DIR:runtime,GSETTINGS_BACKEND:'keyfile',GTK_A11Y:'none',LIBGL_ALWAYS_SOFTWARE:'1',
+            GIO_USE_VFS:'local',GNOME_SHELL_SESSION_MODE:'user',WAYLAND_DISPLAY:'workbench-installed-test'};
+        const settingsDriver=join(temp,'settings.mjs');
+        writeFileSync(settingsDriver,`import Gio from 'gi://Gio';
+const source=Gio.SettingsSchemaSource.new_from_directory(${JSON.stringify(join(extension,'schemas'))},Gio.SettingsSchemaSource.get_default(),false);
+const settings=new Gio.Settings({settings_schema:source.lookup('org.gnome.shell.extensions.papercusp-workbench',false)});
+settings.set_string('pui-path',${JSON.stringify(pui)});settings.set_string('operator',${JSON.stringify(operator)});
+settings.set_boolean('enabled',true);
+new Gio.Settings({schema_id:'org.gnome.shell'}).set_strv('enabled-extensions',
+ ['workbench@papercusp.ai','workbench-test-probe@example.test']);Gio.Settings.sync();`);
+        checkScript(settingsDriver);
+        const configured=spawnSync('gjs',['-m',settingsDriver],{env,encoding:'utf8',timeout:10000});
+        assert.equal(configured.status,0,configured.stderr);
+        const result=await runOwned('dbus-run-session',[privateBus(temp),'--','gnome-shell','--headless','--wayland',
+            '--no-x11','--virtual-monitor','1440x900','--wayland-display','workbench-installed-test'],env,55000,temp);
+        const evidence=existsSync(resultFile)?JSON.parse(readFileSync(resultFile,'utf8')):null;
+        const proof={evidence,sourceCustody,...result,
+            plane:'exact installed preview files and real PUI/canonical operator in a private GNOME Shell; independent observer; Reports scope only'};
+        if(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR){
+            mkdirSync(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,{recursive:true});
+            writeFileSync(join(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,'installed-shell-reports.json'),JSON.stringify(proof,null,2)+'\n');
+        }
+        assert.equal(evidence?.ok,true,JSON.stringify(proof));
+        assert.equal(result.status,0,JSON.stringify(proof));
+        assert.equal(result.error,null,JSON.stringify(proof));
+        for(const file of files)assert.deepEqual(readFileSync(join(extension,file)),readFileSync(join(installed,file)),
+            'Probe must leave exact installed '+file+' unchanged');
+        assert.equal(evidence.assertions.length,10);
+        console.log('INSTALLED_SHELL_REPORTS_PASS '+JSON.stringify(evidence));
+    }));
+
 test('production GNOME installation reports real reload state and survives private Shell login restarts',
     {skip:process.platform!=='linux',timeout:90000}, () => withNativeFixture('workbench-login-',async temp=>{
             const bundle=packageNativeWorkbench(join(temp,'bundle'));
