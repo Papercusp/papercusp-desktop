@@ -189,6 +189,7 @@ console.log(JSON.stringify({rows,environment,version:'native-fixture'}));});
 }
 function runOwned(command, args, env, timeout = 35000, evidenceDir = null) {
     return new Promise(resolveResult => {
+        const startedAt=new Date().toISOString(),started=performance.now();
         const child=spawn(command,args,{env,detached:true,stdio:['ignore','pipe','pipe']});
         let stdout='',stderr='',error=null;
         child.stdout.on('data',data=>{stdout=(stdout+data).slice(-20000);
@@ -205,9 +206,11 @@ function runOwned(command, args, env, timeout = 35000, evidenceDir = null) {
         });
         child.on('error',cause=>{error=cause;});
         child.on('close',(status,signal)=>{clearTimeout(timer);clearTimeout(drain);
-            if(evidenceDir)writeFileSync(join(evidenceDir,'process.json'),JSON.stringify({command,args,status,signal,
-                error:error?{message:error.message,stack:error.stack}:null,stdout,stderr},null,2)+'\n');
-            resolveResult({status,signal,error,stdout,stderr});});
+            const receipt={status,signal,error:error?{name:error.name,message:error.message,stack:error.stack,
+                ...(error.code?{code:error.code}:{})}:null,stdout,stderr,
+                startedAt,finishedAt:new Date().toISOString(),elapsedMs:performance.now()-started,deadlineMs:timeout};
+            if(evidenceDir)writeFileSync(join(evidenceDir,'process.json'),JSON.stringify({command,args,...receipt},null,2)+'\n');
+            resolveResult(receipt);});
     });
 }
 
@@ -313,6 +316,12 @@ test('native harness retains generated source, progress and output after a proce
 writeFileSync(${JSON.stringify(join(temp,'progress.json'))},JSON.stringify({phase:'terminal',assertions:['before timeout']}));
 console.log('driver started');setInterval(()=>{},100);`);
             const result=await runOwned(process.execPath,[driver],process.env,1000,temp);
+            const exported=JSON.parse(JSON.stringify(result));
+            assert.match(exported.error.message,/Native fixture deadline exceeded/,
+                'Exported acceptance JSON must retain the deadline diagnosis');
+            assert.equal(exported.deadlineMs,1000);
+            assert.ok(exported.elapsedMs>=exported.deadlineMs);
+            assert.ok(Date.parse(exported.finishedAt)>=Date.parse(exported.startedAt));
             assert.equal(result.status,0,result.error?.message);
         }),/Native fixture deadline exceeded/);
         assert.equal(existsSync(join(retained,'driver.mjs')),true);
@@ -606,7 +615,7 @@ for (const [surface,acceptance] of Object.entries(installedSurfaces)) test('exac
         writeFileSync(join(probe,'metadata.json'),JSON.stringify({uuid:'workbench-test-probe@example.test',
             name:'Independent installed Workbench probe',description:'Private acceptance observer',
             'shell-version':['46']}));
-        const resultFile=join(temp,'result.json');
+        const resultFile=join(temp,'result.json'),progressFile=join(temp,'progress.json');
         // The observer is a separate extension. The installed product files are
         // never wrapped, subclassed, patched or replaced by a fixture PUI.
         writeFileSync(join(probe,'extension.js'),`import GLib from 'gi://GLib';
@@ -616,11 +625,16 @@ import Shell from 'gi://Shell';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 const assertions=[];let phase='login';
-function check(value,name){if(!value)throw Error(name);assertions.push(name);}
-function waitFor(predicate,limit=300){return new Promise((resolve,reject)=>{let count=0;GLib.timeout_add(GLib.PRIORITY_DEFAULT,50,()=>{
+function progress(){const target=Main.extensionManager.lookup('workbench@papercusp.ai')?.stateObj;
+ GLib.file_set_contents(${JSON.stringify(progressFile)},JSON.stringify({phase,assertions,
+ atUs:GLib.get_monotonic_time(),voiceState:target?._chat?{phase:target._chat.voicePhase,
+ draftChars:target._chat.draft.length,notice:target._voiceNotice,
+ status:target._views.get('papercup')?.voiceStatus.text,operationActive:Boolean(target._voiceOperation)}:null}));}
+function check(value,name){if(!value){progress();throw Error(name);}assertions.push(name);progress();}
+function waitFor(predicate,limit=300){progress();return new Promise((resolve,reject)=>{let count=0;GLib.timeout_add(GLib.PRIORITY_DEFAULT,50,()=>{
  try{if(predicate()){resolve();return GLib.SOURCE_REMOVE;}if(++count>limit)throw Error('Installed Shell deadline: '+phase);
  return GLib.SOURCE_CONTINUE;}catch(error){reject(error);return GLib.SOURCE_REMOVE;}});});}
-function tick(){return new Promise(resolve=>GLib.timeout_add(GLib.PRIORITY_DEFAULT,60,()=>{resolve();return GLib.SOURCE_REMOVE;}));}
+function tick(){progress();return new Promise(resolve=>GLib.timeout_add(GLib.PRIORITY_DEFAULT,60,()=>{resolve();return GLib.SOURCE_REMOVE;}));}
 export default class Probe extends Extension {
  enable(){this.run().catch(error=>this.finish(error));}
  disable(){}
@@ -932,7 +946,8 @@ new Gio.Settings({schema_id:'org.gnome.shell'}).set_strv('enabled-extensions',
             outputAudio={bytes:samples.length,rms:Math.sqrt(energy/(samples.length/2)),
                 sha256:createHash('sha256').update(samples).digest('hex'),format:'16 kHz mono PCM16'};
         }
-        const proof={evidence,sourceCustody,...result,
+        const progress=existsSync(progressFile)?JSON.parse(readFileSync(progressFile,'utf8')):null;
+        const proof={evidence,progress,sourceCustody,...result,
             ...(reference?{speechReference:reference,outputAudio,
                 audioPlane:'private PulseAudio null sinks; actual default GStreamer devices; canonical STT/TTS; no physical microphone/speaker claim'}:{}),
             plane:'exact installed preview files and real PUI/canonical operator in a private GNOME Shell; independent observer; ' + surface + ' scope only'};
