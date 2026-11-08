@@ -679,15 +679,21 @@ namespace Papercusp.Workbench
                     var name = "Papercup answer " + card.Id;
                     if (card.Kind == "select")
                     {
-                        var select = new ComboBox { IsEnabled = active, DisplayMemberPath = "Label", SelectedValuePath = "Id" };
-                        select.ItemsSource = card.Options.Select(option => new { Id = PanelState.Text(option, "id"), Label = PanelState.Text(option, "label") + " · " + PanelState.Text(option, "hint") }).ToArray();
-                        select.SelectedValue = draft.Picks.FirstOrDefault(); AutomationProperties.SetName(select, name); box.Children.Add(select);
+                        var select = new ComboBox { IsEnabled = active, SelectedValuePath = "Tag" };
+                        var options = card.Options.Select(option => new ComboBoxItem { Tag = PanelState.Text(option, "id"),
+                            Content = PanelState.Text(option, "label") + " · " + PanelState.Text(option, "hint") }).ToArray();
+                        select.ItemsSource = options;
+                        select.SelectedItem = options.FirstOrDefault(option => draft.Picks.Contains((string)option.Tag));
+                        AutomationProperties.SetName(select, name); box.Children.Add(select);
                         select.SelectionChanged += (s, e) =>
                         {
                             // WPF can deliver selection changes after a removed
                             // ComboBox is unloaded. It no longer owns this draft.
                             if (!cardsContent.IsAncestorOf(select)) return;
-                            draft.Picks.Clear(); if (select.SelectedValue != null) draft.Picks.Add((string)select.SelectedValue);
+                            // SelectionChanged precedes SelectedValue's update in
+                            // WPF. SelectedItem already identifies the new option.
+                            var selected = select.SelectedItem as ComboBoxItem;
+                            draft.Picks.Clear(); if (selected != null) draft.Picks.Add((string)selected.Tag);
                         };
                     }
                     else if (card.Kind == "radio" || card.Kind == "checkbox")

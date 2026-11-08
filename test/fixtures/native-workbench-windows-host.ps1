@@ -971,8 +971,15 @@ public static class WorkbenchNativeHostFixture
             Find<System.Windows.Controls.RadioButton>(panel, "Papercup answer radio two").IsChecked = true;
             Find<System.Windows.Controls.CheckBox>(panel, "Papercup answer checkbox one").IsChecked = true;
             Find<System.Windows.Controls.CheckBox>(panel, "Papercup answer checkbox two").IsChecked = true;
+            var drafts = (System.Collections.IDictionary)panel.GetType().GetField("cardDrafts", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).GetValue(panel);
+            Func<string[]> selectedDraft = () => ((IEnumerable<string>)drafts["select"].GetType().GetField("Picks").GetValue(drafts["select"])).ToArray();
             var originalSelect = Find<System.Windows.Controls.ComboBox>(panel, "Papercup answer select"); originalSelect.SelectedValue = "two";
             Check(Object.Equals(Find<System.Windows.Controls.ComboBox>(panel, "Papercup answer select").SelectedValue, "two"), "native dropdown selects the canonical option identity");
+            Check(selectedDraft().SequenceEqual(new[] { "two" }), "native dropdown captures the selected identity during the selection event");
+            originalSelect.SelectedItem = null;
+            Check(selectedDraft().Length == 0, "deliberately clearing the current dropdown clears its draft");
+            originalSelect.SelectedItem = originalSelect.Items.Cast<System.Windows.Controls.ComboBoxItem>().Single(option => Object.Equals(option.Tag, "two"));
+            Check(selectedDraft().SequenceEqual(new[] { "two" }), "native dropdown item selection captures the canonical identity");
             Find<System.Windows.Controls.PasswordBox>(panel, "Papercup answer secret").Password = "sensitive literal";
             Find<System.Windows.Controls.DatePicker>(panel, "Papercup answer date").SelectedDate = new DateTime(2026, 11, 20);
             Find<System.Windows.Controls.Slider>(panel, "Papercup answer slider").Value = 6;
@@ -980,6 +987,9 @@ public static class WorkbenchNativeHostFixture
             {
                 click("submit " + id); Until(() => cards.Error != null || cards.Pending == null && !cards.Cards.Any(card => card.Id == id));
                 Check(cards.Error == null, "native card acknowledgement " + id + ": " + cards.Error);
+                if (id == "radio" || id == "checkbox") Check(selectedDraft().SequenceEqual(new[] { "two" }) &&
+                    Object.Equals(Find<System.Windows.Controls.ComboBox>(panel, "Papercup answer select").SelectedValue, "two"),
+                    "unanswered dropdown draft and displayed selection survive " + id + " acknowledgement");
                 if (id == "radio") originalSelect.SelectedValue = null;
                 if (id == "checkbox") Check(Object.Equals(Find<System.Windows.Controls.ComboBox>(panel, "Papercup answer select").SelectedValue, "two"),
                     "late selection event from detached dropdown cannot erase the current card draft");
