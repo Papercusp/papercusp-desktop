@@ -606,6 +606,9 @@ namespace Papercusp.Workbench
                     if (!token.IsCancellationRequested && State.Visible) chat.Settle(generation, environment, id, page);
                     if (!token.IsCancellationRequested && State.Visible && chat.Ready)
                     {
+                        // History readiness must be reflected before awaiting
+                        // the independent optional work-link context request.
+                        RenderChat();
                         try
                         {
                             var plans = await PuiReadBridge.ReadAsync(pui, "plans.list", new Dictionary<string, object> { { "q", "" }, { "limit", 200 } }, token, 22000, environment);
@@ -913,11 +916,12 @@ namespace Papercusp.Workbench
                 if (text == "") return;
                 var generation = chat.Generation; var environment = chat.Environment; var conversation = chat.ConversationId;
                 var linked = chat.Ready ? NativeWorkRefs.Markdown(text, environment, chat.ReferenceHarness, chat.ReferencePlan(plan)) : text;
-                var message = NativeChatContent.View(linked, uri =>
+                RichTextBox message = null;
+                message = NativeChatContent.View(linked, uri =>
                 {
                     // A retained document cannot route a click after its scope
                     // changed, even if a late routed event reaches the callback.
-                    if (State.Visible && chat.Ready && generation == chat.Generation && conversation == chat.ConversationId &&
+                    if (State.Visible && chat.Ready && chatHistory.IsAncestorOf(message) && generation == chat.Generation && conversation == chat.ConversationId &&
                         AccountState.SameEnvironment(environment, chat.Environment)) LaunchChatUri(uri);
                 });
                 AutomationProperties.SetName(message, "Papercup message text"); chatHistory.Children.Add(message);
