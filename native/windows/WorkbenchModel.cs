@@ -177,6 +177,51 @@ namespace Papercusp.Workbench
         }
     }
 
+    // Exact PUI native-voice requests and receipts, shared by capture and playback.
+    public static class NativeVoice
+    {
+        public static byte[] Audio(string text, int limit)
+        {
+            if (String.IsNullOrEmpty(text) || text.Length > limit) throw new InvalidOperationException("Voice audio is empty or too large");
+            byte[] bytes;
+            try { bytes = Convert.FromBase64String(text); }
+            catch (FormatException) { throw new InvalidOperationException("Voice audio is invalid"); }
+            if (Convert.ToBase64String(bytes) != text) throw new InvalidOperationException("Voice audio is not canonical");
+            return bytes;
+        }
+        public static void Validate(Dictionary<string, object> request)
+        {
+            var environment = ChatReply.Value(request, "environment") as Dictionary<string, object>;
+            var operation = PanelState.Text(request, "operation");
+            if (!AccountState.SameEnvironment(environment, environment) || !ChatReply.Uuid(PanelState.Text(request, "conversationId")) ||
+                !ChatReply.Uuid(PanelState.Text(request, "requestId")) || !new[] { "transcribe", "speak" }.Contains(operation))
+                throw new InvalidOperationException("Select an exact voice conversation and request");
+            if (operation == "transcribe")
+            { if (request.ContainsKey("text")) throw new InvalidOperationException("Recording cannot inject text"); Audio(PanelState.Text(request, "audioBase64"), 2600000); }
+            else if (request.ContainsKey("audioBase64") || String.IsNullOrWhiteSpace(PanelState.Text(request, "text")) ||
+                Encoding.UTF8.GetByteCount(PanelState.Text(request, "text")) > 32768) throw new InvalidOperationException("Invalid spoken reply");
+        }
+        public static Dictionary<string, object> Result(Dictionary<string, object> request, Dictionary<string, object> payload)
+        {
+            Validate(request);
+            var environment = ChatReply.Value(request, "environment") as Dictionary<string, object>;
+            if (payload == null || Object.Equals(ChatReply.Value(payload, "ok"), false) || Object.Equals(ChatReply.Value(payload, "partial"), true) ||
+                !String.IsNullOrEmpty(PanelState.Text(payload, "error")) ||
+                !AccountState.SameEnvironment(environment, ChatReply.Value(payload, "environment") as Dictionary<string, object>))
+                throw new InvalidOperationException("Voice receipt environment changed; your draft was preserved");
+            var rows = ChatReply.Value(payload, "rows") as IList;
+            if (rows == null || rows.Count != 1) throw new InvalidOperationException("Voice receipt is incomplete");
+            var row = ChatReply.Object(rows[0]);
+            foreach (var key in new[] { "conversationId", "requestId", "operation" })
+                if (!Object.Equals(ChatReply.Value(row, key), ChatReply.Value(request, key)))
+                    throw new InvalidOperationException("Voice receipt belongs to a different conversation or request");
+            if (PanelState.Text(request, "operation") == "speak") Audio(PanelState.Text(row, "audioBase64"), 11184812);
+            else if (String.IsNullOrWhiteSpace(PanelState.Text(row, "text")) || Encoding.UTF8.GetByteCount(PanelState.Text(row, "text")) > 32768)
+                throw new InvalidOperationException("No usable transcript; your draft was preserved");
+            return row;
+        }
+    }
+
     public sealed class ChatState
     {
         public int Generation;
@@ -190,6 +235,11 @@ namespace Papercusp.Workbench
         private Dictionary<string, object> referenceEnvironment;
         private string referenceConversation = "";
         private readonly Dictionary<string, string> drafts = new Dictionary<string, string>();
+        private readonly Dictionary<string, string> modalities = new Dictionary<string, string>();
+        public string VoiceId, VoicePhase;
+        private string voiceDraft, voiceConversation;
+        private int voiceGeneration;
+        private Dictionary<string, object> voiceEnvironment;
         public string ConversationId { get { return Conversation == null ? "" : PanelState.Text(Conversation, "id"); } }
         public bool Ready { get { return Loaded && ConversationId != "" && AccountState.SameEnvironment(Environment, Environment); } }
         private string DraftKey { get { return ConversationId == "" || !AccountState.SameEnvironment(Environment, Environment) ? null :
@@ -197,9 +247,9 @@ namespace Papercusp.Workbench
                 PanelState.Text(ChatReply.Object(Environment["store"]), "id"), PanelState.Text(ChatReply.Object(Environment["agentChat"]), "scope"), ConversationId }); } }
         public string Draft
         { get { string text; return DraftKey != null && drafts.TryGetValue(DraftKey, out text) ? text : ""; }
-          set { var key = DraftKey; if (key != null) drafts[key] = value ?? ""; } }
+          set { var key = DraftKey; if (key != null) { if (Draft != (value ?? "")) { CancelVoice(); modalities[key] = "text"; } drafts[key] = value ?? ""; } } }
         public int Begin()
-        { ++Generation; Environment = null; Conversation = null; Turns.Clear(); ReferencePlans.Clear(); ReferenceError = null; Loading = true; Loaded = false; HasMoreEarlier = false; Reply = null; Error = null; return Generation; }
+        { CancelVoice(); ++Generation; Environment = null; Conversation = null; Turns.Clear(); ReferencePlans.Clear(); ReferenceError = null; Loading = true; Loaded = false; HasMoreEarlier = false; Reply = null; Error = null; return Generation; }
         private static Dictionary<string, object> Row(Dictionary<string, object> payload, Dictionary<string, object> environment)
         {
             if (!AccountState.SameEnvironment(environment, ChatReply.Value(payload, "environment") as Dictionary<string, object>))
@@ -247,6 +297,7 @@ namespace Papercusp.Workbench
         public long BeginEarlier()
         {
             if (!Ready || Loading || Reply != null || !HasMoreEarlier || Turns.Count == 0) throw new InvalidOperationException("Earlier messages are unavailable");
+            CancelVoice();
             Loading = true; Error = null; return ChatReply.Number(Turns[0]["seq"]);
         }
         public bool Settle(int generation, Dictionary<string, object> environment, string id, Dictionary<string, object> payload, long? before = null)
@@ -273,10 +324,39 @@ namespace Papercusp.Workbench
             HasMoreEarlier = (bool)row["hasMoreEarlier"]; Loading = false; Loaded = true; Error = null; return true;
         }
         public bool CanSend { get { return Ready && !Loading && (Reply == null || Reply.Complete) && !String.IsNullOrWhiteSpace(Draft) && Encoding.UTF8.GetByteCount(Draft) <= 32768; } }
+        public bool CanUseVoice { get { return Ready && !Loading && (Reply == null || Reply.Complete); } }
+        public string SpokenReply { get { var saved = Turns.LastOrDefault(turn => PanelState.Text(turn, "role") == "assistant");
+            return Reply != null && Reply.Phase == "completed" && Reply.DisplayText != "" ? Reply.DisplayText : saved == null ? "" : PanelState.Text(saved, "text"); } }
+        public void BeginVoice(string id, string phase)
+        {
+            if (!CanUseVoice || VoiceId != null || !ChatReply.Uuid(id) || !new[] { "permission", "synthesizing" }.Contains(phase))
+                throw new InvalidOperationException("Load the conversation and finish the current voice operation first");
+            VoiceId = id; VoicePhase = phase; voiceGeneration = Generation; voiceDraft = Draft;
+            voiceEnvironment = ChatReply.Copy(Environment); voiceConversation = ConversationId;
+        }
+        public bool VoiceCurrent(string id)
+        { return VoiceId != null && VoiceId == id && voiceGeneration == Generation && CanUseVoice && voiceDraft == Draft &&
+            voiceConversation == ConversationId && AccountState.SameEnvironment(voiceEnvironment, Environment); }
+        public bool AdvanceVoice(string id, string phase)
+        {
+            if (!VoiceCurrent(id) || !new[] { "permission:recording", "recording:transcribing", "synthesizing:playing" }.Contains(VoicePhase + ":" + phase)) return false;
+            VoicePhase = phase; return true;
+        }
+        public void CancelVoice() { VoiceId = null; VoicePhase = null; voiceEnvironment = null; voiceDraft = null; voiceConversation = null; }
+        public bool Transcribed(string id, Dictionary<string, object> request, Dictionary<string, object> payload)
+        {
+            if (!VoiceCurrent(id)) return false;
+            if (VoicePhase != "transcribing" || PanelState.Text(request, "operation") != "transcribe" || PanelState.Text(request, "requestId") != id ||
+                PanelState.Text(request, "conversationId") != ConversationId || !AccountState.SameEnvironment(Environment, ChatReply.Value(request, "environment") as Dictionary<string, object>))
+                throw new InvalidOperationException("Voice conversation changed; your draft was preserved");
+            var row = NativeVoice.Result(request, payload); drafts[DraftKey] = PanelState.Text(row, "text"); modalities[DraftKey] = "voice";
+            CancelVoice(); return true;
+        }
         public Dictionary<string, object> Send(string userTurnId)
         {
             if (!CanSend) throw new InvalidOperationException("Load the conversation and enter a bounded message first");
-            Reply = new ChatReply(Environment, ConversationId, Draft, userTurnId); Error = null; return Reply.SendRequest();
+            CancelVoice(); string modality; if (!modalities.TryGetValue(DraftKey, out modality)) modality = "text";
+            Reply = new ChatReply(Environment, ConversationId, Draft, userTurnId, modality); Error = null; return Reply.SendRequest();
         }
         public bool Receive(int generation, Dictionary<string, object> frame)
         {

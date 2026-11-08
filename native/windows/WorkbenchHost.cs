@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.IO;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -17,6 +18,73 @@ using System.Windows.Threading;
 
 namespace Papercusp.Workbench
 {
+    // Local Windows audio devices; PUI alone owns the STT/TTS service calls.
+    // No recording survives completion, cancellation, dismissal or an error.
+    public class NativeVoiceDevice
+    {
+        [DllImport("winmm.dll", CharSet = CharSet.Unicode)] private static extern int mciSendString(string command, StringBuilder result, int length, IntPtr callback);
+        [DllImport("winmm.dll", CharSet = CharSet.Unicode)] private static extern bool mciGetErrorString(int code, StringBuilder text, int length);
+        private readonly TaskCompletionSource<bool> stop = new TaskCompletionSource<bool>();
+        private static void Command(string command)
+        {
+            var code = mciSendString(command, null, 0, IntPtr.Zero);
+            if (code == 0) return;
+            var text = new StringBuilder(512); mciGetErrorString(code, text, text.Capacity);
+            throw new InvalidOperationException("Windows audio: " + text);
+        }
+        private static string DirectoryForAudio()
+        {
+            var path = Path.Combine(Path.GetTempPath(), "papercusp-voice-" + Guid.NewGuid().ToString("N"));
+            var security = new System.Security.AccessControl.DirectorySecurity();
+            security.SetAccessRuleProtection(true, false);
+            security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                System.Security.Principal.WindowsIdentity.GetCurrent().User, System.Security.AccessControl.FileSystemRights.FullControl,
+                System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                System.Security.AccessControl.PropagationFlags.None, System.Security.AccessControl.AccessControlType.Allow));
+            Directory.CreateDirectory(path, security); return path;
+        }
+        public virtual void FinishRecording() { stop.TrySetResult(true); }
+        public virtual async Task<byte[]> RecordAsync(Action recording, CancellationToken cancellation)
+        {
+            var alias = "pcvoice" + Guid.NewGuid().ToString("N"); var directory = DirectoryForAudio(); var opened = false;
+            try
+            {
+                cancellation.ThrowIfCancellationRequested();
+                Command("open new type waveaudio alias " + alias); opened = true;
+                Command("set " + alias + " time format milliseconds format tag pcm bitspersample 16 channels 1 samplespersec 16000 bytespersec 32000 alignment 2");
+                Command("record " + alias); recording();
+                await Task.WhenAny(stop.Task, Task.Delay(60000, cancellation)); cancellation.ThrowIfCancellationRequested();
+                Command("stop " + alias);
+                var path = Path.Combine(directory, "recording.wav"); Command("save " + alias + " \"" + path + "\"");
+                var bytes = File.ReadAllBytes(path);
+                if (bytes.Length <= 44 || bytes.Length > 1950000) throw new InvalidOperationException("No usable recording; check microphone access in Windows settings");
+                return bytes;
+            }
+            finally { try { if (opened) Command("close " + alias); } finally { Directory.Delete(directory, true); } }
+        }
+        public virtual async Task PlayAsync(byte[] bytes, CancellationToken cancellation)
+        {
+            var directory = DirectoryForAudio(); var player = new MediaPlayer();
+            var complete = new TaskCompletionSource<bool>();
+            EventHandler ended = (s, e) => complete.TrySetResult(true);
+            EventHandler<ExceptionEventArgs> failed = (s, e) => complete.TrySetException(e.ErrorException);
+            player.MediaEnded += ended; player.MediaFailed += failed;
+            try
+            {
+                cancellation.ThrowIfCancellationRequested();
+                var path = Path.Combine(directory, "reply.mp3"); File.WriteAllBytes(path, bytes);
+                using (cancellation.Register(() => complete.TrySetCanceled()))
+                {
+                    player.Open(new Uri(path)); player.Play();
+                    if (await Task.WhenAny(complete.Task, Task.Delay(180000, cancellation)) != complete.Task)
+                        throw new TimeoutException("Spoken reply did not finish");
+                    await complete.Task;
+                }
+            }
+            finally { player.Stop(); player.Close(); player.MediaEnded -= ended; player.MediaFailed -= failed; Directory.Delete(directory, true); }
+        }
+    }
+
     public sealed class Hotkey
     {
         public uint Modifiers, Key;
@@ -274,6 +342,12 @@ namespace Papercusp.Workbench
             private readonly ComboBox chatReference;
             private readonly TextBlock chatReferenceStatus;
             private readonly Button chatSend, chatEarlier, chatReconnect, chatCancel;
+            private readonly Button voiceRecord, voiceUse, voiceStop, voiceRead;
+            private readonly TextBlock voiceStatus;
+            private CancellationTokenSource voiceCancellation;
+            private NativeVoiceDevice voiceDevice;
+            internal Func<NativeVoiceDevice> CreateVoiceDevice = () => new NativeVoiceDevice();
+            private string voiceNotice = "";
             private CancellationTokenSource chatStream;
             private bool renderingChat;
             private readonly NativeCardsState cards;
@@ -405,11 +479,18 @@ namespace Papercusp.Workbench
                     chatCompose = new TextBox { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 70,
                         MaxHeight = 180, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Margin = new Thickness(0, 8, 0, 4) };
                     AutomationProperties.SetName(chatCompose, "Papercup message"); composer.Children.Add(chatCompose);
-                    chatCompose.TextChanged += (s, e) => { if (!renderingChat) { chat.Draft = chatCompose.Text; UpdateChatControls(); } };
+                    chatCompose.TextChanged += (s, e) => { if (!renderingChat) { if (chat.Draft != chatCompose.Text) StopVoice(); chat.Draft = chatCompose.Text; UpdateChatControls(); } };
                     var actions = new WrapPanel(); composer.Children.Add(actions);
                     chatSend = InboxButton(actions, "Send", "Papercup send", SendChat);
                     chatReconnect = InboxButton(actions, "Reconnect", "Papercup reconnect", () => ControlChat("reconnect"));
                     chatCancel = InboxButton(actions, "Cancel reply", "Papercup cancel reply", () => ControlChat("cancel"));
+                    var voice = new WrapPanel(); composer.Children.Add(voice);
+                    voiceRecord = InboxButton(voice, "Record message", "Papercup record message", () => StartVoice(false));
+                    voiceUse = InboxButton(voice, "Use recording", "Papercup use recording", () => { if (voiceDevice != null) voiceDevice.FinishRecording(); });
+                    voiceStop = InboxButton(voice, "Stop voice", "Papercup stop voice", () => StopVoice("Voice stopped; your draft was preserved"));
+                    voiceRead = InboxButton(voice, "Read reply", "Papercup read reply", () => StartVoice(true));
+                    voiceStatus = new TextBlock { TextWrapping = TextWrapping.Wrap }; composer.Children.Add(voiceStatus);
+                    AutomationProperties.SetName(voiceStatus, "Papercup voice status");
                     chatEarlier = InboxButton(controls, "Earlier messages", "Papercup earlier messages", LoadEarlierChat);
                     chatHistory = new StackPanel();
                     var scroll = new ScrollViewer { Content = chatHistory, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
@@ -514,7 +595,7 @@ namespace Papercusp.Workbench
                 State.Visible = false; debounce.Stop();
                 if (accounts != null) { ++accounts.Generation; accounts.Busy = false; }
                 if (inbox != null) { ++inbox.Generation; inbox.ClearContext(); inboxConfirmation = null; inboxTimer.Stop(); }
-                if (chat != null) { StopChatStream(); StopCards(); ++chat.Generation; chat.Loading = false; }
+                if (chat != null) { StopVoice(); StopChatStream(); StopCards(); ++chat.Generation; chat.Loading = false; }
                 if (refresh != null) { refresh.Cancel(); refresh.Dispose(); refresh = null; }
                 ++State.Generation; CancelDetail();
                 var ownedFocus = IsActive; Hide();
@@ -593,7 +674,7 @@ namespace Papercusp.Workbench
             }
             private async Task RefreshChat(CancellationToken token)
             {
-                StopChatStream(); StopCards(); var generation = chat.Begin(); RenderChat();
+                StopVoice(); StopChatStream(); StopCards(); var generation = chat.Begin(); RenderChat();
                 try
                 {
                     var environment = AccountState.One(await PuiReadBridge.ReadAsync(pui, "operator.identity", null, token));
@@ -826,6 +907,7 @@ namespace Papercusp.Workbench
             }
             private async void LoadEarlierChat()
             {
+                StopVoice();
                 var generation = chat.Generation; var environment = chat.Environment; var id = chat.ConversationId;
                 try
                 {
@@ -840,6 +922,7 @@ namespace Papercusp.Workbench
             }
             private void SendChat()
             {
+                StopVoice();
                 try { StreamChat(chat.Send(Guid.NewGuid().ToString())); }
                 catch (Exception error) { chat.Fail(chat.Generation, error); RenderChat(); }
             }
@@ -870,6 +953,51 @@ namespace Papercusp.Workbench
                     { if (reply.Complete && reply.Phase == "completed") Refresh(); else RenderChat(); }
                 }
             }
+            private void StopVoice(string notice = "")
+            {
+                var source = voiceCancellation; voiceCancellation = null; voiceDevice = null;
+                if (source != null) source.Cancel();
+                if (chat != null) chat.CancelVoice(); voiceNotice = notice;
+                if (voiceStatus != null) UpdateChatControls();
+            }
+            private async void StartVoice(bool speak)
+            {
+                CancellationTokenSource source = null; string id = null;
+                try
+                {
+                    id = Guid.NewGuid().ToString(); chat.BeginVoice(id, speak ? "synthesizing" : "permission");
+                    source = new CancellationTokenSource(); voiceCancellation = source;
+                    var device = CreateVoiceDevice(); voiceDevice = device; voiceNotice = ""; UpdateChatControls();
+                    Func<bool> current = () => voiceCancellation == source && !source.IsCancellationRequested && State.Visible && !shuttingDown && chat.VoiceCurrent(id);
+                    var request = new Dictionary<string, object> { { "environment", ChatReply.Copy(chat.Environment) },
+                        { "conversationId", chat.ConversationId }, { "requestId", id }, { "operation", speak ? "speak" : "transcribe" } };
+                    if (speak) request["text"] = chat.SpokenReply;
+                    else
+                    {
+                        var audio = await device.RecordAsync(() => { if (current() && chat.AdvanceVoice(id, "recording")) UpdateChatControls(); }, source.Token);
+                        if (!current() || !chat.AdvanceVoice(id, "transcribing")) return;
+                        request["audioBase64"] = Convert.ToBase64String(audio);
+                    }
+                    NativeVoice.Validate(request); UpdateChatControls();
+                    var payload = await PuiReadBridge.VoiceAsync(pui, request, source.Token);
+                    if (!current()) return;
+                    if (speak)
+                    {
+                        var row = NativeVoice.Result(request, payload);
+                        if (!chat.AdvanceVoice(id, "playing")) return;
+                        UpdateChatControls(); await device.PlayAsync(NativeVoice.Audio(PanelState.Text(row, "audioBase64"), 11184812), source.Token);
+                        if (current()) StopVoice();
+                    }
+                    else if (chat.Transcribed(id, request, payload)) { voiceNotice = "Transcript ready; review it before sending"; RenderChat(); }
+                }
+                catch (Exception error)
+                { if (source == null) voiceNotice = error.Message; else if (voiceCancellation == source && !source.IsCancellationRequested) StopVoice(error.Message + " · your draft was preserved"); }
+                finally
+                {
+                    if (source != null) { if (voiceCancellation == source) { voiceCancellation = null; voiceDevice = null; chat.CancelVoice(); } source.Dispose(); }
+                    if (!shuttingDown && State.Visible) UpdateChatControls();
+                }
+            }
             private void UpdateChatControls()
             {
                 chatCompose.IsEnabled = chat.Ready && !chat.Loading;
@@ -878,6 +1006,12 @@ namespace Papercusp.Workbench
                 var controllable = chat.Reply != null && !chat.Reply.Complete && chat.Reply.TurnId != "";
                 chatReconnect.IsEnabled = controllable && chatStream == null;
                 chatCancel.IsEnabled = controllable;
+                voiceRecord.IsEnabled = chat.CanUseVoice && voiceCancellation == null;
+                voiceRead.IsEnabled = voiceRecord.IsEnabled && !String.IsNullOrWhiteSpace(chat.SpokenReply);
+                voiceUse.Visibility = chat.VoicePhase == "recording" ? Visibility.Visible : Visibility.Collapsed;
+                voiceStop.Visibility = voiceCancellation != null ? Visibility.Visible : Visibility.Collapsed;
+                voiceStatus.Text = chat.VoicePhase == "permission" ? "Opening microphone…" : chat.VoicePhase == "recording" ? "Recording · up to 60 seconds" :
+                    chat.VoicePhase == "transcribing" ? "Transcribing…" : chat.VoicePhase == "synthesizing" ? "Preparing spoken reply…" : chat.VoicePhase == "playing" ? "Reading reply…" : voiceNotice;
             }
             private void RenderChat()
             {

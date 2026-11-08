@@ -148,6 +148,16 @@ namespace Papercusp.Workbench
             return InvokeAsync(pui, "native-cards", request, cancellation, 22000);
         }
 
+        public static Task<Dictionary<string, object>> VoiceAsync(string pui,
+            Dictionary<string, object> request, CancellationToken cancellation)
+        {
+            object environment, operation;
+            if (request == null || !request.TryGetValue("environment", out environment) || !(environment is Dictionary<string, object>) ||
+                !request.TryGetValue("operation", out operation) || !new[] { "transcribe", "speak" }.Contains(operation as string))
+                throw new ArgumentException("Select a conversation and voice operation");
+            return InvokeAsync(pui, "native-voice", request, cancellation, 92000);
+        }
+
         private static void ValidateCards(Dictionary<string, object> request, string operation)
         {
             object environment, selected, conversation;
@@ -204,8 +214,8 @@ namespace Papercusp.Workbench
             if (timeoutMilliseconds < 1) throw new ArgumentOutOfRangeException("timeoutMilliseconds");
             var json = new JavaScriptSerializer { MaxJsonLength = MaxResponseBytes };
             var request = Utf8.GetBytes(json.Serialize(body));
-            if (request.Length > MaxRequestBytes)
-                throw new ArgumentException("native panel request exceeds 64 KiB", "body");
+            if (request.Length > (command == "native-voice" ? 2700000 : MaxRequestBytes))
+                throw new ArgumentException("native panel request exceeds its limit", "body");
 
             using (var process = new Process())
             using (var deadline = new CancellationTokenSource())

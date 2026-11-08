@@ -200,6 +200,19 @@ test('Windows native question controls preserve typed answers, exact receipts an
         assert.equal(new Set(result.cases).size, result.count);
     });
 
+test('Windows native voice retains drafts, exact canonical receipts, cancellation and modality',
+    {skip:process.platform !== 'win32', timeout:60000}, () => {
+        const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
+            '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'voice', '-Interactive'],
+        {encoding:'utf8', timeout:55000, windowsHide:true});
+        assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
+        const result = JSON.parse(run.stdout.trim());
+        assert.equal(result.ok, true); assert.equal(result.phase, 'voice');
+        assert.equal(result.interactiveDesktop, true); assert.ok(result.processSessionId > 0);
+        assert.ok(result.count >= 30); assert.equal(new Set(result.cases).size, result.count);
+    });
+
 test('Windows native Accounts controls preserve exact identity, confirmed state and independent axes',
     {skip:process.platform !== 'win32', timeout:60000}, () => {
         const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
