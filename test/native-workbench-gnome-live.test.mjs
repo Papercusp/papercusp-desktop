@@ -585,16 +585,18 @@ const installedSurfaces={reports:{title:'Reports',flag:'PAPERCUSP_NATIVE_INSTALL
     accounts:{title:'Accounts',flag:'PAPERCUSP_NATIVE_INSTALLED_ACCOUNTS',assertions:20},
     papercup:{title:'Papercup',flag:'PAPERCUSP_NATIVE_INSTALLED_CHAT',assertions:24},
     voice:{title:'Papercup voice',flag:'PAPERCUSP_NATIVE_INSTALLED_VOICE',assertions:39}};
-for (const [surface,acceptance] of Object.entries(installedSurfaces)) test('exact installed GNOME preview opens canonical ' +
-    acceptance.title + ' through a private Shell shortcut',
+for (const [surface,acceptance] of Object.entries(installedSurfaces))
+for (const isolatedAudio of surface==='papercup'?[false,true]:[surface==='voice'])
+test('exact installed GNOME preview opens canonical ' + acceptance.title + ' through a private Shell shortcut' +
+    (surface==='papercup'&&isolatedAudio?' with an isolated audio context':''),
     {skip:process.platform!=='linux'||process.env[acceptance.flag]!=='1',timeout:surface==='voice'?240000:80000},
     () => withNativeFixture('workbench-installed-shell-',async temp=>{
         const installed=process.env.PAPERCUSP_NATIVE_EXTENSION,operator=process.env.PAPERCUSP_NATIVE_OPERATOR;
         const pui=process.env.PAPERCUSP_NATIVE_PUI;
         assert.ok(installed&&operator&&pui,'Select the installed extension, PUI and operator explicitly');
-        const audio=surface==='voice'?await privateVoiceAudio(temp):null;
+        const audio=isolatedAudio?await privateVoiceAudio(temp):null;
         try {
-        const reference=audio?installedSpeechReference(temp,pui,operator):null;
+        const reference=surface==='voice'?installedSpeechReference(temp,pui,operator):null;
         const stateSurface=surface==='voice'?'papercup':surface==='reports'?'quick-access':surface;
         const data=join(temp,'data'),config=join(temp,'config'),runtime=join(temp,'runtime');
         for(const dir of [data,config,runtime,join(temp,'cache')])mkdirSync(dir,{recursive:true,mode:0o700});
@@ -624,21 +626,25 @@ import Clutter from 'gi://Clutter';
 import Shell from 'gi://Shell';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
-const assertions=[];let phase='login';
+const assertions=[];let phase='login',heartbeat=0,inputEvent=null;
 function progress(){const target=Main.extensionManager.lookup('workbench@papercusp.ai')?.stateObj;
- GLib.file_set_contents(${JSON.stringify(progressFile)},JSON.stringify({phase,assertions,
+ GLib.file_set_contents(${JSON.stringify(progressFile)},JSON.stringify({phase,assertions,heartbeat,inputEvent,
+ papercup:target?._chat?{visible:target._states.get('papercup').visible,loading:target._chat.loading,
+ ready:target._chat.ready,error:target._chat.error,pendingReads:target._bridge._pending.size}:null,
  atUs:GLib.get_monotonic_time(),voiceState:target?._chat?{phase:target._chat.voicePhase,
  draftChars:target._chat.draft.length,notice:target._voiceNotice,
  status:target._views.get('papercup')?.voiceStatus.text,operationActive:Boolean(target._voiceOperation)}:null}));}
 function check(value,name){if(!value){progress();throw Error(name);}assertions.push(name);progress();}
 function waitFor(predicate,limit=300){progress();return new Promise((resolve,reject)=>{let count=0;GLib.timeout_add(GLib.PRIORITY_DEFAULT,50,()=>{
- try{if(predicate()){resolve();return GLib.SOURCE_REMOVE;}if(++count>limit)throw Error('Installed Shell deadline: '+phase);
+ try{progress();if(predicate()){resolve();return GLib.SOURCE_REMOVE;}if(++count>limit)throw Error('Installed Shell deadline: '+phase);
  return GLib.SOURCE_CONTINUE;}catch(error){reject(error);return GLib.SOURCE_REMOVE;}});});}
 function tick(){progress();return new Promise(resolve=>GLib.timeout_add(GLib.PRIORITY_DEFAULT,60,()=>{resolve();return GLib.SOURCE_REMOVE;}));}
 export default class Probe extends Extension {
- enable(){this.run().catch(error=>this.finish(error));}
- disable(){}
+ enable(){this._heartbeat=GLib.timeout_add(GLib.PRIORITY_DEFAULT,1000,()=>{
+ ++heartbeat;progress();return GLib.SOURCE_CONTINUE;});this.run().catch(error=>this.finish(error));}
+ disable(){if(this._heartbeat){GLib.source_remove(this._heartbeat);this._heartbeat=null;}}
  finish(error){const target=Main.extensionManager.lookup('workbench@papercusp.ai')?.stateObj;
+ this.disable();progress();
  GLib.file_set_contents(${JSON.stringify(resultFile)},JSON.stringify({ok:!error,error:error?String(error)+'; '+error.stack:null,
  phase,assertions,reportId:this.reportId,bodyChars:this.bodyChars,inboxItemId:this.inboxItemId,goalId:this.goalId,accountId:this.accountId,
  chat:this.chatProof,voice:this.voiceProof,
@@ -660,8 +666,9 @@ export default class Probe extends Extension {
  ${surface === 'reports' ? "state.scope='reports';" : ''}
  const seat=Clutter.get_default_backend().get_default_seat();
  const keyboard=seat.create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
- const key=async(symbol,pressed)=>{keyboard.notify_keyval(GLib.get_monotonic_time(),symbol,
- pressed?Clutter.KeyState.PRESSED:Clutter.KeyState.RELEASED);await tick();};
+ const key=async(symbol,pressed)=>{inputEvent={symbol,pressed,delivered:false};progress();
+ keyboard.notify_keyval(GLib.get_monotonic_time(),symbol,
+ pressed?Clutter.KeyState.PRESSED:Clutter.KeyState.RELEASED);await tick();inputEvent.delivered=true;progress();};
  async function chord(symbols){for(const symbol of symbols)await key(symbol,true);for(const symbol of [...symbols].reverse())await key(symbol,false);}
  phase='desktop ready';await waitFor(()=>Main.actionMode!==Shell.ActionMode.NONE);
  if(Main.overview.visible)await chord([Clutter.KEY_Escape]);
@@ -948,17 +955,19 @@ new Gio.Settings({schema_id:'org.gnome.shell'}).set_strv('enabled-extensions',
         }
         const progress=existsSync(progressFile)?JSON.parse(readFileSync(progressFile,'utf8')):null;
         const proof={evidence,progress,sourceCustody,...result,
+            audioContext:audio?'private PulseAudio server and two null sinks':'inherited audio environment',
             ...(reference?{speechReference:reference,outputAudio,
                 audioPlane:'private PulseAudio null sinks; actual default GStreamer devices; canonical STT/TTS; no physical microphone/speaker claim'}:{}),
             plane:'exact installed preview files and real PUI/canonical operator in a private GNOME Shell; independent observer; ' + surface + ' scope only'};
         if(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR){
             mkdirSync(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,{recursive:true});
-            writeFileSync(join(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,'installed-shell-'+surface+'.json'),JSON.stringify(proof,null,2)+'\n');
+            writeFileSync(join(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,'installed-shell-'+surface+
+                (surface==='papercup'&&isolatedAudio?'-isolated-audio':'')+'.json'),JSON.stringify(proof,null,2)+'\n');
         }
         assert.equal(evidence?.ok,true,JSON.stringify(proof));
         assert.equal(result.status,0,JSON.stringify(proof));
         assert.equal(result.error,null,JSON.stringify(proof));
-        if(audio){
+        if(surface==='voice'){
             assert.ok(outputAudio?.bytes>3200&&outputAudio.rms>20,
                 'Independent output monitor must observe non-silent canonical speech before Stop');
         }
