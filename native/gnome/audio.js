@@ -2,6 +2,13 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {canonicalBase64} from './panel-model.mjs';
 
+// Load optional GI synchronously before the helper enters Application.run.
+// An asynchronous GI import can stay pending inside that synchronous GTK loop.
+// Missing audio support remains an operation error; unrelated reads still work.
+let Gst, audioUnavailable;
+try { imports.gi.versions.Gst = '1.0'; Gst = imports.gi.Gst; }
+catch (error) { audioUnavailable = error; }
+
 // Devices live in the existing windowless helper. No audio, device handle or
 // pipeline crosses into Shell, and each operation owns its private temp files.
 // Factory injection is local to maintained device tests, never a wire argument.
@@ -21,8 +28,8 @@ export class AudioDevices {
         operation.done = (async () => {
             let directory, file, pipeline, bus, watch = 0, timer = 0, monitor = 0, cancelId = 0;
             try {
-                // Missing audio support must not stop unrelated native reads.
-                const {default: Gst} = await import('gi://Gst?version=1.0'); Gst.init(null);
+                if (!Gst) throw new Error('Audio devices unavailable: ' + audioUnavailable.message);
+                Gst.init(null);
                 if (cancel?.is_cancelled()) throw new Error('Audio stopped; your draft was preserved');
                 directory = GLib.dir_make_tmp('papercusp-voice-XXXXXX');
                 file = Gio.File.new_for_path(GLib.build_filenamev([directory, 'audio']));
