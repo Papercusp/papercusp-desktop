@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$SourceDirectory,
-    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'inbox', 'organizer', 'chat', 'content', 'cards', 'operator', 'operator-inbox', 'environment-refusal', 'fixture-diagnostics', 'fixture-failure', 'fixture-timeout')][string]$Phase = 'all',
+    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'inbox', 'organizer', 'chat', 'content', 'cards', 'voice', 'operator', 'operator-inbox', 'environment-refusal', 'fixture-diagnostics', 'fixture-failure', 'fixture-timeout')][string]$Phase = 'all',
     [string]$PuiExecutable,
     [string]$OperatorUrl,
     [string]$ExpectedWorkspace,
@@ -1096,6 +1096,109 @@ public static class WorkbenchNativeHostFixture
             Check(chat.ReferencePlans.Count == 0, "conversation reload removes previous interactive context choices");
         }
     }
+    private sealed class VoiceDeviceFixture : NativeVoiceDevice
+    {
+        public bool Denied, Playing, Cancelled;
+        public readonly TaskCompletionSource<byte[]> Recording = new TaskCompletionSource<byte[]>();
+        private readonly TaskCompletionSource<bool> playback = new TaskCompletionSource<bool>();
+        public static byte[] Wave()
+        {
+            using (var stream = new System.IO.MemoryStream())
+            using (var writer = new System.IO.BinaryWriter(stream))
+            {
+                writer.Write(System.Text.Encoding.ASCII.GetBytes("RIFF")); writer.Write(320036);
+                writer.Write(System.Text.Encoding.ASCII.GetBytes("WAVEfmt ")); writer.Write(16); writer.Write((short)1);
+                writer.Write((short)1); writer.Write(16000); writer.Write(32000); writer.Write((short)2); writer.Write((short)16);
+                writer.Write(System.Text.Encoding.ASCII.GetBytes("data")); writer.Write(320000); writer.Write(new byte[320000]); return stream.ToArray();
+            }
+        }
+        public override Task<byte[]> RecordAsync(Action ready, CancellationToken token)
+        {
+            if (Denied) throw new InvalidOperationException("fixture microphone denied");
+            token.Register(() => { Cancelled = true; Recording.TrySetCanceled(); }); ready(); return Recording.Task;
+        }
+        public override void FinishRecording() { Recording.TrySetResult(Wave()); }
+        public override Task PlayAsync(byte[] bytes, CancellationToken token)
+        { Playing = true; token.Register(() => { Cancelled = true; playback.TrySetCanceled(); }); return playback.Task; }
+    }
+    private static void VoiceNative()
+    {
+        var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
+        using (var host = new WorkbenchHost(Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_FIXTURE")))
+        {
+            host.State("papercup").Pinned = true; host.Toggle("papercup"); var panel = host.Panel("papercup");
+            var chat = (ChatState)panel.GetType().GetField("chat", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).GetValue(panel);
+            var compose = Find<System.Windows.Controls.TextBox>(panel, "Papercup message");
+            var notice = Find<System.Windows.Controls.TextBlock>(panel, "Papercup voice status");
+            Action<string> click = name => { var button = Find<System.Windows.Controls.Button>(panel, "Papercup " + name);
+                if (!button.IsEnabled) throw new Exception("disabled voice control: " + name); button.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent)); };
+            Until(() => chat.Ready); compose.Text = "retryable draft \u03bb\nsecond line"; var draft = compose.Text;
+            var environment = ChatReply.Copy(chat.Environment); var conversation = chat.ConversationId;
+            var id = Guid.NewGuid().ToString();
+            var request = new Dictionary<string,object>{{"environment",environment},{"conversationId",conversation},{"requestId",id},{"operation","transcribe"},{"audioBase64",Convert.ToBase64String(VoiceDeviceFixture.Wave())}};
+            var row = new Dictionary<string,object>{{"conversationId",conversation},{"requestId",id},{"operation","transcribe"},{"text","voice transcript \u03bb"}};
+            var payload = new Dictionary<string,object>{{"environment",environment},{"rows",new object[]{row}}};
+            NativeVoice.Validate(request); Check(NativeVoice.Result(request,payload)==row,"canonical voice receipt accepts exact Unicode transcript");
+            foreach(var key in new[]{"conversationId","requestId","operation"}) {
+                var bad=ChatReply.Copy(payload); ((Dictionary<string,object>)((System.Collections.IList)bad["rows"])[0])[key]="wrong";
+                Refuses(()=>NativeVoice.Result(request,bad),"voice refuses foreign receipt "+key);
+            }
+            foreach(var key in new[]{"endpoint","workspaceId","store","agentChat"}) {
+                var bad=ChatReply.Copy(payload); var env=ChatReply.Object(bad["environment"]);
+                env[key]=key=="store"? (object)new Dictionary<string,object>{{"id","other"}} : key=="agentChat"? (object)new Dictionary<string,object>{{"scope","other"}} : "other";
+                Refuses(()=>NativeVoice.Result(request,bad),"voice refuses foreign environment axis "+key);
+            }
+            foreach(var text in new[]{"", " ",new string('x',32769)}) {
+                var bad=ChatReply.Copy(payload); ((Dictionary<string,object>)((System.Collections.IList)bad["rows"])[0])["text"]=text;
+                Refuses(()=>NativeVoice.Result(request,bad),"voice refuses empty or oversized transcript #"+cases.Count);
+            }
+            foreach(var audio in new[]{"AB==","AAAA\n","bad",new string('A',2600004)})
+                Refuses(()=>NativeVoice.Audio(audio,2600000),"voice refuses noncanonical or oversized audio #"+cases.Count);
+            chat.BeginVoice(id,"permission"); Check(chat.AdvanceVoice(id,"recording") && chat.AdvanceVoice(id,"transcribing"),"voice advances only through recording and transcription");
+            var badRequest=ChatReply.Copy(request); badRequest["requestId"]=Guid.NewGuid().ToString();
+            Refuses(()=>chat.Transcribed(id,badRequest,payload),"voice rejects request not owned by current capture");
+            Check(chat.Draft==draft,"failed voice receipt preserves exact multiline draft");
+            chat.Draft="edited"; Check(!chat.Transcribed(id,request,payload),"late voice result cannot overwrite edited draft"); chat.Draft=draft;
+            chat.BeginVoice(id,"permission"); ++chat.Generation; Check(!chat.VoiceCurrent(id),"voice result is fenced by generation"); chat.CancelVoice();
+            VoiceDeviceFixture device=null;
+            Action<Func<NativeVoiceDevice>> setDevice = factory => panel.GetType().GetField("CreateVoiceDevice",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).SetValue(panel,factory);
+            setDevice(()=>device=new VoiceDeviceFixture());
+            click("record message"); Check(chat.VoicePhase=="recording" && compose.Text==draft,"recording retains draft and displays recording state");
+            click("stop voice"); Until(()=>device.Cancelled); Check(compose.Text==draft && chat.VoiceId==null,"stop recording releases capture and preserves draft");
+            click("record message"); var hidden=device; host.Toggle("papercup");
+            Check(hidden.Cancelled && !panel.IsVisible && chat.VoiceId==null,"dismissal cancels voice before hiding the resident panel");
+            host.Toggle("papercup"); Until(()=>chat.Ready); Check(compose.Text==draft,"reopening preserves original voice draft");
+            setDevice(()=>device=new VoiceDeviceFixture{Denied=true}); click("record message");
+            Check(notice.Text.Contains("microphone denied") && compose.Text==draft && chat.VoiceId==null,"microphone failure is explicit and preserves retryable draft");
+            setDevice(()=>device=new VoiceDeviceFixture());
+            System.IO.File.WriteAllText(path+".voice-deny","deny"); click("record message"); click("use recording");
+            Until(()=>notice.Text.Contains("voice denied")); Check(compose.Text==draft,"canonical transcription failure retains draft without success");
+            System.IO.File.Delete(path+".voice-deny");
+            System.IO.File.WriteAllText(path+".voice-wrong","wrong"); click("record message"); click("use recording");
+            Until(()=>notice.Text.Contains("different conversation")); Check(compose.Text==draft,"foreign transcription receipt cannot replace draft");
+            System.IO.File.Delete(path+".voice-wrong"); click("record message"); click("use recording");
+            Until(()=>chat.VoiceId==null);
+            Check(compose.Text=="voice transcript \u03bb","canonical Unicode transcript is displayed exactly: text="+compose.Text+"; status="+notice.Text);
+            var progress=Environment.GetEnvironmentVariable("PAPERCUSP_NATIVE_FIXTURE_PROGRESS");
+            if(!String.IsNullOrEmpty(progress)) System.IO.File.WriteAllText(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(progress),"voice-ui.json"),
+                new JavaScriptSerializer().Serialize(new{transcript=compose.Text,status=notice.Text,conversationId=chat.ConversationId}),new System.Text.UTF8Encoding(false));
+            Check(notice.Text.Contains("review") && chat.Reply==null,"transcription requires review and never sends automatically");
+            var writes=System.IO.File.ReadAllLines(path+".voice-writes").Select(line=>Json(line)).ToArray();
+            Check(writes.All(write=>PanelState.Text(write,"conversationId")==conversation) && writes.All(write=>PanelState.Text(write,"requestId")!="") &&
+                ((string)writes.Last()["audioBase64"]).Length>65536,"native voice child receives exact conversation, request and audio beyond ordinary panel limit");
+            var send=chat.Send(Guid.NewGuid().ToString()); Check(PanelState.Text(send,"modality")=="voice","unchanged transcript retains voice modality on canonical send");
+            chat.Reply=null; compose.Text="edited transcript"; send=chat.Send(Guid.NewGuid().ToString());
+            Check(PanelState.Text(send,"modality")=="text","editing transcript restores text modality"); chat.Reply=null;
+            chat.Turns.Add(new Dictionary<string,object>{{"role","assistant"},{"text","public spoken reply"}});
+            // Direct model setup needs the same render production runs after history loads.
+            panel.GetType().GetMethod("RenderChat",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic).Invoke(panel,null);
+            Check(chat.CanUseVoice && chat.SpokenReply=="public spoken reply","spoken reply fixture has a ready canonical assistant turn");
+            click("read reply"); Until(()=>device.Playing); Check(chat.VoicePhase=="playing" && compose.Text=="edited transcript","spoken reply plays canonical receipt without changing draft");
+            click("stop voice"); Check(device.Cancelled && chat.VoiceId==null,"stop spoken reply cancels local playback");
+            var read=Json(System.IO.File.ReadAllLines(path+".voice-writes").Last());
+            Check(PanelState.Text(read,"operation")=="speak" && PanelState.Text(read,"text")=="public spoken reply","spoken reply uses existing canonical TTS route");
+        }
+    }
     private static void ChatNative()
     {
         var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
@@ -1248,6 +1351,7 @@ public static class WorkbenchNativeHostFixture
         if (phase == "chat") { ChatNative(); }
         if (phase == "content") { ContentNative(); }
         if (phase == "cards") { CardsNative(); }
+        if (phase == "voice") { VoiceNative(); }
         if (phase == "operator") { OperatorNative(); }
         if (phase == "operator-inbox") { OperatorInboxNative(); }
         if (phase == "all" || phase == "hotkeys" || phase == "windows")
@@ -1277,7 +1381,8 @@ public static class WorkbenchArgvFixture {
 }
 '@
     $env:WORKBENCH_ARGV_FIXTURE = $argvFixture
-    if ($Phase -in @('accounts', 'goals', 'inbox', 'organizer', 'chat', 'content', 'cards')) {
+    # Compile preflight includes the generated child as well as the WPF fixture.
+    if ($Phase -in @('compile', 'accounts', 'goals', 'inbox', 'organizer', 'chat', 'content', 'cards', 'voice')) {
         $env:WORKBENCH_ACCOUNT_FIXTURE = $accountFixture; $env:WORKBENCH_ACCOUNT_STATE = $accountState
         $env:WORKBENCH_CONTROL_PHASE = $Phase
         Add-Type -OutputAssembly $accountFixture -OutputType ConsoleApplication -ReferencedAssemblies System.Web.Extensions, System.Core -TypeDefinition @'
@@ -1323,6 +1428,19 @@ public static class NativeAccountsFixture {
     }
     private static int Chat(string[] args, Dictionary<string, object> request, JavaScriptSerializer json, string path, object environment) {
         if (args.Length == 1 && args[0] == "native-cards") return Cards(args, request, json, path, environment);
+        if (args.Length == 1 && args[0] == "native-voice") {
+            File.AppendAllText(path+".voice-writes",json.Serialize(request)+"\n");
+            if(File.Exists(path+".voice-deny")) {Console.Error.Write("isolated voice denied");return 7;}
+            if(json.Serialize(request["environment"])!=json.Serialize(environment))return 71;
+            var row=new Dictionary<string,object>{{"conversationId",File.Exists(path+".voice-wrong")?ChatB:request["conversationId"]},{"requestId",request["requestId"]},{"operation",request["operation"]}};
+            if(Object.Equals(request["operation"],"transcribe"))row["text"]="voice transcript \u03bb";
+            else row["audioBase64"]="SUQz";
+            var response=json.Serialize(new{environment=environment,rows=new[]{row}});
+            File.WriteAllText(path+".voice-response",response,new UTF8Encoding(false));
+            var progress=Environment.GetEnvironmentVariable("PAPERCUSP_NATIVE_FIXTURE_PROGRESS");
+            if(!String.IsNullOrEmpty(progress)) File.WriteAllText(Path.Combine(Path.GetDirectoryName(progress),"voice-response.json"),response,new UTF8Encoding(false));
+            var output=new UTF8Encoding(false).GetBytes(response);Console.OpenStandardOutput().Write(output,0,output.Length);return 0;
+        }
         var id = File.Exists(path + ".other") ? ChatB : ChatA;
         var saved = File.Exists(path) ? json.Deserialize<Dictionary<string, object>>(File.ReadAllText(path)) : null;
         var user = saved == null ? null : new { id = (string)saved["userTurnId"], conversationId = ChatA, role = "user", seq = 11, text = (string)saved["text"] };
@@ -1462,7 +1580,7 @@ public static class NativeAccountsFixture {
         var request = json.Deserialize<Dictionary<string, object>>(new StreamReader(Console.OpenStandardInput(), utf8).ReadToEnd());
         var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
         var environment = json.DeserializeObject("{\"endpoint\":\"http://fixture.invalid:3170\",\"workspaceId\":\"isolated\",\"store\":{\"id\":\"fixture\"},\"agentChat\":{\"scope\":\"workspace:isolated\"}}");
-        if (new[] { "chat", "content", "cards" }.Contains(Environment.GetEnvironmentVariable("WORKBENCH_CONTROL_PHASE"))) return Chat(args, request, json, path, environment);
+        if (new[] { "chat", "content", "cards", "voice" }.Contains(Environment.GetEnvironmentVariable("WORKBENCH_CONTROL_PHASE"))) return Chat(args, request, json, path, environment);
         if (Environment.GetEnvironmentVariable("WORKBENCH_CONTROL_PHASE") == "organizer") {
             if (args.Length != 1 || args[0] != "native-read") return 50;
             var name = (string)request["name"]; object organizerRows;
