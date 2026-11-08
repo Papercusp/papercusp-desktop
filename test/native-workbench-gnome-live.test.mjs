@@ -510,7 +510,8 @@ try {
 const installedSurfaces={reports:{title:'Reports',flag:'PAPERCUSP_NATIVE_INSTALLED_SHELL',assertions:10},
     inbox:{title:'Inbox',flag:'PAPERCUSP_NATIVE_INSTALLED_INBOX',assertions:17},
     goals:{title:'Goals',flag:'PAPERCUSP_NATIVE_INSTALLED_GOALS',assertions:17},
-    accounts:{title:'Accounts',flag:'PAPERCUSP_NATIVE_INSTALLED_ACCOUNTS',assertions:20}};
+    accounts:{title:'Accounts',flag:'PAPERCUSP_NATIVE_INSTALLED_ACCOUNTS',assertions:20},
+    papercup:{title:'Papercup',flag:'PAPERCUSP_NATIVE_INSTALLED_CHAT',assertions:24}};
 for (const [surface,acceptance] of Object.entries(installedSurfaces)) test('exact installed GNOME preview opens canonical ' +
     acceptance.title + ' through a private Shell shortcut',
     {skip:process.platform!=='linux'||process.env[acceptance.flag]!=='1',timeout:80000},
@@ -557,6 +558,7 @@ export default class Probe extends Extension {
  finish(error){const target=Main.extensionManager.lookup('workbench@papercusp.ai')?.stateObj;
  GLib.file_set_contents(${JSON.stringify(resultFile)},JSON.stringify({ok:!error,error:error?String(error)+'; '+error.stack:null,
  phase,assertions,reportId:this.reportId,bodyChars:this.bodyChars,inboxItemId:this.inboxItemId,goalId:this.goalId,accountId:this.accountId,
+ chat:this.chatProof,
  questions:target?._inbox.rows.length,savedRunId:target?._inbox.savedRunId,
  inboxState:target?{listReady:target._inbox.listReady,listError:target._inbox.listError,
  bulkReady:target._inbox.bulkReady,bulkError:target._inbox.bulkError,contextError:target._inbox.contextError}:null,
@@ -579,7 +581,58 @@ export default class Probe extends Extension {
  phase='desktop ready';await waitFor(()=>Main.actionMode!==Shell.ActionMode.NONE);
  if(Main.overview.visible)await chord([Clutter.KEY_Escape]);
  await waitFor(()=>Main.actionMode===Shell.ActionMode.NORMAL&&!Main.overview.visible);
- ${surface === 'inbox' ? `phase='native Inbox shortcut';await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_i]);
+ ${surface === 'papercup' ? `phase='native Papercup shortcut';await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_p]);
+ const chat=target._chat;
+ await waitFor(()=>state.visible&&!chat.loading);
+ let view=target._views.get('papercup');
+ check(view.panel.get_parent()!==null,'seat shortcut opens the installed native Papercup actor');
+ check(chat.ready&&!chat.error,'canonical Papercup conversation and history are ready');
+ check(chat.environment.endpoint.startsWith(${JSON.stringify(operator)})&&!!chat.environment.workspaceId&&
+ !!chat.environment.store.id&&!!chat.environment.agentChat.scope,'native Papercup retains the complete canonical environment');
+ const current=await target._bridge.read(${JSON.stringify(pui)},{name:'operatorConversations.current',
+ args:{workspaceId:chat.environment.workspaceId},environment:chat.environment});
+ const conversationId=chat.conversationId;
+ check(current.rows[0]?.id===conversationId&&chat.conversation.subjectKind==='global'&&chat.conversation.status==='active',
+ 'native Papercup selects the exact active canonical conversation');
+ const history=await target._bridge.read(${JSON.stringify(pui)},{name:'operatorTurns.page',
+ args:{conversationId,limit:200},environment:chat.environment});
+ const turns=history.rows[0]?.turns;
+ check(Array.isArray(turns)&&typeof history.rows[0].hasMoreEarlier==='boolean','canonical history has explicit paging state');
+ check(chat.turns.every(turn=>turn.conversationId===conversationId&&turns.some(row=>row.id===turn.id&&row.seq===turn.seq&&
+ row.role===turn.role&&row.text===turn.text)),'native Papercup history preserves canonical identities and literal text');
+ check(new Set(chat.turns.map(turn=>turn.id)).size===chat.turns.length&&
+ chat.turns.every((turn,index)=>index===0||turn.seq>chat.turns[index-1].seq),'native history contains unique ordered turns');
+ check(view.content.get_n_children()>0,'native Papercup renders history or its explicit empty state');
+ check(view.status.text==='Papercup · ready','native Papercup exposes confirmed readiness');
+ check(view.compose.reactive&&global.stage.get_key_focus()===view.compose.clutter_text,
+ 'canonical history loading restores real keyboard focus to compose');
+ check(!view.send.reactive&&chat.draft==='','empty native draft cannot send');
+ check(view.recordVoice.reactive&&!view.useRecording.visible&&!view.cancelVoice.visible,
+ 'installed voice controls expose recording only in its idle state');
+ check(view.readReply.reactive===Boolean(chat.spokenReply),'read reply availability follows the canonical assistant history');
+ check(view.earlier.reactive===Boolean(chat.hasMoreEarlier),'earlier messages availability follows canonical paging');
+ phase='canonical question subscription';await waitFor(()=>target._cards.connected||target._cards.error);
+ check(target._cards.connected&&!target._cards.error,'installed Papercup connects its canonical question subscription');
+ let refused=false;try{await target._bridge.read(${JSON.stringify(pui)},{name:'operatorTurns.page',
+ args:{conversationId,limit:200},environment:{...chat.environment,workspaceId:chat.environment.workspaceId+'-foreign'}});}
+ catch(error){refused=/selected environment changed/.test(error.message);}
+ check(refused,'installed Papercup refuses foreign workspace history');
+ phase='seat draft';await chord([Clutter.KEY_w]);
+ check(chat.draft==='w'&&view.compose.get_text()==='w'&&view.send.reactive,'real seat typing updates only the local conversation draft');
+ check(!chat.reply,'typing a draft does not start a model turn');
+ check(global.get_window_actors().length===0,'installed Papercup creates no application window');
+ phase='Papercup Escape';await chord([Clutter.KEY_Escape]);
+ check(!state.visible&&!target._views.has('papercup')&&!target._cardStream&&!target._voiceOperation,
+ 'seat Escape dismisses Papercup and cancels its owned subscriptions and audio');
+ await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_p]);
+ await waitFor(()=>state.visible&&!chat.loading);view=target._views.get('papercup');
+ check(chat.ready&&chat.conversationId===conversationId&&chat.draft==='w'&&view.compose.get_text()==='w',
+ 'reopening the exact canonical conversation restores its local draft');
+ await chord([Clutter.KEY_Control_L,Clutter.KEY_a]);await chord([Clutter.KEY_BackSpace]);
+ this.chatProof={conversationId,historyTurns:chat.turns.length,hasMoreEarlier:chat.hasMoreEarlier,
+ questionSubscriptionConnected:target._cards.connected,modelTurnStarted:Boolean(chat.reply)};
+ await chord([Clutter.KEY_Escape]);
+ ` : surface === 'inbox' ? `phase='native Inbox shortcut';await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_i]);
  const inbox=target._inbox;
  await waitFor(()=>state.visible&&(inbox.listReady||inbox.listError)&&(inbox.bulkReady||inbox.bulkError));
  const view=target._views.get('inbox');
