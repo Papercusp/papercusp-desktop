@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$SourceDirectory,
-    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'inbox', 'organizer', 'chat', 'operator', 'operator-inbox', 'environment-refusal', 'fixture-diagnostics', 'fixture-failure', 'fixture-timeout')][string]$Phase = 'all',
+    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'inbox', 'organizer', 'chat', 'cards', 'operator', 'operator-inbox', 'environment-refusal', 'fixture-diagnostics', 'fixture-failure', 'fixture-timeout')][string]$Phase = 'all',
     [string]$PuiExecutable,
     [string]$OperatorUrl,
     [string]$ExpectedWorkspace,
@@ -898,6 +898,121 @@ public static class WorkbenchNativeHostFixture
         state.SettleList(state.Generation, Envelope("{\"items\":[" + InboxQuestion + "," + InboxQuestion.Replace("thread-a", "thread-b") + "]}"));
         Check(!state.ListReady && state.ListError != null, "conflicting attention identities are surfaced instead of silently merged");
     }
+    private static IEnumerable<T> Elements<T>(DependencyObject parent) where T : DependencyObject
+    {
+        if (parent is T) yield return (T)parent;
+        foreach (var child in LogicalTreeHelper.GetChildren(parent).OfType<DependencyObject>())
+            foreach (var found in Elements<T>(child)) yield return found;
+    }
+    private static void CardsNative()
+    {
+        const string a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE"); var json = new JavaScriptSerializer();
+        var rows = new List<Dictionary<string, object>>(); var version = 0;
+        Action save = () => System.IO.File.WriteAllText(path + ".cards", json.Serialize(new { version = ++version, rows = rows }));
+        Func<string, string, Dictionary<string, object>> row = (id, kind) => Json(json.Serialize(new {
+            correlationId = id, conversationId = a, prompt = "Question " + id, createdAt = 1,
+            presentation = new { kind = kind } }));
+        foreach (var kind in new[] { "radio", "checkbox", "select", "text", "date", "slider" })
+        {
+            var value = row(kind, kind); var presentation = (Dictionary<string, object>)value["presentation"];
+            if (new[] { "radio", "checkbox", "select" }.Contains(kind)) presentation["options"] = new[] {
+                new { id = "one", label = "Same label", hint = "first", description = "First description" },
+                new { id = "two", label = "Same label", hint = "second", description = "Second description" } };
+            if (kind == "text") { presentation["multiline"] = true; presentation["placeholder"] = "Exact prose";
+                value["approval"] = new { title = "Approval title", body = new[] { "Approval paragraph" }, question = "Approval question" };
+                value["report"] = new { title = "Report title", plans = new[] { new { title = "Plan title", status = "active", summary = "Plan summary",
+                    items = new[] { new { id = "P-001", text = "Report item", status = "done", @ref = "WI-123" } } } } };
+                value["details"] = "Exact details"; }
+            if (kind == "date") { presentation["min"] = "2026-11-01"; presentation["max"] = "2026-11-30"; }
+            if (kind == "slider") { presentation["min"] = 2; presentation["max"] = 10; presentation["step"] = 2; }
+            rows.Add(value);
+        }
+        var secret = row("secret", "text"); ((Dictionary<string, object>)secret["presentation"])["sensitive"] = true;
+        ((Dictionary<string, object>)secret["presentation"])["link"] = "/api/ui/cards/secret/link"; rows.Add(secret);
+        var decline = row("decline", "text"); rows.Add(decline);
+        var cancel = row("cancel", "text"); cancel["allowDecline"] = false; rows.Add(cancel);
+        var expired = row("expired", "text"); expired["timeoutMs"] = 1; rows.Add(expired);
+        rows.Add(row("unknown", "future-kind")); rows.Add(row("denied", "text")); rows.Add(row("wrong", "text"));
+        save();
+        using (var host = new WorkbenchHost(Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_FIXTURE")))
+        {
+            host.State("papercup").Pinned = true; host.Toggle("papercup"); var panel = host.Panel("papercup");
+            var cards = (NativeCardsState)panel.GetType().GetField("cards", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).GetValue(panel);
+            var chat = (ChatState)panel.GetType().GetField("chat", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).GetValue(panel);
+            Func<string, System.Windows.Controls.Button> button = name => Find<System.Windows.Controls.Button>(panel, "Papercup " + name);
+            Action<string> click = name => { var control = button(name); Check(control != null && control.IsEnabled, "native card control enabled: " + name + " #" + cases.Count); control.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent)); };
+            var status = Find<System.Windows.Controls.TextBlock>(panel, "Papercup questions status");
+            Until(() => cards.Connected && cards.Cards.Count == rows.Count);
+            Check(Find<System.Windows.Controls.RadioButton>(panel, "Papercup answer radio one") != null &&
+                Find<System.Windows.Controls.CheckBox>(panel, "Papercup answer checkbox two") != null &&
+                Find<System.Windows.Controls.ComboBox>(panel, "Papercup answer select") != null &&
+                Find<System.Windows.Controls.TextBox>(panel, "Papercup answer text").AcceptsReturn &&
+                Find<System.Windows.Controls.DatePicker>(panel, "Papercup answer date") != null &&
+                Find<System.Windows.Controls.Slider>(panel, "Papercup answer slider") != null, "all six card kinds use native typed WPF controls");
+            Check(Find<System.Windows.Controls.PasswordBox>(panel, "Papercup answer secret") != null &&
+                Find<System.Windows.Controls.TextBox>(panel, "Papercup answer secret") == null, "sensitive card answers are masked native password fields");
+            var displayed = Elements<System.Windows.Controls.TextBlock>(panel).Select(text => text.Text).ToArray();
+            Check(new[] { "Approval title", "Approval paragraph", "Approval question", "Report title", "Plan title", "Plan summary" }.All(displayed.Contains) &&
+                displayed.Any(text => text.Contains("Report item") && text.Contains("WI-123")), "card approval prose and structured report preserve canonical context");
+            var details = Find<System.Windows.Controls.Expander>(panel, "Papercup details text"); details.IsExpanded = true;
+            Check(((System.Windows.Controls.TextBox)details.Content).Text == "Exact details", "card details expand as copyable native text");
+            Check(button("decline cancel") == null && !button("submit expired").IsEnabled && button("submit unknown") == null,
+                "decline policy expiry and unsupported kinds cannot fabricate a native submit");
+            string opened = null;
+            panel.GetType().GetField("LaunchChatUri", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).SetValue(panel, new Action<string>(uri => opened = uri));
+            click("secure link secret");
+            Check(opened == "http://fixture.invalid:3170/api/ui/cards/secret/link", "native secure link uses the selected canonical operator origin");
+            click("submit radio");
+            Check(cards.Connected && cards.Pending == null && status.Text.Contains("Choose") && !System.IO.File.Exists(path + ".card-writes"), "invalid native selection never invokes the response helper");
+            var draft = Find<System.Windows.Controls.TextBox>(panel, "Papercup answer text"); draft.Text = "literal ' $() \u03bb\nsecond line";
+            var prior = cards.Cards[0]; save(); Until(() => !Object.ReferenceEquals(prior, cards.Cards[0]));
+            Check(Find<System.Windows.Controls.TextBox>(panel, "Papercup answer text") == draft && draft.Text.Contains("second line"), "identical new-version snapshots retain controls and exact multiline draft");
+            Find<System.Windows.Controls.RadioButton>(panel, "Papercup answer radio two").IsChecked = true;
+            Find<System.Windows.Controls.CheckBox>(panel, "Papercup answer checkbox one").IsChecked = true;
+            Find<System.Windows.Controls.CheckBox>(panel, "Papercup answer checkbox two").IsChecked = true;
+            Find<System.Windows.Controls.ComboBox>(panel, "Papercup answer select").SelectedValue = "two";
+            Check(Object.Equals(Find<System.Windows.Controls.ComboBox>(panel, "Papercup answer select").SelectedValue, "two"), "native dropdown selects the canonical option identity");
+            Find<System.Windows.Controls.PasswordBox>(panel, "Papercup answer secret").Password = "sensitive literal";
+            Find<System.Windows.Controls.DatePicker>(panel, "Papercup answer date").SelectedDate = new DateTime(2026, 11, 20);
+            Find<System.Windows.Controls.Slider>(panel, "Papercup answer slider").Value = 6;
+            foreach (var id in new[] { "radio", "checkbox", "select", "text", "date", "slider", "secret" })
+            {
+                click("submit " + id); Until(() => cards.Error != null || cards.Pending == null && !cards.Cards.Any(card => card.Id == id));
+                Check(cards.Error == null, "native card acknowledgement " + id + ": " + cards.Error);
+            }
+            var writes = System.IO.File.ReadAllLines(path + ".card-writes").Select(Json).ToArray();
+            Func<string, Dictionary<string, object>> payload = id => (Dictionary<string, object>)writes.Single(write => (string)write["correlationId"] == id)["payload"];
+            Check(((System.Collections.IList)payload("radio")["picks"]).Cast<object>().SequenceEqual(new[] { "two" }) &&
+                ((System.Collections.IList)payload("checkbox")["picks"]).Count == 2 &&
+                ((System.Collections.IList)payload("select")["picks"]).Cast<object>().SequenceEqual(new[] { "two" }), "native choices submit exact option identities despite duplicate labels");
+            Check((string)payload("text")["value"] == "literal ' $() \u03bb\nsecond line" && (string)payload("secret")["value"] == "sensitive literal" &&
+                (string)payload("date")["value"] == "2026-11-20" && Convert.ToInt32(payload("slider")["value"]) == 6, "native typed answers reach the helper byte-for-byte with numeric slider payload");
+            click("decline decline"); Until(() => !cards.Cards.Any(card => card.Id == "decline"));
+            click("cancel cancel"); Until(() => !cards.Cards.Any(card => card.Id == "cancel"));
+            writes = System.IO.File.ReadAllLines(path + ".card-writes").Select(Json).ToArray();
+            Check(writes.Any(write => (string)write["action"] == "decline") && writes.Any(write => (string)write["action"] == "cancel"), "native decline and cancel wait for exact canonical receipts");
+            Find<System.Windows.Controls.TextBox>(panel, "Papercup answer denied").Text = "keep after denial";
+            System.IO.File.WriteAllText(path + ".cards-deny", "deny"); click("submit denied"); Until(() => cards.Error != null && !cards.Connected);
+            Check(cards.Cards.Any(card => card.Id == "denied") && !button("submit denied").IsEnabled &&
+                Find<System.Windows.Controls.TextBox>(panel, "Papercup answer denied").Text == "keep after denial", "denied native answer retains its draft and blocks blind resubmit");
+            System.IO.File.Delete(path + ".cards-deny"); click("reconnect questions"); Until(() => cards.Connected && cards.Cards.Any(card => card.Id == "denied"));
+            Check(Find<System.Windows.Controls.TextBox>(panel, "Papercup answer denied").Text == "keep after denial", "question reconnect preserves exact same-scope draft for reconciliation");
+            Find<System.Windows.Controls.TextBox>(panel, "Papercup answer wrong").Text = "keep until exact receipt";
+            System.IO.File.WriteAllText(path + ".cards-wrong", "wrong"); click("submit wrong"); Until(() => !cards.Connected && cards.Error != null);
+            Check(cards.Cards.Any(card => card.Id == "wrong") && status.Text.Contains("reconciliation"), "wrong correlation receipt cannot remove native card or claim success");
+            System.IO.File.Delete(path + ".cards-wrong"); click("reconnect questions"); Until(() => cards.Connected && cards.Cards.Count > 0);
+            rows.Single(value => (string)value["correlationId"] == "denied")["prompt"] = "Changed question"; save();
+            Until(() => Find<System.Windows.Controls.TextBox>(panel, "Papercup answer denied").Text == "");
+            Check(cards.Cards.Any(card => (string)card.Raw["prompt"] == "Changed question"), "changed card signature clears the old answer instead of reusing a stale draft");
+            System.IO.File.WriteAllText(path + ".other", "other"); host.Toggle("papercup"); host.Toggle("papercup");
+            Until(() => chat.Ready && chat.ConversationId == b && cards.Connected);
+            Check(cards.Cards.Count == 0 && Find<System.Windows.Controls.TextBox>(panel, "Papercup answer denied") == null,
+                "switching conversation fences old question frames and draft controls");
+            host.Toggle("papercup");
+            Check(!cards.Connected && cards.ConversationId == "" && cards.Cards.Count == 0, "dismissing native sidebar cancels subscription and invalidates card generation");
+        }
+    }
     private static void ChatNative()
     {
         var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
@@ -1044,6 +1159,7 @@ public static class WorkbenchNativeHostFixture
         if (phase == "inbox") { InboxModel(); InboxNative(); }
         if (phase == "organizer") { OrganizerModel(); OrganizerNative(); }
         if (phase == "chat") { ChatNative(); }
+        if (phase == "cards") { CardsNative(); }
         if (phase == "operator") { OperatorNative(); }
         if (phase == "operator-inbox") { OperatorInboxNative(); }
         if (phase == "all" || phase == "hotkeys" || phase == "windows")
@@ -1073,7 +1189,7 @@ public static class WorkbenchArgvFixture {
 }
 '@
     $env:WORKBENCH_ARGV_FIXTURE = $argvFixture
-    if ($Phase -in @('accounts', 'goals', 'inbox', 'organizer', 'chat')) {
+    if ($Phase -in @('accounts', 'goals', 'inbox', 'organizer', 'chat', 'cards')) {
         $env:WORKBENCH_ACCOUNT_FIXTURE = $accountFixture; $env:WORKBENCH_ACCOUNT_STATE = $accountState
         $env:WORKBENCH_CONTROL_PHASE = $Phase
         Add-Type -OutputAssembly $accountFixture -OutputType ConsoleApplication -ReferencedAssemblies System.Web.Extensions, System.Core -TypeDefinition @'
@@ -1090,7 +1206,35 @@ public static class NativeAccountsFixture {
         var bytes = new UTF8Encoding(false).GetBytes(json.Serialize(new { environment = environment, @event = kind, data = data }) + "\n");
         Console.OpenStandardOutput().Write(bytes, 0, bytes.Length); Console.Out.Flush();
     }
+    private static int Cards(string[] args, Dictionary<string, object> request, JavaScriptSerializer json, string path, object environment) {
+        if (args.Length != 1 || args[0] != "native-cards" || json.Serialize(request["environment"]) != json.Serialize(environment)) return 70;
+        var conversation = (string)request["conversationId"];
+        if ((string)request["operation"] == "respond") {
+            if (File.Exists(path + ".cards-deny")) { Console.Error.Write("isolated answer denied"); return 7; }
+            var id = (string)request["correlationId"];
+            File.AppendAllText(path + ".card-writes", json.Serialize(request) + "\n");
+            if (!File.Exists(path + ".cards-wrong")) File.WriteAllText(path + ".card-resolved-" + id, "resolved");
+            Console.Write(json.Serialize(new { environment = environment, rows = new[] { new {
+                responded = true, conversationId = conversation, correlationId = File.Exists(path + ".cards-wrong") ? "wrong-receipt" : id } } })); return 0;
+        }
+        Frame(json, environment, "reset", new { workspaceId = "isolated" });
+        string previous = null;
+        for (var i = 0; i < 500; ++i) {
+            if (File.Exists(path + ".cards")) {
+                var raw = File.ReadAllText(path + ".cards");
+                if (raw != previous) {
+                    var saved = json.Deserialize<Dictionary<string, object>>(raw); previous = raw;
+                    var cards = ((IList)saved["rows"]).Cast<Dictionary<string, object>>().Where(row =>
+                        Object.Equals(row["conversationId"], conversation) && !File.Exists(path + ".card-resolved-" + (string)row["correlationId"])).ToArray();
+                    Frame(json, environment, "snapshot", new { workspaceId = "isolated", runId = "native-questions", version = saved["version"], snapshot = new { openCards = cards } });
+                }
+            }
+            System.Threading.Thread.Sleep(50);
+        }
+        return 0;
+    }
     private static int Chat(string[] args, Dictionary<string, object> request, JavaScriptSerializer json, string path, object environment) {
+        if (args.Length == 1 && args[0] == "native-cards") return Cards(args, request, json, path, environment);
         var id = File.Exists(path + ".other") ? ChatB : ChatA;
         var saved = File.Exists(path) ? json.Deserialize<Dictionary<string, object>>(File.ReadAllText(path)) : null;
         var user = saved == null ? null : new { id = (string)saved["userTurnId"], conversationId = ChatA, role = "user", seq = 11, text = (string)saved["text"] };
@@ -1227,7 +1371,7 @@ public static class NativeAccountsFixture {
         var request = json.Deserialize<Dictionary<string, object>>(new StreamReader(Console.OpenStandardInput(), utf8).ReadToEnd());
         var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
         var environment = json.DeserializeObject("{\"endpoint\":\"http://fixture.invalid:3170\",\"workspaceId\":\"isolated\",\"store\":{\"id\":\"fixture\"},\"agentChat\":{\"scope\":\"workspace:isolated\"}}");
-        if (Environment.GetEnvironmentVariable("WORKBENCH_CONTROL_PHASE") == "chat") return Chat(args, request, json, path, environment);
+        if (new[] { "chat", "cards" }.Contains(Environment.GetEnvironmentVariable("WORKBENCH_CONTROL_PHASE"))) return Chat(args, request, json, path, environment);
         if (Environment.GetEnvironmentVariable("WORKBENCH_CONTROL_PHASE") == "organizer") {
             if (args.Length != 1 || args[0] != "native-read") return 50;
             var name = (string)request["name"]; object organizerRows;
@@ -1285,5 +1429,6 @@ finally {
         $chatPath = $accountState + '.' + $suffix
         if (Test-Path -LiteralPath $chatPath) { Remove-Item -LiteralPath $chatPath -Force }
     }
+    Get-ChildItem -LiteralPath ([IO.Path]::GetDirectoryName($accountState)) -Filter ([IO.Path]::GetFileName($accountState) + '.card*') | Remove-Item -Force
     Remove-Item Env:WORKBENCH_ACCOUNT_FIXTURE, Env:WORKBENCH_ACCOUNT_STATE, Env:WORKBENCH_CONTROL_PHASE -ErrorAction SilentlyContinue
 }

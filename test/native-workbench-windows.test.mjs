@@ -166,6 +166,20 @@ test('Windows native Papercup sidebar retains history, streaming, drafts, reconc
         assert.equal(new Set(result.cases).size, result.count);
     });
 
+test('Windows native question controls preserve typed answers, exact receipts and conversation isolation',
+    {skip:process.platform !== 'win32', timeout:60000}, () => {
+        const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
+            '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'cards', '-Interactive'],
+        {encoding:'utf8', timeout:55000, windowsHide:true});
+        assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
+        const result = JSON.parse(run.stdout.trim());
+        assert.equal(result.ok, true); assert.equal(result.phase, 'cards');
+        assert.equal(result.interactiveDesktop, true); assert.ok(result.processSessionId > 0);
+        assert.ok(result.count >= 35);
+        assert.equal(new Set(result.cases).size, result.count);
+    });
+
 test('Windows native Accounts controls preserve exact identity, confirmed state and independent axes',
     {skip:process.platform !== 'win32', timeout:60000}, () => {
         const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',

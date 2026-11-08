@@ -274,6 +274,21 @@ namespace Papercusp.Workbench
             private readonly Button chatSend, chatEarlier, chatReconnect, chatCancel;
             private CancellationTokenSource chatStream;
             private bool renderingChat;
+            private readonly NativeCardsState cards;
+            private readonly StackPanel cardsContent;
+            private readonly TextBlock cardsStatus;
+            private readonly ScrollViewer cardsScroll;
+            private readonly Button cardsReconnect;
+            private readonly DispatcherTimer cardsTimer;
+            private CancellationTokenSource cardsStream;
+            private string cardsRenderKey;
+            private sealed class CardDraft
+            {
+                public string Signature, Value = "";
+                public readonly List<string> Picks = new List<string>();
+            }
+            private readonly Dictionary<string, CardDraft> cardDrafts = new Dictionary<string, CardDraft>();
+            internal Action<string> LaunchChatUri = uri => Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true });
             private List<Dictionary<string, object>> inboxConfirmation;
             private string inboxRunId, inboxListKey, inboxContextKey, inboxBulkKey;
             internal Func<string, bool> ConfirmGoal;
@@ -365,6 +380,16 @@ namespace Papercusp.Workbench
                     chatScope = new TextBlock { TextWrapping = TextWrapping.Wrap };
                     AutomationProperties.SetName(chatScope, "Papercup conversation environment"); controls.Children.Add(chatScope);
                     var chatBody = new DockPanel(); body.Children.Add(chatBody);
+                    cards = new NativeCardsState();
+                    var questions = new StackPanel(); DockPanel.SetDock(questions, Dock.Top); chatBody.Children.Add(questions);
+                    cardsStatus = new TextBlock { TextWrapping = TextWrapping.Wrap };
+                    AutomationProperties.SetName(cardsStatus, "Papercup questions status"); questions.Children.Add(cardsStatus);
+                    cardsReconnect = InboxButton(questions, "Reconnect questions", "Papercup reconnect questions", ConnectCards);
+                    cardsContent = new StackPanel();
+                    cardsScroll = new ScrollViewer { Content = cardsContent, MaxHeight = 260, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+                    AutomationProperties.SetName(cardsScroll, "Papercup questions"); questions.Children.Add(cardsScroll);
+                    cardsTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+                    cardsTimer.Tick += (s, e) => RenderCards();
                     var composer = new StackPanel(); DockPanel.SetDock(composer, Dock.Bottom); chatBody.Children.Add(composer);
                     chatCompose = new TextBox { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 70,
                         MaxHeight = 180, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Margin = new Thickness(0, 8, 0, 4) };
@@ -478,7 +503,7 @@ namespace Papercusp.Workbench
                 State.Visible = false; debounce.Stop();
                 if (accounts != null) { ++accounts.Generation; accounts.Busy = false; }
                 if (inbox != null) { ++inbox.Generation; inbox.ClearContext(); inboxConfirmation = null; inboxTimer.Stop(); }
-                if (chat != null) { StopChatStream(); ++chat.Generation; chat.Loading = false; }
+                if (chat != null) { StopChatStream(); StopCards(); ++chat.Generation; chat.Loading = false; }
                 if (refresh != null) { refresh.Cancel(); refresh.Dispose(); refresh = null; }
                 ++State.Generation; CancelDetail();
                 var ownedFocus = IsActive; Hide();
@@ -557,7 +582,7 @@ namespace Papercusp.Workbench
             }
             private async Task RefreshChat(CancellationToken token)
             {
-                StopChatStream(); var generation = chat.Begin(); RenderChat();
+                StopChatStream(); StopCards(); var generation = chat.Begin(); RenderChat();
                 try
                 {
                     var environment = AccountState.One(await PuiReadBridge.ReadAsync(pui, "operator.identity", null, token));
@@ -570,7 +595,199 @@ namespace Papercusp.Workbench
                     if (!token.IsCancellationRequested && State.Visible) chat.Settle(generation, environment, id, page);
                 }
                 catch (Exception error) { if (!token.IsCancellationRequested) chat.Fail(generation, error); }
-                finally { if (generation == chat.Generation && State.Visible) { RenderChat(); if (IsActive) chatCompose.Focus(); } }
+                finally { if (generation == chat.Generation && State.Visible) { RenderChat(); if (chat.Ready) ConnectCards(); if (IsActive) chatCompose.Focus(); } }
+            }
+            private void StopCards()
+            {
+                var stream = cardsStream; cardsStream = null;
+                if (stream != null) stream.Cancel();
+                cardsTimer.Stop(); cards.Begin(null, ""); cardsRenderKey = null;
+                cardsContent.Children.Clear();
+            }
+            private async void ConnectCards()
+            {
+                if (!State.Visible || !chat.Ready) return;
+                // Drafts are scoped by canonical environment + conversation and
+                // the entire card signature. Reconnect cannot cross that fence.
+                var scope = new JavaScriptSerializer().Serialize(new object[] { chat.Environment, chat.ConversationId });
+                CardDraft savedScope;
+                if (!cardDrafts.TryGetValue("", out savedScope) || savedScope.Signature != scope)
+                { cardDrafts.Clear(); cardDrafts[""] = new CardDraft { Signature = scope }; }
+                StopCards(); var generation = cards.Begin(chat.Environment, chat.ConversationId);
+                var source = new CancellationTokenSource(); cardsStream = source; cardsTimer.Start(); RenderCards();
+                try
+                {
+                    await PuiReadBridge.CardsAsync(pui, cards.Subscription, frame => Dispatcher.Invoke(new Action(() =>
+                    {
+                        if (cardsStream == source && !source.IsCancellationRequested && State.Visible && cards.Receive(generation, frame)) RenderCards();
+                    })), source.Token);
+                    if (cardsStream == source) throw new InvalidOperationException("Questions disconnected; reconnect before answering");
+                }
+                catch (Exception error) { if (cardsStream == source) cards.Failed(generation, error); }
+                finally
+                {
+                    var current = cardsStream == source; if (current) cardsStream = null; source.Dispose();
+                    if (current && State.Visible) RenderCards();
+                }
+            }
+            private void RenderCards()
+            {
+                if (shuttingDown || cards == null) return;
+                cardsStatus.Text = cards.Error ?? (cards.Pending != null ? "Saving answer…" : cards.Connected ? "" : chat.Ready ? "Connecting questions…" : "");
+                cardsReconnect.Visibility = chat.Ready && !cards.Connected && cards.Error != null ? Visibility.Visible : Visibility.Collapsed;
+                var rows = cards.Cards;
+                cardsScroll.Visibility = rows.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+                var key = new JavaScriptSerializer().Serialize(new object[] { rows.Select(row => new object[] { row.Raw, row.Expired }).ToArray(), cards.Pending, cards.Connected });
+                if (cardsRenderKey == key) return;
+                var hadFocus = cardsContent.IsKeyboardFocusWithin;
+                cardsRenderKey = key; cardsContent.Children.Clear();
+                foreach (var card in rows)
+                {
+                    var box = new StackPanel { Margin = new Thickness(0, 4, 0, 12) }; cardsContent.Children.Add(box);
+                    AutomationProperties.SetName(box, "Papercup question " + card.Id);
+                    try
+                    {
+                    foreach (var field in new[] { "prompt", "prose" })
+                    { var text = PanelState.Text(card.Raw, field); if (text != "") InboxText(box, text); }
+                    var approval = ChatReply.Value(card.Raw, "approval") as Dictionary<string, object>;
+                    if (approval != null)
+                    {
+                        InboxText(box, PanelState.Text(approval, "title"));
+                        var paragraphs = ChatReply.Value(approval, "body") as System.Collections.IList;
+                        if (paragraphs != null) foreach (var paragraph in paragraphs) if (paragraph is string) InboxText(box, (string)paragraph);
+                        InboxText(box, PanelState.Text(approval, "question"));
+                    }
+                    var report = ChatReply.Value(card.Raw, "report") as Dictionary<string, object>;
+                    if (report != null)
+                    {
+                        InboxText(box, PanelState.Text(report, "title"));
+                        var plans = ChatReply.Value(report, "plans") as System.Collections.IList;
+                        if (plans != null) foreach (var entry in plans)
+                        {
+                            var plan = ChatReply.Object(entry);
+                            foreach (var field in new[] { "title", "slug", "status", "summary" }) InboxText(box, PanelState.Text(plan, field));
+                            var items = ChatReply.Value(plan, "items") as System.Collections.IList;
+                            if (items != null) foreach (var item in items)
+                            { var row = ChatReply.Object(item); InboxText(box, String.Join(" · ", new[] { "id", "text", "status", "ref" }.Select(field => PanelState.Text(row, field)).Where(text => text != ""))); }
+                        }
+                    }
+                    var signature = new JavaScriptSerializer().Serialize(card.Raw);
+                    CardDraft draft;
+                    if (!cardDrafts.TryGetValue(card.Id, out draft) || draft.Signature != signature)
+                        cardDrafts[card.Id] = draft = new CardDraft { Signature = signature };
+                    var active = cards.Connected && cards.Pending == null && !card.Expired;
+                    var name = "Papercup answer " + card.Id;
+                    if (card.Kind == "select")
+                    {
+                        var select = new ComboBox { IsEnabled = active, DisplayMemberPath = "Label", SelectedValuePath = "Id" };
+                        select.ItemsSource = card.Options.Select(option => new { Id = PanelState.Text(option, "id"), Label = PanelState.Text(option, "label") + " · " + PanelState.Text(option, "hint") }).ToArray();
+                        select.SelectedValue = draft.Picks.FirstOrDefault(); AutomationProperties.SetName(select, name); box.Children.Add(select);
+                        select.SelectionChanged += (s, e) => { draft.Picks.Clear(); if (select.SelectedValue != null) draft.Picks.Add((string)select.SelectedValue); };
+                    }
+                    else if (card.Kind == "radio" || card.Kind == "checkbox")
+                    {
+                        foreach (var option in card.Options)
+                        {
+                            var id = PanelState.Text(option, "id");
+                            System.Windows.Controls.Primitives.ToggleButton choice = card.Kind == "radio" ? (System.Windows.Controls.Primitives.ToggleButton)new RadioButton { GroupName = card.Id } : new CheckBox();
+                            choice.Content = PanelState.Text(option, "label") + " · " + PanelState.Text(option, "hint");
+                            choice.IsChecked = draft.Picks.Contains(id); choice.IsEnabled = active;
+                            AutomationProperties.SetName(choice, name + " " + id); box.Children.Add(choice);
+                            choice.Checked += (s, e) => { if (card.Kind == "radio") draft.Picks.Clear(); if (!draft.Picks.Contains(id)) draft.Picks.Add(id); };
+                            choice.Unchecked += (s, e) => draft.Picks.Remove(id);
+                            var description = PanelState.Text(option, "description"); if (description != "") InboxText(box, description);
+                        }
+                    }
+                    else if (card.Kind == "text")
+                    {
+                        if (Object.Equals(ChatReply.Value(card.Presentation, "sensitive"), true))
+                        {
+                            var field = new PasswordBox { Password = draft.Value, IsEnabled = active };
+                            AutomationProperties.SetName(field, name); box.Children.Add(field);
+                            field.PasswordChanged += (s, e) => draft.Value = field.Password;
+                        }
+                        else
+                        {
+                            var field = new TextBox { Text = draft.Value, IsEnabled = active, TextWrapping = TextWrapping.Wrap,
+                                AcceptsReturn = Object.Equals(ChatReply.Value(card.Presentation, "multiline"), true), MaxHeight = 120,
+                                VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+                            AutomationProperties.SetName(field, name); box.Children.Add(field);
+                            field.TextChanged += (s, e) => draft.Value = field.Text;
+                        }
+                        InboxText(box, PanelState.Text(card.Presentation, "placeholder"));
+                    }
+                    else if (card.Kind == "date")
+                    {
+                        var field = new DatePicker { IsEnabled = active, SelectedDateFormat = DatePickerFormat.Short };
+                        DateTime date;
+                        if (DateTime.TryParseExact(draft.Value, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out date)) field.SelectedDate = date;
+                        if (DateTime.TryParseExact(PanelState.Text(card.Presentation, "min"), "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out date)) field.DisplayDateStart = date;
+                        if (DateTime.TryParseExact(PanelState.Text(card.Presentation, "max"), "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out date)) field.DisplayDateEnd = date;
+                        AutomationProperties.SetName(field, name); box.Children.Add(field);
+                        field.SelectedDateChanged += (s, e) => draft.Value = field.SelectedDate.HasValue ? field.SelectedDate.Value.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) : "";
+                    }
+                    else if (card.Kind == "slider")
+                    {
+                        var minimum = Convert.ToDouble(ChatReply.Value(card.Presentation, "min"), System.Globalization.CultureInfo.InvariantCulture);
+                        var maximum = Convert.ToDouble(ChatReply.Value(card.Presentation, "max"), System.Globalization.CultureInfo.InvariantCulture);
+                        var step = Convert.ToDouble(ChatReply.Value(card.Presentation, "step") ?? 1, System.Globalization.CultureInfo.InvariantCulture);
+                        double value;
+                        var field = new Slider { Minimum = minimum, Maximum = maximum, TickFrequency = step, IsSnapToTickEnabled = true, IsEnabled = active,
+                            Value = Double.TryParse(draft.Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out value) ? value : minimum };
+                        var label = new TextBlock { Text = draft.Value == "" ? "Choose a value · " + minimum + " to " + maximum : draft.Value };
+                        AutomationProperties.SetName(field, name); box.Children.Add(label); box.Children.Add(field);
+                        field.ValueChanged += (s, e) => { draft.Value = field.Value.ToString(System.Globalization.CultureInfo.InvariantCulture); label.Text = draft.Value; };
+                        // Clicking the initial minimum is still an explicit answer.
+                        field.PreviewMouseUp += (s, e) => { draft.Value = field.Value.ToString(System.Globalization.CultureInfo.InvariantCulture); label.Text = draft.Value; };
+                    }
+                    var actions = new WrapPanel(); box.Children.Add(actions);
+                    if (card.CanSubmit) InboxButton(actions, "Submit answer", "Papercup submit " + card.Id, () => AnswerCard(card, "submit", draft), active);
+                    if (!Object.Equals(ChatReply.Value(card.Raw, "allowDecline"), false)) InboxButton(actions, "Decline question", "Papercup decline " + card.Id, () => AnswerCard(card, "decline", draft), active);
+                    InboxButton(actions, "Cancel question", "Papercup cancel " + card.Id, () => AnswerCard(card, "cancel", draft), active);
+                    var link = card.SecureLink(cards.Environment);
+                    if (link != null) InboxButton(actions, "Open secure link", "Papercup secure link " + card.Id, () =>
+                    { try { LaunchChatUri(link); } catch (Exception error) { cardsStatus.Text = error.Message; } }, active);
+                    var details = PanelState.Text(card.Raw, "details");
+                    if (details != "")
+                    {
+                        var disclosure = new Expander { Header = "Show details", Content = new TextBox { Text = details, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap } };
+                        AutomationProperties.SetName(disclosure, "Papercup details " + card.Id); box.Children.Add(disclosure);
+                    }
+                    if (card.Expired) InboxText(box, "This question has expired.");
+                    }
+                    catch (Exception error)
+                    {
+                        box.Children.Clear(); InboxText(box, PanelState.Text(card.Raw, "prompt"));
+                        InboxText(box, "Question unavailable · " + error.Message);
+                    }
+                }
+                if (hadFocus && IsActive) chatCompose.Focus();
+            }
+            private async void AnswerCard(NativeCard card, string action, CardDraft draft)
+            {
+                var generation = cards.Generation; var dispatched = false;
+                try
+                {
+                    card = cards.Cards.FirstOrDefault(current => current.Id == card.Id && ChatReply.Equal(current.Raw, card.Raw));
+                    if (card == null) throw new InvalidOperationException("This question changed; review the current card");
+                    var request = cards.Request(card, action, action == "submit" ? card.Answer(draft.Picks, draft.Value) : null);
+                    RenderCards(); dispatched = true;
+                    var receipt = await PuiReadBridge.RespondToCardAsync(pui, request, refresh.Token);
+                    if (cards.Responded(generation, card.Id, receipt)) cardDrafts.Remove(card.Id);
+                }
+                catch (Exception error)
+                {
+                    if (generation == cards.Generation)
+                    {
+                        if (dispatched)
+                        {
+                            var stream = cardsStream; cardsStream = null; if (stream != null) stream.Cancel();
+                            cards.Failed(generation, error);
+                        }
+                        else cards.Error = error.Message;
+                    }
+                }
+                finally { if (generation == cards.Generation && State.Visible) RenderCards(); }
             }
             private async void LoadEarlierChat()
             {
