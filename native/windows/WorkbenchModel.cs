@@ -11,6 +11,253 @@ namespace Papercusp.Workbench
 {
     // The same canonical models and identities as native/gnome/panel-model.mjs.
     // No local roster, authorization, account or measurement store is introduced.
+    // In-memory projection of the existing chat-protocol v1, not a second
+    // conversation store. Every frame/history page is bound to all four backend
+    // identity axes and an exact conversation. Failed validation is atomic.
+    public sealed class ChatReply
+    {
+        public readonly Dictionary<string, object> Environment;
+        public readonly string ConversationId, Text, UserTurnId, Modality;
+        public string TurnId = "", Phase = "connecting", Raw = "", DisplayText = "";
+        public long Sequence;
+        public bool Complete, Connected = true;
+        public Dictionary<string, object> SavedUser;
+        public List<string> Tools = new List<string>();
+        private Dictionary<long, Dictionary<string, object>> events = new Dictionary<long, Dictionary<string, object>>();
+        private static readonly string[] Phases = { "running", "awaiting-input", "completed", "failed", "cancelled", "interrupted", "needs-reconciliation" };
+        public ChatReply(Dictionary<string, object> environment, string conversationId, string text, string userTurnId, string modality = "text")
+        {
+            if (!AccountState.SameEnvironment(environment, environment) || !Uuid(conversationId) || !Uuid(userTurnId) ||
+                String.IsNullOrWhiteSpace(text) || Encoding.UTF8.GetByteCount(text) > 32768 || !(modality == "text" || modality == "voice"))
+                throw new ArgumentException("Select an exact conversation and bounded message");
+            Environment = Copy(environment); ConversationId = conversationId; Text = text; UserTurnId = userTurnId; Modality = modality;
+        }
+        public static bool Uuid(string value)
+        { return value != null && Regex.IsMatch(value, "\\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\z"); }
+        public static Dictionary<string, object> Copy(Dictionary<string, object> value)
+        { var json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 }; return json.Deserialize<Dictionary<string, object>>(json.Serialize(value)); }
+        public static object Value(Dictionary<string, object> value, string key)
+        { object found; return value != null && value.TryGetValue(key, out found) ? found : null; }
+        public static Dictionary<string, object> Object(object value)
+        { var row = value as Dictionary<string, object>; if (row == null) throw new InvalidOperationException("Invalid canonical object"); return row; }
+        public static long Number(object value)
+        {
+            if (!(value is int || value is long || value is decimal || value is double)) throw new InvalidOperationException("Invalid canonical sequence");
+            var number = Convert.ToDouble(value);
+            if (Double.IsNaN(number) || number < 0 || number > 9007199254740991d || number != Math.Floor(number))
+                throw new InvalidOperationException("Invalid canonical sequence");
+            return Convert.ToInt64(value);
+        }
+        private static bool Equal(object a, object b)
+        {
+            var left = a as Dictionary<string, object>; var right = b as Dictionary<string, object>;
+            if (left != null && right != null) return left.Count == right.Count && left.All(pair => right.ContainsKey(pair.Key) && Equal(pair.Value, right[pair.Key]));
+            var al = a as IList; var bl = b as IList;
+            if (al != null && bl != null) return al.Count == bl.Count && al.Cast<object>().Zip(bl.Cast<object>(), Equal).All(same => same);
+            return System.Object.Equals(a, b);
+        }
+        public Dictionary<string, object> SendRequest()
+        { return new Dictionary<string, object> { { "environment", Copy(Environment) }, { "conversationId", ConversationId },
+            { "operation", "send" }, { "text", Text }, { "userTurnId", UserTurnId }, { "modality", Modality } }; }
+        public Dictionary<string, object> Control(string operation)
+        {
+            if (Complete || TurnId == "" || !(operation == "reconnect" || operation == "cancel"))
+                throw new InvalidOperationException("The saved reply identity is unavailable; refresh before sending again");
+            var request = new Dictionary<string, object> { { "environment", Copy(Environment) }, { "conversationId", ConversationId },
+                { "operation", operation }, { "turnId", TurnId } };
+            if (operation == "reconnect") request["afterSequence"] = Sequence;
+            return request;
+        }
+        public void Disconnected() { Connected = false; if (!Complete) Phase = "needs-reconciliation"; }
+        private bool Matches(Dictionary<string, object> row)
+        { return PanelState.Text(row, "conversationId") == ConversationId && TurnId != "" && PanelState.Text(row, "turnId") == TurnId; }
+        private string ReplyState(Dictionary<string, object> row)
+        {
+            if (Number(Value(row, "schemaVersion")) != 1 || !Matches(row) || !Phases.Contains(PanelState.Text(row, "phase")))
+                throw new InvalidOperationException("Invalid saved reply state");
+            Number(Value(row, "revision")); Number(Value(row, "lastSequence"));
+            var capabilities = Object(Value(row, "capabilities"));
+            if (new[] { "connectionReplay", "persistedHistory", "persistedInteractionDecisions", "completedToolCheckpoints", "interruptedTurnRecovery" }
+                .Any(key => !(Value(capabilities, key) is bool))) throw new InvalidOperationException("Invalid saved reply capabilities");
+            return PanelState.Text(row, "phase");
+        }
+        public void Receive(Dictionary<string, object> frame)
+        {
+            var next = (ChatReply)MemberwiseClone();
+            next.events = new Dictionary<long, Dictionary<string, object>>(events); next.Tools = new List<string>(Tools);
+            next.Reduce(frame);
+            TurnId = next.TurnId; Phase = next.Phase; Raw = next.Raw; DisplayText = next.DisplayText; Sequence = next.Sequence;
+            Complete = next.Complete; Connected = next.Connected; SavedUser = next.SavedUser; Tools = next.Tools; events = next.events;
+        }
+        private void Reduce(Dictionary<string, object> frame)
+        {
+            if (Complete || !AccountState.SameEnvironment(Environment, Value(frame, "environment") as Dictionary<string, object>))
+                throw new InvalidOperationException("The reply environment changed or is already complete");
+            var data = Object(Value(frame, "data")); var kind = PanelState.Text(frame, "event");
+            if (kind == "user-saved")
+            {
+                var row = Object(Value(data, "turn")); Number(Value(row, "seq"));
+                if (PanelState.Text(data, "conversationId") != ConversationId || PanelState.Text(row, "conversationId") != ConversationId ||
+                    PanelState.Text(row, "id") != UserTurnId || PanelState.Text(row, "role") != "user" || PanelState.Text(row, "text") != Text)
+                    throw new InvalidOperationException("Invalid saved message acknowledgement");
+                SavedUser = Copy(row);
+            }
+            else if (kind == "run-meta")
+            {
+                if (Number(Value(data, "chatProtocolVersion")) != 1 || PanelState.Text(data, "conversationId") != ConversationId)
+                    throw new InvalidOperationException("Unsupported reply protocol or conversation");
+            }
+            else if (kind == "turn-meta")
+            {
+                var id = PanelState.Text(data, "turnId");
+                if (Number(Value(data, "schemaVersion")) != 1 || PanelState.Text(data, "conversationId") != ConversationId ||
+                    !Uuid(id) || TurnId != "" && TurnId != id) throw new InvalidOperationException("Invalid reply identity");
+                TurnId = id; Phase = "running"; Connected = true;
+            }
+            else if (kind == "chat-event")
+            {
+                var number = Number(Value(data, "sequence"));
+                if (Number(Value(data, "schemaVersion")) != 1 || !Matches(data) || number == 0 || PanelState.Text(data, "eventId") == "")
+                    throw new InvalidOperationException("Invalid saved reply event");
+                if (number <= Sequence)
+                {
+                    Dictionary<string, object> prior;
+                    if (!events.TryGetValue(number, out prior) || !Equal(prior, data)) throw new InvalidOperationException("Conflicting saved reply event");
+                    return;
+                }
+                if (number != Sequence + 1) throw new InvalidOperationException("The saved reply has a sequence gap");
+                var item = Object(Value(data, "event")); var type = PanelState.Text(item, "type");
+                if (type == "delta")
+                {
+                    if (!(Value(item, "text") is string) || Encoding.UTF8.GetByteCount(Raw + (string)item["text"]) > 8 * 1024 * 1024)
+                        throw new InvalidOperationException("Invalid or oversized reply text");
+                    Raw += (string)item["text"];
+                    var open = Regex.Match(Raw, "<say>", RegexOptions.IgnoreCase);
+                    if (open.Success)
+                    {
+                        var text = Raw.Substring(open.Index + open.Length); var close = Regex.Match(text, "</say>", RegexOptions.IgnoreCase);
+                        if (close.Success) text = text.Substring(0, close.Index);
+                        else for (var n = Math.Min(5, text.Length); n > 0; --n)
+                            if (text.EndsWith("</say>".Substring(0, n), StringComparison.OrdinalIgnoreCase)) { text = text.Substring(0, text.Length - n); break; }
+                        DisplayText = text;
+                    }
+                }
+                else if (type == "tool_call" || type == "tool_result")
+                {
+                    if (PanelState.Text(item, "name") == "" || PanelState.Text(item, "callId") == "" || type == "tool_result" && !(Value(item, "ok") is bool))
+                        throw new InvalidOperationException("Invalid tool activity");
+                    Tools.Add(PanelState.Text(item, "name") + (type == "tool_call" ? " · running" : (bool)item["ok"] ? " · complete" : " · failed"));
+                }
+                else if (type == "lifecycle")
+                { if (!Phases.Contains(PanelState.Text(item, "phase"))) throw new InvalidOperationException("Invalid reply lifecycle"); Phase = PanelState.Text(item, "phase"); }
+                else if (type == "error") throw new InvalidOperationException(PanelState.Text(item, "message"));
+                else if (!new[] { "done", "session", "provenance", "result" }.Contains(type)) throw new InvalidOperationException("Unsupported saved reply event");
+                Sequence = number; events[number] = Copy(data); if (events.Count > 5000) events.Remove(number - 5000);
+            }
+            else if (kind == "turn-state")
+            {
+                var phase = ReplyState(data);
+                if (new[] { "failed", "cancelled", "interrupted", "needs-reconciliation" }.Contains(phase)) throw new InvalidOperationException("The saved reply is " + phase);
+                Phase = phase;
+            }
+            else if (kind == "done")
+            {
+                var turn = Object(Value(data, "persistedTurn")); Number(Value(turn, "seq"));
+                if (!Matches(turn) || Value(data, "phase") != null && PanelState.Text(data, "phase") != "completed")
+                    throw new InvalidOperationException("The saved reply acknowledgement was lost or does not match");
+                Complete = true; Connected = false; Phase = "completed";
+            }
+            else if (kind == "cancelled")
+            {
+                if (!System.Object.Equals(Value(data, "ok"), true) || ReplyState(Object(Value(data, "state"))) != "cancelled")
+                    throw new InvalidOperationException("Reply cancellation needs reconciliation");
+                Complete = true; Connected = false; Phase = "cancelled";
+            }
+            else throw new InvalidOperationException(kind == "error" ? PanelState.Text(data, "message") : "Unsupported reply frame");
+        }
+    }
+
+    public sealed class ChatState
+    {
+        public int Generation;
+        public bool Loading, Loaded, HasMoreEarlier;
+        public string Error;
+        public Dictionary<string, object> Environment, Conversation;
+        public List<Dictionary<string, object>> Turns = new List<Dictionary<string, object>>();
+        public ChatReply Reply;
+        private readonly Dictionary<string, string> drafts = new Dictionary<string, string>();
+        public string ConversationId { get { return Conversation == null ? "" : PanelState.Text(Conversation, "id"); } }
+        public bool Ready { get { return Loaded && ConversationId != "" && AccountState.SameEnvironment(Environment, Environment); } }
+        private string DraftKey { get { return ConversationId == "" || !AccountState.SameEnvironment(Environment, Environment) ? null :
+            new JavaScriptSerializer().Serialize(new[] { PanelState.Text(Environment, "endpoint"), PanelState.Text(Environment, "workspaceId"),
+                PanelState.Text(ChatReply.Object(Environment["store"]), "id"), PanelState.Text(ChatReply.Object(Environment["agentChat"]), "scope"), ConversationId }); } }
+        public string Draft
+        { get { string text; return DraftKey != null && drafts.TryGetValue(DraftKey, out text) ? text : ""; }
+          set { var key = DraftKey; if (key != null) drafts[key] = value ?? ""; } }
+        public int Begin()
+        { ++Generation; Environment = null; Conversation = null; Turns.Clear(); Loading = true; Loaded = false; HasMoreEarlier = false; Reply = null; Error = null; return Generation; }
+        private static Dictionary<string, object> Row(Dictionary<string, object> payload, Dictionary<string, object> environment)
+        {
+            if (!AccountState.SameEnvironment(environment, ChatReply.Value(payload, "environment") as Dictionary<string, object>))
+                throw new InvalidOperationException("The selected conversation environment changed");
+            return AccountState.One(payload);
+        }
+        public bool Bind(int generation, Dictionary<string, object> environment, Dictionary<string, object> payload)
+        {
+            if (generation != Generation) return false;
+            var row = Row(payload, environment);
+            if (!ChatReply.Uuid(PanelState.Text(row, "id")) || PanelState.Text(row, "workspaceId") != PanelState.Text(environment, "workspaceId") ||
+                PanelState.Text(row, "subjectKind") != "global" || PanelState.Text(row, "status") != "active")
+                throw new InvalidOperationException("The active Papercup conversation is unavailable");
+            Environment = ChatReply.Copy(environment); Conversation = ChatReply.Copy(row); return true;
+        }
+        public long BeginEarlier()
+        {
+            if (!Ready || Loading || Reply != null || !HasMoreEarlier || Turns.Count == 0) throw new InvalidOperationException("Earlier messages are unavailable");
+            Loading = true; Error = null; return ChatReply.Number(Turns[0]["seq"]);
+        }
+        public bool Settle(int generation, Dictionary<string, object> environment, string id, Dictionary<string, object> payload, long? before = null)
+        {
+            if (generation != Generation) return false;
+            if (!Loading || !AccountState.SameEnvironment(Environment, environment) || id != ConversationId || id == "")
+                throw new InvalidOperationException("The selected Papercup conversation changed");
+            var row = Row(payload, environment); var items = ChatReply.Value(row, "turns") as IList;
+            if (items == null || !(ChatReply.Value(row, "hasMoreEarlier") is bool) || (bool)row["hasMoreEarlier"] && items.Count == 0)
+                throw new InvalidOperationException("Papercup history is incomplete");
+            var ids = new HashSet<string>(); var turns = new List<Dictionary<string, object>>(); long previous = -1;
+            foreach (var item in items)
+            {
+                var turn = ChatReply.Object(item); var sequence = ChatReply.Number(ChatReply.Value(turn, "seq"));
+                if (PanelState.Text(turn, "id") == "" || !ids.Add(PanelState.Text(turn, "id")) || PanelState.Text(turn, "conversationId") != id ||
+                    sequence <= previous || before.HasValue && sequence >= before.Value || !(ChatReply.Value(turn, "text") is string) ||
+                    !new[] { "user", "assistant", "system", "tool" }.Contains(PanelState.Text(turn, "role"))) throw new InvalidOperationException("Invalid or foreign history message");
+                previous = sequence; turns.Add(ChatReply.Copy(turn));
+            }
+            if (before.HasValue && (!Loaded || Turns.Count == 0 || ChatReply.Number(Turns[0]["seq"]) != before.Value || Turns.Any(turn => ids.Contains(PanelState.Text(turn, "id")))))
+                throw new InvalidOperationException("Earlier messages changed; refresh the conversation");
+            if (!before.HasValue && Loaded) throw new InvalidOperationException("History was already loaded");
+            if (before.HasValue) turns.AddRange(Turns); Turns = turns;
+            HasMoreEarlier = (bool)row["hasMoreEarlier"]; Loading = false; Loaded = true; Error = null; return true;
+        }
+        public bool CanSend { get { return Ready && !Loading && (Reply == null || Reply.Complete) && !String.IsNullOrWhiteSpace(Draft) && Encoding.UTF8.GetByteCount(Draft) <= 32768; } }
+        public Dictionary<string, object> Send(string userTurnId)
+        {
+            if (!CanSend) throw new InvalidOperationException("Load the conversation and enter a bounded message first");
+            Reply = new ChatReply(Environment, ConversationId, Draft, userTurnId); Error = null; return Reply.SendRequest();
+        }
+        public bool Receive(int generation, Dictionary<string, object> frame)
+        {
+            if (generation != Generation) return false;
+            if (Reply == null) throw new InvalidOperationException("No reply is active");
+            Reply.Receive(frame); var row = Reply.SavedUser;
+            if (row != null && !Turns.Any(turn => PanelState.Text(turn, "id") == PanelState.Text(row, "id")))
+            { Turns.Add(ChatReply.Copy(row)); if (Draft == Reply.Text) Draft = ""; }
+            Error = null; return true;
+        }
+        public void Fail(int generation, Exception error)
+        { if (generation == Generation) { Loading = false; Error = error.Message; if (Reply != null) Reply.Disconnected(); } }
+    }
+
     public sealed class PanelResult
     {
         public string Kind, Key, Title, Subtitle;

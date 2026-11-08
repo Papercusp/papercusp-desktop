@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -24,7 +25,7 @@ namespace Papercusp.Workbench
             "plans.list", "plans.get", "advRoster.list", "reports.list", "reports.get",
             "goals.list", "goals.detail", "planSessions.list", "operator.identity",
             "accounts.pool", "accounts.sessionOverride", "plans.attention",
-            "plans.attentionItem", "plans.attentionBulkRun"
+            "plans.attentionItem", "plans.attentionBulkRun", "operatorConversations.current", "operatorTurns.page"
         };
 
         private static void Stop(Process process)
@@ -114,8 +115,61 @@ namespace Papercusp.Workbench
             return InvokeAsync(pui, "native-inbox", request, cancellation, 22000);
         }
 
+        // PUI owns discovery, credentials, saved turns and replay. Frames are
+        // delivered as they arrive; callers marshal them to their UI thread.
+        // Cancelling this pipe never claims to cancel the saved operator turn.
+        public static Task ChatAsync(string pui, Dictionary<string, object> request,
+            Action<Dictionary<string, object>> receive, CancellationToken cancellation,
+            int timeoutMilliseconds = 615000)
+        {
+            object environment, operation;
+            if (request == null || receive == null || !request.TryGetValue("environment", out environment) ||
+                !(environment is Dictionary<string, object>) || !request.TryGetValue("operation", out operation) ||
+                !new[] { "send", "reconnect", "cancel" }.Contains(Convert.ToString(operation)))
+                throw new ArgumentException("Select a conversation and reply operation");
+            return InvokeAsync(pui, "native-chat", request, cancellation, timeoutMilliseconds, receive);
+        }
+
+        private static async Task<string> ReadFrames(Stream stream, Process process,
+            Action<Dictionary<string, object>> receive)
+        {
+            try
+            {
+                var json = new JavaScriptSerializer { MaxJsonLength = MaxResponseBytes };
+                using (var line = new MemoryStream())
+                {
+                    var buffer = new byte[8192]; var total = 0; var frames = 0; int count;
+                    while ((count = await stream.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false)) != 0)
+                    {
+                        total += count;
+                        if (total > MaxResponseBytes) throw new InvalidDataException("PUI stream exceeds the native panel limit");
+                        for (var i = 0; i < count; ++i)
+                        {
+                            if (buffer[i] != 10)
+                            {
+                                if (line.Length >= 1024 * 1024) throw new InvalidDataException("PUI frame exceeds the native panel limit");
+                                line.WriteByte(buffer[i]); continue;
+                            }
+                            var frame = json.DeserializeObject(Utf8.GetString(line.ToArray())) as Dictionary<string, object>;
+                            object kind, environment;
+                            if (frame == null || !frame.TryGetValue("event", out kind) || !(kind is string) ||
+                                String.IsNullOrWhiteSpace((string)kind) || !frame.ContainsKey("data") ||
+                                !frame.TryGetValue("environment", out environment) || !(environment is Dictionary<string, object>))
+                                throw new InvalidDataException("PUI returned an invalid reply frame");
+                            receive(frame); ++frames; line.SetLength(0);
+                        }
+                    }
+                    if (line.Length != 0) throw new InvalidDataException("PUI returned an incomplete reply frame");
+                    if (frames == 0) throw new InvalidDataException("PUI returned no reply frames");
+                }
+                return "";
+            }
+            catch { Stop(process); throw; }
+        }
+
         private static async Task<Dictionary<string, object>> InvokeAsync(string pui, string command,
-            Dictionary<string, object> body, CancellationToken cancellation, int timeoutMilliseconds)
+            Dictionary<string, object> body, CancellationToken cancellation, int timeoutMilliseconds,
+            Action<Dictionary<string, object>> receive = null)
         {
             cancellation.ThrowIfCancellationRequested();
             if (String.IsNullOrWhiteSpace(pui) || !Path.IsPathRooted(pui) || !File.Exists(pui))
@@ -142,7 +196,8 @@ namespace Papercusp.Workbench
                 if (!process.Start()) throw new IOException("Could not start PUI native-read");
                 using (cancellation.Register(() => Stop(process)))
                 {
-                    var stdout = ReadOutput(process.StandardOutput.BaseStream, process);
+                    var stdout = receive == null ? ReadOutput(process.StandardOutput.BaseStream, process) :
+                        ReadFrames(process.StandardOutput.BaseStream, process, receive);
                     var stderr = ReadOutput(process.StandardError.BaseStream, process);
                     var exit = Task.Run(() => process.WaitForExit(timeoutMilliseconds));
                     var timer = Task.Delay(timeoutMilliseconds, deadline.Token);
@@ -172,6 +227,7 @@ namespace Papercusp.Workbench
                             if (process.ExitCode != 0)
                                 throw new IOException(String.IsNullOrWhiteSpace(stderr.Result)
                                     ? "PUI native-read failed" : stderr.Result.Trim());
+                            if (receive != null) return null;
                             var payload = json.DeserializeObject(stdout.Result) as Dictionary<string, object>;
                             object rows, ok, error;
                             if (payload == null || !payload.TryGetValue("rows", out rows) ||

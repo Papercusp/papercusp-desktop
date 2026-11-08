@@ -126,6 +126,19 @@ test('Windows native read adapter preserves canonical envelopes and reaps failed
         assert.equal(new Set(result.cases).size, result.count);
     });
 
+test('Windows native Papercup transport and state preserve streaming, replay, drafts and conversation isolation',
+    {skip:process.platform !== 'win32', timeout:60000}, () => {
+        const run = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', resolve(root, 'test/fixtures/native-workbench-windows-bridge.ps1'),
+            '-BridgeSource', resolve(root, 'native/windows/PuiReadBridge.cs'), '-Phase', 'chat'],
+        {encoding:'utf8', timeout:55000, windowsHide:true});
+        assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
+        const result = JSON.parse(run.stdout.trim());
+        assert.equal(result.ok, true); assert.equal(result.phase, 'chat');
+        assert.ok(result.count >= 40);
+        assert.equal(new Set(result.cases).size, result.count);
+    });
+
 test('Windows native Accounts controls preserve exact identity, confirmed state and independent axes',
     {skip:process.platform !== 'win32', timeout:60000}, () => {
         const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
