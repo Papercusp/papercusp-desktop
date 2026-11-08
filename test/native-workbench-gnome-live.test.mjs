@@ -307,6 +307,8 @@ const dir=GLib.build_filenamev([data,'gnome-shell/extensions',uuid]);
 const source=Gio.SettingsSchemaSource.new_from_directory(dir+'/schemas',Gio.SettingsSchemaSource.get_default(),false);
 const prefs=new Gio.Settings({settings_schema:source.lookup('org.gnome.shell.extensions.papercusp-workbench',false)});
 const bundledPui=prefs.get_string('pui-path');
+const defaultOperator=prefs.get_string('operator');
+prefs.set_string('operator','http://127.0.0.1:3170');
 prefs.set_strv('goals',['<Super><Alt>g']);prefs.set_string('pui-path','/custom/operator/pui');
 shell.set_strv('enabled-extensions',['unrelated@example.invalid']);
 const upgrade=installWorkbench(${JSON.stringify(upgraded.archive)},options);
@@ -315,7 +317,7 @@ const unchanged=installWorkbench(${JSON.stringify(upgraded.archive)},options);
 GLib.unlink(dir+'/schemas/gschemas.compiled');
 const repair=installWorkbench(${JSON.stringify(upgraded.archive)},options);
 Gio.Settings.sync();
-print(JSON.stringify({first,laterServer,enabled,bundledPui,upgrade,preserved,unchanged,repair,
+print(JSON.stringify({first,laterServer,enabled,bundledPui,defaultOperator,operator:prefs.get_string('operator'),upgrade,preserved,unchanged,repair,
  goals:prefs.get_strv('goals'),pui:prefs.get_string('pui-path'),
  compiled:GLib.file_test(dir+'/schemas/gschemas.compiled',GLib.FileTest.EXISTS)}));`);
             checkScript(driver);
@@ -328,6 +330,8 @@ print(JSON.stringify({first,laterServer,enabled,bundledPui,upgrade,preserved,unc
             assert.equal(evidence.laterServer.changed,false);
             assert.deepEqual(evidence.enabled,['unrelated@example.invalid',original.uuid]);
             assert.equal(evidence.bundledPui,pui);
+            assert.equal(evidence.defaultOperator,'');
+            assert.equal(evidence.operator,'http://127.0.0.1:3170');
             assert.equal(evidence.upgrade.changed,true);
             assert.deepEqual(evidence.preserved,['unrelated@example.invalid']);
             assert.equal(evidence.unchanged.changed,false);
@@ -371,6 +375,49 @@ print('GTK_RESIDENT_PASS');
             assert.equal(result.error,null,JSON.stringify(result));
             assert.match(result.stdout,/GTK_RESIDENT_PASS/);
             assert.doesNotMatch(result.stderr,/Gjs-CRITICAL|JS ERROR|GLib-CRITICAL/);
+    }));
+
+test('resident PUI connection selection overrides inherited aliases and cancels old reads and streams',
+    {skip:process.platform!=='linux',timeout:45000}, () => withNativeFixture('workbench-connection-',async temp=>{
+        const pui=join(temp,"pui '$ connection"), driver=join(temp,'driver.mjs');
+        writeFileSync(pui,`#!/usr/bin/env node
+let body='';process.stdin.on('data',c=>body+=c);process.stdin.on('end',()=>{
+ const request=JSON.parse(body),row={pui:process.env.PUI_OPERATOR,shared:process.env.PAPERCUSP_OPERATOR_URL};
+ if(request.name==='slow')return setTimeout(()=>console.log(JSON.stringify({rows:[row]})),10000);
+ if(process.argv[2]==='native-chat'){
+  console.log(JSON.stringify({event:'fixture',data:row,environment:{endpoint:row.pui}}));
+  return setTimeout(()=>{},10000);
+ }
+ console.log(JSON.stringify({rows:[row]}));
+});`,{mode:0o755});
+        writeFileSync(driver,`import {ResidentBridge} from ${JSON.stringify(pathToFileURL(join(root,'native/gnome/bridge.js')).href)};
+const bridge=new ResidentBridge(${JSON.stringify(join(root,'native/gnome/helper.js'))}),pui=${JSON.stringify(pui)};
+const read=()=>bridge.read(pui,{name:'fixture'});
+const check=(row,value)=>{if(row.pui!==value||row.shared!==value)throw Error('Wrong selected operator: '+JSON.stringify(row));};
+check((await read()).rows[0],'http://inherited.invalid');
+bridge.selectOperator(' http://127.0.0.1:3170 ');
+check((await read()).rows[0],'http://127.0.0.1:3170');
+const old=bridge._child,pending=bridge.read(pui,{name:'slow'}).then(()=>false,e=>/connection changed/.test(e.message));
+bridge.selectOperator('http://127.0.0.1:3270');
+if(!await pending)throw Error('Old read survived selection change');
+check((await read()).rows[0],'http://127.0.0.1:3270');
+if(bridge._child===old)throw Error('Reused old helper');
+let ready;const started=new Promise(r=>ready=r);
+const stream=bridge.stream(pui,{},frame=>{check(frame.data,'http://127.0.0.1:3270');ready();});
+const ended=stream.done.then(()=>false,e=>/connection changed/.test(e.message));
+await started;bridge.selectOperator('');
+if(!await ended)throw Error('Old stream survived selection change');
+check((await read()).rows[0],'http://inherited.invalid');bridge.close();
+print('PUI_CONNECTION_SELECTION_PASS');`);
+        checkScript(driver);
+        const runtime=join(temp,'runtime');mkdirSync(runtime,{mode:0o700});
+        const env={...process.env,PUI_OPERATOR:'http://inherited.invalid',PAPERCUSP_OPERATOR_URL:'http://inherited.invalid',
+            XDG_RUNTIME_DIR:runtime,GIO_USE_VFS:'local',GTK_A11Y:'none',LIBGL_ALWAYS_SOFTWARE:'1'};
+        const result=await runOwned('xvfb-run',['-a','-s','-screen 0 1280x800x24 -nolisten tcp',
+            'dbus-run-session',privateBus(temp),'--','gjs','-m',driver],env,35000,temp);
+        assert.equal(result.status,0,JSON.stringify(result));
+        assert.match(result.stdout,/PUI_CONNECTION_SELECTION_PASS/);
+        assert.doesNotMatch(result.stderr,/Gjs-CRITICAL|JS ERROR|GLib-CRITICAL/);
     }));
 
 test('production GNOME installation reports real reload state and survives private Shell login restarts',

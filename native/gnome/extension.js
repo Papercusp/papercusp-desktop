@@ -70,18 +70,24 @@ export default class Workbench extends Extension {
     _configure() {
         if (this._revertingSettings) return;
         const pui = this._settings.get_string('pui-path');
-        if (this._selectedPui !== undefined && this._selectedPui !== pui) {
+        const operator = this._settings.get_string('operator').trim();
+        if (this._selectedPui !== undefined && (this._selectedPui !== pui || this._selectedOperator !== operator)) {
             this._inbox.begin(); this._inboxEnvironment = null; this._inboxRunId = null;
-            this._hide('inbox', false);
-            this._hide('papercup', false);
+            for (const [surface, state] of this._states) {
+                ++state.generation; ++state.detailGeneration;
+                state.sources = {}; state.selection = null; state.detail = null;
+                this._hide(surface, false);
+            }
         }
-        this._selectedPui = pui;
+        this._selectedPui = pui; this._selectedOperator = operator;
+        this._bridge.selectOperator(operator);
         if (!this._settings.get_boolean('enabled')) {
             for (const binding of this._bindings.values()) global.display.ungrab_accelerator(binding.id);
             this._bindings.clear();
             for (const surface of [...this._views.keys()]) this._hide(surface, false);
             this._bridge.close();
             this._bridge = new ResidentBridge(this.path + '/helper.js');
+            this._bridge.selectOperator(operator);
             return;
         }
         const desired = Object.fromEntries([...this._states.keys()]
@@ -359,7 +365,12 @@ export default class Workbench extends Extension {
         const command = argv.map(value => GLib.shell_quote(value)).join(' ');
         const app = Gio.AppInfo.create_from_commandline(command, 'Papercusp session',
             Gio.AppInfoCreateFlags.NEEDS_TERMINAL);
-        if (!app.launch([], global.create_app_launch_context(0, -1)))
+        const context = global.create_app_launch_context(0, -1);
+        if (this._selectedOperator) {
+            context.setenv('PUI_OPERATOR', this._selectedOperator);
+            context.setenv('PAPERCUSP_OPERATOR_URL', this._selectedOperator);
+        }
+        if (!app.launch([], context))
             throw new Error('Could not open the selected session in a terminal');
     }
     async _resume(surface, result) {

@@ -3,6 +3,7 @@
   <schema id="org.gnome.shell.extensions.papercusp-workbench" path="/org/gnome/shell/extensions/papercusp-workbench/">
     <key name="enabled" type="b"><default>true</default><summary>Enable resident Workbench panels</summary></key>
     <key name="pui-path" type="s"><default>'pui'</default><summary>Installed PUI executable</summary></key>
+    <key name="operator" type="s"><default>''</default><summary>PUI connection name or URL; blank uses automatic discovery</summary></key>
     <key name="quick-access" type="as"><default>['&lt;Super&gt;&lt;Alt&gt;space']</default><summary>Quick Access shortcut</summary></key>
     <key name="goals" type="as"><default>['&lt;Super&gt;&lt;Shift&gt;g']</default><summary>Goals shortcut</summary></key>
     <key name="inbox" type="as"><default>['&lt;Super&gt;&lt;Shift&gt;i']</default><summary>Inbox shortcut</summary></key>

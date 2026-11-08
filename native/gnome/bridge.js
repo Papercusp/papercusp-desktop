@@ -114,7 +114,13 @@ export async function nativeStream(pui, request, onFrame, cancellable = null, co
 export class ResidentBridge {
     constructor(helperPath) {
         this.helperPath = helperPath; this._serial = 0; this._pending = new Map();
-        this._writes = Promise.resolve(); this._closed = false;
+        this._writes = Promise.resolve(); this._closed = false; this._operator = '';
+    }
+    selectOperator(value) {
+        const operator = value.trim();
+        if (operator === this._operator) return;
+        this._stop(new Error('Selected PUI connection changed'));
+        this._operator = operator;
     }
     inbox(pui, request) { return this.read(pui, request, 'native-inbox'); }
     voice(pui, request) { return this._request(pui, request, 'native-voice'); }
@@ -147,8 +153,15 @@ export class ResidentBridge {
             try {
                 this._pui = pui;
                 this._cancel = new Gio.Cancellable();
-                this._child = Gio.Subprocess.new(['gjs', '-m', this.helperPath, pui],
-                    Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE);
+                const launcher = new Gio.SubprocessLauncher({flags:
+                    Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE});
+                if (this._operator) {
+                    // Reuse PUI's selector/credential/discovery contract. Both
+                    // selector aliases must agree even in a launcher environment.
+                    launcher.setenv('PUI_OPERATOR', this._operator, true);
+                    launcher.setenv('PAPERCUSP_OPERATOR_URL', this._operator, true);
+                }
+                this._child = launcher.spawnv(['gjs', '-m', this.helperPath, pui]);
                 this._input = new Gio.DataInputStream({base_stream: this._child.get_stdout_pipe()});
                 this._receive(this._child, this._cancel);
             } catch (error) { this._stop(error); return {done: Promise.reject(error), cancel() {}}; }

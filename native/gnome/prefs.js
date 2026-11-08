@@ -14,6 +14,11 @@ export default class WorkbenchPreferences extends ExtensionPreferences {
         settings.bind('enabled', enabled, 'active', Gio.SettingsBindFlags.DEFAULT); group.add(enabled);
         const pui = new Adw.EntryRow({ title: 'PUI executable' });
         settings.bind('pui-path', pui, 'text', Gio.SettingsBindFlags.DEFAULT); group.add(pui);
+        const operator = new Adw.EntryRow({ title: 'Papercusp connection',
+            text: settings.get_string('operator'), show_apply_button: true });
+        operator.set_tooltip_text('PUI connection name or operator URL. Leave blank for automatic discovery.');
+        operator.connect('apply', () => settings.set_string('operator', operator.text.trim()));
+        group.add(operator);
         for (const [key, title] of [['quick-access', 'Quick Access shortcut'], ['goals', 'Goals shortcut'],
             ['inbox', 'Inbox shortcut'], ['organizer', 'Organizer shortcut'], ['papercup', 'Papercup shortcut']]) {
             const entry = new Adw.EntryRow({ title, text: settings.get_strv(key)[0] || '',
