@@ -40,7 +40,10 @@ export function packageNativeWorkbench(outputDirectory, {
 // Both Linux products consume resources/*; the GUI's platform overlay names
 // these two files explicitly so it never acquires the Server's runtime payload.
 export const windowsWorkbenchFiles = Object.freeze([
-    'PuiReadBridge.cs', 'WorkbenchModel.cs', 'WorkbenchHost.cs', 'WorkbenchLifecycle.psm1', 'workbench.ps1',
+    'PuiReadBridge.cs', 'WorkbenchModel.cs', 'WorkbenchContent.cs', 'WorkbenchHost.cs', 'WorkbenchLifecycle.psm1', 'workbench.ps1',
+    'WorkbenchDependencies.ps1', 'dependencies.json',
+    'lib/Markdig.dll', 'lib/System.Memory.dll', 'lib/System.Buffers.dll', 'lib/System.Numerics.Vectors.dll',
+    'lib/System.Runtime.CompilerServices.Unsafe.dll', 'lib/Markdig.LICENSE.txt', 'lib/Microsoft.LICENSE.txt',
 ]);
 
 export function stageNativeWorkbench(desktopRoot = resolve(import.meta.dirname, '..'), {
@@ -87,11 +90,18 @@ export function stageNativeWorkbench(desktopRoot = resolve(import.meta.dirname, 
     }
     if (platform === 'windows' || platform === 'win32') {
         const destination = join(resources, 'workbench-windows');
+        const manifest = JSON.parse(readFileSync(join(desktopRoot, 'native/windows/dependencies.json'), 'utf8'));
+        for (const entry of [...manifest.packages, ...manifest.licenses]) {
+            if (!windowsWorkbenchFiles.includes(entry.file)) throw new Error('Unpackaged Workbench dependency: ' + entry.file);
+            const hash = createHash('sha256').update(readFileSync(join(desktopRoot, 'native/windows', entry.file))).digest('hex');
+            if (hash !== entry.sha256) throw new Error('Workbench dependency hash mismatch: ' + entry.file);
+        }
         mkdirSync(destination, {recursive:true});
         const files = {};
         for (const name of windowsWorkbenchFiles) {
             const source = join(desktopRoot, 'native/windows', name);
             const bytes = readFileSync(source); // Fail closed on an incomplete native source closure.
+            mkdirSync(join(destination, name, '..'), {recursive:true});
             copyFileSync(source, join(destination, name));
             files[name] = createHash('sha256').update(bytes).digest('hex');
         }

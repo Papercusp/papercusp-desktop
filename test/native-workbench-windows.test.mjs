@@ -16,7 +16,7 @@ test('real Inno preserves every native Workbench resource and rejects an incompl
     const fixture = mkdtempSync(join(tmpdir(), 'workbench-inno-'));
     try {
         const source = join(fixture, 'native/windows'); mkdirSync(source, {recursive:true});
-        for (const name of windowsWorkbenchFiles) copyFileSync(join(root, 'native/windows', name), join(source, name));
+        for (const name of windowsWorkbenchFiles) { mkdirSync(join(source, name, '..'), {recursive:true}); copyFileSync(join(root, 'native/windows', name), join(source, name)); }
         const bundle = stageNativeWorkbench(fixture, {platform:'windows'});
         const prefix = process.env.PAPERCUSP_WINE_INNO_PREFIX || join(homedir(), '.papercusp/wine-inno');
         const compiler = process.env.PAPERCUSP_ISCC_EXE || join(prefix, 'drive_c/InnoSetup6/ISCC.exe');
@@ -65,12 +65,19 @@ test('Windows Workbench packaging stages the complete native source closure and 
     const fixture = mkdtempSync(join(tmpdir(), 'workbench-windows-package-'));
     try {
         const source = join(fixture, 'native/windows'); mkdirSync(source, {recursive:true});
-        for (const name of windowsWorkbenchFiles) copyFileSync(join(root, 'native/windows', name), join(source, name));
+        for (const name of windowsWorkbenchFiles) { mkdirSync(join(source, name, '..'), {recursive:true}); copyFileSync(join(root, 'native/windows', name), join(source, name)); }
         const bundle = stageNativeWorkbench(fixture, {platform:'windows'});
         assert.equal(bundle.platform, 'windows');
         assert.deepEqual(Object.keys(bundle.files), windowsWorkbenchFiles);
         for (const [name, hash] of Object.entries(bundle.files))
             assert.equal(createHash('sha256').update(readFileSync(join(bundle.directory, name))).digest('hex'), hash);
+        const dependency = join(source, 'lib/System.Memory.dll'); const original = readFileSync(dependency);
+        writeFileSync(dependency, Buffer.from('wrong assembly'));
+        assert.throws(() => stageNativeWorkbench(fixture, {platform:'windows'}), /dependency hash mismatch/);
+        writeFileSync(dependency, original);
+        rmSync(dependency);
+        assert.throws(() => stageNativeWorkbench(fixture, {platform:'windows'}), /ENOENT/);
+        writeFileSync(dependency, original);
         rmSync(join(source, 'WorkbenchLifecycle.psm1'));
         assert.throws(() => stageNativeWorkbench(fixture, {platform:'windows'}), /ENOENT/);
     } finally { rmSync(fixture, {recursive:true, force:true}); }
@@ -163,6 +170,19 @@ test('Windows native Papercup sidebar retains history, streaming, drafts, reconc
         assert.equal(result.ok, true); assert.equal(result.phase, 'chat');
         assert.equal(result.interactiveDesktop, true);
         assert.ok(result.count >= 25);
+        assert.equal(new Set(result.cases).size, result.count);
+    });
+
+test('Windows native formatted chat and scoped work links use the maintained parser and canonical contexts',
+    {skip:process.platform !== 'win32', timeout:60000}, () => {
+        const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
+            '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'content', '-Interactive'],
+        {encoding:'utf8', timeout:55000, windowsHide:true});
+        assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
+        const result = JSON.parse(run.stdout.trim());
+        assert.equal(result.ok, true); assert.equal(result.phase, 'content');
+        assert.equal(result.interactiveDesktop, true); assert.ok(result.count >= 30);
         assert.equal(new Set(result.cases).size, result.count);
     });
 
