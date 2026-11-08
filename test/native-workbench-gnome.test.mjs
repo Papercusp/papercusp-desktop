@@ -752,6 +752,12 @@ const names=()=>{const dir=GLib.Dir.open(GLib.get_tmp_dir(),0),rows=[];let name;
 const before=names(),devices=new AudioDevices({source:'audiotestsrc is-live=true wave=sine',sink:'fakesink sync=true',durationMs:2000});
 let phases=[],recording;
 recording=devices.record(new Gio.Cancellable(),state=>{phases.push(state.phase);
+ const directory=GLib.Dir.open(GLib.get_tmp_dir(),0);let name,found=false;
+ while((name=directory.read_name())!==null){if(!name.startsWith('papercusp-voice-')||before.includes(name))continue;
+  const path=GLib.build_filenamev([GLib.get_tmp_dir(),name]);
+  const mode=value=>Gio.File.new_for_path(value).query_info('unix::mode',Gio.FileQueryInfoFlags.NONE,null).get_attribute_uint32('unix::mode')&0o777;
+  if(mode(path)!==0o700||mode(path+'/audio')!==0o600)throw Error('recording exposes private audio');found=true;}
+ if(!found)throw Error('recording has no private capture file');
  GLib.timeout_add(GLib.PRIORITY_DEFAULT,100,()=>{recording.stop();return GLib.SOURCE_REMOVE;});});
 let busy=false;try{devices.record(new Gio.Cancellable(),()=>{});}catch(error){busy=error.message.includes('current');}
 if(!busy)throw Error('a second capture claimed the device');

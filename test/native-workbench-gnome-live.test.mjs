@@ -453,7 +453,7 @@ process.exitCode=evidence.ok?0:1;`);
     }));
 
 const selectedJourney=process.env.PAPERCUSP_GNOME_JOURNEY||'all';
-assert.ok(['all','inbox','input','focus','resume','organizer','chat','cards'].includes(selectedJourney),'Unknown PAPERCUSP_GNOME_JOURNEY');
+assert.ok(['all','inbox','input','focus','resume','organizer','chat','cards','voice'].includes(selectedJourney),'Unknown PAPERCUSP_GNOME_JOURNEY');
 // Preserve every scenario while bounding each independent desktop lifetime.
 // The input journey includes the controller and Inbox cases; focus and Resume
 // start from a fresh Shell and cannot spend each other's deadline budget.
@@ -570,6 +570,9 @@ export default class Probe extends Workbench {
    const captured=requests()[0],header=GLib.base64_decode(captured.audioHeader);
    check(captured.operation==='transcribe'&&captured.audioBytes>44&&new TextDecoder().decode(header.slice(0,4))==='RIFF'&&
     new TextDecoder().decode(header.slice(8,12))==='WAVE','native capture reaches PUI as a finalized WAV');
+   check(captured.conversationId===chat.conversationId&&captured.environment.workspaceId==='exact'&&
+    captured.environment.store.id==='store'&&/^[a-f0-9-]{36}$/.test(captured.requestId),
+    'voice transport retains selected environment store conversation and unique request identity');
    check(!exists('chat-actions.json')&&requests().length===1,'transcription neither sends a turn nor starts reply audio');
    setPhase('voice explicit reply playback and stop');
    await click(()=>view().readReply);await waitFor(()=>chat.voicePhase==='playing');
@@ -608,12 +611,15 @@ export default class Probe extends Workbench {
    check(view().compose.get_text()===draft,'returning to original conversation restores only its draft');
    setPhase('voice reviewed explicit Send');
    write('voice-mode','');await transcript();await waitFor(()=>!chat.voice&&chat.draft==='Voice draft');
-   await captureScreen();await click(()=>view().send);await waitFor(()=>exists('chat-actions.json'));
+   await captureScreen();await record();await click(()=>view().send);await waitFor(()=>exists('chat-actions.json'));
    const sent=read('chat-actions.json')[0];
    check(sent.operation==='send'&&sent.text==='Voice draft'&&sent.modality==='voice'&&
     sent.conversationId===chat.conversationId,'explicit native Send carries voice modality and exact reviewed text and identity');
+   check(!chat.voice&&!this._voiceOperation,'explicit Send retires a live recording before starting the saved turn');
    write('chat-release','consumer observed');await waitFor(()=>chat.ready&&!chat.reply);
    check(global.get_window_actors().length===0,'native voice remains outside Dock taskbar and Alt-Tab application windows');
+   await record();this._settings.set_string('pui-path','unconfigured-selected-environment');
+   check(!view()&&!chat.voice&&!this._voiceOperation,'changing the selected PUI environment hides chat and retires its voice devices');
    return this.finish(null);
   }
   if(journey==='cards'){
@@ -1129,7 +1135,7 @@ export default class Probe extends Workbench {
             assert.equal(evidence?.ok,true,JSON.stringify({evidence,progress,...result}));
             assert.equal(result.status,0,JSON.stringify(result));
             assert.equal(result.error,null,JSON.stringify(result));
-            const minimumAssertions={inbox:25,input:36,focus:11,resume:16,organizer:13,chat:31,cards:33,voice:25};
+            const minimumAssertions={inbox:25,input:36,focus:11,resume:16,organizer:13,chat:31,cards:33,voice:26};
             assert.ok(evidence.assertions.length>=minimumAssertions[journey],JSON.stringify(evidence));
             assert.deepEqual([...readFileSync(screenshot).subarray(0,8)], [137,80,78,71,13,10,26,10]);
             if(evidenceDirectory){
