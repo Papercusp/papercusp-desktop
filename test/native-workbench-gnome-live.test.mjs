@@ -54,6 +54,27 @@ const fs=require('node:fs'),dir=${JSON.stringify(temp)};
 const chatId=()=>fs.existsSync(dir+'/conversation-id')?fs.readFileSync(dir+'/conversation-id','utf8'):'conversation+/=&';
 const chatHistory=()=>fs.existsSync(dir+'/chat-history.json')?JSON.parse(fs.readFileSync(dir+'/chat-history.json','utf8')):
  [{id:'saved-five',conversationId:chatId(),seq:5,role:'assistant',text:${JSON.stringify(chatMarkdown)}}];
+const accountState=()=>fs.existsSync(dir+'/account-state.json')?JSON.parse(fs.readFileSync(dir+'/account-state.json','utf8')):
+ {defaultAccountId:'one',forcedAccounts:['two'],excludeAccounts:['one']};
+const accountMode=name=>fs.existsSync(dir+'/'+name)?fs.readFileSync(dir+'/'+name,'utf8'):'';
+if(process.argv[2]==='native-account'){
+ const actions=fs.existsSync(dir+'/account-actions.json')?JSON.parse(fs.readFileSync(dir+'/account-actions.json','utf8')):[];
+ actions.push({...r,pid:process.pid});fs.writeFileSync(dir+'/account-actions.json',JSON.stringify(actions));
+ if(JSON.stringify(r.environment)!==JSON.stringify(environment)||!['default','force','exclude','auto'].includes(r.action)||
+  (r.action!=='auto'&&!['one','two'].includes(r.accountId))){console.error('Exact account environment and action required');process.exitCode=1;return;}
+ const mode=accountMode('account-mode');
+ if(mode==='fail'){console.error('Canonical account write refused');process.exitCode=1;return;}
+ const respond=()=>{
+  const state=accountState();
+  if(r.action==='auto'){state.forcedAccounts=[];state.excludeAccounts=[];}
+  else if(r.action==='default')state.defaultAccountId=r.accountId;
+  else {const field=r.action==='force'?'forcedAccounts':'excludeAccounts';
+   state[field]=state[field].includes(r.accountId)?state[field].filter(id=>id!==r.accountId):[...state[field],r.accountId];}
+  if(mode!=='foreign')fs.writeFileSync(dir+'/account-state.json',JSON.stringify(state));
+  console.log(JSON.stringify({environment:mode==='foreign'?{...environment,workspaceId:'foreign'}:environment,rows:[state]}));};
+ if(mode==='hold'){const timer=setInterval(()=>{if(fs.existsSync(dir+'/account-release')){clearInterval(timer);respond();}},25);return;}
+ respond();return;
+}
 if(process.argv[2]==='native-voice'){
  const actions=fs.existsSync(dir+'/voice-actions.json')?JSON.parse(fs.readFileSync(dir+'/voice-actions.json','utf8')):[];
  const audio=r.audioBase64?Buffer.from(r.audioBase64,'base64'):null;
@@ -138,6 +159,16 @@ if(r.name==='failure'){console.error('canonical ACL refusal');process.exitCode=1
 if(r.name==='operator.identity')rows=[environment];
 else if(r.name==='operatorConversations.current')rows=[{id:chatId(),workspaceId:environment.workspaceId,subjectKind:'global',status:'active'}];
 else if(r.name==='operatorTurns.page')rows=[{turns:r.args.beforeSeq?[{id:'saved-one',conversationId:chatId(),seq:1,role:'user',text:'Earlier message'}]:chatHistory(),hasMoreEarlier:!r.args.beforeSeq&&!fs.existsSync(dir+'/chat-history.json')}];
+else if(r.name==='accounts.pool'||r.name==='accounts.sessionOverride'){
+ const reads=fs.existsSync(dir+'/account-reads.json')?JSON.parse(fs.readFileSync(dir+'/account-reads.json','utf8')):[];
+ reads.push(r);fs.writeFileSync(dir+'/account-reads.json',JSON.stringify(reads));
+ if(JSON.stringify(r.environment)!==JSON.stringify(environment)){console.error('Scoped account read required');process.exitCode=1;return;}
+ const mode=accountMode('account-read-mode');
+ rows=r.name==='accounts.pool'?[{id:'one',name:'Shared',provider:'first'},{id:'two',name:'Shared',provider:'second'}]:[accountState()];
+ if(mode==='duplicate'&&r.name==='accounts.pool')rows=[rows[0],rows[0]];
+ console.log(JSON.stringify({environment:mode==='foreign'?{...environment,store:{id:'foreign'}}:environment,rows,
+  ...(mode==='partial'&&r.name==='accounts.pool'?{partial:true}:{})}));return;
+}
 else if(r.name==='plans.attention')rows=[{items:[question]}];
 else if(r.name==='plans.attentionItem'){
  fs.writeFileSync(dir+'/inbox-context-read.json',JSON.stringify(r));
@@ -536,7 +567,7 @@ export default class Probe extends Extension {
  const target=Main.extensionManager.lookup('workbench@papercusp.ai').stateObj;
  check(target._settings.get_string('pui-path')===${JSON.stringify(pui)},'login loads the exact installed PUI selection');
  check(target._settings.get_string('operator')===${JSON.stringify(operator)},'login retains the selected canonical operator');
- check(target._bindings.size===5,'unmodified installed extension acquires native shortcuts');
+ check(target._bindings.size===6,'unmodified installed extension acquires native shortcuts');
  const state=target._states.get(${JSON.stringify(surface === 'reports' ? 'quick-access' : surface)});
  ${surface === 'reports' ? "state.scope='reports';" : ''}
  const seat=Clutter.get_default_backend().get_default_seat();
@@ -759,11 +790,11 @@ process.exitCode=evidence.ok?0:1;`);
     }));
 
 const selectedJourney=process.env.PAPERCUSP_GNOME_JOURNEY||'all';
-assert.ok(['all','inbox','input','focus','resume','organizer','chat','cards','voice'].includes(selectedJourney),'Unknown PAPERCUSP_GNOME_JOURNEY');
+assert.ok(['all','inbox','input','focus','resume','organizer','chat','cards','voice','accounts'].includes(selectedJourney),'Unknown PAPERCUSP_GNOME_JOURNEY');
 // Preserve every scenario while bounding each independent desktop lifetime.
 // The input journey includes the controller and Inbox cases; focus and Resume
 // start from a fresh Shell and cannot spend each other's deadline budget.
-for(const journey of selectedJourney==='all'?['input','focus','resume','organizer','chat','cards','voice']:[selectedJourney]){
+for(const journey of selectedJourney==='all'?['input','focus','resume','organizer','chat','cards','voice','accounts']:[selectedJourney]){
 test('private GNOME Shell renders actors and handles real seat keyboard, pointer and nested dismissal ['+journey+']',
     {skip:process.platform!=='linux',timeout:75000}, () => withNativeFixture('workbench-shell-',async temp=>{
             const evidenceDirectory=process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR&&
@@ -820,7 +851,7 @@ export default class Probe extends Workbench {
  async probe(){
   this._settings.set_string('pui-path',${JSON.stringify(pui)});
   this._settings.set_string('operator','http://workbench-selected.invalid');
-  check(this._bindings.size===5,'native shortcut acquisition');
+  check(this._bindings.size===6,'native shortcut acquisition');
   const qa=this._states.get('quick-access'),goals=this._states.get('goals');
   const seat=Clutter.get_default_backend().get_default_seat();
   check(typeof seat.create_virtual_device==='function','native seat supports input injection');
@@ -851,6 +882,93 @@ export default class Probe extends Workbench {
   if(Main.overview.visible)await key(Clutter.KEY_Escape);
   await waitFor(()=>Main.actionMode===Shell.ActionMode.NORMAL);
   check(!Main.overview.visible,'desktop ready for normal shortcuts');
+  if(journey==='accounts'){
+   const file=name=>${JSON.stringify(temp)}+'/'+name;
+   const exists=name=>GLib.file_test(file(name),GLib.FileTest.EXISTS);
+   const read=name=>JSON.parse(new TextDecoder().decode(GLib.file_get_contents(file(name))[1]));
+   const write=(name,value)=>GLib.file_set_contents(file(name),value);
+   const actions=()=>exists('account-actions.json')?read('account-actions.json'):[];
+   const state=this._states.get('accounts'),accounts=this._accounts,view=()=>this._views.get('accounts');
+   const walk=actor=>[actor,...actor.get_children().flatMap(walk)];
+   const control=name=>walk(view().content).find(actor=>actor.accessible_name===name);
+   const current=()=>JSON.stringify(accounts.override);
+   const open=async()=>{await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_a]);
+    await waitFor(()=>state.visible&&!accounts.busy);};
+   const refresh=async()=>{this._refreshAccounts();await waitFor(()=>!accounts.busy);};
+   const select=async id=>{await click(()=>control('Account: '+id));await waitFor(()=>accounts.selection===id);};
+   const apply=async action=>{await click(()=>control('Account '+action));await waitFor(()=>!accounts.busy);};
+   diagnose=()=>({busy:accounts.busy,ready:accounts.ready,error:accounts.error,selection:accounts.selection,
+    override:accounts.override,status:view()?.status.text,actions:actions()});
+   setPhase('Accounts shortcut and scoped canonical reads');await open();
+   check(accounts.ready&&accounts.accounts.length===2,'Accounts shortcut opens the complete canonical pool');
+   check(!control('Account default').reactive&&!control('Account force').reactive&&control('Account auto').reactive,
+    'account-specific controls require an exact selection');
+   check(view().status.text.includes('exact')&&view().status.text.includes('http://fixture')&&
+    view().status.text.includes('store')&&view().status.text.includes('workspace'),'Accounts displays selected endpoint workspace store and chat scope');
+   check(read('account-reads.json').every(row=>row.environment.workspaceId==='exact'&&row.environment.store.id==='store'&&
+    row.environment.agentChat.scope==='workspace'),'pool and override reads carry the exact selected environment');
+   check(actions().length===0,'opening Accounts does not mutate steering');
+   check(control('Account: one').label==='Shared · Default · Exclude'&&control('Account: two').label==='Shared · Force',
+    'all independent confirmed steering axes render');
+   setPhase('Accounts local filter and exact duplicate-label selection');
+   view().search.set_text('second');await tick();
+   check(!control('Account: one')&&Boolean(control('Account: two')),'local account search filters by provider despite duplicate names');
+   view().search.set_text('');await tick();await select('two');
+   check(control('Account: two').has_style_class_name('selected')&&accounts.selection==='two','duplicate labels preserve exact account identity');
+   setPhase('Accounts confirmed independent writes');
+   await apply('default');
+   check(accounts.override.defaultAccountId==='two'&&accounts.override.forcedAccounts.join()==='two'&&
+    accounts.override.excludeAccounts.join()==='one','Default changes only its confirmed steering axis');
+   await apply('force');
+   check(accounts.override.defaultAccountId==='two'&&!accounts.override.forcedAccounts.length&&
+    accounts.override.excludeAccounts.join()==='one','Force toggles independently of Default and Exclude');
+   await apply('exclude');
+   check(accounts.override.defaultAccountId==='two'&&accounts.override.excludeAccounts.includes('two')&&
+    !accounts.override.forcedAccounts.length,'Exclude toggles independently without inferring Force');
+   await apply('auto');
+   check(accounts.override.defaultAccountId==='two'&&!accounts.override.forcedAccounts.length&&
+    !accounts.override.excludeAccounts.length,'Auto clears Force and Exclude while preserving Default');
+   check(actions().map(row=>row.action).join()==='default,force,exclude,auto'&&
+    actions().every(row=>row.environment.workspaceId==='exact'&&row.environment.store.id==='store'&&
+     (row.action==='auto'?!Object.hasOwn(row,'accountId'):row.accountId==='two')),'native-account writes preserve exact action account and environment');
+   setPhase('Accounts rejects failed and foreign confirmations');
+   let before=current();write('account-mode','fail');await apply('force');
+   check(accounts.error.includes('write refused')&&current()===before&&!control('Account force').reactive,
+    'failed canonical writes retain confirmed state and require refresh');
+   write('account-mode','');await refresh();await select('one');before=current();
+   write('account-mode','foreign');await apply('default');
+   check(accounts.error.includes('environment changed')&&current()===before,'foreign write confirmation cannot change displayed steering');
+   write('account-mode','');
+   for(const mode of ['partial','duplicate','foreign']){
+    write('account-read-mode',mode);await refresh();
+    check(!accounts.ready&&accounts.error&&!control('Account auto').reactive&&accounts.accounts.length===0,
+     'Accounts refuses '+mode+' canonical pool or scope');
+   }
+   write('account-read-mode','');await refresh();await select('one');
+   setPhase('Accounts pending write cannot update after dismissal');
+   before=current();write('account-mode','hold');const count=actions().length;
+   await click(()=>control('Account default'));await waitFor(()=>actions().length===count+1);
+   check(accounts.busy&&current()===before&&!control('Account auto').reactive,'pending write never changes confirmed state or permits a second action');
+   await key(Clutter.KEY_Escape);
+   check(state.visible&&!accounts.selection,'first Escape dismisses selected account before its panel');
+   await key(Clutter.KEY_Escape);await waitFor(()=>!state.visible);
+   write('account-release','yes');const pid=actions().at(-1).pid;
+   await waitFor(()=>!GLib.file_test('/proc/'+pid,GLib.FileTest.EXISTS));await tick();
+   check(!state.visible&&!this._views.has('accounts')&&accounts.override===null,'hidden Accounts rejects a late write confirmation');
+   write('account-mode','');await open();
+   check(accounts.ready&&accounts.override.defaultAccountId==='one','reopening reads persisted canonical state after late confirmation');
+   setPhase('Accounts environment change and shortcut preferences');
+   this._settings.set_string('operator','http://new-environment.invalid');
+   await waitFor(()=>!state.visible);
+   check(accounts.override===null&&!this._views.has('accounts'),'selected environment change invalidates prior Accounts content');
+   this._settings.set_strv('accounts',['<Super><Shift>y']);await tick();
+   await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_a]);
+   check(!state.visible,'changing Accounts preference releases its old accelerator');
+   await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_y]);await waitFor(()=>state.visible&&!accounts.busy);
+   check(accounts.ready&&this._bindings.size===6,'configured Accounts accelerator reopens the native panel');
+   check(global.get_window_actors().length===0,'Accounts Shell actors create no application window or task-switcher identity');
+   await captureScreen();await this.finish(null);return;
+  }
   if(journey==='voice'){
    this._bridge.helperPath=this.path+'/voice-helper.js';
    const file=name=>${JSON.stringify(temp)}+'/'+name;
@@ -1463,7 +1581,7 @@ export default class Probe extends Workbench {
             assert.equal(evidence?.ok,true,JSON.stringify({evidence,progress,...result}));
             assert.equal(result.status,0,JSON.stringify(result));
             assert.equal(result.error,null,JSON.stringify(result));
-            const minimumAssertions={inbox:25,input:36,focus:11,resume:16,organizer:13,chat:31,cards:33,voice:26};
+            const minimumAssertions={inbox:25,input:36,focus:11,resume:16,organizer:13,chat:31,cards:33,voice:26,accounts:27};
             assert.ok(evidence.assertions.length>=minimumAssertions[journey],JSON.stringify(evidence));
             assert.deepEqual([...readFileSync(screenshot).subarray(0,8)], [137,80,78,71,13,10,26,10]);
             if(evidenceDirectory){
