@@ -971,7 +971,7 @@ public static class WorkbenchNativeHostFixture
             Find<System.Windows.Controls.RadioButton>(panel, "Papercup answer radio two").IsChecked = true;
             Find<System.Windows.Controls.CheckBox>(panel, "Papercup answer checkbox one").IsChecked = true;
             Find<System.Windows.Controls.CheckBox>(panel, "Papercup answer checkbox two").IsChecked = true;
-            Find<System.Windows.Controls.ComboBox>(panel, "Papercup answer select").SelectedValue = "two";
+            var originalSelect = Find<System.Windows.Controls.ComboBox>(panel, "Papercup answer select"); originalSelect.SelectedValue = "two";
             Check(Object.Equals(Find<System.Windows.Controls.ComboBox>(panel, "Papercup answer select").SelectedValue, "two"), "native dropdown selects the canonical option identity");
             Find<System.Windows.Controls.PasswordBox>(panel, "Papercup answer secret").Password = "sensitive literal";
             Find<System.Windows.Controls.DatePicker>(panel, "Papercup answer date").SelectedDate = new DateTime(2026, 11, 20);
@@ -980,6 +980,9 @@ public static class WorkbenchNativeHostFixture
             {
                 click("submit " + id); Until(() => cards.Error != null || cards.Pending == null && !cards.Cards.Any(card => card.Id == id));
                 Check(cards.Error == null, "native card acknowledgement " + id + ": " + cards.Error);
+                if (id == "radio") originalSelect.SelectedValue = null;
+                if (id == "checkbox") Check(Object.Equals(Find<System.Windows.Controls.ComboBox>(panel, "Papercup answer select").SelectedValue, "two"),
+                    "late selection event from detached dropdown cannot erase the current card draft");
             }
             var writes = System.IO.File.ReadAllLines(path + ".card-writes").Select(Json).ToArray();
             Func<string, Dictionary<string, object>> payload = id => (Dictionary<string, object>)writes.Single(write => (string)write["correlationId"] == id)["payload"];

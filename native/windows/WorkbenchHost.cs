@@ -682,7 +682,13 @@ namespace Papercusp.Workbench
                         var select = new ComboBox { IsEnabled = active, DisplayMemberPath = "Label", SelectedValuePath = "Id" };
                         select.ItemsSource = card.Options.Select(option => new { Id = PanelState.Text(option, "id"), Label = PanelState.Text(option, "label") + " · " + PanelState.Text(option, "hint") }).ToArray();
                         select.SelectedValue = draft.Picks.FirstOrDefault(); AutomationProperties.SetName(select, name); box.Children.Add(select);
-                        select.SelectionChanged += (s, e) => { draft.Picks.Clear(); if (select.SelectedValue != null) draft.Picks.Add((string)select.SelectedValue); };
+                        select.SelectionChanged += (s, e) =>
+                        {
+                            // WPF can deliver selection changes after a removed
+                            // ComboBox is unloaded. It no longer owns this draft.
+                            if (!cardsContent.IsAncestorOf(select)) return;
+                            draft.Picks.Clear(); if (select.SelectedValue != null) draft.Picks.Add((string)select.SelectedValue);
+                        };
                     }
                     else if (card.Kind == "radio" || card.Kind == "checkbox")
                     {
