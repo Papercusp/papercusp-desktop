@@ -325,7 +325,7 @@ EOF
         _linked="$(find "$_dst" -type f -links +1 -print -quit)" || { _fail=1; continue; }
         if [ -z "$_linked" ]; then
           echo "verifying completed snapshot $_rel (checksums, independent inodes)"
-          if ! _changes="$(rsync -aH --checksum --dry-run --delete --itemize-changes \
+          if ! _changes="$(rsync -a --checksum --dry-run --delete --itemize-changes \
             "${_tree_filters[@]}" "$_src/" "$_dst/")"; then
             _fail=1
             continue
@@ -392,8 +392,9 @@ EOF
       fi
       mkdir -p "$_tmp" || { _fail=1; continue; }
       # A retained hardlink could couple this copy to its donor or an old
-      # mounted lower layer. Unlink it in staging before rsync applies metadata;
-      # -H then recreates donor hardlink groups with independent inodes.
+      # mounted lower layer. Unlink it in staging before rsync applies metadata.
+      # COPY also separates donor-internal aliases: strict independence requires
+      # each writable destination file to have exactly one link.
       find "$_tmp" -type f -links +1 -exec rm -f -- {} + || { _fail=1; continue; }
     else
       rm -rf "$_tmp" 2>/dev/null
@@ -407,7 +408,7 @@ EOF
     if [ "$_copy_mode" = copy ]; then
       echo "  verifying retained staging bytes before reuse: $_tmp"
       dependency_generation_copy_with_progress "$_src" "$_tmp" --rsync-checksum \
-        "${_tree_filters[@]}" || _copy_rc=$?
+        --no-hard-links "${_tree_filters[@]}" || _copy_rc=$?
     else
       # Preserve rsync's path-specific diagnosis. A generic incomplete receipt
       # cannot distinguish a disappearing cache entry, EXDEV or ENOSPC, and
@@ -521,7 +522,7 @@ for (const rel of source) {
     const staging = output + ".pinned-deps-tmp." + process.pid;
     try {
       fs.mkdirSync(staging);
-      const args = ["-aH", ...(mode === "hardlink" ? ["--link-dest=" + donorOutput] : []), donorOutput + "/", staging + "/"];
+      const args = [mode === "hardlink" ? "-aH" : "-a", ...(mode === "hardlink" ? ["--link-dest=" + donorOutput] : []), donorOutput + "/", staging + "/"];
       const result = cp.spawnSync("rsync", args, { stdio: "inherit" });
       if (result.error || result.status !== 0) throw Error("workspace-bin-copy-failed:" + outputRel);
       fs.renameSync(staging, output);
