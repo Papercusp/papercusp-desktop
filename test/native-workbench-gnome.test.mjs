@@ -6,7 +6,7 @@ import {pathToFileURL} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import test from 'node:test';
 import {buildSync} from 'esbuild';
-import {PanelState, InboxState, ChatState, ChatReply, nativeVoiceRequest, nativeVoiceResult, sameEnvironment, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests,
+import {PanelState, InboxState, ChatState, ChatReply, AccountState, nativeVoiceRequest, nativeVoiceResult, sameEnvironment, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests,
     agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow,
     organizerGroups, organizerMembers, arrangeOrganizerGroup}
     from '../native/gnome/panel-model.mjs';
@@ -20,6 +20,57 @@ const {nativeChatBlocks, nativeWorkRefLinks, safeChatLink, NativeCard, NativeCar
     await import('data:text/javascript;base64,' + Buffer.from(contentBundle.outputFiles[0].contents).toString('base64'));
 const plan = (harness = 'one', slug = 'same') => ({harness, slug, title: 'Shared title', status: 'active'});
 const envelope = rows => ({rows, version: 'canonical-version'});
+
+const accountEnvironment = {endpoint: 'http://fixture', workspaceId: 'workspace', store: {id: 'store'}, agentChat: {scope: 'chat'}};
+const accountPayload = rows => ({environment: accountEnvironment, rows});
+const accountSteering = {defaultAccountId: 'one', forcedAccounts: ['two'], excludeAccounts: ['one']};
+function loadedAccounts() {
+    const state = new AccountState(), token = state.begin();
+    state.settle(token, accountEnvironment, accountPayload([{id: 'one', name: 'Shared'}, {id: 'two', name: 'Shared'}]),
+        accountPayload([accountSteering]));
+    assert.equal(state.ready, true); state.selection = 'two';
+    return state;
+}
+test('native Accounts sends exact scoped controls without coupling or optimistically changing axes', () => {
+    for (const action of ['default', 'force', 'exclude', 'auto']) {
+        const state = loadedAccounts(), {token, request} = state.beginAction(action);
+        assert.deepEqual(request, {action, ...(action === 'auto' ? {} : {accountId: 'two'}), environment: accountEnvironment});
+        assert.deepEqual(state.override, accountSteering); assert.equal(state.busy, true);
+        assert.throws(() => state.beginAction('force'), /Refresh/);
+        const confirmed = action === 'auto' ? {...accountSteering, forcedAccounts: [], excludeAccounts: []} :
+            {...accountSteering, [action === 'default' ? 'defaultAccountId' : action === 'force' ? 'forcedAccounts' : 'excludeAccounts']:
+                action === 'default' ? 'two' : ['one', 'two']};
+        assert.equal(state.applied(token, accountEnvironment, accountPayload([confirmed])), true);
+        assert.deepEqual(state.override, confirmed); assert.equal(state.busy, false);
+        if (action === 'auto') assert.equal(state.override.defaultAccountId, 'one');
+    }
+});
+test('native Accounts retains confirmed state on failed writes and ignores stale or foreign responses', () => {
+    const state = loadedAccounts(), {token} = state.beginAction('force');
+    state.applied(token, accountEnvironment, null, new Error('Canonical write refused'));
+    assert.match(state.error, /write refused/); assert.deepEqual(state.override, accountSteering);
+    assert.throws(() => state.beginAction('exclude'), /Refresh/);
+    const next = state.begin();
+    assert.equal(state.applied(token, accountEnvironment, accountPayload([{...accountSteering, defaultAccountId: 'two'}])), false);
+    state.settle(next, accountEnvironment, accountPayload([{id: 'one'}]), accountPayload([accountSteering]));
+    state.selection = 'one'; const op = state.beginAction('default');
+    state.applied(op.token, accountEnvironment, {...accountPayload([accountSteering]), environment: {...accountEnvironment, workspaceId: 'foreign'}});
+    assert.match(state.error, /environment changed/); assert.deepEqual(state.override, accountSteering);
+});
+test('native Accounts rejects partial or ambiguous pools and every mismatched environment identity', () => {
+    for (const pool of [{...accountPayload([{id: 'one'}]), partial: true}, accountPayload([{id: 'one'}, {id: 'one'}]), accountPayload([{}])]) {
+        const state = new AccountState(); state.settle(state.generation, accountEnvironment, pool, accountPayload([accountSteering]));
+        assert.equal(state.ready, false); assert.equal(state.accounts.length, 0);
+    }
+    for (const foreign of [{...accountEnvironment, endpoint: 'http://other'}, {...accountEnvironment, workspaceId: 'other'},
+        {...accountEnvironment, store: {id: 'other'}}, {...accountEnvironment, agentChat: {scope: 'other'}}]) {
+        const state = new AccountState();
+        state.settle(state.generation, accountEnvironment, {...accountPayload([{id: 'one'}]), environment: foreign}, accountPayload([accountSteering]));
+        assert.equal(state.ready, false); assert.match(state.error, /environment changed/);
+    }
+    const state = loadedAccounts(); state.selection = 'missing'; assert.throws(() => state.request('default'), /exact account/);
+    state.begin(); assert.equal(state.ready, false); assert.equal(state.selection, null);
+});
 
 test('native Markdown uses styled native text, copyable literal code, GFM tables and inert HTML', () => {
     const source = '# Heading\n\n**Bold** and *emphasis* with `a < b` and ~~old~~.\n\n'

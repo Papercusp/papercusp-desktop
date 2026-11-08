@@ -349,6 +349,66 @@ export function oneRow(payload) {
     return rows[0];
 }
 
+// Share the existing PUI account protocol with the other native hosts. Only a
+// confirmed server reply changes the displayed independent steering axes.
+export class AccountState {
+    constructor() { this.generation = 0; this.begin(); }
+    begin() {
+        this.busy = true; this.error = null; this.environment = null;
+        this.override = null; this.accounts = []; this.selection = null;
+        return ++this.generation;
+    }
+    get ready() { return sameEnvironment(this.environment, this.environment) && this.override !== null && !this.error; }
+    static steering(payload) {
+        const value = oneRow(payload);
+        for (const field of ['forcedAccounts', 'excludeAccounts'])
+            if (!Array.isArray(value[field]) || value[field].some(id => typeof id !== 'string' || !id))
+                throw new Error('Canonical account steering is unavailable');
+        if (value.defaultAccountId != null && typeof value.defaultAccountId !== 'string')
+            throw new Error('Canonical default account is unavailable');
+        return value;
+    }
+    settle(token, environment, pool, steering, error = null) {
+        if (token !== this.generation) return false;
+        this.busy = false;
+        try {
+            if (error) throw error;
+            if (!sameEnvironment(environment, environment) || !sameEnvironment(environment, pool?.environment) ||
+                !sameEnvironment(environment, steering?.environment)) throw new Error('Selected account environment changed');
+            const accounts = readRows(pool);
+            if (pool.partial || accounts.some(row => typeof row?.id !== 'string' || !row.id) ||
+                new Set(accounts.map(row => row.id)).size !== accounts.length)
+                throw new Error('Account pool is unavailable or ambiguous');
+            const current = AccountState.steering(steering);
+            this.environment = environment; this.accounts = accounts; this.override = current;
+        } catch (failure) { this.error = String(failure.message || failure); }
+        return true;
+    }
+    request(action) {
+        if (!this.ready || this.busy || !['default', 'force', 'exclude', 'auto'].includes(action))
+            throw new Error('Refresh the selected account environment before applying a control');
+        if (action !== 'auto' && this.accounts.filter(row => row.id === this.selection).length !== 1)
+            throw new Error('Select an exact account');
+        return {action, ...(action === 'auto' ? {} : {accountId: this.selection}), environment: this.environment};
+    }
+    beginAction(action) {
+        const request = this.request(action);
+        this.busy = true; this.error = null;
+        return {token: ++this.generation, request};
+    }
+    applied(token, expected, payload, error = null) {
+        if (token !== this.generation) return false;
+        this.busy = false;
+        try {
+            if (error) throw error;
+            if (!sameEnvironment(this.environment, expected) || !sameEnvironment(expected, payload?.environment))
+                throw new Error('Account environment changed; refresh before applying another control');
+            this.override = AccountState.steering(payload);
+        } catch (failure) { this.error = String(failure.message || failure); }
+        return true;
+    }
+}
+
 const snapshot = value => JSON.parse(JSON.stringify(value));
 const sequence = value => Number.isSafeInteger(value) && value >= 0;
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);

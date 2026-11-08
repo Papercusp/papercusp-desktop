@@ -20,7 +20,8 @@ export default class WorkbenchPreferences extends ExtensionPreferences {
         operator.connect('apply', () => settings.set_string('operator', operator.text.trim()));
         group.add(operator);
         for (const [key, title] of [['quick-access', 'Quick Access shortcut'], ['goals', 'Goals shortcut'],
-            ['inbox', 'Inbox shortcut'], ['organizer', 'Organizer shortcut'], ['papercup', 'Papercup shortcut']]) {
+            ['inbox', 'Inbox shortcut'], ['organizer', 'Organizer shortcut'], ['papercup', 'Papercup shortcut'],
+            ['accounts', 'Accounts shortcut']]) {
             const entry = new Adw.EntryRow({ title, text: settings.get_strv(key)[0] || '',
                 show_apply_button: true });
             entry.connect('apply', () => {

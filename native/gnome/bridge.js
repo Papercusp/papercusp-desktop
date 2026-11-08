@@ -6,7 +6,7 @@ import {nativeVoiceRequest, canonicalBase64} from './panel-model.mjs';
 // No shell, bearer file, local server or second authorization implementation.
 export function nativeRead(pui, request, cancellable = null, command = 'native-read') {
     if (typeof pui !== 'string' || !pui.trim()) return Promise.reject(new Error('PUI is not configured'));
-    if (!['native-read', 'native-inbox', 'native-cards', 'native-voice'].includes(command) ||
+    if (!['native-read', 'native-inbox', 'native-account', 'native-cards', 'native-voice'].includes(command) ||
         (command === 'native-cards' && request.operation !== 'respond'))
         return Promise.reject(new Error('Unsupported native operation'));
     try { if (command === 'native-voice') nativeVoiceRequest(request); }
@@ -123,6 +123,7 @@ export class ResidentBridge {
         this._operator = operator;
     }
     inbox(pui, request) { return this.read(pui, request, 'native-inbox'); }
+    account(pui, request) { return this.read(pui, request, 'native-account'); }
     voice(pui, request) { return this._request(pui, request, 'native-voice'); }
     record(pui, onState) { return this._request(pui, {operation: 'record'}, 'native-audio', onState); }
     play(pui, audioBase64, onState) { return this._request(pui, {operation: 'play', audioBase64}, 'native-audio', onState); }
@@ -137,7 +138,7 @@ export class ResidentBridge {
         if (this._closed) return refused('Workbench has stopped');
         const streaming = command === 'native-chat' || (command === 'native-cards' && request.operation === 'subscribe');
         const audio = command === 'native-audio';
-        if ((!streaming && !['native-read', 'native-inbox', 'native-cards', 'native-voice', 'native-audio'].includes(command)) ||
+        if ((!streaming && !['native-read', 'native-inbox', 'native-account', 'native-cards', 'native-voice', 'native-audio'].includes(command)) ||
             (command === 'native-cards' && !['subscribe', 'respond'].includes(request.operation)) ||
             ((streaming || audio) && typeof onFrame !== 'function') || (!streaming && !audio && onFrame) ||
             (audio && (Object.keys(request).some(key => !['operation', 'audioBase64'].includes(key)) ||

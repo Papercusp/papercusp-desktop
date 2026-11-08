@@ -8,7 +8,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {ResidentBridge} from './bridge.js';
 import {nativeChatBlocks, safeChatLink, NativeCardsState} from './chat-content.js';
-import {PanelState, InboxState, ChatState, sameEnvironment, oneRow, SOURCES, sourceRequests, detailRequest, readRows, rebindShortcuts,
+import {PanelState, InboxState, ChatState, AccountState, sameEnvironment, oneRow, SOURCES, sourceRequests, detailRequest, readRows, rebindShortcuts,
     agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow,
     organizerGroups, arrangeOrganizerGroup, nativeVoiceResult} from './panel-model.mjs';
 
@@ -28,7 +28,8 @@ function button(text, callback) {
 export default class Workbench extends Extension {
     enable() {
         this._settings = this.getSettings();
-        this._states = new Map(['quick-access', 'goals', 'inbox', 'organizer', 'papercup'].map(name => [name, new PanelState()]));
+        this._states = new Map(['quick-access', 'goals', 'inbox', 'organizer', 'papercup', 'accounts'].map(name => [name, new PanelState()]));
+        this._accounts = new AccountState();
         this._states.get('organizer').organizerKind = 'plan';
         this._inbox = new InboxState(); this._inboxRunId = null;
         this._chat = new ChatState(); this._chatStream = null;
@@ -143,7 +144,8 @@ export default class Workbench extends Extension {
         this._views.set(surface, view);
         const header = new St.BoxLayout({style_class: 'papercusp-panel-header'});
         header.add_child(label(surface === 'goals' ? 'Goals' : surface === 'inbox' ? 'Inbox' :
-            surface === 'organizer' ? 'Organizer' : surface === 'papercup' ? 'Papercup' : 'Quick Access', 'papercusp-panel-title'));
+            surface === 'organizer' ? 'Organizer' : surface === 'papercup' ? 'Papercup' :
+            surface === 'accounts' ? 'Accounts' : 'Quick Access', 'papercusp-panel-title'));
         const pin = button(state.pinned ? 'Unpin' : 'Pin', () => {
             state.pinned = !state.pinned;
             pin.label = state.pinned ? 'Unpin' : 'Pin';
@@ -155,12 +157,13 @@ export default class Workbench extends Extension {
         if (surface === 'papercup') { this._buildChat(view); return; }
         view.search = new St.Entry({text: state.query, hint_text: surface === 'inbox' ? 'Search questions' : 'Search plans, agents, reports and goals',
             can_focus: true, x_expand: true, accessible_name: 'Search Workbench'});
+        if (surface === 'accounts') view.search.hint_text = 'Search accounts';
         // Clutter.Text consumes Enter and emits activate instead of bubbling
         // key-press-event to the panel. Keep the focused search route native.
         view.search.clutter_text.connect('activate', () => {
             if (surface === 'inbox') {
                 const row = this._inbox.results(state.query)[0]; if (row) this._loadInboxContext(row.id);
-            } else if (surface !== 'organizer' && !state.detail) this._activate(surface, state.selected());
+            } else if (!['organizer', 'accounts'].includes(surface) && !state.detail) this._activate(surface, state.selected());
         });
         view.search.clutter_text.connect('text-changed', () => {
             state.query = view.search.get_text();
@@ -169,6 +172,7 @@ export default class Workbench extends Extension {
                 this._renderInbox(); return;
             }
             if (surface === 'organizer') { this._renderOrganizer(); return; }
+            if (surface === 'accounts') { this._renderAccounts(); return; }
             // Invalidate old completions immediately, before the debounce.
             ++state.generation;
             state.detail = null; ++state.detailGeneration;
@@ -204,9 +208,9 @@ export default class Workbench extends Extension {
         panel.connect('key-press-event', (_actor, event) => {
             const key = event.get_key_symbol();
             if (key === Clutter.KEY_Escape) this._escape(surface);
-            else if (!['inbox', 'organizer'].includes(surface) && !state.detail && (key === Clutter.KEY_Down || key === Clutter.KEY_Up)) {
+            else if (!['inbox', 'organizer', 'accounts'].includes(surface) && !state.detail && (key === Clutter.KEY_Down || key === Clutter.KEY_Up)) {
                 state.move(key === Clutter.KEY_Down ? 1 : -1); this._render(surface);
-            } else if (!['inbox', 'organizer'].includes(surface) && !state.detail && (key === Clutter.KEY_Return || key === Clutter.KEY_KP_Enter))
+            } else if (!['inbox', 'organizer', 'accounts'].includes(surface) && !state.detail && (key === Clutter.KEY_Return || key === Clutter.KEY_KP_Enter))
                 this._activate(surface, state.selected());
             else return Clutter.EVENT_PROPAGATE;
             return Clutter.EVENT_STOP;
@@ -215,6 +219,9 @@ export default class Workbench extends Extension {
         this._position(); this._render(surface); view.search.grab_key_focus();
     }
     _escape(surface) {
+        if (surface === 'accounts' && this._accounts.selection) {
+            this._accounts.selection = null; this._renderAccounts(); return;
+        }
         if (surface === 'inbox') {
             const view = this._views.get(surface);
             if (view?.confirmRequests) { view.confirmRequests = null; this._renderInbox(); return; }
@@ -230,6 +237,7 @@ export default class Workbench extends Extension {
         if (!view || !state.visible) return;
         if (surface === 'inbox') { this._refreshInbox(); return; }
         if (surface === 'papercup') { this._refreshChat(); return; }
+        if (surface === 'accounts') { this._refreshAccounts(); return; }
         if (surface === 'organizer' && state.organizing) return;
         if (view.searchTimer) { GLib.source_remove(view.searchTimer); view.searchTimer = null; }
         const requests = surface === 'organizer' ? [...sourceRequests('', 'agents'), ...sourceRequests('', 'goals')] :
@@ -244,6 +252,7 @@ export default class Workbench extends Extension {
         }
     }
     _render(surface) {
+        if (surface === 'accounts') { this._renderAccounts(); return; }
         if (surface === 'papercup') { this._renderChat(); return; }
         if (surface === 'inbox') { this._renderInbox(); return; }
         if (surface === 'organizer') { this._renderOrganizer(); return; }
@@ -282,6 +291,65 @@ export default class Workbench extends Extension {
         if (state.hasMoreResults()) view.content.add_child(button('Show more results', () => {
             state.showMoreResults(); this._render(surface);
         }));
+    }
+    async _refreshAccounts() {
+        const view = this._views.get('accounts'), accounts = this._accounts;
+        if (!view || !this._states.get('accounts').visible) return;
+        const token = accounts.begin(), pui = this._settings.get_string('pui-path');
+        this._renderAccounts();
+        try {
+            const identity = await this._bridge.read(pui, {name: 'operator.identity', args: {}});
+            const environment = oneRow(identity);
+            const [pool, steering] = await Promise.all([
+                this._bridge.read(pui, {name: 'accounts.pool', args: {}, environment}),
+                this._bridge.read(pui, {name: 'accounts.sessionOverride', args: {}, environment}),
+            ]);
+            accounts.settle(token, environment, pool, steering);
+        } catch (error) { accounts.settle(token, null, null, null, error); }
+        if (this._views.get('accounts') === view) this._renderAccounts();
+    }
+    async _applyAccount(action) {
+        const accounts = this._accounts, view = this._views.get('accounts');
+        if (!view || !this._states.get('accounts').visible) return;
+        let operation;
+        try { operation = accounts.beginAction(action); }
+        catch (error) { accounts.error = String(error.message || error); this._renderAccounts(); return; }
+        this._renderAccounts();
+        const {token, request} = operation;
+        try {
+            const payload = await this._bridge.account(this._settings.get_string('pui-path'), request);
+            accounts.applied(token, request.environment, payload);
+        } catch (error) { accounts.applied(token, request.environment, null, error); }
+        if (this._views.get('accounts') === view) this._renderAccounts();
+    }
+    _renderAccounts() {
+        const view = this._views.get('accounts'), accounts = this._accounts;
+        if (!view) return;
+        view.content.destroy_all_children();
+        view.status.set_text(accounts.busy ? 'Loading confirmed account state…' : accounts.error ||
+            (accounts.ready ? 'Environment: ' + accounts.environment.workspaceId + ' · ' + accounts.environment.endpoint +
+                '\nStore: ' + accounts.environment.store.id + ' · Chat: ' + accounts.environment.agentChat.scope : 'Account state unavailable'));
+        const controls = new St.BoxLayout({style_class: 'papercusp-panel-scopes'});
+        for (const action of ['default', 'force', 'exclude', 'auto']) {
+            const control = button(action[0].toUpperCase() + action.slice(1), () => this._applyAccount(action));
+            control.accessible_name = 'Account ' + action;
+            control.reactive = control.can_focus = Boolean(accounts.ready && !accounts.busy && (action === 'auto' || accounts.selection));
+            controls.add_child(control);
+        }
+        view.content.add_child(controls);
+        const query = this._states.get('accounts').query.trim().toLowerCase();
+        for (const account of accounts.accounts.filter(row => [row.name, row.id, row.provider].some(value => String(value || '').toLowerCase().includes(query)))) {
+            const current = accounts.override;
+            const axes = [current.defaultAccountId === account.id ? 'Default' : '',
+                current.forcedAccounts.includes(account.id) ? 'Force' : '', current.excludeAccounts.includes(account.id) ? 'Exclude' : ''].filter(Boolean);
+            const row = button((account.name || account.id) + (axes.length ? ' · ' + axes.join(' · ') : ''), () => {
+                accounts.selection = account.id; this._renderAccounts();
+            });
+            row.accessible_name = 'Account: ' + account.id;
+            if (accounts.selection === account.id) row.add_style_class_name('selected');
+            row.reactive = row.can_focus = accounts.ready && !accounts.busy;
+            view.content.add_child(row);
+        }
     }
     _renderOrganizer() {
         const view = this._views.get('organizer'), state = this._states.get('organizer');
@@ -985,6 +1053,7 @@ export default class Workbench extends Extension {
     }
     _hide(surface, restoreFocus) {
         const view = this._views.get(surface), state = this._states.get(surface);
+        if (surface === 'accounts') this._accounts.begin();
         if (surface === 'inbox') { ++this._inbox.generation; this._inbox.clearContext(); }
         if (surface === 'papercup') { this._stopVoice(); this._stopChatStream(); this._stopCards(); this._chat.invalidate(); }
         if (state) { state.visible = false; ++state.generation; ++state.detailGeneration; }
