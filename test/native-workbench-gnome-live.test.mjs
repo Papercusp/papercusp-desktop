@@ -472,8 +472,10 @@ try {
         console.log('INSTALLED_CANONICAL_REPORTS_PASS ' + JSON.stringify(proof));
     }));
 
-test('exact installed GNOME preview opens canonical Reports through a private Shell shortcut',
-    {skip:process.platform!=='linux'||process.env.PAPERCUSP_NATIVE_INSTALLED_SHELL!=='1',timeout:80000},
+for (const surface of ['reports', 'inbox']) test('exact installed GNOME preview opens canonical ' +
+    (surface === 'reports' ? 'Reports' : 'Inbox') + ' through a private Shell shortcut',
+    {skip:process.platform!=='linux'||process.env[surface === 'reports'
+        ? 'PAPERCUSP_NATIVE_INSTALLED_SHELL' : 'PAPERCUSP_NATIVE_INSTALLED_INBOX']!=='1',timeout:80000},
     () => withNativeFixture('workbench-installed-shell-',async temp=>{
         const installed=process.env.PAPERCUSP_NATIVE_EXTENSION,operator=process.env.PAPERCUSP_NATIVE_OPERATOR;
         const pui=process.env.PAPERCUSP_NATIVE_PUI;
@@ -516,7 +518,8 @@ export default class Probe extends Extension {
  disable(){}
  finish(error){const target=Main.extensionManager.lookup('workbench@papercusp.ai')?.stateObj;
  GLib.file_set_contents(${JSON.stringify(resultFile)},JSON.stringify({ok:!error,error:error?String(error)+'; '+error.stack:null,
- phase,assertions,reportId:this.reportId,bodyChars:this.bodyChars,
+ phase,assertions,reportId:this.reportId,bodyChars:this.bodyChars,inboxItemId:this.inboxItemId,
+ questions:target?._inbox.rows.length,savedRunId:target?._inbox.savedRunId,
  sources:target?Object.entries(target._states.get('quick-access').sources)
  .map(([kind,value])=>({kind,status:value.status,error:value.error})):[]}));global.context.terminate();}
  async run(){
@@ -525,7 +528,8 @@ export default class Probe extends Extension {
  check(target._settings.get_string('pui-path')===${JSON.stringify(pui)},'login loads the exact installed PUI selection');
  check(target._settings.get_string('operator')===${JSON.stringify(operator)},'login retains the selected canonical operator');
  check(target._bindings.size===5,'unmodified installed extension acquires native shortcuts');
- const state=target._states.get('quick-access');state.scope='reports';
+ const state=target._states.get(${JSON.stringify(surface === 'reports' ? 'quick-access' : 'inbox')});
+ ${surface === 'reports' ? "state.scope='reports';" : ''}
  const seat=Clutter.get_default_backend().get_default_seat();
  const keyboard=seat.create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
  const key=async(symbol,pressed)=>{keyboard.notify_keyval(GLib.get_monotonic_time(),symbol,
@@ -534,7 +538,43 @@ export default class Probe extends Extension {
  phase='desktop ready';await waitFor(()=>Main.actionMode!==Shell.ActionMode.NONE);
  if(Main.overview.visible)await chord([Clutter.KEY_Escape]);
  await waitFor(()=>Main.actionMode===Shell.ActionMode.NORMAL&&!Main.overview.visible);
- phase='native shortcut';await chord([Clutter.KEY_Super_L,Clutter.KEY_Alt_L,Clutter.KEY_space]);
+ ${surface === 'inbox' ? `phase='native Inbox shortcut';await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_i]);
+ const inbox=target._inbox;
+ await waitFor(()=>state.visible&&(inbox.listReady||inbox.listError)&&(inbox.bulkReady||inbox.bulkError));
+ const view=target._views.get('inbox');
+ check(view.panel.get_parent()!==null,'seat shortcut opens the installed native Inbox actor');
+ check(inbox.listReady&&!inbox.listError,'canonical Inbox list is ready without a resolver error');
+ check(inbox.bulkReady&&!inbox.bulkError,'canonical saved run or explicit absence is ready');
+ check(target._inboxEnvironment.endpoint.startsWith(${JSON.stringify(operator)})&&!!target._inboxEnvironment.workspaceId,
+ 'native Inbox retains the selected canonical environment');
+ check(inbox.rows.length>0&&view.inboxList.get_n_children()===inbox.results(state.query).length,
+ 'native Inbox renders the canonical question population');
+ const controls=view.content.get_children().map(child=>child.label).filter(value=>typeof value==='string');
+ check(['Resolve visible','Stop','Resume','Apply selected'].every(label=>controls.includes(label)),
+ 'native Inbox exposes batch and selected review controls');
+ const saved=await target._bridge.read(${JSON.stringify(pui)},{name:'plans.attentionBulkRun',environment:target._inboxEnvironment});
+ check((saved.rows[0]?.run?.runId||null)===inbox.savedRunId,'native Inbox preserves canonical saved run identity or explicit absence');
+ const row=inbox.rows[0],source=inbox.rows;this.inboxItemId=row.id;
+ view.search.set_text(row.id);
+ check(inbox.rows===source&&inbox.results(state.query).some(item=>item.id===row.id),
+ 'native Inbox search preserves its canonical source and selected identity');
+ const detail=await target._bridge.read(${JSON.stringify(pui)},{name:'plans.attentionItem',args:{itemId:row.id},environment:target._inboxEnvironment});
+ check(detail.rows[0]?.id===row.id&&JSON.stringify(detail.rows[0].ref)===JSON.stringify(row.ref),
+ 'exact canonical question control preserves its typed reference');
+ phase='seat Inbox Enter';await chord([Clutter.KEY_Return]);
+ await waitFor(()=>inbox.context||inbox.contextError);
+ check(inbox.context?.id===row.id&&JSON.stringify(inbox.context.ref)===JSON.stringify(row.ref),
+ 'seat Enter opens the exact canonical question context');
+ const foreign={...target._inboxEnvironment,workspaceId:target._inboxEnvironment.workspaceId+'-foreign'};
+ let refused=false;try{await target._bridge.read(${JSON.stringify(pui)},{name:'plans.attentionItem',args:{itemId:row.id},environment:foreign});}
+ catch(error){refused=/selected environment changed/.test(error.message);}
+ check(refused,'installed Inbox refuses a changed workspace before question access');
+ check(global.get_window_actors().length===0,'installed Inbox creates no application window');
+ phase='nested Inbox Escape';await chord([Clutter.KEY_Escape]);
+ check(!inbox.context&&!inbox.selection&&state.visible,'first seat Escape dismisses only question context');
+ await chord([Clutter.KEY_Escape]);
+ check(!state.visible&&!target._views.has('inbox'),'second seat Escape dismisses the installed Inbox');
+ ` : `phase='native shortcut';await chord([Clutter.KEY_Super_L,Clutter.KEY_Alt_L,Clutter.KEY_space]);
  await waitFor(()=>state.visible&&state.sources.reports?.status==='ready');
  check(target._views.get('quick-access').panel.get_parent()!==null,'seat shortcut opens the installed native actor');
  const report=state.results().find(row=>row.kind==='reports');
@@ -553,6 +593,7 @@ export default class Probe extends Extension {
  check(!state.detail&&state.visible,'first seat Escape dismisses only canonical detail');
  await chord([Clutter.KEY_Escape]);
  check(!state.visible&&!target._views.has('quick-access'),'second seat Escape dismisses the installed panel');
+ `}
  this.finish(null);
  }
 }`);
@@ -575,18 +616,18 @@ new Gio.Settings({schema_id:'org.gnome.shell'}).set_strv('enabled-extensions',
             '--no-x11','--virtual-monitor','1440x900','--wayland-display','workbench-installed-test'],env,55000,temp);
         const evidence=existsSync(resultFile)?JSON.parse(readFileSync(resultFile,'utf8')):null;
         const proof={evidence,sourceCustody,...result,
-            plane:'exact installed preview files and real PUI/canonical operator in a private GNOME Shell; independent observer; Reports scope only'};
+            plane:'exact installed preview files and real PUI/canonical operator in a private GNOME Shell; independent observer; ' + surface + ' scope only'};
         if(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR){
             mkdirSync(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,{recursive:true});
-            writeFileSync(join(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,'installed-shell-reports.json'),JSON.stringify(proof,null,2)+'\n');
+            writeFileSync(join(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,'installed-shell-'+surface+'.json'),JSON.stringify(proof,null,2)+'\n');
         }
         assert.equal(evidence?.ok,true,JSON.stringify(proof));
         assert.equal(result.status,0,JSON.stringify(proof));
         assert.equal(result.error,null,JSON.stringify(proof));
         for(const file of files)assert.deepEqual(readFileSync(join(extension,file)),readFileSync(join(installed,file)),
             'Probe must leave exact installed '+file+' unchanged');
-        assert.equal(evidence.assertions.length,10);
-        console.log('INSTALLED_SHELL_REPORTS_PASS '+JSON.stringify(evidence));
+        assert.equal(evidence.assertions.length,surface === 'reports' ? 10 : 17);
+        console.log('INSTALLED_SHELL_'+surface.toUpperCase()+'_PASS '+JSON.stringify(evidence));
     }));
 
 test('production GNOME installation reports real reload state and survives private Shell login restarts',
