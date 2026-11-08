@@ -231,6 +231,17 @@ if [[ "$CURRENT_SOURCE_SHA" != "$EXPECTED_SOURCE_SHA" ]]; then
 fi
 export PAPERCUSP_EXPECTED_SOURCE_SHA="$EXPECTED_SOURCE_SHA"
 
+# EI-28182072788922658: use the sidecar's dependency ownership gate before
+# expensive seed production. A clean Git pin does not isolate node_modules;
+# an external symlink or writable hard link must fail before any release write.
+# Keep the sidecar check too: dependencies can change after this preflight.
+# shellcheck source=lib/pinned-deps.sh
+source "$ORCHESTRATOR_HERE/lib/pinned-deps.sh"
+if ! papercusp_assert_pinned_deps_decoupled "$MONOREPO" "${PAPERCUSP_PINNED_DEPS_SNAPSHOT_ROOT:-}"; then
+  echo "ERROR: release dependencies are not isolated; refusing before seed or build mutation." >&2
+  exit 2
+fi
+
 # EI-21007848170102877: the finished-byte identity audit is mandatory on every
 # release cut, and it cannot certify anything without the human owner's name as
 # a runtime search literal. Fail HERE — after exact-source validation but before

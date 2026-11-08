@@ -22,7 +22,7 @@ function Test-WorkbenchSettings {
         throw 'Select an installed PUI executable'
     }
     $seen = @{}
-    foreach ($name in @('quick-access', 'goals', 'accounts', 'inbox', 'organizer')) {
+    foreach ($name in @('quick-access', 'goals', 'accounts', 'inbox', 'organizer', 'papercup')) {
         $binding = $Settings.bindings.$name
         if ($binding.enabled -isnot [bool]) { throw 'Invalid panel enabled value' }
         # Validate disabled bindings too, so re-enabling cannot resurrect an
@@ -44,11 +44,11 @@ function Complete-WorkbenchSettings {
     param($Settings)
     # Add the new panel to existing per-account settings without resetting any
     # shortcut or disable choice. Choose a free accelerator if A is already used.
-    foreach ($name in @('accounts', 'inbox', 'organizer')) {
+    foreach ($name in @('accounts', 'inbox', 'organizer', 'papercup')) {
         if ($null -eq $Settings.bindings.PSObject.Properties[$name]) {
             $used = @($Settings.bindings.PSObject.Properties | Where-Object { $_.Value.enabled } |
                 ForEach-Object { [string]$_.Value.modifiers + ':' + [string]$_.Value.key })
-            $preferred = if ($name -eq 'inbox') { 66 } elseif ($name -eq 'organizer') { 79 } else { 65 }
+            $preferred = if ($name -eq 'inbox') { 66 } elseif ($name -eq 'organizer') { 79 } elseif ($name -eq 'papercup') { 80 } else { 65 }
             $available = @(@($preferred) + @(65..90 | Where-Object { $_ -ne $preferred }) |
                 Where-Object { ('3:' + $_) -notin $used })
             if ($available.Count -eq 0) { throw "No free default $name shortcut; configure existing shortcuts first" }

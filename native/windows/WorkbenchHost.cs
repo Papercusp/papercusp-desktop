@@ -89,6 +89,7 @@ namespace Papercusp.Workbench
             panels.Add("accounts", new NativePanel(pui, "Accounts", "accounts", Relayout));
             panels.Add("inbox", new NativePanel(pui, "Inbox", "inbox", Relayout));
             panels.Add("organizer", new NativePanel(pui, "Organizer", "organizer", Relayout));
+            panels.Add("papercup", new NativePanel(pui, "Papercup", "papercup", Relayout));
         }
         public Window Panel(string name) { return panels[name]; }
         public PanelState State(string name) { return panels[name].State; }
@@ -105,7 +106,7 @@ namespace Papercusp.Workbench
         }
         private void Relayout()
         {
-            var visible = new[] { "quick-access", "goals", "accounts", "inbox", "organizer" }.Where(name => panels[name].State.Visible).ToArray();
+            var visible = new[] { "quick-access", "goals", "accounts", "inbox", "organizer", "papercup" }.Where(name => panels[name].State.Visible).ToArray();
             for (var i = 0; i < visible.Length; ++i)
                 panels[visible[i]].Position(PanelBounds(SystemParameters.WorkArea, visible.Length, i));
         }
@@ -266,6 +267,13 @@ namespace Papercusp.Workbench
             private List<OrganizerReceipt> organizerReceipts;
             private bool organizing;
             private string organizerError;
+            private readonly ChatState chat;
+            private readonly StackPanel chatHistory;
+            private readonly TextBox chatCompose;
+            private readonly TextBlock chatScope;
+            private readonly Button chatSend, chatEarlier, chatReconnect, chatCancel;
+            private CancellationTokenSource chatStream;
+            private bool renderingChat;
             private List<Dictionary<string, object>> inboxConfirmation;
             private string inboxRunId, inboxListKey, inboxContextKey, inboxBulkKey;
             internal Func<string, bool> ConfirmGoal;
@@ -297,6 +305,7 @@ namespace Papercusp.Workbench
                 var controls = new StackPanel(); DockPanel.SetDock(controls, Dock.Top); layout.Children.Add(controls);
                 search = new TextBox { FontSize = 16, Margin = new Thickness(0, 8, 0, 8) };
                 AutomationProperties.SetName(search, "Search Workbench"); controls.Children.Add(search);
+                if (scope == "papercup") search.Visibility = Visibility.Collapsed;
                 if (scope == "all")
                 {
                     var filter = new ComboBox { ItemsSource = new[] { "all", "plans", "agents", "reports", "goals" }, SelectedIndex = 0 };
@@ -350,6 +359,26 @@ namespace Papercusp.Workbench
                 ConfirmGoal = message => MessageBox.Show(this, message, "Confirm goal action", MessageBoxButton.YesNo,
                     MessageBoxImage.Question, MessageBoxResult.No) == MessageBoxResult.Yes;
                 var body = new Grid(); layout.Children.Add(body);
+                if (scope == "papercup")
+                {
+                    chat = new ChatState();
+                    chatScope = new TextBlock { TextWrapping = TextWrapping.Wrap };
+                    AutomationProperties.SetName(chatScope, "Papercup conversation environment"); controls.Children.Add(chatScope);
+                    var chatBody = new DockPanel(); body.Children.Add(chatBody);
+                    var composer = new StackPanel(); DockPanel.SetDock(composer, Dock.Bottom); chatBody.Children.Add(composer);
+                    chatCompose = new TextBox { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 70,
+                        MaxHeight = 180, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Margin = new Thickness(0, 8, 0, 4) };
+                    AutomationProperties.SetName(chatCompose, "Papercup message"); composer.Children.Add(chatCompose);
+                    chatCompose.TextChanged += (s, e) => { if (!renderingChat) { chat.Draft = chatCompose.Text; UpdateChatControls(); } };
+                    var actions = new WrapPanel(); composer.Children.Add(actions);
+                    chatSend = InboxButton(actions, "Send", "Papercup send", SendChat);
+                    chatReconnect = InboxButton(actions, "Reconnect", "Papercup reconnect", () => ControlChat("reconnect"));
+                    chatCancel = InboxButton(actions, "Cancel reply", "Papercup cancel reply", () => ControlChat("cancel"));
+                    chatEarlier = InboxButton(controls, "Earlier messages", "Papercup earlier messages", LoadEarlierChat);
+                    chatHistory = new StackPanel();
+                    var scroll = new ScrollViewer { Content = chatHistory, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+                    AutomationProperties.SetName(scroll, "Papercup conversation history"); chatBody.Children.Add(scroll);
+                }
                 if (scope == "organizer")
                 {
                     organizerContent = new StackPanel();
@@ -380,7 +409,7 @@ namespace Papercusp.Workbench
                     inboxTimer.Tick += async (s, e) => { inboxTimer.Stop(); await FollowInboxRun(); };
                 }
                 results = new ListBox { FontSize = 15 }; body.Children.Add(results);
-                if (inbox != null || organizerContent != null) results.Visibility = Visibility.Collapsed;
+                if (inbox != null || organizerContent != null || chat != null) results.Visibility = Visibility.Collapsed;
                 AutomationProperties.SetName(results, "Workbench results");
                 results.SelectionChanged += (s, e) =>
                 {
@@ -401,6 +430,7 @@ namespace Papercusp.Workbench
                 {
                     if (e.Key == Key.Escape)
                     {
+                        if (chat != null) { Dismiss(true); e.Handled = true; return; }
                         if (inbox != null)
                         {
                             if (inboxConfirmation != null) { inboxConfirmation = null; RenderInboxConfirmation(); }
@@ -411,7 +441,9 @@ namespace Papercusp.Workbench
                         if (State.Escape() == "panel") Dismiss(true); else Render();
                         e.Handled = true;
                     }
-                    else if (e.Key == Key.Enter && State.Detail == null && inbox == null && organizerContent == null) { OpenSelected(); e.Handled = true; }
+                    else if (e.Key == Key.Enter && chat != null && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
+                    { SendChat(); e.Handled = true; }
+                    else if (e.Key == Key.Enter && State.Detail == null && inbox == null && organizerContent == null && chat == null) { OpenSelected(); e.Handled = true; }
                     else if ((e.Key == Key.Down || e.Key == Key.Up) && search.IsKeyboardFocusWithin)
                     {
                         var count = results.Items.Count;
@@ -437,13 +469,16 @@ namespace Papercusp.Workbench
             }
             internal void Summon()
             {
-                priorWindow = GetForegroundWindow(); State.Visible = true; relayout(); Show(); Activate(); search.Focus(); Refresh();
+                priorWindow = GetForegroundWindow(); State.Visible = true; relayout(); Show(); Activate();
+                if (chat != null) chatCompose.Focus(); else search.Focus();
+                Refresh();
             }
             internal void Dismiss(bool restore)
             {
                 State.Visible = false; debounce.Stop();
                 if (accounts != null) { ++accounts.Generation; accounts.Busy = false; }
                 if (inbox != null) { ++inbox.Generation; inbox.ClearContext(); inboxConfirmation = null; inboxTimer.Stop(); }
+                if (chat != null) { StopChatStream(); ++chat.Generation; chat.Loading = false; }
                 if (refresh != null) { refresh.Cancel(); refresh.Dispose(); refresh = null; }
                 ++State.Generation; CancelDetail();
                 var ownedFocus = IsActive; Hide();
@@ -462,6 +497,7 @@ namespace Papercusp.Workbench
                 refresh = new CancellationTokenSource();
                 if (accounts != null) { await RefreshAccounts(refresh.Token); return; }
                 if (inbox != null) { await RefreshInbox(refresh.Token); return; }
+                if (chat != null) { await RefreshChat(refresh.Token); return; }
                 var token = refresh.Token; var generation = State.BeginRefresh();
                 if (organizerContent != null)
                 {
@@ -492,6 +528,7 @@ namespace Papercusp.Workbench
             private void Render()
             {
                 if (shuttingDown) return;
+                if (chat != null) { RenderChat(); return; }
                 if (organizerContent != null) { RenderOrganizer(); return; }
                 if (accounts != null) { RenderAccounts(); return; }
                 if (inbox != null) { RenderInbox(); return; }
@@ -512,6 +549,117 @@ namespace Papercusp.Workbench
                 if (State.Detail != null) resume.Visibility = Visibility.Collapsed;
                 more.Visibility = State.Detail == null && State.Results(true).Count > rows.Count ? Visibility.Visible : Visibility.Collapsed;
                 RenderGoalControls();
+            }
+            private void StopChatStream()
+            {
+                var stream = chatStream; chatStream = null;
+                if (stream != null) { stream.Cancel(); if (chat.Reply != null) chat.Reply.Disconnected(); }
+            }
+            private async Task RefreshChat(CancellationToken token)
+            {
+                StopChatStream(); var generation = chat.Begin(); RenderChat();
+                try
+                {
+                    var environment = AccountState.One(await PuiReadBridge.ReadAsync(pui, "operator.identity", null, token));
+                    var conversation = await PuiReadBridge.ReadAsync(pui, "operatorConversations.current",
+                        new Dictionary<string, object> { { "workspaceId", PanelState.Text(environment, "workspaceId") } }, token, 22000, environment);
+                    if (token.IsCancellationRequested || !State.Visible || !chat.Bind(generation, environment, conversation)) return;
+                    var id = chat.ConversationId;
+                    var page = await PuiReadBridge.ReadAsync(pui, "operatorTurns.page",
+                        new Dictionary<string, object> { { "conversationId", id }, { "limit", 200 } }, token, 22000, environment);
+                    if (!token.IsCancellationRequested && State.Visible) chat.Settle(generation, environment, id, page);
+                }
+                catch (Exception error) { if (!token.IsCancellationRequested) chat.Fail(generation, error); }
+                finally { if (generation == chat.Generation && State.Visible) { RenderChat(); if (IsActive) chatCompose.Focus(); } }
+            }
+            private async void LoadEarlierChat()
+            {
+                var generation = chat.Generation; var environment = chat.Environment; var id = chat.ConversationId;
+                try
+                {
+                    var before = chat.BeginEarlier(); RenderChat();
+                    var token = refresh.Token;
+                    var page = await PuiReadBridge.ReadAsync(pui, "operatorTurns.page", new Dictionary<string, object> {
+                        { "conversationId", id }, { "limit", 200 }, { "beforeSeq", before } }, token, 22000, environment);
+                    if (!token.IsCancellationRequested && State.Visible) chat.Settle(generation, environment, id, page, before);
+                }
+                catch (Exception error) { if (generation == chat.Generation) chat.Fail(generation, error); }
+                finally { if (generation == chat.Generation && State.Visible) RenderChat(); }
+            }
+            private void SendChat()
+            {
+                try { StreamChat(chat.Send(Guid.NewGuid().ToString())); }
+                catch (Exception error) { chat.Fail(chat.Generation, error); RenderChat(); }
+            }
+            private void ControlChat(string operation)
+            {
+                try { StreamChat(chat.Reply.Control(operation)); }
+                catch (Exception error) { chat.Fail(chat.Generation, error); RenderChat(); }
+            }
+            private async void StreamChat(Dictionary<string, object> request)
+            {
+                StopChatStream(); var source = new CancellationTokenSource(); chatStream = source;
+                var generation = chat.Generation; var reply = chat.Reply; reply.Connected = true; RenderChat();
+                try
+                {
+                    await PuiReadBridge.ChatAsync(pui, request, frame => Dispatcher.Invoke(new Action(() =>
+                    {
+                        if (chatStream != source || source.IsCancellationRequested || generation != chat.Generation || !State.Visible) return;
+                        if (chat.Receive(generation, frame)) RenderChat();
+                    })), source.Token);
+                    if (chatStream == source && !reply.Complete)
+                        throw new InvalidOperationException("Reply ended without a saved acknowledgement; reconcile before sending again");
+                }
+                catch (Exception error) { if (chatStream == source) chat.Fail(generation, error); }
+                finally
+                {
+                    var current = chatStream == source; if (current) chatStream = null; source.Dispose();
+                    if (current && generation == chat.Generation && State.Visible)
+                    { if (reply.Complete && reply.Phase == "completed") Refresh(); else RenderChat(); }
+                }
+            }
+            private void UpdateChatControls()
+            {
+                chatCompose.IsEnabled = chat.Ready && !chat.Loading;
+                chatSend.IsEnabled = chat.CanSend && chatStream == null;
+                chatEarlier.IsEnabled = chat.Ready && chat.HasMoreEarlier && !chat.Loading && chat.Reply == null;
+                var controllable = chat.Reply != null && !chat.Reply.Complete && chat.Reply.TurnId != "";
+                chatReconnect.IsEnabled = controllable && chatStream == null;
+                chatCancel.IsEnabled = controllable;
+            }
+            private void RenderChat()
+            {
+                if (shuttingDown) return;
+                renderingChat = true;
+                try
+                {
+                    chatCompose.Text = chat.Draft;
+                    chatScope.Text = chat.Environment == null ? "Selecting conversation…" :
+                        PanelState.Text(chat.Environment, "endpoint") + "\n" + PanelState.Text(chat.Environment, "workspaceId") +
+                        " · " + chat.ConversationId;
+                    status.Text = chat.Error != null ? "Unavailable · " + chat.Error : chat.Loading ? "Loading conversation…" :
+                        chat.Reply != null ? "Reply · " + chat.Reply.Phase : chat.Ready ? "Conversation ready" : "Conversation unavailable";
+                    chatHistory.Children.Clear();
+                    foreach (var turn in chat.Turns)
+                    {
+                        InboxText(chatHistory, PanelState.Text(turn, "role"));
+                        ChatText(PanelState.Text(turn, "text"));
+                    }
+                    if (chat.Reply != null)
+                    {
+                        ChatText(chat.Reply.DisplayText);
+                        foreach (var tool in chat.Reply.Tools) InboxText(chatHistory, tool);
+                    }
+                    UpdateChatControls();
+                }
+                finally { renderingChat = false; }
+            }
+            private void ChatText(string text)
+            {
+                if (text == "") return;
+                var message = new TextBox { Text = text, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
+                    BorderThickness = new Thickness(0), Background = Brushes.Transparent, Margin = new Thickness(0, 4, 0, 12) };
+                AutomationProperties.SetName(message, "Papercup message text"); chatHistory.Children.Add(message);
             }
             private void RenderOrganizer()
             {

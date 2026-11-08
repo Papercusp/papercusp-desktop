@@ -85,7 +85,7 @@ test('Windows per-account login lifecycle preserves shortcuts and explicit disab
         assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
         const result = JSON.parse(run.stdout.trim());
         assert.equal(result.ok, true);
-        assert.equal(result.count, 35);
+        assert.equal(result.count, 40);
         assert.equal(new Set(result.cases).size, result.count);
     });
 
@@ -108,7 +108,7 @@ test('Windows actual resident lifecycle and native settings work in the signed-i
         const result = JSON.parse(run.stdout.trim());
         assert.equal(result.ok, true);
         assert.equal(result.resident, true);
-        assert.equal(result.count, 45);
+        assert.equal(result.count, 51);
         assert.equal(new Set(result.cases).size, result.count);
     });
 
@@ -136,6 +136,20 @@ test('Windows native Papercup transport and state preserve streaming, replay, dr
         const result = JSON.parse(run.stdout.trim());
         assert.equal(result.ok, true); assert.equal(result.phase, 'chat');
         assert.ok(result.count >= 40);
+        assert.equal(new Set(result.cases).size, result.count);
+    });
+
+test('Windows native Papercup sidebar retains history, streaming, drafts, reconciliation and conversation isolation',
+    {skip:process.platform !== 'win32', timeout:60000}, () => {
+        const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
+            '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'chat', '-Interactive'],
+        {encoding:'utf8', timeout:55000, windowsHide:true});
+        assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
+        const result = JSON.parse(run.stdout.trim());
+        assert.equal(result.ok, true); assert.equal(result.phase, 'chat');
+        assert.equal(result.interactiveDesktop, true);
+        assert.ok(result.count >= 25);
         assert.equal(new Set(result.cases).size, result.count);
     });
 

@@ -31,6 +31,58 @@ const calls = {
   mac: section(release, '    env \\\n      TARGET_OS=darwin', '    # 2) universal .app'),
 };
 
+const dependencyPreflight = section(
+  release,
+  '# EI-28182072788922658:',
+  '# EI-21007848170102877:',
+);
+
+for (const mode of ['external-symlink', 'writable-hardlink', 'independent-copy', 'declared-snapshot']) {
+  test(`release dependency preflight checks ${mode} before seed work`, (context) => {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'release-dependency-preflight-'));
+    context.after(() => fs.rmSync(fixture, { recursive: true, force: true }));
+    const root = path.join(fixture, 'candidate');
+    const donor = path.join(fixture, 'snapshot');
+    const modules = path.join(root, 'node_modules');
+    const marker = path.join(fixture, 'seed-started');
+    fs.mkdirSync(root);
+    fs.mkdirSync(path.join(donor, 'node_modules'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'package.json'), '{"name":"candidate","private":true}');
+    fs.writeFileSync(path.join(donor, 'package.json'), '{"name":"snapshot","private":true}');
+    const dependency = path.join(donor, 'node_modules', 'dependency.js');
+    fs.writeFileSync(dependency, 'module.exports = 1;\n', { mode: 0o644 });
+    if (mode === 'external-symlink' || mode === 'declared-snapshot') {
+      fs.symlinkSync(path.join(donor, 'node_modules'), modules, 'dir');
+    } else {
+      fs.mkdirSync(modules);
+      if (mode === 'writable-hardlink') fs.linkSync(dependency, path.join(modules, 'dependency.js'));
+      else fs.copyFileSync(dependency, path.join(modules, 'dependency.js'));
+    }
+    const result = spawnSync('bash', ['-c', [
+      'set -euo pipefail',
+      dependencyPreflight,
+      'printf "started\\n" > "$SEED_MARKER"',
+    ].join('\n')], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ORCHESTRATOR_HERE: bin,
+        MONOREPO: root,
+        PAPERCUSP_PINNED_DEPS_SNAPSHOT_ROOT: mode === 'declared-snapshot' ? donor : '',
+        SEED_MARKER: marker,
+      },
+    });
+    const accepted = mode === 'independent-copy' || mode === 'declared-snapshot';
+    assert.equal(result.status, accepted ? 0 : 2, `${result.stdout}\n${result.stderr}`);
+    assert.equal(fs.existsSync(marker), accepted, 'rejected dependencies must stop seed work');
+    if (!accepted) assert.match(result.stderr, /refusing before seed or build mutation/);
+    assert.ok(
+      release.indexOf(dependencyPreflight) < release.indexOf('release_task_journal_configure()'),
+      'dependency ownership must be checked before release stages can begin',
+    );
+  });
+}
+
 test('mac leg asserts the freshly built Darwin sidecar, not the Linux hash', () => {
   assert.match(release, /unset PAPERCUSP_EXPECTED_SERVE_SHA/);
   assert.match(calls.mac, /mac_expected_serve_sha=\"\$\(sha256sum \"\$MAC_SIDECAR_DIR\/serve\.mjs\"/);

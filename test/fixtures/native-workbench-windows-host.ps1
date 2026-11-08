@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$SourceDirectory,
-    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'inbox', 'organizer', 'operator', 'operator-inbox', 'environment-refusal', 'fixture-diagnostics', 'fixture-failure', 'fixture-timeout')][string]$Phase = 'all',
+    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'inbox', 'organizer', 'chat', 'operator', 'operator-inbox', 'environment-refusal', 'fixture-diagnostics', 'fixture-failure', 'fixture-timeout')][string]$Phase = 'all',
     [string]$PuiExecutable,
     [string]$OperatorUrl,
     [string]$ExpectedWorkspace,
@@ -898,6 +898,73 @@ public static class WorkbenchNativeHostFixture
         state.SettleList(state.Generation, Envelope("{\"items\":[" + InboxQuestion + "," + InboxQuestion.Replace("thread-a", "thread-b") + "]}"));
         Check(!state.ListReady && state.ListError != null, "conflicting attention identities are surfaced instead of silently merged");
     }
+    private static void ChatNative()
+    {
+        var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
+        Action<string> mark = name => System.IO.File.WriteAllText(path + "." + name, name);
+        Action<string> clear = name => System.IO.File.Delete(path + "." + name);
+        using (var host = new WorkbenchHost(Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_FIXTURE")))
+        {
+            host.State("papercup").Pinned = true; host.Toggle("papercup"); var panel = host.Panel("papercup");
+            var chat = (ChatState)panel.GetType().GetField("chat", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).GetValue(panel);
+            var compose = Find<System.Windows.Controls.TextBox>(panel, "Papercup message");
+            var status = Find<System.Windows.Controls.TextBlock>(panel, "Workbench status");
+            Func<string, System.Windows.Controls.Button> button = name => Find<System.Windows.Controls.Button>(panel, "Papercup " + name);
+            Action<string> click = name => { var b = button(name); Check(b.IsEnabled, "native chat control enabled: " + name + " #" + cases.Count); b.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent)); };
+            Action reload = () => panel.GetType().GetMethod("Refresh", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).Invoke(panel, null);
+            Until(() => chat.Ready);
+            var hwnd = new WindowInteropHelper(panel).Handle;
+            Check(panel.IsVisible && !panel.ShowInTaskbar && panel.WindowStyle == WindowStyle.None && (Style(hwnd, -20) & 0x80) != 0,
+                "Papercup is a resident native tool sidebar without app chrome");
+            var scope = Find<System.Windows.Controls.TextBlock>(panel, "Papercup conversation environment");
+            Check(scope.Text.Contains("fixture.invalid:3170") && scope.Text.Contains("isolated") && scope.Text.Contains(chat.ConversationId),
+                "Papercup displays the canonical selected environment and conversation");
+            Check(chat.Turns.Count == 1 && PanelState.Text(chat.Turns[0], "text") == "Recent history", "native chat loads canonical history");
+            click("earlier messages"); Until(() => !chat.Loading);
+            Check(chat.Turns.Count == 2 && PanelState.Text(chat.Turns[0], "text") == "Earlier history", "native history prepends the exact earlier page");
+            compose.Text = "draft +/=& \u03bb\nsecond line"; var draft = compose.Text;
+            host.Toggle("papercup"); host.Toggle("papercup"); Until(() => chat.Ready);
+            Check(host.Panel("papercup") == panel && new WindowInteropHelper(panel).Handle == hwnd && compose.Text == draft,
+                "native Papercup retains its HWND and exact multiline draft across dismissal");
+            mark("deny"); click("send"); Until(() => chat.Error != null);
+            Check(compose.Text == draft && !button("send").IsEnabled && status.Text.StartsWith("Unavailable") && !System.IO.File.Exists(path + ".writes"),
+                "denied native send retains draft without success or a duplicate send route");
+            clear("deny"); reload(); Until(() => chat.Ready); click("send");
+            Until(() => chat.Reply != null && chat.Reply.DisplayText == "Partial" && !chat.Reply.Complete);
+            Check(compose.Text == "" && chat.Reply.SavedUser != null, "only canonical user acknowledgement clears the native draft");
+            Check(Find<System.Windows.Controls.TextBox>(panel, "Papercup message text") != null && !chat.Reply.DisplayText.Contains("internal"),
+                "native incremental display excludes private text");
+            Until(() => chat.Reply == null && chat.Ready);
+            Check(chat.Turns.Any(t => PanelState.Text(t, "role") == "assistant" && PanelState.Text(t, "text") == "Partial reply"),
+                "completed native stream reloads the saved canonical assistant turn");
+            mark("disconnect"); compose.Text = "reconnect me"; click("send"); Until(() => chat.Error != null && chat.Reply != null && chat.Reply.TurnId != "");
+            var writes = System.IO.File.ReadAllLines(path + ".writes").Length;
+            Check(button("reconnect").IsEnabled && !button("send").IsEnabled, "disconnected native reply exposes reconciliation without resending");
+            clear("disconnect"); click("reconnect"); Until(() => chat.Reply == null && chat.Ready);
+            Check(System.IO.File.ReadAllLines(path + ".writes").Length == writes && System.IO.File.ReadAllText(path + ".controls").Contains("reconnect:1"),
+                "native reconnect resumes the saved turn cursor without a second send");
+            mark("hold"); compose.Text = "cancel me"; click("send"); Until(() => chat.Reply != null && chat.Reply.Sequence == 1);
+            click("cancel reply"); Until(() => chat.Reply != null && chat.Reply.Complete);
+            Check(chat.Reply.Phase == "cancelled" && status.Text.Contains("cancelled") && System.IO.File.ReadAllText(path + ".controls").Contains("cancel"),
+                "native cancel waits for a canonical cancelled acknowledgement");
+            clear("hold"); reload(); Until(() => chat.Ready);
+            mark("hold"); compose.Text = "conversation A only"; click("send"); Until(() => chat.Reply != null && chat.Reply.Sequence == 1);
+            var a = chat.ConversationId; mark("other"); host.Toggle("papercup"); host.Toggle("papercup"); Until(() => chat.Ready && chat.ConversationId != a);
+            compose.Text = "conversation B draft"; Pump();
+            Check(chat.Reply == null && chat.Turns.All(t => !PanelState.Text(t, "text").Contains("conversation A only")) && compose.Text == "conversation B draft",
+                "late A stream cannot enter conversation B or clear its native draft");
+            clear("other"); clear("hold"); reload(); Until(() => chat.Ready && chat.ConversationId == a);
+            Check(chat.Turns.Any(t => PanelState.Text(t, "text") == "conversation A only"), "returning to A reads its independently saved user event");
+            mark("other"); reload(); Until(() => chat.Ready && chat.ConversationId != a);
+            Check(compose.Text == "conversation B draft", "native draft keys include the canonical conversation identity");
+            clear("other"); reload(); Until(() => chat.Ready && chat.ConversationId == a);
+            mark("foreign"); compose.Text = "foreign frame"; click("send"); Until(() => chat.Error != null);
+            Check(chat.Reply.DisplayText == "" && status.Text.Contains("Unavailable") && compose.Text == "foreign frame",
+                "foreign environment frame cannot alter native reply or acknowledge its draft");
+            clear("foreign");
+            Check(System.IO.File.ReadAllLines(path + ".writes").All(line => line == a), "every native send is bound to conversation A in the helper receipt");
+        }
+    }
     private static void InboxNative()
     {
         var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
@@ -976,6 +1043,7 @@ public static class WorkbenchNativeHostFixture
         if (phase == "goals") { GoalsNative(); }
         if (phase == "inbox") { InboxModel(); InboxNative(); }
         if (phase == "organizer") { OrganizerModel(); OrganizerNative(); }
+        if (phase == "chat") { ChatNative(); }
         if (phase == "operator") { OperatorNative(); }
         if (phase == "operator-inbox") { OperatorInboxNative(); }
         if (phase == "all" || phase == "hotkeys" || phase == "windows")
@@ -1005,7 +1073,7 @@ public static class WorkbenchArgvFixture {
 }
 '@
     $env:WORKBENCH_ARGV_FIXTURE = $argvFixture
-    if ($Phase -in @('accounts', 'goals', 'inbox', 'organizer')) {
+    if ($Phase -in @('accounts', 'goals', 'inbox', 'organizer', 'chat')) {
         $env:WORKBENCH_ACCOUNT_FIXTURE = $accountFixture; $env:WORKBENCH_ACCOUNT_STATE = $accountState
         $env:WORKBENCH_CONTROL_PHASE = $Phase
         Add-Type -OutputAssembly $accountFixture -OutputType ConsoleApplication -ReferencedAssemblies System.Web.Extensions, System.Core -TypeDefinition @'
@@ -1017,6 +1085,62 @@ using System.Linq;
 using System.Text;
 using System.Web.Script.Serialization;
 public static class NativeAccountsFixture {
+    private const string ChatA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ChatB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", ChatTurn = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    private static void Frame(JavaScriptSerializer json, object environment, string kind, object data) {
+        var bytes = new UTF8Encoding(false).GetBytes(json.Serialize(new { environment = environment, @event = kind, data = data }) + "\n");
+        Console.OpenStandardOutput().Write(bytes, 0, bytes.Length); Console.Out.Flush();
+    }
+    private static int Chat(string[] args, Dictionary<string, object> request, JavaScriptSerializer json, string path, object environment) {
+        var id = File.Exists(path + ".other") ? ChatB : ChatA;
+        var saved = File.Exists(path) ? json.Deserialize<Dictionary<string, object>>(File.ReadAllText(path)) : null;
+        var user = saved == null ? null : new { id = (string)saved["userTurnId"], conversationId = ChatA, role = "user", seq = 11, text = (string)saved["text"] };
+        if (args.Length != 1) return 60;
+        if (args[0] == "native-read") {
+            var name = (string)request["name"]; object row;
+            if (name == "operator.identity") row = environment;
+            else {
+                if (json.Serialize(request["environment"]) != json.Serialize(environment)) return 61;
+                var query = (Dictionary<string, object>)request["args"];
+                if (name == "operatorConversations.current") row = new { id = id, workspaceId = "isolated", subjectKind = "global", status = "active" };
+                else if (name == "operatorTurns.page" && Object.Equals(query["conversationId"], id)) {
+                    var earlier = query.ContainsKey("beforeSeq"); var turns = new List<object>();
+                    if (earlier && Convert.ToInt32(query["beforeSeq"]) != 10) return 62;
+                    turns.Add(new { id = earlier ? "earlier" : "recent", conversationId = id, role = "system", seq = earlier ? 1 : 10, text = earlier ? "Earlier history" : "Recent history" });
+                    if (!earlier && id == ChatA && user != null) {
+                        turns.Add(user); if (File.Exists(path + ".complete")) turns.Add(new { id = "assistant", conversationId = id, role = "assistant", seq = 12, text = "Partial reply" });
+                    }
+                    row = new { turns = turns, hasMoreEarlier = !earlier };
+                } else return 63;
+            }
+            Console.Write(json.Serialize(new { rows = new[] { row }, environment = environment })); return 0;
+        }
+        if (args[0] != "native-chat" || !Object.Equals(request["conversationId"], ChatA) || json.Serialize(request["environment"]) != json.Serialize(environment)) return 64;
+        if (File.Exists(path + ".deny")) { Console.Error.Write("isolated send denied"); return 7; }
+        var operation = (string)request["operation"];
+        if (operation == "send") {
+            File.WriteAllText(path, json.Serialize(request)); File.Delete(path + ".complete");
+            File.AppendAllText(path + ".writes", ChatA + "\n");
+            var actualEnvironment = File.Exists(path + ".foreign") ? json.DeserializeObject("{\"endpoint\":\"http://foreign.invalid\",\"workspaceId\":\"foreign\",\"store\":{\"id\":\"foreign\"},\"agentChat\":{\"scope\":\"foreign\"}}") : environment;
+            Frame(json, actualEnvironment, "user-saved", new { conversationId = ChatA, turn = new { id = request["userTurnId"], conversationId = ChatA, role = "user", seq = 11, text = request["text"] } });
+        } else {
+            if (!Object.Equals(request["turnId"], ChatTurn)) return 65;
+            File.AppendAllText(path + ".controls", operation + (operation == "reconnect" ? ":" + request["afterSequence"] : "") + "\n");
+        }
+        if (operation == "cancel") {
+            Frame(json, environment, "cancelled", new { ok = true, state = new { schemaVersion = 1, conversationId = ChatA, turnId = ChatTurn,
+                phase = "cancelled", revision = 2, lastSequence = 1, capabilities = new { connectionReplay = true, persistedHistory = true,
+                    persistedInteractionDecisions = true, completedToolCheckpoints = true, interruptedTurnRecovery = true } } }); return 0;
+        }
+        Frame(json, environment, "turn-meta", new { schemaVersion = 1, conversationId = ChatA, turnId = ChatTurn });
+        if (operation == "send") {
+            Frame(json, environment, "chat-event", new { schemaVersion = 1, conversationId = ChatA, turnId = ChatTurn, sequence = 1, eventId = "delta1", @event = new { type = "delta", text = "internal<say>Partial" } });
+            System.Threading.Thread.Sleep(File.Exists(path + ".hold") ? 4000 : 700);
+            if (File.Exists(path + ".disconnect")) { Console.Error.Write("isolated stream disconnected"); return 7; }
+        }
+        Frame(json, environment, "chat-event", new { schemaVersion = 1, conversationId = ChatA, turnId = ChatTurn, sequence = 2, eventId = "delta2", @event = new { type = "delta", text = " reply</say>" } });
+        File.WriteAllText(path + ".complete", "complete");
+        Frame(json, environment, "done", new { phase = "completed", persistedTurn = new { conversationId = ChatA, turnId = ChatTurn, seq = 12 } }); return 0;
+    }
     private static int Inbox(string[] args, Dictionary<string, object> request, JavaScriptSerializer json, UTF8Encoding utf8, string path, object environment) {
         const string question = "{\"id\":\"question +/=& \\u03bb\",\"kind\":\"question\",\"title\":\"Alpha literal question\",\"body\":\"Question body\",\"contextMarkdown\":\"Exact context\",\"ref\":{\"kind\":\"coord-escalation\",\"conversationId\":\"thread-a\",\"options\":[{\"id\":\"yes\",\"label\":\"Yes\"}]},\"actions\":[{\"id\":\"resolve\"}]}";
         const string review = "{\"runId\":\"run-1\",\"itemId\":\"question +/=& \\u03bb\",\"kind\":\"question\",\"title\":\"Review Alpha\",\"ref\":{\"kind\":\"coord-escalation\",\"conversationId\":\"thread-a\"},\"outcome\":\"recommended\",\"actionId\":\"answer\",\"draftAnswer\":\"draft\",\"recommendation\":{\"kind\":\"recommended\"}}";
@@ -1103,6 +1227,7 @@ public static class NativeAccountsFixture {
         var request = json.Deserialize<Dictionary<string, object>>(new StreamReader(Console.OpenStandardInput(), utf8).ReadToEnd());
         var path = Environment.GetEnvironmentVariable("WORKBENCH_ACCOUNT_STATE");
         var environment = json.DeserializeObject("{\"endpoint\":\"http://fixture.invalid:3170\",\"workspaceId\":\"isolated\",\"store\":{\"id\":\"fixture\"},\"agentChat\":{\"scope\":\"workspace:isolated\"}}");
+        if (Environment.GetEnvironmentVariable("WORKBENCH_CONTROL_PHASE") == "chat") return Chat(args, request, json, path, environment);
         if (Environment.GetEnvironmentVariable("WORKBENCH_CONTROL_PHASE") == "organizer") {
             if (args.Length != 1 || args[0] != "native-read") return 50;
             var name = (string)request["name"]; object organizerRows;
@@ -1155,6 +1280,10 @@ finally {
     Remove-Item Env:WORKBENCH_ARGV_FIXTURE -ErrorAction SilentlyContinue
     foreach ($path in @($accountFixture, $accountState, ($accountState + '.deny'), ($accountState + '.writes'), ($accountState + '.unknown'), ($accountState + '.dormant'))) {
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+    }
+    foreach ($suffix in @('complete', 'controls', 'hold', 'other', 'disconnect', 'foreign')) {
+        $chatPath = $accountState + '.' + $suffix
+        if (Test-Path -LiteralPath $chatPath) { Remove-Item -LiteralPath $chatPath -Force }
     }
     Remove-Item Env:WORKBENCH_ACCOUNT_FIXTURE, Env:WORKBENCH_ACCOUNT_STATE, Env:WORKBENCH_CONTROL_PHASE -ErrorAction SilentlyContinue
 }

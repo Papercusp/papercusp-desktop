@@ -94,6 +94,20 @@ try {
     Check ((Read-WorkbenchSettings $context $pui).bindings.'quick-access'.key -eq 79) 'Organizer upgrade retains the prior Quick Access shortcut'
     [void](Save-WorkbenchSettings $context $settings $script)
     $legacy.bindings.PSObject.Properties.Remove('accounts')
+    Check ($settings.bindings.papercup.enabled -and $settings.bindings.papercup.modifiers -eq 3 -and $settings.bindings.papercup.key -eq 80) 'first install enables Papercup on Ctrl Alt P'
+    $oldChat = $settings | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $oldChat.bindings.PSObject.Properties.Remove('papercup'); $oldChat.bindings.'quick-access'.key = 80
+    [IO.File]::WriteAllText($context.File, ($oldChat | ConvertTo-Json -Depth 8))
+    $newChat = Read-WorkbenchSettings $context $pui
+    Check ($newChat.bindings.papercup.key -eq 67 -and $newChat.bindings.'quick-access'.key -eq 80) 'Papercup migration avoids existing shortcuts'
+    [void](Save-WorkbenchSettings $context $settings $script -PreserveExisting)
+    Check ((Read-WorkbenchSettings $context $pui).bindings.papercup.key -eq 67) 'installer persists migrated Papercup shortcut'
+    $newChat.bindings.papercup.enabled = $false
+    [void](Save-WorkbenchSettings $context $newChat $script)
+    [void](Save-WorkbenchSettings $context $settings $script -PreserveExisting)
+    Check (-not (Read-WorkbenchSettings $context $pui).bindings.papercup.enabled) 'upgrade preserves explicitly disabled Papercup'
+    Check ((Read-WorkbenchSettings $context $pui).bindings.'quick-access'.key -eq 80) 'Papercup upgrade retains existing surface preferences'
+    [void](Save-WorkbenchSettings $context $settings $script)
     $legacy.enabled = $false; $legacy.bindings.'quick-access'.key = 65; $legacy.bindings.goals.enabled = $false
     [IO.File]::WriteAllText($context.File, ($legacy | ConvertTo-Json -Depth 8))
     $migrated = Read-WorkbenchSettings $context $pui
@@ -203,6 +217,8 @@ try {
                 if ($null -eq $window) { Start-Sleep -Milliseconds 100 }
             }
             Check ($null -ne $window) 'settings command reaches the resident native WPF dialog through its account event'
+            Check ($null -ne $window.FindFirst([Windows.Automation.TreeScope]::Descendants,
+                [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, 'Papercup shortcut'))) 'resident settings exposes the configurable Papercup shortcut'
             $enabledControl = $window.FindFirst([Windows.Automation.TreeScope]::Descendants,
                 [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, 'Enable Workbench at login'))
             $toggle = $enabledControl.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)
