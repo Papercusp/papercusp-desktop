@@ -509,7 +509,8 @@ try {
 
 const installedSurfaces={reports:{title:'Reports',flag:'PAPERCUSP_NATIVE_INSTALLED_SHELL',assertions:10},
     inbox:{title:'Inbox',flag:'PAPERCUSP_NATIVE_INSTALLED_INBOX',assertions:17},
-    goals:{title:'Goals',flag:'PAPERCUSP_NATIVE_INSTALLED_GOALS',assertions:17}};
+    goals:{title:'Goals',flag:'PAPERCUSP_NATIVE_INSTALLED_GOALS',assertions:17},
+    accounts:{title:'Accounts',flag:'PAPERCUSP_NATIVE_INSTALLED_ACCOUNTS',assertions:20}};
 for (const [surface,acceptance] of Object.entries(installedSurfaces)) test('exact installed GNOME preview opens canonical ' +
     acceptance.title + ' through a private Shell shortcut',
     {skip:process.platform!=='linux'||process.env[acceptance.flag]!=='1',timeout:80000},
@@ -555,7 +556,7 @@ export default class Probe extends Extension {
  disable(){}
  finish(error){const target=Main.extensionManager.lookup('workbench@papercusp.ai')?.stateObj;
  GLib.file_set_contents(${JSON.stringify(resultFile)},JSON.stringify({ok:!error,error:error?String(error)+'; '+error.stack:null,
- phase,assertions,reportId:this.reportId,bodyChars:this.bodyChars,inboxItemId:this.inboxItemId,goalId:this.goalId,
+ phase,assertions,reportId:this.reportId,bodyChars:this.bodyChars,inboxItemId:this.inboxItemId,goalId:this.goalId,accountId:this.accountId,
  questions:target?._inbox.rows.length,savedRunId:target?._inbox.savedRunId,
  inboxState:target?{listReady:target._inbox.listReady,listError:target._inbox.listError,
  bulkReady:target._inbox.bulkReady,bulkError:target._inbox.bulkError,contextError:target._inbox.contextError}:null,
@@ -614,6 +615,58 @@ export default class Probe extends Extension {
  check(!inbox.context&&!inbox.selection&&state.visible,'first seat Escape dismisses only question context');
  await chord([Clutter.KEY_Escape]);
  check(!state.visible&&!target._views.has('inbox'),'second seat Escape dismisses the installed Inbox');
+ ` : surface === 'accounts' ? `phase='native Accounts shortcut';await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_a]);
+ const accounts=target._accounts;
+ await waitFor(()=>state.visible&&!accounts.busy);
+ const view=target._views.get('accounts');
+ const walk=actor=>[actor,...actor.get_children().flatMap(walk)];
+ const control=name=>walk(view.content).find(actor=>actor.accessible_name===name);
+ const ids=rows=>rows.map(row=>row.id).sort().join(',');
+ check(view.panel.get_parent()!==null,'seat shortcut opens the installed native Accounts actor');
+ check(accounts.ready&&!accounts.error&&accounts.accounts.length>0,'canonical account pool and steering are ready');
+ check(accounts.environment.endpoint.startsWith(${JSON.stringify(operator)})&&!!accounts.environment.workspaceId&&
+ !!accounts.environment.store.id&&!!accounts.environment.agentChat.scope,'native Accounts retains the selected canonical environment');
+ const pool=await target._bridge.read(${JSON.stringify(pui)},{name:'accounts.pool',environment:accounts.environment});
+ check(!pool.partial&&ids(pool.rows)===ids(accounts.accounts),'native Accounts preserves every exact canonical account identity');
+ const steering=await target._bridge.read(${JSON.stringify(pui)},{name:'accounts.sessionOverride',environment:accounts.environment});
+ const axes=value=>JSON.stringify({defaultAccountId:value.defaultAccountId??null,
+ forcedAccounts:[...value.forcedAccounts].sort(),excludeAccounts:[...value.excludeAccounts].sort()});
+ const before=axes(steering.rows[0]);
+ check(axes(accounts.override)===before,'native Accounts displays confirmed canonical steering on each independent axis');
+ check(view.status.text.includes(accounts.environment.endpoint)&&view.status.text.includes(accounts.environment.workspaceId)&&
+ view.status.text.includes(accounts.environment.store.id)&&view.status.text.includes(accounts.environment.agentChat.scope),
+ 'native Accounts displays endpoint workspace store and chat scope');
+ check(walk(view.content).filter(actor=>actor.accessible_name?.startsWith('Account: ')).length===pool.rows.length,
+ 'native Accounts renders the complete canonical pool');
+ check(['default','force','exclude','auto'].every(action=>Boolean(control('Account '+action))),
+ 'native Accounts exposes all four independent steering controls');
+ check(!control('Account default').reactive&&!control('Account force').reactive&&!control('Account exclude').reactive&&
+ control('Account auto').reactive,'account-specific controls require exact selection');
+ const account=accounts.accounts[0];this.accountId=account.id;
+ view.search.set_text(account.id);await tick();
+ check(Boolean(control('Account: '+account.id))&&accounts.accounts.length===pool.rows.length,
+ 'native Accounts local filtering retains canonical source and exact identity');
+ const pointer=seat.create_virtual_device(Clutter.InputDeviceType.POINTER_DEVICE);
+ const actor=control('Account: '+account.id),[x,y]=actor.get_transformed_position(),[width,height]=actor.get_transformed_size();
+ pointer.notify_absolute_motion(GLib.get_monotonic_time(),x+width/2,y+height/2);await tick();
+ pointer.notify_button(GLib.get_monotonic_time(),1,Clutter.ButtonState.PRESSED);await tick();
+ pointer.notify_button(GLib.get_monotonic_time(),1,Clutter.ButtonState.RELEASED);await tick();
+ check(accounts.selection===account.id&&control('Account: '+account.id).has_style_class_name('selected'),
+ 'real seat selection retains the exact canonical account ID');
+ check(['default','force','exclude'].every(action=>control('Account '+action).reactive),
+ 'exact selection enables each independent account control');
+ let refused=false;try{await target._bridge.read(${JSON.stringify(pui)},{name:'accounts.pool',
+ environment:{...accounts.environment,workspaceId:accounts.environment.workspaceId+'-foreign'}});}
+ catch(error){refused=/selected environment changed/.test(error.message);}
+ check(refused,'installed Accounts refuses a changed workspace before pool access');
+ const after=await target._bridge.read(${JSON.stringify(pui)},{name:'accounts.sessionOverride',environment:accounts.environment});
+ check(axes(after.rows[0])===before,'opening filtering and selecting Accounts leaves canonical steering unchanged');
+ check(global.get_window_actors().length===0,'installed Accounts creates no application window');
+ phase='nested Accounts Escape';await chord([Clutter.KEY_Escape]);
+ check(!accounts.selection&&state.visible,'first seat Escape dismisses only selected account');
+ await chord([Clutter.KEY_Escape]);
+ check(!state.visible&&!target._views.has('accounts')&&accounts.override===null,
+ 'second seat Escape dismisses the installed Accounts panel and retires its scope');
  ` : surface === 'goals' ? `phase='native Goals shortcut';await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_g]);
  await waitFor(()=>state.visible&&['ready','unavailable'].includes(state.sources.goals?.status));
  const view=target._views.get('goals'),source=state.sources.goals;
