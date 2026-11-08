@@ -1153,7 +1153,8 @@ export default class Probe extends Workbench {
   check(this._views.get('inbox').bulkStatus.text.includes('1/8 decided'),'Inbox persisted denominator reaches native status');
   await this._loadInboxContext('question+/=&');
   check(this._inbox.context.body==='Exact context','Inbox selected context preserves exact identity');
-  check(JSON.stringify(read('inbox-context-read.json').args)===JSON.stringify({id:'question+/=&'}),
+  const contextRead=JSON.parse(new TextDecoder().decode(GLib.file_get_contents(${JSON.stringify(join(temp,'inbox-context-read.json'))})[1]));
+  check(JSON.stringify(contextRead.args)===JSON.stringify({id:'question+/=&'}),
    'Inbox context read uses canonical id without action itemId');
   this._inbox.answer=' Native answer ';this._prepareInbox('resolve',{actionId:'answer'});
   check(this._views.get('inbox').confirmRequests[0].answer==='Native answer','Inbox confirmation freezes edited answer');
