@@ -234,6 +234,36 @@ final class WorkbenchChatTests: XCTestCase {
         speech["audioBase64"] = .string("invalid")
         XCTAssertThrowsError(try NativeVoice.receipt(.object(["environment": environment(), "rows": .array([.object(speech)])]), request: speak))
     }
+    func testIndexedReadingPreservesTheFullSourceAndRejectsDriftBeforeAdvancing() throws {
+        let id = "c88bf103-8399-42ee-93ae-19e73114e3fd", text = String(repeating: "λ🙂 literal $() ", count: 500)
+        var reading = try NativeVoice.Reading(environment: environment(), conversationID: id, text: text)
+        let original = reading.request
+        XCTAssertFalse(reading.advance())
+        func row(_ request: JSONValue, total: JSONValue = .number(3)) -> JSONValue {
+            .object(["conversationId": request["conversationId"], "requestId": request["requestId"], "operation": .string("speak"),
+                "chunkIndex": request["chunkIndex"], "totalChunks": total, "audioBase64": .string("AAEC")])
+        }
+        for index in 0..<3 {
+            XCTAssertEqual(reading.request["chunkIndex"], .number(Double(index)))
+            XCTAssertEqual(reading.request["text"], .string(text)); XCTAssertEqual(reading.request["requestId"], original["requestId"])
+            for total in [JSONValue.null, .string("3"), .number(0), .number(32769), .number(2.5)] {
+                XCTAssertThrowsError(try reading.accept(row(reading.request, total: total)))
+            }
+            if index > 0 { XCTAssertThrowsError(try reading.accept(row(reading.request, total: .number(4)))) }
+            guard case .object(var foreign) = row(reading.request) else { return XCTFail("expected a chunk receipt") }
+            foreign["chunkIndex"] = .number(Double(index + 1))
+            XCTAssertThrowsError(try reading.accept(.object(foreign)))
+            try reading.accept(row(reading.request))
+            XCTAssertEqual(reading.advance(), index < 2)
+        }
+        for index in [-1, 32768] { XCTAssertThrowsError(try NativeVoice.request(environment: environment(), conversationID: id, text: text, chunkIndex: index)) }
+        XCTAssertThrowsError(try NativeVoice.request(environment: environment(), conversationID: id, audio: Data([1]), chunkIndex: 0))
+        var state = ChatState(); let token = try bound(&state)
+        _ = try state.settle(token, environment: environment(), conversationID: "conv", payload: page([]))
+        let operation = try state.beginVoice(.synthesizing)
+        XCTAssertTrue(state.advanceVoice(operation, to: .playing)); XCTAssertTrue(state.advanceVoice(operation, to: .synthesizing))
+        state.cancelVoice(); XCTAssertFalse(state.advanceVoice(operation, to: .playing))
+    }
     private func question(_ id: String = "card", conversation: String = "conv", kind: String = "radio") -> JSONValue {
         .object(["correlationId": .string(id), "conversationId": .string(conversation), "prompt": .string("Choose a route"),
             "createdAt": .number(5), "presentation": .object(["kind": .string(kind), "options": .array([
