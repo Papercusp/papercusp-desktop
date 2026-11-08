@@ -586,10 +586,11 @@ const installedSurfaces={reports:{title:'Reports',flag:'PAPERCUSP_NATIVE_INSTALL
     papercup:{title:'Papercup',flag:'PAPERCUSP_NATIVE_INSTALLED_CHAT',assertions:24},
     voice:{title:'Papercup voice',flag:'PAPERCUSP_NATIVE_INSTALLED_VOICE',assertions:39}};
 for (const [surface,acceptance] of Object.entries(installedSurfaces))
-for (const [isolatedAudio,speechPreflight] of surface==='papercup'?
-    [[false,false],[true,false],[true,true]]:[[surface==='voice',surface==='voice']])
+for (const [isolatedAudio,speechPreflight,forcedCollection=false] of surface==='papercup'?
+    [[false,false],[true,false],[true,true],[true,true,true]]:[[surface==='voice',surface==='voice']])
 test('exact installed GNOME preview opens canonical ' + acceptance.title + ' through a private Shell shortcut' +
-    (surface==='papercup'?(speechPreflight?' with canonical speech preflight':
+    (surface==='papercup'?(forcedCollection?' with forced collection after canonical speech preflight':
+        speechPreflight?' with canonical speech preflight':
         isolatedAudio?' with an isolated audio context':''):''),
     {skip:process.platform!=='linux'||process.env[acceptance.flag]!=='1',timeout:speechPreflight?240000:80000},
     () => withNativeFixture('workbench-installed-shell-',async temp=>{
@@ -626,6 +627,7 @@ test('exact installed GNOME preview opens canonical ' + acceptance.title + ' thr
 import Gio from 'gi://Gio';
 import Clutter from 'gi://Clutter';
 import Shell from 'gi://Shell';
+import System from 'system';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 const assertions=[];let phase='login',heartbeat=0,inputEvent=null;
@@ -641,6 +643,8 @@ function waitFor(predicate,limit=300){progress();return new Promise((resolve,rej
  try{progress();if(predicate()){resolve();return GLib.SOURCE_REMOVE;}if(++count>limit)throw Error('Installed Shell deadline: '+phase);
  return GLib.SOURCE_CONTINUE;}catch(error){reject(error);return GLib.SOURCE_REMOVE;}});});}
 function tick(){progress();return new Promise(resolve=>GLib.timeout_add(GLib.PRIORITY_DEFAULT,60,()=>{resolve();return GLib.SOURCE_REMOVE;}));}
+async function collectAt(name){const before=heartbeat;phase=name;progress();System.gc();
+ await waitFor(()=>heartbeat>before,100);check(heartbeat>before,'independent heartbeat resumes after '+name);}
 export default class Probe extends Extension {
  enable(){this._heartbeat=GLib.timeout_add(GLib.PRIORITY_DEFAULT,1000,()=>{
  ++heartbeat;progress();return GLib.SOURCE_CONTINUE;});this.run().catch(error=>this.finish(error));}
@@ -675,6 +679,7 @@ export default class Probe extends Extension {
  phase='desktop ready';await waitFor(()=>Main.actionMode!==Shell.ActionMode.NONE);
  if(Main.overview.visible)await chord([Clutter.KEY_Escape]);
  await waitFor(()=>Main.actionMode===Shell.ActionMode.NORMAL&&!Main.overview.visible);
+ ${forcedCollection?"await collectAt('startup collection');":''}
  ${surface === 'papercup'||surface === 'voice' ? `phase='native Papercup shortcut';await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_p]);
  const chat=target._chat;
  await waitFor(()=>state.visible&&!chat.loading);
@@ -705,6 +710,7 @@ export default class Probe extends Extension {
  'installed voice controls expose recording only in its idle state');
  check(view.readReply.reactive===Boolean(chat.spokenReply),'read reply availability follows the canonical assistant history');
  check(view.earlier.reactive===Boolean(chat.hasMoreEarlier),'earlier messages availability follows canonical paging');
+ ${forcedCollection?"await collectAt('rendered chat collection');":''}
  phase='canonical question subscription';await waitFor(()=>target._cards.connected||target._cards.error);
  check(target._cards.connected&&!target._cards.error,'installed Papercup connects its canonical question subscription');
  let refused=false;try{await target._bridge.read(${JSON.stringify(pui)},{name:'operatorTurns.page',
@@ -718,6 +724,7 @@ export default class Probe extends Extension {
  phase='Papercup Escape';await chord([Clutter.KEY_Escape]);
  check(!state.visible&&!target._views.has('papercup')&&!target._cardStream&&!target._voiceOperation,
  'seat Escape dismisses Papercup and cancels its owned subscriptions and audio');
+ ${forcedCollection?"await collectAt('dismissed chat collection');":''}
  await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_p]);
  await waitFor(()=>state.visible&&!chat.loading);view=target._views.get('papercup');
  check(chat.ready&&chat.conversationId===conversationId&&chat.draft==='w'&&view.compose.get_text()==='w',
@@ -965,7 +972,7 @@ new Gio.Settings({schema_id:'org.gnome.shell'}).set_strv('enabled-extensions',
         if(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR){
             mkdirSync(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,{recursive:true});
             writeFileSync(join(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,'installed-shell-'+surface+
-                (surface==='papercup'?(speechPreflight?'-speech-preflight':
+                (surface==='papercup'?(forcedCollection?'-forced-gc':speechPreflight?'-speech-preflight':
                     isolatedAudio?'-isolated-audio':''):'')+'.json'),JSON.stringify(proof,null,2)+'\n');
         }
         assert.equal(evidence?.ok,true,JSON.stringify(proof));
@@ -977,7 +984,7 @@ new Gio.Settings({schema_id:'org.gnome.shell'}).set_strv('enabled-extensions',
         }
         for(const file of files)assert.deepEqual(readFileSync(join(extension,file)),readFileSync(join(installed,file)),
             'Probe must leave exact installed '+file+' unchanged');
-        assert.equal(evidence.assertions.length,acceptance.assertions);
+        assert.equal(evidence.assertions.length,acceptance.assertions+(forcedCollection?3:0));
         console.log('INSTALLED_SHELL_'+surface.toUpperCase()+'_PASS '+JSON.stringify(evidence));
         }finally{await audio?.close();}
     }));
