@@ -476,10 +476,12 @@ try {
         console.log('INSTALLED_CANONICAL_REPORTS_PASS ' + JSON.stringify(proof));
     }));
 
-for (const surface of ['reports', 'inbox']) test('exact installed GNOME preview opens canonical ' +
-    (surface === 'reports' ? 'Reports' : 'Inbox') + ' through a private Shell shortcut',
-    {skip:process.platform!=='linux'||process.env[surface === 'reports'
-        ? 'PAPERCUSP_NATIVE_INSTALLED_SHELL' : 'PAPERCUSP_NATIVE_INSTALLED_INBOX']!=='1',timeout:80000},
+const installedSurfaces={reports:{title:'Reports',flag:'PAPERCUSP_NATIVE_INSTALLED_SHELL',assertions:10},
+    inbox:{title:'Inbox',flag:'PAPERCUSP_NATIVE_INSTALLED_INBOX',assertions:17},
+    goals:{title:'Goals',flag:'PAPERCUSP_NATIVE_INSTALLED_GOALS',assertions:17}};
+for (const [surface,acceptance] of Object.entries(installedSurfaces)) test('exact installed GNOME preview opens canonical ' +
+    acceptance.title + ' through a private Shell shortcut',
+    {skip:process.platform!=='linux'||process.env[acceptance.flag]!=='1',timeout:80000},
     () => withNativeFixture('workbench-installed-shell-',async temp=>{
         const installed=process.env.PAPERCUSP_NATIVE_EXTENSION,operator=process.env.PAPERCUSP_NATIVE_OPERATOR;
         const pui=process.env.PAPERCUSP_NATIVE_PUI;
@@ -522,19 +524,20 @@ export default class Probe extends Extension {
  disable(){}
  finish(error){const target=Main.extensionManager.lookup('workbench@papercusp.ai')?.stateObj;
  GLib.file_set_contents(${JSON.stringify(resultFile)},JSON.stringify({ok:!error,error:error?String(error)+'; '+error.stack:null,
- phase,assertions,reportId:this.reportId,bodyChars:this.bodyChars,inboxItemId:this.inboxItemId,
+ phase,assertions,reportId:this.reportId,bodyChars:this.bodyChars,inboxItemId:this.inboxItemId,goalId:this.goalId,
  questions:target?._inbox.rows.length,savedRunId:target?._inbox.savedRunId,
  inboxState:target?{listReady:target._inbox.listReady,listError:target._inbox.listError,
  bulkReady:target._inbox.bulkReady,bulkError:target._inbox.bulkError,contextError:target._inbox.contextError}:null,
- sources:target?Object.entries(target._states.get('quick-access').sources)
- .map(([kind,value])=>({kind,status:value.status,error:value.error})):[]}));global.context.terminate();}
+ sources:target?Object.entries(target._states.get(${JSON.stringify(surface === 'reports' ? 'quick-access' : surface)}).sources)
+ .map(([kind,value])=>({kind,status:value.status,error:value.error,total:value.total,rows:value.rows?.length,
+ partial:value.partial})):[]}));global.context.terminate();}
  async run(){
  await waitFor(()=>Main.extensionManager.lookup('workbench@papercusp.ai')?.stateObj?._states);
  const target=Main.extensionManager.lookup('workbench@papercusp.ai').stateObj;
  check(target._settings.get_string('pui-path')===${JSON.stringify(pui)},'login loads the exact installed PUI selection');
  check(target._settings.get_string('operator')===${JSON.stringify(operator)},'login retains the selected canonical operator');
  check(target._bindings.size===5,'unmodified installed extension acquires native shortcuts');
- const state=target._states.get(${JSON.stringify(surface === 'reports' ? 'quick-access' : 'inbox')});
+ const state=target._states.get(${JSON.stringify(surface === 'reports' ? 'quick-access' : surface)});
  ${surface === 'reports' ? "state.scope='reports';" : ''}
  const seat=Clutter.get_default_backend().get_default_seat();
  const keyboard=seat.create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
@@ -580,6 +583,46 @@ export default class Probe extends Extension {
  check(!inbox.context&&!inbox.selection&&state.visible,'first seat Escape dismisses only question context');
  await chord([Clutter.KEY_Escape]);
  check(!state.visible&&!target._views.has('inbox'),'second seat Escape dismisses the installed Inbox');
+ ` : surface === 'goals' ? `phase='native Goals shortcut';await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_g]);
+ await waitFor(()=>state.visible&&['ready','unavailable'].includes(state.sources.goals?.status));
+ const view=target._views.get('goals'),source=state.sources.goals;
+ check(view.panel.get_parent()!==null,'seat shortcut opens the installed native Goals actor');
+ check(Object.keys(state.sources).join(',')==='goals','native Goals requests only its canonical source');
+ check(source.status==='ready'&&source.rows.length>0,'canonical Goals are ready without a resolver error');
+ const canonicalList=await target._bridge.read(${JSON.stringify(pui)},{name:'goals.list',args:{query:'',limit:500}});
+ const portfolio=canonicalList.rows[0];
+ check(portfolio.goals.length===source.rows.length&&portfolio.totalGoals===source.total&&
+ Boolean(portfolio.truncatedByLimit||portfolio.partial)===source.partial,
+ 'native Goals preserves canonical returned count, total and partial state');
+ check(view.status.text.includes(source.rows.length+' of '+portfolio.totalGoals),
+ 'native Goals renders the canonical returned and total counts');
+ const goal=state.results()[0];this.goalId=goal.row.id;
+ check(view.content.get_children().some(actor=>actor.accessible_name==='goals: '+goal.title),
+ 'native Goals renders its selected canonical goal title');
+ const canonical=await target._bridge.read(${JSON.stringify(pui)},{name:'goals.detail',args:{goalId:this.goalId}});
+ const detail=canonical.rows[0];
+ check(detail.goal?.id===this.goalId&&Array.isArray(detail.agents)&&Array.isArray(detail.plans),
+ 'exact canonical goal control retains goal, agent and plan identities');
+ phase='seat Goals Enter';await chord([Clutter.KEY_Return]);
+ await waitFor(()=>state.detail&&state.detail.text!=='Loading…');
+ const selected=JSON.parse(state.detail.text);
+ check(selected.goal?.id===this.goalId&&state.detail.title===goal.title,
+ 'seat Enter opens the exact selected canonical goal');
+ check(JSON.stringify(selected.plans)===JSON.stringify(detail.plans)&&
+ JSON.stringify(selected.agents)===JSON.stringify(detail.agents),
+ 'native goal detail retains canonical linked plans and agents');
+ check(view.content.get_children().some(actor=>actor.text===state.detail.text),
+ 'native Goals renders the canonical detail in its actor tree');
+ const identity=await target._bridge.read(${JSON.stringify(pui)},{name:'operator.identity'});
+ let refused=false;try{await target._bridge.read(${JSON.stringify(pui)},{name:'goals.detail',args:{goalId:this.goalId},
+ environment:{...identity.rows[0],workspaceId:identity.rows[0].workspaceId+'-foreign'}});}
+ catch(error){refused=/selected environment changed/.test(error.message);}
+ check(refused,'installed Goals refuses a changed workspace before goal access');
+ check(global.get_window_actors().length===0,'installed Goals creates no application window');
+ phase='nested Goals Escape';await chord([Clutter.KEY_Escape]);
+ check(!state.detail&&state.visible,'first seat Escape dismisses only canonical goal detail');
+ await chord([Clutter.KEY_Escape]);
+ check(!state.visible&&!target._views.has('goals'),'second seat Escape dismisses the installed Goals panel');
  ` : `phase='native shortcut';await chord([Clutter.KEY_Super_L,Clutter.KEY_Alt_L,Clutter.KEY_space]);
  await waitFor(()=>state.visible&&state.sources.reports?.status==='ready');
  check(target._views.get('quick-access').panel.get_parent()!==null,'seat shortcut opens the installed native actor');
@@ -632,7 +675,7 @@ new Gio.Settings({schema_id:'org.gnome.shell'}).set_strv('enabled-extensions',
         assert.equal(result.error,null,JSON.stringify(proof));
         for(const file of files)assert.deepEqual(readFileSync(join(extension,file)),readFileSync(join(installed,file)),
             'Probe must leave exact installed '+file+' unchanged');
-        assert.equal(evidence.assertions.length,surface === 'reports' ? 10 : 17);
+        assert.equal(evidence.assertions.length,acceptance.assertions);
         console.log('INSTALLED_SHELL_'+surface.toUpperCase()+'_PASS '+JSON.stringify(evidence));
     }));
 
