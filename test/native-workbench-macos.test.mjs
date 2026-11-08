@@ -7,6 +7,7 @@ import {tmpdir} from 'node:os';
 import {createHash} from 'node:crypto';
 import {stageNativeWorkbench} from '../bin/package-native-workbench.mjs';
 import {processGroupLifetime} from '@papercusp/operator-core/lib/fleet/process-group-lifetime';
+import {linuxProcStateFromStat} from '@papercusp/operator-core/lib/process-identity';
 
 const root = resolve(import.meta.dirname, '..');
 const packagePath = join(root, 'src-tauri/macos-term-shim');
@@ -29,7 +30,10 @@ async function withSwiftFixture(prefix, action) {
 // Reuse the shared process-group exit fence: a closed Swift driver alone does
 // not prove its compiler helpers stopped. Keep the deadline until that fence.
 async function runSwift(command, args, scratch, timeoutMs) {
+    const startedAt = Date.now(), timings = {};
     const child = spawn(command, args, {detached:process.platform !== 'win32', stdio:['ignore', 'pipe', 'pipe']});
+    child.once('spawn', () => { timings.spawnMs = Date.now() - startedAt; });
+    child.once('exit', () => { timings.exitMs = Date.now() - startedAt; });
     let stdout = '', stderr = '', error = null, groupExited = false;
     const lifetime = processGroupLifetime(child, message => appendFileSync(join(scratch, 'cleanup.log'), message + '\n'));
     for (const [stream, file, capture] of [
@@ -41,11 +45,12 @@ async function runSwift(command, args, scratch, timeoutMs) {
     }
     const closed = new Promise(resolveResult => {
         child.once('error', cause => { error = cause; });
-        child.once('close', (status, signal) => resolveResult({status, signal}));
+        child.once('close', (status, signal) => { timings.closeMs = Date.now() - startedAt; resolveResult({status, signal}); });
     });
     let drain;
     const deadline = Date.now() + timeoutMs;
     const timer = setTimeout(() => {
+        timings.deadlineMs = Date.now() - startedAt;
         error ||= new Error('Swift process-group deadline exceeded');
         lifetime.signal('SIGKILL');
         drain = setTimeout(() => { child.stdout.destroy(); child.stderr.destroy(); }, 3000);
@@ -56,6 +61,7 @@ async function runSwift(command, args, scratch, timeoutMs) {
         if (child.pid !== undefined) {
             await lifetime.waitForExit({timeoutMs:Math.max(1, deadline - Date.now() + 3500)});
             groupExited = true;
+            timings.groupExitMs = Date.now() - startedAt;
         }
     } catch (cause) {
         error ||= cause;
@@ -63,7 +69,7 @@ async function runSwift(command, args, scratch, timeoutMs) {
     } finally {
         clearTimeout(timer); clearTimeout(drain);
     }
-    const receipt = {...result, command, args, pid:child.pid, groupExited,
+    const receipt = {...result, command, args, pid:child.pid, groupExited, timeoutMs, timings,
         error:error ? {message:error.message, code:error.code, stack:error.stack} : null, stdout, stderr};
     writeFileSync(join(scratch, 'process.json'), JSON.stringify(receipt, null, 2) + '\n');
     return receipt;
@@ -85,9 +91,15 @@ ${leader === 'exited' ? 'process.exit(0);' : 'setInterval(()=>{},100);'}});`;
                 assert.equal(result.groupExited, true, JSON.stringify(result));
                 assert.match(result.error?.message ?? '', /deadline exceeded/);
                 const pid = Number(readFileSync(join(scratch, 'compiler.pid'), 'utf8'));
-                const state = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], {encoding:'utf8', timeout:3000});
-                assert.ifError(state.error);
-                assert.ok(state.status === 1 || /^Z/.test(state.stdout.trim()), 'compiler descendant must be absent or dead: ' + state.stdout);
+                if (process.platform === 'linux') {
+                    let state;
+                    try { state = linuxProcStateFromStat(readFileSync('/proc/' + pid + '/stat', 'utf8')); }
+                    catch (error) { if (error.code !== 'ENOENT') throw error; }
+                    assert.ok(state === undefined || state === 'Z' || state === 'X',
+                        'compiler descendant must be absent or dead: ' + state);
+                } else {
+                    assert.throws(() => process.kill(pid, 0), {code:'ESRCH'});
+                }
                 throw new Error('fixture assertion after timeout');
             }), /fixture assertion after timeout/);
             assert.match(readFileSync(join(retained, 'stdout.log'), 'utf8'), /compiler started/);
@@ -111,10 +123,18 @@ test('Swift harness records spawn failure before assertion and cleans successful
         assert.equal(JSON.parse(readFileSync(join(failed, 'process.json'), 'utf8')).error.code, 'ENOENT');
         await withSwiftFixture('workbench-swift-success-', async scratch => {
             succeeded = scratch;
-            const result = await runSwift(process.execPath, ['-e', 'console.log("complete")'], scratch, 2000);
+            // A shell builtin exercises successful close/cleanup without starting
+            // another Node loader worker. Inherited verifier preloads belong to
+            // the test runtime and are not the compiler process being measured.
+            const command = process.platform === 'win32' ? process.env.ComSpec || 'cmd.exe' : '/bin/sh';
+            const args = process.platform === 'win32' ? ['/d', '/c', 'echo complete'] : ['-c', 'printf "complete\\n"'];
+            const result = await runSwift(command, args, scratch, 2000);
             assert.equal(result.status, 0);
             assert.equal(result.error, null);
             assert.equal(result.groupExited, true);
+            assert.equal(result.stdout.trim(), 'complete');
+            assert.ok(result.timings.closeMs >= result.timings.exitMs);
+            assert.equal(result.timings.deadlineMs, undefined);
         });
         assert.throws(() => statSync(succeeded), /ENOENT/);
     } finally { if (failed) rmSync(failed, {recursive:true, force:true}); }
