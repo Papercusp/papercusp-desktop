@@ -53,6 +53,33 @@ const fs=require('node:fs'),dir=${JSON.stringify(temp)};
 const chatId=()=>fs.existsSync(dir+'/conversation-id')?fs.readFileSync(dir+'/conversation-id','utf8'):'conversation+/=&';
 const chatHistory=()=>fs.existsSync(dir+'/chat-history.json')?JSON.parse(fs.readFileSync(dir+'/chat-history.json','utf8')):
  [{id:'saved-five',conversationId:chatId(),seq:5,role:'assistant',text:${JSON.stringify(chatMarkdown)}}];
+if(process.argv[2]==='native-cards'){
+ const state=()=>fs.existsSync(dir+'/cards-state.json')?JSON.parse(fs.readFileSync(dir+'/cards-state.json','utf8')):
+  {version:1,openCards:[]};
+ const emit=(event,data)=>console.log(JSON.stringify({environment,event,data}));
+ if(r.operation==='subscribe'){
+  const subscriptions=fs.existsSync(dir+'/card-subscriptions.json')?JSON.parse(fs.readFileSync(dir+'/card-subscriptions.json','utf8')):[];
+  subscriptions.push(r);fs.writeFileSync(dir+'/card-subscriptions.json',JSON.stringify(subscriptions));
+  const snapshot=state();emit('reset',{workspaceId:environment.workspaceId});
+  emit('snapshot',{workspaceId:environment.workspaceId,runId:'card-run+/=&',version:snapshot.version,
+   snapshot:{openCards:snapshot.openCards}});
+  let published=fs.existsSync(dir+'/card-publish.json')?fs.readFileSync(dir+'/card-publish.json','utf8'):'';
+  setInterval(()=>{if(!fs.existsSync(dir+'/card-publish.json'))return;
+   const next=fs.readFileSync(dir+'/card-publish.json','utf8');if(next===published)return;published=next;
+   console.log(next);fs.writeFileSync(dir+'/card-emitted.json',next);
+  },25);return;
+ }
+ const actions=fs.existsSync(dir+'/card-actions.json')?JSON.parse(fs.readFileSync(dir+'/card-actions.json','utf8')):[];
+ actions.push(r);fs.writeFileSync(dir+'/card-actions.json',JSON.stringify(actions));
+ const commit=()=>{const snapshot=state();snapshot.version++;
+  snapshot.openCards=snapshot.openCards.filter(card=>card.correlationId!==r.correlationId);
+  fs.writeFileSync(dir+'/cards-state.json',JSON.stringify(snapshot));};
+ if(r.correlationId==='lost+/=&'){commit();return;}
+ const timer=setInterval(()=>{if(!fs.existsSync(dir+'/card-ack-'+actions.length))return;
+  clearInterval(timer);commit();
+  console.log(JSON.stringify({environment,rows:[{responded:true,conversationId:r.conversationId,correlationId:r.correlationId}]}));
+ },25);return;
+}
 if(process.argv[2]==='native-chat'){
  const actions=fs.existsSync(dir+'/chat-actions.json')?JSON.parse(fs.readFileSync(dir+'/chat-actions.json','utf8')):[];
  actions.push(r);fs.writeFileSync(dir+'/chat-actions.json',JSON.stringify(actions));
@@ -407,11 +434,11 @@ process.exitCode=evidence.ok?0:1;`);
     }));
 
 const selectedJourney=process.env.PAPERCUSP_GNOME_JOURNEY||'all';
-assert.ok(['all','inbox','input','focus','resume','organizer','chat'].includes(selectedJourney),'Unknown PAPERCUSP_GNOME_JOURNEY');
+assert.ok(['all','inbox','input','focus','resume','organizer','chat','cards'].includes(selectedJourney),'Unknown PAPERCUSP_GNOME_JOURNEY');
 // Preserve every scenario while bounding each independent desktop lifetime.
 // The input journey includes the controller and Inbox cases; focus and Resume
 // start from a fresh Shell and cannot spend each other's deadline budget.
-for(const journey of selectedJourney==='all'?['input','focus','resume','organizer','chat']:[selectedJourney]){
+for(const journey of selectedJourney==='all'?['input','focus','resume','organizer','chat','cards']:[selectedJourney]){
 test('private GNOME Shell renders actors and handles real seat keyboard, pointer and nested dismissal ['+journey+']',
     {skip:process.platform!=='linux',timeout:75000}, () => withNativeFixture('workbench-shell-',async temp=>{
             const evidenceDirectory=process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR&&
@@ -489,6 +516,127 @@ export default class Probe extends Workbench {
   if(Main.overview.visible)await key(Clutter.KEY_Escape);
   await waitFor(()=>Main.actionMode===Shell.ActionMode.NORMAL);
   check(!Main.overview.visible,'desktop ready for normal shortcuts');
+  if(journey==='cards'){
+   const read=name=>JSON.parse(new TextDecoder().decode(GLib.file_get_contents(${JSON.stringify(temp)}+'/'+name)[1]));
+   const write=(name,value)=>GLib.file_set_contents(${JSON.stringify(temp)}+'/'+name,JSON.stringify(value));
+   const environment={endpoint:'http://fixture',workspaceId:'exact',store:{id:'store'},agentChat:{scope:'workspace'}};
+   const conversationId='conversation+/=&',runId='card-run+/=&';
+   const question=(id,kind='radio')=>({correlationId:id,conversationId,createdAt:1,
+    prompt:kind==='text'?'**Explain the choice**':'**Choose a route**',
+    presentation:kind==='radio'?{kind,options:[{id:'a+/=&',label:'Route A'},{id:'b+/=&',label:'Route B'}]}:
+     {kind,placeholder:'Exact answer'},allowDecline:true});
+   const choice=question('choice+/=&');
+   write('cards-state.json',{version:1,openCards:[choice]});
+   setPhase('cards shortcut and canonical subscription');
+   await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_p]);
+   const state=this._cards;
+   await waitFor(()=>this._chat.ready&&state.connected&&state.cards.length===1);
+   const view=()=>this._views.get('papercup');
+   const descendants=actor=>[actor,...(actor.get_children?.()||[]).flatMap(descendants)];
+   const cardActors=()=>descendants(view().cardsContent);
+   const control=name=>cardActors().find(actor=>actor instanceof St.Button&&actor.get_label()===name);
+   const entry=()=>cardActors().find(actor=>actor instanceof St.Entry);
+   const publish=(openCards,version,extra={})=>{
+    write('cards-state.json',{version,openCards});
+    write('card-publish.json',{environment,event:'snapshot',data:{workspaceId:'exact',runId,version,snapshot:{openCards},...extra}});
+   };
+   const actions=()=>GLib.file_test(${JSON.stringify(join(temp,'card-actions.json'))},GLib.FileTest.EXISTS)?read('card-actions.json'):[];
+   check(read('card-subscriptions.json')[0].conversationId===conversationId&&
+    JSON.stringify(read('card-subscriptions.json')[0].environment)===JSON.stringify(environment),
+    'questions subscribe with exact selected conversation and environment');
+   check(state.cards[0].id===choice.correlationId&&state.cards[0].runId===runId,
+    'canonical run snapshot reaches the native question');
+   const prompt=cardActors().find(actor=>actor instanceof St.Label&&actor.text==='Choose a route');
+   await tick();
+   check(prompt?.mapped&&prompt.get_transformed_size()[1]>0&&prompt.clutter_text.get_use_markup(),
+    'question Markdown is styled and allocated visible native text');
+   check(view().cardScroll.visible&&control('Route A')?.mapped&&control('Submit answer')?.mapped,
+    'native choices and answer actions are visible in the card viewport');
+   setPhase('cards real seat choice and gated acknowledgement');
+   await click(()=>control('Route B'));
+   check(control('Route B').checked&&!control('Route A').checked,'seat click selects the exact radio option');
+   await click(()=>control('Submit answer'));
+   await waitFor(()=>state.pending===choice.correlationId&&actions().length===1);
+   check(state.cards.length===1&&view().cardStatus.text==='Saving answer…',
+    'question remains visible while its canonical acknowledgement is held');
+   check(!control('Submit answer').reactive&&!control('Decline question').reactive,
+    'pending answer disables duplicate native actions');
+   check(JSON.stringify(actions()[0])===JSON.stringify({environment,conversationId,operation:'respond',
+    correlationId:choice.correlationId,action:'submit',payload:{picks:['b+/=&']}}),
+    'native selection sends the exact identity and option payload');
+   write('card-ack-1',true);await waitFor(()=>!state.pending&&state.cards.length===0);
+   check(!view().cardScroll.visible,'only canonical response acknowledgement dismisses the question');
+   setPhase('cards free text and readable native form');
+   const textCard=question('text+/=&','text');publish([textCard],3);
+   await waitFor(()=>state.cards[0]?.id===textCard.correlationId&&entry()?.mapped);
+   await click(()=>entry());
+   for(const symbol of [Clutter.KEY_e,Clutter.KEY_x,Clutter.KEY_a,Clutter.KEY_c,Clutter.KEY_t])await key(symbol);
+   check(entry().get_text()==='exact','seat typing reaches the native answer field');
+   check(entry().has_key_focus()||entry().contains(global.stage.get_key_focus()),'native answer retains keyboard focus');
+   await captureScreen();
+   await click(()=>control('Submit answer'));await waitFor(()=>actions().length===2&&state.pending);
+   inputLog.push({phase,focusAfterAnswerReplacement:String(global.stage.get_key_focus())});
+   check(view().panel.contains(global.stage.get_key_focus()),
+    'replacing the focused answer field preserves a keyboard target inside the panel');
+   check(actions()[1].payload.value==='exact'&&actions()[1].correlationId===textCard.correlationId,
+    'native free text submission preserves exact answer and correlation identity');
+   write('card-ack-2',true);await waitFor(()=>state.cards.length===0&&!state.pending);
+   setPhase('cards canonical decline and cancellation');
+   const declined=question('decline+/=&');publish([declined],5);
+   await waitFor(()=>state.cards[0]?.id===declined.correlationId);
+   await click(()=>control('Decline question'));await waitFor(()=>actions().length===3&&state.pending);
+   check(actions()[2].action==='decline'&&!Object.hasOwn(actions()[2],'payload')&&state.cards.length===1,
+    'Decline waits for receipt and sends no fabricated answer');
+   write('card-ack-3',true);await waitFor(()=>state.cards.length===0&&!state.pending);
+   const cancelled=question('cancel+/=&');publish([cancelled],7);
+   await waitFor(()=>state.cards[0]?.id===cancelled.correlationId);
+   await click(()=>control('Cancel question'));await waitFor(()=>actions().length===4&&state.pending);
+   check(actions()[3].action==='cancel'&&actions()[3].correlationId===cancelled.correlationId,
+    'Cancel sends the exact canonical question identity');
+   write('card-ack-4',true);await waitFor(()=>state.cards.length===0&&!state.pending);
+   check(state.acknowledged.has(cancelled.correlationId),'Cancel dismissal follows canonical receipt');
+   setPhase('cards lost acknowledgement and canonical reconnect');
+   const lost=question('lost+/=&');publish([lost],9);
+   await waitFor(()=>state.cards[0]?.id===lost.correlationId);
+   await click(()=>control('Decline question'));
+   await waitFor(()=>!state.connected&&view().cardReconnect.visible&&actions().length===5);
+   check(state.cards.length===1&&!control('Submit answer').reactive,
+    'lost acknowledgement retains the question and disables stale answers');
+   await click(()=>view().cardReconnect);await waitFor(()=>state.connected&&state.cards.length===0);
+   check(actions().length===5,'reconnect reads canonical state without sending a duplicate answer');
+   check(read('card-subscriptions.json').length===2,'reconnect creates a fresh canonical subscription');
+   setPhase('cards stale and foreign identity controls');
+   const retained=question('retained+/=&');publish([retained],11);
+   await waitFor(()=>state.cards[0]?.id===retained.correlationId);
+   publish([question('stale+/=&')],10);
+   await waitFor(()=>read('card-emitted.json').data.version===10);await tick();await tick();
+   check(state.cards[0]?.id===retained.correlationId&&state.snapshots.get(runId).version===11,
+    'older canonical snapshot cannot replace the current question');
+   publish([question('foreign+/=&')].map(card=>({...card,conversationId:'foreign-conversation'})),12);
+   await waitFor(()=>!state.connected&&view().cardReconnect.visible);
+   check(state.cards[0]?.id===retained.correlationId&&!control('Submit answer').reactive,
+    'foreign conversation snapshot fails closed and cannot enable its answer');
+   GLib.file_set_contents(${JSON.stringify(join(temp,'conversation-id'))},'different-conversation');
+   check(new TextDecoder().decode(GLib.file_get_contents(${JSON.stringify(join(temp,'conversation-id'))})[1])===
+    'different-conversation','conversation fixture stores an exact raw identity without JSON quotes');
+   write('cards-state.json',{version:13,openCards:[]});
+   this._refreshChat();await waitFor(()=>this._chat.ready&&state.connected&&state.conversationId==='different-conversation');
+   check(state.cards.length===0&&this._cardDrafts.size===0,'conversation change clears prior questions and answer drafts');
+   setPhase('cards same-origin secure link');
+   const secure={...question('secure+/=&','browser'),presentation:{kind:'browser',
+    link:'/api/ui/cards/secure%2B%2F%3D%26/link'},conversationId:'different-conversation'};
+   publish([secure],14);await waitFor(()=>state.cards[0]?.id===secure.correlationId);
+   const opened=[];this._launchChatUri=uri=>opened.push(uri);
+   check(!control('Submit answer'),'browser card cannot invent an inline submission');
+   await click(()=>control('Open secure link'));
+   check(opened[0]==='http://fixture/api/ui/cards/secure%2B%2F%3D%26/link',
+    'secure question link activates only its canonical same-origin route');
+   check(global.get_window_actors().length===0,'questions remain native Shell actors outside application windows');
+   inputLog.push({phase,focusBeforeEscape:String(global.stage.get_key_focus())});
+   await key(Clutter.KEY_Escape);
+   check(!this._states.get('papercup').visible&&!this._cardStream,'Escape dismisses questions and cancels their local subscription');
+   return this.finish(null);
+  }
   if(journey==='chat'){
    setPhase('chat shortcut and canonical history');
    await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_p]);
@@ -874,7 +1022,7 @@ export default class Probe extends Workbench {
             assert.equal(evidence?.ok,true,JSON.stringify({evidence,progress,...result}));
             assert.equal(result.status,0,JSON.stringify(result));
             assert.equal(result.error,null,JSON.stringify(result));
-            const minimumAssertions={inbox:25,input:36,focus:11,resume:16,organizer:13,chat:31};
+            const minimumAssertions={inbox:25,input:36,focus:11,resume:16,organizer:13,chat:31,cards:31};
             assert.ok(evidence.assertions.length>=minimumAssertions[journey],JSON.stringify(evidence));
             assert.deepEqual([...readFileSync(screenshot).subarray(0,8)], [137,80,78,71,13,10,26,10]);
             if(evidenceDirectory){

@@ -589,6 +589,8 @@ export default class Workbench extends Extension {
         view.cardScroll.visible = Boolean(cards.length);
         const renderKey = JSON.stringify([cards.map(card => card.raw), state.pending, state.connected]);
         if (view.cardRenderKey === renderKey) return;
+        const focus = global.stage.get_key_focus();
+        const replacedFocus = Boolean(focus && view.cardsContent.contains(focus));
         view.cardRenderKey = renderKey; view.cardsContent.destroy_all_children();
         for (const card of cards) {
             const box = new St.BoxLayout({vertical: true, x_expand: true, style_class: 'papercusp-detail'});
@@ -645,6 +647,9 @@ export default class Workbench extends Extension {
             }
             if (card.expired) box.add_child(label('This question has expired.'));
         }
+        // Replacing a focused answer field drops Shell's keyboard target.
+        // Keep Escape and keyboard navigation inside the stable chat panel.
+        if (replacedFocus) view.compose.grab_key_focus();
     }
     async _answerCard(card, action, draft) {
         const state = this._cards, token = state.generation;
