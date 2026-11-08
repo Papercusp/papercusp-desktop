@@ -586,17 +586,19 @@ const installedSurfaces={reports:{title:'Reports',flag:'PAPERCUSP_NATIVE_INSTALL
     papercup:{title:'Papercup',flag:'PAPERCUSP_NATIVE_INSTALLED_CHAT',assertions:24},
     voice:{title:'Papercup voice',flag:'PAPERCUSP_NATIVE_INSTALLED_VOICE',assertions:39}};
 for (const [surface,acceptance] of Object.entries(installedSurfaces))
-for (const isolatedAudio of surface==='papercup'?[false,true]:[surface==='voice'])
+for (const [isolatedAudio,speechPreflight] of surface==='papercup'?
+    [[false,false],[true,false],[true,true]]:[[surface==='voice',surface==='voice']])
 test('exact installed GNOME preview opens canonical ' + acceptance.title + ' through a private Shell shortcut' +
-    (surface==='papercup'&&isolatedAudio?' with an isolated audio context':''),
-    {skip:process.platform!=='linux'||process.env[acceptance.flag]!=='1',timeout:surface==='voice'?240000:80000},
+    (surface==='papercup'?(speechPreflight?' with canonical speech preflight':
+        isolatedAudio?' with an isolated audio context':''):''),
+    {skip:process.platform!=='linux'||process.env[acceptance.flag]!=='1',timeout:speechPreflight?240000:80000},
     () => withNativeFixture('workbench-installed-shell-',async temp=>{
         const installed=process.env.PAPERCUSP_NATIVE_EXTENSION,operator=process.env.PAPERCUSP_NATIVE_OPERATOR;
         const pui=process.env.PAPERCUSP_NATIVE_PUI;
         assert.ok(installed&&operator&&pui,'Select the installed extension, PUI and operator explicitly');
         const audio=isolatedAudio?await privateVoiceAudio(temp):null;
         try {
-        const reference=surface==='voice'?installedSpeechReference(temp,pui,operator):null;
+        const reference=speechPreflight?installedSpeechReference(temp,pui,operator):null;
         const stateSurface=surface==='voice'?'papercup':surface==='reports'?'quick-access':surface;
         const data=join(temp,'data'),config=join(temp,'config'),runtime=join(temp,'runtime');
         for(const dir of [data,config,runtime,join(temp,'cache')])mkdirSync(dir,{recursive:true,mode:0o700});
@@ -956,13 +958,15 @@ new Gio.Settings({schema_id:'org.gnome.shell'}).set_strv('enabled-extensions',
         const progress=existsSync(progressFile)?JSON.parse(readFileSync(progressFile,'utf8')):null;
         const proof={evidence,progress,sourceCustody,...result,
             audioContext:audio?'private PulseAudio server and two null sinks':'inherited audio environment',
-            ...(reference?{speechReference:reference,outputAudio,
+            ...(reference?{speechReference:reference}:{}),
+            ...(surface==='voice'?{outputAudio,
                 audioPlane:'private PulseAudio null sinks; actual default GStreamer devices; canonical STT/TTS; no physical microphone/speaker claim'}:{}),
             plane:'exact installed preview files and real PUI/canonical operator in a private GNOME Shell; independent observer; ' + surface + ' scope only'};
         if(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR){
             mkdirSync(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,{recursive:true});
             writeFileSync(join(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR,'installed-shell-'+surface+
-                (surface==='papercup'&&isolatedAudio?'-isolated-audio':'')+'.json'),JSON.stringify(proof,null,2)+'\n');
+                (surface==='papercup'?(speechPreflight?'-speech-preflight':
+                    isolatedAudio?'-isolated-audio':''):'')+'.json'),JSON.stringify(proof,null,2)+'\n');
         }
         assert.equal(evidence?.ok,true,JSON.stringify(proof));
         assert.equal(result.status,0,JSON.stringify(proof));
