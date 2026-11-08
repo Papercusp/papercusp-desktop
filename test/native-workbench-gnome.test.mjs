@@ -741,6 +741,45 @@ function runStreamDriver(temp, script, helper = false) {
     rmSync(temp,{recursive:true,force:true});
 }
 
+// Hardware is explicitly opted into: ordinary CI must never open a microphone
+// or speaker. Exercise production defaults and reject GStreamer's dummy sink,
+// which otherwise makes an unavailable desktop sound device look successful.
+test('production-default physical audio devices record and play without synthetic fallback',
+    {skip: process.platform !== 'linux' || process.env.PAPERCUSP_NATIVE_PHYSICAL_AUDIO !== '1', timeout: 30000}, () => {
+        const temp = mkdtempSync(join(tmpdir(), 'workbench-physical-audio-'));
+        const audio = pathToFileURL(join(root, 'native/gnome/audio.js')).href;
+        runStreamDriver(temp, `import Gio from 'gi://Gio';import GLib from 'gi://GLib';
+import Gst from 'gi://Gst';
+import {AudioDevices} from ${JSON.stringify(audio)};
+Gst.init(null);
+const parse=Gst.parse_launch;let pipeline;
+Gst.parse_launch=description=>{pipeline=parse(description);return pipeline;};
+// Gst.Iterator exposes conflicting boxed copy methods in GJS. GStreamer's
+// own graph diagnostic includes the selected auto-device children instead.
+const graph=()=>Gst.debug_bin_to_dot_data(pipeline,Gst.DebugGraphDetails.ALL);
+const names=()=>{const dir=GLib.Dir.open(GLib.get_tmp_dir(),0),rows=[];let name;
+ while((name=dir.read_name())!==null)if(name.startsWith('papercusp-voice-'))rows.push(name);return rows.sort().join('\\n');};
+const before=names(),devices=new AudioDevices({durationMs:500}),observed=[];
+for(let attempt=0;attempt<2;attempt++){
+ const inspect=state=>{const selected=graph();
+  if(/Gst(?:FakeSrc|FakeSink|AudioTestSrc)/.test(selected))throw Error('default audio selected a synthetic device');
+  const physical=[...new Set(selected.match(/Gst(?:PipeWire|Pulse|Alsa|Jack|Oss|OpenAL)[A-Za-z]+/g)||[])];
+  if(!physical.length)throw Error('default audio has no identified hardware backend: '+selected);
+  observed.push({attempt,phase:state.phase,backends:physical});};
+ const result=await devices.record(new Gio.Cancellable(),inspect).done;
+ const bytes=GLib.base64_decode(result.audioBase64),header=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+ if(bytes.length<=44||header.getUint16(20,true)!==1||header.getUint16(22,true)!==1||
+    header.getUint32(24,true)!==16000||header.getUint16(34,true)!==16)throw Error('physical capture did not produce mono PCM16 WAV');
+ if(devices.active||names()!==before)throw Error('physical capture leaked a device or private recording');
+ if(!(await devices.play(result.audioBase64,new Gio.Cancellable(),inspect).done).played)throw Error('physical playback did not complete');
+ if(devices.active||names()!==before)throw Error('physical playback leaked a device or private recording');
+}
+if(observed.map(row=>row.phase).join(',')!=='recording,playing,recording,playing')throw Error('physical device phases incomplete');
+print(JSON.stringify({physicalAudio:observed,scope:'current-build default device backend lifecycle; no installed artifact or audible quality claim'}));
+print('NATIVE_STREAM_PASS');
+`);
+    });
+
 test('GStreamer devices finalize mono PCM WAV, play, bound duration and clean up failed or cancelled operations',
     {skip:process.platform!=='linux',timeout:30000}, () => {
         const temp=mkdtempSync(join(tmpdir(),'workbench-audio-devices-'));
