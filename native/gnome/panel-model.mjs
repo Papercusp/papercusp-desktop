@@ -625,7 +625,7 @@ export function nativeVoiceRequest(request) {
         throw new Error('Invalid or oversized native voice request');
     return snapshot(request);
 }
-function canonicalBase64(text, limit) {
+export function canonicalBase64(text, limit) {
     if (typeof text !== 'string' || !text.length || text.length > limit || text.length % 4 ||
         !/^[A-Za-z0-9+/]*={0,2}$/.test(text)) return false;
     // A flat character class stays bounded for a full minute of audio. Check

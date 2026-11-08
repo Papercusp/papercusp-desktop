@@ -1,6 +1,6 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
-import {nativeVoiceRequest} from './panel-model.mjs';
+import {nativeVoiceRequest, canonicalBase64} from './panel-model.mjs';
 
 // The PUI command owns discovery, IPC/HTTP, credentials and its read allowlist.
 // No shell, bearer file, local server or second authorization implementation.
@@ -118,6 +118,8 @@ export class ResidentBridge {
     }
     inbox(pui, request) { return this.read(pui, request, 'native-inbox'); }
     voice(pui, request) { return this._request(pui, request, 'native-voice'); }
+    record(pui, onState) { return this._request(pui, {operation: 'record'}, 'native-audio', onState); }
+    play(pui, audioBase64, onState) { return this._request(pui, {operation: 'play', audioBase64}, 'native-audio', onState); }
     read(pui, request, command = 'native-read') {
         return this._request(pui, request, command).done;
     }
@@ -128,14 +130,18 @@ export class ResidentBridge {
         const refused = message => ({done: Promise.reject(new Error(message)), cancel() {}});
         if (this._closed) return refused('Workbench has stopped');
         const streaming = command === 'native-chat' || (command === 'native-cards' && request.operation === 'subscribe');
-        if ((!streaming && !['native-read', 'native-inbox', 'native-cards', 'native-voice'].includes(command)) ||
+        const audio = command === 'native-audio';
+        if ((!streaming && !['native-read', 'native-inbox', 'native-cards', 'native-voice', 'native-audio'].includes(command)) ||
             (command === 'native-cards' && !['subscribe', 'respond'].includes(request.operation)) ||
-            (streaming && typeof onFrame !== 'function') || (!streaming && onFrame))
+            ((streaming || audio) && typeof onFrame !== 'function') || (!streaming && !audio && onFrame) ||
+            (audio && (Object.keys(request).some(key => !['operation', 'audioBase64'].includes(key)) ||
+                !['record', 'play'].includes(request.operation) ||
+                (request.operation === 'play' ? !canonicalBase64(request.audioBase64, 11_184_812) : request.audioBase64 !== undefined))))
             return refused('Unsupported native operation');
         try { if (command === 'native-voice') nativeVoiceRequest(request); }
         catch (error) { return refused(error.message); }
         const bytes = new TextEncoder().encode(JSON.stringify({request, command}));
-        if (bytes.length > (command === 'native-voice' ? 2_700_000 : 64 * 1024)) return refused('Native request exceeds its limit');
+        if (bytes.length > (audio ? 11_200_000 : command === 'native-voice' ? 2_700_000 : 64 * 1024)) return refused('Native request exceeds its limit');
         if (this._child && this._pui !== pui) this._stop(new Error('Selected PUI connection changed'));
         if (!this._child) {
             try {
@@ -149,13 +155,15 @@ export class ResidentBridge {
         }
         const id = ++this._serial, child = this._child, cancel = this._cancel;
         const done = new Promise((resolve, reject) => {
-            const timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, streaming ? 617000 : command === 'native-voice' ? 94000 : command === 'native-inbox' ? 67000 : 24000, () => {
+            const timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, audio ? 185000 : streaming ? 617000 : command === 'native-voice' ? 94000 : command === 'native-inbox' ? 67000 : 24000, () => {
                 this._stop(new Error('Native helper did not respond in time')); return GLib.SOURCE_REMOVE;
             });
-            this._pending.set(id, {resolve, reject, timer, onFrame, streaming, failure: null});
+            this._pending.set(id, {resolve, reject, timer, onFrame, streaming, audio, failure: null});
             this._write(child, cancel, {id, request, command});
         });
-        return {done, cancel: () => {
+        return {done, stop: () => {
+            if (audio && request.operation === 'record' && this._pending.has(id)) this._write(child, cancel, {id, stop: true});
+        }, cancel: () => {
             const pending = this._pending.get(id);
             if (!pending || pending.failure) return;
             pending.failure = new Error(pending.streaming ? 'Native stream stopped; reconcile the saved reply' : 'Native operation stopped');
@@ -180,7 +188,7 @@ export class ResidentBridge {
                 const message = JSON.parse(line), pending = this._pending.get(message.id);
                 if (!pending) throw new Error('Native helper returned an unknown request');
                 if (Object.hasOwn(message, 'frame')) {
-                    if (!pending.streaming) throw new Error('Native helper returned an unexpected stream');
+                    if (!pending.streaming && !pending.audio) throw new Error('Native helper returned an unexpected stream');
                     if (!pending.failure) {
                         try { pending.onFrame(message.frame); }
                         catch (error) { pending.failure = error; this._write(child, cancel, {id: message.id, cancel: true}); }

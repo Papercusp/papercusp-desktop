@@ -24,7 +24,7 @@ export function packageNativeWorkbench(outputDirectory, {
         format: 'esm', platform: 'neutral', target: 'es2022',
         outfile: join(prepared, 'chat-content.js'), logLevel: 'silent'});
     const result = spawnSync('gnome-extensions', ['pack', '--force',
-        '--extra-source=bridge.js', '--extra-source=helper.js', '--extra-source=panel-model.mjs', '--extra-source=chat-content.js',
+        '--extra-source=bridge.js', '--extra-source=helper.js', '--extra-source=audio.js', '--extra-source=panel-model.mjs', '--extra-source=chat-content.js',
         '--out-dir', resolve(outputDirectory), prepared],
     {encoding: 'utf8', timeout: 30000});
     if (result.error || result.status !== 0)

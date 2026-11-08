@@ -3,6 +3,7 @@ import Gio from 'gi://Gio';
 import GioUnix from 'gi://GioUnix';
 import GLib from 'gi://GLib';
 import {nativeRead, nativeStream} from './bridge.js';
+import {AudioDevices} from './audio.js';
 
 // The Shell owns the panels. This GTK4/libadwaita process has no windows,
 // credentials, server or alternate model store. Its parent owns its lifetime;
@@ -12,6 +13,7 @@ const application = new Adw.Application({application_id: 'ai.papercusp.Workbench
 const input = new Gio.DataInputStream({base_stream: new GioUnix.InputStream({fd: 0, close_fd: false})});
 const cancellable = new Gio.Cancellable();
 const pending = new Map();
+const audio = new AudioDevices(), recordings = new Map();
 const pui = ARGV[0] || 'pui';
 let stopping = false;
 function stop() {
@@ -29,6 +31,9 @@ function readNext() {
             if (message.cancel === true && Number.isSafeInteger(message.id)) {
                 pending.get(message.id)?.cancel(); readNext(); return;
             }
+            if (message.stop === true && Number.isSafeInteger(message.id)) {
+                recordings.get(message.id)?.stop(); readNext(); return;
+            }
             if (!Number.isSafeInteger(message.id) || message.id < 1 || pending.has(message.id) ||
                 !message.request || typeof message.request !== 'object' || Array.isArray(message.request))
                 throw new Error('Malformed native helper request');
@@ -36,7 +41,17 @@ function readNext() {
             const command = message.command || 'native-read';
             const streaming = command === 'native-chat' ||
                 (command === 'native-cards' && message.request.operation === 'subscribe');
-            const operation = streaming ? nativeStream(pui, message.request,
+            const onAudioState = frame => { if (!stopping) print(JSON.stringify({id: message.id, frame})); };
+            let device, deviceFailure;
+            if (command === 'native-audio') {
+                try {
+                    if (message.request.operation === 'record') device = audio.record(cancel, onAudioState);
+                    else if (message.request.operation === 'play') device = audio.play(message.request.audioBase64, cancel, onAudioState);
+                    else throw new Error('Unsupported native audio operation');
+                    recordings.set(message.id, device);
+                } catch (error) { deviceFailure = error; }
+            }
+            const operation = deviceFailure ? Promise.reject(deviceFailure) : device ? device.done : streaming ? nativeStream(pui, message.request,
                 frame => { if (!stopping) print(JSON.stringify({id: message.id, frame})); }, cancel, command) :
                 nativeRead(pui, message.request, cancel, command);
             operation
@@ -44,6 +59,7 @@ function readNext() {
                 .catch(error => { if (!stopping) print(JSON.stringify({id: message.id, error: String(error.message || error)})); })
                 .finally(() => {
                     pending.delete(message.id);
+                    recordings.delete(message.id);
                     if (stopping && !pending.size) { application.release(); application.quit(); }
                 });
             readNext();

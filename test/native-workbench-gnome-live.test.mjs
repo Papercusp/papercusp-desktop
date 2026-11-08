@@ -53,6 +53,25 @@ const fs=require('node:fs'),dir=${JSON.stringify(temp)};
 const chatId=()=>fs.existsSync(dir+'/conversation-id')?fs.readFileSync(dir+'/conversation-id','utf8'):'conversation+/=&';
 const chatHistory=()=>fs.existsSync(dir+'/chat-history.json')?JSON.parse(fs.readFileSync(dir+'/chat-history.json','utf8')):
  [{id:'saved-five',conversationId:chatId(),seq:5,role:'assistant',text:${JSON.stringify(chatMarkdown)}}];
+if(process.argv[2]==='native-voice'){
+ const actions=fs.existsSync(dir+'/voice-actions.json')?JSON.parse(fs.readFileSync(dir+'/voice-actions.json','utf8')):[];
+ const audio=r.audioBase64?Buffer.from(r.audioBase64,'base64'):null;
+ actions.push({...r,audioBase64:undefined,audioBytes:audio?.length,audioHeader:audio?.subarray(0,44).toString('base64'),pid:process.pid});
+ fs.writeFileSync(dir+'/voice-actions.json',JSON.stringify(actions));
+ const mode=fs.existsSync(dir+'/voice-mode')?fs.readFileSync(dir+'/voice-mode','utf8'):'';
+ if(mode==='fail'){console.error('Speech service unavailable');process.exitCode=1;return;}
+ const respond=()=>{
+  const row={conversationId:r.conversationId,requestId:r.requestId,operation:r.operation};
+  if(r.operation==='transcribe')row.text='Voice draft';
+  else{const wav=Buffer.alloc(44+16000*2*3);wav.write('RIFF');wav.writeUInt32LE(wav.length-8,4);wav.write('WAVEfmt ',8);
+   wav.writeUInt32LE(16,16);wav.writeUInt16LE(1,20);wav.writeUInt16LE(1,22);wav.writeUInt32LE(16000,24);
+   wav.writeUInt32LE(32000,28);wav.writeUInt16LE(2,32);wav.writeUInt16LE(16,34);wav.write('data',36);wav.writeUInt32LE(wav.length-44,40);
+   row.audioBase64=wav.toString('base64');}
+  if(mode==='foreign')row.requestId='00000000-0000-4000-8000-000000000099';
+  console.log(JSON.stringify({environment,rows:[row]}));};
+ if(mode==='hold'){const timer=setInterval(()=>{if(fs.existsSync(dir+'/voice-release')){clearInterval(timer);respond();}},25);return;}
+ respond();return;
+}
 if(process.argv[2]==='native-cards'){
  const state=()=>fs.existsSync(dir+'/cards-state.json')?JSON.parse(fs.readFileSync(dir+'/cards-state.json','utf8')):
   {version:1,openCards:[]};
@@ -237,7 +256,7 @@ test('GNOME archive installs all runtime sources and preserves private preferenc
             install();
             const extension=join(env.XDG_DATA_HOME,'gnome-shell/extensions',bundle.uuid);
             for(const file of ['metadata.json','extension.js','stylesheet.css','prefs.js',
-                'bridge.js','helper.js','panel-model.mjs'])
+                'bridge.js','helper.js','audio.js','panel-model.mjs'])
                 assert.deepEqual(readFileSync(join(extension,file)),readFileSync(join(root,'native/gnome',file)),file);
             assert.equal(createHash('sha256').update(readFileSync(join(extension,'chat-content.js'))).digest('hex'),bundle.chatContentSha256);
             assert.doesNotMatch(readFileSync(join(extension,'chat-content.js'),'utf8'),/from ['"]marked['"]|from ['"].*\.ts['"]/);
@@ -438,7 +457,7 @@ assert.ok(['all','inbox','input','focus','resume','organizer','chat','cards'].in
 // Preserve every scenario while bounding each independent desktop lifetime.
 // The input journey includes the controller and Inbox cases; focus and Resume
 // start from a fresh Shell and cannot spend each other's deadline budget.
-for(const journey of selectedJourney==='all'?['input','focus','resume','organizer','chat','cards']:[selectedJourney]){
+for(const journey of selectedJourney==='all'?['input','focus','resume','organizer','chat','cards','voice']:[selectedJourney]){
 test('private GNOME Shell renders actors and handles real seat keyboard, pointer and nested dismissal ['+journey+']',
     {skip:process.platform!=='linux',timeout:75000}, () => withNativeFixture('workbench-shell-',async temp=>{
             const evidenceDirectory=process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR&&
@@ -452,6 +471,15 @@ test('private GNOME Shell renders actors and handles real seat keyboard, pointer
                     XDG_CACHE_HOME:join(temp,'cache'),GIO_USE_VFS:'local'},encoding:'utf8',timeout:15000});
             assert.equal(install.status,0,install.stderr||String(install.error));
             cpSync(join(extension,'extension.js'),join(extension,'workbench.js'));
+            if(journey==='voice'){
+                writeFileSync(join(temp,'conversation-id'),'00000000-0000-4000-8000-000000000001');
+                // The production helper and device code are unchanged. This
+                // separate fixture selects real GStreamer synthetic devices
+                // without exposing a device override on the production wire.
+                writeFileSync(join(extension,'voice-helper.js'),readFileSync(join(extension,'helper.js'),'utf8')
+                    .replace('new AudioDevices()',"new AudioDevices({source:'audiotestsrc is-live=true',sink:'fakesink sync=true'})"));
+                checkScript(join(extension,'voice-helper.js'));
+            }
             const pui=fixturePui(temp), resultFile=join(temp,'result.json');
             const screenshot=join(temp,'native-input.png');
             const focusDriver=join(temp,'focus-windows.mjs');
@@ -516,6 +544,78 @@ export default class Probe extends Workbench {
   if(Main.overview.visible)await key(Clutter.KEY_Escape);
   await waitFor(()=>Main.actionMode===Shell.ActionMode.NORMAL);
   check(!Main.overview.visible,'desktop ready for normal shortcuts');
+  if(journey==='voice'){
+   this._bridge.helperPath=this.path+'/voice-helper.js';
+   const file=name=>${JSON.stringify(temp)}+'/'+name;
+   const read=name=>JSON.parse(new TextDecoder().decode(GLib.file_get_contents(file(name))[1]));
+   const exists=name=>GLib.file_test(file(name),GLib.FileTest.EXISTS);
+   const write=(name,value)=>GLib.file_set_contents(file(name),value);
+   const requests=()=>exists('voice-actions.json')?read('voice-actions.json'):[];
+   const chat=this._chat,view=()=>this._views.get('papercup');
+   setPhase('voice canonical conversation and idle controls');
+   await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_p]);await waitFor(()=>chat.ready);
+   check(chat.conversationId==='00000000-0000-4000-8000-000000000001','voice binds exact canonical UUID conversation');
+   check(view().recordVoice.reactive&&view().readReply.reactive&&!view().cancelVoice.visible,
+    'native voice controls offer explicit recording and reply playback');
+   check(requests().length===0&&!exists('chat-actions.json'),'opening conversation never records sends or plays automatically');
+   const record=async()=>{await click(()=>view().recordVoice);await waitFor(()=>chat.voicePhase==='recording');};
+   const transcript=async()=>{await record();await click(()=>view().useRecording);};
+   setPhase('voice recording and reviewed transcript');
+   await record();
+   check(view().useRecording.visible&&view().cancelVoice.visible&&!view().recordVoice.reactive,
+    'real GStreamer capture exposes stop and use controls without duplicate capture');
+   await click(()=>view().useRecording);await waitFor(()=>!chat.voice&&chat.draft==='Voice draft');
+   check(view().compose.get_text()==='Voice draft'&&view().voiceStatus.text.includes('Review'),
+    'exact transcription populates editable native draft with review before Send');
+   const captured=requests()[0],header=GLib.base64_decode(captured.audioHeader);
+   check(captured.operation==='transcribe'&&captured.audioBytes>44&&new TextDecoder().decode(header.slice(0,4))==='RIFF'&&
+    new TextDecoder().decode(header.slice(8,12))==='WAVE','native capture reaches PUI as a finalized WAV');
+   check(!exists('chat-actions.json')&&requests().length===1,'transcription neither sends a turn nor starts reply audio');
+   setPhase('voice explicit reply playback and stop');
+   await click(()=>view().readReply);await waitFor(()=>chat.voicePhase==='playing');
+   check(requests().at(-1).operation==='speak'&&requests().at(-1).text===chat.spokenReply,
+    'Read reply synthesizes only the exact selected reply');
+   await click(()=>view().cancelVoice);await waitFor(()=>!chat.voice&&!this._voiceOperation);
+   check(chat.draft==='Voice draft'&&view().voiceStatus.text.includes('stopped'),'stopping playback preserves the reviewed draft');
+   setPhase('voice unavailable service and foreign receipt');
+   write('voice-mode','fail');await transcript();await waitFor(()=>!chat.voice);
+   check(chat.draft==='Voice draft'&&view().voiceStatus.text.includes('Speech service unavailable'),
+    'speech service failure preserves draft and explains the failure');
+   write('voice-mode','foreign');await transcript();await waitFor(()=>!chat.voice);
+   check(chat.draft==='Voice draft'&&view().voiceStatus.text.includes('different'),
+    'a foreign voice receipt cannot replace the draft');
+   setPhase('voice pending transcript retired by native edit');
+   write('voice-mode','hold');await transcript();await waitFor(()=>chat.voicePhase==='transcribing'&&requests().length===5);
+   const waitingPid=requests().at(-1).pid;
+   view().compose.grab_key_focus();await key(Clutter.KEY_x);await waitFor(()=>!chat.voice);
+   await waitFor(()=>!GLib.file_test('/proc/'+waitingPid,GLib.FileTest.EXISTS));
+   write('voice-release','released');await tick();
+   check(chat.draft!=='Voice draft'&&chat.draft.includes('x')&&!this._voiceOperation,
+    'seat editing cancels and reaps pending speech before any late transcript can apply');
+   setPhase('voice recording retired by refresh and Earlier');
+   await record();this._refreshChat();await waitFor(()=>chat.ready&&!chat.voice);
+   check(chat.draft.includes('x')&&!this._voiceOperation,'refresh retires capture and preserves the conversation draft');
+   await record();await click(()=>view().earlier);await waitFor(()=>!chat.loading&&!chat.voice);
+   check(chat.turns[0].seq===1&&!this._voiceOperation,'Earlier messages retires capture before changing history');
+   setPhase('voice hide and conversation isolation');
+   await record();await key(Clutter.KEY_Escape);await waitFor(()=>!view());
+   check(!this._voiceOperation&&!chat.voice,'Escape retires devices without creating an application window');
+   await chord([Clutter.KEY_Super_L,Clutter.KEY_Shift_L,Clutter.KEY_p]);await waitFor(()=>chat.ready);
+   const draft=chat.draft;await record();write('conversation-id','00000000-0000-4000-8000-000000000003');
+   this._refreshChat();await waitFor(()=>chat.ready&&chat.conversationId.endsWith('003'));
+   check(chat.draft===''&&!chat.voice&&!this._voiceOperation,'another conversation inherits neither recording nor voice draft');
+   write('conversation-id','00000000-0000-4000-8000-000000000001');this._refreshChat();await waitFor(()=>chat.ready&&chat.draft===draft);
+   check(view().compose.get_text()===draft,'returning to original conversation restores only its draft');
+   setPhase('voice reviewed explicit Send');
+   write('voice-mode','');await transcript();await waitFor(()=>!chat.voice&&chat.draft==='Voice draft');
+   await captureScreen();await click(()=>view().send);await waitFor(()=>exists('chat-actions.json'));
+   const sent=read('chat-actions.json')[0];
+   check(sent.operation==='send'&&sent.text==='Voice draft'&&sent.modality==='voice'&&
+    sent.conversationId===chat.conversationId,'explicit native Send carries voice modality and exact reviewed text and identity');
+   write('chat-release','consumer observed');await waitFor(()=>chat.ready&&!chat.reply);
+   check(global.get_window_actors().length===0,'native voice remains outside Dock taskbar and Alt-Tab application windows');
+   return this.finish(null);
+  }
   if(journey==='cards'){
    const read=name=>JSON.parse(new TextDecoder().decode(GLib.file_get_contents(${JSON.stringify(temp)}+'/'+name)[1]));
    const write=(name,value)=>GLib.file_set_contents(${JSON.stringify(temp)}+'/'+name,JSON.stringify(value));
@@ -997,10 +1097,13 @@ export default class Probe extends Workbench {
 `);
             checkScript(join(extension,'extension.js'));
             const sourceCustody={archiveSha256:bundle.sha256,journey,
-                files:Object.fromEntries(['extension.js','workbench.js','panel-model.mjs','bridge.js','helper.js','chat-content.js',
+                files:Object.fromEntries(['extension.js','workbench.js','panel-model.mjs','bridge.js','helper.js','audio.js','chat-content.js',
                     'schemas/org.gnome.shell.extensions.papercusp-workbench.gschema.xml'].map(file=>
                     [file,createHash('sha256').update(readFileSync(join(extension,file))).digest('hex')])),
                 testSha256:createHash('sha256').update(readFileSync(import.meta.filename)).digest('hex')};
+            if(journey==='voice')sourceCustody.audioFixture={path:'voice-helper.js',
+                sha256:createHash('sha256').update(readFileSync(join(extension,'voice-helper.js'))).digest('hex'),
+                plane:'production AudioDevices and helper with constructor-selected audiotestsrc and fakesink; no physical microphone or speaker claim'};
             writeFileSync(join(temp,'source-custody.json'),JSON.stringify(sourceCustody,null,2)+'\n');
             const env={...process.env,XDG_DATA_HOME:data,XDG_CONFIG_HOME:config,XDG_CACHE_HOME:join(temp,'cache'),
                 XDG_RUNTIME_DIR:runtime,GSETTINGS_BACKEND:'keyfile',GTK_A11Y:'none',
@@ -1026,7 +1129,7 @@ export default class Probe extends Workbench {
             assert.equal(evidence?.ok,true,JSON.stringify({evidence,progress,...result}));
             assert.equal(result.status,0,JSON.stringify(result));
             assert.equal(result.error,null,JSON.stringify(result));
-            const minimumAssertions={inbox:25,input:36,focus:11,resume:16,organizer:13,chat:31,cards:33};
+            const minimumAssertions={inbox:25,input:36,focus:11,resume:16,organizer:13,chat:31,cards:33,voice:25};
             assert.ok(evidence.assertions.length>=minimumAssertions[journey],JSON.stringify(evidence));
             assert.deepEqual([...readFileSync(screenshot).subarray(0,8)], [137,80,78,71,13,10,26,10]);
             if(evidenceDirectory){

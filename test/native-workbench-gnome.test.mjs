@@ -741,6 +741,44 @@ function runStreamDriver(temp, script, helper = false) {
     rmSync(temp,{recursive:true,force:true});
 }
 
+test('GStreamer devices finalize mono PCM WAV, play, bound duration and clean up failed or cancelled operations',
+    {skip:process.platform!=='linux',timeout:30000}, () => {
+        const temp=mkdtempSync(join(tmpdir(),'workbench-audio-devices-'));
+        const audio=pathToFileURL(join(root,'native/gnome/audio.js')).href;
+        runStreamDriver(temp,`import Gio from 'gi://Gio';import GLib from 'gi://GLib';
+import {AudioDevices} from ${JSON.stringify(audio)};
+const names=()=>{const dir=GLib.Dir.open(GLib.get_tmp_dir(),0),rows=[];let name;
+ while((name=dir.read_name())!==null)if(name.startsWith('papercusp-voice-'))rows.push(name);return rows.sort().join('\\n');};
+const before=names(),devices=new AudioDevices({source:'audiotestsrc is-live=true wave=sine',sink:'fakesink sync=true',durationMs:2000});
+let phases=[],recording;
+recording=devices.record(new Gio.Cancellable(),state=>{phases.push(state.phase);
+ GLib.timeout_add(GLib.PRIORITY_DEFAULT,100,()=>{recording.stop();return GLib.SOURCE_REMOVE;});});
+let busy=false;try{devices.record(new Gio.Cancellable(),()=>{});}catch(error){busy=error.message.includes('current');}
+if(!busy)throw Error('a second capture claimed the device');
+const result=await recording.done,bytes=GLib.base64_decode(result.audioBase64),header=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+if(bytes.length<=44||header.getUint16(20,true)!==1||header.getUint16(22,true)!==1||
+ header.getUint32(24,true)!==16000||header.getUint16(34,true)!==16)throw Error('recording is not bounded mono PCM16 WAV');
+if(devices.active||names()!==before)throw Error('successful recording leaked devices or private files');
+const played=await devices.play(result.audioBase64,new Gio.Cancellable(),state=>phases.push(state.phase)).done;
+if(!played.played||phases.join(',')!=='recording,playing'||devices.active||names()!==before)throw Error('playback lifecycle or cleanup failed');
+const bounded=new AudioDevices({source:'audiotestsrc is-live=true',durationMs:100});
+if(!(await bounded.record(new Gio.Cancellable(),()=>{}).done).audioBase64||names()!==before)throw Error('recording limit did not finalize');
+const cancel=new Gio.Cancellable();let cancelled=false;
+try{await devices.record(cancel,()=>cancel.cancel()).done;}catch(error){cancelled=error.message.includes('stopped');}
+if(!cancelled||devices.active||names()!==before)throw Error('cancellation retained audio or device state');
+const already=new Gio.Cancellable();already.cancel();let refused=false;
+try{await devices.record(already,()=>{throw Error('cancelled capture started');}).done;}catch(error){refused=error.message.includes('stopped');}
+if(!refused||names()!==before)throw Error('cancelled capture touched a device');
+for(const operation of ['record','play']){let failed=false;
+ try{const handle=operation==='record'?new AudioDevices({source:'no_such_audio_device'}).record(new Gio.Cancellable(),()=>{}):
+ devices.play('AAEC',new Gio.Cancellable(),()=>{});await handle.done;}catch(error){failed=true;}
+ if(!failed||names()!==before)throw Error('failed '+operation+' leaked private audio or reported success');}
+let malformed=false;try{devices.play('AB==',new Gio.Cancellable(),()=>{});}catch(error){malformed=true;}
+if(!malformed||devices.active)throw Error('noncanonical playback admitted');
+print('NATIVE_STREAM_PASS');
+`,true);
+    });
+
 test('resident voice transport accepts bounded audio, isolates cancellation and reaps PUI before completion',
     {skip:process.platform!=='linux',timeout:30000}, () => {
         const temp=mkdtempSync(join(tmpdir(),"workbench-voice '$-")),pui=join(temp,'pui fixture');

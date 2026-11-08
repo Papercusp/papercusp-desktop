@@ -10,7 +10,7 @@ import {ResidentBridge} from './bridge.js';
 import {nativeChatBlocks, safeChatLink, NativeCardsState} from './chat-content.js';
 import {PanelState, InboxState, ChatState, sameEnvironment, oneRow, SOURCES, sourceRequests, detailRequest, readRows, rebindShortcuts,
     agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow,
-    organizerGroups, arrangeOrganizerGroup} from './panel-model.mjs';
+    organizerGroups, arrangeOrganizerGroup, nativeVoiceResult} from './panel-model.mjs';
 
 function label(text, style = '') {
     const actor = new St.Label({text: String(text), style_class: style, x_expand: true});
@@ -32,6 +32,7 @@ export default class Workbench extends Extension {
         this._states.get('organizer').organizerKind = 'plan';
         this._inbox = new InboxState(); this._inboxRunId = null;
         this._chat = new ChatState(); this._chatStream = null;
+        this._voiceOperation = null; this._voiceNotice = '';
         this._cards = new NativeCardsState(); this._cardStream = null; this._cardDrafts = new Map();
         this._states.get('goals').scope = 'goals';
         this._views = new Map();
@@ -482,10 +483,19 @@ export default class Workbench extends Extension {
         view.compose = new St.Entry({text: this._chat.draft, hint_text: 'Message Papercup', can_focus: true,
             x_expand: true, accessible_name: 'Message Papercup'});
         view.compose.clutter_text.connect('text-changed', () => {
+            if (this._chat.draft !== view.compose.get_text()) this._stopVoice();
             this._chat.draft = view.compose.get_text(); this._updateChatControls(view);
         });
         view.compose.clutter_text.connect('activate', () => this._sendChat());
         panel.add_child(view.compose); view.send = button('Send', () => this._sendChat()); panel.add_child(view.send);
+        const voice = new St.BoxLayout({style_class: 'papercusp-panel-scopes'});
+        view.recordVoice = button('Record message', () => this._recordVoice()); voice.add_child(view.recordVoice);
+        view.useRecording = button('Use recording', () => this._voiceOperation?.handle?.stop()); voice.add_child(view.useRecording);
+        view.cancelVoice = button('Stop voice', () => this._stopVoice('Voice stopped; your draft was preserved'));
+        voice.add_child(view.cancelVoice);
+        view.readReply = button('Read reply', () => this._readReply()); voice.add_child(view.readReply);
+        panel.add_child(voice);
+        view.voiceStatus = label('', 'papercusp-panel-status'); panel.add_child(view.voiceStatus);
         // Dismiss consistently from every focused descendant control.
         panel.connect('captured-event', (_actor, event) => {
             if (event.type() !== Clutter.EventType.KEY_PRESS || event.get_key_symbol() !== Clutter.KEY_Escape)
@@ -503,6 +513,13 @@ export default class Workbench extends Extension {
         view.earlier.reactive = Boolean(chat.ready && !chat.loading && !reply && chat.hasMoreEarlier);
         view.reconnect.visible = Boolean(reply?.turnId && !reply.complete && !reply.connected);
         view.cancelReply.visible = Boolean(reply?.turnId && !reply.complete);
+        view.recordVoice.reactive = Boolean(chat.canUseVoice && !chat.voice);
+        view.readReply.reactive = Boolean(chat.canUseVoice && !chat.voice && chat.spokenReply);
+        view.useRecording.visible = chat.voicePhase === 'recording';
+        view.cancelVoice.visible = Boolean(chat.voice);
+        const phases = {permission: 'Opening microphone…', recording: 'Recording · up to one minute',
+            transcribing: 'Transcribing…', synthesizing: 'Preparing reply audio…', playing: 'Reading reply…'};
+        view.voiceStatus.set_text(phases[chat.voicePhase] || this._voiceNotice);
     }
     _renderChat() {
         const view = this._views.get('papercup'); if (!view) return;
@@ -666,7 +683,65 @@ export default class Workbench extends Extension {
     _stopChatStream() {
         const stream = this._chatStream; this._chatStream = null; stream?.cancel();
     }
+    _stopVoice(notice = '') {
+        const operation = this._voiceOperation; this._voiceOperation = null;
+        operation?.handle?.cancel(); this._chat.cancelVoice(); this._voiceNotice = notice;
+        const view = this._views.get('papercup'); if (view) this._updateChatControls(view);
+    }
+    _beginVoice(phase) {
+        const id = GLib.uuid_string_random(), chat = this._chat, view = this._views.get('papercup');
+        chat.beginVoice(id, phase);
+        const operation = {id, view, pui: this._settings.get_string('pui-path')};
+        operation.current = () => this._voiceOperation === operation && this._views.get('papercup') === view &&
+            operation.pui === this._settings.get_string('pui-path') && chat.voiceCurrent(id);
+        this._voiceOperation = operation; this._voiceNotice = ''; this._updateChatControls(view);
+        return operation;
+    }
+    _voiceFailed(operation, error) {
+        if (operation?.current()) this._stopVoice(String(error.message || error) + ' · your draft was preserved');
+    }
+    async _recordVoice() {
+        let operation;
+        try {
+            operation = this._beginVoice('permission');
+            const {id, pui} = operation, chat = this._chat;
+            operation.handle = this._bridge.record(pui, state => {
+                if (operation.current() && state.phase === 'recording' && chat.advanceVoice(id, 'recording'))
+                    this._updateChatControls(operation.view);
+            });
+            const recording = await operation.handle.done;
+            if (!operation.current() || !chat.advanceVoice(id, 'transcribing')) return;
+            this._updateChatControls(operation.view);
+            const request = {environment: chat.voice.environment, conversationId: chat.voice.conversationId,
+                requestId: id, operation: 'transcribe', audioBase64: recording.audioBase64};
+            operation.handle = this._bridge.voice(pui, request);
+            const payload = await operation.handle.done;
+            if (!operation.current() || !chat.transcribed(id, request, payload)) return;
+            this._voiceOperation = null; this._voiceNotice = 'Review your transcript, then Send';
+            this._renderChat(); operation.view.compose.grab_key_focus();
+        } catch (error) { this._voiceFailed(operation, error); }
+    }
+    async _readReply() {
+        let operation;
+        try {
+            operation = this._beginVoice('synthesizing');
+            const {id, pui} = operation, chat = this._chat;
+            const request = {environment: chat.voice.environment, conversationId: chat.voice.conversationId,
+                requestId: id, operation: 'speak', text: chat.spokenReply};
+            operation.handle = this._bridge.voice(pui, request);
+            const payload = await operation.handle.done;
+            if (!operation.current()) return;
+            const row = nativeVoiceResult(request, payload);
+            operation.handle = this._bridge.play(pui, row.audioBase64, state => {
+                if (operation.current() && state.phase === 'playing' && chat.advanceVoice(id, 'playing'))
+                    this._updateChatControls(operation.view);
+            });
+            await operation.handle.done;
+            if (operation.current()) this._stopVoice('Reply audio finished');
+        } catch (error) { this._voiceFailed(operation, error); }
+    }
     async _refreshChat() {
+        this._stopVoice();
         this._stopChatStream(); this._stopCards(); const token = this._chat.begin(), view = this._views.get('papercup');
         if (!view) return;
         const pui = this._settings.get_string('pui-path'); this._renderChat();
@@ -707,6 +782,7 @@ export default class Workbench extends Extension {
     async _loadEarlierChat() {
         const chat = this._chat, token = chat.generation, environment = chat.environment, id = chat.conversationId;
         try {
+            this._stopVoice();
             const beforeSeq = chat.beginEarlier(); this._renderChat();
             const page = await this._bridge.read(this._settings.get_string('pui-path'), {name: 'operatorTurns.page',
                 args: {conversationId: id, beforeSeq, limit: 200}, environment});
@@ -715,7 +791,7 @@ export default class Workbench extends Extension {
         finally { this._renderChat(); }
     }
     _sendChat() {
-        try { this._streamChat(this._chat.send(GLib.uuid_string_random())); }
+        try { this._stopVoice(); this._streamChat(this._chat.send(GLib.uuid_string_random())); }
         catch (error) { this._chat.fail(this._chat.generation, error); this._renderChat(); }
     }
     _controlChat(operation) {
@@ -899,7 +975,7 @@ export default class Workbench extends Extension {
     _hide(surface, restoreFocus) {
         const view = this._views.get(surface), state = this._states.get(surface);
         if (surface === 'inbox') { ++this._inbox.generation; this._inbox.clearContext(); }
-        if (surface === 'papercup') { this._stopChatStream(); this._stopCards(); this._chat.invalidate(); }
+        if (surface === 'papercup') { this._stopVoice(); this._stopChatStream(); this._stopCards(); this._chat.invalidate(); }
         if (state) { state.visible = false; ++state.generation; ++state.detailGeneration; }
         this._destroyActors(surface); this._position();
         if (restoreFocus && view?.priorWindow &&
