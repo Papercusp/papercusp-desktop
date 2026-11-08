@@ -6,7 +6,7 @@ import {pathToFileURL} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import test from 'node:test';
 import {buildSync} from 'esbuild';
-import {PanelState, InboxState, ChatState, ChatReply, sameEnvironment, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests,
+import {PanelState, InboxState, ChatState, ChatReply, nativeVoiceRequest, nativeVoiceResult, sameEnvironment, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests,
     agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow,
     organizerGroups, organizerMembers, arrangeOrganizerGroup}
     from '../native/gnome/panel-model.mjs';
@@ -154,6 +154,66 @@ function activeReply() {
     reply.receive(chatFrame('turn-meta',{schemaVersion:1,conversationId:'conversation',turnId:replyId}));
     return reply;
 }
+test('voice requests and receipts retain exact identity and reject malformed, empty and oversized results', () => {
+    const request = {environment:chatEnvironment,conversationId:replyId,requestId:userId,operation:'transcribe',audioBase64:'UklGRg=='};
+    assert.deepEqual(nativeVoiceRequest(request),request);
+    assert.equal(nativeVoiceRequest({...request,audioBase64:'AAAA'.repeat(649999)}).audioBase64.length,2599996);
+    for (const audioBase64 of ['AAB=','AB==','AA=A','AAAA='])
+        assert.throws(()=>nativeVoiceRequest({...request,audioBase64}),/voice/);
+    const receipt = {...request,text:'Recognized speech'}; delete receipt.audioBase64;
+    const payload = chatEnvelope([receipt]);
+    assert.equal(nativeVoiceResult(request,payload).text,'Recognized speech');
+    for (const row of [{...receipt,requestId:replyId},{...receipt,conversationId:userId},
+        {...receipt,operation:'speak'},{...receipt,text:''},{...receipt,text:'λ'.repeat(17000)}])
+        assert.throws(()=>nativeVoiceResult(request,chatEnvelope([row])),/receipt|usable/);
+    assert.throws(()=>nativeVoiceResult(request,chatEnvelope([receipt],{...chatEnvironment,store:{id:'foreign'}})),/receipt/);
+    assert.throws(()=>nativeVoiceResult(request,chatEnvelope([receipt,receipt])),/receipt/);
+    for (const bad of [{...request,conversationId:'foreign'},{...request,text:'injected'},
+        {...request,audioBase64:'not base64'},{...request,audioBase64:'AAAA'.repeat(650001)}])
+        assert.throws(()=>nativeVoiceRequest(bad),/voice/);
+    const speak={environment:chatEnvironment,conversationId:replyId,requestId:userId,operation:'speak',text:'Read this'};
+    assert.deepEqual(nativeVoiceRequest(speak),speak);
+    assert.equal(nativeVoiceResult(speak,chatEnvelope([{...speak,audioBase64:'AAEC'}])).audioBase64,'AAEC');
+    assert.throws(()=>nativeVoiceResult(speak,chatEnvelope([{...speak,audioBase64:'invalid'}])),/usable/);
+});
+test('voice transcription requires the live operation and preserves drafts through edits, refresh and cancellation', () => {
+    const {state}=loadedChat();state.draft='Original draft';
+    // Unit fixture uses a human-readable conversation id; use the exact bound
+    // identity here and exercise UUID admission separately above.
+    const request={environment:chatEnvironment,conversationId:'conversation',requestId:userId,operation:'transcribe'};
+    const payload=chatEnvelope([{...request,text:'Voice draft'}]);
+    state.beginVoice(userId,'permission');
+    assert.equal(state.advanceVoice(userId,'playing'),false);
+    assert.equal(state.advanceVoice(userId,'recording'),true);
+    assert.throws(()=>state.beginVoice(replyId,'permission'),/finish/);
+    assert.equal(state.advanceVoice(userId,'transcribing'),true);
+    assert.throws(()=>state.transcribed(userId,request,chatEnvelope([{...request,text:''}])),/usable/);
+    assert.equal(state.draft,'Original draft');
+    assert.equal(state.transcribed(userId,request,payload),true);
+    assert.equal(state.draft,'Voice draft');assert.equal(state.voicePhase,null);
+    assert.equal(state.send(replyId).modality,'voice');
+    for (const action of ['edit','refresh','cancel','send','earlier']) {
+        const {state}=loadedChat([turn(5)],true);state.draft='Keep me';
+        state.beginVoice(userId,'permission');state.advanceVoice(userId,'recording');state.advanceVoice(userId,'transcribing');
+        if(action==='edit')state.draft='New edit';
+        if(action==='refresh')state.begin();
+        if(action==='cancel')state.cancelVoice();
+        if(action==='send')state.send(replyId);
+        if(action==='earlier')state.beginEarlier();
+        assert.equal(state.transcribed(userId,request,payload),false,action);
+        if(action!=='refresh')assert.equal(state.draft,action==='edit'?'New edit':'Keep me',action);
+    }
+});
+test('voice playback cannot follow a changed conversation, draft or active reply', () => {
+    const {state}=loadedChat([turn(5,{role:'assistant',text:'Spoken reply'})]);
+    assert.equal(state.spokenReply,'Spoken reply');
+    state.beginVoice(userId,'synthesizing');
+    assert.equal(state.advanceVoice(userId,'playing'),true);
+    state.draft='Typed correction';
+    assert.equal(state.voiceCurrent(userId),false);
+    assert.equal(state.send(replyId).modality,'text');
+    assert.throws(()=>state.beginVoice(userId,'permission'),/Load/);
+});
 test('Papercup history rejects foreign, duplicate, unordered and incomplete pages without changing the transcript', () => {
     for (const rows of [[turn(3),turn(2)],[turn(2),turn(3,{id:'message-2'})],
         [turn(2,{conversationId:'foreign'})],[turn(2,{seq:NaN})],[turn(2,{role:'unknown'})],[turn(2,{text:null})]]) {
@@ -680,6 +740,41 @@ function runStreamDriver(temp, script, helper = false) {
     assert.match(result.stdout, /NATIVE_STREAM_PASS/);
     rmSync(temp,{recursive:true,force:true});
 }
+
+test('resident voice transport accepts bounded audio, isolates cancellation and reaps PUI before completion',
+    {skip:process.platform!=='linux',timeout:30000}, () => {
+        const temp=mkdtempSync(join(tmpdir(),"workbench-voice '$-")),pui=join(temp,'pui fixture');
+        writeFileSync(pui,`#!/usr/bin/env node
+const fs=require('node:fs');let input='';process.stdin.on('data',c=>input+=c);process.stdin.on('end',()=>{
+ const r=JSON.parse(input);
+ if(process.argv[2]!=='native-voice'){console.log(JSON.stringify({rows:[r]}));return;}
+ if(r.text==='wait'){fs.writeFileSync(${JSON.stringify(join(temp,'waiting-pid'))},String(process.pid));setInterval(()=>{},1000);return;}
+ console.log(JSON.stringify({environment:r.environment,rows:[{conversationId:r.conversationId,
+ requestId:r.requestId,operation:r.operation,text:'Recognized speech',audioBytes:r.audioBase64?.length}]}));
+});`,{mode:0o700});
+        const bridge=pathToFileURL(join(root,'native/gnome/bridge.js')).href;
+        runStreamDriver(temp,`import Gio from 'gi://Gio';import GLib from 'gi://GLib';
+import {ResidentBridge} from ${JSON.stringify(bridge)};
+const bridge=new ResidentBridge(${JSON.stringify(join(root,'native/gnome/helper.js'))}),pui=${JSON.stringify(pui)};
+const environment={endpoint:'http://selected',workspaceId:'exact',store:{id:'store'},agentChat:{scope:'workspace'}};
+const request={environment,conversationId:'15138297-1c15-4a94-8d70-e6bfdb15ae01',
+ requestId:'25138297-1c15-4a94-8d70-e6bfdb15ae01',operation:'transcribe',audioBase64:'AAAA'.repeat(32000)};
+const result=await bridge.voice(pui,request).done;
+if(result.rows[0].audioBytes!==128000||result.rows[0].requestId!==request.requestId)throw Error('voice admission or identity changed');
+const waiting=bridge.voice(pui,{...request,audioBase64:undefined,operation:'speak',text:'wait'});
+// Attach rejection handling before requesting cancellation.
+const outcome=waiting.done.then(()=>false,error=>error.message.includes('stopped'));
+const file=${JSON.stringify(join(temp,'waiting-pid'))};
+let attempts=0;while(!GLib.file_test(file,GLib.FileTest.EXISTS)){
+ if(++attempts>500)throw Error('voice fixture never started');
+ await new Promise(resolve=>GLib.timeout_add(GLib.PRIORITY_DEFAULT,10,()=>{resolve();return GLib.SOURCE_REMOVE;}));}
+const pid=new TextDecoder().decode(GLib.file_get_contents(file)[1]);
+const sibling=bridge.read(pui,{name:'reports.get',args:{id:'unrelated'}});waiting.cancel();
+if(!await outcome||GLib.file_test('/proc/'+pid,GLib.FileTest.EXISTS))throw Error('cancelled voice PUI was not reaped');
+if((await sibling).rows[0].args.id!=='unrelated')throw Error('voice cancellation poisoned another read');
+bridge.close();print('NATIVE_STREAM_PASS');
+`,true);
+    });
 
 test('actual GJS streaming bridge delivers incrementally, drains errors and reaps cancelled children',
     {skip:process.platform!=='linux',timeout:30000}, () => {

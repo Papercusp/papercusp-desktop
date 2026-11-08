@@ -541,6 +541,7 @@ export default class Probe extends Workbench {
     write('card-publish.json',{environment,event:'snapshot',data:{workspaceId:'exact',runId,version,snapshot:{openCards},...extra}});
    };
    const actions=()=>GLib.file_test(${JSON.stringify(join(temp,'card-actions.json'))},GLib.FileTest.EXISTS)?read('card-actions.json'):[];
+   check(view().panel.contains(global.stage.get_key_focus()),'canonical questions load preserves native panel keyboard focus');
    check(read('card-subscriptions.json')[0].conversationId===conversationId&&
     JSON.stringify(read('card-subscriptions.json')[0].environment)===JSON.stringify(environment),
     'questions subscribe with exact selected conversation and environment');
@@ -621,6 +622,9 @@ export default class Probe extends Workbench {
     'different-conversation','conversation fixture stores an exact raw identity without JSON quotes');
    write('cards-state.json',{version:13,openCards:[]});
    this._refreshChat();await waitFor(()=>this._chat.ready&&state.connected&&state.conversationId==='different-conversation');
+   inputLog.push({phase,focusAfterConversationRefresh:String(global.stage.get_key_focus())});
+   check(view().panel.contains(global.stage.get_key_focus()),
+    'conversation refresh restores keyboard focus from the GNOME stage fallback');
    check(state.cards.length===0&&this._cardDrafts.size===0,'conversation change clears prior questions and answer drafts');
    setPhase('cards same-origin secure link');
    const secure={...question('secure+/=&','browser'),presentation:{kind:'browser',
@@ -1022,7 +1026,7 @@ export default class Probe extends Workbench {
             assert.equal(evidence?.ok,true,JSON.stringify({evidence,progress,...result}));
             assert.equal(result.status,0,JSON.stringify(result));
             assert.equal(result.error,null,JSON.stringify(result));
-            const minimumAssertions={inbox:25,input:36,focus:11,resume:16,organizer:13,chat:31,cards:31};
+            const minimumAssertions={inbox:25,input:36,focus:11,resume:16,organizer:13,chat:31,cards:33};
             assert.ok(evidence.assertions.length>=minimumAssertions[journey],JSON.stringify(evidence));
             assert.deepEqual([...readFileSync(screenshot).subarray(0,8)], [137,80,78,71,13,10,26,10]);
             if(evidenceDirectory){

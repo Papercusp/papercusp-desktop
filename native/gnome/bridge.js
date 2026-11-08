@@ -1,15 +1,20 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import {nativeVoiceRequest} from './panel-model.mjs';
 
 // The PUI command owns discovery, IPC/HTTP, credentials and its read allowlist.
 // No shell, bearer file, local server or second authorization implementation.
 export function nativeRead(pui, request, cancellable = null, command = 'native-read') {
     if (typeof pui !== 'string' || !pui.trim()) return Promise.reject(new Error('PUI is not configured'));
-    if (!['native-read', 'native-inbox', 'native-cards'].includes(command) ||
+    if (!['native-read', 'native-inbox', 'native-cards', 'native-voice'].includes(command) ||
         (command === 'native-cards' && request.operation !== 'respond'))
         return Promise.reject(new Error('Unsupported native operation'));
+    try { if (command === 'native-voice') nativeVoiceRequest(request); }
+    catch (error) { return Promise.reject(error); }
+    if (cancellable?.is_cancelled()) return Promise.reject(new Error('Native operation stopped'));
     const body = JSON.stringify(request);
-    if (new TextEncoder().encode(body).length > 64 * 1024) return Promise.reject(new Error('Native request exceeds its limit'));
+    if (new TextEncoder().encode(body).length > (command === 'native-voice' ? 2_700_000 : 64 * 1024))
+        return Promise.reject(new Error('Native request exceeds its limit'));
     return new Promise((resolve, reject) => {
         let process;
         try {
@@ -17,22 +22,30 @@ export function nativeRead(pui, request, cancellable = null, command = 'native-r
                 Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
         } catch (error) { reject(error); return; }
         let timedOut = false;
-        let timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, command === 'native-inbox' ? 65000 : 22000, () => {
+        let timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, command === 'native-voice' ? 92000 : command === 'native-inbox' ? 65000 : 22000, () => {
             timer = null; timedOut = true; process.force_exit(); return GLib.SOURCE_REMOVE;
         });
         const cancel = cancellable?.connect(() => process.force_exit());
-        process.communicate_utf8_async(body, cancellable, (child, result) => {
+        process.communicate_utf8_async(body, cancellable, async (child, result) => {
             if (timer) GLib.source_remove(timer);
             if (cancel) cancellable.disconnect(cancel);
+            let payload, failure;
             try {
                 const [, stdout, stderr] = child.communicate_utf8_finish(result);
                 if (timedOut) throw new Error('The selected operator did not respond in time');
                 if (!child.get_successful()) throw new Error(stderr.trim() || stdout.trim() || 'PUI read failed');
-                const payload = JSON.parse(stdout);
+                payload = JSON.parse(stdout);
                 if (payload.ok === false || payload.error || !Array.isArray(payload.rows))
                     throw new Error(payload.error || 'The operator returned no row envelope');
-                resolve(payload);
-            } catch (error) { reject(error); }
+            } catch (error) { failure = error; child.force_exit(); }
+            // Cancellation may finish communicate before the killed child has
+            // exited. Do not report completion while the PUI process is alive.
+            try {
+                await new Promise((done, fail) => child.wait_async(null, (process, waitResult) => {
+                    try { process.wait_finish(waitResult); done(); } catch (error) { fail(error); }
+                }));
+                if (failure) reject(failure); else resolve(payload);
+            } catch (error) { reject(failure || error); }
         });
     });
 }
@@ -104,6 +117,7 @@ export class ResidentBridge {
         this._writes = Promise.resolve(); this._closed = false;
     }
     inbox(pui, request) { return this.read(pui, request, 'native-inbox'); }
+    voice(pui, request) { return this._request(pui, request, 'native-voice'); }
     read(pui, request, command = 'native-read') {
         return this._request(pui, request, command).done;
     }
@@ -114,12 +128,14 @@ export class ResidentBridge {
         const refused = message => ({done: Promise.reject(new Error(message)), cancel() {}});
         if (this._closed) return refused('Workbench has stopped');
         const streaming = command === 'native-chat' || (command === 'native-cards' && request.operation === 'subscribe');
-        if ((!streaming && !['native-read', 'native-inbox', 'native-cards'].includes(command)) ||
+        if ((!streaming && !['native-read', 'native-inbox', 'native-cards', 'native-voice'].includes(command)) ||
             (command === 'native-cards' && !['subscribe', 'respond'].includes(request.operation)) ||
             (streaming && typeof onFrame !== 'function') || (!streaming && onFrame))
             return refused('Unsupported native operation');
+        try { if (command === 'native-voice') nativeVoiceRequest(request); }
+        catch (error) { return refused(error.message); }
         const bytes = new TextEncoder().encode(JSON.stringify({request, command}));
-        if (bytes.length > 64 * 1024) return refused('Native request exceeds its limit');
+        if (bytes.length > (command === 'native-voice' ? 2_700_000 : 64 * 1024)) return refused('Native request exceeds its limit');
         if (this._child && this._pui !== pui) this._stop(new Error('Selected PUI connection changed'));
         if (!this._child) {
             try {
@@ -133,7 +149,7 @@ export class ResidentBridge {
         }
         const id = ++this._serial, child = this._child, cancel = this._cancel;
         const done = new Promise((resolve, reject) => {
-            const timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, streaming ? 617000 : command === 'native-inbox' ? 67000 : 24000, () => {
+            const timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, streaming ? 617000 : command === 'native-voice' ? 94000 : command === 'native-inbox' ? 67000 : 24000, () => {
                 this._stop(new Error('Native helper did not respond in time')); return GLib.SOURCE_REMOVE;
             });
             this._pending.set(id, {resolve, reject, timer, onFrame, streaming, failure: null});
@@ -141,8 +157,8 @@ export class ResidentBridge {
         });
         return {done, cancel: () => {
             const pending = this._pending.get(id);
-            if (!pending?.streaming || pending.failure) return;
-            pending.failure = new Error('Native stream stopped; reconcile the saved reply');
+            if (!pending || pending.failure) return;
+            pending.failure = new Error(pending.streaming ? 'Native stream stopped; reconcile the saved reply' : 'Native operation stopped');
             this._write(child, cancel, {id, cancel: true});
         }};
     }

@@ -361,16 +361,17 @@ function conversationRow(payload, environment) {
 // Projection of the canonical chat-protocol v1, shared by Node and real Shell.
 // A transport disconnect is never a durable cancellation or permission to resend.
 export class ChatReply {
-    constructor(environment, conversationId, text, userTurnId) {
+    constructor(environment, conversationId, text, userTurnId, modality = 'text') {
         if (!sameEnvironment(environment, environment) || !conversationId || !uuid(userTurnId))
             throw new Error('Missing canonical conversation or message identity');
-        Object.assign(this, {environment: snapshot(environment), conversationId, text, userTurnId,
+        if (!['text', 'voice'].includes(modality)) throw new Error('Invalid message modality');
+        Object.assign(this, {environment: snapshot(environment), conversationId, text, userTurnId, modality,
             turnId: '', sequence: 0, savedUser: null, phase: 'connecting', complete: false,
             connected: true, displayText: '', raw: '', tools: [], events: new Map()});
     }
     get sendRequest() {
         return {environment: snapshot(this.environment), conversationId: this.conversationId,
-            operation: 'send', text: this.text, userTurnId: this.userTurnId, modality: 'text'};
+            operation: 'send', text: this.text, userTurnId: this.userTurnId, modality: this.modality};
     }
     control(operation) {
         if (!['reconnect', 'cancel'].includes(operation) || !this.turnId || this.complete)
@@ -477,15 +478,20 @@ export class ChatReply {
 }
 
 export class ChatState {
-    constructor() { this.generation = 0; this.drafts = new Map(); this.referenceContexts = new Map(); this.begin(); this.loading = false; }
+    constructor() { this.generation = 0; this.drafts = new Map(); this.draftModalities = new Map(); this.referenceContexts = new Map(); this.begin(); this.loading = false; }
     get conversationId() { return this.conversation?.id || ''; }
     get ready() { return this.loaded && this.conversationId && sameEnvironment(this.environment, this.environment); }
     get draftKey() { return this.conversationId && sameEnvironment(this.environment, this.environment) ?
         JSON.stringify([this.environment.endpoint, this.environment.workspaceId, this.environment.store.id,
             this.environment.agentChat.scope, this.conversationId]) : null; }
     get draft() { return this.drafts.get(this.draftKey) || ''; }
-    set draft(text) { if (this.draftKey) this.drafts.set(this.draftKey, text); }
+    set draft(text) {
+        if (!this.draftKey) return;
+        if (this.draft !== text) { this.cancelVoice(); this.draftModalities.set(this.draftKey, 'text'); }
+        this.drafts.set(this.draftKey, text);
+    }
     begin() {
+        this.cancelVoice();
         ++this.generation;
         Object.assign(this, {environment: null, conversation: null, turns: [], loading: true,
             loaded: false, hasMoreEarlier: false, reply: null, error: null, referencePlans: [], referenceError: null});
@@ -503,7 +509,7 @@ export class ChatState {
     beginEarlier() {
         if (!this.ready || this.loading || this.reply || !this.hasMoreEarlier || !sequence(this.turns[0]?.seq))
             throw new Error('Earlier messages are unavailable');
-        this.loading = true; this.error = null; return this.turns[0].seq;
+        this.cancelVoice(); this.loading = true; this.error = null; return this.turns[0].seq;
     }
     settle(token, environment, conversationId, payload, beforeSeq = null) {
         if (token !== this.generation) return false;
@@ -552,9 +558,44 @@ export class ChatState {
     }
     get canSend() { return Boolean(this.ready && !this.loading && (!this.reply || this.reply.complete) &&
         this.draft.trim() && new TextEncoder().encode(this.draft).length <= 32 * 1024); }
+    get canUseVoice() { return Boolean(this.ready && !this.loading && (!this.reply || this.reply.complete)); }
+    get spokenReply() {
+        return this.reply?.phase === 'completed' && this.reply.displayText ? this.reply.displayText :
+            [...this.turns].reverse().find(turn => turn.role === 'assistant')?.text || '';
+    }
+    beginVoice(id, phase) {
+        if (!uuid(id) || !this.canUseVoice || this.voice || !['permission', 'synthesizing'].includes(phase))
+            throw new Error('Load the conversation and finish the current voice operation first');
+        this.voice = {id, generation: this.generation, environment: snapshot(this.environment),
+            conversationId: this.conversationId, draft: this.draft};
+        this.voicePhase = phase; return id;
+    }
+    voiceCurrent(id) {
+        const voice = this.voice;
+        return Boolean(voice && voice.id === id && voice.generation === this.generation && this.canUseVoice &&
+            sameEnvironment(voice.environment, this.environment) && voice.conversationId === this.conversationId &&
+            voice.draft === this.draft);
+    }
+    advanceVoice(id, phase) {
+        if (!this.voiceCurrent(id) || !['permission:recording', 'recording:transcribing', 'synthesizing:playing']
+            .includes(this.voicePhase + ':' + phase)) return false;
+        this.voicePhase = phase; return true;
+    }
+    cancelVoice() { this.voice = null; this.voicePhase = null; }
+    transcribed(id, request, payload) {
+        if (!this.voiceCurrent(id)) return false;
+        if (this.voicePhase !== 'transcribing' || request.requestId !== id || request.operation !== 'transcribe' ||
+            request.conversationId !== this.conversationId || !sameEnvironment(request.environment, this.environment))
+            throw new Error('The voice conversation changed; your draft was preserved');
+        const row = nativeVoiceResult(request, payload);
+        this.drafts.set(this.draftKey, row.text); this.draftModalities.set(this.draftKey, 'voice');
+        this.cancelVoice(); return true;
+    }
     send(userTurnId) {
         if (!this.canSend) throw new Error('Load the conversation and enter a bounded message first');
-        this.reply = new ChatReply(this.environment, this.conversationId, this.draft, userTurnId);
+        this.cancelVoice();
+        this.reply = new ChatReply(this.environment, this.conversationId, this.draft, userTurnId,
+            this.draftModalities.get(this.draftKey) || 'text');
         this.error = null; return this.reply.sendRequest;
     }
     receive(token, frame) {
@@ -571,6 +612,38 @@ export class ChatState {
         if (token !== this.generation) return;
         this.reply?.disconnected(); this.error = String(error.message || error);
     }
+}
+// Reuse the existing PUI VoiceRequest and canonical receipt. Devices stay local;
+// neither an unacknowledged transcript nor a foreign audio result can be applied.
+export function nativeVoiceRequest(request) {
+    if (!sameEnvironment(request?.environment, request?.environment) || !uuid(request?.conversationId) ||
+        !uuid(request?.requestId) || !['transcribe', 'speak'].includes(request?.operation))
+        throw new Error('Select an exact voice conversation and request');
+    const bounded = (text, max) => typeof text === 'string' && text.trim() && new TextEncoder().encode(text).length <= max;
+    if (request.operation === 'speak' ? (!bounded(request.text, 32 * 1024) || request.audioBase64 !== undefined) :
+        (request.text !== undefined || !canonicalBase64(request.audioBase64, 2_600_000)))
+        throw new Error('Invalid or oversized native voice request');
+    return snapshot(request);
+}
+function canonicalBase64(text, limit) {
+    if (typeof text !== 'string' || !text.length || text.length > limit || text.length % 4 ||
+        !/^[A-Za-z0-9+/]*={0,2}$/.test(text)) return false;
+    // A flat character class stays bounded for a full minute of audio. Check
+    // the padding bits too so alternate encodings cannot alias one receipt.
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    return text.endsWith('==') ? (alphabet.indexOf(text.at(-3)) & 15) === 0 :
+        !text.endsWith('=') || (alphabet.indexOf(text.at(-2)) & 3) === 0;
+}
+export function nativeVoiceResult(request, payload) {
+    const rows = readRows(payload), row = rows[0];
+    if (!sameEnvironment(request.environment, payload.environment) || rows.length !== 1 ||
+        row?.conversationId !== request.conversationId || row?.requestId !== request.requestId ||
+        row?.operation !== request.operation || !['transcribe', 'speak'].includes(request.operation))
+        throw new Error('Voice receipt belongs to a different environment, conversation or request');
+    if (request.operation === 'transcribe' ? (typeof row.text !== 'string' || !row.text.trim() ||
+        new TextEncoder().encode(row.text).length > 32 * 1024) : !canonicalBase64(row.audioBase64, 11_184_812))
+        throw new Error('No usable voice result; your draft was preserved');
+    return snapshot(row);
 }
 export class InboxState {
     constructor() {

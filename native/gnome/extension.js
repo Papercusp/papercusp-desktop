@@ -672,6 +672,11 @@ export default class Workbench extends Extension {
         const pui = this._settings.get_string('pui-path'); this._renderChat();
         const current = () => token === this._chat.generation && this._views.get('papercup') === view &&
             pui === this._settings.get_string('pui-path');
+        const restoreFocus = () => {
+            const focus = global.stage.get_key_focus();
+            // A deactivated focused entry falls back to MetaStage on GNOME.
+            if (this._chat.ready && (!focus || focus === global.stage)) view.compose.grab_key_focus();
+        };
         try {
             const environment = oneRow(await this._bridge.read(pui, {name: 'operator.identity', args: {}}));
             if (!current()) return;
@@ -684,7 +689,7 @@ export default class Workbench extends Extension {
             if (current()) {
                 this._chat.settle(token, environment, id, page); this._renderChat();
                 this._connectCards();
-                if (!global.stage.get_key_focus()) view.compose.grab_key_focus();
+                restoreFocus();
             }
             try {
                 const plans = await this._bridge.read(pui, {name: 'plans.list', args: {}, environment});
@@ -694,9 +699,8 @@ export default class Workbench extends Extension {
         finally {
             if (current()) {
                 this._renderChat();
-                // The entry was unavailable at construction until canonical
-                // history arrived. Restore focus only if no other actor owns it.
-                if (this._chat.ready && !global.stage.get_key_focus()) view.compose.grab_key_focus();
+                // Restore only when no other real actor owns keyboard focus.
+                restoreFocus();
             }
         }
     }
