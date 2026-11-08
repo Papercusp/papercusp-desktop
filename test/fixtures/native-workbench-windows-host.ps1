@@ -1130,7 +1130,11 @@ public static class WorkbenchNativeHostFixture
             clear("deny"); reload(); Until(() => chat.Ready); click("send");
             Until(() => chat.Reply != null && chat.Reply.DisplayText == "Partial" && !chat.Reply.Complete);
             Check(compose.Text == "" && chat.Reply.SavedUser != null, "only canonical user acknowledgement clears the native draft");
-            Check(Find<System.Windows.Controls.TextBox>(panel, "Papercup message text") != null && !chat.Reply.DisplayText.Contains("internal"),
+            var displayedMessages = Elements<System.Windows.Controls.RichTextBox>(panel)
+                .Where(view => System.Windows.Automation.AutomationProperties.GetName(view) == "Papercup message text")
+                .Select(view => new System.Windows.Documents.TextRange(view.Document.ContentStart, view.Document.ContentEnd).Text).ToArray();
+            Check(displayedMessages.Any(text => text.Trim() == "Partial") &&
+                displayedMessages.All(text => !text.Contains("internal")) && !chat.Reply.DisplayText.Contains("internal"),
                 "native incremental display excludes private text");
             Until(() => chat.Reply == null && chat.Ready);
             Check(chat.Turns.Any(t => PanelState.Text(t, "role") == "assistant" && PanelState.Text(t, "text") == "Partial reply"),
