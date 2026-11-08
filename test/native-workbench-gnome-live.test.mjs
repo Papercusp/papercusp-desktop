@@ -44,7 +44,8 @@ function fixturePui(temp) {
     writeFileSync(file, `#!/usr/bin/env node
 if(process.argv[2]==='workbench'){
 require('node:fs').writeFileSync(${JSON.stringify(join(temp,'terminal-launch.json'))},JSON.stringify({
-argv:process.argv.slice(2),tty:[0,1,2].map(fd=>require('node:tty').isatty(fd))}));
+argv:process.argv.slice(2),tty:[0,1,2].map(fd=>require('node:tty').isatty(fd)),
+operator:process.env.PUI_OPERATOR,sharedOperator:process.env.PAPERCUSP_OPERATOR_URL}));
 process.exit(0);}
 let text='';process.stdin.on('data',c=>text+=c);process.stdin.on('end',()=>{
 const r=JSON.parse(text);let rows=[];
@@ -420,6 +421,57 @@ print('PUI_CONNECTION_SELECTION_PASS');`);
         assert.doesNotMatch(result.stderr,/Gjs-CRITICAL|JS ERROR|GLib-CRITICAL/);
     }));
 
+test('installed GNOME bridge reads canonical Reports and rejects a foreign environment',
+    {skip: process.platform !== 'linux' || process.env.PAPERCUSP_NATIVE_INSTALLED_REPORTS !== '1', timeout: 100000},
+    () => withNativeFixture('workbench-installed-reports-', async temp => {
+        const extension = process.env.PAPERCUSP_NATIVE_EXTENSION;
+        const operator = process.env.PAPERCUSP_NATIVE_OPERATOR;
+        assert.ok(extension && operator, 'Select the exact installed extension and operator');
+        const driver = join(temp, 'driver.mjs');
+        writeFileSync(driver, `import Gio from 'gi://Gio';
+import {ResidentBridge} from ${JSON.stringify(pathToFileURL(join(extension, 'bridge.js')).href)};
+const schema=Gio.SettingsSchemaSource.new_from_directory(${JSON.stringify(join(extension, 'schemas'))},Gio.SettingsSchemaSource.get_default(),false);
+const settings=new Gio.Settings({settings_schema:schema.lookup('org.gnome.shell.extensions.papercusp-workbench',false)});
+const pui=settings.get_string('pui-path'),operator=settings.get_string('operator');
+if(operator!==${JSON.stringify(operator)}||!pui)throw Error('Installed preferences do not select the expected connection');
+const bridge=new ResidentBridge(${JSON.stringify(join(extension, 'helper.js'))});
+bridge.selectOperator(operator);
+const checks=[];const check=(value,name)=>{if(!value)throw Error(name);checks.push(name);};
+try {
+ const identity=await bridge.read(pui,{name:'operator.identity'}),environment=identity.rows[0];
+ check(identity.rows.length===1&&environment.endpoint.startsWith(operator)&&!!environment.workspaceId&&!!environment.store.id,'installed PUI selects the configured operator');
+ const list=await bridge.read(pui,{name:'reports.list',args:{limit:5},environment});
+ check(Array.isArray(list.rows)&&list.rows.length>0,'canonical Reports list returns selectable rows');
+ const reportId=list.rows[0].report_id;
+ check(typeof reportId==='string'&&reportId.length>0,'canonical list preserves the exact report ID');
+ const detail=await bridge.read(pui,{name:'reports.get',args:{reportId},environment});
+ check(detail.rows.length===1&&detail.rows[0].report_id===reportId&&typeof detail.rows[0].body_md==='string'&&detail.rows[0].body_md.length>0,'canonical detail returns the selected report and full Markdown');
+ const missing=await bridge.read(pui,{name:'reports.get',args:{reportId:'workbench-missing-'+Date.now()},environment});
+ check(missing.rows.length===0,'a missing exact report returns an empty result');
+ for(const field of ['workspaceId','endpoint','store','agentChat']){
+  const foreign=JSON.parse(JSON.stringify(environment));
+  if(field==='store')foreign.store.id+='-foreign';else if(field==='agentChat')foreign.agentChat.scope+='-foreign';else foreign[field]+='-foreign';
+  let refused=false;try{await bridge.read(pui,{name:'reports.get',args:{reportId},environment:foreign});}
+  catch(error){refused=/selected environment changed/.test(error.message);}
+  check(refused,'foreign '+field+' is refused before report access');
+ }
+ print('INSTALLED_CANONICAL_REPORTS_PASS '+JSON.stringify({checks,environment,pui,reportId,bodyChars:detail.rows[0].body_md.length}));
+} finally {bridge.close();}`);
+        checkScript(driver);
+        const result = await runOwned('gjs', ['-m', driver], process.env, 90000, temp);
+        assert.equal(result.status, 0, JSON.stringify(result));
+        assert.match(result.stdout, /INSTALLED_CANONICAL_REPORTS_PASS/);
+        assert.doesNotMatch(result.stderr, /Gjs-CRITICAL|JS ERROR|GLib-CRITICAL/);
+        const proof = JSON.parse(result.stdout.split('INSTALLED_CANONICAL_REPORTS_PASS ')[1].split('\n')[0]);
+        assert.equal(proof.checks.length, 9);
+        if (process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR) {
+            mkdirSync(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR, {recursive:true});
+            writeFileSync(join(process.env.PAPERCUSP_NATIVE_EVIDENCE_DIR, 'installed-canonical-reports.json'),
+                JSON.stringify(proof, null, 2) + '\n');
+        }
+        console.log('INSTALLED_CANONICAL_REPORTS_PASS ' + JSON.stringify(proof));
+    }));
+
 test('production GNOME installation reports real reload state and survives private Shell login restarts',
     {skip:process.platform!=='linux',timeout:90000}, () => withNativeFixture('workbench-login-',async temp=>{
             const bundle=packageNativeWorkbench(join(temp,'bundle'));
@@ -560,6 +612,7 @@ export default class Probe extends Workbench {
  async finish(error){progress();if(error||!GLib.file_test(${JSON.stringify(screenshot)},GLib.FileTest.EXISTS)){try{await captureScreen();}catch(cause){inputLog.push({screenshotError:String(cause)});error||=cause;}}GLib.file_set_contents(${JSON.stringify(resultFile)},JSON.stringify({ok:!error,error:error?String(error)+'; '+String(error.stack||''):null,phase,journey,inputLog,actionMode:Main.actionMode,overview:Main.overview.visible,windows:global.get_window_actors().map(actor=>({title:actor.meta_window.get_title(),minimized:actor.meta_window.minimized,focused:actor.meta_window===global.display.focus_window})),states:[...this._states].map(([surface,s])=>({surface,visible:s.visible,pinned:s.pinned,selection:s.selection,detail:s.detail})),assertions}));if(this._focusFixture){this._focusFixture.force_exit();await new Promise(resolve=>this._focusFixture.wait_async(null,(child,result)=>{child.wait_finish(result);resolve();}));}if(this._inputCapture)global.stage.disconnect(this._inputCapture);global.stage.disconnect(this._pointerCapture);this.disable();global.context.terminate();}
  async probe(){
   this._settings.set_string('pui-path',${JSON.stringify(pui)});
+  this._settings.set_string('operator','http://workbench-selected.invalid');
   check(this._bindings.size===5,'native shortcut acquisition');
   const qa=this._states.get('quick-access'),goals=this._states.get('goals');
   const seat=Clutter.get_default_backend().get_default_seat();
@@ -996,7 +1049,20 @@ export default class Probe extends Workbench {
   await chord([Clutter.KEY_Super_L,Clutter.KEY_Alt_L,Clutter.KEY_space]);
   await waitFor(()=>!qa.visible);
   check(this._views.size===0,'seat shortcut toggles pinned panel closed');
-  if(journey==='input')return this.finish(null);
+  if(journey==='input'){
+   setPhase('connection change clears visible panel data');
+   await chord([Clutter.KEY_Super_L,Clutter.KEY_Alt_L,Clutter.KEY_space]);
+   await waitFor(()=>qa.visible&&Object.values(qa.sources).some(source=>source.status==='ready'));
+   const generation=qa.generation;
+   this._settings.set_string('operator','http://workbench-other.invalid');
+   await waitFor(()=>this._selectedOperator==='http://workbench-other.invalid'&&this._views.size===0);
+   check(qa.generation>generation&&[...this._states.values()].every(state=>
+    !state.visible&&Object.keys(state.sources).length===0&&state.selection===null&&state.detail===null),
+    'connection change dismisses panels and retires old data, detail and selection');
+   check(this._bridge._operator==='http://workbench-other.invalid'&&this._inboxEnvironment===null,
+    'connection change selects the new helper backend and retires Inbox identity');
+   return this.finish(null);
+  }
   }
   setPhase('focus fixture mapping');
   this._focusFixture=Gio.Subprocess.new(['gjs','-m',${JSON.stringify(focusDriver)}],Gio.SubprocessFlags.NONE);
@@ -1145,6 +1211,9 @@ export default class Probe extends Workbench {
     GLib.get_host_name(),'ended-owner']),
     'production GIO terminal launch preserves exact arguments and quoted PUI executable path');
   check(launched.tty.every(Boolean),'GIO launches the selected command inside a real terminal PTY');
+  check(launched.operator==='http://workbench-selected.invalid'&&
+    launched.sharedOperator==='http://workbench-selected.invalid',
+    'GIO terminal inherits both aliases of the selected Workbench connection');
   check(!qa.visible,'real terminal handoff dismisses its native launcher');
   this.finish(null);
  }
