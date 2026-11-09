@@ -999,12 +999,22 @@ export default class Workbench extends Extension {
         const view = this._views.get('inbox'); if (!view) return;
         const inbox = this._inbox, query = this._states.get('inbox').query; inbox.retainVisibleSelection(query);
         if (!view.inboxList) {
-            for (const [operation, title] of [['start', 'Resolve visible'], ['stop', 'Stop'], ['resume', 'Resume'], ['apply', 'Apply selected']]) view.content.add_child(button(title, () => this._prepareInbox(operation)));
+            view.inboxRunControls = new Map();
+            for (const [operation, title] of [['start', 'Resolve visible'], ['stop', 'Stop'], ['resume', 'Resume'], ['apply', 'Apply selected']]) {
+                const control = button(title, () => this._prepareInbox(operation));
+                if (operation === 'stop' || operation === 'resume') view.inboxRunControls.set(operation, control);
+                view.content.add_child(control);
+            }
             view.runField = new St.Entry({text: this._inboxRunId || '', hint_text: 'Saved run ID', can_focus: true, x_expand: true, accessible_name: 'Saved Inbox run ID'});
             view.content.add_child(view.runField);
             view.content.add_child(button('Open saved run', () => { this._inboxRunId = view.runField.get_text().trim() || null; this._refreshInbox(); }));
             for (const key of ['inboxConfirm', 'inboxList', 'inboxContext', 'inboxBulk']) { view[key] = new St.BoxLayout({vertical: true, x_expand: true}); view.content.add_child(view[key]); }
             view.bulkStatus = label(''); view.content.add_child(view.bulkStatus);
+        }
+        for (const [operation, control] of view.inboxRunControls) {
+            let enabled = false;
+            try { inbox.request(operation, this._inboxEnvironment, {query}); enabled = true; } catch { /* Unavailable actions stay out of pointer and keyboard navigation. */ }
+            control.reactive = enabled; control.can_focus = enabled;
         }
         const rows = inbox.results(query);
         view.status.set_text(inbox.listError ? 'Inbox unavailable — ' + inbox.listError : inbox.listReady ? rows.length + ' questions' + (inbox.listPartial ? ' · Partial list' : '') : 'Loading questions…');
