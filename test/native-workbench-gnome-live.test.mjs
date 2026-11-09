@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {appendFileSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+import {appendFileSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -16,7 +16,8 @@ async function withNativeFixture(prefix, action) {
     const temp=mkdtempSync(join(tmpdir(),prefix));
     try {
         const result=await action(temp);
-        rmSync(temp,{recursive:true,force:true});
+        if(existsSync(join(temp,'stall-sample')))console.error('GNOME_NATIVE_STALL_EVIDENCE '+temp);
+        else rmSync(temp,{recursive:true,force:true});
         return result;
     } catch(error) {
         // Keep generated drivers, installed sources, progress and process output
@@ -214,6 +215,63 @@ function runOwned(command, args, env, timeout = 35000, evidenceDir = null) {
     });
 }
 
+// Yama restricts sibling attachment on Ubuntu. Permit this harness process and
+// its descendants to inspect only the private debuggee, without a host policy
+// change or permission for unrelated processes. The allowlist survives exec.
+const nativeDebugPrefix=['python3','-c',
+    'import ctypes,os,sys\nlibc=ctypes.CDLL(None,use_errno=True)\n'+
+    'rc=libc.prctl(0x59616d61,int(sys.argv[1]),0,0,0)\n'+
+    'if rc: raise OSError(ctypes.get_errno(),"PR_SET_PTRACER failed")\n'+
+    'os.execvp(sys.argv[2],sys.argv[2:])',String(process.pid)];
+function captureNativeStack(pid,directory,timeout) {
+    return runOwned('gdb',['-nx','-batch','-iex','set debuginfod enabled off',
+        '-p',String(pid),'-ex','thread apply all bt','-ex','detach'],process.env,timeout,directory);
+}
+function startNativeStallObserver(temp, {staleMs=8000,pollMs=250,sampleTimeoutMs=12000,
+    stat=statSync,capture=captureNativeStack}={}) {
+    const progressFile=join(temp,'progress.json');
+    let stopped=false,timer,inFlight=Promise.resolve(),sampled=false;
+    const receipt={status:'observing',staleMs,sampleTimeoutMs,missingReads:0,partialReads:0};
+    async function inspect() {
+        let progress,updated;
+        try {
+            // Cleanup can delete the file between read and stat; a write can be
+            // observed before its JSON is complete. Neither is a Shell stall.
+            progress=JSON.parse(readFileSync(progressFile,'utf8'));
+            updated=stat(progressFile).mtimeMs;
+        } catch(error) {
+            if(error.code==='ENOENT'){receipt.missingReads++;return;}
+            if(error instanceof SyntaxError){receipt.partialReads++;return;}
+            throw error;
+        }
+        if(!Number.isSafeInteger(progress.shellPid)||progress.shellPid<=1||
+            Date.now()-updated<=staleMs)return;
+        sampled=true;
+        Object.assign(receipt,{status:'sampling',progress,staleForMs:Date.now()-updated,
+            directory:join(temp,'stall-sample')});
+        mkdirSync(receipt.directory,{recursive:true});
+        receipt.process=await capture(progress.shellPid,receipt.directory,sampleTimeoutMs);
+        receipt.status=receipt.process.status===0&&!receipt.process.error?'captured':'capture-failed';
+    }
+    function schedule() {
+        timer=setTimeout(()=>{
+            inFlight=inspect().catch(error=>{
+                sampled=true;receipt.status='observer-failed';receipt.error=String(error);
+            }).finally(()=>{if(!stopped&&!sampled)schedule();});
+        },pollMs);
+    }
+    schedule();
+    return {async stop() {
+        stopped=true;clearTimeout(timer);
+        // Join an active sampler before withNativeFixture can remove its files.
+        await inFlight;
+        if(receipt.status==='observing')receipt.status='no-stall';
+        try {writeFileSync(join(temp,'native-stall-observer.json'),JSON.stringify(receipt,null,2)+'\n');}
+        catch(error){if(error.code!=='ENOENT')throw error;receipt.fixtureRemoved=true;}
+        return receipt;
+    }};
+}
+
 async function privateVoiceAudio(temp) {
     const directory=join(temp,'pulse');mkdirSync(directory,{mode:0o700});
     const server='unix:'+join(directory,'native');
@@ -340,6 +398,128 @@ test('native harness deletes successful fixtures',async () => {
     await withNativeFixture('workbench-harness-',async temp=>{completed=temp;writeFileSync(join(temp,'result.json'),'{}');});
     assert.equal(existsSync(completed),false);
 });
+
+test('native stall observer tolerates progress deletion between read and stat before fixture cleanup',
+    {timeout:5000},async()=>{
+        let completed,receipt,captures=0;
+        await withNativeFixture('workbench-observer-',async temp=>{
+            completed=temp;
+            const file=join(temp,'progress.json');
+            writeFileSync(file,JSON.stringify({shellPid:process.pid,heartbeat:1}));
+            let observed;
+            const raced=new Promise(resolve=>{observed=resolve;});
+            const observer=startNativeStallObserver(temp,{pollMs:5,staleMs:0,
+                stat:path=>{rmSync(path);observed();return statSync(path);},
+                capture:async()=>{captures++;throw Error('Cleanup must not trigger sampling');}});
+            try {await raced;}finally{receipt=await observer.stop();}
+            assert.equal(existsSync(join(temp,'native-stall-observer.json')),true);
+        });
+        assert.equal(receipt.status,'no-stall');
+        assert.equal(receipt.missingReads,1);
+        assert.equal(captures,0);
+        assert.equal(existsSync(completed),false);
+    });
+
+test('native stall observer stops normally when the entire fixture has disappeared',
+    {timeout:5000},async()=>{
+        const temp=mkdtempSync(join(tmpdir(),'workbench-observer-'));
+        const observer=startNativeStallObserver(temp,{pollMs:5});
+        rmSync(temp,{recursive:true,force:true});
+        await new Promise(resolve=>setTimeout(resolve,30));
+        const receipt=await observer.stop();
+        assert.equal(receipt.status,'no-stall');
+        assert.equal(receipt.fixtureRemoved,true);
+        assert.ok(receipt.missingReads>0);
+        assert.equal(existsSync(temp),false,'An observer must not recreate a removed fixture');
+    });
+
+test('native stall observer ignores partial and fresh progress then samples stale progress only once',
+    {timeout:5000},async()=>{
+    let retained;
+    try {await withNativeFixture('workbench-observer-',async temp=>{
+        retained=temp;
+        const file=join(temp,'progress.json');
+        writeFileSync(file,'{');
+        let captures=0,receipt,started,finished;
+        const sampled=new Promise(resolve=>{started=resolve;});
+        const captured=new Promise(resolve=>{finished=resolve;});
+        const observer=startNativeStallObserver(temp,{pollMs:5,staleMs:1000,
+            capture:async(pid,directory,timeout)=>{
+                captures++;assert.equal(pid,process.pid);started();
+                const result=await runOwned(process.execPath,['-e','console.log("native sample retained")'],
+                    process.env,timeout,directory);
+                finished();return result;
+            }});
+        try {
+            await new Promise(resolve=>setTimeout(resolve,30));
+            assert.equal(captures,0,'Incomplete JSON must not be sampled');
+            writeFileSync(file,JSON.stringify({shellPid:process.pid,heartbeat:2,phase:'fresh'}));
+            await new Promise(resolve=>setTimeout(resolve,30));
+            assert.equal(captures,0,'A live heartbeat must not be sampled');
+            utimesSync(file,new Date(0),new Date(0));
+            await sampled;
+            await captured;
+            await new Promise(resolve=>setTimeout(resolve,30));
+        } finally {receipt=await observer.stop();}
+        assert.equal(captures,1);
+        assert.equal(receipt.status,'captured');
+        assert.ok(receipt.partialReads>0);
+        assert.equal(receipt.progress.phase,'fresh');
+        assert.match(readFileSync(join(receipt.directory,'stdout.log'),'utf8'),/native sample retained/);
+    });
+    assert.equal(existsSync(join(retained,'stall-sample','stdout.log')),true,
+        'Successful completion must preserve raw evidence from a sampled stall');
+    }finally{if(retained)rmSync(retained,{recursive:true,force:true});}
+    });
+
+test('native stall observer joins a bounded sampler and retains its deadline diagnosis before cleanup',
+    {timeout:5000},async()=>{
+    let retained;
+    try {await withNativeFixture('workbench-observer-',async temp=>{
+        retained=temp;
+        const file=join(temp,'progress.json');
+        writeFileSync(file,JSON.stringify({shellPid:process.pid,heartbeat:1}));
+        utimesSync(file,new Date(0),new Date(0));
+        let started;
+        const sampling=new Promise(resolve=>{started=resolve;});
+        const observer=startNativeStallObserver(temp,{pollMs:5,sampleTimeoutMs:100,
+            capture:(pid,directory,timeout)=>{
+                started();return runOwned(process.execPath,['-e','setInterval(()=>{},100)'],
+                    process.env,timeout,directory);
+            }});
+        await sampling;
+        const receipt=await observer.stop();
+        assert.equal(receipt.status,'capture-failed');
+        assert.equal(receipt.process.signal,'SIGKILL');
+        assert.match(receipt.process.error.message,/Native fixture deadline exceeded/);
+        assert.equal(JSON.parse(readFileSync(join(receipt.directory,'process.json'))).signal,'SIGKILL');
+    });}finally{if(retained)rmSync(retained,{recursive:true,force:true});}
+    });
+
+test('native stall observer captures an owned native process under the current ptrace policy',
+    {skip:process.platform!=='linux',timeout:20000},async()=>{
+    let retained;
+    try {await withNativeFixture('workbench-observer-',async temp=>{
+        retained=temp;
+        const progress=join(temp,'progress.json'),release=join(temp,'release');
+        const observer=startNativeStallObserver(temp,{staleMs:20,pollMs:10,
+            capture:async(pid,directory,timeout)=>{
+                const result=await captureNativeStack(pid,directory,timeout);
+                writeFileSync(release,'done');return result;
+            }});
+        let result,receipt;
+        try {
+            result=await runOwned(nativeDebugPrefix[0],[...nativeDebugPrefix.slice(1),process.execPath,'-e',
+                'const fs=require("node:fs");fs.writeFileSync('+JSON.stringify(progress)+
+                ',JSON.stringify({shellPid:process.pid,heartbeat:1}));'+
+                'setInterval(()=>{if(fs.existsSync('+JSON.stringify(release)+'))process.exit(0);},20);'],
+                process.env,15000,temp);
+        }finally{receipt=await observer.stop();}
+        assert.equal(receipt.status,'captured',JSON.stringify(receipt));
+        assert.match(readFileSync(join(receipt.directory,'stdout.log'),'utf8'),/Thread [\s\S]*#0 /);
+        assert.equal(result.status,0,JSON.stringify(result));
+    });}finally{if(retained)rmSync(retained,{recursive:true,force:true});}
+    });
 
 test('private GIO terminal preflight preserves quoted argv and real PTYs without service activation',
     {skip:process.platform!=='linux',timeout:25000},()=>withNativeFixture('workbench-terminal-',async temp=>{
@@ -633,6 +813,7 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 const assertions=[];let phase='login',heartbeat=0,inputEvent=null;
 function progress(){const target=Main.extensionManager.lookup('workbench@papercusp.ai')?.stateObj;
  GLib.file_set_contents(${JSON.stringify(progressFile)},JSON.stringify({phase,assertions,heartbeat,inputEvent,
+ shellPid:new Gio.Credentials().get_unix_pid(),
  papercup:target?._chat?{visible:target._states.get('papercup').visible,loading:target._chat.loading,
  ready:target._chat.ready,error:target._chat.error,pendingReads:target._bridge._pending.size}:null,
  atUs:GLib.get_monotonic_time(),voiceState:target?._chat?{phase:target._chat.voicePhase,
@@ -952,8 +1133,13 @@ new Gio.Settings({schema_id:'org.gnome.shell'}).set_strv('enabled-extensions',
         checkScript(settingsDriver);
         const configured=spawnSync('gjs',['-m',settingsDriver],{env,encoding:'utf8',timeout:10000});
         assert.equal(configured.status,0,configured.stderr);
-        const result=await runOwned('dbus-run-session',[privateBus(temp),'--','gnome-shell','--headless','--wayland',
-            '--no-x11','--virtual-monitor','1440x900','--wayland-display','workbench-installed-test'],env,surface==='voice'?150000:55000,temp);
+        const observer=startNativeStallObserver(temp);
+        let result,stackSampling;
+        try {
+            result=await runOwned('dbus-run-session',[privateBus(temp),'--',...nativeDebugPrefix,'gnome-shell','--headless','--wayland',
+                '--no-x11','--virtual-monitor','1440x900','--wayland-display','workbench-installed-test'],env,
+                surface==='voice'?150000:55000,temp);
+        } finally {stackSampling=await observer.stop();}
         const evidence=existsSync(resultFile)?JSON.parse(readFileSync(resultFile,'utf8')):null;
         let outputAudio=null;
         if(audio&&existsSync(audio.output)){
@@ -963,7 +1149,7 @@ new Gio.Settings({schema_id:'org.gnome.shell'}).set_strv('enabled-extensions',
                 sha256:createHash('sha256').update(samples).digest('hex'),format:'16 kHz mono PCM16'};
         }
         const progress=existsSync(progressFile)?JSON.parse(readFileSync(progressFile,'utf8')):null;
-        const proof={evidence,progress,sourceCustody,...result,
+        const proof={evidence,progress,sourceCustody,stackSampling,...result,
             audioContext:audio?'private PulseAudio server and two null sinks':'inherited audio environment',
             ...(reference?{speechReference:reference}:{}),
             ...(surface==='voice'?{outputAudio,
