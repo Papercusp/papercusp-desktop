@@ -1341,6 +1341,36 @@ public static class WorkbenchNativeHostFixture
             Until(() => status.Text.Contains("1 resolved") && status.Text.Contains("complete"));
             written = System.IO.File.ReadAllLines(path + ".writes"); var apply = Json(written[1]);
             Check(written.Length == 2 && apply["answer"].Equals("edited native answer \u03bb") && ((Dictionary<string, object>)apply["expected"])["id"].Equals("question +/=& \u03bb"), "native Apply sends the exact selected identity and edited Unicode draft");
+            var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+            var inbox = (InboxState)panel.GetType().GetField("inbox", flags).GetValue(panel);
+            var render = panel.GetType().GetMethod("RenderInbox", flags);
+            var savedRun = inbox.Run; var savedItems = inbox.Items; var savedPending = inbox.Pending;
+            var retryableItem = new Dictionary<string, object>(savedItems[0]); retryableItem["outcome"] = "failed";
+            Action<bool, bool, string> checkRunButtons = (stop, resume, phase) =>
+            {
+                Check(Find<System.Windows.Controls.Button>(panel, "Inbox stop").IsEnabled == stop, "native Inbox " + phase + " Stop actual button sensitivity");
+                Check(Find<System.Windows.Controls.Button>(panel, "Inbox resume").IsEnabled == resume, "native Inbox " + phase + " Resume actual button sensitivity");
+            };
+            try
+            {
+                inbox.Items = new List<Dictionary<string, object>> { retryableItem };
+                foreach (var phase in new[] { "pending", "running", "review", "failed", "complete" })
+                {
+                    inbox.Run = new Dictionary<string, object>(savedRun); inbox.Run["phase"] = phase;
+                    render.Invoke(panel, null);
+                    checkRunButtons(phase == "pending" || phase == "running", phase == "review", phase);
+                }
+                inbox.Run = new Dictionary<string, object>(savedRun); inbox.Run["phase"] = "review";
+                inbox.Items = new List<Dictionary<string, object>>(); render.Invoke(panel, null);
+                checkRunButtons(false, false, "review without retryable items");
+                inbox.Items.Add(retryableItem);
+                inbox.Pending = true; render.Invoke(panel, null); checkRunButtons(false, false, "pending action");
+                inbox.Pending = false; inbox.Run = null; render.Invoke(panel, null); checkRunButtons(false, false, "no saved run");
+            }
+            finally
+            {
+                inbox.Run = savedRun; inbox.Items = savedItems; inbox.Pending = savedPending; render.Invoke(panel, null);
+            }
             host.State("inbox").Pinned = true; host.Toggle("goals"); Pump();
             var goals = host.Panel("goals");
             Check(panel.IsVisible && goals.IsVisible && !new Rect(panel.Left, panel.Top, panel.Width, panel.Height).IntersectsWith(new Rect(goals.Left, goals.Top, goals.Width, goals.Height)), "Inbox pins alongside independent panels within separate native slots");

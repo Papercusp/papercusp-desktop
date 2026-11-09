@@ -1844,6 +1844,31 @@ export default class Probe extends Workbench {
   await waitFor(()=>this._inbox.listReady&&this._inbox.bulkReady);
   check(this._inbox.rows[0].id==='question+/=&','Inbox canonical list reaches native actor');
   check(this._views.get('inbox').bulkStatus.text.includes('1/8 decided'),'Inbox persisted denominator reaches native status');
+  const phaseInbox=this._inbox,phaseView=this._views.get('inbox');
+  const savedPhaseState={run:phaseInbox.run,items:phaseInbox.items,pending:phaseInbox.pending};
+  const runButton=title=>phaseView.content.get_children().find(actor=>actor.label===title);
+  const checkRunButtons=(stop,resume,phase)=>{
+   for(const [title,enabled] of [['Stop',stop],['Resume',resume]]){
+    const actor=runButton(title);
+    check(actor?.reactive===enabled,'Inbox '+phase+' '+title+' actual button sensitivity');
+    check(actor?.can_focus===enabled,'Inbox '+phase+' '+title+' actual button focusability');
+   }
+  };
+  try{
+   phaseInbox.items=[{runId:savedPhaseState.run.runId,itemId:'retryable-phase-item',outcome:'failed'}];
+   for(const phase of ['pending','running','review','failed','complete']){
+    phaseInbox.run={...savedPhaseState.run,phase};this._renderInbox();
+    checkRunButtons(['pending','running'].includes(phase),phase==='review',phase);
+   }
+   phaseInbox.run={...savedPhaseState.run,phase:'review'};phaseInbox.items=[];this._renderInbox();
+   checkRunButtons(false,false,'review without retryable items');
+   phaseInbox.items=[{runId:savedPhaseState.run.runId,itemId:'retryable-phase-item',outcome:'failed'}];phaseInbox.pending=true;this._renderInbox();
+   checkRunButtons(false,false,'pending action');
+   phaseInbox.pending=false;phaseInbox.run=null;this._renderInbox();
+   checkRunButtons(false,false,'no saved run');
+  }finally{
+   Object.assign(phaseInbox,savedPhaseState);this._renderInbox();
+  }
   await this._loadInboxContext('question+/=&');
   check(this._inbox.context.body==='Exact context','Inbox selected context preserves exact identity');
   const contextRead=JSON.parse(new TextDecoder().decode(GLib.file_get_contents(${JSON.stringify(join(temp,'inbox-context-read.json'))})[1]));
