@@ -738,7 +738,12 @@ export class InboxState {
             selectedReviews: new Set(), applied: new Set(), drafts: new Map(), answer: ''});
     }
     clearContext() { ++this.contextGeneration; this.context = null; this.contextError = null; }
-    begin() {
+    begin({resetEnvironment = false} = {}) {
+        if (resetEnvironment) {
+            ++this.actionGeneration; this.pending = false;
+            this.savedRunId = null; this.selection = null; this.answer = ''; this.actionNotice = null;
+            this.selectedReviews.clear(); this.applied.clear(); this.drafts.clear();
+        }
         ++this.generation; this.rows = []; this.items = []; this.run = null;
         this.listReady = false; this.bulkReady = false; this.listPartial = false;
         this.listError = null; this.bulkError = null; this.clearContext(); return this.generation;

@@ -73,7 +73,7 @@ export default class Workbench extends Extension {
         const pui = this._settings.get_string('pui-path');
         const operator = this._settings.get_string('operator').trim();
         if (this._selectedPui !== undefined && (this._selectedPui !== pui || this._selectedOperator !== operator)) {
-            this._inbox.begin(); this._inboxEnvironment = null; this._inboxRunId = null;
+            this._inbox.begin({resetEnvironment: true}); this._inboxEnvironment = null; this._inboxRunId = null;
             for (const [surface, state] of this._states) {
                 ++state.generation; ++state.detailGeneration;
                 state.sources = {}; state.selection = null; state.detail = null;

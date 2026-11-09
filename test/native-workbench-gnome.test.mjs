@@ -524,6 +524,34 @@ test('Inbox writes demand exact environment and terminal receipt and never repea
     assert.throws(()=>state.recordAction(token,request,{...receipt,rows:[{...receipt.rows[0],recorded:false}]}),/do not repeat/);
     state.finishAction(token); assert.throws(()=>state.request('apply',environment,{itemId:question.id}),/current question/);
 });
+test('Inbox connection changes retire old action receipts and isolate review state with identical IDs', () => {
+    for (const operation of ['apply', 'start']) {
+        const {state, token: readToken} = loadedInbox();
+        if (operation === 'start') state.settleBulk(readToken, bulk([], null));
+        state.selectedReviews.add(question.id); state.drafts.set(question.id, 'Previous connection draft');
+        state.applied.add('previously-resolved'); state.selection = question.id; state.answer = 'Previous answer';
+        const request = state.request(operation, environment, {itemId: question.id});
+        const oldAction = state.beginAction([request]);
+        const nextRead = state.begin({resetEnvironment: true});
+        const receipt = {environment, rows: [{ok: true, resolved: true, itemId: question.id, runId: 'old-run'}]};
+        assert.throws(() => state.recordAction(oldAction, request, receipt), /environment changed/);
+        assert.equal(state.pending, false);
+        assert.equal(state.savedRunId, null); assert.equal(state.selection, null);
+        assert.equal(state.answer, ''); assert.equal(state.actionNotice, null);
+        assert.equal(state.selectedReviews.size, 0); assert.equal(state.drafts.size, 0);
+        assert.equal(state.applied.size, 0);
+        state.settleList(nextRead, envelope([{items: [question]}]));
+        state.settleBulk(nextRead, bulk([recommended]));
+        assert.equal(state.canSelect(question.id), true);
+        assert.equal(state.draft(recommended), recommended.draftAnswer || '');
+        state.selectedReviews.add(question.id);
+        const nextRequest = state.request('apply', environment, {itemId: question.id});
+        const nextAction = state.beginAction([nextRequest]);
+        state.finishAction(oldAction, new Error('Old connection ended'));
+        assert.equal(state.pending, true); assert.equal(state.actionNotice, null);
+        state.finishAction(nextAction);
+    }
+});
 test('Inbox batch admission freezes only visible questions and resumes only retryable items', () => {
     const {state,token}=loadedInbox(); state.settleBulk(token,bulk([],null));
     const request=state.request('start',environment,{query:'%_'});

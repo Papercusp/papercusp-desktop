@@ -1914,6 +1914,11 @@ export default class Probe extends Workbench {
    await chord([Clutter.KEY_Super_L,Clutter.KEY_Alt_L,Clutter.KEY_space]);
    await waitFor(()=>qa.visible&&Object.values(qa.sources).some(source=>source.status==='ready'));
    const generation=qa.generation;
+   const oldInboxRequest={operation:'start',environment:this._inboxEnvironment};
+   const oldInboxAction=this._inbox.beginAction([oldInboxRequest]);
+   this._inbox.savedRunId='previous-connection-run';this._inbox.selection='previous-question';
+   this._inbox.answer='Previous answer';this._inbox.selectedReviews.add('previous-question');
+   this._inbox.drafts.set('previous-question','Previous draft');this._inbox.applied.add('previous-question');
    this._settings.set_string('operator','http://workbench-other.invalid');
    await waitFor(()=>this._selectedOperator==='http://workbench-other.invalid'&&this._views.size===0);
    check(qa.generation>generation&&[...this._states.values()].every(state=>
@@ -1921,6 +1926,14 @@ export default class Probe extends Workbench {
     'connection change dismisses panels and retires old data, detail and selection');
    check(this._bridge._operator==='http://workbench-other.invalid'&&this._inboxEnvironment===null,
     'connection change selects the new helper backend and retires Inbox identity');
+   check(!this._inbox.pending&&this._inbox.savedRunId===null&&this._inbox.selection===null&&
+    !this._inbox.answer&&!this._inbox.selectedReviews.size&&!this._inbox.drafts.size&&!this._inbox.applied.size,
+    'connection change clears pending Inbox actions and connection-scoped reviews');
+   let staleActionRefused=false;
+   try{this._inbox.recordAction(oldInboxAction,oldInboxRequest,{environment:oldInboxRequest.environment,
+    rows:[{ok:true,runId:'previous-connection-run'}]});}catch(error){staleActionRefused=/environment changed/.test(error.message);}
+   check(staleActionRefused&&this._inboxRunId===null,
+    'late previous-connection action receipt cannot restore a saved Inbox run');
    return this.finish(null);
   }
   }
