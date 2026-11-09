@@ -206,6 +206,20 @@ final class WorkbenchControlsTests: XCTestCase {
         XCTAssertThrowsError(try state.request("apply", environment: environment, itemID: "a"))
         XCTAssertEqual(try InboxState.counts(run: savedRun(), items: [row, .object(owner)])["ownerAction"], 1)
     }
+    func testInboxRunControlsAdmitResumeOnlyInReviewAndStopOnlyWhileActive() throws {
+        for phase in ["pending", "running", "review", "failed", "complete"] {
+            var state = InboxState(); let token = state.begin()
+            state.settleBulk(token, payload: envelope([.object(["run": savedRun(total: 1, phase: phase),
+                "items": .array([outcome("retry", "failed")])])]))
+            XCTAssertTrue(state.bulkReady, phase)
+            if phase == "review" {
+                XCTAssertEqual(try state.request("resume", environment: environment)["itemIds"], .array([.string("retry")]), phase)
+            } else { XCTAssertThrowsError(try state.request("resume", environment: environment), phase) }
+            if ["pending", "running"].contains(phase) {
+                XCTAssertEqual(try state.request("stop", environment: environment)["runId"], savedRun()["runId"], phase)
+            } else { XCTAssertThrowsError(try state.request("stop", environment: environment), phase) }
+        }
+    }
     func testInboxStopContinueAndManualAnswerRequireCurrentStateAndMatchingReceipts() throws {
         var state = InboxState(); let token = state.begin()
         let items = [outcome("pending", "pending"), outcome("failed", "failed"), outcome("retry", "skipped", "retry_needed"),

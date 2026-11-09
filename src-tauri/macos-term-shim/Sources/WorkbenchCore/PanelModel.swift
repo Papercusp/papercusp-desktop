@@ -230,7 +230,7 @@ public struct InboxState {
                 "title": row["title"], "ref": row["ref"], "ownerAgentId": row["ownerAgentId"]]) })
             body["filter"] = .object(["tier": .null, "kinds": .array([]), "query": .string(query), "shownCount": .number(Double(visible.count))])
         case "stop", "resume":
-            guard bulkReady, !run["runId"].text.isEmpty, operation == "stop" ? activeRun : !activeRun else { throw WorkbenchError("Load a saved run in the appropriate phase") }
+            guard bulkReady, !run["runId"].text.isEmpty, operation == "stop" ? activeRun : run["phase"].text == "review" else { throw WorkbenchError("Load a saved run in the appropriate phase") }
             body["runId"] = run["runId"]
             if operation == "resume" {
                 let ids = items.filter(Self.retryable).map { $0["itemId"] }

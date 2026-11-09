@@ -886,10 +886,15 @@ public static class WorkbenchNativeHostFixture
         Check(!state.SettleLiveBulk(state.Generation, "different", bulk), "live refresh cannot replace the selected saved run");
         var duplicate = new List<Dictionary<string, object>> { state.Items[0], state.Items[0] };
         Refuses(() => InboxState.Counts(state.Run, duplicate), "duplicate bulk identities fail closed");
-        state.Run["phase"] = "complete"; state.Items[0]["outcome"] = "failed";
-        request = state.Request("resume", environment);
-        Check(((System.Collections.IList)request["itemIds"]).Count == 1, "resume submits only retryable saved item identities");
-        Refuses(() => state.Request("stop", environment), "stop refuses a terminal run");
+        state.Items[0]["outcome"] = "failed";
+        foreach (var phase in new[] { "pending", "running", "review", "failed", "complete" })
+        {
+            state.Run["phase"] = phase;
+            if (phase == "review") Check(((System.Collections.IList)state.Request("resume", environment)["itemIds"]).Count == 1, "resume submits only retryable saved item identities in review");
+            else Refuses(() => state.Request("resume", environment), "resume refuses run phase " + phase);
+            if (phase == "pending" || phase == "running") Check(state.Request("stop", environment)["runId"].Equals("run-1"), "stop targets active run phase " + phase);
+            else Refuses(() => state.Request("stop", environment), "stop refuses run phase " + phase);
+        }
         state.Run["phase"] = "running"; Check(state.Request("stop", environment)["runId"].Equals("run-1"), "stop targets the exact active saved run");
         Refuses(() => state.Request("start", environment), "active saved run prevents a second batch");
         state = InboxLoaded(); token = state.Select(id); state.SettleContext(token, id, Envelope(InboxQuestion)); state.RetainVisibleSelection("no match");

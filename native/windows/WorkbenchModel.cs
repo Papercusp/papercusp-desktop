@@ -1185,7 +1185,7 @@ namespace Papercusp.Workbench
             }
             else if (operation == "stop" || operation == "resume")
             {
-                if (!BulkReady || Run == null || (operation == "stop" ? !active : active)) throw new InvalidOperationException("Load a saved run in the appropriate phase");
+                if (!BulkReady || Run == null || (operation == "stop" ? !active : Text(Run, "phase") != "review")) throw new InvalidOperationException("Load a saved run in the appropriate phase");
                 body["runId"] = Required(Run, "runId");
                 if (operation == "resume") { var ids = Items.Where(Retryable).Select(row => Text(row, "itemId")).ToArray(); if (ids.Length == 0) throw new InvalidOperationException("No retryable items remain"); body["itemIds"] = ids; }
             }

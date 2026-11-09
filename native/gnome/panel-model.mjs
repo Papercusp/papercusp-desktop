@@ -840,7 +840,7 @@ export class InboxState {
             body.items = visible.map(row => ({itemId: row.id, kind: row.kind, title: row.title, ref: row.ref, ownerAgentId: row.ownerAgentId ?? null}));
             body.filter = {tier: null, kinds: [], query, shownCount: visible.length};
         } else if (['stop', 'resume'].includes(operation)) {
-            if (!this.bulkReady || !this.run?.runId || (operation === 'stop' ? !active : active)) throw new Error('Load a saved run in the appropriate phase');
+            if (!this.bulkReady || !this.run?.runId || (operation === 'stop' ? !active : this.run.phase !== 'review')) throw new Error('Load a saved run in the appropriate phase');
             body.runId = this.run.runId;
             if (operation === 'resume') {
                 body.itemIds = this.items.filter(InboxState.retryable).map(row => row.itemId);

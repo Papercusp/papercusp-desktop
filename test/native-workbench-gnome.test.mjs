@@ -551,6 +551,17 @@ test('Inbox connection changes retire old action receipts and isolate review sta
         state.finishAction(nextAction);
     }
 });
+test('Inbox run controls admit Resume only in review and Stop only while active', () => {
+    for (const phase of ['pending', 'running', 'review', 'failed', 'complete']) {
+        const {state, token} = loadedInbox();
+        state.settleBulk(token, bulk([{...recommended, outcome:'failed'}], {runId:'run+/=&', phase, totalItems:1}));
+        assert.equal(state.bulkReady, true, phase);
+        if (phase === 'review') assert.deepEqual(state.request('resume', environment).itemIds, [question.id]);
+        else assert.throws(() => state.request('resume', environment), /phase/, phase);
+        if (['pending', 'running'].includes(phase)) assert.equal(state.request('stop', environment).runId, 'run+/=&', phase);
+        else assert.throws(() => state.request('stop', environment), /phase/, phase);
+    }
+});
 test('Inbox batch admission freezes only visible questions and resumes only retryable items', () => {
     const {state,token}=loadedInbox(); state.settleBulk(token,bulk([],null));
     const request=state.request('start',environment,{query:'%_'});
