@@ -512,7 +512,9 @@ namespace Papercusp.Workbench
                     {
                         var value = operation;
                         var label = operation == "start" ? "Resolve visible" : operation == "apply" ? "Apply selected" : operation == "stop" ? "Stop" : "Resume";
-                        inboxControls.Add(InboxButton(actions, label, "Inbox " + operation, () => PrepareInbox(value)));
+                        var control = InboxButton(actions, label, "Inbox " + operation, () => PrepareInbox(value));
+                        if (operation == "stop" || operation == "resume") control.Tag = operation;
+                        inboxControls.Add(control);
                     }
                     var runField = new TextBox { Margin = new Thickness(0, 8, 0, 4) };
                     AutomationProperties.SetName(runField, "Saved Inbox run ID"); inboxContent.Children.Add(runField);
@@ -1270,7 +1272,14 @@ namespace Papercusp.Workbench
                 status.Text = (inbox.ListError != null ? "Inbox unavailable · " + inbox.ListError : inbox.ListReady ? rows.Count + " questions" + (inbox.ListPartial ? " · Partial list" : "") : "Loading questions…") +
                     "\n" + InboxState.Text(inboxEnvironment, "endpoint") + " · " + InboxState.Text(inboxEnvironment, "workspaceId") + "\n" + runStatus +
                     (inbox.Pending ? "\nApplying action…" : "") + (inbox.ActionNotice == null ? "" : "\n" + inbox.ActionNotice);
-                foreach (var button in inboxControls) button.IsEnabled = !inbox.Pending;
+                foreach (var button in inboxControls)
+                {
+                    button.IsEnabled = !inbox.Pending;
+                    var operation = button.Tag as string;
+                    if (operation == null) continue;
+                    try { inbox.Request(operation, inboxEnvironment, State.Query); }
+                    catch (InvalidOperationException) { button.IsEnabled = false; }
+                }
                 RenderInboxConfirmation();
                 var json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
                 var listKey = json.Serialize(new object[] { rows, inbox.Selection, inbox.Pending });
