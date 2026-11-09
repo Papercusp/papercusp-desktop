@@ -277,6 +277,11 @@ test('Windows Inbox freezes visible confirmations, reconciles saved runs and ret
         assert.equal(result.interactiveDesktop, true);
         assert.ok(result.count >= 30);
         assert.equal(new Set(result.cases).size, result.count);
+        for (const phase of ['pending', 'running', 'review', 'failed', 'complete',
+            'review without retryable items', 'pending action', 'no saved run']) {
+            for (const action of ['Stop', 'Resume'])
+                assert.ok(result.cases.includes('native Inbox ' + phase + ' ' + action + ' actual button sensitivity'));
+        }
     });
 
 test('Windows standalone PUI starts before any operator request', {
