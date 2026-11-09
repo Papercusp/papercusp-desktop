@@ -334,9 +334,9 @@ test('audited source archive retains its exact expired checkout until the artifa
   assert.match(retained, /COMMITTED_SOURCE_ARCHIVE_RETENTION_OK/);
   assert.equal(lifecycle.verifyCommittedWorkRoot(source, sha, [], archive).sha, sha);
   const options = { root: tmp, nowMs: lifecycle.MAX_AGE_MS + 3600_000, cwds: [], isAlive: () => false, maxIdleKept: 0 };
-  assert.ok(lifecycle.sweepStaleWorkRoots(options).kept.some(x => x.reason === 'dependent-artifact'));
+  assert.ok((await lifecycle.sweepStaleWorkRoots(options)).kept.some(x => x.reason === 'dependent-artifact'));
   assert.ok(fs.existsSync(source));
   fs.rmSync(archive);
-  assert.ok(lifecycle.sweepStaleWorkRoots(options).removed.some(x => x.reason === 'max-age'));
+  assert.ok((await lifecycle.sweepStaleWorkRoots(options)).removed.some(x => x.reason === 'max-age'));
   assert.equal(fs.existsSync(source), false);
 });
