@@ -12,6 +12,30 @@ const root = resolve(import.meta.dirname, '..');
 const chatCode = 'const literal = "<&> WI-999";';
 const chatMarkdown = '# Native heading\n\n**Native bold** and `literal <&>`.\n\n```js\n' +
     chatCode + '\n```\n\nSee WI-123 and P-007. [Docs](https://example.test/docs?x=1&y=2)';
+// Shared by both real-seat drivers. Pointer motion can flush a pending layout
+// or replace a canonical result, so resolve and hit-test again before pressing.
+async function clickNativeControl(findActor, io) {
+    const deadline=io.time()+2000000;
+    do {
+        await io.tick();
+        const actor=findActor();
+        if(!actor||!actor.visible||!actor.reactive)continue;
+        const before=[...actor.get_transformed_position(),...actor.get_transformed_size()];
+        const [x,y,w,h]=before;
+        if(w<=0||h<=0)continue;
+        io.move(x+w/2,y+h/2);await io.tick();
+        if(findActor()!==actor){io.record({replacedActor:io.phase()});continue;}
+        const after=[...actor.get_transformed_position(),...actor.get_transformed_size()];
+        const picked=io.pick(x+w/2,y+h/2);
+        const hit=Boolean(picked&&(picked===actor||actor.contains(picked)));
+        const stable=before.every((value,index)=>value===after[index]);
+        io.record({pointerTarget:actor.label||actor.accessible_name||String(actor),
+            phase:io.phase(),before,after,hit,stable,picked:String(picked)});
+        if(!stable||!hit)continue;
+        io.press();await io.tick();io.release();await io.tick();return;
+    }while(io.time()<deadline);
+    throw Error('No stable current native control: '+io.phase());
+}
 async function withNativeFixture(prefix, action) {
     const temp=mkdtempSync(join(tmpdir(),prefix));
     try {
@@ -363,6 +387,36 @@ print('GIO_TERMINAL_PREFLIGHT_PASS');`);
     assert.ok(launched.tty.every(Boolean),'Default terminal must supply three PTY descriptors');
     return {argv:launched.argv,tty:launched.tty,plane:'real default GIO terminal; private X11 and service-free D-Bus; fixture command'};
 }
+
+test('native pointer retargets a control moved by layout during pointer motion',async()=>{
+    let now=0,x=100,moves=0,point,presses=[];
+    const intended={visible:true,reactive:true,label:'Stop voice',
+        get_transformed_position:()=>[x,20],get_transformed_size:()=>[40,20],contains:()=>false};
+    const adjacent={label:'Use recording'},receipts=[];
+    await clickNativeControl(()=>intended,{time:()=>now,phase:()=> 'recording cancellation',
+        tick:async()=>{now+=1000;},move:(px,py)=>{point=[px,py];if(++moves===1)x=200;},
+        pick:px=>px>=x&&px<x+40?intended:adjacent,
+        press:()=>presses.push([...point]),release:()=>{},record:row=>receipts.push(row)});
+    assert.deepEqual(presses,[[220,30]],'Never press the adjacent Use recording control at the stale coordinate');
+    assert.equal(receipts[0].hit,false);assert.equal(receipts[0].stable,false);
+    assert.equal(receipts.at(-1).hit,true);
+});
+
+test('native pointer reacquires replaced actors and refuses an obscured control',async()=>{
+    let now=0,current,original,pressed=0;
+    const actor=()=>({visible:true,reactive:true,get_transformed_position:()=>[10,20],
+        get_transformed_size:()=>[40,20],contains:()=>false});
+    original=current=actor();const replacement=actor(),receipts=[];
+    const io={time:()=>now,phase:()=> 'replaced result',tick:async()=>{now+=100000;},
+        move:()=>{current=replacement;},pick:()=>current,press:()=>pressed++,release:()=>{},
+        record:row=>receipts.push(row)};
+    await clickNativeControl(()=>current,io);
+    assert.notEqual(current,original);assert.equal(pressed,1);
+    assert.equal(receipts[0].replacedActor,'replaced result');
+    pressed=0;io.pick=()=>actor();
+    await assert.rejects(clickNativeControl(()=>current,io),/No stable current native control/);
+    assert.equal(pressed,0,'An overlay must never receive a press intended for the covered control');
+});
 
 test('native harness retains generated source, progress and output after a process deadline', async () => {
     let retained;
@@ -810,10 +864,11 @@ import Shell from 'gi://Shell';
 import System from 'system';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
-const assertions=[];let phase='login',heartbeat=0,inputEvent=null;
+const assertions=[],pointerLog=[];let phase='login',heartbeat=0,inputEvent=null;
 function progress(){const target=Main.extensionManager.lookup('workbench@papercusp.ai')?.stateObj;
  GLib.file_set_contents(${JSON.stringify(progressFile)},JSON.stringify({phase,assertions,heartbeat,inputEvent,
  shellPid:new Gio.Credentials().get_unix_pid(),
+ pointerLog,
  papercup:target?._chat?{visible:target._states.get('papercup').visible,loading:target._chat.loading,
  ready:target._chat.ready,error:target._chat.error,pendingReads:target._bridge._pending.size}:null,
  atUs:GLib.get_monotonic_time(),voiceState:target?._chat?{phase:target._chat.voicePhase,
@@ -833,7 +888,7 @@ export default class Probe extends Extension {
  finish(error){const target=Main.extensionManager.lookup('workbench@papercusp.ai')?.stateObj;
  this.disable();progress();
  GLib.file_set_contents(${JSON.stringify(resultFile)},JSON.stringify({ok:!error,error:error?String(error)+'; '+error.stack:null,
- phase,assertions,reportId:this.reportId,bodyChars:this.bodyChars,inboxItemId:this.inboxItemId,goalId:this.goalId,accountId:this.accountId,
+ phase,assertions,pointerLog,reportId:this.reportId,bodyChars:this.bodyChars,inboxItemId:this.inboxItemId,goalId:this.goalId,accountId:this.accountId,
  chat:this.chatProof,voice:this.voiceProof,
  voiceState:target?{phase:target._chat.voicePhase,draft:target._chat.draft,notice:target._voiceNotice,
  status:target._views.get('papercup')?.voiceStatus.text,operationActive:Boolean(target._voiceOperation)}:null,
@@ -915,21 +970,23 @@ export default class Probe extends Extension {
  const audio=${JSON.stringify(audio&&{server:audio.server,pid:audio.pid,output:audio.output})};
  const reference=${JSON.stringify(reference)};
  const pointer=seat.create_virtual_device(Clutter.InputDeviceType.POINTER_DEVICE);
- async function click(actor){const [x,y]=actor.get_transformed_position(),[width,height]=actor.get_transformed_size();
- pointer.notify_absolute_motion(GLib.get_monotonic_time(),x+width/2,y+height/2);await tick();
- pointer.notify_button(GLib.get_monotonic_time(),1,Clutter.ButtonState.PRESSED);await tick();
- pointer.notify_button(GLib.get_monotonic_time(),1,Clutter.ButtonState.RELEASED);await tick();}
+ const click=findActor=>(${clickNativeControl.toString()})(findActor,{
+ time:()=>GLib.get_monotonic_time(),tick,phase:()=>phase,record:row=>pointerLog.push(row),
+ move:(x,y)=>pointer.notify_absolute_motion(GLib.get_monotonic_time(),x,y),
+ pick:(x,y)=>global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE,x,y),
+ press:()=>pointer.notify_button(GLib.get_monotonic_time(),Clutter.BUTTON_PRIMARY,Clutter.ButtonState.PRESSED),
+ release:()=>pointer.notify_button(GLib.get_monotonic_time(),Clutter.BUTTON_PRIMARY,Clutter.ButtonState.RELEASED)});
  const waitChild=child=>new Promise((resolve,reject)=>child.wait_async(null,(process,result)=>{
  try{process.wait_finish(result);if(!process.get_successful())throw Error('Audio feeder failed');resolve();}catch(error){reject(error);}}));
  check(reference.conversationId===conversationId,'speech reference uses the same canonical conversation and environment');
- phase='installed recording cancellation';await click(view.recordVoice);await waitFor(()=>chat.voicePhase==='recording');
+ phase='installed recording cancellation';await click(()=>view.recordVoice);await waitFor(()=>chat.voicePhase==='recording');
  check(view.useRecording.visible&&view.cancelVoice.visible,'unmodified installed helper captures through the private audio server');
- await click(view.cancelVoice);await waitFor(()=>!chat.voice&&!target._voiceOperation);
+ await click(()=>view.cancelVoice);await waitFor(()=>!chat.voice&&!target._voiceOperation);
  check(chat.draft===''&&!chat.reply,'cancelling recording neither transcribes nor sends a turn');
- phase='installed speech loopback';await click(view.recordVoice);await waitFor(()=>chat.voicePhase==='recording');
+ phase='installed speech loopback';await click(()=>view.recordVoice);await waitFor(()=>chat.voicePhase==='recording');
  const requestId=chat.voice.id;
  const feeder=Gio.Subprocess.new(['paplay','--server='+audio.server,'--device=workbench_capture',reference.wav],Gio.SubprocessFlags.NONE);
- await waitChild(feeder);await tick();await click(view.useRecording);
+ await waitChild(feeder);await tick();await click(()=>view.useRecording);
  await waitFor(()=>!chat.voice&&!target._voiceOperation,1800);view=target._views.get('papercup');
  const transcript=chat.draft;
  check(/quick brown fox/i.test(transcript)&&/lazy dog/i.test(transcript),'actual canonical STT recognizes the speech captured by the installed helper');
@@ -943,13 +1000,13 @@ export default class Probe extends Extension {
  const capture=launcher.spawnv(['parec','--server='+audio.server,'--device=workbench_output.monitor','--raw',
  '--format=s16le','--rate=16000','--channels=1']);
  try{
- phase='installed canonical reply playback';await click(view.readReply);await waitFor(()=>chat.voicePhase==='playing'||!chat.voice,1800);
+ phase='installed canonical reply playback';await click(()=>view.readReply);await waitFor(()=>chat.voicePhase==='playing'||!chat.voice,1800);
  check(chat.voicePhase==='playing','actual canonical TTS reaches the unmodified installed playback device');
  await new Promise(resolve=>GLib.timeout_add(GLib.PRIORITY_DEFAULT,1200,()=>{resolve();return GLib.SOURCE_REMOVE;}));
- await click(view.cancelVoice);await waitFor(()=>!chat.voice&&!target._voiceOperation);
+ await click(()=>view.cancelVoice);await waitFor(()=>!chat.voice&&!target._voiceOperation);
  check(chat.draft===reviewed&&view.voiceStatus.text.includes('stopped'),'stopping real reply playback preserves the reviewed draft');
  }finally{capture.force_exit();await new Promise(resolve=>capture.wait_async(null,(_process,result)=>{capture.wait_finish(result);resolve();}));}
- phase='installed audio disconnect';await click(view.recordVoice);await waitFor(()=>chat.voicePhase==='recording');
+ phase='installed audio disconnect';await click(()=>view.recordVoice);await waitFor(()=>chat.voicePhase==='recording');
  await waitChild(Gio.Subprocess.new(['kill','-TERM',String(audio.pid)],Gio.SubprocessFlags.NONE));
  await waitFor(()=>!chat.voice&&!target._voiceOperation);
  check(chat.draft===reviewed&&view.voiceStatus.text.includes('preserved')&&!view.useRecording.visible,
@@ -1328,20 +1385,11 @@ export default class Probe extends Workbench {
   const key=async symbol=>{keyboard.notify_keyval(time(),symbol,Clutter.KeyState.PRESSED);await tick();keyboard.notify_keyval(time(),symbol,Clutter.KeyState.RELEASED);await tick();};
   const chord=async symbols=>{for(const symbol of symbols){keyboard.notify_keyval(time(),symbol,Clutter.KeyState.PRESSED);await tick();}for(const symbol of [...symbols].reverse()){keyboard.notify_keyval(time(),symbol,Clutter.KeyState.RELEASED);await tick();}};
   const primaryButton=Clutter.BUTTON_PRIMARY;
-  const click=async findActor=>{
-   const deadline=GLib.get_monotonic_time()+2000000;
-   do{
-    await tick();const actor=findActor();if(!actor)continue;
-    const [x,y]=actor.get_transformed_position(),[w,h]=actor.get_transformed_size();
-    pointer.notify_absolute_motion(time(),x+w/2,y+h/2);await tick();
-    // A canonical source may settle and replace the result controls while
-    // the pointer is moving. Never inspect or click the disposed old actor.
-    if(findActor()!==actor){inputLog.push({replacedActor:phase});continue;}
-    pointer.notify_button(time(),primaryButton,Clutter.ButtonState.PRESSED);await tick();
-    pointer.notify_button(time(),primaryButton,Clutter.ButtonState.RELEASED);await tick();return;
-   }while(GLib.get_monotonic_time()<deadline);
-   throw Error('No stable current native control: '+phase);
-  };
+  const click=findActor=>(${clickNativeControl.toString()})(findActor,{time,tick,phase:()=>phase,
+   record:row=>inputLog.push(row),move:(x,y)=>pointer.notify_absolute_motion(time(),x,y),
+   pick:(x,y)=>global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE,x,y),
+   press:()=>pointer.notify_button(time(),primaryButton,Clutter.ButtonState.PRESSED),
+   release:()=>pointer.notify_button(time(),primaryButton,Clutter.ButtonState.RELEASED)});
   setPhase('desktop startup');
   await waitFor(()=>!Main.layoutManager._startingUp);
   if(Main.overview.visible)await key(Clutter.KEY_Escape);
