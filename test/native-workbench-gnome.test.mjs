@@ -123,10 +123,10 @@ const userId='00000000-0000-4000-8000-000000000001', replyId='00000000-0000-4000
 const chatEnvelope = (rows, environment=chatEnvironment) => ({rows,environment});
 const conversation = (id='conversation', environment=chatEnvironment) => ({id,workspaceId:environment.workspaceId,subjectKind:'global',status:'active'});
 const turn = (seq, patch={}) => ({id:'message-'+seq,conversationId:'conversation',seq,role:'assistant',text:'Message '+seq,...patch});
-function loadedChat(rows=[],hasMoreEarlier=false) {
+function loadedChat(rows=[],hasMoreEarlier=false,conversationId='conversation') {
     const state=new ChatState(),token=state.begin();
-    state.bind(token,chatEnvironment,chatEnvelope([conversation()]));
-    state.settle(token,chatEnvironment,'conversation',chatEnvelope([{turns:rows,hasMoreEarlier}]));
+    state.bind(token,chatEnvironment,chatEnvelope([conversation(conversationId)]));
+    state.settle(token,chatEnvironment,conversationId,chatEnvelope([{turns:rows,hasMoreEarlier}]));
     return {state,token};
 }
 const chatFrame = (event,data,environment=chatEnvironment) => ({event,data,environment});
@@ -268,10 +268,9 @@ test('full native reading waits for each playback and stops on cancellation, cha
     }
 });
 test('voice transcription requires the live operation and preserves drafts through edits, refresh and cancellation', () => {
-    const {state}=loadedChat();state.draft='Original draft';
-    // Unit fixture uses a human-readable conversation id; use the exact bound
-    // identity here and exercise UUID admission separately above.
-    const request={environment:chatEnvironment,conversationId:'conversation',requestId:userId,operation:'transcribe'};
+    const conversationId='00000000-0000-4000-8000-000000000003';
+    const {state}=loadedChat([],false,conversationId);state.draft='Original draft';
+    const request={environment:chatEnvironment,conversationId,requestId:userId,operation:'transcribe',audioBase64:'AAEC'};
     const payload=chatEnvelope([{...request,text:'Voice draft'}]);
     state.beginVoice(userId,'permission');
     assert.equal(state.advanceVoice(userId,'playing'),false);
@@ -284,7 +283,7 @@ test('voice transcription requires the live operation and preserves drafts throu
     assert.equal(state.draft,'Voice draft');assert.equal(state.voicePhase,null);
     assert.equal(state.send(replyId).modality,'voice');
     for (const action of ['edit','refresh','cancel','send','earlier']) {
-        const {state}=loadedChat([turn(5)],true);state.draft='Keep me';
+        const {state}=loadedChat([turn(5,{conversationId})],true,conversationId);state.draft='Keep me';
         state.beginVoice(userId,'permission');state.advanceVoice(userId,'recording');state.advanceVoice(userId,'transcribing');
         if(action==='edit')state.draft='New edit';
         if(action==='refresh')state.begin();
