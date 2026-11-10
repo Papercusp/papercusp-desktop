@@ -14,7 +14,7 @@
 #
 # papercusp_ensure_host_worker_bundler <orchestrator bundle-host-common.sh>
 #   No-op when the already-sourced target helper defines bundle_host_workers. Otherwise it
-#   imports ONLY bundle_host_workers + HOST_WORKER_OUTPUTS from the orchestrator's copy. It
+#   imports bundle_host_workers, its helper dependencies and HOST_WORKER_OUTPUTS from the orchestrator's copy. It
 #   never re-sources that copy into this shell: the helper's load-once guard would turn a
 #   re-source into a silent no-op, and a real re-source would replace the target's esbuild
 #   boundary variables.
@@ -29,7 +29,11 @@ papercusp_ensure_host_worker_bundler() {
       source "$1" >/dev/null || exit 1
       declare -F bundle_host_workers >/dev/null || exit 1
       declare -p HOST_WORKER_OUTPUTS >/dev/null 2>&1 || exit 1
-      declare -f bundle_host_workers
+      for helper in bundle_host_run_step bundle_host_cached_package bundle_host_prepare_esbuild \
+        bundle_host_replay_identity_define bundle_host_esbuild bundle_host_prepare_testing_core \
+        bundle_host_verify_testing_core bundle_host_handler_bootstrap bundle_host_workers; do
+        if declare -F "$helper" >/dev/null; then declare -f "$helper"; fi
+      done
       declare -p HOST_WORKER_OUTPUTS
     ' _ "$common")"; then
     echo "FATAL: orchestrator helper '$common' does not define bundle_host_workers + HOST_WORKER_OUTPUTS" >&2

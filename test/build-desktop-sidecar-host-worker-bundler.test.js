@@ -70,6 +70,27 @@ test('a target helper that already defines bundle_host_workers is used as-is (or
   assert.equal(r.stdout.trim(), 'target-version');
 });
 
+test('an imported worker composer retains its required witness helper dependencies', () => {
+  const dir = fixture();
+  fs.appendFileSync(path.join(dir, 'orch-common.sh'), [
+    'bundle_host_verify_testing_core() { echo "verified $1"; }',
+    'bundle_host_prepare_testing_core() { bundle_host_verify_testing_core "$1"; }',
+    'bundle_host_workers() { bundle_host_prepare_testing_core "$1"; echo "workers $2"; }',
+    '',
+  ].join('\n'));
+  const r = run([
+    'set -euo pipefail', `source "${dir}/target-common.sh"`, `source "${lib}"`,
+    `papercusp_ensure_host_worker_bundler "${dir}/orch-common.sh"`,
+    'bundle_host_workers /source /output',
+    'echo "externals=${HOST_COMMON_EXTERNALS[*]}"',
+  ].join('\n'));
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /verified \/source/);
+  assert.match(r.stdout, /workers \/output/);
+  assert.match(r.stdout, /externals=--external:target-only/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('no function anywhere fails loudly instead of reaching "command not found"', () => {
   const dir = fixture();
   const missing = run(`

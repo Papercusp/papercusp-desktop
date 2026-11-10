@@ -46,6 +46,7 @@ RUNTIME_SIBLINGS=(
   snapshot-fold.worker.mjs mutation-probe-closure.worker.mjs
   admission-jobs.worker.mjs precision-bench-worker.mjs
   first-party-callers.worker.mjs role-codex-home.worker.mjs
+  warm-cochange-index.worker.mjs testing-core.worker.mjs
   systemd-scope-env-runner.mjs git-ext-bridge.mjs
 )
 

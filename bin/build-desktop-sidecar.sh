@@ -1691,7 +1691,7 @@ source "$HERE/lib/host-worker-bundler.sh"
 papercusp_ensure_host_worker_bundler "$HERE/../../apps/operator/bin/bundle-host-common.sh" || exit 1
 # Import missing recipes for older exact-source targets without replacing the
 # target's banner, package or external boundaries (same rule as the worker adapter).
-for _pc_recipe in bundle_host_run_step bundle_host_cached_package bundle_host_prepare_esbuild bundle_host_esbuild bundle_host_primary bundle_host_launcher; do
+for _pc_recipe in bundle_host_run_step bundle_host_cached_package bundle_host_prepare_esbuild bundle_host_replay_identity_define bundle_host_esbuild bundle_host_prepare_testing_core bundle_host_verify_testing_core bundle_host_primary bundle_host_launcher; do
   if ! declare -F "$_pc_recipe" >/dev/null 2>&1; then
     _pc_recipe_definition="$(env -u PAPERCUSP_BUNDLE_HOST_COMMON_LOADED bash -c '
       source "$1" || exit 1

@@ -155,13 +155,10 @@ STAMP_BANNER="${HOST_BANNER}console.log('[sidecar] build ${BUILD_STAMP}');"
 
 echo "→ esbuild-bundling serve entry → $OUT/serve.mjs"
 echo "  build stamp: $BUILD_STAMP"
-( cd "$WEB_DIR" && npx --yes esbuild@0.25.0 bin/serve.ts \
-    --bundle --platform=node --format=esm --target=node22 \
+bundle_host_primary "$REPO_ROOT" "$OUT" \
     "${HOST_EXTERNALS[@]}" \
-    --outfile="$OUT/serve.mjs" \
     --banner:js="$STAMP_BANNER" \
-    ${HOST_BANNER_DEFINES[@]+"${HOST_BANNER_DEFINES[@]}"} \
-    --define:__PAPERCUSP_BUNDLED_SIDECAR__=true )
+    --define:__PAPERCUSP_BUNDLED_SIDECAR__=true
 [ -s "$OUT/serve.mjs" ] || { echo "FATAL: esbuild produced no serve.mjs" >&2; exit 1; }
 
 bundle_host_workers "$REPO_ROOT" "$OUT" || exit 1
