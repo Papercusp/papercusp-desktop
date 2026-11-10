@@ -245,7 +245,8 @@ function collectStaticClosure(root, entrypoints) {
   let pending = entrypoints.map((file) => path.resolve(root, file));
   const resolver = `import { pathToFileURL } from 'node:url';
     import { createRequire } from 'node:module';
-    const queries = JSON.parse(process.argv[1]);
+    import { readFileSync } from 'node:fs';
+    const queries = JSON.parse(readFileSync(0, 'utf8'));
     console.log(JSON.stringify(queries.map(({file, specifier, mode}) => {
       try { return {target: mode === 'require' ? pathToFileURL(createRequire(file).resolve(specifier)).href
         : import.meta.resolve(specifier, pathToFileURL(file).href)}; }
@@ -292,9 +293,11 @@ function collectStaticClosure(root, entrypoints) {
     }
     if (queries.length) {
       const input = queries.map(({ file, edge }) => ({ file, specifier: edge.site.specifier, mode: edge.resolutionMode }));
+      // Populations from bundled packages exceed OS per-argument limits. Keep
+      // every query and its order, using stdin instead of one unbounded argv.
       const resolutions = JSON.parse(execFileSync(process.execPath,
-        ['--experimental-import-meta-resolve', '--input-type=module', '-e', resolver, JSON.stringify(input)],
-        { env, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }));
+        ['--experimental-import-meta-resolve', '--input-type=module', '-e', resolver],
+        { env, input: JSON.stringify(input), encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }));
       if (resolutions.length !== queries.length) throw new Error('Node resolver population mismatch');
       resolutions.forEach((resolution, index) => {
         const edge = queries[index].edge;

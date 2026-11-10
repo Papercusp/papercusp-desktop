@@ -198,6 +198,26 @@ test('D-161 static closure follows Node import and require conditions without ex
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('D-161 static closure resolves large import populations without OS argument limits', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-module-large-population-'));
+  try {
+    // This repeated valid edge used to exceed Linux's per-argument limit when
+    // the entire query population was serialized into one child argv entry.
+    const count = 2400;
+    fs.writeFileSync(path.join(dir, 'entry.cjs'), "require('./leaf.cjs');\n".repeat(count));
+    fs.writeFileSync(path.join(dir, 'leaf.cjs'), "throw new Error('must not execute');");
+    const proof = collectStaticClosure(dir, ['entry.cjs']);
+    const edges = proof.files.find((file) => file.file === 'entry.cjs').imports;
+    assert.equal(edges.length, count, 'retain every source site');
+    assert.ok(edges.every((edge) => edge.target === 'leaf.cjs'));
+    assert.deepEqual(proof.files.map((file) => file.file), ['entry.cjs', 'leaf.cjs']);
+    assert.deepEqual(proof.failures, []);
+    assert.deepEqual(proof.outside, []);
+    assert.deepEqual(proof.unresolved, []);
+    assert.equal(proof.closureAccepted, false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('D-161 static closure retains caught missing imports, generated bodies and root escapes', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-module-boundary-'));
   try {
