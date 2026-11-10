@@ -169,7 +169,7 @@ function collectLexicalReferences(file, seeds) {
   file = path.resolve(file);
   const bytes = fs.readFileSync(file), text = bytes.toString('utf8');
   if (!Buffer.from(text, 'utf8').equals(bytes)) throw new Error('non-UTF8 module refused');
-  const tree = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const tree = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.getScriptKindFromFileName(file));
   if (tree.parseDiagnostics.length) throw new Error(`module parse errors: ${tree.parseDiagnostics.length}`);
   if (!Array.isArray(seeds) || !seeds.length) throw new Error('exact lexical seeds required');
   ts.bindSourceFile(tree, { allowJs: true, noResolve: true, noLib: true });

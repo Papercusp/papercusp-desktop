@@ -112,6 +112,45 @@ test('D-161 lexical seeds bind UTF8 bytes and fail closed on invalid input', () 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('D-161 lexical census preserves TypeScript generic call contexts', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-lexical-generics-'));
+  try {
+    const file = path.join(dir, 'caller.ts');
+    const source = "import { dynamicImport } from './helper'; await dynamicImport<TransformersModule>('pkg');";
+    fs.writeFileSync(file, source);
+    const proof = collectLexicalReferences(file, [{ name: 'dynamicImport',
+      byteStart: Buffer.byteLength(source.slice(0, source.indexOf('dynamicImport'))) }]);
+    assert.deepEqual(proof.populations[0].references.map((row) => row.context.source),
+      ['dynamicImport', "dynamicImport<TransformersModule>('pkg')"]);
+    assert.equal(proof.closureAccepted, false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+for (const extension of ['ts', 'mts', 'cts', 'tsx']) {
+  test(`D-161 lexical census binds typed aliases and excludes shadowed calls in .${extension}`, () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-lexical-typed-'));
+    try {
+      const file = path.join(dir, `caller.${extension}`);
+      const source = `/* Ω😀 */ import { dynamicImport as load } from './helper';
+        type Result = { value: string };
+        const pending: Promise<Result> = load<Result>('pkg');
+        function shadow(load: <T>(specifier: string) => Promise<T>) {
+          return load<Result>('shadow');
+        }
+        export { load as publicLoad };`;
+      fs.writeFileSync(file, source);
+      const proof = collectLexicalReferences(file, [{ name: 'load',
+        byteStart: Buffer.byteLength(source.slice(0, source.indexOf('load }'))) }]);
+      assert.deepEqual(proof.populations[0].references.map((row) => row.context.source),
+        ['dynamicImport as load', "load<Result>('pkg')", 'load as publicLoad']);
+      for (const row of proof.populations[0].references) {
+        assert.equal(Buffer.from(source).subarray(row.identifier.byteStart, row.identifier.byteEnd).toString(), 'load');
+      }
+      assert.equal(proof.closureAccepted, false);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+}
+
 test('D-161 lexical census retains local export escapes and refuses ambiguous lookup environments', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-lexical-escapes-'));
   try {
