@@ -112,6 +112,64 @@ test('D-161 lexical seeds bind UTF8 bytes and fail closed on invalid input', () 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('D-161 lexical census resolves named function expression self references without joining shadows', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-lexical-self-'));
+  try {
+    const file = path.join(dir, 'bundle.cjs');
+    const source = `/* Ω😀 */ const bind = outer;
+      const factory = function bind(value) {
+        const again = () => bind(value);
+        function shadow(bind) { return bind(value); }
+        { const bind = other; bind(value); }
+        return {bind, property: object.bind};
+      }; bind('outer');`;
+    fs.writeFileSync(file, source);
+    const at = (fragment, offset = 0) => Buffer.byteLength(source.slice(0, source.indexOf(fragment) + offset));
+    const self = { name: 'bind', byteStart: at('function bind', 'function '.length) };
+    const expected = [self.byteStart, at('() => bind', '() => '.length), at('{bind,', 1)];
+    const proof = collectLexicalReferences(file, [self]);
+    assert.deepEqual(proof.populations[0].references.map((row) => row.identifier.byteStart), expected);
+    assert.deepEqual(collectLexicalReferences(file, [{ name: 'bind', byteStart: expected[1] }])
+      .populations[0].references, proof.populations[0].references);
+    assert.deepEqual(collectLexicalReferences(file, [{ name: 'bind', byteStart: at('bind = outer') }])
+      .populations[0].references.map((row) => row.identifier.byteStart), [at('bind = outer'), at("bind('outer')")]);
+    assert.equal(proof.closureAccepted, false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('D-161 lexical census distinguishes a function expression name from same-name body bindings', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-lexical-self-shadow-'));
+  try {
+    const file = path.join(dir, 'bundle.cjs');
+    for (const source of ['const f = function bind(bind) { return bind; };',
+      'const f = function bind() { var bind = other; return bind; };']) {
+      fs.writeFileSync(file, source);
+      const selfStart = source.indexOf('function bind') + 'function '.length;
+      const bodyStart = source.indexOf('bind', selfStart + 'bind'.length);
+      const proof = collectLexicalReferences(file, [{ name: 'bind', byteStart: selfStart },
+        { name: 'bind', byteStart: bodyStart }]);
+      assert.deepEqual(proof.populations[0].references.map((row) => row.identifier.byteStart), [selfStart]);
+      assert.deepEqual(proof.populations[1].references.map((row) => row.identifier.byteStart),
+        [bodyStart, source.lastIndexOf('bind')]);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('D-161 named function expression census still refuses default and with environments', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-lexical-self-refusal-'));
+  try {
+    const file = path.join(dir, 'bundle.cjs');
+    for (const [source, refusal] of [
+      ['const f = function bind(value = bind) { return value; };', /parameter-default/],
+      ['const f = function bind() { with (dynamicScope) { use(bind); } };', /with-scope/],
+    ]) {
+      fs.writeFileSync(file, source);
+      assert.throws(() => collectLexicalReferences(file, [{ name: 'bind',
+        byteStart: source.indexOf('function bind') + 'function '.length }]), refusal);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('D-161 lexical census preserves TypeScript generic call contexts', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-lexical-generics-'));
   try {

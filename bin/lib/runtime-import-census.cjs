@@ -195,6 +195,12 @@ function collectLexicalReferences(file, seeds) {
   };
   const binding = (node) => {
     if (!lexical(node)) return null;
+    // A named function expression has a private self-name environment outside
+    // its parameter/body locals. Its declaration always denotes that symbol,
+    // even when a parameter or var in the body has the same spelling.
+    if (ts.isFunctionExpression(node.parent) && node.parent.name === node) {
+      return node.parent.symbol || null;
+    }
     const name = ts.escapeLeadingUnderscores(node.text);
     for (let scope = node.parent; scope; scope = scope.parent) {
       // Default parameter initializers have a separate environment from a
@@ -206,6 +212,9 @@ function collectLexicalReferences(file, seeds) {
       if (ts.isWithStatement(scope)) throw new Error('with-scope lexical reference refused');
       const symbol = scope.locals?.get(name);
       if (symbol) return symbol;
+      if (ts.isFunctionExpression(scope) && scope.name?.escapedText === name) {
+        return scope.symbol || null;
+      }
     }
     return null;
   };
