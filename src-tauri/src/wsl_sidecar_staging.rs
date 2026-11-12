@@ -343,17 +343,54 @@ impl OwnedChild {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn process_group_has_live_members(pgid: u32) -> io::Result<bool> {
+    let processes = std::fs::read_dir("/proc")?;
+    for process in processes {
+        let process = process?;
+        let name = process.file_name();
+        let name = name.to_string_lossy();
+        if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let stat = match std::fs::read_to_string(process.path().join("stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let Some((_, fields)) = stat.rsplit_once(") ") else {
+            continue;
+        };
+        let mut fields = fields.split_whitespace();
+        let Some(state) = fields.next().and_then(|field| field.chars().next()) else {
+            continue;
+        };
+        if fields.next().is_none() {
+            continue;
+        }
+        let Some(member_pgid) = fields.next().and_then(|field| field.parse::<u32>().ok()) else {
+            continue;
+        };
+        if member_pgid == pgid && !matches!(state, 'Z' | 'X') {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 impl Drop for OwnedChild {
     fn drop(&mut self) {
         #[cfg(target_os = "linux")]
         {
             unsafe extern "C" { fn kill(pid: i32, signal: i32) -> i32; }
+            let pid = self.0.id();
             // Only spawn() creates these groups; try_wait() never reaps their
-            // leader. Signal before wait(), so no recycled PID/PGID can match.
-            let group_kill_result = unsafe { kill(-(self.0.id() as i32), 9) };
+            // leader. Keep it unreaped while waiting for every live group member
+            // to stop, so the anchored PID cannot be recycled as another PGID.
+            let group_kill_result = unsafe { kill(-(pid as i32), 9) };
             #[cfg(test)]
             record_child_cleanup_diagnostic(ChildCleanupDiagnostic {
-                pid: self.0.id(),
+                pid,
                 group_kill_result,
                 errno: if group_kill_result == -1 {
                     io::Error::last_os_error().raw_os_error()
@@ -361,8 +398,30 @@ impl Drop for OwnedChild {
                     None
                 },
             });
-            let _ = group_kill_result;
+            let _ = self.0.kill();
+            let mut inspection_error_reported = false;
+            loop {
+                match process_group_has_live_members(pid) {
+                    Ok(false) => break,
+                    Ok(true) => {}
+                    Err(error) => {
+                        if !inspection_error_reported {
+                            eprintln!(
+                                "[wsl-staging] cannot inspect process group {pid} during cleanup; waiting for procfs: {error}"
+                            );
+                            inspection_error_reported = true;
+                        }
+                    }
+                }
+                let _ = unsafe { kill(-(pid as i32), 9) };
+                std::thread::sleep(Duration::from_millis(if inspection_error_reported {
+                    100
+                } else {
+                    10
+                }));
+            }
         }
+        #[cfg(not(target_os = "linux"))]
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
@@ -788,6 +847,10 @@ mod tests {
         let _ = unrelated.wait();
         assert!(error.to_string().contains("archive producer"), "{error}");
         assert!(unrelated_survived, "cleanup signalled an unrelated process");
+        assert!(
+            process_samples.is_empty(),
+            "extractor descendant {pid} was live after stage_archive returned; pre_cleanup={pre_cleanup}; child_cleanups=[{cleanup_diagnostics}]; post_return_samples=[{process_samples}]"
+        );
         assert!(
             stopped,
             "extractor descendant {pid} survived stage_archive failure; pre_cleanup={pre_cleanup}; child_cleanups=[{cleanup_diagnostics}]; post_cleanup_samples=[{process_samples}]"

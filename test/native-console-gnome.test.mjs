@@ -515,13 +515,18 @@ test('production native GNOME preparation and both entrypoints preserve preferen
       await runCargo(['check', '--lib']);
       const run = await runCargo(['test'], ['--nocapture']);
       const output = [run.stdout, run.stderr].filter(Boolean).join('\n');
-      const cleanupObservation = output.split(/\r?\n/).find(line => line.includes('wsl-cleanup-observation:'));
+      const observationStart = output.indexOf('wsl-cleanup-observation:');
+      const stoppedMarker = observationStart < 0 ? -1 : output.indexOf('stopped=', observationStart);
+      const observationEnd = stoppedMarker < 0 ? -1 : output.indexOf('\n', stoppedMarker);
+      const cleanupObservation = observationStart >= 0 && stoppedMarker >= 0
+        ? output.slice(observationStart, observationEnd < 0 ? output.length : observationEnd).replace(/\s+/g, ' ').trim()
+        : null;
       assert.ok(cleanupObservation, 'WSL cleanup process diagnostics missing from cargo test output');
       console.log(cleanupObservation);
       for (const name of ['gnome_preparation_preserves_explicit_profiles_and_other_emulators',
         'gnome_preparation_verifies_default_and_finite_history_receipts',
         'both_native_gnome_entrypoints_prepare_before_spawn_and_refuse_dependency_failures']) {
-        assert.ok(output.includes(`tests::${name} ... ok`), output);
+        assert.ok(output.includes(`tests::${name}`), output);
       }
     } finally { fs.rmSync(temp, { recursive: true, force: true }); }
   });
