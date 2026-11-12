@@ -228,6 +228,73 @@ fi
 /// anchors the process-group identity even when the leader exited first.
 struct OwnedChild(Child);
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+struct ChildCleanupDiagnostic {
+    pid: u32,
+    group_kill_result: i32,
+    errno: Option<i32>,
+}
+
+#[cfg(test)]
+impl std::fmt::Display for ChildCleanupDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "pid={} group_kill_result={} errno={:?}",
+            self.pid, self.group_kill_result, self.errno
+        )
+    }
+}
+
+#[cfg(test)]
+struct ChildCleanupDiagnostics {
+    rows: [Option<ChildCleanupDiagnostic>; 8],
+    len: usize,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static CHILD_CLEANUP_DIAGNOSTICS: std::cell::RefCell<ChildCleanupDiagnostics> =
+        std::cell::RefCell::new(ChildCleanupDiagnostics { rows: [None; 8], len: 0 });
+}
+
+#[cfg(test)]
+fn reset_child_cleanup_diagnostics() {
+    CHILD_CLEANUP_DIAGNOSTICS.with(|diagnostics| {
+        let mut diagnostics = diagnostics.borrow_mut();
+        diagnostics.rows = [None; 8];
+        diagnostics.len = 0;
+    });
+}
+
+#[cfg(test)]
+fn record_child_cleanup_diagnostic(diagnostic: ChildCleanupDiagnostic) {
+    CHILD_CLEANUP_DIAGNOSTICS.with(|diagnostics| {
+        let mut diagnostics = diagnostics.borrow_mut();
+        if diagnostics.len < diagnostics.rows.len() {
+            let index = diagnostics.len;
+            diagnostics.rows[index] = Some(diagnostic);
+            diagnostics.len += 1;
+        }
+    });
+}
+
+#[cfg(test)]
+fn take_child_cleanup_diagnostics() -> Vec<ChildCleanupDiagnostic> {
+    CHILD_CLEANUP_DIAGNOSTICS.with(|diagnostics| {
+        let mut diagnostics = diagnostics.borrow_mut();
+        let rows = diagnostics.rows[..diagnostics.len]
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        diagnostics.rows = [None; 8];
+        diagnostics.len = 0;
+        rows
+    })
+}
+
 impl OwnedChild {
     fn spawn(command: &mut Command) -> io::Result<Self> {
         #[cfg(target_os = "linux")]
@@ -283,7 +350,18 @@ impl Drop for OwnedChild {
             unsafe extern "C" { fn kill(pid: i32, signal: i32) -> i32; }
             // Only spawn() creates these groups; try_wait() never reaps their
             // leader. Signal before wait(), so no recycled PID/PGID can match.
-            let _ = unsafe { kill(-(self.0.id() as i32), 9) };
+            let group_kill_result = unsafe { kill(-(self.0.id() as i32), 9) };
+            #[cfg(test)]
+            record_child_cleanup_diagnostic(ChildCleanupDiagnostic {
+                pid: self.0.id(),
+                group_kill_result,
+                errno: if group_kill_result == -1 {
+                    io::Error::last_os_error().raw_os_error()
+                } else {
+                    None
+                },
+            });
+            let _ = group_kill_result;
         }
         let _ = self.0.kill();
         let _ = self.0.wait();
@@ -562,6 +640,64 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[derive(Debug)]
+    struct ProcessIdentity {
+        pid: u32,
+        comm: String,
+        state: char,
+        ppid: u32,
+        pgid: u32,
+        sid: u32,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl std::fmt::Display for ProcessIdentity {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "pid={} comm={} state={} ppid={} pgid={} sid={}",
+                self.pid, self.comm, self.state, self.ppid, self.pgid, self.sid
+            )
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Debug)]
+    struct ProcessSample {
+        elapsed_ms: u128,
+        identity: ProcessIdentity,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl std::fmt::Display for ProcessSample {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}ms {}", self.elapsed_ms, self.identity)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_identity_from_stat(pid: &str, stat: &str) -> Option<ProcessIdentity> {
+        let (prefix, rest) = stat.rsplit_once(") ")?;
+        let comm = prefix.split_once('(')?.1.to_string();
+        let pid = pid.trim().parse().ok()?;
+        let mut fields = rest.split_whitespace();
+        Some(ProcessIdentity {
+            pid,
+            comm,
+            state: fields.next()?.chars().next()?,
+            ppid: fields.next()?.parse().ok()?,
+            pgid: fields.next()?.parse().ok()?,
+            sid: fields.next()?.parse().ok()?,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_identity(pid: &str) -> Option<ProcessIdentity> {
+        let stat = fs::read_to_string(format!("/proc/{}/stat", pid.trim())).ok()?;
+        process_identity_from_stat(pid, &stat)
+    }
+
+    #[cfg(target_os = "linux")]
     fn process_is_running(pid: &str) -> bool {
         // A killed grandchild may briefly be a zombie awaiting its own parent;
         // it cannot execute or retain a pipe. Do not mistake that for a live leak.
@@ -583,20 +719,63 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn observe_stopped_with_trace(pid: &str) -> (bool, Vec<ProcessSample>) {
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(1);
+        let mut samples = Vec::new();
+        let mut last_sample_ms = None;
+        loop {
+            match process_identity(pid) {
+                None => return (true, samples),
+                Some(identity) if identity.state == 'Z' => return (true, samples),
+                Some(identity) => {
+                    let elapsed_ms = started.elapsed().as_millis();
+                    if last_sample_ms.map_or(true, |last| elapsed_ms.saturating_sub(last) >= 50) {
+                        samples.push(ProcessSample { elapsed_ms, identity });
+                        last_sample_ms = Some(elapsed_ms);
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                return (false, samples);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn producer_failure_stops_extractor_descendants_before_return() {
         let f = Fixture::new();
         let mut unrelated = Command::new("sleep").arg("20").spawn().unwrap();
+        reset_child_cleanup_diagnostics();
         let mut consumer = Command::new("bash");
         consumer.args(["-c", WSL_READY_SCRIPT, "ready", "/bin/bash", "-c",
             "bash -c 'echo $$ > \"$1/descendant.pid\"; while ! test -f \"$1/release\"; do sleep 0.01; done; touch \"$1/escaped\"' descendant \"$1\" & wait",
             "extractor"]).arg(&f.0);
         let mut producer = Command::new("bash");
-        producer.args(["-c", "while ! test -f \"$1/descendant.pid\"; do sleep 0.01; done; exit 19", "producer"])
+        producer.args(["-c", "while ! test -f \"$1/descendant.pid\"; do sleep 0.01; done; pid=$(cat \"$1/descendant.pid\"); cat \"/proc/$pid/stat\" > \"$1/descendant.pre-cleanup.stat\"; exit 19", "producer"])
             .arg(&f.0);
         let error = stage_archive(producer, consumer, Duration::from_secs(3)).unwrap_err();
         let pid = fs::read_to_string(f.0.join("descendant.pid")).unwrap();
-        let stopped = observe_stopped(&pid);
+        let pre_cleanup = fs::read_to_string(f.0.join("descendant.pre-cleanup.stat"))
+            .ok()
+            .and_then(|stat| process_identity_from_stat(&pid, &stat));
+        let (stopped, process_samples) = observe_stopped_with_trace(&pid);
+        let cleanup_diagnostics = take_child_cleanup_diagnostics();
+        let pre_cleanup = pre_cleanup
+            .map(|identity| identity.to_string())
+            .unwrap_or_else(|| "unavailable".to_string());
+        let cleanup_diagnostics = cleanup_diagnostics
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let process_samples = process_samples
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
         let unrelated_survived = unrelated.try_wait().unwrap().is_none();
         // Release the fixture even on the deliberately failing pre-fix run:
         // the regression itself must not strand the process it detects.
@@ -606,7 +785,10 @@ mod tests {
         let _ = unrelated.wait();
         assert!(error.to_string().contains("archive producer"), "{error}");
         assert!(unrelated_survived, "cleanup signalled an unrelated process");
-        assert!(stopped, "extractor descendant {pid} survived stage_archive failure");
+        assert!(
+            stopped,
+            "extractor descendant {pid} survived stage_archive failure; pre_cleanup={pre_cleanup}; child_cleanups=[{cleanup_diagnostics}]; post_cleanup_samples=[{process_samples}]"
+        );
         assert!(!f.0.join("escaped").exists(), "extractor mutated files after return");
     }
 
