@@ -776,6 +776,9 @@ mod tests {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(", ");
+        println!(
+            "wsl-cleanup-observation: descendant={pid} pre_cleanup={pre_cleanup} child_cleanups=[{cleanup_diagnostics}] post_return_samples=[{process_samples}] stopped={stopped}"
+        );
         let unrelated_survived = unrelated.try_wait().unwrap().is_none();
         // Release the fixture even on the deliberately failing pre-fix run:
         // the regression itself must not strand the process it detects.

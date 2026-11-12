@@ -496,10 +496,12 @@ test('production native GNOME preparation and both entrypoints preserve preferen
         '[workspace]', '[lib]', `path=${JSON.stringify(driver)}`, '[dependencies]',
         'serde_json="1"', 'uuid={version="1",features=["v4"]}', 'libc="0.2"',
       ].join('\n'));
-      const runCargo = async (args) => {
-        const result = await runFixtureCommand(process.env.CARGO || 'cargo', [...args, '--offline', '--manifest-path', manifest],
+      const runCargo = async (args, testArgs = []) => {
+        const cargoArgs = [...args, '--offline', '--manifest-path', manifest];
+        if (testArgs.length) cargoArgs.push('--', ...testArgs);
+        const result = await runFixtureCommand(process.env.CARGO || 'cargo', cargoArgs,
           {
-            stage: `cargo ${args.join(' ')}`,
+            stage: `cargo ${args.join(' ')}${testArgs.length ? ` -- ${testArgs.join(' ')}` : ''}`,
             timeout: 55000,
             // Each fixture starts several owned child processes with five-second
             // operation bounds; parallel Rust tests can starve otherwise tiny archives.
@@ -511,11 +513,15 @@ test('production native GNOME preparation and both entrypoints preserve preferen
       // Compile the production helper bodies and declaration without cfg(test)
       // before running their behavioral regressions.
       await runCargo(['check', '--lib']);
-      const run = await runCargo(['test']);
+      const run = await runCargo(['test'], ['--nocapture']);
+      const output = [run.stdout, run.stderr].filter(Boolean).join('\n');
+      const cleanupObservation = output.split(/\r?\n/).find(line => line.includes('wsl-cleanup-observation:'));
+      assert.ok(cleanupObservation, 'WSL cleanup process diagnostics missing from cargo test output');
+      console.log(cleanupObservation);
       for (const name of ['gnome_preparation_preserves_explicit_profiles_and_other_emulators',
         'gnome_preparation_verifies_default_and_finite_history_receipts',
         'both_native_gnome_entrypoints_prepare_before_spawn_and_refuse_dependency_failures']) {
-        assert.ok(run.stdout.includes(`tests::${name} ... ok`), run.stdout);
+        assert.ok(output.includes(`tests::${name} ... ok`), output);
       }
     } finally { fs.rmSync(temp, { recursive: true, force: true }); }
   });
