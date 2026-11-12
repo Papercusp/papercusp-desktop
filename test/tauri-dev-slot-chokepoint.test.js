@@ -720,13 +720,35 @@ test('no launcher routes around the chokepoint with a bare `tauri dev`', () => {
 const CAN_PROBE = existsSync('/proc/self/exe') && existsSync('/bin/sleep');
 const NO_PROBE_REASON = 'needs Linux /proc + /bin/sleep to stage a running desktop';
 
+const SPAWN_DIAGNOSTIC_TAIL_CHARS = 400;
+function boundedSpawnOutput(value) {
+  if (value == null || value === '') return '(empty)';
+  const text = String(value);
+  return text.length <= SPAWN_DIAGNOSTIC_TAIL_CHARS
+    ? text
+    : '…' + text.slice(-SPAWN_DIAGNOSTIC_TAIL_CHARS);
+}
+
+function spawnFailureMessage(phase, res, elapsedMs) {
+  return [
+    phase + ' failed after ' + elapsedMs + 'ms',
+    'code=' + (res.error?.code ?? 'unknown') +
+      ' status=' + (res.status ?? 'null') +
+      ' signal=' + (res.signal ?? 'none'),
+    'error=' + boundedSpawnOutput(res.error?.message ?? res.error),
+    'stdout tail (max ' + SPAWN_DIAGNOSTIC_TAIL_CHARS + ' chars): ' + boundedSpawnOutput(res.stdout),
+    'stderr tail (max ' + SPAWN_DIAGNOSTIC_TAIL_CHARS + ' chars): ' + boundedSpawnOutput(res.stderr),
+  ].join('\n');
+}
+
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
 /** Source the claim in a sandboxed HOME, optionally under an ancestor renamed the way npm renames itself. */
-function claimIn(home, { ancestorTitle, env = {} } = {}) {
+function claimIn(home, { ancestorTitle, env = {}, spawnSyncImpl = spawnSync, now = Date.now } = {}) {
   const inner = `. ${shq(CLAIM)}; printf '%s' "\${CARGO_TARGET_DIR:-}"`;
   const cmd = ancestorTitle ? `exec -a ${shq(ancestorTitle)} bash -c ${shq(inner)}` : inner;
-  const res = spawnSync('bash', ['-c', cmd], {
+  const startedAt = now();
+  const res = spawnSyncImpl('bash', ['-c', cmd], {
     env: {
       ...process.env, HOME: home, CARGO_TARGET_DIR: '', ...env,
       PATH: `${prepareCargoProbe(home)}:${env.PATH || process.env.PATH}`,
@@ -734,9 +756,43 @@ function claimIn(home, { ancestorTitle, env = {} } = {}) {
     encoding: 'utf8',
     timeout: 10_000,
   });
-  if (res.error) throw res.error;
+  const elapsedMs = Math.max(0, now() - startedAt);
+  if (res.error) {
+    throw new Error(spawnFailureMessage('claimIn bash', res, elapsedMs), { cause: res.error });
+  }
   return { targetDir: res.stdout ?? '', stderr: res.stderr ?? '' };
 }
+
+test('claimIn retains bounded phase diagnostics when bash fails', () => {
+  const home = mkdtempSync(join(tmpdir(), 'claim-in-failure-'));
+  const spawnError = Object.assign(new Error('spawnSync bash ETIMEDOUT'), { code: 'ETIMEDOUT' });
+  const result = {
+    error: spawnError,
+    stdout: 'o'.repeat(2000),
+    stderr: 'e'.repeat(2000),
+    status: null,
+    signal: 'SIGTERM',
+  };
+  const times = [1000, 12137];
+  try {
+    assert.throws(
+      () => claimIn(home, { spawnSyncImpl: () => result, now: () => times.shift() }),
+      (error) => {
+        assert.strictEqual(error.cause, spawnError);
+        assert.match(error.message, /claimIn bash failed after 11137ms/);
+        assert.match(error.message, /code=ETIMEDOUT status=null signal=SIGTERM/);
+        assert.ok(error.message.includes('stdout tail (max 400 chars):'));
+        assert.ok(error.message.includes('stderr tail (max 400 chars):'));
+        assert.ok(error.message.includes('o'.repeat(SPAWN_DIAGNOSTIC_TAIL_CHARS)));
+        assert.ok(error.message.includes('e'.repeat(SPAWN_DIAGNOSTIC_TAIL_CHARS)));
+        assert.ok(error.message.length < 1200, 'failure diagnostics remain bounded');
+        return true;
+      },
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 /**
  * Stage a real process executing out of `<home>/.cargo-target/debug/papercusp-desktop`
