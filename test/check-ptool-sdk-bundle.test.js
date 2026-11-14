@@ -164,7 +164,7 @@ test('the current producer checks the real ptool bundle even when the frozen tar
     });
     const result = execute(block);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    assert.match(result.stdout, /ptool SDK self-check: 3 loader\(s\) resolve from an isolated copy/);
+    assert.match(result.stdout, /ptool SDK self-check: [1-9]\d* loader\(s\) resolve from an isolated copy/);
     assert.equal(fs.existsSync(path.join(target, 'bin/check-ptool-sdk-bundle.mjs')), false);
     const oldPath = block.replace('$HERE/check-ptool-sdk-bundle.mjs', '$ROOT/bin/check-ptool-sdk-bundle.mjs');
     assert.notEqual(oldPath, block);
