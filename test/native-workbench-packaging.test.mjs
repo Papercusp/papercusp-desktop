@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
 import {cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
@@ -71,4 +72,52 @@ test('Windows staging preserves the prior output on dependency mismatch or an un
     writeFileSync(manifestPath, JSON.stringify(manifest));
     assert.throws(() => stageNativeWorkbench(root, {platform:'windows'}), /Unpackaged Workbench dependency/);
     assert.deepEqual(inventory(previous.directory), before);
+}));
+
+test('Windows packaging CLI inventories installer payload bytes and refuses missing or mismatched inputs', () => withWindowsSource((root, source) => {
+    const command = () => spawnSync(process.execPath,
+        [join(desktop, 'bin/package-native-workbench.mjs'), '--stage-bundle', root, 'windows'],
+        {encoding:'utf8', timeout:30000});
+    // The installer is an independent consumer of the packager's closure. Derive
+    // its expected payload names without importing the production allowlist.
+    const installer = readFileSync(join(desktop, 'src-tauri/windows/inno/papercusp.iss'), 'utf8');
+    const expected = [...installer.matchAll(/^Source: "\{#BuildRoot\}\\resources\\workbench-windows\\([^"]+)"/gm)]
+        .map(match => match[1].replaceAll('\\', '/')).sort();
+    assert.ok(expected.length > 0, 'the real installer must declare Workbench payloads');
+
+    const initial = command();
+    assert.equal(initial.error, undefined);
+    assert.equal(initial.status, 0, initial.stderr);
+    const receipt = JSON.parse(initial.stdout);
+    assert.equal(receipt.platform, 'windows');
+    assert.equal(receipt.directory, join(root, 'src-tauri/resources/workbench-windows'));
+    assert.deepEqual(Object.keys(receipt.files).sort(), expected);
+    assert.deepEqual(inventory(receipt.directory), receipt.files);
+    assert.deepEqual(Object.keys(receipt).sort(), ['directory', 'files', 'platform']);
+    // This receipt describes packaging bytes. It carries no installed/native
+    // acceptance, signed artifact, login, or three-OS qualification assertion.
+    for (const name of expected)
+        assert.equal(receipt.files[name], hash(readFileSync(join(source, name))));
+
+    writeFileSync(join(receipt.directory, 'unlisted.dll'), 'stale output');
+    const refreshed = command();
+    assert.equal(refreshed.status, 0, refreshed.stderr);
+    assert.deepEqual(inventory(receipt.directory), receipt.files);
+
+    const missingPath = join(source, 'WorkbenchLifecycle.psm1');
+    const saved = readFileSync(missingPath);
+    rmSync(missingPath);
+    const missing = command();
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /ENOENT.*WorkbenchLifecycle\.psm1/);
+    assert.equal(missing.stdout, '');
+    assert.deepEqual(inventory(receipt.directory), receipt.files);
+
+    writeFileSync(missingPath, saved);
+    writeFileSync(join(source, 'lib/System.Memory.dll'), 'mismatched payload');
+    const mismatch = command();
+    assert.equal(mismatch.status, 1);
+    assert.match(mismatch.stderr, /dependency hash mismatch: lib\/System\.Memory\.dll/);
+    assert.equal(mismatch.stdout, '');
+    assert.deepEqual(inventory(receipt.directory), receipt.files);
 }));
