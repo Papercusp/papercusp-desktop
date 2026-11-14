@@ -307,6 +307,37 @@ test('early source preflight rejects replay closure and primary input gaps befor
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('vm-release rejects missing, partial and late qualification seams before expensive build work', () => {
+  const dir = fixture();
+  historicalSource(dir);
+  const serve = path.join(dir, 'apps/operator/bin/serve.ts');
+  const check = (profile = 'vm-release') => run(`set -euo pipefail\nsource "${lib}"\npapercusp_preflight_host_qualification "${dir}" "${profile}"`);
+  const boot = '  if (argv[0] === "--verify-boot-imports") {\n    console.log("PAPERCUSP_BOOT_IMPORTS_OK");\n    process.exit(0);\n  }\n';
+  const prompts = '  if (argv[0] === "--verify-role-prompts") {\n    console.log("PAPERCUSP_ROLE_PROMPT_ASSETS ");\n    process.exit(0);\n  }\n';
+  const main = (body) => `async function main(): Promise<void> {\n${body}\n}\n`;
+  try {
+    const historical = check();
+    assert.notEqual(historical.status, 0);
+    assert.match(historical.stderr, /target lacks early final-image qualification seam --verify-boot-imports/);
+    assert.match(historical.stderr, /unknown flags would start the runtime/);
+    assert.equal(check('dogfood').status, 0, 'historical dogfood is not a vm-release qualification claim');
+    for (const body of [boot, prompts, boot + prompts.replace('PAPERCUSP_ROLE_PROMPT_ASSETS ', 'wrong receipt'),
+      boot.replace('process.exit(0)', 'process.exit(1)') + prompts,
+      '  assertVmReleaseRuntimePolicy({});\n' + boot + prompts,
+      '// flags alone are not dispatch: --verify-boot-imports --verify-role-prompts\n']) {
+      fs.writeFileSync(serve, main(body));
+      assert.notEqual(check().status, 0, body);
+    }
+    fs.writeFileSync(serve, main(boot + prompts + '  assertVmReleaseRuntimePolicy({});\n'));
+    assert.equal(check().status, 0, 'complete early source contract must pass');
+    fs.copyFileSync(path.resolve(root, '../apps/operator/bin/serve.ts'), serve);
+    assert.equal(check().status, 0, 'maintained current source must pass');
+    const guard = builder.indexOf('papercusp_preflight_host_qualification "$REPO_ROOT" "$DISTRIBUTION_PROFILE"');
+    assert.ok(guard > 0 && guard < builder.indexOf('--preflight-vulnerabilities --refresh-db'));
+    assert.ok(guard < builder.indexOf('→ building operator-vite SPA'));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 // The optional standalone sibling follows the TARGET revision, unlike the
 // required worker composer. Execute the real caller block against each helper
 // contract so an older exact-source release never calls a missing function.

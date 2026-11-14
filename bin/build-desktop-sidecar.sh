@@ -224,6 +224,7 @@ fi
 # shellcheck source=lib/host-worker-bundler.sh
 source "$HERE/lib/host-worker-bundler.sh"
 papercusp_preflight_host_recipes "$REPO_ROOT" "$HERE/../../apps/operator/bin/bundle-host-common.sh" || exit 1
+papercusp_preflight_host_qualification "$REPO_ROOT" "$DISTRIBUTION_PROFILE" || exit 1
 
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
   # Share the final audit's scanner/DB integrity and freshness checks before

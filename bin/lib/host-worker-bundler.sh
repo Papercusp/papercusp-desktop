@@ -78,6 +78,35 @@ papercusp_preflight_host_recipes() { # <target repo root> <producer common helpe
   ' _ "$common" "$root"
 }
 
+# The final verifier invokes these read-only CLI seams. Older serve entrypoints
+# interpret unknown flags as normal startup, so an immutable-policy error is a
+# misleading late symptom. Refuse that target before any expensive production;
+# never replace its product code or relax the final-image verifier.
+papercusp_preflight_host_qualification() { # <target repo root> <distribution profile>
+  [[ "$2" == vm-release ]] || return 0
+  node --input-type=module - "$1" <<'NODE'
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+const file = resolve(process.argv[2], 'apps/operator/bin/serve.ts');
+const source = readFileSync(file, 'utf8');
+const main = source.slice(source.indexOf('async function main('));
+const policy = main.indexOf('assertVmReleaseRuntimePolicy(');
+for (const [flag, receipt] of [['--verify-boot-imports', 'PAPERCUSP_BOOT_IMPORTS_OK'],
+    ['--verify-role-prompts', 'PAPERCUSP_ROLE_PROMPT_ASSETS ']]) {
+  const branch = new RegExp('^\\s*if\\s*\\(\\s*argv\\[0\\]\\s*===\\s*["\']' + flag + '["\']\\s*\\)\\s*\\{', 'm').exec(main);
+  const end = branch && main.indexOf('\n  }', branch.index);
+  const body = branch && end >= 0 ? main.slice(branch.index, end) : '';
+  if (!body.includes(receipt) || !body.includes('process.exit(0)')
+      || (policy >= 0 && branch.index >= policy)) {
+    throw new Error(`target lacks early final-image qualification seam ${flag}: ${file}; ` +
+      'unknown flags would start the runtime. Select a source with both read-only probes; ' +
+      'refusing before scanner downloads or compilation (no product injection or verifier bypass).');
+  }
+}
+console.log('HOST_QUALIFICATION_SOURCE_READY');
+NODE
+}
+
 papercusp_configure_host_testing_core() { # <target repo root>
   local contract
   contract="$(papercusp_host_testing_core_contract "$1")" || return 1
