@@ -540,7 +540,9 @@ fi
 # repository contains the operator source packed into the sidecar. Labels are
 # stable manifest namespaces and prevent checkout paths from leaking.
 _OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/papercusp-release-dirty-source.XXXXXX")"
-bash "$ROOT/bin/emit-build-provenance.sh" --capture-dirty-source \
+# Provenance is release machinery: use the current emitter while its explicit
+# inputs and output paths continue to describe the frozen product tree.
+bash "$ORCHESTRATOR_HERE/emit-build-provenance.sh" --capture-dirty-source \
   "$_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST" \
   "desktop=$ROOT" "workspace=$ROOT/.." \
   || { echo "ERROR: could not capture content-addressed source provenance at cut start" >&2; exit 2; }
@@ -3163,7 +3165,7 @@ print(json.dumps(record))
   PROVENANCE_SOURCE_GIT_HEAD="$head" \
   PROVENANCE_SOURCE_GIT_DIRTY="$dirty" \
   PROVENANCE_REQUIRE_CANDIDATE_PIN="${PROVENANCE_REQUIRE_CANDIDATE_PIN:-auto}" \
-  PROVENANCE_GIT_ROOT="$ROOT" bash "$ROOT/bin/emit-build-provenance.sh" \
+  PROVENANCE_GIT_ROOT="$ROOT" bash "$ORCHESTRATOR_HERE/emit-build-provenance.sh" \
     "$bundle" "$VERSION" "$sha" "$reused" \
     "$bundle"/deb/*_"$VERSION"_*.deb "$bundle"/appimage/*_"$VERSION"_*.AppImage
 }
@@ -3858,7 +3860,7 @@ if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
   PROVENANCE_SOURCE_GIT_HEAD="$_mac_prov_head" \
   PROVENANCE_SOURCE_GIT_DIRTY="$_mac_prov_dirty" \
   PROVENANCE_REQUIRE_CANDIDATE_PIN="${PROVENANCE_REQUIRE_CANDIDATE_PIN:-auto}" \
-  PROVENANCE_GIT_ROOT="$ROOT" bash "$ROOT/bin/emit-build-provenance.sh" \
+  PROVENANCE_GIT_ROOT="$ROOT" bash "$ORCHESTRATOR_HERE/emit-build-provenance.sh" \
     "$MAC_OUT" "$VERSION" "$_mac_prov_sha" "$([[ "${MAC_REUSE:-0}" == "1" ]] && echo true || echo false)" \
     "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg "$MAC_OUT"/macos/*.app.tar.gz \
     || { echo "ERROR: mac build-provenance.json emit failed — refusing to ship mac artifacts WITHOUT a provenance record (the .app.tar.gz is unversioned; nothing else can prove which cut these bytes belong to)." >&2; exit 1; }
