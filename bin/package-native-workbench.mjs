@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Use GNOME's maintained archive/schema compiler rather than a second packer.
-import {mkdirSync, mkdtempSync, cpSync, readFileSync, copyFileSync, writeFileSync, statSync, chmodSync, rmSync} from 'node:fs';
+import {mkdirSync, mkdtempSync, cpSync, readFileSync, copyFileSync, writeFileSync, statSync, chmodSync, renameSync, rmSync} from 'node:fs';
 import {resolve, join, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
@@ -90,22 +90,31 @@ export function stageNativeWorkbench(desktopRoot = resolve(import.meta.dirname, 
     }
     if (platform === 'windows' || platform === 'win32') {
         const destination = join(resources, 'workbench-windows');
-        const manifest = JSON.parse(readFileSync(join(desktopRoot, 'native/windows/dependencies.json'), 'utf8'));
+        // Read the entire closure before touching the previous output. Validate,
+        // copy and inventory the same bytes, even if a source changes afterward.
+        const sources = Object.fromEntries(windowsWorkbenchFiles.map(name =>
+            [name, readFileSync(join(desktopRoot, 'native/windows', name))]));
+        const manifest = JSON.parse(sources['dependencies.json'].toString('utf8'));
         for (const entry of [...manifest.packages, ...manifest.licenses]) {
             if (!windowsWorkbenchFiles.includes(entry.file)) throw new Error('Unpackaged Workbench dependency: ' + entry.file);
-            const hash = createHash('sha256').update(readFileSync(join(desktopRoot, 'native/windows', entry.file))).digest('hex');
+            const hash = createHash('sha256').update(sources[entry.file]).digest('hex');
             if (hash !== entry.sha256) throw new Error('Workbench dependency hash mismatch: ' + entry.file);
         }
-        mkdirSync(destination, {recursive:true});
-        const files = {};
-        for (const name of windowsWorkbenchFiles) {
-            const source = join(desktopRoot, 'native/windows', name);
-            const bytes = readFileSync(source); // Fail closed on an incomplete native source closure.
-            mkdirSync(join(destination, name, '..'), {recursive:true});
-            copyFileSync(source, join(destination, name));
-            files[name] = createHash('sha256').update(bytes).digest('hex');
-        }
-        return {platform:'windows', directory:destination, files};
+        mkdirSync(resources, {recursive:true});
+        const prepared = mkdtempSync(join(resources, 'workbench-windows-source-'));
+        try {
+            const files = {};
+            for (const [name, bytes] of Object.entries(sources)) {
+                mkdirSync(join(prepared, name, '..'), {recursive:true});
+                writeFileSync(join(prepared, name), bytes);
+                files[name] = createHash('sha256').update(bytes).digest('hex');
+            }
+            // Replace this owned output only after preparation succeeds, removing
+            // obsolete nested files that are absent from the returned inventory.
+            rmSync(destination, {recursive:true, force:true});
+            renameSync(prepared, destination);
+            return {platform:'windows', directory:destination, files};
+        } finally { rmSync(prepared, {recursive:true, force:true}); }
     }
     if (platform !== 'linux') throw new Error('Unsupported native Workbench bundle platform: ' + platform);
     const bundle = packageNativeWorkbench(resources, {sourceDirectory: join(desktopRoot, 'native/gnome')});
