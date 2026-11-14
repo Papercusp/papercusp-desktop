@@ -870,6 +870,47 @@ function runStreamDriver(temp, script, helper = false) {
     rmSync(temp,{recursive:true,force:true});
 }
 
+test('resident bridge rejects invalid PUI paths before spawning or replacing its helper',
+    {skip:process.platform!=='linux',timeout:30000}, () => {
+        const temp=mkdtempSync(join(tmpdir(),"workbench-invalid-pui-")),pui=streamFixture(temp);
+        const fakeHelper=join(temp,'unexpected-helper.js'),marker=join(temp,'helper-started');
+        writeFileSync(fakeHelper,`import GLib from 'gi://GLib'; GLib.file_set_contents(${JSON.stringify(marker)}, 'unexpected helper');`);
+        const bridge=pathToFileURL(join(root,'native/gnome/bridge.js')).href;
+        runStreamDriver(temp,`import GLib from 'gi://GLib';
+import {ResidentBridge} from ${JSON.stringify(bridge)};
+const invalidPaths=['','   ',null,undefined,42];
+const request={name:'reports.get',args:{id:'literal +/=&'}};
+async function unconfigured(bridge,operation) {
+ const child=bridge._child,result=operation().then(()=>null,error=>error);
+ const started=bridge._child,error=await result;
+ if(started!==child||bridge._child!==child)
+  throw Error('Invalid PUI path started or replaced the resident helper');
+ if(error?.message!=='PUI is not configured')
+  throw Error('Invalid PUI path did not reject as a configuration error: '+error);
+}
+async function invalidOperations(bridge) {
+ for(const path of invalidPaths) {
+  await unconfigured(bridge,()=>bridge.read(path,request));
+  await unconfigured(bridge,()=>bridge.stream(path,{mode:'wait'},()=>{}).done);
+ }
+}
+const cold=new ResidentBridge(${JSON.stringify(fakeHelper)});
+try { await invalidOperations(cold); } finally { cold.close(); }
+if(GLib.file_test(${JSON.stringify(marker)},GLib.FileTest.EXISTS))
+ throw Error('Invalid configuration executed the helper');
+const warm=new ResidentBridge(${JSON.stringify(join(root,'native/gnome/helper.js'))});
+try {
+ const first=await warm.read(${JSON.stringify(pui)},request),child=warm._child;
+ if(first.rows[0].args.id!==request.args.id)throw Error('Valid PUI identity changed');
+ await invalidOperations(warm);
+ const next=await warm.read(${JSON.stringify(pui)},{name:'reports.get',args:{id:'still-ready'}});
+ if(warm._child!==child||next.rows[0].args.id!=='still-ready')
+  throw Error('Invalid configuration disrupted the working helper');
+} finally { warm.close(); }
+print('NATIVE_STREAM_PASS');
+`,true);
+    });
+
 // Hardware is explicitly opted into: ordinary CI must never open a microphone
 // or speaker. Exercise production defaults and reject GStreamer's dummy sink,
 // which otherwise makes an unavailable desktop sound device look successful.

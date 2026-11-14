@@ -136,6 +136,7 @@ export class ResidentBridge {
     _request(pui, request, command, onFrame = null) {
         const refused = message => ({done: Promise.reject(new Error(message)), cancel() {}});
         if (this._closed) return refused('Workbench has stopped');
+        if (typeof pui !== 'string' || !pui.trim()) return refused('PUI is not configured');
         const streaming = command === 'native-chat' || (command === 'native-cards' && request.operation === 'subscribe');
         const audio = command === 'native-audio';
         if ((!streaming && !['native-read', 'native-inbox', 'native-account', 'native-cards', 'native-voice', 'native-audio'].includes(command)) ||
