@@ -423,10 +423,10 @@ import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 const [modulePath, artifact, platform] = process.argv.slice(2);
 const { encodeTauriUpdateAuthorization } = await import(pathToFileURL(modulePath).href);
-const payload = encodeTauriUpdateAuthorization({ schema: 'tauri-update-authorization-v1',
+const payload = encodeTauriUpdateAuthorization({ schema: 'tauri-update-authorization-v2',
   artifactSha256: createHash('sha256').update(readFileSync(artifact)).digest('hex'),
   policySha256: 'b'.repeat(64), configurationSha256: 'c'.repeat(64), sourceRevision: 'd'.repeat(40),
-  version: '9.9.9', product: 'gui', platform, authorId: 'author', approverId: 'reviewer', approverEpoch: 1,
+  version: '9.9.9', product: 'gui', platform, authorIds: ['author'], approverId: 'reviewer', approverEpoch: 1,
   signerId: 'signer', signerEpoch: 1, rootEpoch: 1, rollbackCounter: 5, issuedAt: 1000, expiresAt: 2000 });
 const signature = Buffer.from('untrusted comment: fixture\nAA\ntrusted comment: fixture\nAA\n').toString('base64');
 writeFileSync(`${artifact}.update-authorization.json`, JSON.stringify({ [platform]: { payload, signature, approvalSignature: signature } }));
