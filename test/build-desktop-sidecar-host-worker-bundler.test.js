@@ -171,6 +171,8 @@ function historicalSource(dir) {
     'apps/operator/bin/serve.ts': 'console.log("historical host");\n',
     'apps/operator/bin/ascii-escape-bundle.mjs': '// fixture syntax check\n',
     'scripts/npm-install-safe.mjs': '// fixture cache lease\n',
+    'packages/plugin-loader/package.json': '{"dependencies":{}}\n',
+    'packages/plugin-loader/src/daemon/supervisor.ts': 'export default {};\n',
   })) {
     fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
     fs.writeFileSync(path.join(dir, file), body);
@@ -223,6 +225,60 @@ test('partial current testing-core contracts fail preflight and never replace th
     assert.equal(current.stdout.trim(), 'current-recipe');
     fs.writeFileSync(worker, '');
     assert.notEqual(check().status, 0, 'empty current worker must fail');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('handler runtime preflight requires the complete current feature or a fully historical source', () => {
+  const dir = fixture();
+  historicalSource(dir);
+  const base = path.join(dir, 'packages/plugin-loader');
+  const manifest = path.join(base, 'package.json');
+  const supervisor = path.join(base, 'src/daemon/supervisor.ts');
+  const files = ['handler-bootstrap.ts', 'handler-runtime.ts', 'handler-seccomp.ts',
+    'handler-runtime-build.ts', 'handler-installation.ts'].map(file => path.join(base, 'src/daemon', file));
+  const check = () => run(`set -euo pipefail\nsource "${lib}"\npapercusp_host_handler_runtime_contract "${dir}"`);
+  try {
+    assert.equal(check().stdout.trim(), 'historical');
+    fs.writeFileSync(manifest, '{"dependencies":{"koffi":"3.3.7"}}');
+    assert.notEqual(check().status, 0, 'a Koffi pin alone is not the handler feature');
+    fs.writeFileSync(supervisor, "import './handler-runtime';\n");
+    for (const file of files) fs.writeFileSync(file, '// handler source\n');
+    assert.equal(check().stdout.trim(), 'current');
+    for (const file of files) {
+      fs.rmSync(file);
+      assert.notEqual(check().status, 0, `missing ${path.basename(file)} must fail early`);
+      fs.writeFileSync(file, '// handler source\n');
+    }
+    fs.writeFileSync(manifest, '{"dependencies":{"koffi":"^3.3.7"}}');
+    assert.notEqual(check().status, 0, 'unpinned Koffi must fail');
+    fs.writeFileSync(manifest, '{"dependencies":{}}');
+    assert.notEqual(check().status, 0, 'current runtime without Koffi must fail');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('real Koffi fetch and handler packaging blocks follow the validated target feature', () => {
+  const dir = fixture();
+  const koffi = builder.match(/^if \[\[ "\$PAPERCUSP_HANDLER_RUNTIME_CONTRACT" == current \]\]; then[\s\S]*?^fi$/m)?.[0];
+  const handler = builder.match(/^if \[\[ "\$target_os" == linux && "\$PAPERCUSP_HANDLER_RUNTIME_CONTRACT" == current \]\]; then[\s\S]*?^fi$/m)?.[0];
+  assert.ok(koffi && handler, 'both native runtime stages must follow the target contract');
+  try {
+    const execute = (contract, pin) => run([
+      'set -euo pipefail', `SIDECAR_DIR="${dir}"`, '_bare_node_platform=linux; TARGET_ARCH=x64',
+      `PAPERCUSP_HANDLER_RUNTIME_CONTRACT=${contract}`, 'target_os=linux; target_arch=x64; node_dst=/node',
+      `opt_dep_version() { printf '%s' '${pin}'; }`,
+      'fetch_cross_npm_pkg() { echo "fetch $1"; }',
+      'stage_handler_runtime() { echo "stage $1 $2"; }', koffi, handler,
+    ].join('\n'));
+    const old = execute('historical', '');
+    assert.equal(old.status, 0, old.stderr);
+    assert.equal(old.stdout, '', 'historical packaging must not inject a native runtime');
+    const missing = execute('current', '');
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /Koffi target pin missing/);
+    const current = execute('current', '3.3.7');
+    assert.equal(current.status, 0, current.stderr);
+    assert.match(current.stdout, /fetch @koromix\/koffi-linux-x64@3.3.7/);
+    assert.match(current.stdout, /stage \/node x64/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

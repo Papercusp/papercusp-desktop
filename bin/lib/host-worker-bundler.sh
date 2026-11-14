@@ -38,9 +38,33 @@ papercusp_host_testing_core_contract() { # <target repo root>
   fi
 }
 
+papercusp_host_handler_runtime_contract() { # <target repo root>
+  node --input-type=module - "$1" <<'NODE'
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
+const root = process.argv[2];
+const base = 'packages/plugin-loader';
+const manifest = JSON.parse(readFileSync(resolve(root, base, 'package.json'), 'utf8'));
+const supervisor = readFileSync(resolve(root, base, 'src/daemon/supervisor.ts'), 'utf8');
+const files = ['handler-bootstrap.ts', 'handler-runtime.ts', 'handler-seccomp.ts',
+  'handler-runtime-build.ts', 'handler-installation.ts'].map(file => resolve(root, base, 'src/daemon', file));
+const pin = manifest.dependencies?.koffi;
+const references = /handler-runtime|handler-bootstrap|handler-seccomp/.test(supervisor);
+if (!pin && !references && files.every(file => !existsSync(file))) {
+  console.log('historical');
+} else if (typeof pin === 'string' && /^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(pin)
+    && references && files.every(file => existsSync(file) && statSync(file).isFile() && statSync(file).size > 0)) {
+  console.log('current');
+} else {
+  throw new Error('incomplete target handler runtime: require matching supervisor, source closure and exact Koffi pin');
+}
+NODE
+}
+
 papercusp_preflight_host_recipes() { # <target repo root> <producer common helper>
   local root="$1" common="$2" input
   papercusp_host_testing_core_contract "$root" >/dev/null || return 1
+  PAPERCUSP_HANDLER_RUNTIME_CONTRACT="$(papercusp_host_handler_runtime_contract "$root")" || return 1
   for input in apps/operator/bin/bundle-host-common.sh apps/operator/bin/serve.ts \
     apps/operator/bin/ascii-escape-bundle.mjs scripts/npm-install-safe.mjs; do
     [[ -s "$root/$input" ]] || { echo "FATAL: missing host recipe input $root/$input" >&2; return 1; }

@@ -2357,12 +2357,16 @@ if ! node "$HERE/check-ptool-sdk-bundle.mjs" "$SIDECAR_DIR/scripts/ptool.mjs" --
   exit 1
 fi
 for np in "${NATIVE_PKGS[@]}"; do copy_pkg_closure "$np"; done
-# Reuse the existing target-specific npm fetch for Koffi's optional native addon.
-_koffi_target="@koromix/koffi-${_bare_node_platform}-${TARGET_ARCH}"
-if [[ ! -d "$SIDECAR_DIR/node_modules/$_koffi_target" ]]; then
-  _koffi_version="$(opt_dep_version "$SIDECAR_DIR/node_modules/koffi/package.json" "$_koffi_target")"
-  [[ -n "$_koffi_version" ]] || { echo "ERROR: Koffi target pin missing" >&2; exit 1; }
-  fetch_cross_npm_pkg "$_koffi_target@$_koffi_version" "$SIDECAR_DIR/node_modules" || exit 1
+# A historical source has no handler runtime or Koffi dependency. The early
+# source-contract preflight refuses partial current features before expensive work.
+if [[ "$PAPERCUSP_HANDLER_RUNTIME_CONTRACT" == current ]]; then
+  # Reuse the existing target-specific npm fetch for Koffi's optional native addon.
+  _koffi_target="@koromix/koffi-${_bare_node_platform}-${TARGET_ARCH}"
+  if [[ ! -d "$SIDECAR_DIR/node_modules/$_koffi_target" ]]; then
+    _koffi_version="$(opt_dep_version "$SIDECAR_DIR/node_modules/koffi/package.json" "$_koffi_target")"
+    [[ -n "$_koffi_version" ]] || { echo "ERROR: Koffi target pin missing" >&2; exit 1; }
+    fetch_cross_npm_pkg "$_koffi_target@$_koffi_version" "$SIDECAR_DIR/node_modules" || exit 1
+  fi
 fi
 copy_host_external_closures || exit 1
 echo "  copied $nat_copied package(s) ($nat_missing missing)"
@@ -4630,7 +4634,7 @@ if [[ -z "$node_dst" || ! -s "$node_dst" ]]; then
 fi
 
 # Measure one target-specific guest closure. Installer approval remains separate.
-if [[ "$target_os" == linux ]]; then
+if [[ "$target_os" == linux && "$PAPERCUSP_HANDLER_RUNTIME_CONTRACT" == current ]]; then
   case "$target_arch" in
     x64) _handler_triplet=x86_64-linux-gnu ;;
     arm64) _handler_triplet=aarch64-linux-gnu ;;
