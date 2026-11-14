@@ -770,7 +770,6 @@ release_artifacts_find_provenance() {
 # package that never replaces the running operator (WI-6554700010030528).
 release_artifacts_linux_deb_role() {
   local f="${1:-}" name pkg=""
-  name="$(basename "$f")"
   if [[ -f "$f" ]] && command -v dpkg-deb >/dev/null 2>&1; then
     pkg="$(dpkg-deb -f "$f" Package 2>/dev/null || true)"
   fi
@@ -781,6 +780,7 @@ release_artifacts_linux_deb_role() {
   esac
   # No readable package identity (unreadable control member, no dpkg-deb, or an
   # unrecognised name): fall back to the filename, still excluding seed companions.
+  name="$(basename "$f")"
   if [[ "$name" == *-seed_* || "$name" == *-seed.deb ]]; then echo companion
   elif [[ "$name" == *[Ss]erver* ]]; then echo server
   else echo gui

@@ -203,10 +203,6 @@ gen_latest_manifest_notes_path()       { printf '/tmp/papercusp-notes-%s.md\n' "
 # gen_latest_manifest <version> <channel> <tag> <artifact>...
 gen_latest_manifest() {
   local version="$1" channel="$2" tag="$3"; shift 3
-  local out_path out_server_path notes_path
-  out_path="$(gen_latest_manifest_json_path "$tag")"
-  out_server_path="$(gen_latest_manifest_server_json_path "$tag")"
-  notes_path="$(gen_latest_manifest_notes_path "$tag")"
   # EI-18111560213741904 MERGE MODE — see the header comment above.
   local merge_gui="${GEN_LATEST_MANIFEST_MERGE_GUI_JSON:-}"
   local merge_srv="${GEN_LATEST_MANIFEST_MERGE_SERVER_JSON:-}"
@@ -221,7 +217,7 @@ gen_latest_manifest() {
   done
   if [[ "$needs_authorization" == 1 ]]; then
     signature_module="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/libs/generic/tauri-release-kit/src/signature.mjs"
-    authorizations="$(node --input-type=module - "$signature_module" "$version" "$@" <<'NODE'
+    if ! authorizations="$(node --input-type=module - "$signature_module" "$version" "$@" <<'NODE'
 import { existsSync, readFileSync, statSync, createReadStream } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -252,8 +248,15 @@ for (const artifact of artifacts) {
 }
 process.stdout.write(JSON.stringify(result));
 NODE
-    )" || return 1
+    )"; then
+      return 1
+    fi
   fi
+
+  local out_path out_server_path notes_path
+  out_path="$(gen_latest_manifest_json_path "$tag")"
+  out_server_path="$(gen_latest_manifest_server_json_path "$tag")"
+  notes_path="$(gen_latest_manifest_notes_path "$tag")"
 
   python3 - "$version" "$channel" "$tag" "$out_path" "$out_server_path" "$notes_path" "$merge_gui" "$merge_srv" "$authorizations" "$@" <<'PY'
 import json, os, sys, pathlib, hashlib
