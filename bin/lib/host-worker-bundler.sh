@@ -18,6 +18,57 @@
 #   never re-sources that copy into this shell: the helper's load-once guard would turn a
 #   re-source into a silent no-op, and a real re-source would replace the target's esbuild
 #   boundary variables.
+
+# The current producer can target a revision from before the detached testing
+# core existed. Absence is historical only when its runtime, worker and witness
+# helper agree. A damaged current checkout must never acquire the legacy route.
+papercusp_host_testing_core_contract() { # <target repo root>
+  local root="$1" runtime="$1/packages/operator-core/lib/agent-tools/testing/run.ts"
+  local worker="$1/packages/operator-core/lib/agent-tools/testing/testing-core.worker.ts"
+  local helper="$1/scripts/lib/testing-core-witness.mjs" required=0
+  [[ -s "$runtime" ]] || { echo "FATAL: missing testing runtime $runtime" >&2; return 1; }
+  if grep -Eq 'testing-core[.]worker|__PAPERCUSP_TESTING_CORE_WITNESS__' "$runtime"; then required=1; fi
+  if [[ ! -e "$worker" && ! -e "$helper" && "$required" == 0 ]]; then
+    printf '%s\n' historical
+  elif [[ -s "$worker" && -s "$helper" && "$required" == 1 ]]; then
+    printf '%s\n' witnessed
+  else
+    echo "FATAL: incomplete target testing-core contract: runtime=$runtime worker=$worker helper=$helper" >&2
+    return 1
+  fi
+}
+
+papercusp_preflight_host_recipes() { # <target repo root> <producer common helper>
+  local root="$1" common="$2" input
+  papercusp_host_testing_core_contract "$root" >/dev/null || return 1
+  for input in apps/operator/bin/bundle-host-common.sh apps/operator/bin/serve.ts \
+    apps/operator/bin/ascii-escape-bundle.mjs scripts/npm-install-safe.mjs; do
+    [[ -s "$root/$input" ]] || { echo "FATAL: missing host recipe input $root/$input" >&2; return 1; }
+  done
+  # Exercise the maintained replay manifest reader before scanner downloads or
+  # SPA compilation. It validates partial features and every named source input.
+  env -u PAPERCUSP_BUNDLE_HOST_COMMON_LOADED bash -c '
+    set -euo pipefail
+    source "$1"
+    bundle_host_replay_identity_define "$2" >/dev/null
+  ' _ "$common" "$root"
+}
+
+papercusp_configure_host_testing_core() { # <target repo root>
+  local contract
+  contract="$(papercusp_host_testing_core_contract "$1")" || return 1
+  [[ "$contract" == historical ]] || return 0
+  # Only the producer's new primary recipe is adapted. Keep the target's worker
+  # composer and external boundary; do not inject newer runtime code or a witness.
+  bundle_host_prepare_testing_core() {
+    BUNDLE_HOST_TESTING_CORE_WITNESS_DEFINE='--define:__PAPERCUSP_TESTING_CORE_WITNESS__=undefined'
+    echo '    ✓ target runtime predates the detached testing core; preserving its worker graph' >&2
+  }
+  bundle_host_verify_testing_core() {
+    [[ "$(papercusp_host_testing_core_contract "$1")" == historical ]]
+  }
+}
+
 papercusp_ensure_host_worker_bundler() {
   declare -F bundle_host_workers >/dev/null 2>&1 && return 0
   local common="${1:-}" defs
