@@ -75,7 +75,10 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
+import time
 import zipfile
+from collections import deque
 from datetime import datetime, timezone
 
 # ── PATH rules — the class that actually bit us: a scratch/state dir sweeping in
@@ -1716,6 +1719,9 @@ VM_RELEASE_GRYPE_DB_MAX_AGE_HOURS = 72
 # This accommodates that operation, not a diagnosis of the historical timeout
 # (EI-25323345241522712 remains the runtime investigation).
 VM_RELEASE_GRYPE_DB_TIMEOUT_SECONDS = 300
+# Bootstrap downloads, extracts and migrates the DB; it is not a metadata read.
+# A measured successful cold bootstrap took 309.62s (EI-28800918827174014).
+VM_RELEASE_GRYPE_BOOTSTRAP_TIMEOUT_SECONDS = 1800
 
 # EI-21925061645614369 — how many installed npm package directories we need to SEE on disk before
 # we are willing to insist the SBOM catalogued some. This is only a walk cutoff, not a threshold:
@@ -1800,6 +1806,7 @@ def _vulnerability_tool_metadata():
     metadata_env["SYFT_CHECK_FOR_APP_UPDATE"] = "false"
     metadata_env["GRYPE_CHECK_FOR_APP_UPDATE"] = "false"
     metadata_env["GRYPE_DB_AUTO_UPDATE"] = "false"
+    metadata_env["GRYPE_DB_VALIDATE_BY_HASH_ON_START"] = "true"
     _prepare_grype_cache(metadata_env)
     syft_version = _parse_tool_json(
         [syft, "version", "-o", "json"], "syft version", metadata_env
@@ -1825,6 +1832,91 @@ def _vulnerability_tool_metadata():
     return syft, grype, metadata_env, syft_version, grype_version, db_status, db_built
 
 
+def _bootstrap_grype_db(grype, env):
+    """Bound bootstrap separately and expose its actual progress on timeout.
+
+    Grype v6's distribution client extracts inside Download(), before emitting
+    'downloaded vulnerability DB'. Report that interval as download-extract;
+    never manufacture a separate extraction measurement from the same clock.
+    Newer/other writers exposing 'unarchiving DB' get an explicit extract phase.
+    Readiness still requires the independent hash/freshness check below.
+    """
+    env = env.copy()
+    env["GRYPE_CHECK_FOR_APP_UPDATE"] = "false"
+    env["GRYPE_LOG_LEVEL"] = "debug"
+    env["GRYPE_DB_VALIDATE_BY_HASH_ON_START"] = "true"
+    started = phase_started = time.monotonic()
+    phase = "check"
+    tail = deque(maxlen=12)
+    read_errors = []
+
+    def report(outcome, **fields):
+        print("GRYPE_DB_BOOTSTRAP " + json.dumps({
+            "phase": phase, "outcome": outcome,
+            "elapsedSeconds": round(time.monotonic() - phase_started, 3),
+            **fields,
+        }, sort_keys=True), file=sys.stderr, flush=True)
+
+    report("started", timeoutSeconds=VM_RELEASE_GRYPE_BOOTSTRAP_TIMEOUT_SECONDS,
+           extractionTiming="included-in-download-extract-unless-reported-separately")
+    try:
+        process = subprocess.Popen(
+            [grype, "db", "update"], env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+        )
+    except OSError as exc:
+        report("launch-failed")
+        print(f"WARNING: grype db update could not run: {exc}; "
+              "validated freshness decides", file=sys.stderr)
+        return
+
+    def read_progress():
+        nonlocal phase, phase_started
+        try:
+            for line in process.stdout:
+                tail.append(line.rstrip())
+                next_phase = None
+                if "downloading new vulnerability DB" in line:
+                    next_phase = "download-extract"
+                elif "unarchiving DB" in line:
+                    next_phase = "extract"
+                elif "downloaded vulnerability DB" in line or "applying DB migrations" in line:
+                    next_phase = "import"
+                elif "moved database directory to activate" in line:
+                    next_phase = "activate"
+                if next_phase and next_phase != phase:
+                    report("complete")
+                    phase = next_phase
+                    phase_started = time.monotonic()
+                    report("started")
+        except (OSError, ValueError) as exc:
+            read_errors.append(str(exc))
+
+    reader = threading.Thread(target=read_progress, daemon=True)
+    reader.start()
+    timed_out = False
+    try:
+        code = process.wait(timeout=VM_RELEASE_GRYPE_BOOTSTRAP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        process.kill()
+        code = process.wait()
+    finally:
+        reader.join(timeout=5)
+    # Never close a pipe under a reader which has not returned. The finite child
+    # deadline is authoritative; a missing EOF is reported, not an endless wait.
+    if not reader.is_alive():
+        process.stdout.close()
+    outcome = "timeout" if timed_out else "complete" if code == 0 else "failed"
+    report(outcome, exitCode=code,
+           totalSeconds=round(time.monotonic() - started, 3),
+           timeoutSeconds=VM_RELEASE_GRYPE_BOOTSTRAP_TIMEOUT_SECONDS,
+           diagnosticsComplete=not reader.is_alive() and not read_errors)
+    if timed_out or code != 0 or read_errors or reader.is_alive():
+        print("WARNING: grype DB bootstrap did not complete cleanly; "
+              "validated freshness decides\n" + "\n".join(tail), file=sys.stderr)
+
+
 def preflight_vulnerabilities(args):
     """Check scanners before building; this never attests an artifact."""
     if args not in ([], ["--refresh-db"]):
@@ -1839,17 +1931,7 @@ def preflight_vulnerabilities(args):
     if args:
         grype = shutil.which("grype")
         if grype:
-            env = os.environ.copy()
-            env["GRYPE_CHECK_FOR_APP_UPDATE"] = "false"
-            try:
-                result = subprocess.run([grype, "db", "update"], env=env,
-                                        timeout=VM_RELEASE_GRYPE_DB_TIMEOUT_SECONDS)
-                if result.returncode != 0:
-                    print("WARNING: grype db update failed; validated freshness decides",
-                          file=sys.stderr)
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                print(f"WARNING: grype db update could not run: {exc}; "
-                      "validated freshness decides", file=sys.stderr)
+            _bootstrap_grype_db(grype, os.environ)
     try:
         _vulnerability_tool_metadata()
     except RuntimeError as exc:

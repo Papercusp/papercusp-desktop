@@ -109,6 +109,91 @@ test('vulnerability preflight refuses an obstructing file without deleting it or
   assert.equal(fs.existsSync(calls), false);
 });
 
+function bootstrapProbe(mode) {
+  // Exercise the production preflight with a simulated 310s updater. Sleeping
+  // for five minutes would obscure the budget regression rather than test it.
+  const probe = [
+    'import io, json, os, runpy, sys, tempfile, types',
+    'ns = runpy.run_path(sys.argv[1])',
+    'mode = sys.argv[2]; calls = []; state = {"killed": False}',
+    'class Process:',
+    '    def __init__(self, command, **kwargs):',
+    '        calls.append({"operation": "update", "argv": command[1:], "hash": kwargs["env"]["GRYPE_DB_VALIDATE_BY_HASH_ON_START"], "log": kwargs["env"]["GRYPE_LOG_LEVEL"]})',
+    '        self.stdout = io.StringIO("[0000] INFO downloading new vulnerability DB\\n[0111] INFO downloaded vulnerability DB\\n[0111] DEBUG applying DB migrations\\n[0309] DEBUG moved database directory to activate\\n")',
+    '    def wait(self, timeout=None):',
+    '        if timeout is not None:',
+    '            calls.append({"operation": "bootstrap-wait", "timeout": timeout})',
+    '            if timeout < 310 or mode == "timeout":',
+    '                raise ns["subprocess"].TimeoutExpired("grype db update", timeout)',
+    '        return -9 if state["killed"] else 1 if mode == "failed-stale" else 0',
+    '    def kill(self): state["killed"] = True',
+    'def run(command, **kwargs):',
+    '    is_db = command[1:3] == ["db", "status"]',
+    '    calls.append({"operation": "status" if is_db else "version", "timeout": kwargs["timeout"], "autoUpdate": kwargs["env"]["GRYPE_DB_AUTO_UPDATE"], "hash": kwargs["env"]["GRYPE_DB_VALIDATE_BY_HASH_ON_START"]})',
+    '    value = {"version": "test"}',
+    '    if is_db:',
+    '        built = ns["datetime"].now(ns["timezone"].utc)',
+    '        if mode == "failed-stale":',
+    '            from datetime import timedelta',
+    '            built -= timedelta(hours=73)',
+    '        value = {"valid": not state["killed"], "built": built.isoformat()}',
+    '    return types.SimpleNamespace(returncode=0, stdout=json.dumps(value), stderr="")',
+    'ns["subprocess"].Popen = Process',
+    'ns["subprocess"].run = run',
+    'ns["shutil"].which = lambda name: "/test/" + name',
+    'with tempfile.TemporaryDirectory() as cache:',
+    '    os.environ["GRYPE_DB_CACHE_DIR"] = cache',
+    '    os.environ["GRYPE_DB_VALIDATE_BY_HASH_ON_START"] = "false"',
+    '    code = ns["preflight_vulnerabilities"](["--refresh-db"])',
+    'print(json.dumps({"code": code, "calls": calls, **state}))',
+  ].join('\n');
+  const result = spawnSync('python3', ['-c', probe, SCRIPT, mode], {
+    encoding: 'utf8', timeout: 15_000,
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  return { result, measured: JSON.parse(result.stdout.trim().split('\n').at(-1)) };
+}
+
+test('Grype cold bootstrap can exceed the metadata deadline and reports real phase boundaries', () => {
+  const { result, measured } = bootstrapProbe('slow-success');
+  assert.equal(measured.code, 0, result.stderr);
+  assert.equal(measured.killed, false);
+  assert.deepEqual(measured.calls.map((c) => c.timeout).filter((x) => x !== undefined),
+    [1800, 60, 60, 300]);
+  const update = measured.calls.find((c) => c.operation === 'update');
+  assert.deepEqual(update.argv, ['db', 'update']);
+  assert.equal(update.hash, 'true');
+  assert.equal(update.log, 'debug');
+  assert.ok(measured.calls.filter((c) => c.operation !== 'bootstrap-wait')
+    .every((c) => c.hash === 'true'));
+  const events = result.stderr.split('\n').filter((s) => s.startsWith('GRYPE_DB_BOOTSTRAP '))
+    .map((s) => JSON.parse(s.slice('GRYPE_DB_BOOTSTRAP '.length)));
+  assert.deepEqual(events.filter((e) => e.outcome === 'started').map((e) => e.phase),
+    ['check', 'download-extract', 'import', 'activate']);
+  assert.ok(events.every((e) => e.elapsedSeconds >= 0));
+  assert.equal(events.at(-1).diagnosticsComplete, true);
+  assert.match(events[0].extractionTiming, /included-in-download-extract/);
+  assert.match(result.stdout, /VULNERABILITY TOOLS READY/);
+});
+
+test('Grype bootstrap timeout kills its child and cannot admit an invalid partial DB', () => {
+  const { result, measured } = bootstrapProbe('timeout');
+  assert.equal(measured.code, 2);
+  assert.equal(measured.killed, true);
+  assert.match(result.stderr, /"outcome": "timeout"/);
+  assert.match(result.stderr, /grype DB reports valid != true/);
+  assert.doesNotMatch(result.stdout, /VULNERABILITY TOOLS READY/);
+});
+
+test('a failed Grype bootstrap still checks freshness and rejects a stale cached DB', () => {
+  const { result, measured } = bootstrapProbe('failed-stale');
+  assert.equal(measured.code, 2);
+  assert.match(result.stderr, /"outcome": "failed"/);
+  assert.match(result.stderr, /maximum is 72h/);
+  assert.doesNotMatch(result.stdout, /VULNERABILITY TOOLS READY/);
+});
+
 /** 1-based line index of the first line matching `re`, or -1. */
 function firstLine(text, re) {
   const lines = text.split('\n');
