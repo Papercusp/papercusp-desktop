@@ -30,9 +30,14 @@ papercusp_ensure_host_worker_bundler() {
       declare -F bundle_host_workers >/dev/null || exit 1
       declare -p HOST_WORKER_OUTPUTS >/dev/null 2>&1 || exit 1
       for helper in bundle_host_run_step bundle_host_cached_package bundle_host_prepare_esbuild \
-        bundle_host_replay_identity_define bundle_host_esbuild bundle_host_prepare_testing_core \
+        bundle_host_replay_identity_define bundle_host_esbuild bundle_host_testing_core_fixture_opt_in \
+        bundle_host_degrade_testing_core bundle_host_prepare_testing_core \
         bundle_host_verify_testing_core bundle_host_handler_bootstrap bundle_host_workers; do
         if declare -F "$helper" >/dev/null; then declare -f "$helper"; fi
+      done
+      for state in BUNDLE_HOST_TESTING_CORE_UNWITNESSED BUNDLE_HOST_TESTING_CORE_DEGRADED \
+        BUNDLE_HOST_TESTING_CORE_FIXTURE BUNDLE_HOST_TESTING_CORE_WORKER_ARGS; do
+        if declare -p "$state" >/dev/null 2>&1; then declare -p "$state"; fi
       done
       declare -p HOST_WORKER_OUTPUTS
     ' _ "$common")"; then
@@ -42,6 +47,8 @@ papercusp_ensure_host_worker_bundler() {
   # declare -p prints `declare -a NAME=(...)`; evaluated inside this function that would create a
   # LOCAL array, so promote it to a global. Function definitions are always global.
   defs="${defs/declare -a HOST_WORKER_OUTPUTS=/declare -ga HOST_WORKER_OUTPUTS=}"
+  defs="${defs//declare -- BUNDLE_HOST_TESTING_CORE_/declare -g BUNDLE_HOST_TESTING_CORE_}"
+  defs="${defs//declare -a BUNDLE_HOST_TESTING_CORE_/declare -ga BUNDLE_HOST_TESTING_CORE_}"
   eval "$defs" || return 1
   declare -F bundle_host_workers >/dev/null 2>&1 || return 1
   echo "    ✓ target helper predates bundle_host_workers; using the orchestrator's ($common)"

@@ -1691,12 +1691,23 @@ source "$HERE/lib/host-worker-bundler.sh"
 papercusp_ensure_host_worker_bundler "$HERE/../../apps/operator/bin/bundle-host-common.sh" || exit 1
 # Import missing recipes for older exact-source targets without replacing the
 # target's banner, package or external boundaries (same rule as the worker adapter).
-for _pc_recipe in bundle_host_run_step bundle_host_cached_package bundle_host_prepare_esbuild bundle_host_replay_identity_define bundle_host_esbuild bundle_host_prepare_testing_core bundle_host_verify_testing_core bundle_host_primary bundle_host_launcher; do
+for _pc_recipe in bundle_host_run_step bundle_host_cached_package bundle_host_prepare_esbuild bundle_host_replay_identity_define bundle_host_esbuild bundle_host_testing_core_fixture_opt_in bundle_host_degrade_testing_core bundle_host_prepare_testing_core bundle_host_verify_testing_core bundle_host_primary bundle_host_launcher; do
   if ! declare -F "$_pc_recipe" >/dev/null 2>&1; then
     _pc_recipe_definition="$(env -u PAPERCUSP_BUNDLE_HOST_COMMON_LOADED bash -c '
       source "$1" || exit 1
       declare -f "$2"
     ' _ "$HERE/../../apps/operator/bin/bundle-host-common.sh" "$_pc_recipe")" || exit 1
+    eval "$_pc_recipe_definition" || exit 1
+  fi
+done
+# Imported recipes need their own state, while the target retains its banner,
+# native packages and external boundary.
+for _pc_recipe_state in BUNDLE_HOST_TESTING_CORE_UNWITNESSED BUNDLE_HOST_TESTING_CORE_DEGRADED BUNDLE_HOST_TESTING_CORE_FIXTURE BUNDLE_HOST_TESTING_CORE_WORKER_ARGS; do
+  if ! declare -p "$_pc_recipe_state" >/dev/null 2>&1; then
+    _pc_recipe_definition="$(env -u PAPERCUSP_BUNDLE_HOST_COMMON_LOADED bash -c '
+      source "$1" || exit 1
+      declare -p "$2"
+    ' _ "$HERE/../../apps/operator/bin/bundle-host-common.sh" "$_pc_recipe_state")" || exit 1
     eval "$_pc_recipe_definition" || exit 1
   fi
 done

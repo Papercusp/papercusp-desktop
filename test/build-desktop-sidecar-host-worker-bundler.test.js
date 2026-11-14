@@ -91,6 +91,51 @@ test('an imported worker composer retains its required witness helper dependenci
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('imported testing-core recipes retain fixture/degradation helpers and global state', () => {
+  const dir = fixture();
+  fs.appendFileSync(path.join(dir, 'orch-common.sh'), [
+    'BUNDLE_HOST_TESTING_CORE_UNWITNESSED=unwitnessed:legacy',
+    'BUNDLE_HOST_TESTING_CORE_DEGRADED=unwitnessed:refused',
+    'BUNDLE_HOST_TESTING_CORE_FIXTURE=unwitnessed:fixture',
+    'BUNDLE_HOST_TESTING_CORE_WORKER_ARGS=(entry.ts --bundle)',
+    'bundle_host_testing_core_fixture_opt_in() { return 1; }',
+    'bundle_host_degrade_testing_core() { echo "$BUNDLE_HOST_TESTING_CORE_DEGRADED ${BUNDLE_HOST_TESTING_CORE_WORKER_ARGS[*]}"; }',
+    'bundle_host_prepare_testing_core() { bundle_host_testing_core_fixture_opt_in || bundle_host_degrade_testing_core; }',
+    'bundle_host_workers() { bundle_host_prepare_testing_core; }', '',
+  ].join('\n'));
+  try {
+    const r = run(['set -euo pipefail', `source "${dir}/target-common.sh"`, `source "${lib}"`,
+      `papercusp_ensure_host_worker_bundler "${dir}/orch-common.sh"`, 'bundle_host_workers',
+      'echo "$BUNDLE_HOST_TESTING_CORE_UNWITNESSED $BUNDLE_HOST_TESTING_CORE_FIXTURE"',
+    ].join('\n'));
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /unwitnessed:refused entry.ts --bundle/);
+    assert.match(r.stdout, /unwitnessed:legacy unwitnessed:fixture/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('the real sidecar recipe adapter supports a target predating replay identity', () => {
+  const dir = fixture();
+  const mono = path.resolve(root, '..');
+  const block = builder.match(/^for _pc_recipe in [\s\S]*?^BUNDLE_HOST_ESBUILD_PATH=.*$/m)?.[0];
+  assert.ok(block, 'maintained recipe adapter is missing');
+  try {
+    const r = run(['set -euo pipefail', `source "${dir}/target-common.sh"`,
+      `HERE="${mono}/papercusp-desktop/bin"`, block,
+      `bundle_host_replay_identity_define "${dir}"`,
+      'bundle_host_testing_core_fixture_opt_in && exit 88',
+      'echo "$BUNDLE_HOST_TESTING_CORE_UNWITNESSED $BUNDLE_HOST_TESTING_CORE_DEGRADED"',
+      'declare -F bundle_host_degrade_testing_core >/dev/null',
+      'echo "externals=${HOST_COMMON_EXTERNALS[*]}"',
+    ].join('\n'));
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /RETAINED_REPLAY_SOURCE_SHA256__=undefined/);
+    assert.match(r.stdout, /unwitnessed:helper-not-committed unwitnessed:custody-refused/);
+    assert.match(r.stdout, /externals=--external:target-only/);
+    assert.doesNotMatch(r.stderr, /command not found|unbound variable/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('no function anywhere fails loudly instead of reaching "command not found"', () => {
   const dir = fixture();
   const missing = run(`
