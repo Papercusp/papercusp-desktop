@@ -186,16 +186,42 @@ try {
             $script:controllerIndex++
             Trace ('controller begin ' + $Operation)
             $arguments = '-STA -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $controller + '" -Action ' + $Operation
-            $child = Start-Process $exe -ArgumentList $arguments -WindowStyle Hidden -PassThru
+            if ($env:PAPERCUSP_NATIVE_FIXTURE_TRACE -eq '1') {
+                $command = "Set-PSDebug -Trace 1; & '" + $controller.Replace("'", "''") + "' -Action " + $Operation
+                $arguments = '-STA -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' +
+                    [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+            }
+            $evidenceDirectory = if ($env:PAPERCUSP_NATIVE_FIXTURE_PROGRESS) {
+                [IO.Path]::GetDirectoryName($env:PAPERCUSP_NATIVE_FIXTURE_PROGRESS)
+            } else { $directory }
+            $prefix = Join-Path $evidenceDirectory ('controller-' + $script:controllerIndex + '-' + $Operation)
+            $began = [DateTime]::UtcNow
+            $child = Start-Process $exe -ArgumentList $arguments -WindowStyle Hidden -RedirectStandardOutput ($prefix + '.out') -RedirectStandardError ($prefix + '.err') -PassThru
+            $null = $child.Handle
+            $identity = @{ id=$child.Id; startTicks=$child.StartTime.ToUniversalTime().Ticks }
+            $deadline = [DateTime]::UtcNow.AddMilliseconds($controllerTimeoutMs)
             try {
-                if (-not $child.WaitForExit($controllerTimeoutMs)) { $child.Kill(); throw ('Owned controller timed out: ' + $Operation) }
+                if (-not $child.WaitForExit($controllerTimeoutMs)) { throw ('Owned controller timed out: ' + $Operation + '; evidence: ' + $prefix) }
                 if ($child.ExitCode -ne 0) {
                     $log = Join-Path $residentContext.Directory 'workbench-windows-error.log'
                     $diagnostic = if (Test-Path $log) { [IO.File]::ReadAllText($log) } else { 'no resident error log' }
                     throw ('Controller ' + $Operation + ' exited ' + $child.ExitCode + ': ' + $diagnostic)
                 }
                 Trace ('controller completed ' + $Operation)
-            } finally { $child.Dispose() }
+            } finally {
+                try {
+                    $running = Get-Process -Id $identity.id -ErrorAction SilentlyContinue
+                    if ($running -and $running.StartTime.ToUniversalTime().Ticks -eq $identity.startTicks) {
+                        & "$env:SystemRoot\System32\taskkill.exe" /PID $identity.id /T /F 2>&1 | Out-Null
+                        if (-not $running.WaitForExit(5000)) { throw 'Owned lifecycle controller did not exit after termination' }
+                    }
+                    $log = Join-Path $residentContext.Directory 'workbench-windows-error.log'
+                    if (Test-Path -LiteralPath $log) { Copy-Item -LiteralPath $log -Destination ($prefix + '-resident.err') }
+                    [IO.File]::WriteAllText(($prefix + '.json'), (@{ operation=$Operation; identity=$identity;
+                        startedAt=$began.ToString('o'); deadline=$deadline.ToString('o'); finishedAt=[DateTime]::UtcNow.ToString('o');
+                        stdout=($prefix + '.out'); stderr=($prefix + '.err') } | ConvertTo-Json -Depth 4 -Compress))
+                } finally { $child.Dispose() }
+            }
         }
         try {
             $nativeSettings = Read-WorkbenchSettings $residentContext $pui

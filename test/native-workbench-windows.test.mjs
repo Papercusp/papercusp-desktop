@@ -160,11 +160,18 @@ test('Windows native cards validate typed answers and reconcile exact canonical 
     });
 
 test('Windows native Papercup sidebar retains history, streaming, drafts, reconciliation and conversation isolation',
-    {skip:process.platform !== 'win32', timeout:60000}, () => {
+    {skip:process.platform !== 'win32', timeout:100000}, () => {
+        const contract = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
+            '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'chat', '-BudgetOnly'],
+        {encoding:'utf8', timeout:10000, windowsHide:true});
+        assert.equal(contract.status, 0, contract.stderr || contract.stdout || String(contract.error));
+        const budget = JSON.parse(contract.stdout.trim());
+        assert.equal(budget.clientTimeoutMs, budget.startupTimeoutMs + budget.fixtureTimeoutMs + 10000);
         const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
             '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
             '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'chat', '-Interactive'],
-        {encoding:'utf8', timeout:55000, windowsHide:true});
+        {encoding:'utf8', timeout:budget.clientTimeoutMs, windowsHide:true});
         assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
         const result = JSON.parse(run.stdout.trim());
         assert.equal(result.ok, true); assert.equal(result.phase, 'chat');
@@ -303,7 +310,7 @@ test('Windows standalone PUI starts before any operator request', {
 });
 
 test('Windows interactive fixture retains failure diagnostics and terminates its timed out child',
-    {skip:process.platform !== 'win32', timeout:120000}, () => {
+    {skip:process.platform !== 'win32', timeout:180000}, () => {
         const contract = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
             '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
             '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'fixture-diagnostics', '-BudgetOnly'],
@@ -311,8 +318,10 @@ test('Windows interactive fixture retains failure diagnostics and terminates its
         assert.equal(contract.status, 0, contract.stderr || contract.stdout || String(contract.error));
         const budget = JSON.parse(contract.stdout.trim());
         assert.deepEqual(budget.children.map(child => child.phase), ['fixture-failure', 'fixture-timeout']);
+        for (const child of budget.children) assert.equal(child.clientTimeoutMs,
+            child.startupTimeoutMs + child.fixtureTimeoutMs + child.cleanupTimeoutMs);
         assert.equal(budget.fixtureTimeoutMs, budget.children.reduce((sum, child) => sum + child.clientTimeoutMs, 10000));
-        assert.ok(budget.clientTimeoutMs > budget.fixtureTimeoutMs && budget.clientTimeoutMs < 120000);
+        assert.ok(budget.clientTimeoutMs > budget.fixtureTimeoutMs && budget.clientTimeoutMs < 180000);
         const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
             '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
             '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'fixture-diagnostics'],
@@ -322,6 +331,24 @@ test('Windows interactive fixture retains failure diagnostics and terminates its
         assert.equal(result.ok, true); assert.equal(result.phase, 'fixture-diagnostics');
         assert.equal(result.count, 19); assert.equal(new Set(result.cases).size, result.count);
     });
+
+test('Windows diagnostic controller timeout reaps only its exact child and scheduled task', {
+    skip:process.platform !== 'win32', timeout:70000,
+}, () => {
+    const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
+        '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'fixture-controller-cleanup'],
+    {encoding:'utf8', timeout:65000, windowsHide:true});
+    assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
+    const result = JSON.parse(run.stdout.trim());
+    assert.equal(result.ok, true); assert.equal(result.phase, 'fixture-controller-cleanup');
+    for (const name of ['controller timeout leaves no owned native child',
+        'controller timeout leaves no owned task', 'controller timeout preserves an unrelated scheduled task',
+        'cleanup refuses a replaced scheduled task action',
+        'cleanup refuses a reused process id with a different creation time',
+        'diagnostic reads preserve logs while a redirect writer is still open']) assert.ok(result.cases.includes(name), name);
+    assert.equal(new Set(result.cases).size, result.count);
+});
 
 test('Windows native environment refusal oracle distinguishes commands and rejects success, unrelated errors and timeouts', {
     skip: process.platform !== 'win32', timeout:60000,

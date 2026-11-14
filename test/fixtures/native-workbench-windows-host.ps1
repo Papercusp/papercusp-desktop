@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$SourceDirectory,
-    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'inbox', 'organizer', 'chat', 'content', 'cards', 'voice', 'operator', 'operator-inbox', 'environment-refusal', 'fixture-diagnostics', 'fixture-failure', 'fixture-timeout')][string]$Phase = 'all',
+    [ValidateSet('all', 'compile', 'preflight', 'model', 'hotkeys', 'windows', 'lifecycle', 'accounts', 'goals', 'inbox', 'organizer', 'chat', 'content', 'cards', 'voice', 'operator', 'operator-inbox', 'environment-refusal', 'fixture-diagnostics', 'fixture-controller-cleanup', 'fixture-failure', 'fixture-timeout')][string]$Phase = 'all',
     [string]$PuiExecutable,
     [string]$OperatorUrl,
     [string]$ExpectedWorkspace,
@@ -18,14 +18,24 @@ foreach ($source in @('PuiReadBridge.cs', 'WorkbenchModel.cs', 'WorkbenchHost.cs
 }
 if ($Phase -eq 'lifecycle') {
     $budget = & (Join-Path $PSScriptRoot 'native-workbench-windows-lifecycle.ps1') -SourceDirectory $SourceDirectory -BudgetOnly | ConvertFrom-Json
-} elseif ($Phase -eq 'fixture-diagnostics') {
-    $children = @([pscustomobject]@{phase='fixture-failure';clientTimeoutMs=45000},
-        [pscustomobject]@{phase='fixture-timeout';clientTimeoutMs=22000})
+} elseif ($Phase -in @('fixture-diagnostics', 'fixture-controller-cleanup')) {
+    $children = if ($Phase -eq 'fixture-controller-cleanup') {
+        @([pscustomobject]@{phase='fixture-timeout';clientTimeoutMs=45000})
+    } else { @('fixture-failure', 'fixture-timeout') | ForEach-Object {
+        $workMs = if ($_ -eq 'fixture-timeout') { 12000 } else { 35000 }
+        [pscustomobject]@{phase=$_; startupTimeoutMs=35000; fixtureTimeoutMs=$workMs;
+            cleanupTimeoutMs=10000; clientTimeoutMs=(35000 + $workMs + 10000)}
+    } }
     $milliseconds = ($children | Measure-Object -Property clientTimeoutMs -Sum).Sum + 10000
     $budget = [pscustomobject]@{ fixtureTimeoutMs=$milliseconds; clientTimeoutMs=($milliseconds + 10000); children=$children }
 } else {
     $milliseconds = if ($Phase -in @('operator', 'operator-inbox')) { 90000 } elseif ($Phase -eq 'fixture-timeout') { 12000 } else { 35000 }
     $budget = [pscustomobject]@{ fixtureTimeoutMs=$milliseconds; clientTimeoutMs=($milliseconds + 10000) }
+    if ($Phase -eq 'chat') {
+        # Compilation has its own bounded startup leg; it must not consume the UI test leg.
+        $budget | Add-Member -NotePropertyName startupTimeoutMs -NotePropertyValue $milliseconds
+        $budget.clientTimeoutMs += $budget.startupTimeoutMs
+    }
 }
 if ($BudgetOnly) { $budget | ConvertTo-Json -Compress; return }
 function Restore-FixtureRegistration($Context, $PriorCommand, [string]$ScriptPath) {
@@ -33,36 +43,155 @@ function Restore-FixtureRegistration($Context, $PriorCommand, [string]$ScriptPat
     # absent before this run and still pointing at this exact test controller.
     if ($null -eq $PriorCommand) { Remove-WorkbenchRegistration $Context (Get-Item -LiteralPath $ScriptPath).FullName }
 }
-if ($Phase -eq 'fixture-diagnostics') {
+function Stop-FixtureChild([string]$Directory) {
+    $identityPath = Join-Path $Directory 'child.json'
+    if (-not [IO.File]::Exists($identityPath)) { return $null }
+    $owned = [IO.File]::ReadAllText($identityPath) | ConvertFrom-Json
+    $childProcess = Get-Process -Id $owned.id -ErrorAction SilentlyContinue
+    if ($childProcess -and $childProcess.StartTime.ToUniversalTime().Ticks -eq $owned.startTicks) {
+        & "$env:SystemRoot\System32\taskkill.exe" /PID $owned.id /T /F 2>&1 | Out-Null
+        if (-not $childProcess.WaitForExit(5000)) { throw 'Owned native child did not exit after termination' }
+        return $owned.id
+    }
+    return $null
+}
+function Read-FixtureLog([string]$Path) {
+    # Redirected stdout/stderr may still have a writer during failure teardown.
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    $reader = [IO.StreamReader]::new($stream)
+    try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
+}
+function Clear-FixtureCustody([string]$Directory) {
+    $custodyPath = Join-Path $Directory 'custody.json'
+    if (-not [IO.File]::Exists($custodyPath)) { return $null }
+    $custody = [IO.File]::ReadAllText($custodyPath) | ConvertFrom-Json
+    $task = Get-ScheduledTask -TaskName $custody.taskName -ErrorAction SilentlyContinue
+    $removed = $false
+    $stoppedChild = Stop-FixtureChild $Directory
+    # A task with replaced actions is no longer ours. Never stop it by name alone.
+    if ($task -and @($task.Actions).Count -eq 1 -and
+        $task.Actions[0].Execute -eq $custody.execute -and $task.Actions[0].Arguments -eq $custody.arguments) {
+        if ($task.State -eq 'Running') { Stop-ScheduledTask -TaskName $custody.taskName }
+        Unregister-ScheduledTask -TaskName $custody.taskName -Confirm:$false
+        $removed = $true
+    }
+    return @{ stoppedChild=$stoppedChild; taskRemoved=$removed; taskName=$custody.taskName }
+}
+if ($Phase -in @('fixture-diagnostics', 'fixture-controller-cleanup')) {
     Import-Module (Join-Path $SourceDirectory 'WorkbenchLifecycle.psm1') -Force
     $priorEvidence = $env:PAPERCUSP_NATIVE_EVIDENCE_DIR
     $directory = Join-Path $env:TEMP ('WorkbenchDiagnostics-' + [Guid]::NewGuid().ToString('N'))
     [void][IO.Directory]::CreateDirectory($directory)
     $env:PAPERCUSP_NATIVE_EVIDENCE_DIR = $directory
     $cases = [Collections.Generic.List[string]]::new()
+    $sentinelName = 'Papercusp-WorkbenchSentinel-' + [Guid]::NewGuid().ToString('N')
+    $sentinelAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument '-NoProfile -Command exit'
+    $sentinelPrincipal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
     function Check([bool]$Value, [string]$Name) {
         if (-not $Value) { throw $Name }
         $cases.Add($Name)
     }
     try {
+        Register-ScheduledTask -TaskName $sentinelName -Action $sentinelAction -Principal $sentinelPrincipal | Out-Null
         foreach ($childBudget in $budget.children) {
             $diagnosticPhase = $childBudget.phase
+            $caseDirectory = Join-Path $directory $diagnosticPhase
+            [void][IO.Directory]::CreateDirectory($caseDirectory)
+            $env:PAPERCUSP_NATIVE_EVIDENCE_DIR = $caseDirectory
             [Console]::Error.WriteLine('PHASE diagnostics begin ' + $diagnosticPhase)
             $out = Join-Path $directory ($diagnosticPhase + '.out')
             $err = Join-Path $directory ($diagnosticPhase + '.err')
             $command = "& '" + $PSCommandPath.Replace("'", "''") + "' -SourceDirectory '" +
                 $SourceDirectory.Replace("'", "''") + "' -Phase '" + $diagnosticPhase + "' -Interactive"
             $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+            $process = $null; $controllerStartTicks = $null; $controllerTimedOut = $false
+            try {
             $process = Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList @(
                 '-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded
             ) -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
             # Windows PowerShell loses ExitCode after redirected child exit
             # unless the native process handle is retained before waiting.
             $null = $process.Handle
-            if (-not $process.WaitForExit($childBudget.clientTimeoutMs)) { throw ('Diagnostic wrapper exceeded its composed child budget: ' + $diagnosticPhase) }
+            $controllerStartTicks = $process.StartTime.ToUniversalTime().Ticks
+            if ($Phase -eq 'fixture-controller-cleanup') {
+                $readyDeadline = [DateTime]::UtcNow.AddMilliseconds($childBudget.clientTimeoutMs)
+                do {
+                    $entered = @(Get-ChildItem -LiteralPath $caseDirectory -Filter stdout.txt -Recurse | Where-Object {
+                        (Read-FixtureLog $_.FullName).Contains('diagnostic child entered')
+                    })
+                    if ($entered.Count -gt 0) { break }
+                    if ($process.HasExited) { throw 'Diagnostic controller exited before the owned child entered' }
+                    Start-Sleep -Milliseconds 100
+                } while ([DateTime]::UtcNow -lt $readyDeadline)
+                Check ($entered.Count -eq 1) 'controller timeout is injected only after the owned child enters'
+                $controllerTimedOut = $true
+            } else {
+                # A controller can spend time registering/starting its task before
+                # the child's work deadline exists. Budget those legs separately.
+                $startupDeadline = [DateTime]::UtcNow.AddMilliseconds($childBudget.startupTimeoutMs)
+                $deadlines = @()
+                do {
+                    $deadlines = @(Get-ChildItem -LiteralPath $caseDirectory -Filter deadline.json -Recurse)
+                    if ($deadlines.Count -gt 0 -or $process.HasExited) { break }
+                    Start-Sleep -Milliseconds 100
+                } while ([DateTime]::UtcNow -lt $startupDeadline)
+                if ($deadlines.Count -gt 0) {
+                    $childDeadline = [DateTime]::Parse(([IO.File]::ReadAllText($deadlines[0].FullName) | ConvertFrom-Json).deadline).ToUniversalTime()
+                    $remaining = [Math]::Max(0, [Math]::Ceiling(($childDeadline.AddMilliseconds($childBudget.cleanupTimeoutMs) - [DateTime]::UtcNow).TotalMilliseconds))
+                    $controllerTimedOut = -not $process.WaitForExit([int]$remaining)
+                } else { $controllerTimedOut = -not $process.HasExited }
+            }
+            if ($controllerTimedOut -and $Phase -ne 'fixture-controller-cleanup') {
+                throw ('Diagnostic wrapper exceeded its composed child budget: ' + $diagnosticPhase)
+            }
+            if ($Phase -ne 'fixture-controller-cleanup') {
             [Console]::Error.WriteLine('PHASE diagnostics completed ' + $diagnosticPhase)
             Check ($process.ExitCode -eq 1) ($diagnosticPhase + ' rejects the injected failure')
-            $process.Dispose()
+            }
+            } finally {
+                # The scheduled runner is not a descendant of this SSH controller.
+                # Reap the exact controller, then reconcile its persisted task/child custody.
+                if ($null -ne $process) {
+                    try {
+                        $controller = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
+                        if ($controller -and $null -ne $controllerStartTicks -and $controller.StartTime.ToUniversalTime().Ticks -eq $controllerStartTicks) {
+                            & "$env:SystemRoot\System32\taskkill.exe" /PID $process.Id /T /F 2>&1 | Out-Null
+                        }
+                    } finally { $process.Dispose() }
+                }
+                $cleanup = @(Get-ChildItem -LiteralPath $caseDirectory -Filter custody.json -Recurse | ForEach-Object {
+                    Clear-FixtureCustody $_.DirectoryName
+                })
+                [IO.File]::WriteAllText((Join-Path $directory ($diagnosticPhase + '-controller.json')), (@{
+                    timedOut=$controllerTimedOut; cleaned=$cleanup; finishedAt=[DateTime]::UtcNow.ToString('o')
+                } | ConvertTo-Json -Depth 5 -Compress))
+            }
+            if ($Phase -eq 'fixture-controller-cleanup') {
+                Check ($cleanup.Count -eq 1 -and $cleanup[0].taskRemoved) 'controller timeout unregisters the exact owned scheduled task'
+                $identity = [IO.File]::ReadAllText((Join-Path $entered[0].DirectoryName 'child.json')) | ConvertFrom-Json
+                $childProcess = Get-Process -Id $identity.id -ErrorAction SilentlyContinue
+                Check (-not $childProcess -or $childProcess.StartTime.ToUniversalTime().Ticks -ne $identity.startTicks) 'controller timeout leaves no owned native child'
+                Check ($null -eq (Get-ScheduledTask -TaskName $cleanup[0].taskName -ErrorAction SilentlyContinue)) 'controller timeout leaves no owned task'
+                Check ($null -ne (Get-ScheduledTask -TaskName $sentinelName -ErrorAction SilentlyContinue)) 'controller timeout preserves an unrelated scheduled task'
+                $replacement = Join-Path $directory 'replacement'; [void][IO.Directory]::CreateDirectory($replacement)
+                [IO.File]::WriteAllText((Join-Path $replacement 'custody.json'), (@{
+                    taskName=$sentinelName; execute=$sentinelAction.Execute; arguments='a replaced action'
+                } | ConvertTo-Json -Compress))
+                $refused = Clear-FixtureCustody $replacement
+                Check (-not $refused.taskRemoved -and $null -ne (Get-ScheduledTask -TaskName $sentinelName -ErrorAction SilentlyContinue)) 'cleanup refuses a replaced scheduled task action'
+                [IO.File]::WriteAllText((Join-Path $replacement 'child.json'), (@{
+                    id=$PID; startTicks=([Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().Ticks - 1)
+                } | ConvertTo-Json -Compress))
+                $refused = Clear-FixtureCustody $replacement
+                Check ($null -eq $refused.stoppedChild) 'cleanup refuses a reused process id with a different creation time'
+                $logPath = Join-Path $replacement 'active.log'
+                $writer = [IO.StreamWriter]::new([IO.File]::Open($logPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite))
+                try {
+                    $writer.Write('retained active writer'); $writer.Flush()
+                    Check ((Read-FixtureLog $logPath) -eq 'retained active writer') 'diagnostic reads preserve logs while a redirect writer is still open'
+                } finally { $writer.Dispose() }
+                continue
+            }
             Check ([IO.File]::ReadAllText($err).Contains('WORKBENCH_FIXTURE_EVIDENCE ')) ($diagnosticPhase + ' returns retained evidence location')
             $manifests = @(Get-ChildItem -LiteralPath $directory -Filter diagnostic.json -Recurse | ForEach-Object {
                 [IO.File]::ReadAllText($_.FullName) | ConvertFrom-Json
@@ -96,8 +225,12 @@ if ($Phase -eq 'fixture-diagnostics') {
         } finally { Remove-Item -LiteralPath $context.RunKey -Recurse -Force }
         @{ok=$true; platform='windows'; phase=$Phase; count=$cases.Count; cases=$cases.ToArray()} | ConvertTo-Json -Depth 4 -Compress
     } finally {
+        $sentinel = Get-ScheduledTask -TaskName $sentinelName -ErrorAction SilentlyContinue
+        if ($sentinel -and $sentinel.Actions[0].Execute -eq $sentinelAction.Execute -and $sentinel.Actions[0].Arguments -eq $sentinelAction.Arguments) {
+            Unregister-ScheduledTask -TaskName $sentinelName -Confirm:$false
+        }
         $env:PAPERCUSP_NATIVE_EVIDENCE_DIR = $priorEvidence
-        if ($cases.Count -eq 19) { Remove-Item -LiteralPath $directory -Recurse -Force }
+        if (($Phase -eq 'fixture-diagnostics' -and $cases.Count -eq 19) -or ($Phase -eq 'fixture-controller-cleanup' -and $cases.Count -eq 12)) { Remove-Item -LiteralPath $directory -Recurse -Force }
         else { [Console]::Error.WriteLine('Diagnostic self-test evidence: ' + $directory) }
     }
     return
@@ -122,6 +255,7 @@ if ($Interactive) {
     $fixtureCommand = "$" + "ProgressPreference='SilentlyContinue'; " + '$env:PAPERCUSP_NATIVE_FIXTURE_PROGRESS=' +
         "'" + (Join-Path $directory 'progress.log').Replace("'", "''") + "'; & '" + $PSCommandPath.Replace("'", "''") + "' -SourceDirectory '" +
         $SourceDirectory.Replace("'", "''") + "' -Phase '" + $Phase + "'"
+    if ($env:PAPERCUSP_NATIVE_FIXTURE_TRACE -eq '1') { $fixtureCommand = '$env:PAPERCUSP_NATIVE_FIXTURE_TRACE=''1''; ' + $fixtureCommand }
     if ($Phase -in @('operator', 'operator-inbox')) {
         foreach ($nameValue in @(@('PuiExecutable', $PuiExecutable), @('OperatorUrl', $OperatorUrl),
             @('ExpectedWorkspace', $ExpectedWorkspace), @('ExpectedPlan', $ExpectedPlan), @('ExpectedGoal', $ExpectedGoal))) {
@@ -151,59 +285,62 @@ Move-Item -LiteralPath ($target + '.tmp') -Destination $target
     $completed = $false
     $failure = $null
     $startedAt = [DateTime]::UtcNow.ToString('o')
+    $deadline = $null; $taskStartedAt = $null; $cleanupStartedAt = $null
     try {
         $runnerPath = Join-Path $directory 'run.ps1'
         [IO.File]::WriteAllText($runnerPath, $runner)
         $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument (
             '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -EncodedFixture {1} -OutputDirectory "{2}"' -f $runnerPath, $encodedFixture, $directory)
         $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
+        [IO.File]::WriteAllText((Join-Path $directory 'custody.json'), (@{
+            taskName=$name; execute=$action.Execute; arguments=$action.Arguments
+        } | ConvertTo-Json -Compress))
         Register-ScheduledTask -TaskName $name -Action $action -Principal $principal | Out-Null
         Start-ScheduledTask -TaskName $name
+        $taskStartedAt = [DateTime]::UtcNow.ToString('o')
+        if ($Phase -eq 'chat') {
+            $readyPath = Join-Path $directory 'ready.json'
+            $startupDeadline = [DateTime]::UtcNow.AddMilliseconds($budget.startupTimeoutMs)
+            while (-not [IO.File]::Exists($readyPath) -and -not [IO.File]::Exists($receipt) -and [DateTime]::UtcNow -lt $startupDeadline) { Start-Sleep -Milliseconds 100 }
+            if (-not [IO.File]::Exists($readyPath) -and -not [IO.File]::Exists($receipt)) { throw 'Native chat compilation exceeded its startup budget' }
+        }
         $deadline = [DateTime]::UtcNow.AddMilliseconds($budget.fixtureTimeoutMs)
+        [IO.File]::WriteAllText((Join-Path $directory 'deadline.json'), (@{
+            taskStartedAt=$taskStartedAt; deadline=$deadline.ToString('o'); budget=$budget
+        } | ConvertTo-Json -Compress))
         while (-not [IO.File]::Exists($receipt) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
         if (-not [IO.File]::Exists($receipt)) { throw ('Interactive ' + $Phase + ' fixture exceeded its ' + $budget.fixtureTimeoutMs + 'ms phase budget; inspect retained progress and child identity') }
         $result = [IO.File]::ReadAllText($receipt) | ConvertFrom-Json
-        if ([IO.File]::Exists($stderr)) { [Console]::Error.Write([IO.File]::ReadAllText($stderr)) }
+        if ([IO.File]::Exists($stderr)) { [Console]::Error.Write((Read-FixtureLog $stderr)) }
         if ($result.exitCode -ne 0 -and [IO.File]::Exists($stdout)) {
-            [Console]::Error.WriteLine('FAILED CHILD STDOUT: ' + [IO.File]::ReadAllText($stdout))
+            [Console]::Error.WriteLine('FAILED CHILD STDOUT: ' + (Read-FixtureLog $stdout))
         }
         if ($result.PSObject.Properties['error']) { throw $result.error }
         if ($result.exitCode -ne 0) { throw "Interactive fixture exited $($result.exitCode)" }
         if ($result.sessionId -le 0) { throw 'Interactive fixture ran in service Session 0' }
-        [Console]::Write([IO.File]::ReadAllText($stdout))
+        [Console]::Write((Read-FixtureLog $stdout))
         $completed = $true
     } catch {
         $failure = $_.Exception.Message
         throw
     } finally {
-        $stoppedChild = $null
-        if (-not $completed -and [IO.File]::Exists((Join-Path $directory 'child.json'))) {
-            $owned = [IO.File]::ReadAllText((Join-Path $directory 'child.json')) | ConvertFrom-Json
-            $childProcess = Get-Process -Id $owned.id -ErrorAction SilentlyContinue
-            if ($childProcess -and $childProcess.StartTime.ToUniversalTime().Ticks -eq $owned.startTicks) {
-                # Verify creation identity before terminating only this fixture's tree.
-                & "$env:SystemRoot\System32\taskkill.exe" /PID $owned.id /T /F 2>&1 | Out-Null
-                $stoppedChild = $owned.id
-            }
-        }
-        $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-        if ($task) {
-            if ($task.State -eq 'Running') { Stop-ScheduledTask -TaskName $name }
-            Unregister-ScheduledTask -TaskName $name -Confirm:$false
-        }
+        $cleanupStartedAt = [DateTime]::UtcNow.ToString('o')
+        $cleanup = Clear-FixtureCustody $directory
+        $stoppedChild = if ($null -ne $cleanup) { $cleanup.stoppedChild } else { $null }
         if (-not $completed -and $null -ne $lifecycleContext) {
             Restore-FixtureRegistration $lifecycleContext $priorRunCommand (Join-Path $SourceDirectory 'workbench.ps1')
         }
         if ($completed -and -not $env:PAPERCUSP_NATIVE_EVIDENCE_DIR) {
             Remove-Item -LiteralPath $directory -Recurse -Force
         } else {
-            $diagnostic = @{ ok=$completed; phase=$Phase; budget=$budget; startedAt=$startedAt; finishedAt=[DateTime]::UtcNow.ToString('o');
+            $diagnostic = @{ ok=$completed; phase=$Phase; budget=$budget; startedAt=$startedAt; taskStartedAt=$taskStartedAt;
+                deadline=$(if ($null -ne $deadline) { $deadline.ToString('o') } else { $null }); cleanupStartedAt=$cleanupStartedAt; finishedAt=[DateTime]::UtcNow.ToString('o');
                 error=$failure; stoppedChild=$stoppedChild; directory=$directory; taskName=$name }
             [IO.File]::WriteAllText((Join-Path $directory 'diagnostic.json'), ($diagnostic | ConvertTo-Json -Compress))
             if (-not $completed) {
                 foreach ($log in @('progress.log', 'stdout.txt', 'stderr.txt')) {
                     $logPath = Join-Path $directory $log
-                    if ([IO.File]::Exists($logPath)) { [Console]::Error.WriteLine($log + ': ' + [IO.File]::ReadAllText($logPath)) }
+                    if ([IO.File]::Exists($logPath)) { [Console]::Error.WriteLine($log + ': ' + (Read-FixtureLog $logPath)) }
                 }
             }
             [Console]::Error.WriteLine('WORKBENCH_FIXTURE_EVIDENCE ' + (Join-Path $directory 'diagnostic.json'))
@@ -257,10 +394,17 @@ public static class WorkbenchNativeHostFixture
     private static readonly List<object> organizerRuns = new List<object>();
     private static Dictionary<string, object> Json(string text)
     { return new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(text); }
+    private static void Trace(string action)
+    {
+        var line = DateTime.UtcNow.ToString("o") + " " + action;
+        Console.Error.WriteLine(line);
+        var path = Environment.GetEnvironmentVariable("PAPERCUSP_NATIVE_FIXTURE_PROGRESS");
+        if (!String.IsNullOrEmpty(path)) System.IO.File.AppendAllText(path, line + Environment.NewLine);
+    }
     private static void Check(bool ok, string name)
     {
         if (!ok) throw new Exception(name);
-        cases.Add(name); Console.Error.WriteLine("PASS " + name);
+        cases.Add(name); Trace("PASS " + name);
     }
     private static void Refuses(Action action, string name)
     {
@@ -620,7 +764,9 @@ public static class WorkbenchNativeHostFixture
     private static void Until(Func<bool> condition, int seconds = 10)
     {
         var deadline = DateTime.UtcNow.AddSeconds(seconds);
+        Trace("UNTIL begin deadline=" + deadline.ToString("o"));
         do { Pump(); if (condition()) return; } while (DateTime.UtcNow < deadline);
+        Trace("UNTIL timeout");
         throw new Exception("Native UI did not settle within " + seconds + " seconds");
     }
     private static void OperatorInboxNative()
@@ -1245,7 +1391,8 @@ public static class WorkbenchNativeHostFixture
             var compose = Find<System.Windows.Controls.TextBox>(panel, "Papercup message");
             var status = Find<System.Windows.Controls.TextBlock>(panel, "Workbench status");
             Func<string, System.Windows.Controls.Button> button = name => Find<System.Windows.Controls.Button>(panel, "Papercup " + name);
-            Action<string> click = name => { var b = button(name); Check(b.IsEnabled, "native chat control enabled: " + name + " #" + cases.Count); b.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent)); };
+            Action<string> click = name => { var b = button(name); Check(b.IsEnabled, "native chat control enabled: " + name + " #" + cases.Count);
+                Trace("CLICK begin " + name); b.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent)); Trace("CLICK end " + name); };
             Action reload = () => panel.GetType().GetMethod("Refresh", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).Invoke(panel, null);
             Until(() => chat.Ready);
             var hwnd = new WindowInteropHelper(panel).Handle;
@@ -1689,6 +1836,10 @@ public static class NativeAccountsFixture {
     [IO.File]::WriteAllText($fixtureFile, $fixture)
     Add-Type -Path @((Join-Path $SourceDirectory 'PuiReadBridge.cs'),
         (Join-Path $SourceDirectory 'WorkbenchModel.cs'), (Join-Path $SourceDirectory 'WorkbenchContent.cs'), (Join-Path $SourceDirectory 'WorkbenchHost.cs'), $fixtureFile) -ReferencedAssemblies $references
+    if ($Phase -eq 'chat' -and $env:PAPERCUSP_NATIVE_FIXTURE_PROGRESS) {
+        [IO.File]::WriteAllText((Join-Path ([IO.Path]::GetDirectoryName($env:PAPERCUSP_NATIVE_FIXTURE_PROGRESS)) 'ready.json'),
+            (@{ compiledAt=[DateTime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress))
+    }
     [WorkbenchNativeHostFixture]::Run($Phase)
 } catch { [Console]::Error.WriteLine($_.Exception.ToString()); throw }
 finally {
