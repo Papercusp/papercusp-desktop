@@ -283,7 +283,8 @@ function runFreshWithFailedSibling({ emitterFails = false } = {}) {
     `mkdir -p ${JSON.stringify(deb)}`,
     `printf "raw:%s" "$role" > ${JSON.stringify(deb)}"/Papercusp_\${role}_0.0.18_amd64.deb"`,
   ].join('\n'), { mode: 0o755 });
-  const emitter = path.join(bin, 'emit-build-provenance.sh');
+  fs.writeFileSync(path.join(bin, 'emit-build-provenance.sh'), 'exit 97 # frozen emitter must not run\n');
+  const emitter = path.join(orchestrator, 'emit-build-provenance.sh');
   if (emitterFails) fs.writeFileSync(emitter, 'exit 23\n');
   else fs.symlinkSync(path.join(root, 'bin', 'emit-build-provenance.sh'), emitter);
   fs.writeFileSync(cutStartPath, '1\n');
@@ -2114,3 +2115,51 @@ test('contract regressions use the current orchestrator with the managed-release
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+for (const phase of ['capture', 'mac']) {
+  test(`provenance ${phase} uses the current emitter with frozen source and output paths`, () => {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-provenance-roots-'));
+    try {
+      const frozen = path.join(temp, 'product', 'papercusp-desktop');
+      const current = path.join(temp, 'current', 'bin');
+      const calls = path.join(temp, 'calls');
+      fs.mkdirSync(path.join(frozen, 'bin'), { recursive: true });
+      fs.mkdirSync(current, { recursive: true });
+      fs.writeFileSync(path.join(frozen, 'bin', 'emit-build-provenance.sh'), 'exit 97\n');
+      fs.writeFileSync(path.join(current, 'emit-build-provenance.sh'), [
+        'set -euo pipefail',
+        `printf '%s\\n' "${'${PROVENANCE_GIT_ROOT-}'}" "${'${PROVENANCE_SOURCE_GIT_HEAD-}'}" "${'${PROVENANCE_SOURCE_GIT_DIRTY-}'}" "$@" > ${JSON.stringify(calls)}`,
+        'if [[ "$1" == --capture-dirty-source ]]; then printf "{}" > "$2"; fi',
+      ].join('\n'));
+      const command = [
+        'set -euo pipefail',
+        `ROOT=${JSON.stringify(frozen)}`,
+        `ORCHESTRATOR_HERE=${JSON.stringify(current)}`,
+        `export TMPDIR=${JSON.stringify(temp)}`,
+        'VERSION=0.0.33', 'BUILD_SHA=frozen-build', 'MAC_REUSE=0',
+        `MAC_OUT=${JSON.stringify(path.join(frozen, 'target', 'mac-bundle'))}`,
+        `PROVENANCE_SOURCE_GIT_HEAD=${'a'.repeat(40)}`,
+        'PROVENANCE_SOURCE_GIT_DIRTY=false',
+        phase === 'capture'
+          ? sliceBetween('_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST=', '# Preserve the input state NOW')
+          : sliceBetween('  _mac_prov_sha="$BUILD_SHA"', '  if [[ "${RELEASE_TASK_JOURNAL_ENABLED:-0}" == "1" ]]; then'),
+      ].join('\n');
+      const result = spawnSync('bash', ['-c', command], { encoding: 'utf8', timeout: 5000 });
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const [gitRoot, sourceHead, sourceDirty, ...args] = fs.readFileSync(calls, 'utf8').trimEnd().split('\n');
+      if (phase === 'capture') {
+        assert.equal(args[0], '--capture-dirty-source');
+        assert.equal(fs.readFileSync(args[1], 'utf8'), '{}');
+        assert.deepEqual(args.slice(2), [`desktop=${frozen}`, `workspace=${path.dirname(frozen)}`]);
+      } else {
+        assert.equal(gitRoot, frozen);
+        assert.equal(sourceHead, 'a'.repeat(40));
+        assert.equal(sourceDirty, 'false');
+        assert.deepEqual(args.slice(0, 4), [path.join(frozen, 'target', 'mac-bundle'), '0.0.33', 'frozen-build', 'false']);
+        assert.ok(args.slice(4).every(artifact => artifact.startsWith(args[0] + path.sep)));
+      }
+    } finally {
+      fs.rmSync(temp, { recursive: true, force: true });
+    }
+  });
+}
