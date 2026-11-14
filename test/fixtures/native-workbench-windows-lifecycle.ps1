@@ -1,17 +1,20 @@
-param([Parameter(Mandatory=$true)][string]$SourceDirectory, [switch]$Resident, [switch]$BudgetOnly)
+param([Parameter(Mandatory=$true)][string]$SourceDirectory, [switch]$Resident, [switch]$BudgetOnly, [switch]$ControllerDiagnostics)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $SourceDirectory 'WorkbenchLifecycle.psm1') -Force
 $controllerOperations = @('Install', 'Install', 'Settings', 'Run', 'Enable', 'Disable', 'Uninstall')
 $controllerTimeoutMs = 12000
+$controllerStartupTimeoutMs = 10000
+$controllerCleanupTimeoutMs = 5000
 $settingsTimeoutMs = 5000
 # The wrapper must contain every bounded child phase, two settings waits and
 # settings/cleanup work. The same contract is read by the Node client.
-$fixtureTimeoutMs = 35000 + $controllerOperations.Count * $controllerTimeoutMs + 2 * $settingsTimeoutMs
+$fixtureTimeoutMs = 35000 + $controllerOperations.Count * ($controllerStartupTimeoutMs + $controllerTimeoutMs + $controllerCleanupTimeoutMs) + 2 * $settingsTimeoutMs
 if ($BudgetOnly) {
     @{ fixtureTimeoutMs=$fixtureTimeoutMs; clientTimeoutMs=($fixtureTimeoutMs + 10000);
-        controllerTimeoutMs=$controllerTimeoutMs; settingsTimeoutMs=$settingsTimeoutMs;
+        controllerTimeoutMs=$controllerTimeoutMs; controllerStartupTimeoutMs=$controllerStartupTimeoutMs;
+        controllerCleanupTimeoutMs=$controllerCleanupTimeoutMs; settingsTimeoutMs=$settingsTimeoutMs;
         controllerOperations=$controllerOperations; baseTimeoutMs=35000 } | ConvertTo-Json -Compress
     return
 }
@@ -52,6 +55,85 @@ function Login($Context) {
     $entry = Get-ItemProperty -Path $Context.RunKey -Name $Context.RunName -ErrorAction SilentlyContinue
     if ($null -eq $entry) { return $null }
     return $entry.($Context.RunName)
+}
+function Invoke-FixtureController([string]$ControllerPath, [string]$Operation, [string]$Prefix,
+    [int]$StartupTimeoutMs = $controllerStartupTimeoutMs, [int]$OperationTimeoutMs = $controllerTimeoutMs,
+    [string]$StartupScript = '') {
+    $readyPath = $Prefix + '.ready'
+    $quote = { param($Value) "'" + $Value.Replace("'", "''") + "'" }
+    # Publish an atomic handshake from inside the interpreter. Its startup must
+    # not consume the operation budget (which still contains production's own deadline).
+    $command = "`$ErrorActionPreference = 'Stop'; " + $StartupScript + '; ' +
+        '[IO.File]::WriteAllText(' + (& $quote ($readyPath + '.tmp')) + ", [DateTime]::UtcNow.ToString('o')); " +
+        '[IO.File]::Move(' + (& $quote ($readyPath + '.tmp')) + ', ' + (& $quote $readyPath) + '); '
+    if ($env:PAPERCUSP_NATIVE_FIXTURE_TRACE -eq '1') { $command += 'Set-PSDebug -Trace 1; ' }
+    $command += '& ' + (& $quote $ControllerPath) + ' -Action ' + (& $quote $Operation)
+    $arguments = '-STA -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' +
+        [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    $receipt = @{ operation=$Operation; startedAt=[DateTime]::UtcNow.ToString('o'); readyAt=$null;
+        deadline=$null; identity=$null; exitCode=$null; failureStage='startup';
+        stdout=($Prefix + '.out'); stderr=($Prefix + '.err') }
+    $child = $null
+    try {
+        $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $child = Start-Process $exe -ArgumentList $arguments -WindowStyle Hidden -RedirectStandardOutput $receipt.stdout -RedirectStandardError $receipt.stderr -PassThru
+        $null = $child.Handle
+        $receipt.identity = @{ id=$child.Id; startTicks=$child.StartTime.ToUniversalTime().Ticks }
+        $startupDeadline = [DateTime]::UtcNow.AddMilliseconds($StartupTimeoutMs)
+        while (-not [IO.File]::Exists($readyPath) -and -not $child.HasExited -and [DateTime]::UtcNow -lt $startupDeadline) { Start-Sleep -Milliseconds 20 }
+        if (-not [IO.File]::Exists($readyPath)) { throw ('Owned controller startup failed or timed out: ' + $Operation + '; evidence: ' + $Prefix) }
+        $readyAt = [DateTime]::Parse([IO.File]::ReadAllText($readyPath)).ToUniversalTime()
+        $receipt.readyAt = $readyAt.ToString('o')
+        $deadline = $readyAt.AddMilliseconds($OperationTimeoutMs)
+        $receipt.deadline = $deadline.ToString('o'); $receipt.failureStage = 'operation'
+        $remaining = [int][Math]::Max(0, [Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds))
+        if (-not $child.WaitForExit($remaining)) { throw ('Owned controller operation timed out: ' + $Operation + '; evidence: ' + $Prefix) }
+        $receipt.exitCode = $child.ExitCode
+        if ($child.ExitCode -ne 0) { throw ('Controller ' + $Operation + ' exited ' + $child.ExitCode + '; evidence: ' + $Prefix) }
+        $receipt.failureStage = $null
+    } finally {
+        try {
+            if ($null -ne $receipt.identity) {
+                $running = Get-Process -Id $receipt.identity.id -ErrorAction SilentlyContinue
+                if ($running -and $running.StartTime.ToUniversalTime().Ticks -eq $receipt.identity.startTicks) {
+                    & "$env:SystemRoot\System32\taskkill.exe" /PID $receipt.identity.id /T /F 2>&1 | Out-Null
+                    if (-not $running.WaitForExit($controllerCleanupTimeoutMs)) { throw 'Owned lifecycle controller did not exit after termination' }
+                }
+            }
+        } finally {
+            $receipt.finishedAt = [DateTime]::UtcNow.ToString('o')
+            [IO.File]::WriteAllText(($Prefix + '.json'), ($receipt | ConvertTo-Json -Depth 4 -Compress))
+            if ($null -ne $child) { $child.Dispose() }
+        }
+    }
+    return $receipt
+}
+if ($ControllerDiagnostics) {
+    [void][IO.Directory]::CreateDirectory($directory)
+    try {
+        $probe = Join-Path $directory 'controller.ps1'
+        [IO.File]::WriteAllText($probe, "param([string]`$Action); if (`$Action -eq 'Hang') { Start-Sleep -Seconds 60 }")
+        $success = Invoke-FixtureController $probe Run (Join-Path $directory 'slow-start') -OperationTimeoutMs 1000 -StartupScript 'Start-Sleep -Milliseconds 1500'
+        Check ($success.exitCode -eq 0) 'controller operation succeeds after a startup longer than its operation budget'
+        Check (([DateTime]::Parse($success.readyAt) - [DateTime]::Parse($success.startedAt)).TotalMilliseconds -ge 1500) 'delayed interpreter startup is measured separately'
+        Check ($null -eq $success.failureStage) 'successful controller has no failed phase'
+        foreach ($phase in @('operation', 'startup')) {
+            $prefix = Join-Path $directory $phase
+            $failed = $false
+            try {
+                if ($phase -eq 'operation') { Invoke-FixtureController $probe Hang $prefix -OperationTimeoutMs 200 | Out-Null }
+                else { Invoke-FixtureController $probe Run $prefix -StartupTimeoutMs 200 -StartupScript 'Start-Sleep -Seconds 60' | Out-Null }
+            } catch { $failed = $_.Exception.Message.Contains('Owned controller ' + $phase) }
+            Check $failed ($phase + ' timeout reports its exact phase')
+            $evidence = [IO.File]::ReadAllText($prefix + '.json') | ConvertFrom-Json
+            Check ($evidence.failureStage -eq $phase) ($phase + ' timeout retains its phase receipt')
+            $running = Get-Process -Id $evidence.identity.id -ErrorAction SilentlyContinue
+            Check (-not $running -or $running.StartTime.ToUniversalTime().Ticks -ne $evidence.identity.startTicks) ($phase + ' timeout reaps the exact owned controller')
+            Check ([IO.File]::Exists($evidence.stdout) -and [IO.File]::Exists($evidence.stderr)) ($phase + ' timeout retains both output streams')
+        }
+        @{ok=$true; phase='controller-diagnostics'; count=$cases.Count; cases=$cases.ToArray()} | ConvertTo-Json -Depth 5 -Compress
+    } finally { Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction SilentlyContinue }
+    return
 }
 try {
     [void][IO.Directory]::CreateDirectory($directory)
@@ -185,42 +267,16 @@ try {
             }
             $script:controllerIndex++
             Trace ('controller begin ' + $Operation)
-            $arguments = '-STA -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $controller + '" -Action ' + $Operation
-            if ($env:PAPERCUSP_NATIVE_FIXTURE_TRACE -eq '1') {
-                $command = "Set-PSDebug -Trace 1; & '" + $controller.Replace("'", "''") + "' -Action " + $Operation
-                $arguments = '-STA -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' +
-                    [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-            }
             $evidenceDirectory = if ($env:PAPERCUSP_NATIVE_FIXTURE_PROGRESS) {
                 [IO.Path]::GetDirectoryName($env:PAPERCUSP_NATIVE_FIXTURE_PROGRESS)
             } else { $directory }
             $prefix = Join-Path $evidenceDirectory ('controller-' + $script:controllerIndex + '-' + $Operation)
-            $began = [DateTime]::UtcNow
-            $child = Start-Process $exe -ArgumentList $arguments -WindowStyle Hidden -RedirectStandardOutput ($prefix + '.out') -RedirectStandardError ($prefix + '.err') -PassThru
-            $null = $child.Handle
-            $identity = @{ id=$child.Id; startTicks=$child.StartTime.ToUniversalTime().Ticks }
-            $deadline = [DateTime]::UtcNow.AddMilliseconds($controllerTimeoutMs)
             try {
-                if (-not $child.WaitForExit($controllerTimeoutMs)) { throw ('Owned controller timed out: ' + $Operation + '; evidence: ' + $prefix) }
-                if ($child.ExitCode -ne 0) {
-                    $log = Join-Path $residentContext.Directory 'workbench-windows-error.log'
-                    $diagnostic = if (Test-Path $log) { [IO.File]::ReadAllText($log) } else { 'no resident error log' }
-                    throw ('Controller ' + $Operation + ' exited ' + $child.ExitCode + ': ' + $diagnostic)
-                }
+                Invoke-FixtureController $controller $Operation $prefix | Out-Null
                 Trace ('controller completed ' + $Operation)
             } finally {
-                try {
-                    $running = Get-Process -Id $identity.id -ErrorAction SilentlyContinue
-                    if ($running -and $running.StartTime.ToUniversalTime().Ticks -eq $identity.startTicks) {
-                        & "$env:SystemRoot\System32\taskkill.exe" /PID $identity.id /T /F 2>&1 | Out-Null
-                        if (-not $running.WaitForExit(5000)) { throw 'Owned lifecycle controller did not exit after termination' }
-                    }
-                    $log = Join-Path $residentContext.Directory 'workbench-windows-error.log'
-                    if (Test-Path -LiteralPath $log) { Copy-Item -LiteralPath $log -Destination ($prefix + '-resident.err') }
-                    [IO.File]::WriteAllText(($prefix + '.json'), (@{ operation=$Operation; identity=$identity;
-                        startedAt=$began.ToString('o'); deadline=$deadline.ToString('o'); finishedAt=[DateTime]::UtcNow.ToString('o');
-                        stdout=($prefix + '.out'); stderr=($prefix + '.err') } | ConvertTo-Json -Depth 4 -Compress))
-                } finally { $child.Dispose() }
+                $log = Join-Path $residentContext.Directory 'workbench-windows-error.log'
+                if (Test-Path -LiteralPath $log) { Copy-Item -LiteralPath $log -Destination ($prefix + '-resident.err') }
             }
         }
         try {

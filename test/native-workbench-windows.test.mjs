@@ -97,7 +97,7 @@ test('Windows per-account login lifecycle preserves shortcuts and explicit disab
     });
 
 test('Windows actual resident lifecycle and native settings work in the signed-in account',
-    {skip:process.platform !== 'win32', timeout:180000}, () => {
+    {skip:process.platform !== 'win32', timeout:270000}, () => {
         const contract = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
             '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
             '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'lifecycle', '-BudgetOnly'],
@@ -105,8 +105,9 @@ test('Windows actual resident lifecycle and native settings work in the signed-i
         assert.equal(contract.status, 0, contract.stderr || contract.stdout || String(contract.error));
         const budget = JSON.parse(contract.stdout.trim());
         assert.deepEqual(budget.controllerOperations, ['Install', 'Install', 'Settings', 'Run', 'Enable', 'Disable', 'Uninstall']);
-        assert.equal(budget.fixtureTimeoutMs, budget.baseTimeoutMs + budget.controllerOperations.length * budget.controllerTimeoutMs + 2 * budget.settingsTimeoutMs);
-        assert.ok(budget.clientTimeoutMs > budget.fixtureTimeoutMs && budget.clientTimeoutMs < 180000);
+        assert.equal(budget.fixtureTimeoutMs, budget.baseTimeoutMs + budget.controllerOperations.length *
+            (budget.controllerStartupTimeoutMs + budget.controllerTimeoutMs + budget.controllerCleanupTimeoutMs) + 2 * budget.settingsTimeoutMs);
+        assert.ok(budget.clientTimeoutMs > budget.fixtureTimeoutMs && budget.clientTimeoutMs < 270000);
         const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
             '-File', resolve(root, 'test/fixtures/native-workbench-windows-host.ps1'),
             '-SourceDirectory', resolve(root, 'native/windows'), '-Phase', 'lifecycle', '-Interactive'],
@@ -117,6 +118,18 @@ test('Windows actual resident lifecycle and native settings work in the signed-i
         assert.equal(result.resident, true);
         assert.equal(result.count, 51);
         assert.equal(new Set(result.cases).size, result.count);
+    });
+
+test('Windows lifecycle controller separates interpreter startup and operation deadlines and reaps timed out children',
+    {skip:process.platform !== 'win32', timeout:45000}, () => {
+        const run = spawnSync('powershell.exe', ['-STA', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', resolve(root, 'test/fixtures/native-workbench-windows-lifecycle.ps1'),
+            '-SourceDirectory', resolve(root, 'native/windows'), '-ControllerDiagnostics'],
+        {encoding:'utf8', timeout:40000, windowsHide:true});
+        assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error));
+        const result = JSON.parse(run.stdout.trim());
+        assert.equal(result.ok, true); assert.equal(result.phase, 'controller-diagnostics');
+        assert.equal(result.count, 11); assert.equal(new Set(result.cases).size, result.count);
     });
 
 test('Windows native read adapter preserves canonical envelopes and reaps failed/cancelled helpers',
