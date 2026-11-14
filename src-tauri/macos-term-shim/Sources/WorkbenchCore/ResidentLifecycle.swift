@@ -71,7 +71,7 @@ public struct ResidentLifecycle {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
     }
-    private func validate(_ url: URL) throws {
+    @discardableResult private func validate(_ url: URL) throws -> [String: Data] {
         let info = try PropertyListSerialization.propertyList(from: Data(contentsOf: url.appendingPathComponent("Contents/Info.plist")), format: nil) as? [String: Any]
         guard info?["CFBundleIdentifier"] as? String == Self.label,
               info?["CFBundleExecutable"] as? String == "PapercuspWorkbench",
@@ -79,6 +79,9 @@ public struct ResidentLifecycle {
               fm.isExecutableFile(atPath: url.appendingPathComponent("Contents/MacOS/PapercuspWorkbench").path) else {
             throw WorkbenchError("The native Workbench bundle is incomplete or has a different identity")
         }
+        // Validate every candidate, including a first install and the staged
+        // copy, before any login job or installed bundle can be changed.
+        return try manifest(url)
     }
     private func manifest(_ url: URL) throws -> [String: Data] {
         let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey]
@@ -115,15 +118,15 @@ public struct ResidentLifecycle {
         guard home.isFileURL, home.path.hasPrefix("/"), sourceBundle.isFileURL,
               sourceBundle.path.hasPrefix("/"), pui.isFileURL, pui.path.hasPrefix("/"),
               fm.isExecutableFile(atPath: pui.path) else { throw WorkbenchError("Install an executable PUI before Workbench") }
-        try validate(sourceBundle)
+        let sourceFiles = try validate(sourceBundle)
         let handle = try lock(); defer { try? handle.close() }
         let settingsExisted = fm.fileExists(atPath: settingsURL.path)
         let settings = try ResidentSettings.load(from: settingsURL, defaultPui: pui.path)
         let nextPlist = try plistData(pui: settings.pui)
         let previousPlist = fm.fileExists(atPath: plist.path) ? try Data(contentsOf: plist) : nil
         let existed = fm.fileExists(atPath: bundle.path)
-        if existed { try validate(bundle) }
-        let same = try existed && manifest(bundle) == manifest(sourceBundle)
+        let installedFiles = existed ? try validate(bundle) : nil
+        let same = installedFiles == sourceFiles
         if same && (!settings.enabled || previousPlist == nextPlist) {
             if settings.enabled { try await start() }
             else { try await stop(); if fm.fileExists(atPath: plist.path) { try fm.removeItem(at: plist) } }

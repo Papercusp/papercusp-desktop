@@ -110,6 +110,32 @@ final class WorkbenchResidentLifecycleTests: XCTestCase {
         do { try await f.lifecycle.uninstall(); XCTFail("deleted foreign bundle") } catch {}
         XCTAssertTrue(FileManager.default.fileExists(atPath: f.lifecycle.bundle.path))
     }
+    func testResidentRejectsLinkedBundleContentsBeforeFirstInstallOrUpgrade() async throws {
+        for installed in [false, true] {
+            for relativePath in ["Contents/MacOS/PapercuspWorkbench", "Contents/Resources/linked-resource"] {
+                let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
+                if installed { _ = try await f.lifecycle.install(sourceBundle: f.source, pui: f.pui) }
+                let binary = f.lifecycle.bundle.appendingPathComponent("Contents/MacOS/PapercuspWorkbench")
+                let previousBinary = try? Data(contentsOf: binary)
+                let previousPlist = try? Data(contentsOf: f.lifecycle.plist)
+                let previousCalls = f.calls
+                let link = f.source.appendingPathComponent(relativePath)
+                try FileManager.default.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if FileManager.default.fileExists(atPath: link.path) { try FileManager.default.removeItem(at: link) }
+                try FileManager.default.createSymbolicLink(at: link, withDestinationURL: f.pui)
+                do {
+                    _ = try await f.lifecycle.install(sourceBundle: f.source, pui: f.pui)
+                    XCTFail("accepted linked bundle contents: installed=\(installed), path=\(relativePath)")
+                } catch {
+                    XCTAssertTrue(error.localizedDescription.contains("symbolic link"), String(describing: error))
+                }
+                XCTAssertEqual(f.calls, previousCalls, "invalid candidates must not touch the resident login job")
+                XCTAssertEqual(try? Data(contentsOf: binary), previousBinary)
+                XCTAssertEqual(try? Data(contentsOf: f.lifecycle.plist), previousPlist)
+                XCTAssertEqual(try String(contentsOf: f.pui), "#!/bin/sh\nprintf resident-v1\n")
+            }
+        }
+    }
     func testResidentUninstallRemovesOnlyItsBundleAndLoginRetainingPreferences() async throws {
         let f = try fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
         _ = try await f.lifecycle.install(sourceBundle: f.source, pui: f.pui)
