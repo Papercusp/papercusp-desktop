@@ -957,6 +957,22 @@ function prepareBuilderPreflightRepo(dir) {
       copy(path.posix.join(relative, 'package.json'));
     }
   }
+  // Satisfy the source-closure preflight with coherent worker/handler contracts.
+  // These tests exercise later identity/scanner boundaries, so a missing source
+  // entrypoint must not stop them before their intended failure is observed.
+  const recipes = {
+    'packages/operator-core/lib/agent-tools/testing/run.ts': 'export const run = () => {};\n',
+    'packages/plugin-loader/package.json': '{"dependencies":{}}\n',
+    'packages/plugin-loader/src/daemon/supervisor.ts': 'export default {};\n',
+    'apps/operator/bin/bundle-host-common.sh': '# historical source recipe\n',
+    'apps/operator/bin/serve.ts': fs.readFileSync(path.join(source, 'apps/operator/bin/serve.ts'), 'utf8'),
+    'apps/operator/bin/ascii-escape-bundle.mjs': 'export {};\n',
+  };
+  for (const [relative, body] of Object.entries(recipes)) {
+    const target = path.join(repo, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, body);
+  }
   // The producer's --check imports this API without executing it. Any accidental
   // package command is a test failure; no install/cache lease is needed here.
   fs.mkdirSync(path.join(repo, 'scripts'), { recursive: true });
