@@ -164,6 +164,93 @@ test('build-desktop-sidecar.sh resolves the bundler right after the target helpe
   assert.ok(sourceAt > 0 && ensureAt > sourceAt && callAt > ensureAt, `${sourceAt} ${ensureAt} ${callAt}`);
 });
 
+function historicalSource(dir) {
+  for (const [file, body] of Object.entries({
+    'packages/operator-core/lib/agent-tools/testing/run.ts': 'export default {};\n',
+    'apps/operator/bin/bundle-host-common.sh': '# historical helper\n',
+    'apps/operator/bin/serve.ts': 'console.log("historical host");\n',
+    'apps/operator/bin/ascii-escape-bundle.mjs': '// fixture syntax check\n',
+    'scripts/npm-install-safe.mjs': '// fixture cache lease\n',
+  })) {
+    fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+    fs.writeFileSync(path.join(dir, file), body);
+  }
+}
+
+test('the real imported primary packages a historical runtime without compiling or inventing a testing core', () => {
+  const dir = fixture();
+  historicalSource(dir);
+  const mono = path.resolve(root, '..');
+  const block = builder.match(/^for _pc_recipe in [\s\S]*?^BUNDLE_HOST_ESBUILD_PATH=.*$/m)?.[0];
+  try {
+    const result = run([
+      'set -euo pipefail', `source "${dir}/target-common.sh"`, `source "${lib}"`,
+      `HERE="${mono}/papercusp-desktop/bin"`, block,
+      `papercusp_preflight_host_recipes "${dir}" "${mono}/apps/operator/bin/bundle-host-common.sh"`,
+      `papercusp_configure_host_testing_core "${dir}"`,
+      'HOST_BANNER=""; HOST_BANNER_DEFINES=(); NATIVE_PKGS=()',
+      'bundle_host_esbuild() { printf "compile %s\\n" "$*"; for arg in "$@"; do case "$arg" in --outfile=*) printf "host" > "${arg#--outfile=}";; esac; done; }',
+      `bundle_host_primary "${dir}" "${dir}/out"`,
+    ].join('\n'));
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(fs.readFileSync(path.join(dir, 'out/serve.mjs'), 'utf8'), 'host');
+    assert.match(result.stdout, /--define:__PAPERCUSP_TESTING_CORE_WITNESS__=undefined/);
+    assert.doesNotMatch(result.stdout, /testing-core[.]worker/);
+    assert.equal(fs.existsSync(path.join(dir, 'out/testing-core.worker.witness.json')), false);
+    assert.match(result.stderr, /preserving its worker graph/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('partial current testing-core contracts fail preflight and never replace the current recipe', () => {
+  const dir = fixture();
+  historicalSource(dir);
+  const worker = path.join(dir, 'packages/operator-core/lib/agent-tools/testing/testing-core.worker.ts');
+  const runtime = path.join(dir, 'packages/operator-core/lib/agent-tools/testing/run.ts');
+  const helper = path.join(dir, 'scripts/lib/testing-core-witness.mjs');
+  const check = () => run(`set -euo pipefail\nsource "${lib}"\npapercusp_configure_host_testing_core "${dir}"`);
+  try {
+    fs.mkdirSync(path.dirname(helper), { recursive: true });
+    fs.writeFileSync(helper, '// helper\n');
+    assert.notEqual(check().status, 0, 'helper without runtime/worker must fail');
+    fs.rmSync(helper);
+    fs.writeFileSync(runtime, "new URL('./testing-core.worker.mjs', import.meta.url);\n");
+    assert.notEqual(check().status, 0, 'runtime with missing worker/helper must fail');
+    fs.writeFileSync(worker, '// current worker\n');
+    assert.notEqual(check().status, 0, 'missing witness helper must fail');
+    fs.writeFileSync(helper, '// helper\n');
+    const current = run(`set -euo pipefail\nsource "${lib}"\nbundle_host_prepare_testing_core() { echo current-recipe; }\npapercusp_configure_host_testing_core "${dir}"\nbundle_host_prepare_testing_core`);
+    assert.equal(current.status, 0, current.stderr);
+    assert.equal(current.stdout.trim(), 'current-recipe');
+    fs.writeFileSync(worker, '');
+    assert.notEqual(check().status, 0, 'empty current worker must fail');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('early source preflight rejects replay closure and primary input gaps before expensive build phases', () => {
+  const dir = fixture();
+  historicalSource(dir);
+  const common = path.resolve(root, '../apps/operator/bin/bundle-host-common.sh');
+  const preflight = () => run(`set -euo pipefail\nsource "${lib}"\npapercusp_preflight_host_recipes "${dir}" "${common}"`);
+  try {
+    assert.equal(preflight().status, 0);
+    const identity = path.join(dir, 'packages/operator-core/lib/retained-replay-identity.ts');
+    fs.writeFileSync(identity, '// current identity\n');
+    assert.notEqual(preflight().status, 0, 'partial replay feature must fail');
+    fs.writeFileSync(path.join(path.dirname(identity), 'retained-replay-sources.json'), '["missing.ts"]');
+    assert.notEqual(preflight().status, 0, 'missing replay input must fail');
+    fs.rmSync(identity);
+    fs.rmSync(path.join(path.dirname(identity), 'retained-replay-sources.json'));
+    fs.rmSync(path.join(dir, 'apps/operator/bin/ascii-escape-bundle.mjs'));
+    const missing = preflight();
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /missing host recipe input.*ascii-escape-bundle/);
+    const preflightAt = builder.indexOf('papercusp_preflight_host_recipes "$REPO_ROOT"');
+    assert.ok(preflightAt > 0 && preflightAt < builder.indexOf('--preflight-vulnerabilities --refresh-db'));
+    assert.ok(preflightAt < builder.indexOf('→ building operator-vite SPA'));
+    assert.match(builder, /papercusp_configure_host_testing_core "\$REPO_ROOT" \|\| exit 1/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 // The optional standalone sibling follows the TARGET revision, unlike the
 // required worker composer. Execute the real caller block against each helper
 // contract so an older exact-source release never calls a missing function.

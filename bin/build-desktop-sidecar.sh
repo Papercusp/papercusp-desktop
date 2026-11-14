@@ -219,6 +219,12 @@ if [[ "$DISTRIBUTION_PROFILE" == "vm-release" || "${PAPERCUSP_TRANSFORMERS_VERIF
   papercusp_verify_transformers_dependencies "$REPO_ROOT" 0 "$_transformers_declaration_policy" || exit 1
 fi
 
+# Refuse incompatible source closures before scanner refresh, dependency work or
+# SPA compilation. Source the adapter only: target build state is loaded below.
+# shellcheck source=lib/host-worker-bundler.sh
+source "$HERE/lib/host-worker-bundler.sh"
+papercusp_preflight_host_recipes "$REPO_ROOT" "$HERE/../../apps/operator/bin/bundle-host-common.sh" || exit 1
+
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
   # Share the final audit's scanner/DB integrity and freshness checks before
   # source capture, installs or compilation. A ready scanner is not a green
@@ -1712,6 +1718,7 @@ for _pc_recipe_state in BUNDLE_HOST_TESTING_CORE_UNWITNESSED BUNDLE_HOST_TESTING
   fi
 done
 BUNDLE_HOST_ESBUILD_PATH="${BUNDLE_HOST_ESBUILD_PATH:-}"
+papercusp_configure_host_testing_core "$REPO_ROOT" || exit 1
 
 # WI-10006694: an ESM bundle whose graph reaches a CommonJS require() carries esbuild's
 # `Dynamic require of "x" is not supported` stub. Without HOST_BANNER's createRequire shim that stub
