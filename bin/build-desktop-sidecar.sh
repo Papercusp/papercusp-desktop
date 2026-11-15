@@ -5457,6 +5457,7 @@ bundle_linux_addon_libraries "$SIDECAR_TMP_DIR" || exit 1
 # the other. Dogfood does not enter this block and retains its source/templates/
 # multi-environment behavior unchanged.
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then
+  papercusp_stage_host_qualification_assets "$REPO_ROOT" "$SIDECAR_DIR" || exit 1
   echo "→ pruning vm-release sidecar to the runtime-only allowlist (D-043/P-052)"
   python3 "$HERE/audit-release-bundle.py" --prune-vm-release "$SIDECAR_DIR"
   assert_sidecar_db_sql_matches_source "after vm-release prune"

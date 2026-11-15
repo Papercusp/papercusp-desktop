@@ -876,7 +876,7 @@ check_boot_import_closure() {
   "$side/bin/node" --input-type=module - "$side" "$REQUIRED_NATIVE_MODULES" "$phase" <<'NODE'
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, fstatSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
@@ -904,12 +904,45 @@ try {
     }
     const receipt = JSON.parse(readFileSync(binding, 'utf8'));
     const hash = file => createHash('sha256').update(readFileSync(file)).digest('hex');
-    if (Object.keys(receipt).sort().join(',') !== 'diagnosticSha256,promptSourceSha256,registrySourceSha256,route,schemaVersion,serveSha256,sourceSha'
+    const keys = ['diagnosticSha256', 'promptSourceSha256', 'registrySourceSha256', 'route', 'schemaVersion', 'serveSha256', 'sourceSha'];
+    if (Object.hasOwn(receipt, 'packaging')) keys.push('packaging');
+    if (Object.keys(receipt).sort().join(',') !== keys.sort().join(',')
         || receipt.schemaVersion !== 'sidecar-qualification/v1' || receipt.route !== 'diagnostic'
         || !/^[a-f0-9]{40}$/.test(receipt.sourceSha)
         || ['diagnosticSha256', 'promptSourceSha256', 'registrySourceSha256', 'serveSha256'].some(key => !/^[a-f0-9]{64}$/.test(receipt[key]))
         || receipt.serveSha256 !== hash(entry) || receipt.diagnosticSha256 !== hash(diagnostic)) {
       throw Error('QUALIFICATION_BINDING_INVALID: diagnostic or product digest mismatch');
+    }
+    if (Object.hasOwn(receipt, 'packaging')) {
+      const packaging = receipt.packaging;
+      if (!packaging || Object.keys(packaging).sort().join(',') !== 'promptAssets,rootManifestSha256'
+          || !Array.isArray(packaging.promptAssets)
+          || !/^[a-f0-9]{64}$/.test(packaging.rootManifestSha256)) {
+        throw Error('QUALIFICATION_PACKAGING_INVALID: packaging schema');
+      }
+      const verify = (file, expected) => {
+        const target = join(side, file);
+        if (!existsSync(target) || !inside(target) || !statSync(target).isFile()
+            || !/^[a-f0-9]{64}$/.test(expected) || hash(target) !== expected) {
+          throw Error('QUALIFICATION_PACKAGING_INVALID: missing, changed or escaping ' + file);
+        }
+      };
+      const seen = new Set();
+      for (const asset of packaging.promptAssets) {
+        if (!asset || Object.keys(asset).sort().join(',') !== 'file,sha256'
+            || typeof asset.file !== 'string'
+            || !/^apps\/operator\/prompts\/[a-z][a-z0-9-]*\.(persona|converse|tools)\.md$/.test(asset.file)
+            || seen.has(asset.file)) throw Error('QUALIFICATION_PACKAGING_INVALID: prompt inventory');
+        seen.add(asset.file);
+        verify(asset.file, asset.sha256);
+      }
+      verify('package.json', packaging.rootManifestSha256);
+      const manifest = JSON.parse(readFileSync(join(side, 'package.json'), 'utf8'));
+      if (!existsSync(join(side, 'packages')) || !inside(join(side, 'packages'))
+          || !statSync(join(side, 'packages')).isDirectory()
+          || !manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+        throw Error('QUALIFICATION_PACKAGING_INVALID: root boundary');
+      }
     }
     entry = diagnostic;
   }
