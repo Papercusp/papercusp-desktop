@@ -5,11 +5,26 @@
 // name alone produced a signed Server bundle that installed but could not boot.
 
 const assert = require('node:assert/strict');
-const { spawnSync } = require('node:child_process');
+const { spawnSync: spawnChildSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+function reportPhase(name, phase) {
+  // Synchronous output survives a subsequent blocked import or child process.
+  fs.writeSync(2, `[dependency-closure] ${JSON.stringify({ name, phase, at: Date.now() })}\n`);
+}
+let activeCase = 'registration';
+test.beforeEach(t => { activeCase = t.name; reportPhase(t.name, 'case:start'); });
+test.afterEach(t => { reportPhase(t.name, 'case:end'); });
+function spawnSync(command, args, options = {}) {
+  reportPhase(activeCase, `child:${path.basename(command)}:start`);
+  const result = spawnChildSync(command, args, {
+    timeout: 30000, killSignal: 'SIGKILL', ...options,
+  });
+  reportPhase(activeCase, `child:${path.basename(command)}:${result.error?.code || result.signal || result.status}`);
+  return result;
+}
 const { createHash, generateKeyPairSync, sign } = require('node:crypto');
 const { createRequire } = require('node:module');
 const { pathToFileURL } = require('node:url');
@@ -371,10 +386,14 @@ test('pruned odiff preserves the real eager import and pixelmatch comparison wit
   } finally { fs.rmSync(fixture.fixtureRoot, { recursive: true, force: true }); }
 });
 
-test('odiff pruning removes the nested esy engine while inventory rejects other foreign payloads', async () => {
+test('odiff pruning removes the nested esy engine while inventory rejects other foreign payloads', { timeout: 15000 }, async t => {
+  const phase = name => reportPhase(t.name, name);
+  phase('fixture:start');
   const fixture = makeFixture();
   try {
+    phase('inventory-import:start');
     const { sidecarInventory } = await import('../bin/lib/server-container.mjs');
+    phase('inventory-import:ready');
     const relativeEngine = 'node_modules/odiff-bin/3/i/odiff-33ddbef3/bin/ODiffBin';
     const sourceEngine = path.join(fixture.repoRoot, relativeEngine);
     // ELF64 little-endian x86-64, as shipped in odiff's esy installation store.
@@ -834,3 +853,13 @@ test('handler build selector keeps measurement-only packaging and refuses malfor
   assert.ok(producer.indexOf('select_handler_build_inputs "$@" || exit 1') < producer.indexOf('node "$HERE/lib/spa-freshness.js"'));
   assert.equal((producer.match(/source "\$HERE\/lib\/host-runtime-closure\.sh"/g) || []).length, 1);
 });
+
+test('bounded child probe returns its last phase when a fixture stops progressing', () => {
+  const result = spawnSync('bash', ['-c', 'printf "phase=blocked-fixture\\n" >&2\nexec sleep 30'], {
+    encoding: 'utf8', timeout: 1000,
+  });
+  assert.equal(result.error?.code, 'ETIMEDOUT', result.stderr);
+  assert.equal(result.signal, 'SIGKILL');
+  assert.match(result.stderr, /phase=blocked-fixture/);
+});
+
