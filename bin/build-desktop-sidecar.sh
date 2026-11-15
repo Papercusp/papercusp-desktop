@@ -1305,7 +1305,10 @@ _runtime_workspace_install_args=()
 for _runtime_workspace in "${RUNTIME_BUILD_WORKSPACES[@]}"; do
   _runtime_workspace_install_args+=("--workspace=$_runtime_workspace")
 done
-(cd "$REPO_ROOT" && node scripts/npm-install-safe.mjs install \
+# Installation policy follows the current producer, just like its other
+# helpers. Keep the frozen product's dependency graph and install mutex via
+# --repo-root; its historical helper may still reify obsolete nested locks.
+(cd "$REPO_ROOT" && node "$HERE/../../scripts/npm-install-safe.mjs" --repo-root "$REPO_ROOT" install \
   --legacy-peer-deps --no-audit --no-fund --ignore-scripts --include=dev \
   --workspace=@papercusp/web --workspace=@papercusp/operator-vite \
   "${_runtime_workspace_install_args[@]}")
