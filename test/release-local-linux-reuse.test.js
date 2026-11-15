@@ -2150,7 +2150,7 @@ for (const phase of ['capture', 'mac']) {
       if (phase === 'capture') {
         assert.equal(args[0], '--capture-dirty-source');
         assert.equal(fs.readFileSync(args[1], 'utf8'), '{}');
-        assert.deepEqual(args.slice(2), [`desktop=${frozen}`, `workspace=${path.dirname(frozen)}`]);
+        assert.deepEqual(args.slice(2), [`desktop=${frozen}`, `workspace=${frozen}/..`]);
       } else {
         assert.equal(gitRoot, frozen);
         assert.equal(sourceHead, 'a'.repeat(40));
