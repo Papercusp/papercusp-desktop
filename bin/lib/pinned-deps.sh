@@ -572,7 +572,8 @@ papercusp_pinned_deps_preflight_generation() (
   dependency_generation_select_verifier_inputs "$_snap" "$_store" || return $?
   dependency_generation_acquire_selector_lease "$_store" "$DEPENDENCY_GENERATION_ID" "${BASHPID:-$$}" "$DEPENDENCY_GENERATION_TOKEN" || return $?
   trap 'dependency_generation_release_selector_lease' EXIT
-  dependency_generation_select_prevalidated "$_store" "$DEPENDENCY_GENERATION_ID" "$DEPENDENCY_GENERATION_TOKEN" || return $?
+  dependency_generation_select_prevalidated "$_store" "$DEPENDENCY_GENERATION_ID" "$DEPENDENCY_GENERATION_TOKEN" \
+    "$DEPENDENCY_GENERATION_SCOPE_MODE" "$DEPENDENCY_GENERATION_CLOSURE_FINGERPRINT" || return $?
   node "$(dirname "$_self")/../../../apps/operator/bin/release/dependency-generation-verifier.mjs" verify "$DEPENDENCY_GENERATION_PATH" "$_snap" || return $?
   if [ "${3:-}" = size ]; then
     local _size
@@ -598,7 +599,8 @@ papercusp_pinned_deps_snapshot_generation_locked() (
   _selector="$DEPENDENCY_GENERATION_SELECTOR_KEY"
   dependency_generation_acquire_selector_lease "$_store" "$_identity" "${BASHPID:-$$}" "$_token" || return $?
   trap 'dependency_generation_release_copy_lock; dependency_generation_release_selector_lease' EXIT
-  dependency_generation_select_prevalidated "$_store" "$_identity" "$_token" || return $?
+  dependency_generation_select_prevalidated "$_store" "$_identity" "$_token" \
+    "$DEPENDENCY_GENERATION_SCOPE_MODE" "$DEPENDENCY_GENERATION_CLOSURE_FINGERPRINT" || return $?
   local _verifier_helper="$(dirname "$_self")/../../../apps/operator/bin/release/dependency-generation-verifier.mjs"
   # A legacy/incomplete generation remains valid for release consumers, but
   # cannot authorize a native runtime. Validate before the first tree copy.
@@ -635,8 +637,9 @@ papercusp_pinned_deps_snapshot_generation_locked() (
     dependency_generation_audit_lock_tree "$_snap/papercusp-desktop" "$_snap/papercusp-desktop" || return $?
   fi
   papercusp_pinned_deps_preflight "$_snap" || return $?
-  dependency_generation_select_prevalidated "$_store" "$_identity" "$_token" || return $?
-  [ "$(dependency_generation_input_fingerprint "$_snap")" = "$_input" ] || return 74
+  dependency_generation_select_prevalidated "$_store" "$_identity" "$_token" \
+    "$DEPENDENCY_GENERATION_SCOPE_MODE" "$DEPENDENCY_GENERATION_CLOSURE_FINGERPRINT" || return $?
+  [ "$(dependency_generation_verification_input_fingerprint "$_snap")" = "$_input" ] || return 74
   {
     printf 'donor=%s\nmode=generation-copy\ntrees=%s\ngeneration=%s\ninput=%s\ntoken=%s\nselector=%s\n' "$_donor" "$_n" "$_identity" "$_input" "$_token" "$_selector"
     echo "takenAtUtc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
