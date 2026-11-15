@@ -875,7 +875,8 @@ check_boot_import_closure() {
   local phase="${2:-boot}"
   "$side/bin/node" --input-type=module - "$side" "$REQUIRED_NATIVE_MODULES" "$phase" <<'NODE'
 import { spawnSync } from 'node:child_process';
-import { closeSync, fstatSync, mkdtempSync, openSync, readSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { closeSync, existsSync, fstatSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
@@ -894,6 +895,24 @@ try {
     return !isAbsolute(suffix) && suffix !== '..' && !suffix.startsWith('..' + sep);
   };
   const natives = process.argv[3].trim().split(/\s+/).filter(Boolean);
+  let entry = join(side, 'serve.mjs');
+  const diagnostic = join(side, 'sidecar-qualification.mjs');
+  const binding = join(side, 'sidecar-qualification.json');
+  if (existsSync(diagnostic) || existsSync(binding)) {
+    if (!existsSync(diagnostic) || !existsSync(binding) || !inside(diagnostic) || !inside(binding)) {
+      throw Error('QUALIFICATION_BINDING_INVALID: incomplete or escaping diagnostic');
+    }
+    const receipt = JSON.parse(readFileSync(binding, 'utf8'));
+    const hash = file => createHash('sha256').update(readFileSync(file)).digest('hex');
+    if (Object.keys(receipt).sort().join(',') !== 'diagnosticSha256,promptSourceSha256,registrySourceSha256,route,schemaVersion,serveSha256,sourceSha'
+        || receipt.schemaVersion !== 'sidecar-qualification/v1' || receipt.route !== 'diagnostic'
+        || !/^[a-f0-9]{40}$/.test(receipt.sourceSha)
+        || ['diagnosticSha256', 'promptSourceSha256', 'registrySourceSha256', 'serveSha256'].some(key => !/^[a-f0-9]{64}$/.test(receipt[key]))
+        || receipt.serveSha256 !== hash(entry) || receipt.diagnosticSha256 !== hash(diagnostic)) {
+      throw Error('QUALIFICATION_BINDING_INVALID: diagnostic or product digest mismatch');
+    }
+    entry = diagnostic;
+  }
   if (!natives.length) throw Error('boot import namespace FAILED: empty native contract');
   if (natives.includes('@lydell/node-pty')) natives.push(`@lydell/node-pty-${process.platform}-${process.arch}`);
   for (const name of natives) {
@@ -1033,7 +1052,7 @@ registerHooks({ resolve(specifier, context, nextResolve) {
     // Confine loader/internal filesystem calls too; this phase grants no writes.
     // Addons remain the separately checked trusted native contract.
     const permissions = promptPhase ? ['--permission', '--allow-fs-read=' + side, '--allow-fs-read=' + guard, '--allow-addons'] : [];
-    result = spawnSync(executable, [...permissions, '--require', guard, join(side, 'serve.mjs'), flag],
+    result = spawnSync(executable, [...permissions, '--require', guard, entry, flag],
       { cwd: side, env, encoding: 'utf8', timeout: 60000, maxBuffer: 1024 * 1024,
         stdio: ['ignore', 'pipe', stderrFd] });
     const size = fstatSync(stderrFd).size;

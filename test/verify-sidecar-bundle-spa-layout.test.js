@@ -479,6 +479,46 @@ function runBootCheck(body, envOverrides = {}, setup = () => {}) {
   } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
 }
 
+function installDiagnostic(dir, body = "console.log('PAPERCUSP_BOOT_IMPORTS_OK');") {
+  const { createHash } = require('node:crypto');
+  const hash = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  fs.writeFileSync(path.join(dir, 'sidecar-qualification.mjs'), body);
+  fs.writeFileSync(path.join(dir, 'sidecar-qualification.json'), JSON.stringify({
+    schemaVersion: 'sidecar-qualification/v1', route: 'diagnostic', sourceSha: 'a'.repeat(40),
+    serveSha256: hash(path.join(dir, 'serve.mjs')),
+    diagnosticSha256: hash(path.join(dir, 'sidecar-qualification.mjs')),
+    registrySourceSha256: 'b'.repeat(64), promptSourceSha256: 'c'.repeat(64),
+  }));
+}
+
+test('historical diagnostic route leaves installed serve untouched and current images use native flags', () => {
+  const diagnostic = runBootCheck("throw Error('installed serve must not run');", {}, installDiagnostic);
+  assert.equal(diagnostic.status, 0, diagnostic.stderr);
+  const native = runBootCheck("if (!process.argv.includes('--verify-boot-imports')) throw Error('native flag missing'); console.log('PAPERCUSP_BOOT_IMPORTS_OK');");
+  assert.equal(native.status, 0, native.stderr);
+});
+
+test('diagnostic route refuses missing bindings, changed code, changed serve and malformed source identity', () => {
+  for (const mutate of [
+    dir => fs.rmSync(path.join(dir, 'sidecar-qualification.json')),
+    dir => fs.rmSync(path.join(dir, 'sidecar-qualification.mjs')),
+    dir => fs.appendFileSync(path.join(dir, 'sidecar-qualification.mjs'), '\n// changed'),
+    dir => fs.appendFileSync(path.join(dir, 'serve.mjs'), '\n// changed'),
+    dir => { const file = path.join(dir, 'sidecar-qualification.json'); const r = JSON.parse(fs.readFileSync(file)); r.sourceSha = ''; fs.writeFileSync(file, JSON.stringify(r)); },
+  ]) {
+    const result = runBootCheck("throw Error('no fallback to startup');", {}, dir => { installDiagnostic(dir); mutate(dir); });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /QUALIFICATION_BINDING_INVALID/);
+  }
+});
+
+test('historical diagnostics retain the same socket and subprocess isolation even if errors are caught', () => {
+  const result = runBootCheck("throw Error('serve must not run');", {}, dir => installDiagnostic(dir,
+    "import net from 'node:net'; try { net.connect(5432); } catch {} console.log('PAPERCUSP_BOOT_IMPORTS_OK');"));
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /BOOT_IMPORT_IO_FORBIDDEN/);
+});
+
 test('boot preflight refuses ancestor natives and missing target node-pty before executing the graph', () => {
   for (const name of ['@lydell/node-pty', `@lydell/node-pty-${process.platform}-${process.arch}`]) {
     const result = runBootCheck(`throw Error('GRAPH_MUST_NOT_RUN');`, {}, dir => {

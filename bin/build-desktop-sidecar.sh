@@ -1824,6 +1824,15 @@ if [[ ! -f "$SIDECAR_DIR/serve.mjs" ]]; then
   echo "ERROR: esbuild did not produce $SIDECAR_DIR/serve.mjs"
   exit 1
 fi
+if [[ "$DISTRIBUTION_PROFILE" == vm-release ]]; then
+  papercusp_bundle_host_qualification "$REPO_ROOT" "$SIDECAR_DIR" \
+    "${MINIFY_ARGS[@]}" --define:__PAPERCUSP_BUNDLED_SIDECAR__=true \
+    --define:__PAPERCUSP_RUNTIME_ACCEPTANCE_PUBLIC_KEY__="$RUNTIME_ACCEPTANCE_KEY_JSON" \
+    --define:process.env.PAPERCUP_DOGFOOD_REPO_REF="\"${PAPERCUP_DOGFOOD_REPO_REF:-}\"" \
+    --define:process.env.PAPERCUP_DOGFOOD_POT_PUBKEY="\"${PAPERCUP_DOGFOOD_POT_PUBKEY:-${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}}\"" \
+    --define:process.env.PAPERCUP_DOGFOOD_POT_INVITE_SECRET="\"${PAPERCUP_DOGFOOD_POT_INVITE_SECRET:-${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}}\"" \
+    "${VERSION_DEFINE_ARGS[@]}" "${HOST_EXTERNALS[@]}" || exit 1
+fi
 
 # git-ext-bridge.mjs — the pot-git `ext::` transport helper (fetch-transport.ts
 # resolves it as a SIBLING of the running entry: dirname(import.meta.url), which
