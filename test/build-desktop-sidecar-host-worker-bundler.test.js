@@ -542,6 +542,24 @@ export function loadRoleToolsMd(role) { return resolveChatRoleDocument(role, 'to
     fs.writeFileSync(outside, expected.get(last));
     fs.symlinkSync(outside, path.join(out, last));
     assert.match(check('prompts').stderr, /QUALIFICATION_PACKAGING_INVALID/);
+    fs.unlinkSync(path.join(out, last));
+    fs.writeFileSync(path.join(out, last), expected.get(last));
+    // Frozen DBOS boot identity starts an unconditional Git lookup at module
+    // evaluation. A receipt alone must never turn this into accepted no-IO proof.
+    fs.writeFileSync(path.join(source, 'packages/operator-core/lib/agent-tools/index.ts'),
+      "import { execFile } from 'node:child_process'; import { promisify } from 'node:util';\n" +
+      "async function resolveHead() { try { await promisify(execFile)('git', ['rev-parse', 'HEAD']); } catch { return null; } }\n" +
+      "export const bootIdentity = { bootCommit: resolveHead() };\n");
+    fs.unlinkSync(bindingPath);
+    const eagerBuild = compile();
+    assert.equal(eagerBuild.status, 0, eagerBuild.stderr);
+    const eagerStage = stage();
+    assert.equal(eagerStage.status, 0, eagerStage.stderr);
+    const eagerIO = check('boot');
+    assert.notEqual(eagerIO.status, 0);
+    assert.match(eagerIO.stderr, /"receiptObserved":true/);
+    assert.match(eagerIO.stderr, /BOOT_IMPORT_IO_FORBIDDEN/);
+    assert.match(eagerIO.stderr, /child_process.execFile/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
