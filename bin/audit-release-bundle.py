@@ -1480,10 +1480,70 @@ def _vm_release_asset_allowed(rel):
                for prefix in VM_RELEASE_ASSET_ALLOWLIST)
 
 
-def _vm_release_residue_class(rel, is_dir=False):
+def _vm_release_packaging_paths(root):
+    """Validate the existing diagnostic binding before preserving exact assets."""
+    binding = os.path.join(root, "sidecar-qualification.json")
+    if not os.path.lexists(binding):
+        return set()
+
+    def fail(reason):
+        raise ValueError("QUALIFICATION_PACKAGING_INVALID: " + reason)
+
+    def digest(rel):
+        file = os.path.join(root, rel)
+        if not os.path.isfile(file) or os.path.commonpath([root, os.path.realpath(file)]) != root:
+            fail("missing or escaping " + rel)
+        with open(file, "rb") as source:
+            return hashlib.sha256(source.read()).hexdigest()
+
+    if os.path.commonpath([root, os.path.realpath(binding)]) != root:
+        fail("escaping binding")
+    try:
+        with open(binding, encoding="utf-8") as source:
+            receipt = json.load(source)
+        if not isinstance(receipt, dict):
+            fail("binding must be an object")
+        if "packaging" not in receipt:
+            return set()
+        packaging = receipt["packaging"]
+        if not isinstance(packaging, dict) or set(packaging) != {"promptAssets", "rootManifestSha256"}:
+            fail("packaging schema")
+        assets = packaging["promptAssets"]
+        if not isinstance(assets, list):
+            fail("promptAssets must be an array")
+        paths = {"package.json"}
+        for asset in assets:
+            if not isinstance(asset, dict) or set(asset) != {"file", "sha256"}:
+                fail("asset schema")
+            rel, expected = asset["file"], asset["sha256"]
+            if not isinstance(rel, str) or not re.fullmatch(
+                    r"apps/operator/prompts/[a-z][a-z0-9-]*\.(?:persona|converse|tools)\.md", rel):
+                fail("invalid prompt path")
+            if rel in paths:
+                fail("duplicate " + rel)
+            if not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected) or digest(rel) != expected:
+                fail("digest mismatch " + rel)
+            paths.add(rel)
+        expected = packaging["rootManifestSha256"]
+        if not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected) or digest("package.json") != expected:
+            fail("root manifest digest mismatch")
+        packages = os.path.join(root, "packages")
+        if not os.path.isdir(packages) or os.path.commonpath([root, os.path.realpath(packages)]) != root:
+            fail("missing or escaping packages boundary")
+        with open(os.path.join(root, "package.json"), encoding="utf-8") as source:
+            if not isinstance(json.load(source), dict):
+                fail("root manifest must be an object")
+        return paths
+    except (OSError, TypeError, json.JSONDecodeError) as error:
+        fail(str(error))
+
+
+def _vm_release_residue_class(rel, is_dir=False, packaging_paths=None):
     """Return the forbidden residue class for one sidecar-relative path."""
     rel = _vm_release_rel(rel).rstrip("/")
     if not rel:
+        return None
+    if rel in (packaging_paths or ()):
         return None
     for root in VM_RELEASE_FORBIDDEN_ROOTS:
         if rel == root or rel.startswith(root + "/"):
@@ -1557,18 +1617,19 @@ def _vm_release_residue_class(rel, is_dir=False):
 
 
 def _vm_release_findings(root):
+    packaging_paths = _vm_release_packaging_paths(root)
     findings = []
     for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
         for name in dirnames:
             full = os.path.join(dirpath, name)
             rel = os.path.relpath(full, root)
-            residue = _vm_release_residue_class(rel, is_dir=True)
+            residue = _vm_release_residue_class(rel, is_dir=True, packaging_paths=packaging_paths)
             if residue:
                 findings.append((residue, _vm_release_rel(rel) + "/"))
         for name in filenames:
             full = os.path.join(dirpath, name)
             rel = os.path.relpath(full, root)
-            residue = _vm_release_residue_class(rel, is_dir=False)
+            residue = _vm_release_residue_class(rel, is_dir=False, packaging_paths=packaging_paths)
             if residue:
                 findings.append((residue, _vm_release_rel(rel)))
     return sorted(set(findings))
@@ -1629,6 +1690,11 @@ def prune_vm_release(args):
               "PAPERCUSP_DESKTOP_VERSION before pruning", file=sys.stderr)
         return 2
 
+    try:
+        packaging_paths = _vm_release_packaging_paths(root)
+    except ValueError as error:
+        print("AUDIT ERROR: " + str(error), file=sys.stderr)
+        return 2
     removed = []
     # Top-down deletion prevents a forbidden test/docs subtree from being walked
     # and makes symlinked directories inert (unlink the link; never follow it).
@@ -1637,7 +1703,7 @@ def prune_vm_release(args):
         for name in dirnames:
             full = os.path.join(dirpath, name)
             rel = os.path.relpath(full, root)
-            residue = _vm_release_residue_class(rel, is_dir=True)
+            residue = _vm_release_residue_class(rel, is_dir=True, packaging_paths=packaging_paths)
             if residue:
                 if os.path.islink(full):
                     os.unlink(full)
@@ -1650,7 +1716,7 @@ def prune_vm_release(args):
         for name in filenames:
             full = os.path.join(dirpath, name)
             rel = os.path.relpath(full, root)
-            residue = _vm_release_residue_class(rel, is_dir=False)
+            residue = _vm_release_residue_class(rel, is_dir=False, packaging_paths=packaging_paths)
             if residue:
                 os.unlink(full)
                 removed.append((residue, _vm_release_rel(rel)))
@@ -1673,7 +1739,11 @@ def audit_vm_release(args):
               file=sys.stderr)
         return 2
     root = os.path.realpath(args[0])
-    findings = _vm_release_findings(root)
+    try:
+        findings = _vm_release_findings(root)
+    except ValueError as error:
+        print("AUDIT ERROR: " + str(error), file=sys.stderr)
+        return 2
     if findings:
         print(f"\n    ✗ VM-RELEASE NON-RUNTIME RESIDUE ({len(findings)} path(s))")
         for residue, rel in findings[:80]:
