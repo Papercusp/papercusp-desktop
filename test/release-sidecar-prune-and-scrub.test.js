@@ -1799,6 +1799,9 @@ test('build-mac-cross resolves Cargo-installed tools from CARGO_HOME under a min
         PAPERCUSP_RELEASE_HOST: 'updates.invalid.test',
         PAPERCUSP_BUILD_SHA: 'deadbeef',
         PAPERCUSP_BUILD_VERSION: '0.0.0-test',
+        // This preflight stops at missingSdk before certificate validation/signing.
+        // Own these bytes so the fixture never depends on a host signing identity.
+        MAC_SIGN_P12_BASE64: Buffer.from('preflight-only certificate fixture').toString('base64'),
         // src-tauri/seed/ is gitignored: a clean checkout (the gate's) never has one, so
         // without an explicit opt-out the release seed guard stops this preflight before
         // it reaches Cargo. The fixture builds no installer.
@@ -1917,7 +1920,12 @@ else:
 
 test('build-mac-cross enables production codegen and scrubs metadata before signing', () => {
   const src = fs.readFileSync(MAC_CROSS, 'utf8');
-  assert.ok(src.includes('cargo zigbuild --release --target "$arch" -p papercusp-desktop --features custom-protocol'),
+  const buildCommand = src.match(/^\s*cargo zigbuild\b[^\n]*/m)?.[0];
+  assert.ok(buildCommand, 'the release cross-build command must exist');
+  assert.match(buildCommand, /--release\b/);
+  assert.match(buildCommand, /--target "\$arch"/);
+  assert.match(buildCommand, /-p papercusp-desktop\b/);
+  assert.match(buildCommand, /--features custom-protocol\b/,
     'release mac builds must enable Tauri custom-protocol so tauri_build uses production codegen (EI-200443)');
   const scrubAt = src.lastIndexOf('strip_mac_signing_xattrs "$app"');
   const checkAt = src.lastIndexOf('verify_mac_signing_xattrs "$app"');
