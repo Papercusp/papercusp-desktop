@@ -128,7 +128,7 @@ test('the scheduled live federation gate waits boundedly for a progressing packa
 
 test('long build serialization is distinct from the reader-facing publication lock', async () => {
   const buildLockAt = builder.indexOf('exec 8>"$SIDECAR_BUILD_LOCK"');
-  const dependencyWorkAt = builder.indexOf('node scripts/npm-install-safe.mjs install');
+  const dependencyWorkAt = builder.indexOf('node "$HERE/../../scripts/npm-install-safe.mjs" --repo-root "$REPO_ROOT" install');
   const verifyAt = builder.indexOf('"$ROOT/bin/verify-sidecar-bundle.sh"');
   const publishLockAt = builder.indexOf('__pc_acquire_sidecar_publish_lock || exit $?');
   assert(buildLockAt > 0 && buildLockAt < dependencyWorkAt, 'the build-only lock must serialize the whole build');

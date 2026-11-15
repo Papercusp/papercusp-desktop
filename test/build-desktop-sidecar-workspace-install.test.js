@@ -34,6 +34,41 @@ function extractFunction(name) {
 }
 
 const LDCONFIG_RESOLVER = extractFunction('resolve_ldconfig');
+const installCommand = 'node "$HERE/../../scripts/npm-install-safe.mjs" --repo-root "$REPO_ROOT" install';
+
+test('sidecar install uses the current guard against the frozen product root', t => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "pc-sidecar-installer's roots-"));
+  t.after(() => fs.rmSync(fixture, { recursive: true, force: true }));
+  const producer = path.join(fixture, 'current producer');
+  const product = path.join(fixture, 'frozen product');
+  const here = path.join(producer, 'papercusp-desktop/bin');
+  fs.mkdirSync(here, { recursive: true });
+  fs.mkdirSync(path.join(producer, 'scripts'));
+  fs.mkdirSync(path.join(product, 'scripts'), { recursive: true });
+  fs.writeFileSync(path.join(producer, 'scripts/npm-install-safe.mjs'), [
+    'console.log(JSON.stringify({helper:"producer",cwd:process.cwd(),args:process.argv.slice(2)}));',
+  ].join('\n'));
+  fs.writeFileSync(path.join(product, 'scripts/npm-install-safe.mjs'), [
+    'console.error("obsolete frozen installer invoked"); process.exit(91);',
+  ].join('\n'));
+  const start = builder.indexOf('RUNTIME_BUILD_WORKSPACES=(');
+  const end = builder.indexOf('unset _runtime_workspace_install_args _runtime_workspace', start);
+  assert(start >= 0 && end > start, 'runtime install block is missing');
+  const result = childProcess.spawnSync('bash', ['-c', [
+    'set -euo pipefail', builder.slice(start, end),
+  ].join('\n')], {
+    encoding: 'utf8', timeout: 10_000,
+    env: { ...process.env, HERE: here, REPO_ROOT: product },
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const observed = JSON.parse(result.stdout.trim());
+  assert.equal(observed.helper, 'producer');
+  assert.equal(observed.cwd, product);
+  assert.deepEqual(observed.args.slice(0, 3), ['--repo-root', product, 'install']);
+  for (const workspace of ['@papercusp/web', '@papercusp/operator-vite', '@papercusp/omp', '@papercusp/sse']) {
+    assert(observed.args.includes(`--workspace=${workspace}`));
+  }
+});
 
 test('headless Server shutdown lets operator children finish after the parent exits', { timeout: 120000 }, async (t) => {
   if (process.platform !== 'linux' || childProcess.spawnSync(
@@ -140,7 +175,7 @@ test('audited pinned dogfood installs inherit generation skip; ordinary dogfood 
     assert.equal(JSON.parse(result.stdout.trim()).skip, expected);
   }
   const guard = builder.indexOf('export PAPERCUSP_SKIP_DEP_GENERATION=');
-  const install = builder.indexOf('(cd "$REPO_ROOT" && node scripts/npm-install-safe.mjs install');
+  const install = builder.indexOf(`(cd "$REPO_ROOT" && ${installCommand}`);
   assert.ok(guard >= 0 && install > guard, 'the contract must be inherited by the first install');
 });
 
@@ -194,7 +229,7 @@ test('native Server builder defaults enter the real release guard before install
 });
 
 test('clean-source native transformer validation follows dependency hydration and precedes SPA assembly', () => {
-  const install = builder.indexOf('(cd "$REPO_ROOT" && node scripts/npm-install-safe.mjs install');
+  const install = builder.indexOf(`(cd "$REPO_ROOT" && ${installCommand}`);
   const validation = builder.indexOf('papercusp_verify_transformers_native_target "$REPO_ROOT" "$TARGET_OS" "$TARGET_ARCH" "" "$_transformers_declaration_policy" || exit 1');
   const spa = builder.indexOf('echo "→ building operator-vite SPA (vite build → locked sidecar snapshot)"');
   assert.ok(install >= 0 && validation > install && spa > validation,
@@ -528,7 +563,7 @@ test('helper preflight is non-mutating and precedes expensive producer work', ()
   assert(guard > 0);
   assert(guard > builder.indexOf('source identity mismatch at entry'));
   assert(guard > builder.indexOf('requires a clean source tree at cut start'));
-  assert(guard < builder.indexOf('node scripts/npm-install-safe.mjs install'));
+  assert(guard < builder.indexOf(installCommand));
   assert(guard < builder.indexOf('→ building operator-vite SPA'));
 });
 
@@ -730,7 +765,7 @@ test('sidecar dependency install includes both source workspaces with exact name
   assert.equal(operatorName, '@papercusp/web');
   assert.equal(viteName, '@papercusp/operator-vite');
   const installStart = builder.indexOf(
-    '(cd "$REPO_ROOT" && node scripts/npm-install-safe.mjs install',
+    `(cd "$REPO_ROOT" && ${installCommand}`,
   );
   const installEnd = builder.indexOf(
     ')\n',
@@ -1898,7 +1933,7 @@ test('sidecar server bundle declares DBOS telemetry runtime requirements', () =>
 
 test('sidecar build resolves and verifies the repo-pinned Node runtime before npm install', () => {
   const runtimeStart = builder.indexOf('PAPERCUSP_REQUIRED_NODE_MAJOR=');
-  const installStart = builder.indexOf('node scripts/npm-install-safe.mjs install');
+  const installStart = builder.indexOf(installCommand);
   assert(runtimeStart >= 0, 'missing repo-pinned Node runtime selector');
   assert(installStart > runtimeStart, 'Node runtime selection must happen before npm install');
 
