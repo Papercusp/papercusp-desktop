@@ -80,8 +80,9 @@ papercusp_preflight_host_recipes() { # <target repo root> <producer common helpe
 
 # The final verifier invokes these read-only CLI seams. Older serve entrypoints
 # interpret unknown flags as normal startup, so an immutable-policy error is a
-# misleading late symptom. Refuse that target before any expensive production;
-# never replace its product code or relax the final-image verifier.
+# misleading late symptom. D-100 permits a producer-owned diagnostic compiled
+# from the selected target's own registry and prompt resolver, never new product
+# code. A partial native seam cannot fall back to this historical route.
 papercusp_preflight_host_qualification() { # <target repo root> <distribution profile>
   [[ "$2" == vm-release ]] || return 0
   node --input-type=module - "$1" <<'NODE'
@@ -91,19 +92,125 @@ const file = resolve(process.argv[2], 'apps/operator/bin/serve.ts');
 const source = readFileSync(file, 'utf8');
 const main = source.slice(source.indexOf('async function main('));
 const policy = main.indexOf('assertVmReleaseRuntimePolicy(');
+let native = 0;
 for (const [flag, receipt] of [['--verify-boot-imports', 'PAPERCUSP_BOOT_IMPORTS_OK'],
     ['--verify-role-prompts', 'PAPERCUSP_ROLE_PROMPT_ASSETS ']]) {
   const branch = new RegExp('^\\s*if\\s*\\(\\s*argv\\[0\\]\\s*===\\s*["\']' + flag + '["\']\\s*\\)\\s*\\{', 'm').exec(main);
   const end = branch && main.indexOf('\n  }', branch.index);
   const body = branch && end >= 0 ? main.slice(branch.index, end) : '';
+  if (!branch && !source.includes(flag)) continue;
   if (!body.includes(receipt) || !body.includes('process.exit(0)')
       || (policy >= 0 && branch.index >= policy)) {
     throw new Error(`target lacks early final-image qualification seam ${flag}: ${file}; ` +
-      'unknown flags would start the runtime. Select a source with both read-only probes; ' +
+      'unknown flags would start the runtime. Partial native probes cannot use historical diagnostics; ' +
       'refusing before scanner downloads or compilation (no product injection or verifier bypass).');
   }
+  native++;
 }
-console.log('HOST_QUALIFICATION_SOURCE_READY');
+if (native === 2) { console.log('native'); process.exit(0); }
+if (native !== 0) throw new Error('partial final-image qualification seams; need both native probes');
+const prompt = readFileSync(resolve(process.argv[2], 'packages/operator-core/lib/prompt-assembly.ts'), 'utf8');
+for (const name of ['PROMPT_ROLES', 'CHAT_ROLE_DOCUMENT_KINDS', 'resolveChatRoleDocument',
+    'chatRoleDocumentFilePath', 'chatRoleDocumentCandidates', 'loadRolePersona', 'loadRoleConverse', 'loadRoleToolsMd']) {
+  if (!new RegExp('export (?:const|function) ' + name + '\\b').test(prompt)) {
+    throw new Error('historical prompt qualification capability unavailable: ' + name);
+  }
+}
+if (!readFileSync(resolve(process.argv[2], 'packages/operator-core/lib/agent-tools/index.ts'), 'utf8').trim()) {
+  throw new Error('historical tool registry qualification capability unavailable');
+}
+console.log('diagnostic');
+NODE
+}
+
+# Reuse the primary's compiler, native boundary, source guards and banner.
+# Only the observer entry is new; serve.mjs and every imported product source
+# remain unchanged. Bind the observer to both serve bytes and source identity.
+papercusp_bundle_host_qualification() { # <target repo root> <output dir> [esbuild args...]
+  local root="$1" out="$2" route
+  shift 2
+  route="$(papercusp_preflight_host_qualification "$root" vm-release)" || return 1
+  [[ "$route" == diagnostic ]] || return 0
+  (
+    cd "$root" || exit 1
+    # The target's cache-lease runner owns stdin for its own JS. A named
+    # generated observer entry survives that wrapper without mutating source.
+    [[ ! -e "$out/.sidecar-qualification-entry.ts" ]] || exit 1
+    trap 'rm -f "$out/.sidecar-qualification-entry.ts"' EXIT
+    cat > "$out/.sidecar-qualification-entry.ts" <<'ENTRY'
+import { createHash } from 'node:crypto';
+const flag = process.argv[2];
+if (flag === '--verify-boot-imports') {
+  await import('@papercusp/operator-core/lib/agent-tools/index');
+  console.log('PAPERCUSP_BOOT_IMPORTS_OK');
+} else if (flag === '--verify-role-prompts') {
+  const p = await import('@papercusp/operator-core/lib/prompt-assembly');
+  for (const key of ['resolveChatRoleDocument', 'chatRoleDocumentFilePath', 'chatRoleDocumentCandidates',
+      'loadRolePersona', 'loadRoleConverse', 'loadRoleToolsMd']) {
+    if (typeof p[key] !== 'function') throw Error('HISTORICAL_PROMPT_CAPABILITY_UNAVAILABLE: ' + key);
+  }
+  if (!Array.isArray(p.PROMPT_ROLES) || !p.PROMPT_ROLES.length
+      || JSON.stringify(p.CHAT_ROLE_DOCUMENT_KINDS) !== '["persona","converse","tools"]') {
+    throw Error('HISTORICAL_PROMPT_CAPABILITY_UNAVAILABLE: document population');
+  }
+  const documents = p.PROMPT_ROLES.flatMap(role => p.CHAT_ROLE_DOCUMENT_KINDS.map(document => {
+    const required = document !== 'tools';
+    const resolved = p.resolveChatRoleDocument(role, document);
+    const hit = required && !resolved?.text.trim() ? null : resolved;
+    let refusalVerified = false;
+    if (!hit && required) {
+      const expected = 'prompt-assembly: ' + role + '.' + document + '.md not found at ' +
+        p.chatRoleDocumentFilePath(role, document) + ' (nor at any of the prompt-chain candidates: ' +
+        p.chatRoleDocumentCandidates(role, document).slice(0, -1).join(', ') + '). ' +
+        (document === 'persona' ? 'Every role must have a persona.md.' : 'Required for chat-mode roles.');
+      try {
+        if (document === 'persona') p.loadRolePersona(role);
+        else p.loadRoleConverse(role);
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== expected) throw error;
+        refusalVerified = true;
+      }
+      if (!refusalVerified) throw Error('HISTORICAL_PROMPT_REFUSAL_UNVERIFIED: ' + role + '.' + document);
+    }
+    if (!hit && !required && p.loadRoleToolsMd(role) !== null) throw Error('HISTORICAL_OPTIONAL_PROMPT_MISMATCH');
+    return { role, document, required, disposition: hit ? 'available' : required ? 'unavailable' : 'optional-absent',
+      sha256: hit ? createHash('sha256').update(hit.text).digest('hex') : null, refusalVerified };
+  }));
+  console.log('PAPERCUSP_ROLE_PROMPT_ASSETS ' + JSON.stringify({ schemaVersion: 'role-prompt-assets/v1',
+    roles: [...p.PROMPT_ROLES], documents, installedUseVerified: false, candidateAccepted: false }));
+} else throw Error('HISTORICAL_QUALIFICATION_FLAG_INVALID');
+process.exit(0);
+ENTRY
+    node --input-type=module - "$root" "$out/.sidecar-qualification-entry.ts" <<'NODE'
+import { readFileSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+const [root, entry] = process.argv.slice(2);
+let source = readFileSync(entry, 'utf8');
+for (const name of ['agent-tools/index', 'prompt-assembly']) {
+  source = source.replace("'@papercusp/operator-core/lib/" + name + "'",
+    JSON.stringify(resolve(root, 'packages/operator-core/lib', name + '.ts')));
+}
+writeFileSync(entry, source);
+NODE
+    bundle_host_esbuild "$root" "$out/.sidecar-qualification-entry.ts" \
+      --bundle --platform=node --format=esm --target=node22 \
+      --outfile="$out/sidecar-qualification.mjs" --metafile="$out/sidecar-qualification.mjs.meta.json" \
+      --banner:js="$HOST_BANNER" "${HOST_BANNER_DEFINES[@]}" "$@" || exit 1
+  ) || return 1
+  node --input-type=module - "$root" "$out" <<'NODE'
+import { createHash } from 'node:crypto';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { resolve } from 'node:path';
+const [root, out] = process.argv.slice(2);
+const hash = file => createHash('sha256').update(readFileSync(file)).digest('hex');
+const sourceSha = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+if (!/^[a-f0-9]{40}$/.test(sourceSha)) throw Error('qualification requires exact source commit');
+writeFileSync(resolve(out, 'sidecar-qualification.json'), JSON.stringify({ schemaVersion: 'sidecar-qualification/v1',
+  route: 'diagnostic', sourceSha, serveSha256: hash(resolve(out, 'serve.mjs')),
+  diagnosticSha256: hash(resolve(out, 'sidecar-qualification.mjs')),
+  registrySourceSha256: hash(resolve(root, 'packages/operator-core/lib/agent-tools/index.ts')),
+  promptSourceSha256: hash(resolve(root, 'packages/operator-core/lib/prompt-assembly.ts')) }) + '\n', { flag: 'wx' });
 NODE
 }
 
