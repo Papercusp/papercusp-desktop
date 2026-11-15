@@ -179,6 +179,34 @@ function historicalSource(dir) {
   }
 }
 
+function historicalQualificationSource(dir) {
+  const files = {
+    'packages/operator-core/package.json': '{"name":"@papercusp/operator-core","exports":{"./lib/*":"./lib/*.ts"}}',
+    'packages/operator-core/lib/agent-tools/index.ts': 'export const registry = [];\n',
+    'packages/operator-core/lib/prompt-assembly.ts': `
+export const PROMPT_ROLES = ['operator'];
+export const CHAT_ROLE_DOCUMENT_KINDS = ['persona', 'converse', 'tools'];
+export function resolveChatRoleDocument() { return null; }
+export function chatRoleDocumentFilePath(role, kind) { return '/missing/' + role + '.' + kind + '.md'; }
+export function chatRoleDocumentCandidates(role, kind) { return [chatRoleDocumentFilePath(role, kind)]; }
+function missing(role, kind) {
+  throw Error('prompt-assembly: ' + role + '.' + kind + '.md not found at ' +
+    chatRoleDocumentFilePath(role, kind) + ' (nor at any of the prompt-chain candidates: ). ' +
+    (kind === 'persona' ? 'Every role must have a persona.md.' : 'Required for chat-mode roles.'));
+}
+export function loadRolePersona(role) { return missing(role, 'persona'); }
+export function loadRoleConverse(role) { return missing(role, 'converse'); }
+export function loadRoleToolsMd() { return null; }
+`,
+  };
+  for (const [file, body] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+    fs.writeFileSync(path.join(dir, file), body);
+  }
+  fs.mkdirSync(path.join(dir, 'node_modules/@papercusp'), { recursive: true });
+  fs.symlinkSync(path.join(dir, 'packages/operator-core'), path.join(dir, 'node_modules/@papercusp/operator-core'));
+}
+
 test('the real imported primary packages a historical runtime without compiling or inventing a testing core', () => {
   const dir = fixture();
   historicalSource(dir);
@@ -307,7 +335,7 @@ test('early source preflight rejects replay closure and primary input gaps befor
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('vm-release rejects missing, partial and late qualification seams before expensive build work', () => {
+test('vm-release selects historical diagnostics or complete native probes and refuses partial capabilities early', () => {
   const dir = fixture();
   historicalSource(dir);
   const serve = path.join(dir, 'apps/operator/bin/serve.ts');
@@ -318,9 +346,15 @@ test('vm-release rejects missing, partial and late qualification seams before ex
   try {
     const historical = check();
     assert.notEqual(historical.status, 0);
-    assert.match(historical.stderr, /target lacks early final-image qualification seam --verify-boot-imports/);
-    assert.match(historical.stderr, /unknown flags would start the runtime/);
+    assert.match(historical.stderr, /prompt-assembly/);
     assert.equal(check('dogfood').status, 0, 'historical dogfood is not a vm-release qualification claim');
+    historicalQualificationSource(dir);
+    assert.equal(check().stdout.trim(), 'diagnostic');
+    const prompt = path.join(dir, 'packages/operator-core/lib/prompt-assembly.ts');
+    const complete = fs.readFileSync(prompt, 'utf8');
+    fs.writeFileSync(prompt, complete.replace('export function loadRolePersona', 'function loadRolePersona'));
+    assert.match(check().stderr, /historical prompt qualification capability unavailable: loadRolePersona/);
+    fs.writeFileSync(prompt, complete);
     for (const body of [boot, prompts, boot + prompts.replace('PAPERCUSP_ROLE_PROMPT_ASSETS ', 'wrong receipt'),
       boot.replace('process.exit(0)', 'process.exit(1)') + prompts,
       '  assertVmReleaseRuntimePolicy({});\n' + boot + prompts,
@@ -330,11 +364,69 @@ test('vm-release rejects missing, partial and late qualification seams before ex
     }
     fs.writeFileSync(serve, main(boot + prompts + '  assertVmReleaseRuntimePolicy({});\n'));
     assert.equal(check().status, 0, 'complete early source contract must pass');
+    assert.equal(check().stdout.trim(), 'native');
     fs.copyFileSync(path.resolve(root, '../apps/operator/bin/serve.ts'), serve);
     assert.equal(check().status, 0, 'maintained current source must pass');
     const guard = builder.indexOf('papercusp_preflight_host_qualification "$REPO_ROOT" "$DISTRIBUTION_PROFILE"');
     assert.ok(guard > 0 && guard < builder.indexOf('--preflight-vulnerabilities --refresh-db'));
     assert.ok(guard < builder.indexOf('→ building operator-vite SPA'));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('historical diagnostic compiles only the selected registry and verifies actual prompt refusal behavior', () => {
+  const dir = fixture();
+  const source = path.join(dir, 'source');
+  const out = path.join(dir, 'out');
+  const esbuild = require.resolve('esbuild/bin/esbuild');
+  const git = spawnSync('git', ['clone', '--quiet', '--shared', '--no-checkout', path.resolve(root, '..'), source], { encoding: 'utf8' });
+  assert.equal(git.status, 0, git.stderr);
+  historicalSource(source);
+  historicalQualificationSource(source);
+  fs.mkdirSync(out);
+  fs.writeFileSync(path.join(out, 'serve.mjs'), 'throw Error("installed serve must stay untouched");\n');
+  const original = fs.readFileSync(path.join(out, 'serve.mjs'));
+  // The real frozen cache runner consumes stdin for its lease adapter. A
+  // compiler fixture that inherited stdin masked this production boundary.
+  const build = () => run(`set -euo pipefail\nsource "${lib}"\nHOST_BANNER=''; HOST_BANNER_DEFINES=()\nbundle_host_esbuild() { shift; "${esbuild}" "$@" </dev/null; }\npapercusp_bundle_host_qualification "${source}" "${out}"`);
+  const probe = flag => spawnSync(process.execPath, [path.join(out, 'sidecar-qualification.mjs'), flag], { encoding: 'utf8' });
+  try {
+    const built = build();
+    assert.equal(built.status, 0, built.stderr);
+    assert.equal(fs.existsSync(path.join(out, '.sidecar-qualification-entry.ts')), false);
+    assert.deepEqual(fs.readFileSync(path.join(out, 'serve.mjs')), original);
+    assert.equal(probe('--verify-boot-imports').stdout.trim(), 'PAPERCUSP_BOOT_IMPORTS_OK');
+    const prompts = probe('--verify-role-prompts');
+    assert.equal(prompts.status, 0, prompts.stderr);
+    const receipt = JSON.parse(prompts.stdout.trim().slice('PAPERCUSP_ROLE_PROMPT_ASSETS '.length));
+    assert.equal(receipt.installedUseVerified, false);
+    assert.deepEqual(receipt.documents.map(doc => [doc.disposition, doc.refusalVerified]),
+      [['unavailable', true], ['unavailable', true], ['optional-absent', false]]);
+    assert.notEqual(probe('--unknown').status, 0);
+    const binding = JSON.parse(fs.readFileSync(path.join(out, 'sidecar-qualification.json')));
+    assert.equal(binding.sourceSha, spawnSync('git', ['-C', source, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim());
+    const promptFile = path.join(source, 'packages/operator-core/lib/prompt-assembly.ts');
+    const originalPrompt = fs.readFileSync(promptFile, 'utf8');
+    fs.writeFileSync(promptFile, originalPrompt.replace('return null;', "return { text: 'SYNTHETIC_PROMPT' };"));
+    fs.rmSync(path.join(out, 'sidecar-qualification.json'));
+    assert.equal(build().status, 0);
+    const present = JSON.parse(probe('--verify-role-prompts').stdout.trim().slice('PAPERCUSP_ROLE_PROMPT_ASSETS '.length));
+    const expectedHash = require('node:crypto').createHash('sha256').update('SYNTHETIC_PROMPT').digest('hex');
+    assert.ok(present.documents.every(doc => doc.disposition === 'available' && doc.sha256 === expectedHash && doc.refusalVerified === false));
+    fs.writeFileSync(promptFile, originalPrompt.replace("return missing(role, 'persona');", "return '';// not a refusal\n"));
+    fs.rmSync(path.join(out, 'sidecar-qualification.json'));
+    assert.equal(build().status, 0);
+    const refused = probe('--verify-role-prompts');
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /HISTORICAL_PROMPT_REFUSAL_UNVERIFIED/);
+    fs.writeFileSync(promptFile, originalPrompt);
+    fs.writeFileSync(path.join(source, 'packages/operator-core/lib/agent-tools/index.ts'),
+      "import { loadRolePersona } from '../prompt-assembly';\nexport const eager = loadRolePersona('oracle');\n");
+    fs.rmSync(path.join(out, 'sidecar-qualification.json'));
+    assert.equal(build().status, 0);
+    const eager = probe('--verify-boot-imports');
+    assert.notEqual(eager.status, 0, 'a frozen eager persona read must never produce qualification');
+    assert.match(eager.stderr, /oracle.persona.md not found/);
+    assert.doesNotMatch(eager.stdout, /PAPERCUSP_BOOT_IMPORTS_OK/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
