@@ -139,8 +139,63 @@ papercusp_bundle_host_qualification() { # <target repo root> <output dir> [esbui
     trap 'rm -f "$out/.sidecar-qualification-entry.ts"' EXIT
     cat > "$out/.sidecar-qualification-entry.ts" <<'ENTRY'
 import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 const flag = process.argv[2];
-if (flag === '--verify-boot-imports') {
+if (flag === '--package-role-prompts') {
+  const source = realpathSync(process.argv[3]);
+  const out = realpathSync(process.argv[4]);
+  if (source === out) throw Error('QUALIFICATION_PACKAGING_SOURCE_IS_OUTPUT');
+  const p = await import('@papercusp/operator-core/lib/prompt-assembly');
+  if (!Array.isArray(p.PROMPT_ROLES) || !p.PROMPT_ROLES.length
+      || JSON.stringify(p.CHAT_ROLE_DOCUMENT_KINDS) !== '["persona","converse","tools"]') {
+    throw Error('HISTORICAL_PROMPT_CAPABILITY_UNAVAILABLE: document population');
+  }
+  const inside = (root, file) => {
+    const suffix = relative(root, realpathSync(file));
+    return !isAbsolute(suffix) && suffix !== '..' && !suffix.startsWith('..' + sep);
+  };
+  // Rename new files into place: retained diagnostic images may share hardlinks
+  // with an unaccepted stage whose bytes must remain unchanged.
+  const write = (file, bytes) => {
+    mkdirSync(dirname(file), { recursive: true });
+    if (!inside(out, dirname(file))) throw Error('QUALIFICATION_PACKAGING_OUTPUT_ESCAPED');
+    const temp = file + '.packaging.' + process.pid;
+    writeFileSync(temp, bytes, { flag: 'wx' });
+    renameSync(temp, file);
+  };
+  const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+  const assets = [];
+  const seen = new Set();
+  // Derive the complete population from the selected loader. No current prompt
+  // source or producer-maintained role roster may enter an historical image.
+  for (const role of p.PROMPT_ROLES) for (const document of p.CHAT_ROLE_DOCUMENT_KINDS) {
+    if (!/^[a-z][a-z0-9-]*$/.test(role)) throw Error('HISTORICAL_PROMPT_CAPABILITY_UNAVAILABLE: role');
+    const file = 'apps/operator/prompts/' + role + '.' + document + '.md';
+    if (seen.has(file)) throw Error('QUALIFICATION_PACKAGING_DUPLICATE: ' + file);
+    seen.add(file);
+    const hit = p.resolveChatRoleDocument(role, document,
+      { harnessDir: join(source, 'libs/papercusp/packages/harness'), blueprintRoots: [] });
+    if (!hit) continue;
+    if (!inside(source, hit.path)) throw Error('QUALIFICATION_PROMPT_SOURCE_ESCAPED: ' + file);
+    const bytes = readFileSync(hit.path);
+    if (bytes.toString('utf8') !== hit.text) throw Error('QUALIFICATION_PROMPT_SOURCE_CHANGED: ' + file);
+    write(join(out, file), bytes);
+    assets.push({ file, sha256: hash(bytes) });
+  }
+  // The frozen store recognizes a monorepo root by package.json AND packages/.
+  // Keep CommonJS .js helpers working: a new boundary must not set type:module.
+  mkdirSync(join(out, 'packages'), { recursive: true });
+  if (!inside(out, join(out, 'packages'))) throw Error('QUALIFICATION_PACKAGING_OUTPUT_ESCAPED');
+  const manifestPath = join(out, 'package.json');
+  const manifest = existsSync(manifestPath) ? readFileSync(manifestPath)
+    : Buffer.from(JSON.stringify({ name: 'papercusp-runtime', private: true }) + '\n');
+  write(manifestPath, manifest);
+  const binding = join(out, 'sidecar-qualification.json');
+  const receipt = JSON.parse(readFileSync(binding, 'utf8'));
+  receipt.packaging = { promptAssets: assets, rootManifestSha256: hash(manifest) };
+  write(binding, JSON.stringify(receipt) + '\n');
+} else if (flag === '--verify-boot-imports') {
   await import('@papercusp/operator-core/lib/agent-tools/index');
   console.log('PAPERCUSP_BOOT_IMPORTS_OK');
 } else if (flag === '--verify-role-prompts') {
@@ -212,6 +267,16 @@ writeFileSync(resolve(out, 'sidecar-qualification.json'), JSON.stringify({ schem
   registrySourceSha256: hash(resolve(root, 'packages/operator-core/lib/agent-tools/index.ts')),
   promptSourceSha256: hash(resolve(root, 'packages/operator-core/lib/prompt-assembly.ts')) }) + '\n', { flag: 'wx' });
 NODE
+}
+
+papercusp_stage_host_qualification_assets() { # <selected source> <image>
+  local root="$1" out="$2" route
+  route="$(papercusp_preflight_host_qualification "$root" vm-release)" || return 1
+  [[ "$route" == diagnostic ]] || return 0
+  PAPERCUSP_PROMPTS_DIR="$root/apps/operator/prompts" \
+    PAPERCUSP_HARNESS_DIR="$root/libs/papercusp/packages/harness" \
+    PAPERCUSP_INTEGRATION_ROOT="" PAPERCUSP_CANONICAL_TREE="" \
+    node "$out/sidecar-qualification.mjs" --package-role-prompts "$root" "$out"
 }
 
 papercusp_configure_host_testing_core() { # <target repo root>
