@@ -106,7 +106,7 @@ decisions: `mac-desktop-release-readiness-2026-06-11` (esp. D-006).
 VM prereqs (one-time, already on the VM): Xcode CLT, nvm Node 22,
 `brew install libpq pgvector` (pg client tools + the vector extension —
 the build FAILS without pgvector since a fresh DB cannot boot without
-it). VM ops: `systemctl --user start papercup-vm-mac.service`;
+it). VM ops: `systemctl --user start papercusp-vm-mac.service`;
 recovery runbook: the `mac-vm-qmp-recovery` agent insight.
 
 The bundle is NOT Apple-signed/notarized (alpha decision D-002): first

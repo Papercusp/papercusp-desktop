@@ -150,6 +150,28 @@ test('fixture cleanup guard runs after each test', async () => {
   await assert.rejects(stat(cleanupGuardDir), { code: 'ENOENT' });
 });
 
+test('health probe checks the registered Mac VM unit name', async () => {
+  const { env, dir } = await fixture();
+  const argsFile = path.join(dir, 'systemctl-args');
+  const systemctlStub = [
+    '#!/bin/sh',
+    'printf "%s " "$@" > "$MAC_VM_SYSTEMCTL_ARGS"',
+    '[ "$4" = "papercusp-vm-mac.service" ]',
+    '',
+  ].join(String.fromCharCode(10));
+  await writeFile(path.join(dir, 'bin', 'systemctl'), systemctlStub);
+  await chmod(path.join(dir, 'bin', 'systemctl'), 0o755);
+  env.MAC_VM_SYSTEMCTL_ARGS = argsFile;
+
+  const result = spawnSync('bash', [script, '--json'], { env, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(JSON.parse(result.stdout).service_active, true);
+  assert.equal(
+    await readFile(argsFile, 'utf8'),
+    '--user is-active --quiet papercusp-vm-mac.service ',
+  );
+});
+
 test('desktop test scratch helper nests sync and async fixtures under one parent', async () => {
   const syncDir = makeDesktopTestScratchDirSync('scratch-helper-sync-');
   const asyncDir = await makeDesktopTestScratchDir('scratch-helper-async-');

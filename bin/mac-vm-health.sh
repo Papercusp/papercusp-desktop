@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host-side liveness probe for papercup-vm-mac.service. Unlike
+# Host-side liveness probe for papercusp-vm-mac.service. Unlike
 # mac-vm-inspect-running.sh, this remains useful when macOS never reaches sshd.
 set -uo pipefail
 
@@ -32,7 +32,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 service_active=false
-systemctl --user is-active --quiet papercup-vm-mac.service 2>/dev/null && service_active=true
+systemctl --user is-active --quiet papercusp-vm-mac.service 2>/dev/null && service_active=true
 
 # Read QEMU's process state before opening another SSH-forward connection. The
 # historical failure filled QEMU's 1024-FD soft limit with CLOSE_WAIT sockets;
