@@ -430,6 +430,121 @@ test('historical diagnostic compiles only the selected registry and verifies act
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('frozen packaging repairs eager persona reads and the guarded root walk without changing source or IO grants', () => {
+  const dir = fixture();
+  const source = path.join(dir, 'source');
+  const out = path.join(dir, 'out');
+  const esbuild = require.resolve('esbuild/bin/esbuild');
+  const git = spawnSync('git', ['clone', '--quiet', '--shared', '--no-checkout', path.resolve(root, '..'), source], { encoding: 'utf8' });
+  assert.equal(git.status, 0, git.stderr);
+  historicalSource(source);
+  historicalQualificationSource(source);
+  fs.mkdirSync(out);
+  fs.mkdirSync(path.join(dir, 'packages'));
+  fs.writeFileSync(path.join(dir, 'package.json'), '{"name":"outside-image"}');
+  const promptSource = `
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+let boundary = dirname(fileURLToPath(import.meta.url));
+while (!(existsSync(join(boundary, 'package.json')) && existsSync(join(boundary, 'packages')))) {
+  const parent = dirname(boundary);
+  if (parent === boundary) throw Error('FROZEN_ROOT_BOUNDARY_MISSING');
+  boundary = parent;
+}
+readFileSync(join(boundary, 'package.json'), 'utf8');
+export const PROMPT_ROLES = ['operator', 'oracle', 'papercup-deep'];
+export const CHAT_ROLE_DOCUMENT_KINDS = ['persona', 'converse', 'tools'];
+function promptsDir() {
+  const explicit = process.env.PAPERCUSP_PROMPTS_DIR;
+  return explicit && existsSync(explicit) ? explicit : join(process.cwd(), 'apps/operator/prompts');
+}
+export function chatRoleDocumentFilePath(role, kind) { return join(promptsDir(), role + '.' + kind + '.md'); }
+export function chatRoleDocumentCandidates(role, kind) { return [chatRoleDocumentFilePath(role, kind)]; }
+export function resolveChatRoleDocument(role, kind) {
+  const file = chatRoleDocumentFilePath(role, kind);
+  return existsSync(file) ? { path: file, text: readFileSync(file, 'utf8') } : null;
+}
+export function loadRolePersona(role) {
+  const hit = resolveChatRoleDocument(role, 'persona');
+  if (!hit) throw Error(role + '.persona.md was pruned');
+  return hit.text;
+}
+export function loadRoleConverse(role) { return resolveChatRoleDocument(role, 'converse').text; }
+export function loadRoleToolsMd(role) { return resolveChatRoleDocument(role, 'tools')?.text ?? null; }
+`;
+  fs.writeFileSync(path.join(source, 'packages/operator-core/lib/prompt-assembly.ts'), promptSource);
+  fs.writeFileSync(path.join(source, 'packages/operator-core/lib/agent-tools/index.ts'),
+    "import { loadRolePersona } from '../prompt-assembly'; export const eager = loadRolePersona('oracle');\n");
+  const expected = new Map();
+  for (const role of ['operator', 'oracle', 'papercup-deep']) for (const kind of ['persona', 'converse', 'tools']) {
+    const rel = `apps/operator/prompts/${role}.${kind}.md`;
+    const bytes = Buffer.from(`# frozen ${role}.${kind}\nΩ exact source bytes\n`);
+    fs.mkdirSync(path.dirname(path.join(source, rel)), { recursive: true });
+    fs.writeFileSync(path.join(source, rel), bytes);
+    expected.set(rel, bytes);
+  }
+  fs.writeFileSync(path.join(out, 'serve.mjs'), 'throw Error("installed serve stays unchanged");\n');
+  const serve = fs.readFileSync(path.join(out, 'serve.mjs'));
+  const compile = () => run(`set -euo pipefail\nsource "${lib}"\nHOST_BANNER=''; HOST_BANNER_DEFINES=()\nbundle_host_esbuild() { shift; "${esbuild}" "$@" </dev/null; }\npapercusp_bundle_host_qualification "${source}" "${out}"`);
+  const stage = () => run(`set -euo pipefail\nsource "${lib}"\npapercusp_stage_host_qualification_assets "${source}" "${out}"`);
+  const verifier = fs.readFileSync(path.join(root, 'bin/verify-sidecar-bundle.sh'), 'utf8');
+  const start = verifier.indexOf('check_boot_import_closure() {');
+  const end = verifier.indexOf('\nif [[ "$CROSS" == "0" ]]; then', start);
+  assert.ok(start >= 0 && end > start);
+  const check = phase => run(`set -euo pipefail\nREQUIRED_NATIVE_MODULES=fixture-native\n${verifier.slice(start, end)}\ncheck_boot_import_closure "${out}" "${phase}"`);
+  const audit = () => spawnSync('python3', [path.join(root, 'bin/audit-release-bundle.py'), '--prune-vm-release', out],
+    { encoding: 'utf8', env: { ...process.env, PAPERCUSP_BUILD_SHA: 'a'.repeat(40), PAPERCUSP_DESKTOP_VERSION: '1.0.0' } });
+  try {
+    const compiled = compile();
+    assert.equal(compiled.status, 0, compiled.stdout + compiled.stderr);
+    fs.mkdirSync(path.join(out, 'bin'));
+    fs.symlinkSync(process.execPath, path.join(out, 'bin/node'));
+    fs.mkdirSync(path.join(out, 'node_modules/fixture-native'), { recursive: true });
+    fs.writeFileSync(path.join(out, 'node_modules/fixture-native/index.js'), 'module.exports = {};\n');
+    const missingPersona = check('boot');
+    assert.notEqual(missingPersona.status, 0);
+    assert.match(missingPersona.stderr, /oracle.persona.md was pruned/);
+    const outsideWalk = check('prompts');
+    assert.notEqual(outsideWalk.status, 0);
+    assert.match(outsideWalk.stderr, /ERR_ACCESS_DENIED/);
+    const bindingPath = path.join(out, 'sidecar-qualification.json');
+    const originalBinding = fs.readFileSync(bindingPath);
+    const retainedBinding = path.join(dir, 'retained-binding.json');
+    fs.linkSync(bindingPath, retainedBinding);
+    const staged = stage();
+    assert.equal(staged.status, 0, staged.stderr);
+    assert.deepEqual(fs.readFileSync(retainedBinding), originalBinding, 'retained hardlinks must not be mutated');
+    const binding = JSON.parse(fs.readFileSync(bindingPath));
+    assert.deepEqual(binding.packaging.promptAssets.map(asset => asset.file), [...expected.keys()]);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(out, 'package.json'))).type, undefined);
+    fs.writeFileSync(path.join(out, 'apps/operator/prompts/unreferenced.persona.md'), 'not a loader asset');
+    const pruned = audit();
+    assert.equal(pruned.status, 0, pruned.stderr);
+    assert.equal(fs.existsSync(path.join(out, 'apps/operator/prompts/unreferenced.persona.md')), false);
+    for (const [file, bytes] of expected) {
+      assert.deepEqual(fs.readFileSync(path.join(out, file)), bytes);
+      assert.deepEqual(fs.readFileSync(path.join(source, file)), bytes);
+    }
+    assert.deepEqual(fs.readFileSync(path.join(out, 'serve.mjs')), serve);
+    assert.equal(fs.readFileSync(path.join(source, 'packages/operator-core/lib/prompt-assembly.ts'), 'utf8'), promptSource);
+    for (const phase of ['boot', 'prompts']) {
+      const result = check(phase);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+    }
+    const last = [...expected.keys()].at(-1);
+    fs.writeFileSync(path.join(out, last), 'tampered');
+    assert.match(check('prompts').stderr, /QUALIFICATION_PACKAGING_INVALID/);
+    fs.writeFileSync(path.join(out, last), expected.get(last));
+    fs.unlinkSync(path.join(out, last));
+    assert.match(check('boot').stderr, /QUALIFICATION_PACKAGING_INVALID/);
+    const outside = path.join(dir, 'outside-prompt.md');
+    fs.writeFileSync(outside, expected.get(last));
+    fs.symlinkSync(outside, path.join(out, last));
+    assert.match(check('prompts').stderr, /QUALIFICATION_PACKAGING_INVALID/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 // The optional standalone sibling follows the TARGET revision, unlike the
 // required worker composer. Execute the real caller block against each helper
 // contract so an older exact-source release never calls a missing function.

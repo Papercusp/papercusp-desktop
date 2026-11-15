@@ -146,11 +146,6 @@ if (flag === '--package-role-prompts') {
   const source = realpathSync(process.argv[3]);
   const out = realpathSync(process.argv[4]);
   if (source === out) throw Error('QUALIFICATION_PACKAGING_SOURCE_IS_OUTPUT');
-  const p = await import('@papercusp/operator-core/lib/prompt-assembly');
-  if (!Array.isArray(p.PROMPT_ROLES) || !p.PROMPT_ROLES.length
-      || JSON.stringify(p.CHAT_ROLE_DOCUMENT_KINDS) !== '["persona","converse","tools"]') {
-    throw Error('HISTORICAL_PROMPT_CAPABILITY_UNAVAILABLE: document population');
-  }
   const inside = (root, file) => {
     const suffix = relative(root, realpathSync(file));
     return !isAbsolute(suffix) && suffix !== '..' && !suffix.startsWith('..' + sep);
@@ -165,6 +160,20 @@ if (flag === '--package-role-prompts') {
     renameSync(temp, file);
   };
   const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+  // Do this before importing the loader: its store computes its root eagerly.
+  // A boundary supplies no extra IO permissions and preserves CommonJS helpers.
+  mkdirSync(join(out, 'packages'), { recursive: true });
+  if (!inside(out, join(out, 'packages'))) throw Error('QUALIFICATION_PACKAGING_OUTPUT_ESCAPED');
+  const manifestPath = join(out, 'package.json');
+  if (existsSync(manifestPath) && !inside(out, manifestPath)) throw Error('QUALIFICATION_PACKAGING_OUTPUT_ESCAPED');
+  const manifest = existsSync(manifestPath) ? readFileSync(manifestPath)
+    : Buffer.from(JSON.stringify({ name: 'papercusp-runtime', private: true }) + '\n');
+  write(manifestPath, manifest);
+  const p = await import('@papercusp/operator-core/lib/prompt-assembly');
+  if (!Array.isArray(p.PROMPT_ROLES) || !p.PROMPT_ROLES.length
+      || JSON.stringify(p.CHAT_ROLE_DOCUMENT_KINDS) !== '["persona","converse","tools"]') {
+    throw Error('HISTORICAL_PROMPT_CAPABILITY_UNAVAILABLE: document population');
+  }
   const assets = [];
   const seen = new Set();
   // Derive the complete population from the selected loader. No current prompt
@@ -183,14 +192,6 @@ if (flag === '--package-role-prompts') {
     write(join(out, file), bytes);
     assets.push({ file, sha256: hash(bytes) });
   }
-  // The frozen store recognizes a monorepo root by package.json AND packages/.
-  // Keep CommonJS .js helpers working: a new boundary must not set type:module.
-  mkdirSync(join(out, 'packages'), { recursive: true });
-  if (!inside(out, join(out, 'packages'))) throw Error('QUALIFICATION_PACKAGING_OUTPUT_ESCAPED');
-  const manifestPath = join(out, 'package.json');
-  const manifest = existsSync(manifestPath) ? readFileSync(manifestPath)
-    : Buffer.from(JSON.stringify({ name: 'papercusp-runtime', private: true }) + '\n');
-  write(manifestPath, manifest);
   const binding = join(out, 'sidecar-qualification.json');
   const receipt = JSON.parse(readFileSync(binding, 'utf8'));
   receipt.packaging = { promptAssets: assets, rootManifestSha256: hash(manifest) };
@@ -242,7 +243,7 @@ import { resolve } from 'node:path';
 const [root, entry] = process.argv.slice(2);
 let source = readFileSync(entry, 'utf8');
 for (const name of ['agent-tools/index', 'prompt-assembly']) {
-  source = source.replace("'@papercusp/operator-core/lib/" + name + "'",
+  source = source.replaceAll("'@papercusp/operator-core/lib/" + name + "'",
     JSON.stringify(resolve(root, 'packages/operator-core/lib', name + '.ts')));
 }
 writeFileSync(entry, source);

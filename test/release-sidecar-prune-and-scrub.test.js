@@ -417,6 +417,60 @@ function tmp(name) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `wi37620-${name}-`));
 }
 
+test('vm-release packaging preserves only bound prompts and refuses missing, tampered or escaping inventory before prune', () => {
+  const dir = tmp('bound-prompts');
+  const outside = tmp('outside-prompt');
+  const hash = bytes => require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+  const manifest = '{"name":"frozen-runtime","private":true}\n';
+  const files = ['operator.persona', 'oracle.converse', 'papercup-deep.tools']
+    .map(name => `apps/operator/prompts/${name}.md`);
+  const bindingPath = path.join(dir, 'sidecar-qualification.json');
+  const receipt = { packaging: { rootManifestSha256: hash(manifest),
+    promptAssets: files.map(file => ({ file, sha256: hash(file) })) } };
+  const bind = () => fs.writeFileSync(bindingPath, JSON.stringify(receipt));
+  try {
+    fs.mkdirSync(path.join(dir, 'packages'));
+    fs.writeFileSync(path.join(dir, 'package.json'), manifest);
+    fs.mkdirSync(path.join(dir, 'apps/operator/prompts'), { recursive: true });
+    for (const file of files) fs.writeFileSync(path.join(dir, file), file);
+    const unlisted = path.join(dir, 'apps/operator/prompts/unlisted.md');
+    fs.writeFileSync(unlisted, 'unlisted');
+    bind();
+    const last = path.join(dir, files.at(-1));
+    for (const action of ['missing', 'tampered', 'escaped']) {
+      fs.rmSync(last, { force: true });
+      if (action === 'tampered') fs.writeFileSync(last, 'changed');
+      if (action === 'escaped') {
+        const target = path.join(outside, 'prompt.md');
+        fs.writeFileSync(target, files.at(-1));
+        fs.symlinkSync(target, last);
+      }
+      const result = vmReleaseAudit('--prune-vm-release', dir);
+      assert.notEqual(result.status, 0, action);
+      assert.match(result.stderr, /QUALIFICATION_PACKAGING_INVALID/);
+      assert.equal(fs.existsSync(unlisted), true, 'validation must precede every deletion');
+    }
+    fs.unlinkSync(last);
+    fs.writeFileSync(last, files.at(-1));
+    receipt.packaging.promptAssets.push(receipt.packaging.promptAssets[0]);
+    bind();
+    assert.match(vmReleaseAudit('--prune-vm-release', dir).stderr, /duplicate/);
+    receipt.packaging.promptAssets.pop();
+    receipt.packaging.promptAssets.reverse();
+    bind();
+    const result = vmReleaseAudit('--prune-vm-release', dir);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(fs.existsSync(unlisted), false);
+    for (const file of files) assert.equal(fs.readFileSync(path.join(dir, file), 'utf8'), file);
+    assert.equal(vmReleaseAudit('--audit-vm-release', dir).status, 0);
+    fs.rmSync(path.join(dir, 'package.json'));
+    assert.match(vmReleaseAudit('--audit-vm-release', dir).stderr, /QUALIFICATION_PACKAGING_INVALID/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 test('vm-release prune removes non-runtime residue, preserves allowlisted assets, and writes the threat boundary', () => {
   const dir = tmp('vm-release-prune');
   const write = (rel, body = 'fixture\n') => {
