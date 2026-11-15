@@ -36,6 +36,43 @@ function extractFunction(name) {
 const LDCONFIG_RESOLVER = extractFunction('resolve_ldconfig');
 const installCommand = 'node "$HERE/../../scripts/npm-install-safe.mjs" --repo-root "$REPO_ROOT" install';
 
+/** Imports erased by TypeScript do not belong to the installed runtime graph. */
+function runtimeModuleSpecifiers(text, file) {
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+  const specifiers = [];
+  const visitNode = (node) => {
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+      if (!node.isTypeOnly && !node.importClause?.isTypeOnly &&
+          node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+        specifiers.push(node.moduleSpecifier.text);
+      }
+    } else if (ts.isCallExpression(node) && node.arguments.length === 1 &&
+        ts.isStringLiteral(node.arguments[0]) &&
+        (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+          (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
+      specifiers.push(node.arguments[0].text);
+    }
+    ts.forEachChild(node, visitNode);
+  };
+  visitNode(source);
+  return specifiers;
+}
+
+test('sidecar import census distinguishes erased types from runtime edges', () => {
+  assert.deepEqual(runtimeModuleSpecifiers(`
+    import type { File } from '@babel/types';
+    export type { Node } from 'type-export';
+    type Result = import('type-query').Result;
+    import 'side-effects';
+    import { handle, type Options } from 'mixed-runtime';
+    export { handle } from 'value-export';
+    const lazy = import('dynamic-runtime');
+    const required = require('commonjs-runtime');
+  `, 'runtime-census.ts'), [
+    'side-effects', 'mixed-runtime', 'value-export', 'dynamic-runtime', 'commonjs-runtime',
+  ]);
+});
+
 test('sidecar install uses the current guard against the frozen product root', t => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "pc-sidecar-installer's roots-"));
   t.after(() => fs.rmSync(fixture, { recursive: true, force: true }));
@@ -1868,29 +1905,9 @@ test('sidecar source union declares every bare runtime import in operator-core',
       }
       if (!/\.[cm]?[jt]sx?$/.test(entry.name) || /\.(test|spec)\.[^.]+$/.test(entry.name)) continue;
       if (sourceTreeOnly.has(path.relative(repoRoot, file))) continue;
-      const source = ts.createSourceFile(
-        file,
-        fs.readFileSync(file, 'utf8'),
-        ts.ScriptTarget.Latest,
-        true,
-      );
-      const visitNode = (node) => {
-        if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
-          if (node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
-            inspectSpecifier(node.moduleSpecifier.text, file);
-          }
-        } else if (
-          ts.isCallExpression(node) &&
-          node.arguments.length === 1 &&
-          ts.isStringLiteral(node.arguments[0]) &&
-          (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
-            (ts.isIdentifier(node.expression) && node.expression.text === 'require'))
-        ) {
-          inspectSpecifier(node.arguments[0].text, file);
-        }
-        ts.forEachChild(node, visitNode);
-      };
-      visitNode(source);
+      for (const specifier of runtimeModuleSpecifiers(fs.readFileSync(file, 'utf8'), file)) {
+        inspectSpecifier(specifier, file);
+      }
     }
   };
 
@@ -1899,6 +1916,16 @@ test('sidecar source union declares every bare runtime import in operator-core',
     [...missing].map(([dependency, files]) => [dependency, [...files].sort()]).sort(),
     [],
   );
+});
+
+test('operator-core declares and locks its HTTP tool dispatcher runtime', () => {
+  const manifestPath = path.join(repoRoot, 'packages/operator-core/package.json');
+  const manifest = require(manifestPath);
+  const lock = require(path.join(repoRoot, 'package-lock.json'));
+  const dependency = '@papercusp/tooldef-http';
+  assert.ok(manifest.dependencies[dependency], 'runtime dispatcher must have a direct dependency');
+  assert.equal(lock.packages['packages/operator-core'].dependencies[dependency], manifest.dependencies[dependency]);
+  assert.doesNotThrow(() => createRequire(manifestPath).resolve(dependency));
 });
 
 test('sidecar server bundle declares DBOS telemetry runtime requirements', () => {
