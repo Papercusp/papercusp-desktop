@@ -7,15 +7,17 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = resolve(packageRoot, '..');
 const runnerArgs = process.argv.slice(2);
 
+let nodeLedgerModule = null;
 let ledger = null;
+let ledgerOutcome = null;
 let ledgerReason = null;
 if (runnerArgs.some((arg) => arg.startsWith('--test-reporter'))) {
   ledgerReason = 'caller supplied --test-reporter';
 } else {
   try {
     const { tsImport } = await import('tsx/esm/api');
-    const nodeLedger = await tsImport('../../libs/test-config/src/node-test-ledger.ts', import.meta.url);
-    ledger = await nodeLedger.beginNodeTestLedger({ repoRoot });
+    nodeLedgerModule = await tsImport('../../libs/test-config/src/node-test-ledger.ts', import.meta.url);
+    ledger = await nodeLedgerModule.beginNodeTestLedger({ repoRoot });
   } catch (error) {
     ledgerReason = 'ledger unavailable: ' + (error instanceof Error ? error.message : String(error));
   }
@@ -38,9 +40,9 @@ const result = await new Promise((resolveResult) => {
 
 if (ledger) {
   try {
-    const outcome = await ledger.record();
-    const reason = outcome.reason ? ' reason=' + JSON.stringify(outcome.reason) : '';
-    console.log('TEST_FILE_LEDGER runner=node:test rows=' + outcome.recorded + reason);
+    ledgerOutcome = await ledger.record();
+    const reason = ledgerOutcome.reason ? ' reason=' + JSON.stringify(ledgerOutcome.reason) : '';
+    console.log('TEST_FILE_LEDGER runner=node:test rows=' + ledgerOutcome.recorded + reason);
   } catch (error) {
     ledgerReason = 'recording failed: ' + (error instanceof Error ? error.message : String(error));
   }
@@ -55,5 +57,11 @@ if (result.error) {
 } else if (result.signal) {
   process.kill(process.pid, result.signal);
 } else {
-  process.exitCode = result.code ?? 1;
+  const exitCode = nodeLedgerModule
+    ? nodeLedgerModule.nodeTestRunnerExitCode(result.code, ledgerOutcome)
+    : (result.code === 0 ? 1 : result.code ?? 1);
+  if (result.code === 0 && exitCode !== 0) {
+    console.error('[run-node-test-suite] refusing a green exit without complete ledger acknowledgement');
+  }
+  process.exitCode = exitCode;
 }
