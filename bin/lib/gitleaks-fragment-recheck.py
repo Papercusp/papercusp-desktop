@@ -42,6 +42,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 GITLEAKS = os.environ.get('GITLEAKS_BIN', 'gitleaks')
@@ -175,6 +176,8 @@ def recheck(report_path: Path, config: Path) -> tuple[list[dict], list[dict]]:
     try:
         serial = 0
         for file_name, findings in by_file.items():
+            print(f'gitleaks fragment recheck: starting {file_name}: {len(findings)} finding(s)',
+                  file=sys.stderr, flush=True)
             source = Path(file_name)
             if not file_name or not source.is_file():
                 kept.extend(findings)
@@ -186,37 +189,60 @@ def recheck(report_path: Path, config: Path) -> tuple[list[dict], list[dict]]:
             unredacted = {tuple(f.get(k) for k in COORDS): f for f in rescan}
             data = source.read_bytes()
             relative = _relative_target(file_name)
-            for finding in findings:
+            # A decision considers EVERY occurrence of the unredacted match in
+            # this file. Other findings with the same rule and true match ask
+            # exactly the same question. Cache that decision, never a redacted
+            # report entry; each original finding still gets its own audit row.
+            decisions: dict[tuple[str, bytes], tuple[str, str, int, int | None]] = {}
+            reused = 0
+            file_serial = serial
+            last_progress = time.monotonic()
+            for processed, finding in enumerate(findings, 1):
                 twin = unredacted.get(tuple(finding.get(k) for k in COORDS))
                 match = str(twin.get('Match', '')).encode('utf-8') if twin else b''
                 if not match:
                     kept.append(finding)
                     audit.append(_audit(finding, 'kept', 'not-reproduced-by-file-rescan'))
-                    continue
-                offsets = _occurrences(data, match)
-                windows = [_window(data, offset, len(match)) for offset in offsets]
-                distinct = list(dict.fromkeys(w for w in windows if w is not None))
-                if not offsets or len(offsets) > MAX_OCCURRENCES or None in windows \
-                        or len(distinct) > MAX_DISTINCT_WINDOWS:
-                    kept.append(finding)
-                    reason = ('match-not-found' if not offsets else
-                              'too-many-occurrences' if len(offsets) > MAX_OCCURRENCES else
-                              'unaligned-window' if None in windows else 'too-many-distinct-windows')
-                    audit.append(_audit(finding, 'kept', reason, len(offsets)))
-                    continue
-                reproduced = False
-                for window in distinct:
-                    serial += 1
-                    if _window_reproduces(work, relative, window, str(finding.get('RuleID')),
-                                          config, serial):
-                        reproduced = True
-                        break
-                if reproduced:
-                    kept.append(finding)
-                    audit.append(_audit(finding, 'kept', 'reproduced-in-true-bytes', len(offsets)))
                 else:
-                    audit.append(_audit(finding, 'dropped', 'fragment-artifact', len(offsets),
-                                        len(distinct)))
+                    rule = str(finding.get('RuleID'))
+                    key = (rule, match)
+                    decision = decisions.get(key)
+                    if decision is not None:
+                        reused += 1
+                    else:
+                        offsets = _occurrences(data, match)
+                        windows = [_window(data, offset, len(match)) for offset in offsets]
+                        distinct = list(dict.fromkeys(w for w in windows if w is not None))
+                        if not offsets or len(offsets) > MAX_OCCURRENCES or None in windows \
+                                or len(distinct) > MAX_DISTINCT_WINDOWS:
+                            reason = ('match-not-found' if not offsets else
+                                      'too-many-occurrences' if len(offsets) > MAX_OCCURRENCES else
+                                      'unaligned-window' if None in windows else 'too-many-distinct-windows')
+                            decision = ('kept', reason, len(offsets), None)
+                        else:
+                            reproduced = False
+                            for window in distinct:
+                                serial += 1
+                                if _window_reproduces(work, relative, window, rule, config, serial):
+                                    reproduced = True
+                                    break
+                            decision = (('kept', 'reproduced-in-true-bytes', len(offsets), None)
+                                        if reproduced else
+                                        ('dropped', 'fragment-artifact', len(offsets), len(distinct)))
+                        decisions[key] = decision
+                    disposition, reason, occurrences, window_count = decision
+                    if disposition == 'kept':
+                        kept.append(finding)
+                    audit.append(_audit(finding, disposition, reason, occurrences, window_count))
+                now = time.monotonic()
+                if now - last_progress >= 10:
+                    print(f'gitleaks fragment recheck: {file_name}: {processed}/{len(findings)} '
+                          f'finding(s), {reused} reused decision(s), '
+                          f'{serial - file_serial} window scan(s)', file=sys.stderr, flush=True)
+                    last_progress = now
+            print(f'gitleaks fragment recheck: completed {file_name}: {len(findings)}/{len(findings)} '
+                  f'finding(s), {reused} reused decision(s), {serial - file_serial} window scan(s)',
+                  file=sys.stderr, flush=True)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     return kept, audit

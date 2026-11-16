@@ -1249,6 +1249,65 @@ test('fragment recheck fails closed on findings it cannot re-verify', () => {
   assert.equal(broken.audit, null);
 });
 
+test('fragment recheck reuses true-byte decisions without losing findings or crossing file, rule or match boundaries', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'papercusp-fragment-reuse-'));
+  try {
+    const program = String.raw`
+import importlib.util,json,pathlib,sys,os
+s=importlib.util.spec_from_file_location('recheck',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+base=pathlib.Path(sys.argv[2]);os.chdir(base)
+totals=[]
+for count in [63,64,65,257]:
+ for reverse in [False,True]:
+  originals=[];twins={};calls={'files':0,'windows':0}
+  for name in ['a.mjs','b.mjs']:
+   (base/name).write_text(';'*1200+('tokenShared;otherToken;'+';'*1200)*count)
+   twins[name]=[]
+   for index in range(count):
+    for rule,match in [('keep-rule','tokenShared'),('drop-rule','tokenShared'),('keep-rule','otherToken')]:
+     f={'File':name,'RuleID':rule,'StartLine':index+1,'EndLine':index+1,'StartColumn':1 if match=='tokenShared' else 2,'EndColumn':10,'Fingerprint':name+rule+str(1 if match=='tokenShared' else 2)+str(index),'Match':'REDACTED','Secret':'REDACTED'}
+     originals.append(f);twins[name].append(dict(f,Match=match))
+  # Missing twins remain fail-closed even when a redacted entry looks identical.
+  missing=dict(originals[0],StartLine=count+1,EndLine=count+1,Fingerprint='unpaired')
+  originals.append(missing)
+  if reverse:originals.reverse()
+  def detector(cwd,target,config,report,timeout):
+   if cwd==base:
+    calls['files']+=1;return twins[target]
+   calls['windows']+=1
+   data=(cwd/target).read_bytes()
+   # A real same-rule match near the OTHER occurrence must not reproduce it.
+   return [{'RuleID':'keep-rule','Match':'tokenShared'}] if target=='a.mjs' and b'tokenShared' in data else []
+  m._gitleaks=detector
+  # Exercise incremental progress deterministically without a sleep.
+  ticks=iter(range(0,1000000,11));m.time.monotonic=lambda:next(ticks)
+  report=base/'report.json';report.write_text(json.dumps(originals))
+  kept,audit=m.recheck(report,base/'config.toml')
+  expected=[f for f in originals if (f['File']=='a.mjs' and f['RuleID']=='keep-rule' and f['StartColumn']==1) or f['Fingerprint']=='unpaired']
+  assert kept==expected,(count,reverse)
+  assert len(audit)==len(originals)
+  assert sorted(a['Fingerprint'] for a in audit)==sorted(f['Fingerprint'] for f in originals)
+  assert sum(a['reason']=='not-reproduced-by-file-rescan' for a in audit)==1
+  assert calls=={'files':2,'windows':6},calls
+  assert 'tokenShared' not in json.dumps(audit) and 'otherToken' not in json.dumps(audit)
+  totals.append({'count':count,'reverse':reverse,'findings':len(originals),'kept':len(kept),'calls':calls})
+print(json.dumps(totals))
+`;
+    const result = spawnSync('python3', ['-I', '-c', program, recheckPath, temp],
+      { encoding: 'utf8', timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    const totals = JSON.parse(result.stdout);
+    assert.equal(totals.length, 8);
+    assert.match(result.stderr, /starting a\.mjs:/);
+    assert.match(result.stderr, /finding\(s\), \d+ reused decision\(s\), \d+ window scan\(s\)/);
+    assert.match(result.stderr, /completed b\.mjs:/);
+    assert.ok(!result.stderr.includes('tokenShared'));
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test('release-local re-verifies gitleaks findings over true bytes before the seed filter and failure accounting', () => {
   const source = fs.readFileSync(scriptPath, 'utf8');
   const scan = source.indexOf('( cd "$ROOT" && gitleaks dir "$_gitleaks_root"');
