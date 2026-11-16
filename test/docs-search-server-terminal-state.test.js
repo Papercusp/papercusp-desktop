@@ -2,9 +2,53 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const vm = require('node:vm');
 
 const main = fs.readFileSync(path.join(__dirname, '../src-tauri/src/main.rs'), 'utf8');
 const cargo = fs.readFileSync(path.join(__dirname, '../src-tauri/Cargo.toml'), 'utf8');
+
+test('native route handoffs preserve pending acknowledgements while navigating the current webview', () => {
+  const start = main.indexOf('fn navigate_window_to_route');
+  assert.ok(start >= 0, 'the shared native route handler must exist');
+  const handler = main.slice(start, main.indexOf('\n}', start) + 2);
+  const template = handler.match(/format!\(\s*("(?:\\.|[^"\\])*")/);
+  assert.ok(template, 'exercise the actual native navigation script');
+  const navigation = JSON.parse(template[1]);
+
+  for (const route of ['/reports?sel=rpt_exact&ws=workspace-a', '/plans?sel=workbench#D-024', '/reports?sel=quoted\"value']) {
+    let location = new URL('http://127.0.0.1:33701/reports?sel=rpt_newer&hist=true');
+    const pending = { done: false };
+    const events = [];
+    const navigations = [];
+    const window = {
+      __reportsPublication: pending,
+      location: {
+        get href() { return location.href; },
+        assign(target) {
+          location = new URL(target, location);
+          delete window.__reportsPublication;
+        },
+      },
+      history: {
+        pushState(state, title, target) {
+          navigations.push(target);
+          location = new URL(target, location);
+        },
+      },
+      dispatchEvent(event) { events.push(event.type); },
+    };
+    class PopStateEvent {
+      constructor(type) { this.type = type; }
+    }
+
+    vm.runInNewContext(navigation.replace('{}', JSON.stringify(route)), { window, PopStateEvent });
+
+    assert.equal(window.__reportsPublication, pending, 'navigation must not unload the pending intent/request');
+    assert.equal(window.location.href, new URL(route, 'http://127.0.0.1:33701').href);
+    assert.deepEqual(navigations, [route]);
+    assert.deepEqual(events, ['popstate']);
+  }
+});
 
 test('a rejected shortcut rebind rebuilds native tray checkmarks from the persisted choice', () => {
   const start = main.indexOf('} else if let Some(payload) = id.strip_prefix(DOCS_SHORTCUT_MENU_PREFIX)');

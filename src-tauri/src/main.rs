@@ -6676,13 +6676,11 @@ fn take_pending_route() -> Option<String> {
     sanitize_app_route(&raw)
 }
 
-/// Navigate `window` to a same-origin app `route` via a soft client navigation
-/// (the desktop host's `location.assign` override turns it into a pushState nav;
-/// off that host it degrades to a real load — either way it lands there). Shared
-/// by the in-process branch and the cross-process apply.
+/// Navigate `window` to a same-origin app `route` without unloading pending IPC
+/// or UI intent acknowledgements. Shared by both hand-off paths.
 fn navigate_window_to_route<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, route: &str) {
     let js = format!(
-        "window.location.assign({})",
+        "window.history.pushState(null, '', {}); window.dispatchEvent(new PopStateEvent('popstate'));",
         serde_json::to_string(route).unwrap_or_else(|_| "\"/\"".to_string())
     );
     if let Err(e) = window.eval(&js) {
