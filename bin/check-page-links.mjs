@@ -61,6 +61,18 @@ async function probeOnce(url, fetchImpl, timeoutMs) {
       });
       await res.body?.cancel?.();
     }
+    if (res.status >= 200 && res.status < 300 &&
+      /\.(?:deb|dmg|exe|zip|appimage|tar\.gz|tar\.zst)$/i.test(new URL(url).pathname)) {
+      // HEAD and tiny Range requests can succeed while the real download is
+      // rejected (Cloud Run's non-streamed HTTP/1 response limit is 32 MiB).
+      // Start a normal GET without Range, then release it after its first chunk.
+      // This proves request acceptance; whole-file digests remain a separate check.
+      res = await fetchImpl(url, { method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(timeoutMs) });
+      if (res.body) {
+        const reader = res.body.getReader();
+        try { await reader.read(); } finally { await reader.cancel(); }
+      }
+    }
     return res.status;
   } catch {
     return 0; // connection-level failure: no HTTP answer at all

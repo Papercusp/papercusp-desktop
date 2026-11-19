@@ -113,13 +113,40 @@ test('a page whose every link is served passes (calibration: the checker is not 
   assert.ok(results.every((r) => r.status === 200));
 });
 
-test('a host without HEAD support is probed with a one-byte GET', async () => {
+test('a host without HEAD support is probed with a range then an ordinary download GET', async () => {
   const results = await checker.checkLinks(
     ['desktop-v0.0.25-alpha/Papercusp%20GUI_0.0.25_amd64.deb', 'desktop-v0.0.25-alpha/missing.deb'],
     headlessBase,
   );
-  assert.deepEqual(results.map((r) => r.status), [206, 404]);
+  assert.deepEqual(results.map((r) => r.status), [200, 404]);
   assert.equal(checker.verdict(results), 1);
+});
+
+test('full-download rejection is detected at the response boundary even when HEAD and Range work', async () => {
+  const boundary = 32 * 1024 * 1024;
+  const requests = [];
+  const limited = await listen((req, res) => {
+    const size = Number(new URL(req.url, 'http://x').pathname.match(/(\d+)\.deb$/)?.[1]);
+    requests.push({ size, method: req.method, range: req.headers.range });
+    res.statusCode = req.method === 'HEAD' || req.headers.range || size <= boundary ? 200 : 500;
+    res.end(req.method === 'HEAD' ? undefined : 'download accepted');
+  });
+  try {
+    const host = `http://127.0.0.1:${limited.address().port}/`;
+    const links = [boundary - 1, boundary, boundary + 1].map((size) => `${size}.deb`);
+    for (const order of [links, [...links].reverse()]) {
+      const results = await checker.checkLinks(order, host, { concurrency: 2 });
+      assert.deepEqual(results.map((r) => r.status), order.map((link) => Number(link.split('.')[0]) > boundary ? 500 : 200));
+      assert.equal(checker.verdict(results), 1);
+    }
+    for (const size of [boundary - 1, boundary, boundary + 1]) {
+      assert.ok(requests.some((r) => r.size === size && r.method === 'HEAD'));
+      assert.ok(requests.some((r) => r.size === size && r.method === 'GET' && !r.range));
+    }
+  } finally {
+    limited.closeAllConnections();
+    await new Promise((resolve) => limited.close(resolve));
+  }
 });
 
 test('an unreachable host is "nothing measured" (exit 2), never a pass', async () => {
