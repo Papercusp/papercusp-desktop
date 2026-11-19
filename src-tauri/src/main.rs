@@ -747,7 +747,13 @@ fn install_load_failure_recovery<R: tauri::Runtime>(window: &tauri::WebviewWindo
             // origin: its same-origin health poll dials exactly the origin
             // that died.
             wv.load_alternate_html(
-                &recovery_page_html(failing_uri, kind, waited, &crash_hint),
+                &recovery_page_html(
+                    failing_uri,
+                    kind,
+                    waited,
+                    &crash_hint,
+                    env_switch::dev_recovery_release_port(failing_uri),
+                ),
                 failing_uri,
                 Some(failing_uri),
             );
@@ -970,7 +976,13 @@ fn html_escape_text(text: &str) -> String {
 /// `crash_hint` — where the operator's error would be if it crashed instead
 /// of still booting.
 #[cfg(target_os = "linux")]
-fn recovery_page_html(failing_uri: &str, kind: RecoveryKind, waited: Duration, crash_hint: &str) -> String {
+fn recovery_page_html(
+    failing_uri: &str,
+    kind: RecoveryKind,
+    waited: Duration,
+    crash_hint: &str,
+    release_port: Option<u16>,
+) -> String {
     let uri_js = serde_json::to_string(failing_uri)
         .unwrap_or_else(|_| "\"/\"".to_string())
         .replace('<', "\\u003c");
@@ -979,6 +991,12 @@ fn recovery_page_html(failing_uri: &str, kind: RecoveryKind, waited: Duration, c
     let hint_hidden = if waited >= RECOVERY_CRASH_HINT_AFTER { "" } else { " hidden" };
     let hint_html = html_escape_text(crash_hint);
     let target_html = html_escape_text(failing_uri);
+    // A normal same-window navigation makes native on_page_load retarget the
+    // API as well. Start at the deployed build's home without forwarding the
+    // failed navigation's path or query.
+    let release_link = release_port.map(|port| format!(
+        r#"<a id="deployed-build" href="http://127.0.0.1:{port}/" referrerpolicy="no-referrer"{hint_hidden}>Switch to the deployed build</a>"#,
+    )).unwrap_or_default();
     let starting = kind == RecoveryKind::Starting;
     let (title, heading, detail) = match kind {
         RecoveryKind::Starting => (
@@ -1000,6 +1018,7 @@ fn recovery_page_html(failing_uri: &str, kind: RecoveryKind, waited: Duration, c
   p{{margin:0;color:#8a92a3;max-width:46ch}}
   button{{margin-top:6px;padding:7px 18px;border-radius:8px;border:1px solid #3a4254;background:#1a1f29;color:#d6dae2;font:inherit;cursor:pointer}}
   button:hover{{background:#232a38}}
+  a{{color:#9bb9fd}}
   .dot{{width:9px;height:9px;border-radius:50%;background:#e0b54a;animation:b 1.2s ease-in-out infinite}}
   .elapsed{{font-variant-numeric:tabular-nums}}
   .hint{{color:#e0b54a}}
@@ -1012,6 +1031,7 @@ fn recovery_page_html(failing_uri: &str, kind: RecoveryKind, waited: Duration, c
   <p class="hint" id="hint"{hint_hidden}>{hint_html}</p>
   <p>Connecting to <code>{target_html}</code></p>
   <button onclick="location.replace(TARGET)">Retry now</button>
+  {release_link}
   <script>
     const TARGET = {uri_js};
     const WAIT_STARTED = Date.now() - {waited_ms};
@@ -1027,6 +1047,8 @@ fn recovery_page_html(failing_uri: &str, kind: RecoveryKind, waited: Duration, c
       document.getElementById('elapsed').textContent = waitedText(ms);
       if (ms >= HINT_AFTER_MS) {{
         document.getElementById('hint').hidden = false;
+        const deployedBuild = document.getElementById('deployed-build');
+        if (deployedBuild) deployedBuild.hidden = false;
         document.getElementById('heading').textContent = STARTING
           ? 'Papercusp startup needs attention' : 'Papercusp is still disconnected';
         document.getElementById('detail').textContent = 'The operator has not answered. Check its startup log; this window will keep trying.';
@@ -1582,6 +1604,7 @@ mod tests {
             super::RecoveryKind::Lost,
             std::time::Duration::ZERO,
             "hint",
+            None,
         );
         assert!(html.contains(r#"const TARGET = "http://127.0.0.1:3170/adv?ws=x";"#));
         assert!(html.contains("Retry now"));
@@ -1591,6 +1614,7 @@ mod tests {
             super::RecoveryKind::Starting,
             std::time::Duration::ZERO,
             "hint",
+            None,
         );
         // The quote is JSON-escaped and `<` is unicode-escaped, so neither a
         // raw </script> nor a raw <script> from the URI survives in the HTML.
@@ -1607,13 +1631,13 @@ mod tests {
     fn recovery_page_cold_start_does_not_claim_the_operator_was_lost() {
         let uri = "http://127.0.0.1:3270/adv?ws=papercusp-workspace";
         let zero = std::time::Duration::ZERO;
-        let starting = super::recovery_page_html(uri, super::RecoveryKind::Starting, zero, "hint");
+        let starting = super::recovery_page_html(uri, super::RecoveryKind::Starting, zero, "hint", None);
         assert!(!starting.contains("lost its operator process"), "cold start must not claim a loss");
         assert!(starting.contains("Starting Papercusp"));
         assert!(starting.contains("<title>Papercusp — starting</title>"));
         assert!(starting.contains("poll();"), "the starting page must still poll for the operator");
 
-        let lost = super::recovery_page_html(uri, super::RecoveryKind::Lost, zero, "hint");
+        let lost = super::recovery_page_html(uri, super::RecoveryKind::Lost, zero, "hint", None);
         assert!(lost.contains("Papercusp lost its operator process"));
         assert!(lost.contains("<title>Papercusp — reconnecting</title>"));
         assert!(lost.contains("poll();"));
@@ -1629,7 +1653,7 @@ mod tests {
         use std::time::Duration;
         let uri = "http://127.0.0.1:3270/adv?ws=papercusp-workspace";
         let html =
-            super::recovery_page_html(uri, super::RecoveryKind::Starting, Duration::from_millis(42_500), "hint");
+            super::recovery_page_html(uri, super::RecoveryKind::Starting, Duration::from_millis(42_500), "hint", None);
         assert!(html.contains(r#"<p class="elapsed" id="elapsed"></p>"#), "elapsed counter element");
         assert!(
             html.contains("const WAIT_STARTED = Date.now() - 42500;"),
@@ -1674,7 +1698,7 @@ mod tests {
         let after = super::RECOVERY_CRASH_HINT_AFTER;
         assert_eq!(after, Duration::from_secs(180), "the plan asks for ~3 minutes");
 
-        let early = super::recovery_page_html(uri, super::RecoveryKind::Starting, Duration::from_secs(30), "HINT-TEXT");
+        let early = super::recovery_page_html(uri, super::RecoveryKind::Starting, Duration::from_secs(30), "HINT-TEXT", None);
         assert!(early.contains(r#"<p class="hint" id="hint" hidden>HINT-TEXT</p>"#), "hidden before 3 min");
         assert!(early.contains("const HINT_AFTER_MS = 180000;"));
         assert!(
@@ -1682,12 +1706,12 @@ mod tests {
             "a page left open must reveal the hint when the wait crosses the threshold"
         );
 
-        let late = super::recovery_page_html(uri, super::RecoveryKind::Starting, after, "HINT-TEXT");
+        let late = super::recovery_page_html(uri, super::RecoveryKind::Starting, after, "HINT-TEXT", None);
         assert!(late.contains(r#"<p class="hint" id="hint">HINT-TEXT</p>"#), "visible from 3 min on");
-        let lost_late = super::recovery_page_html(uri, super::RecoveryKind::Lost, after * 2, "HINT-TEXT");
+        let lost_late = super::recovery_page_html(uri, super::RecoveryKind::Lost, after * 2, "HINT-TEXT", None);
         assert!(lost_late.contains(r#"<p class="hint" id="hint">HINT-TEXT</p>"#), "a lost operator gets it too");
 
-        let hostile = super::recovery_page_html(uri, super::RecoveryKind::Starting, after, r#"<img src=x onerror="a">&"#);
+        let hostile = super::recovery_page_html(uri, super::RecoveryKind::Starting, after, r#"<img src=x onerror="a">&"#, None);
         assert!(!hostile.contains("<img src=x"), "hint text must be escaped");
         assert!(hostile.contains("&lt;img src=x onerror=&quot;a&quot;&gt;&amp;"));
     }
@@ -1719,11 +1743,11 @@ mod tests {
         use std::process::{Command, Stdio};
         let html = super::recovery_page_html(
             "http://127.0.0.1:3270/adv?ws=test", super::RecoveryKind::Starting,
-            std::time::Duration::ZERO, "Check the startup log",
+            std::time::Duration::ZERO, "Check the startup log", Some(3070),
         );
         let lost_html = super::recovery_page_html(
             "http://127.0.0.1:3270/adv?ws=test", super::RecoveryKind::Lost,
-            std::time::Duration::ZERO, "Check the startup log",
+            std::time::Duration::ZERO, "Check the startup log", None,
         );
         if let Some(dir) = std::env::var_os("PAPERCUSP_TEST_ARTIFACT_DIR") {
             std::fs::create_dir_all(&dir).unwrap();
@@ -1734,9 +1758,18 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const pages = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 async function check(starting) {
-  const script = pages[starting ? 'starting' : 'lost'].match(/<script>([\s\S]*?)<\/script>/)[1];
+  const html = pages[starting ? 'starting' : 'lost'];
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+  const releaseLink = html.match(/<a id="deployed-build" href="([^"]+)" referrerpolicy="no-referrer"( hidden)?>/);
+  if (starting) {
+    assert.equal(releaseLink?.[1], 'http://127.0.0.1:3070/');
+    assert.equal(releaseLink?.[2], ' hidden');
+  } else {
+    assert.equal(releaseLink, null);
+  }
   let now = 0, calls = 0, navigations = [], timers = [], intervals = [];
   const nodes = Object.fromEntries(['heading', 'detail', 'hint', 'elapsed'].map(id => [id, { hidden: true, textContent: '' }]));
+  if (releaseLink) nodes['deployed-build'] = { hidden: true };
   const context = {
     Date: { now: () => now }, AbortController,
     document: { getElementById: id => nodes[id] },
@@ -1757,6 +1790,7 @@ async function check(starting) {
   for (now of [179999, 180000, 180001, 20 * 60 * 60 * 1000]) {
     intervals[0]();
     assert.equal(nodes.hint.hidden, now < 180000);
+    if (releaseLink) assert.equal(nodes['deployed-build'].hidden, now < 180000);
     if (now >= 180000) assert.equal(nodes.heading.textContent,
       starting ? 'Papercusp startup needs attention' : 'Papercusp is still disconnected');
   }

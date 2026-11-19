@@ -281,6 +281,30 @@ pub fn reachable_fallback_env() -> Option<u16> {
     first_reachable(&[3070, 3170], port_reachable)
 }
 
+/// Let a human leave a stuck working-tree operator through the same trusted
+/// environment navigation used by the normal switcher. An explicit API pin
+/// must never offer navigation that would leave content and API on different
+/// operators. Only the deployed build is offered from this recovery page.
+#[cfg(target_os = "linux")]
+pub(crate) fn dev_recovery_release_port(failing_uri: &str) -> Option<u16> {
+    if !cfg!(debug_assertions) || env_api_target().is_some() {
+        return None;
+    }
+    let launch_port = parse_api_target(std::env::var("OPERATOR_DEV_PORT").ok())?;
+    let (_, _, release_port, _) = fixed_targets().iter().find(|(_, name, _, _)| *name == "prod")?;
+    release_target_for_failed_dev_url(failing_uri, launch_port, *release_port).filter(|port| port_reachable(*port))
+}
+
+#[cfg(target_os = "linux")]
+fn release_target_for_failed_dev_url(failing_uri: &str, launch_port: u16, release_port: u16) -> Option<u16> {
+    let failed_url = url::Url::parse(failing_uri).ok()?;
+    (failed_url.scheme() == "http"
+        && failed_url.host_str() == Some("127.0.0.1")
+        && failed_url.port() == Some(launch_port)
+        && launch_port != release_port)
+        .then_some(release_port)
+}
+
 /// Point `/api` at `target_port`'s operator (EI-190) + drop the live IPC
 /// connection so the next call dials the selected operator's socket.
 fn retarget_api(app: &tauri::AppHandle, target_port: u16) {
@@ -639,6 +663,17 @@ mod tests {
         let staging = url::Url::parse("http://127.0.0.1:3170/adv").unwrap();
         assert_eq!(navigation_target(&staging, Some(3370)), None);
         assert_eq!(startup_target(None, None), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovery_offers_release_only_for_the_failed_launcher_origin() {
+        let target = |uri| release_target_for_failed_dev_url(uri, 3271, 3070);
+        assert_eq!(target("http://127.0.0.1:3271/adv?ws=local"), Some(3070));
+        assert_eq!(target("http://127.0.0.1:3270/"), None);
+        assert_eq!(target("http://127.0.0.1:3070/"), None);
+        assert_eq!(target("http://example.test:3271/"), None);
+        assert_eq!(release_target_for_failed_dev_url("http://127.0.0.1:3070/", 3070, 3070), None);
     }
 
     #[test]
