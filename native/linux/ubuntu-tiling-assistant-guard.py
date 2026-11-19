@@ -13,13 +13,16 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
+import subprocess
 import tempfile
 
 EXTENSION = Path('/usr/share/gnome-shell/extensions/tiling-assistant@ubuntu.com/extension.js')
 INSTALL = Path('/usr/local/lib/papercusp/ubuntu-tiling-assistant-guard.py')
 HOOK = Path('/etc/apt/apt.conf.d/99papercusp-tiling-assistant-guard')
 BACKUPS = Path('/var/lib/papercusp/tiling-assistant-guard')
+UUID = 'tiling-assistant@ubuntu.com'
 HOOK_CONTENT = ('// WI-6554700010053174: preserve the monitorless-window crash fix.\n'
                 'DPkg::Post-Invoke { "/usr/bin/python3 ' + str(INSTALL) + ' --apply"; };\n')
 MARKER = '// Papercusp WI-6554700010053174: reject monitorless windows before native calls.'
@@ -112,14 +115,84 @@ def install_guard():
     return {**result, 'installed': str(INSTALL), 'aptHook': str(HOOK)}
 
 
+def autostart_path():
+    config = Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config')))
+    return config / 'autostart/papercusp-tiling-assistant-restore.desktop'
+
+
+def bus_call(method, arguments=(), shell=True, run=subprocess.run):
+    result = run(['gdbus', 'call', '--address', 'unix:path=/run/user/' + str(os.getuid()) + '/bus',
+                  '--dest', 'org.gnome.Shell' if shell else 'org.freedesktop.DBus',
+                  '--object-path', '/org/gnome/Shell' if shell else '/org/freedesktop/DBus',
+                  '--method', method, *arguments], capture_output=True, text=True, timeout=15)
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or 'Desktop D-Bus call failed')
+    return result.stdout.strip()
+
+
+def current_shell_pid(run=subprocess.run):
+    value = bus_call('org.freedesktop.DBus.GetConnectionUnixProcessID', ['org.gnome.Shell'], False, run)
+    match = re.fullmatch(r'\(uint32 ([0-9]+),\)', value)
+    if not match:
+        raise ValueError('Cannot identify the current GNOME Shell: ' + value)
+    return int(match[1])
+
+
+def activation_desktop(previous_pid):
+    return ('[Desktop Entry]\nType=Application\n'
+            'Name=Restore repaired Ubuntu Tiling Assistant\nNoDisplay=true\n'
+            'X-GNOME-Autostart-Phase=Applications\n'
+            'Exec=/usr/bin/python3 ' + str(INSTALL) + ' --activate-on-login --previous-shell-pid=' +
+            str(previous_pid) + '\n')
+
+
+def defer_activation(extension=EXTENSION, autostart=None, run=subprocess.run):
+    # GNOME 46's ReloadExtension is explicitly unsupported. Keep this desktop
+    # alive and protected, then restore the repaired feature in a fresh shell.
+    if apply_guard(extension, check=True)['status'] != 'guarded':
+        raise ValueError('The repaired extension must be installed first')
+    previous_pid = current_shell_pid(run)
+    autostart = Path(autostart) if autostart is not None else autostart_path()
+    content = activation_desktop(previous_pid)
+    if autostart.exists() and autostart.read_text() != content:
+        raise ValueError('Refusing to replace an unknown activation entry: ' + str(autostart))
+    atomic_write(autostart, content.encode('utf-8'))
+    if bus_call('org.gnome.Shell.Extensions.DisableExtension', [UUID], run=run) != '(true,)':
+        raise ValueError('Could not disable the old in-memory Tiling Assistant; activation entry retained')
+    return {'status': 'protected-until-next-login', 'previousShellPid': previous_pid,
+            'restoreAtNextLogin': str(autostart)}
+
+
+def activate_on_login(previous_pid, extension=EXTENSION, autostart=None, run=subprocess.run):
+    autostart = Path(autostart) if autostart is not None else autostart_path()
+    if autostart.read_text() != activation_desktop(previous_pid):
+        raise ValueError('Activation entry changed; leaving it and extension settings untouched')
+    if current_shell_pid(run) == previous_pid:
+        raise ValueError('A fresh desktop login is required to load the repaired module')
+    if apply_guard(extension, check=True)['status'] != 'guarded':
+        raise ValueError('The repaired extension is not installed; activation entry retained')
+    if bus_call('org.gnome.Shell.Extensions.EnableExtension', [UUID], run=run) != '(true,)':
+        raise ValueError('Repaired Tiling Assistant did not enable; activation entry retained')
+    autostart.unlink()
+    return {'status': 'activated', 'previousShellPid': previous_pid}
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--install', action='store_true')
     mode.add_argument('--apply', action='store_true')
     mode.add_argument('--check', action='store_true')
+    mode.add_argument('--defer-activation', action='store_true')
+    mode.add_argument('--activate-on-login', action='store_true')
+    parser.add_argument('--previous-shell-pid', type=int)
     args = parser.parse_args()
     try:
-        print(json.dumps(install_guard() if args.install else apply_guard(check=args.check)))
+        if args.activate_on_login and not args.previous_shell_pid:
+            raise ValueError('--activate-on-login requires --previous-shell-pid')
+        result = (install_guard() if args.install else defer_activation() if args.defer_activation else
+                  activate_on_login(args.previous_shell_pid) if args.activate_on_login else
+                  apply_guard(check=args.check))
+        print(json.dumps(result))
     except (OSError, ValueError) as error:
         parser.exit(1, 'Tiling Assistant crash guard: ' + str(error) + '\n')

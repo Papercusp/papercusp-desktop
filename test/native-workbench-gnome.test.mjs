@@ -100,6 +100,55 @@ test('Ubuntu guard preserves complete backups, reapplies package replacements, a
         assert.equal(readFileSync(extension,'utf8'),duplicate);
     } finally {rmSync(directory,{recursive:true,force:true});}
 });
+test('Ubuntu repair protects the current desktop and restores tiling once after a fresh login',()=>{
+    const result=runTilingGuard(`
+import tempfile, pathlib, types
+with tempfile.TemporaryDirectory() as d:
+ p=pathlib.Path(d); extension=p/'extension.js'; entry=p/'restore.desktop'
+ extension.write_text(guard['AFTER'])
+ pid=123; calls=[]
+ def bus(argv, **kwargs):
+  calls.append(argv)
+  out='(uint32 '+str(pid)+',)' if 'org.freedesktop.DBus.GetConnectionUnixProcessID' in argv else '(true,)'
+  return types.SimpleNamespace(returncode=0, stdout=out, stderr='')
+ first=guard['defer_activation'](extension,entry,bus)
+ assert entry.exists()
+ try: guard['activate_on_login'](123,extension,entry,bus)
+ except ValueError as e: assert 'fresh desktop' in str(e)
+ else: raise AssertionError('Must not reload the cached module in the same shell')
+ assert entry.exists()
+ pid=456
+ last=guard['activate_on_login'](123,extension,entry,bus)
+ assert not entry.exists()
+ methods=[a[a.index('--method')+1] for a in calls]
+ assert methods.count('org.gnome.Shell.Extensions.EnableExtension')==1
+ assert methods.count('org.gnome.Shell.Extensions.DisableExtension')==1
+ print(json.dumps([first['status'],last['status']]))`,null);
+    assert.deepEqual(result,['protected-until-next-login','activated']);
+});
+test('Ubuntu login restoration retains recovery on failure and refuses changed activation entries',()=>{
+    const result=runTilingGuard(`
+import tempfile, pathlib, types
+with tempfile.TemporaryDirectory() as d:
+ p=pathlib.Path(d); extension=p/'extension.js'; entry=p/'restore.desktop'
+ extension.write_text(guard['AFTER']); entry.write_text(guard['activation_desktop'](123))
+ calls=[]
+ def bus(argv, **kwargs):
+  calls.append(argv)
+  out='(uint32 456,)' if 'org.freedesktop.DBus.GetConnectionUnixProcessID' in argv else '(false,)'
+  return types.SimpleNamespace(returncode=0, stdout=out, stderr='')
+ try: guard['activate_on_login'](123,extension,entry,bus)
+ except ValueError as e: assert 'did not enable' in str(e)
+ else: raise AssertionError('Failed enable must not consume recovery')
+ assert entry.exists()
+ entry.write_text('changed by account'); calls.clear()
+ try: guard['activate_on_login'](123,extension,entry,bus)
+ except ValueError as e: assert 'changed' in str(e)
+ else: raise AssertionError('Unknown entry must not be overwritten')
+ assert calls==[] and entry.read_text()=='changed by account'
+ print(json.dumps('recovery-preserved'))`,null);
+    assert.equal(result,'recovery-preserved');
+});
 // The shared protocol uses TypeScript's .js source specifiers. Exercise the
 // same closed ESM source graph produced for GJS, without Node-specific loaders.
 const contentBundle = buildSync({entryPoints:[join(root,'native/gnome/chat-content.mjs')],
