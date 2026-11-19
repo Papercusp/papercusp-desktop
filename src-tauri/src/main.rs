@@ -906,9 +906,8 @@ fn restore_window_visibility<R: tauri::Runtime + 'static>(
 }
 
 /// How long the recovery page waits before adding the "it may have crashed"
-/// hint (plan desktop-dev-startup-speed-2026-10-06 P-003). A loaded dev box
-/// can take minutes to boot the operator, so the hint says that waiting can
-/// be normal rather than declaring a crash.
+/// hint. This is an attention threshold, not proof of a crash: a live process
+/// can be withholding HTTP while a required migration or backup is failing.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const RECOVERY_CRASH_HINT_AFTER: Duration = Duration::from_secs(180);
 
@@ -930,11 +929,11 @@ fn recovery_crash_hint_for(dev_build: bool, serve_log: &std::path::Path) -> Stri
     let minutes = RECOVERY_CRASH_HINT_AFTER.as_secs() / 60;
     if dev_build {
         format!(
-            "Still waiting after {minutes} minutes. On a busy machine that can be normal, but the server may also have crashed. If it did, its error is in the terminal window where you ran npm run dev."
+            "Startup has not completed after {minutes} minutes. Check the terminal window where you ran npm run dev for a failed backup, blocked migration, or process error. Retrying this window cannot repair a failed prerequisite. It will reconnect automatically when the operator is ready."
         )
     } else {
         format!(
-            "Still waiting after {minutes} minutes. On a busy machine that can be normal, but the server may also have failed to start. If it did, its error is in {}.",
+            "Startup has not completed after {minutes} minutes. Check {} for a failed backup, blocked migration, or process error. Retrying this window cannot repair a failed prerequisite. It will reconnect automatically when the operator is ready.",
             serve_log.display()
         )
     }
@@ -979,6 +978,8 @@ fn recovery_page_html(failing_uri: &str, kind: RecoveryKind, waited: Duration, c
     let hint_after_ms = RECOVERY_CRASH_HINT_AFTER.as_millis();
     let hint_hidden = if waited >= RECOVERY_CRASH_HINT_AFTER { "" } else { " hidden" };
     let hint_html = html_escape_text(crash_hint);
+    let target_html = html_escape_text(failing_uri);
+    let starting = kind == RecoveryKind::Starting;
     let (title, heading, detail) = match kind {
         RecoveryKind::Starting => (
             "Papercusp — starting",
@@ -1005,15 +1006,17 @@ fn recovery_page_html(failing_uri: &str, kind: RecoveryKind, waited: Duration, c
   @keyframes b{{50%{{opacity:.25}}}}
 </style></head><body><div class="wrap">
   <div class="dot"></div>
-  <h1>{heading}</h1>
-  <p>{detail}</p>
+  <h1 id="heading">{heading}</h1>
+  <p id="detail">{detail}</p>
   <p class="elapsed" id="elapsed"></p>
   <p class="hint" id="hint"{hint_hidden}>{hint_html}</p>
+  <p>Connecting to <code>{target_html}</code></p>
   <button onclick="location.replace(TARGET)">Retry now</button>
   <script>
     const TARGET = {uri_js};
     const WAIT_STARTED = Date.now() - {waited_ms};
     const HINT_AFTER_MS = {hint_after_ms};
+    const STARTING = {starting};
     function waitedText(ms) {{
       const s = Math.max(0, Math.floor(ms / 1000));
       if (s < 60) return 'Waiting ' + s + ' s';
@@ -1022,16 +1025,27 @@ fn recovery_page_html(failing_uri: &str, kind: RecoveryKind, waited: Duration, c
     function tick() {{
       const ms = Date.now() - WAIT_STARTED;
       document.getElementById('elapsed').textContent = waitedText(ms);
-      if (ms >= HINT_AFTER_MS) document.getElementById('hint').hidden = false;
+      if (ms >= HINT_AFTER_MS) {{
+        document.getElementById('hint').hidden = false;
+        document.getElementById('heading').textContent = STARTING
+          ? 'Papercusp startup needs attention' : 'Papercusp is still disconnected';
+        document.getElementById('detail').textContent = 'The operator has not answered. Check its startup log; this window will keep trying.';
+      }}
     }}
     tick();
     setInterval(tick, 1000);
     async function poll() {{
+      // A TCP connection can succeed while HTTP never returns headers. Bound
+      // each probe so one stuck fetch cannot disable recovery permanently.
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
       try {{
-        await fetch(TARGET, {{ method: 'HEAD', cache: 'no-store' }});
+        await fetch(TARGET, {{ method: 'HEAD', cache: 'no-store', signal: controller.signal }});
         location.replace(TARGET);
       }} catch (_e) {{
         setTimeout(poll, 1000);
+      }} finally {{
+        clearTimeout(timeout);
       }}
     }}
     poll();
@@ -1664,7 +1678,7 @@ mod tests {
         assert!(early.contains(r#"<p class="hint" id="hint" hidden>HINT-TEXT</p>"#), "hidden before 3 min");
         assert!(early.contains("const HINT_AFTER_MS = 180000;"));
         assert!(
-            early.contains("if (ms >= HINT_AFTER_MS) document.getElementById('hint').hidden = false;"),
+            early.contains("if (ms >= HINT_AFTER_MS) {") && early.contains("document.getElementById('hint').hidden = false;"),
             "a page left open must reveal the hint when the wait crosses the threshold"
         );
 
@@ -1685,7 +1699,8 @@ mod tests {
         let log = std::path::Path::new("/home/u/.papercusp/logs/serve.log");
         let dev = super::recovery_crash_hint_for(true, log);
         assert!(dev.contains("3 minutes"));
-        assert!(dev.contains("may also have crashed"));
+        assert!(dev.contains("failed backup, blocked migration, or process error"));
+        assert!(!dev.contains("On a busy machine"));
         assert!(dev.contains("the terminal window where you ran npm run dev"));
         assert!(!dev.contains("serve.log"));
 
@@ -1693,6 +1708,75 @@ mod tests {
         assert!(packaged.contains("3 minutes"));
         assert!(packaged.contains("/home/u/.papercusp/logs/serve.log"));
         assert!(!packaged.contains("npm run dev"), "an installed app has no npm run dev terminal");
+    }
+
+    /// Execute the rendered page, including a connection that never returns
+    /// headers. A string assertion cannot prove that recovery keeps running.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovery_page_recovers_after_a_hung_probe_and_flags_stalled_startup() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let html = super::recovery_page_html(
+            "http://127.0.0.1:3270/adv?ws=test", super::RecoveryKind::Starting,
+            std::time::Duration::ZERO, "Check the startup log",
+        );
+        if let Some(dir) = std::env::var_os("PAPERCUSP_TEST_ARTIFACT_DIR") {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(std::path::Path::new(&dir).join("desktop-recovery.html"), &html).unwrap();
+        }
+        let mut child = Command::new("node").args(["-e", r#"
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const html = require('node:fs').readFileSync(0, 'utf8');
+const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+async function check(starting) {
+  let now = 0, calls = 0, navigations = [], timers = [], intervals = [];
+  const nodes = Object.fromEntries(['heading', 'detail', 'hint', 'elapsed'].map(id => [id, { hidden: true, textContent: '' }]));
+  const context = {
+    Date: { now: () => now }, AbortController,
+    document: { getElementById: id => nodes[id] },
+    location: { replace: url => navigations.push(url) },
+    setInterval: fn => intervals.push(fn),
+    setTimeout: (fn, ms) => { const t = { fn, ms, cleared: false }; timers.push(t); return t; },
+    clearTimeout: t => { t.cleared = true; },
+    fetch: (_url, options) => {
+      calls++;
+      if (calls === 1) return new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(new Error('aborted')));
+      });
+      // Any HTTP response demonstrates that navigation can be retried.
+      return Promise.resolve({ status: 503 });
+    },
+  };
+  vm.runInNewContext(starting ? script : script.replace('const STARTING = true;', 'const STARTING = false;'), context);
+  for (now of [179999, 180000, 180001, 20 * 60 * 60 * 1000]) {
+    intervals[0]();
+    assert.equal(nodes.hint.hidden, now < 180000);
+    if (now >= 180000) assert.equal(nodes.heading.textContent,
+      starting ? 'Papercusp startup needs attention' : 'Papercusp is still disconnected');
+  }
+  assert.equal(calls, 1, 'timer ticks must not start overlapping probes');
+  assert.equal(navigations.length, 0);
+  const timeout = timers.find(t => t.ms === 5000);
+  assert.ok(timeout, 'a hung request needs a deadline');
+  timeout.fn();
+  await new Promise(setImmediate);
+  assert.equal(timeout.cleared, true);
+  const retry = timers.find(t => t.ms === 1000 && !t.cleared);
+  assert.ok(retry, 'a timed out probe must schedule recovery');
+  retry.fn();
+  await new Promise(setImmediate);
+  assert.equal(calls, 2);
+  assert.deepEqual(navigations, ['http://127.0.0.1:3270/adv?ws=test']);
+  assert.equal(timers.filter(t => t.ms === 5000 && !t.cleared).length, 0);
+}
+(async () => { await check(true); await check(false); })().catch(e => { console.error(e); process.exitCode = 1; });
+"#]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .spawn().expect("Node is required to exercise the desktop recovery script");
+        child.stdin.take().unwrap().write_all(html.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "recovery script failed: {}", String::from_utf8_lossy(&output.stderr));
     }
 
     /// WI-10002878: the commit/fail sequencing WebKit drives. The recovery
