@@ -1721,6 +1721,10 @@ mod tests {
             "http://127.0.0.1:3270/adv?ws=test", super::RecoveryKind::Starting,
             std::time::Duration::ZERO, "Check the startup log",
         );
+        let lost_html = super::recovery_page_html(
+            "http://127.0.0.1:3270/adv?ws=test", super::RecoveryKind::Lost,
+            std::time::Duration::ZERO, "Check the startup log",
+        );
         if let Some(dir) = std::env::var_os("PAPERCUSP_TEST_ARTIFACT_DIR") {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(std::path::Path::new(&dir).join("desktop-recovery.html"), &html).unwrap();
@@ -1728,9 +1732,9 @@ mod tests {
         let mut child = Command::new("node").args(["-e", r#"
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
-const html = require('node:fs').readFileSync(0, 'utf8');
-const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+const pages = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 async function check(starting) {
+  const script = pages[starting ? 'starting' : 'lost'].match(/<script>([\s\S]*?)<\/script>/)[1];
   let now = 0, calls = 0, navigations = [], timers = [], intervals = [];
   const nodes = Object.fromEntries(['heading', 'detail', 'hint', 'elapsed'].map(id => [id, { hidden: true, textContent: '' }]));
   const context = {
@@ -1749,7 +1753,7 @@ async function check(starting) {
       return Promise.resolve({ status: 503 });
     },
   };
-  vm.runInNewContext(starting ? script : script.replace('const STARTING = true;', 'const STARTING = false;'), context);
+  vm.runInNewContext(script, context);
   for (now of [179999, 180000, 180001, 20 * 60 * 60 * 1000]) {
     intervals[0]();
     assert.equal(nodes.hint.hidden, now < 180000);
@@ -1774,7 +1778,8 @@ async function check(starting) {
 (async () => { await check(true); await check(false); })().catch(e => { console.error(e); process.exitCode = 1; });
 "#]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
             .spawn().expect("Node is required to exercise the desktop recovery script");
-        child.stdin.take().unwrap().write_all(html.as_bytes()).unwrap();
+        let pages = serde_json::json!({ "starting": html, "lost": lost_html }).to_string();
+        child.stdin.take().unwrap().write_all(pages.as_bytes()).unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success(), "recovery script failed: {}", String::from_utf8_lossy(&output.stderr));
     }
