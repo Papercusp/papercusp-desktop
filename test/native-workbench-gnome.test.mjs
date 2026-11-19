@@ -6,12 +6,100 @@ import {pathToFileURL} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import test from 'node:test';
 import {buildSync} from 'esbuild';
+import {runInNewContext} from 'node:vm';
 import {PanelState, InboxState, ChatState, ChatReply, AccountState, nativeVoiceRequest, nativeVoiceResult, readNativeReply, sameEnvironment, readRows, sourceRows, resultFor, searchResults, detailRequest, rebindShortcuts, sourceRequests,
     agentFocusTarget, agentResumeTarget, resumeArgv, exactAgentWindow,
     organizerGroups, organizerMembers, arrangeOrganizerGroup}
     from '../native/gnome/panel-model.mjs';
 
 const root = resolve(import.meta.dirname, '..');
+const tilingGuard = join(root, 'native/linux/ubuntu-tiling-assistant-guard.py');
+function runTilingGuard(script, input) {
+    const result = spawnSync('/usr/bin/python3', ['-c',
+        'import runpy, json, sys; guard = runpy.run_path(sys.argv[1]); ' + script, tilingGuard],
+    {input: JSON.stringify(input), encoding:'utf8', timeout:10000});
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+}
+const ubuntuPanelCallback = `            return allWindowsByStacking.find(w => {
+                const rect = w.get_frame_rect();
+                const workArea = w.get_work_area_current_monitor();
+                return w.is_on_primary_monitor() &&
+                        w.showing_on_its_workspace() &&
+                        w.get_window_type() !== Meta.WindowType.DESKTOP &&
+                        (w.maximized_vertically || w.tiledRect?.y === workArea.y) &&
+                        stageX > rect.x && stageX < rect.x + rect.width;
+            });`;
+const guardedPanelCallback = runTilingGuard(
+    'print(json.dumps(guard["patch_source"](json.load(sys.stdin))))', ubuntuPanelCallback);
+function dragWindow(source, windows, monitors=1, stageX=50) {
+    return runInNewContext('(function () {' + source + '})()', {
+        allWindowsByStacking:windows, stageX, Meta:{WindowType:{DESKTOP:1}},
+        global:{display:{get_n_monitors:()=>monitors}},
+    });
+}
+function panelWindow({monitor=0, primary=true, visible=true, type=0, maximized=true, tiledY}={}) {
+    return {maximized_vertically:maximized, tiledRect:tiledY === undefined ? undefined : {y:tiledY},
+        get_monitor:()=>monitor, is_on_primary_monitor:()=>primary,
+        showing_on_its_workspace:()=>visible, get_window_type:()=>type,
+        get_frame_rect:()=>({x:0,y:0,width:100,height:100}),
+        get_work_area_current_monitor:()=> {
+            if (monitor < 0) throw new Error('libmutter assertion: logical_monitor');
+            return {x:0,y:0,width:100,height:100};
+        }};
+}
+test('Ubuntu panel drag skips monitorless windows in every stacking position without losing valid windows',()=>{
+    const invalid=panelWindow({monitor:-1}), valid=panelWindow();
+    assert.throws(()=>dragWindow(ubuntuPanelCallback,[invalid,valid]),/logical_monitor/);
+    for (const windows of [[invalid,valid],[valid,invalid],[invalid,invalid,valid]])
+        assert.equal(dragWindow(guardedPanelCallback,windows),valid);
+    assert.equal(dragWindow(guardedPanelCallback,[invalid]),undefined);
+});
+test('Ubuntu panel guard checks monitor boundaries and eligibility before any native work-area call',()=>{
+    const valid=panelWindow({monitor:1});
+    assert.equal(dragWindow(guardedPanelCallback,[valid],2),valid); // N-1
+    for (const [monitor,count] of [[2,2],[3,2],[-1,2],[0,0]]) { // N, N+1, removed, no displays
+        const window=panelWindow({monitor});
+        window.get_work_area_current_monitor=()=>{throw new Error('must not call native code');};
+        assert.equal(dragWindow(guardedPanelCallback,[window],count),undefined);
+    }
+    for (const options of [{primary:false},{visible:false},{type:1}]) {
+        const window=panelWindow(options);
+        window.get_work_area_current_monitor=()=>{throw new Error('ineligible native call');};
+        assert.equal(dragWindow(guardedPanelCallback,[window]),undefined);
+    }
+});
+test('Ubuntu panel guard retains tiling, maximized-window selection and drag position bounds',()=>{
+    const tiled=panelWindow({maximized:false,tiledY:0}),maximized=panelWindow();
+    assert.equal(dragWindow(guardedPanelCallback,[tiled,maximized]),tiled);
+    assert.equal(dragWindow(guardedPanelCallback,[panelWindow({maximized:false}),maximized]),maximized);
+    for (const position of [0,100,101]) assert.equal(dragWindow(guardedPanelCallback,[maximized],1,position),undefined);
+});
+test('Ubuntu guard preserves complete backups, reapplies package replacements, and refuses unknown source',()=>{
+    const directory=mkdtempSync(join(tmpdir(),'ubuntu-tiling-guard-'));
+    try {
+        const extension=join(directory,'extension.js'),backups=join(directory,'backups');
+        const original='// Ubuntu package source\n'+ubuntuPanelCallback+'\n// preserved footer\n';
+        writeFileSync(extension,original);
+        const apply=()=>runTilingGuard('p=json.load(sys.stdin); print(json.dumps(guard["apply_guard"](p["extension"],p["backups"])))',{extension,backups});
+        const first=apply();
+        assert.equal(first.status,'patched');assert.equal(readFileSync(first.backup,'utf8'),original);
+        assert.equal(apply().status,'guarded');
+        assert.equal(readFileSync(extension,'utf8'),original.replace(ubuntuPanelCallback,guardedPanelCallback));
+        // A later package version replaces the file; the same post-invoke entry patches that source.
+        const updated=original+'// next Ubuntu package generation\n';
+        writeFileSync(extension,updated);
+        const next=apply();assert.equal(next.status,'patched');assert.notEqual(next.backup,first.backup);
+        assert.equal(readFileSync(next.backup,'utf8'),updated);
+        assert.equal(readFileSync(first.backup,'utf8'),original);
+        const unknown='// unexpected upstream implementation\n';writeFileSync(extension,unknown);
+        const refusal=runTilingGuard('p=json.load(sys.stdin)\ntry: guard["apply_guard"](p["extension"],p["backups"])\nexcept ValueError as e: print(json.dumps(str(e)))',{extension,backups});
+        assert.match(refusal,/Unsupported/);assert.equal(readFileSync(extension,'utf8'),unknown);
+        const duplicate=ubuntuPanelCallback+'\n'+ubuntuPanelCallback;writeFileSync(extension,duplicate);
+        assert.match(runTilingGuard('p=json.load(sys.stdin)\ntry: guard["apply_guard"](p["extension"],p["backups"])\nexcept ValueError as e: print(json.dumps(str(e)))',{extension,backups}),/Unsupported/);
+        assert.equal(readFileSync(extension,'utf8'),duplicate);
+    } finally {rmSync(directory,{recursive:true,force:true});}
+});
 // The shared protocol uses TypeScript's .js source specifiers. Exercise the
 // same closed ESM source graph produced for GJS, without Node-specific loaders.
 const contentBundle = buildSync({entryPoints:[join(root,'native/gnome/chat-content.mjs')],
