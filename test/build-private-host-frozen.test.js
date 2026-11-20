@@ -227,7 +227,12 @@ test('P537 independent: production and private callers share executable compiler
     'bundle_host_launcher "$ORACLE_DONOR" "$ORACLE_OUTPUT/psu.mjs" psu-launcher',
   ].join('\n')], { env: { ORACLE_COMMON: common, ORACLE_DONOR: f.donor, ORACLE_OUTPUT: f.output, ORACLE_RECORD: record } });
   succeeded(result);
-  const [primary, launcher] = fs.readFileSync(record, 'utf8').trim().split('\n');
+  const recipes = fs.readFileSync(record, 'utf8').trim().split('\n');
+  const primaryRecipes = recipes.filter(line => line.includes('/apps/operator/bin/serve.ts'));
+  const launcherRecipes = recipes.filter(line => line.includes('/apps/operator/scripts/psu-launcher.mjs'));
+  assert.equal(primaryRecipes.length, 1);
+  assert.equal(launcherRecipes.length, 1);
+  const [primary] = primaryRecipes, [launcher] = launcherRecipes;
   assert.ok(primary.includes('/apps/operator/bin/serve.ts'));
   assert.ok(primary.includes('--define:__PAPERCUSP_BUNDLED_SIDECAR__=true'));
   assert.ok(primary.includes('--banner:js='));
