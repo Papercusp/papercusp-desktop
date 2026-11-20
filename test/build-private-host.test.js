@@ -21,6 +21,22 @@ function pkg(dir,manifest,body='module.exports=true;') {
   fs.writeFileSync(path.join(dir,'package.json'),JSON.stringify(manifest));
   fs.writeFileSync(path.join(dir,'index.js'),body);
 }
+function commitFixtureSource(f) {
+  // Only the disposable donor is a Git fixture. Shared-tree state must never
+  // decide these clean/dirty source-identity assertions.
+  const git=(...args)=>{
+    const r=spawnSync('git',['-C',f.donor,'-c','core.hooksPath=/dev/null',
+      '-c','user.name=Private host fixture','-c','user.email=fixture@invalid',...args],
+    {encoding:'utf8',env:{...process.env,GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null'}});
+    assert.equal(r.status,0,r.stdout+r.stderr);
+    return r.stdout.trim();
+  };
+  git('init','--quiet');
+  fs.writeFileSync(path.join(f.donor,'source-fixture.txt'),'committed source\n');
+  git('add','--all');
+  git('-c','commit.gpgsign=false','commit','--quiet','-m','private host source fixture');
+  return git('rev-parse','--short','HEAD');
+}
 function shell(f,program) {
   return spawnSync('bash',['-c',[
     'set -euo pipefail','source "$CLOSURE"',
@@ -101,7 +117,14 @@ test('shared PRIMARY and launcher recipes retain real entry and CLI boundary',t=
   const r=spawnSync('bash',['-c',program],{encoding:'utf8',timeout:5000,
     env:{...process.env,COMMON:common,DONOR:f.donor,OUTPUT:f.output,RECORD:record}});
   assert.equal(r.status,0,r.stdout+r.stderr);
-  const [primary,launcher]=fs.readFileSync(record,'utf8').trim().split('\n');
+  // PRIMARY also compiles its testing worker. Select entrypoint recipes so
+  // that the worker compile cannot be mistaken for the PRIMARY call.
+  const recipes=fs.readFileSync(record,'utf8').trim().split('\n');
+  const primaryRecipes=recipes.filter(line=>line.includes('/apps/operator/bin/serve.ts'));
+  const launcherRecipes=recipes.filter(line=>line.includes('/apps/operator/scripts/psu-launcher.mjs'));
+  assert.equal(primaryRecipes.length,1);
+  assert.equal(launcherRecipes.length,1);
+  const [primary]=primaryRecipes,[launcher]=launcherRecipes;
   assert.ok(primary.includes('/apps/operator/bin/serve.ts'));
   assert.ok(primary.includes('--define:__PAPERCUSP_BUNDLED_SIDECAR__=true'));
   assert.ok(launcher.includes('/apps/operator/scripts/psu-launcher.mjs'));
@@ -124,16 +147,18 @@ test('runtime require-root copying stops on failure even when caller tests its s
 });
 
 test('source SHA resolver uses the actual checkout and refuses a borrowed parent identity',t=>{
-  const f=fixture(t),repo=path.resolve(desktop,'..');
-  const expected=spawnSync('git',['-C',repo,'rev-parse','--short','HEAD'],{encoding:'utf8'});
-  assert.equal(expected.status,0,expected.stderr);
+  const f=fixture(t),repo=f.donor,expected=commitFixtureSource(f);
   const resolveSha=(root,extra={})=>spawnSync('bash',['-c',
     'source "$COMMON"; bundle_host_source_sha "$SOURCE_ROOT"'],{
     encoding:'utf8',timeout:15000,env:{...process.env,NODE_OPTIONS:'',NODE_PATH:'',
-      VERIFY_TAURI_SOURCE_RECEIPT:'',COMMON:common,SOURCE_ROOT:root,...extra}});
+      VERIFY_TAURI_SOURCE_RECEIPT:'',PAPERCUSP_BUNDLE_SNAPSHOT_DIRTY:'',COMMON:common,SOURCE_ROOT:root,...extra}});
   const actual=resolveSha(repo);
   assert.equal(actual.status,0,actual.stderr);
-  assert.equal(actual.stdout.trim(),expected.stdout.trim());
+  assert.equal(actual.stdout.trim(),expected);
+  fs.appendFileSync(path.join(repo,'source-fixture.txt'),'uncommitted change\n');
+  const dirty=resolveSha(repo);
+  assert.equal(dirty.status,0,dirty.stderr);
+  assert.equal(dirty.stdout.trim(),expected+'+dirty');
   const nested=resolveSha(path.join(repo,'apps/operator'));
   assert.equal(nested.status,0,nested.stderr);
   assert.equal(nested.stdout,'');
@@ -155,18 +180,26 @@ test('private source SHA setup produces a real bundled identity without a runtim
   fs.writeFileSync(source,'import {resolveBuildInfo} from '+JSON.stringify(path.join(repo,'packages/operator-core/lib/build-info.ts'))+';\n'
     +'console.log(JSON.stringify(resolveBuildInfo({env:{},gitSha:()=>{throw new Error("runtime git identity forbidden");}})));\n');
   fs.copyFileSync(path.join(repo,'apps/operator/bin/ascii-escape-bundle.mjs'),path.join(f.donor,'apps/operator/bin/ascii-escape-bundle.mjs'));
+  const worker=path.join(f.donor,'packages/operator-core/lib/agent-tools/testing/testing-core.worker.ts');
+  fs.mkdirSync(path.dirname(worker),{recursive:true});
+  fs.writeFileSync(worker,'export {};\n');
+  const expected=commitFixtureSource(f);
   const command='set -euo pipefail\nsource "$COMMON"\nREPO_ROOT="$SOURCE_ROOT"\n'
     +builder.slice(start,end)+'\n'
     +'bundle_host_esbuild() { "$ESBUILD" "${@:2}"; }\n'
     +'bundle_host_primary "$DONOR" "$OUTPUT" --define:__PAPERCUSP_BUNDLED_SIDECAR__=true "${BUNDLED_SOURCE_SHA_DEFINE[@]}"\n'
     +'node "$OUTPUT/serve.mjs"';
-  const r=spawnSync('bash',['-c',command],{encoding:'utf8',timeout:15000,
+  const run=()=>spawnSync('bash',['-c',command],{encoding:'utf8',timeout:15000,
     env:{...process.env,NODE_OPTIONS:'',NODE_PATH:'',PAPERCUSP_BUILD_SHA:'',VERIFY_TAURI_SOURCE_RECEIPT:'',
-      COMMON:common,SOURCE_ROOT:repo,DONOR:f.donor,OUTPUT:f.output,
+      PAPERCUSP_BUNDLE_SNAPSHOT_DIRTY:'',COMMON:common,SOURCE_ROOT:f.donor,DONOR:f.donor,OUTPUT:f.output,
       ESBUILD:path.join(path.dirname(require.resolve('esbuild/package.json')),'bin/esbuild')}});
+  const r=run();
   assert.equal(r.status,0,r.stdout+r.stderr);
-  const expected=spawnSync('git',['-C',repo,'rev-parse','--short','HEAD'],{encoding:'utf8'});
-  assert.equal(JSON.parse(r.stdout.trim().split('\n').at(-1)).sha,expected.stdout.trim());
+  assert.equal(JSON.parse(r.stdout.trim().split('\n').at(-1)).sha,expected);
+  fs.appendFileSync(source,'// uncommitted build input\n');
+  const dirty=run();
+  assert.equal(dirty.status,78,dirty.stdout+dirty.stderr);
+  assert.match(dirty.stderr,/private PRIMARY requires a verified source SHA/);
 });
 
 function graphFixture(t) {
