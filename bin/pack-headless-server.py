@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 
 ROOT = "papercusp-server"
 SIDECAR = ROOT + "/sidecar"
-OMITTED = {"source.tar.zst", "env-sidecars"}
+OMITTED = {"source.tar.zst", "env-sidecars", "spa"}
 
 
 def file_digest(path):
