@@ -2370,6 +2370,13 @@ if ! node "$HERE/check-ptool-sdk-bundle.mjs" "$SIDECAR_DIR/scripts/ptool.mjs" --
   exit 1
 fi
 for np in "${NATIVE_PKGS[@]}"; do copy_pkg_closure "$np"; done
+# The memory store is built on mem0ai, which libs/generic/memory loads at run time by a
+# specifier no bundler can follow (its dynamic-import.ts), so nothing above stages it. Without
+# it the store never opens in a packaged server ("Cannot find package 'mem0ai'"), whatever
+# credentials or embedder the host has. compromise is the noun-phrase extractor mem0 requires
+# the same way. Proven loadable from the staged tree at the end of this script.
+copy_pkg_closure mem0ai || exit 1
+copy_pkg_closure compromise || exit 1
 # A historical source has no handler runtime or Koffi dependency. The early
 # source-contract preflight refuses partial current features before expensive work.
 if [[ "$PAPERCUSP_HANDLER_RUNTIME_CONTRACT" == current ]]; then
@@ -5679,6 +5686,13 @@ if [[ -n "$_unexpected_model_entries" ]]; then
   exit 1
 fi
 assert_no_transformers_model_fragments "$SIDECAR_DIR/node_modules/@huggingface/transformers/models" || exit 1
+
+# mem0ai is resolved by name at run time, so a bundle that built cleanly can still ship a memory
+# store that never opens. Load it from the staged tree, as the server will.
+if ! (cd "$SIDECAR_DIR" && node -e "import('mem0ai/oss').then(m => { if (typeof m.Memory !== 'function') throw new Error('mem0ai/oss has no Memory export'); })"); then
+  echo "FATAL: the staged sidecar cannot load mem0ai/oss: the memory store would never open in this build" >&2
+  exit 1
+fi
 
 # EI-200 epilogue (2026-07-18, gate run 20260718-000508): the destination is
 # NOT guaranteed absent here — a concurrent bare `cargo build` (tauri-dev
