@@ -17,6 +17,9 @@ export PAPERCUSP_HARNESS_DIR="$sidecar/harness" PAPERCUSP_RUBRICS_DIR="$sidecar/
 export PAPERCUSP_TEMPLATES_DIR="$sidecar/templates" PAPERCUSP_GOAL_PACKAGES_DIR="$sidecar/goal-packages"
 export PAPERCUSP_PROMPTS_DIR="$sidecar/prompts" PAPERCUSP_DOCS_ROOT="$sidecar/internal-docs"
 export OTEL_SDK_DISABLED=true
+# The durable loop, as the desktop app starts it: without these the server boots and answers, but
+# schedules nothing, so parked memory writes are never applied and no routine runs.
+export PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_ORCHESTRATOR=1
 PATH="$sidecar/bin:$PATH"
 export PATH
 mkdir -p "$PAPERCUSP_HOME" "$PAPERCUSP_WORKSPACES_ROOT"
