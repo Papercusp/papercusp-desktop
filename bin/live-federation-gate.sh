@@ -304,6 +304,20 @@ WORK="/tmp/live-fed-gate-$STAMP"; mkdir -p "$WORK"
 # manual/direct rig that happens to use the same /tmp prefix (WI-40905). A
 # prefix is a workload class, not ownership.
 export PAPERCUSP_LIVE_FED_GATE_RUN="$WORK"
+# WI-6554700010070220: a rebuild window builds its sidecar into THIS run's private
+# directory (PAPERCUSP_SIDECAR_OUT), never into the shared canonical
+# papercusp-desktop/src-tauri/sidecar. The canonical tree is also the output of
+# attended desktop and package builds, and it can carry host mounts: the WI-6417
+# disk-offload fstab bind over sidecar/node_modules rode the publish swap into
+# sidecar.old.<pid>, and the old-tree delete died EBUSY, so every gate window
+# banked a build RED. GATE_SIDECAR_SRC is the tree every consumer below reads:
+# the serve.mjs checks, the .deb repack, the from-repo smoke and the
+# local-matrix node binary. A window that does not rebuild (REBUILD=0) keeps
+# reading the shared published sidecar, as before. cleanup_gate_sidecar_out
+# deletes the private tree (about 5GB) at EXIT; the logs in $WORK stay.
+GATE_SIDECAR_ROOT="$WORK/sidecar-out"
+GATE_SIDECAR_DIR="$GATE_SIDECAR_ROOT/sidecar"
+GATE_SIDECAR_SRC="$DESKTOP_DIR/src-tauri/sidecar"
 # Run-dir retention (WI-3087, 2026-07-05): this gate leaked ~3.5GB per heavy run (the
 # dpkg-deb -R unpacked pkg/ tree + the repacked gate .deb were never cleaned) — 67 dirs /
 # 111GB of /tmp by the time it filled the root disk. Keep only the newest
@@ -1264,7 +1278,30 @@ guard_prod_ports preflight
 # incident's damage window was the smoke's own multi-minute runtime. Reaped on exit.
 ( while :; do sleep "${GATE_PORT_GUARD_INTERVAL_S:-15}"; guard_prod_ports sweep; done ) &
 GUARD_SWEEP_PID=$!
-trap 'guard_prod_ports exit-trap; reap_gate_sidecars; kill "$GUARD_SWEEP_PID" 2>/dev/null || true; rm -rf -- "${GATE_SELF_SNAPSHOT_DIR:-}" 2>/dev/null || true' EXIT
+# WI-6554700010070220: delete this run's private sidecar output (about 5GB) at EXIT.
+# The logs in $WORK stay for retention. Never delete across a mount: a recursive
+# delete descends into a bind mount and empties its SOURCE, and --one-file-system
+# cannot see a same-device bind, so mountinfo is checked first.
+cleanup_gate_sidecar_out() {
+  local root real work_real mp
+  root="${GATE_SIDECAR_ROOT:-}"
+  [ -n "$root" ] && [ -d "$root" ] || return 0
+  real="$(cd "$root" 2>/dev/null && pwd -P)" || return 0
+  work_real="$(cd "$WORK" 2>/dev/null && pwd -P)" || return 0
+  if [ "$real" != "$work_real/sidecar-out" ]; then
+    log "sidecar-out cleanup: refusing unexpected path $real"; return 0
+  fi
+  if [ -r /proc/self/mountinfo ]; then
+    while IFS= read -r mp; do
+      mp="$(printf '%b' "$mp")"   # mountinfo octal-escapes (\040 = space)
+      case "$mp/" in
+        "$real/"*) log "sidecar-out cleanup: $mp is a mount under $real; leaving the tree in place"; return 0 ;;
+      esac
+    done < <(awk '{print $5}' /proc/self/mountinfo)
+  fi
+  rm -rf --one-file-system -- "$real" 2>/dev/null || log "sidecar-out cleanup: could not fully remove $real"
+}
+trap 'guard_prod_ports exit-trap; reap_gate_sidecars; cleanup_gate_sidecar_out; kill "$GUARD_SWEEP_PID" 2>/dev/null || true; rm -rf -- "${GATE_SELF_SNAPSHOT_DIR:-}" 2>/dev/null || true' EXIT
 # An external kill (unit TimeoutStartSec, manual systemctl stop) must NEVER end a run
 # silently: the 2026-07-17 00:30 run was systemd-killed mid-local-matrix with no GATE:
 # line, so watchers greping verdicts waited forever and the red-EI/state machinery never
@@ -2013,7 +2050,14 @@ if [ -z "${GATE_DEB:-}" ]; then
     # the shared helper still times out and reports the holder when a writer is
     # genuinely wedged. An explicit operator override remains authoritative.
     capture_source_lock_snapshot "$WORK/source-locks-before-build.json"
+    # WI-6554700010070220: build into this run's private output (GATE_SIDECAR_ROOT).
+    # It no longer shares sidecar.lock with attended desktop/package builds; the
+    # bounded wait below stays as the backstop.
+    GATE_SIDECAR_SRC="$GATE_SIDECAR_DIR"
+    mkdir -p "$GATE_SIDECAR_ROOT"
+    log "sidecar output: $GATE_SIDECAR_DIR (private to this run)"
     ( cd "$DESKTOP_DIR" && \
+      PAPERCUSP_SIDECAR_OUT="$GATE_SIDECAR_DIR" \
       PAPERCUSP_SIDECAR_LOCK_WAIT_SEC="${PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-3600}" \
         bash bin/build-desktop-sidecar.sh ) >"$WORK/build.log" 2>&1 || { BUILD_RC=$?; FAIL_BUILD=1; log "BUILD FAILED (rc=$BUILD_RC) — $WORK/build.log"; }
     if (( FAIL_BUILD == 1 )); then
@@ -2030,7 +2074,7 @@ if [ -z "${GATE_DEB:-}" ]; then
   # Grep the FUNCTION NAME, not a log phrase: the original 'grantEpochKeysToMembers on
   # admit' literal was reworded out of the source and the stale check WARNed on every
   # build while the mechanism was in fact present (bundle carries the symbol 3x).
-  grep -qa 'grantEpochKeysToMembers' "$DESKTOP_DIR/src-tauri/sidecar/serve.mjs" 2>/dev/null \
+  grep -qa 'grantEpochKeysToMembers' "$GATE_SIDECAR_SRC/serve.mjs" 2>/dev/null \
     || log "WARN: fresh serve.mjs lacks the Seam-2 grantEpochKeysToMembers symbol — re-key legs may false-RED."
   # 2026-07-18 (run 20260718-000508): a nested sidecar publish (concurrent cargo
   # build.rs placeholder squatted src-tauri/sidecar mid-swap; the bundler's mv then
@@ -2038,9 +2082,9 @@ if [ -z "${GATE_DEB:-}" ]; then
   # gate deb — the smoke died 7 min in on luxon injection and the run burned a
   # content-matrix RED on pure build corruption. Refuse to repack a tree that is
   # obviously not a sidecar bundle: that is a BUILD red, not a matrix red.
-  if [ "$FAIL_BUILD" != 1 ] && [ ! -f "$DESKTOP_DIR/src-tauri/sidecar/serve.mjs" ]; then
+  if [ "$FAIL_BUILD" != 1 ] && [ ! -f "$GATE_SIDECAR_SRC/serve.mjs" ]; then
     FAIL_BUILD=1
-    log "BUILD FAILED — src-tauri/sidecar has no serve.mjs (nested sidecar.tmp.* publish?) — refusing to repack a corrupt sidecar tree"
+    log "BUILD FAILED — $GATE_SIDECAR_SRC has no serve.mjs (nested sidecar.tmp.* publish?) — refusing to repack a corrupt sidecar tree"
   fi
   # EI-20580419609576585 — the REPACK must not be gated on SKIP_MATRIX alone. SKIP_MATRIX=1
   # is set by the attestation wall (:1086) to force-skip the two GITHUB-dependent legs, but
@@ -2169,7 +2213,7 @@ if [ -z "${GATE_DEB:-}" ]; then
       GATE_DEB="$WORK/Papercusp_gate.deb"
       ( cd "$WORK" && mkdir -p pkg && dpkg-deb -R "$BASE_DEB" pkg \
           && test -x pkg/usr/bin/papercusp-desktop \
-          && APPDIR="$(find pkg/usr/lib -maxdepth 1 -mindepth 1 -type d | head -1)" && rm -rf "$APPDIR/sidecar" && cp -r "$DESKTOP_DIR/src-tauri/sidecar" "$APPDIR/sidecar" \
+          && APPDIR="$(find pkg/usr/lib -maxdepth 1 -mindepth 1 -type d | head -1)" && rm -rf "$APPDIR/sidecar" && cp -r "$GATE_SIDECAR_SRC" "$APPDIR/sidecar" \
           && dpkg-deb -Zgzip -z1 -b pkg "$GATE_DEB" && rm -rf pkg ) >"$WORK/repack.log" 2>&1 \
         && log "repacked fresh .deb (base=$BASE_DEB)" || { log "repack FAILED ($WORK/repack.log) — skipping content-matrix"; GATE_DEB=""; SKIP_MATRIX=1; }
     else
@@ -2671,7 +2715,15 @@ if [ "$SKIP_FROMREPO" != 1 ] && [ "${GATE_SKIP_GH_PREFLIGHT:-0}" != 1 ]; then
   fi
 fi
 if [ "$SKIP_FROMREPO" != 1 ]; then
+  # WI-6554700010070220: hand the smoke the tree this window built. A private
+  # tree lives under /tmp, so its hardlink snapshot must sit on /tmp as well; the
+  # smoke's default snapshot parent is on the root filesystem.
+  FROMREPO_SIDECAR_ENV=(PAPERCUSP_SMOKE_SIDECAR_DIR="$GATE_SIDECAR_SRC")
+  if [ "$GATE_SIDECAR_SRC" = "$GATE_SIDECAR_DIR" ]; then
+    FROMREPO_SIDECAR_ENV+=(PAPERCUSP_SMOKE_SIDECAR_SNAPSHOT_PARENT="$GATE_SIDECAR_ROOT/smoke-snapshots")
+  fi
   FROMREPO_RES="$(run_smoke from-repo two-instance-hive-from-repo-smoke.sh "" \
+    "${FROMREPO_SIDECAR_ENV[@]}" \
     HIVE_SMOKE_MODE=sidecar PAPERCUSP_SMOKE_DISPLAY="$((GATE_DISPLAY + 2))" DISCOVERY_RETRIES=100 \
     PAPERCUSP_FLAG_PAPERCUSP_HIVE_REKEY=1 WITNESS_PROBE=1 \
     PAPERCUSP_SMOKE_LOG_BANK_DIR="$WORK/pair-logs-from-repo")"
@@ -2747,7 +2799,7 @@ else
     # below 24 cores it disables pinning entirely), plus CN_C=pcusp-rig-c and IP_C=10.99.0.13.
     # A first-ever membership_churn RED is COVERAGE, not a regression: triage it, do not
     # revert to 2 frames to hide it. Set MATRIX_FRAMES=2 for a one-off cheaper run.
-    if ( cd "$DESKTOP_DIR/.." && bash "papercusp-desktop/bin/local-matrix.sh" --frames="${MATRIX_FRAMES:-3}" ${GATE_DEB:+--deb="$GATE_DEB"} ) >"$WORK/local-matrix.out" 2>&1; then
+    if ( cd "$DESKTOP_DIR/.." && PCUSP_LOCAL_RIG_SIDECAR_NODE="$GATE_SIDECAR_SRC/bin/node" bash "papercusp-desktop/bin/local-matrix.sh" --frames="${MATRIX_FRAMES:-3}" ${GATE_DEB:+--deb="$GATE_DEB"} ) >"$WORK/local-matrix.out" 2>&1; then
       MATRIXFULL_RES="PASS"; echo "$(now_s)" >"$STATE_DIR/last-matrix-green"
       # EI-18657324526667507: last-matrix-green answers "when was it last GOOD"; last-matrix-verdict
       # answers "when did it last DECIDE anything". They must stay separate — a leg that only ever

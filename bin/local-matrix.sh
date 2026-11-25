@@ -525,7 +525,7 @@ fi
 # than silently restoring the bug.
 preflight_host_preconditions() {
   local missing=0 u seen="" tok actual_login dht_reused=0 common_sh deb_out deb_rc
-  local sidecar_node="$DESKTOP_DIR/src-tauri/sidecar/bin/node"
+  local sidecar_node="${PCUSP_LOCAL_RIG_SIDECAR_NODE:-$DESKTOP_DIR/src-tauri/sidecar/bin/node}"
 
   # (1) sidecar node binary — needed to start the containerized testnet DHT. A
   #     --reuse run that finds its DHT container already up never starts one, so
@@ -728,7 +728,9 @@ log "frames ssh-ready"
 # frames reach everything as same-bridge c2c traffic (no ufw INPUT dependency).
 DHT_IP="${PCUSP_LOCAL_RIG_DHT_IP:-${GW%.*}.5}"
 DHT_CN="$NET-dht"
-SIDECAR_NODE="$DESKTOP_DIR/src-tauri/sidecar/bin/node"
+# WI-6554700010070220: the live-fed gate passes the node of the sidecar it built
+# (PCUSP_LOCAL_RIG_SIDECAR_NODE); a manual run keeps the shared published sidecar.
+SIDECAR_NODE="${PCUSP_LOCAL_RIG_SIDECAR_NODE:-$DESKTOP_DIR/src-tauri/sidecar/bin/node}"
 BOOTSTRAP=""
 if [ "$REUSE" = 1 ] && [ -f "$STATE_FILE" ]; then
   if [ -n "$(docker ps -q -f "name=^${DHT_CN}\$")" ]; then
