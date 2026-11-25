@@ -254,11 +254,30 @@ there and redo it.
   sequences multiple subsystems: `plans:new` + `plans:add-item`, then `plans:start`
   (promotes items into work-items). Don't over-apply — a single work-item, a one-shot
   fix, or pure investigation needs no plan.
+  Work with an outside plan reference is already planned at any size. Skip local plan creation,
+  binding, activation and its conversation audit. Hold a work-item before editing, register each
+  split piece under the reference, respect approvals and locks, and finish each with `work_items:complete`.
 - **Shape, then specify; lead approval with the walkthrough.** For an owner-originated
   plan, write `## Product shaping` (audience, problem, outcome, non-goals, source turns,
   scenarios) BEFORE requirements, and requirements before tasks. Ask the owner to
   approve with the `ownerWalkthrough` from `plans:audit { slug, phase:'shaping' }`
   first — plain-language scenarios, assumptions, open choices — not the requirement list.
+- **Discover before implementation review.** Brief → scoped discovery → findings
+  incorporated → implementation review → execution. Discovery is ordinary task work
+  about a draft, not starting its implementation. Use code-intelligence suggestions
+  as leads; inspect current behavior, remaining gaps and feasibility. In `## Discovery`,
+  author bounded questions, conclusions, existing evidence refs and dispositions on
+  current R/P/D/section targets. Save with `plans:set-content`, then finalize with
+  `plans:audit { slug, phase:'discovery' }`; the server derives facts and freshness.
+  An incomplete draft is a **provisional discovery brief**. Reviewers read original
+  intent and the reconciled revision with full BAR re-review and no round cap.
+  Implementers start only after review and authority checks. Small/general plans may
+  reuse current evidence and justify unchanged scope; relevant changes reopen only
+  affected judgments. Keep in-flight work and historical terminal records intact.
+  Example: original proof-warming P-001 "inventory current behavior and find gaps"
+  cannot defer those answers until implementation. Inspect the existing proof cache,
+  cite its current evidence, remove duplicate warming work, and retain only the
+  evidenced gap before finalizing discovery and requesting implementation review.
 - **Audit the complete source conversation before activating a draft plan.** Before
   `draft → ready` / `active` or `plans:start`, use `sessions:search` / `sessions:read`
   to re-read the full plan-related conversation — never rely on memory or a summary.
@@ -285,8 +304,13 @@ there and redo it.
   run it via `code:run` and return distilled evidence; park the evidence on the work-item.
 - **A blocker is work, not a stop sign — resolve it, don't relay it.** Hit a blocker (a
   failing dep, a broken tool, an env/config fault, a wedged service)? Investigate the root
-  cause, fix it, and fix it DURABLY so the whole class can't recur — not a one-off patch that
-  leaves the trap armed for the next agent. Escalate to the owner ONLY when the fix is
+  cause and establish authority BEFORE attempting repair. Current canonical evidence that
+  a provider controls the dependency, a live peer owns the exclusive work, or a human must
+  act is sufficient to defer; do not attempt their mutation to prove a refusal. A tool or
+  command being available does not grant authority. For a safe in-authority remedy, fix it
+  DURABLY and verify it. Otherwise record the investigation, permitted attempts (possibly
+  none), evidenced reason, responsible actor, next action and reachable recheck on the
+  existing item, retaining custody. Escalate to the owner ONLY when the fix is
   genuinely irreversible / high-stakes, outside your authority, or you've tried and truly
   can't resolve it — and then bring your diagnosis + a proposed durable fix, not just the
   blocker. Record what you found/did durably (work-item / plan) and carry any still-open item
@@ -399,6 +423,25 @@ there and redo it.
 - **Confirm before hard-to-reverse or outward-facing actions** unless durably authorized;
   approval in one context doesn't carry to the next. Report outcomes faithfully — if
   tests fail, say so with the output; state done plainly only when verified.
+- **Lossless data — bound the work, never the truth.** A limit may bound how much one pass
+  processes or one view shows; it must never silently decide what is true. Any slice, SQL
+  `LIMIT`, top-N, prefix loop, page size, queue eviction or text cut over real data keeps the
+  complete source and makes the omission explicit and recoverable: report what was left out
+  and return a cursor, spill, page token or resync path that consumers actually follow.
+  Repeated batches make durable, fair progress across restarts; no item past the boundary
+  starves. Never slice an identity (id, URL, path, key, hash) or a semantic record to fit;
+  reject it intact with an explicit error. A real contract or security limit needs exact
+  provenance and explicit overflow behaviour. Raising a cap, changing a default or adding a
+  config knob is not a fix. Prove it in the native suite at N-1, N and N+1 and across many
+  batches, with the decisive item after the boundary, consumer-level recovery, permutations
+  and restart fairness; never assert the old capped output. Labelled display previews,
+  hashes and validation limits are not data loss.
+  - **Planning:** a plan whose work reads, lists, batches, buffers or summarizes data writes
+    this contract into its requirements (omission signal, recovery path, N-1/N/N+1 and
+    multi-batch tests) so implementation cannot pick a silent cap.
+  - **Reviewing:** a reviewer, grader or tester treats a silent cut (no omission signal, no
+    working recovery path, or a test that only asserts the capped output) as a defect and
+    does not pass the work until the boundary tests exist.
 - **In alpha, timidity is the failure mode, not breakage** — but this bias governs HOW you
   execute *once the owner has approved the plan and chosen the route* (or while AUTO mode is
   ON), NOT whether to start (see "Default posture" above). When the right fix is a
@@ -457,7 +500,8 @@ there and redo it.
 **Publish finished owner-facing prose.** When you finish an audit, review, analysis,
 postmortem, status digest or proposal for the human owner, save the complete Markdown
 through `reports:publish` before your final reply. Preserve Mermaid fences and keep
-the default `visibility:'owner'` unless a broader audience was requested. Complete
+the default `visibility:'workspace'` (public within this workspace); use `owner`
+or `pot` visibility only when restricted access is explicitly requested. Complete
 delivery in this order: (1) `reports:publish`; (2) `reports:get { id: report_id }` using
 the returned id; (3) verify that readback contains the complete Markdown and intended
 visibility; (4) provide a descriptive Markdown link to the report page in the GUI.
@@ -986,7 +1030,7 @@ put work in the *coordination* queue. So the question is never "is it tracked?"
 - **Substantive** — changes behavior, edits product source meaningfully, could
   collide with a peer, needs verification: **a work-item** (no plan needed).
 - **Big scope** — multi-file, architectural, multi-step, or the approach itself
-  needs review: **a plan**, before the first edit.
+  needs review: **a plan**, before the first edit. A bound outside reference satisfies this tier.
 - **Tie-breaker** — unsure which tier? File the item. An unneeded work-item costs
   almost nothing; an untracked substantive change is the failure this prevents.
   The asymmetry favors over-filing.
@@ -1038,7 +1082,8 @@ AUTO you skip the ask and still register per the tiers.
 ## Coordination: subscribe → ask → file
 
 - **A cross-lane ruling is a plan Decision, recorded THE MOMENT it forms — never only a coord
-  message.** This applies to ANY agent who issues a ruling other lanes must follow, not just a
+  message.** For outside-planned work, record the ruling as a comment on the affected work-item.
+  For a Papercusp plan, this applies to ANY agent who issues a ruling other lanes must follow, not just a
   fleet leader (see also the fleet-leader monitor-wake rule below, which is the same rule in that
   context): `plans:add-decision { slug, title, body }`. Rationale, observed live: a member
   re-read a recorded ruling, discovered its own earlier report had been wrong on most of the
@@ -1095,6 +1140,12 @@ AUTO you skip the ask and still register per the tiers.
   when done); durable how-it-works → an agent-insights doc, authored with `docs:author`
   (NEVER by hand-writing the .mdx — Postgres is canonical and the file is a projection, so
   a hand-written or hand-edited file is refused by the next projection and never lands).
+  **Capture a proven recurring root cause in the same turn.** When the owner flags
+  recurrence ("agents keep hitting this") after a non-obvious root cause and its fix
+  have been proven, call `docs:author` as your next action, before wrapping up. Write
+  or update the agent-insight runbook with **What / Why it matters / How to apply**
+  and the evidence. A `memory:remember` entry or a promise to write it at close-out
+  does not satisfy this trigger; the insight is part of finishing the fix.
   **Capture discoveries beyond the invocation record when you find them.** Plain tool
   failures are filed automatically from `tool_invocations` by the invocation-friction
   watchdog, including recovery when fast-path delivery fails. Do not hand-report a plain
