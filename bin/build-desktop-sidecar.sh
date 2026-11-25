@@ -802,6 +802,60 @@ __pc_release_sidecar_publish_lock() {
 # sidecar.build.lock. Only that exact, closed placeholder shape is disposable.
 # A directory carrying real output (or any unknown residue) belongs to another
 # writer and must be preserved rather than silently rm -rf'd.
+# ── Never rename or delete across a mount (WI-6554700010070220) ──
+# A persistent bind mount over sidecar/node_modules (the WI-6417 disk offload)
+# rides the publish swap's rename into sidecar.old.<pid>; a plain `rm -rf` of
+# that tree then empties the bind SOURCE and dies EBUSY on the mountpoint (the
+# live-fed gate build leg's failure). So refuse any output tree that contains a
+# mount BEFORE touching it, and delete with the no-crossing flag (GNU
+# --one-file-system / BSD -x) as a second line of defence. The mountinfo check is
+# the primary guard: --one-file-system cannot see a same-device bind mount.
+__pc_mounts_under() {
+  local dir="$1" real mp
+  real="$(cd "$dir" 2>/dev/null && pwd -P)" || return 0
+  if [[ -r /proc/self/mountinfo ]]; then
+    while IFS= read -r mp; do
+      mp="$(printf '%b' "$mp")"   # mountinfo octal-escapes (\040 = space)
+      if [[ "$mp" == "$real" || "$mp" == "$real"/* ]]; then printf '%s\n' "$mp"; fi
+    done < <(awk '{print $5}' /proc/self/mountinfo)
+  else
+    while IFS= read -r mp; do
+      if [[ "$mp" == "$real" || "$mp" == "$real"/* ]]; then printf '%s\n' "$mp"; fi
+    done < <(mount | sed -n 's/^.* on \(.*\) (.*$/\1/p')
+  fi
+  return 0
+}
+
+# Returns 2 (and changes nothing) when $1 is, or contains, a mount point.
+__pc_refuse_mounts_under() {
+  local dir="$1" what="$2" mounts
+  mounts="$(__pc_mounts_under "$dir")"
+  if [[ -z "$mounts" ]]; then return 0; fi
+  {
+    echo "FATAL: $what: $dir contains mount point(s); refusing to rename or delete across a mount (WI-6554700010070220):"
+    printf '%s\n' "$mounts" | sed 's/^/  mount: /'
+    echo "  Unmount it (or move the mount outside the sidecar output), then re-run. Nothing was changed."
+  } >&2
+  return 2
+}
+
+# rm -rf that never crosses into a mount: rc 2 = refused (tree untouched),
+# otherwise rm's own status.
+__pc_rm_tree_no_cross() {
+  local dir="$1"
+  if [[ ! -e "$dir" && ! -L "$dir" ]]; then return 0; fi
+  __pc_refuse_mounts_under "$dir" "recursive delete" || return $?
+  if rm --version >/dev/null 2>&1; then
+    rm -rf --one-file-system -- "$dir"
+  else
+    rm -rfx -- "$dir"
+  fi
+}
+
+# Fail fast, before any build or publish mutation, when the final output
+# already holds a mount (the publish swap would carry it into sidecar.old.<pid>).
+__pc_refuse_mounts_under "$SIDECAR_FINAL_DIR" "preflight" || exit 1
+
 __pc_is_cargo_sidecar_placeholder() {
   local dir="$1" marker unexpected
   [[ -d "$dir" && ! -L "$dir" ]] || return 1
@@ -5525,6 +5579,9 @@ chmod -R u+w "$SIDECAR_DIR"
 # squatter guard) because "absent" is NOT guaranteed under concurrency.
 OLD_DIR="$SIDECAR_FINAL_DIR.old.$$"
 if [[ -d "$SIDECAR_FINAL_DIR" ]]; then
+  # Re-check at the swap (WI-6554700010070220): a mount that appeared mid-build
+  # would ride this rename into $OLD_DIR and be emptied by its removal below.
+  __pc_refuse_mounts_under "$SIDECAR_FINAL_DIR" "publish swap" || exit 1
   mv "$SIDECAR_FINAL_DIR" "$OLD_DIR"
 fi
 # ── Preserve release-staged OVERLAY artifacts across a republish (WI-3346) ──
@@ -5849,7 +5906,17 @@ NODE
 fi
 
 # Publication and ALL final qualification/metadata writes are complete.
-rm -rf "$OLD_DIR"
+# Discard the prior tree without crossing a mount (WI-6554700010070220): a
+# mount refusal (rc 2) keeps it with a warning; any other rm failure still
+# fails the build exactly as the plain rm -rf did.
+__pc_rm_tree_no_cross "$OLD_DIR" || {
+  _pc_rm_rc=$?
+  if [[ "$_pc_rm_rc" -eq 2 ]]; then
+    echo "WARNING: prior sidecar kept at $OLD_DIR (it contains a mount, see above); remove it by hand after unmounting" >&2
+  else
+    exit "$_pc_rm_rc"
+  fi
+}
 _sidecar_success=1
 # Release readers
 # before the non-mutating size/report epilogue.
