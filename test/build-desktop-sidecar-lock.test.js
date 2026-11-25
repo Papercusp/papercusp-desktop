@@ -655,7 +655,9 @@ test('WI-6557: the EXIT trap handles prior output and releases lockdirs', () => 
     trapLines[0], /__pc_finish_sidecar_build/, 'EXIT must invoke the shipped lifecycle handler',
   );
   assert(FINISH_FN);
-  assert.match(FINISH_FN, /\$\{OLD_DIR:\+"\$OLD_DIR"\}/);
+  // WI-6557's OLD_DIR reap now goes through the WI-6554700010070220 no-cross
+  // delete; `${OLD_DIR:-}` keeps an unset OLD_DIR safe under set -u.
+  assert.match(FINISH_FN, /\[\[ -n "\$\{OLD_DIR:-\}" [^\n]*\]\]; then\n\s*__pc_rm_tree_no_cross "\$OLD_DIR"/);
   assert.match(FINISH_FN, /SIDECAR_BUILD_LOCKDIR/);
   assert.match(FINISH_FN, /SIDECAR_PUBLISH_LOCKDIR/);
 });
@@ -715,6 +717,11 @@ test('WI-6557: the real EXIT handler restores OLD_DIR and preserves failed stage
 // from the shipped script, never a hand-copied duplicate that could drift.
 const SWEEP_FN = (builder.match(/^__pc_sweep_stale_staging\(\) \{\n[\s\S]*?^\}$/m) || [])[0];
 const BUILDER_PID_FN = (builder.match(/^__pc_pid_is_sidecar_builder\(\) \{\n[\s\S]*?^\}$/m) || [])[0];
+// The sweep deletes through the WI-6554700010070220 mount-guard helpers; run those too.
+const MOUNT_GUARD_HELPERS = builder.slice(
+  builder.indexOf('__pc_mounts_under() {'),
+  builder.indexOf('# Fail fast, before any build or publish mutation'),
+);
 
 test('WI-38368: the stale-staging sweep function is present in the shipped script', () => {
   assert(SWEEP_FN, 'could not locate __pc_sweep_stale_staging() in build-desktop-sidecar.sh');
@@ -774,6 +781,7 @@ test('WI-38368: the sweep reaps dead residue, spares a LIVE build, and never eat
       'set -euo pipefail',
       `SIDECAR_FINAL_DIR=${JSON.stringify(final)}`,
       `SIDECAR_TMP_DIR=${JSON.stringify(ownTmp)}`,
+      MOUNT_GUARD_HELPERS,
       BUILDER_PID_FN,
       SWEEP_FN, // the ACTUAL function from the shipped script
       '__pc_sweep_stale_staging',

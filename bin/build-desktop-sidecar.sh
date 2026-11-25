@@ -797,11 +797,6 @@ __pc_release_sidecar_publish_lock() {
   _sidecar_publish_locked=0
 }
 
-# EI-21830176050381484: build.rs may recreate the resource-glob placeholder in
-# the tiny publish window even though real sidecar builders are serialized by
-# sidecar.build.lock. Only that exact, closed placeholder shape is disposable.
-# A directory carrying real output (or any unknown residue) belongs to another
-# writer and must be preserved rather than silently rm -rf'd.
 # ── Never rename or delete across a mount (WI-6554700010070220) ──
 # A persistent bind mount over sidecar/node_modules (the WI-6417 disk offload)
 # rides the publish swap's rename into sidecar.old.<pid>; a plain `rm -rf` of
@@ -856,6 +851,11 @@ __pc_rm_tree_no_cross() {
 # already holds a mount (the publish swap would carry it into sidecar.old.<pid>).
 __pc_refuse_mounts_under "$SIDECAR_FINAL_DIR" "preflight" || exit 1
 
+# EI-21830176050381484: build.rs may recreate the resource-glob placeholder in
+# the tiny publish window even though real sidecar builders are serialized by
+# sidecar.build.lock. Only that exact, closed placeholder shape is disposable.
+# A directory carrying real output (or any unknown residue) belongs to another
+# writer and must be preserved rather than silently rm -rf'd.
 __pc_is_cargo_sidecar_placeholder() {
   local dir="$1" marker unexpected
   [[ -d "$dir" && ! -L "$dir" ]] || return 1
@@ -945,9 +945,15 @@ __pc_sweep_stale_staging() {
       echo "[sweep] skip $(basename "$d") — pid $pid is a LIVE build"
       continue
     fi
+    # WI-6554700010070220: a dead run's sidecar.old.<pid> can still carry a
+    # bind mount that rode its publish swap. Keep it; never empty the mount.
+    if [[ -n "$(__pc_mounts_under "$d")" ]]; then
+      echo "[sweep] WARN kept $(basename "$d") — it contains a mount; unmount it, then remove it by hand (WI-6554700010070220)" >&2
+      continue
+    fi
     sz="$(du -sk "$d" 2>/dev/null | cut -f1)"
     [[ "$sz" =~ ^[0-9]+$ ]] || sz=0
-    if rm -rf "$d" 2>/dev/null; then
+    if __pc_rm_tree_no_cross "$d" 2>/dev/null; then
       reaped=$((reaped + 1)); freed_kb=$((freed_kb + sz))
       echo "[sweep] reaped $(basename "$d") — owning pid $pid is dead ($((sz / 1024))MB)"
     else
@@ -1083,7 +1089,12 @@ __pc_finish_sidecar_build() {
         || echo "ERROR: failed bytes retained but resume receipt unavailable" >&2
     fi
   else
-    rm -rf "$SIDECAR_TMP_DIR" ${OLD_DIR:+"$OLD_DIR"}
+    # WI-6554700010070220: never cross a mount. The success epilogue keeps an
+    # OLD_DIR that contains a mount (with a warning); do not empty it here.
+    __pc_rm_tree_no_cross "$SIDECAR_TMP_DIR"
+    if [[ -n "${OLD_DIR:-}" && -z "$(__pc_mounts_under "$OLD_DIR")" ]]; then
+      __pc_rm_tree_no_cross "$OLD_DIR"
+    fi
     # An accepted output makes every retained failure of it obsolete
     # (WI-6554700010010442). The build lock is still held here.
     if [[ -n "${SIDECAR_FAILED_STAGE_ROOT:-}" ]]; then
