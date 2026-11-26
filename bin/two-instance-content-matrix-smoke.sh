@@ -338,7 +338,10 @@ ins() { local ty="$1" ws="$2" t="$3" nid; case "$t" in ba) nid=2;; ab) nid=3;; *
   esac; }
 poll() { local ty="$1" t="$2" nid; case "$t" in ba) nid=2;; ab) nid=3;; *) nid=1;; esac
   case "$ty" in
-   features) echo "SELECT origin FROM harness_shared.harness_features_consolidated WHERE feature_id='F-MX-$t' AND origin='remote' LIMIT 1;";;
+   # Federated features are applied by the features-by-id projection, which labels them
+   # origin='remote:features-by-id'; a plain 'remote' is only seen briefly before that relabel.
+   # Requiring 'remote' alone reported rows that had crossed as misses (WI-6554700010070619).
+   features) echo "SELECT origin FROM harness_shared.harness_features_consolidated WHERE feature_id='F-MX-$t' AND origin IN ('remote','remote:features-by-id') LIMIT 1;";;
    conversations) echo "SELECT origin FROM harness_shared.coord_conversations WHERE id='conv-MX-$t' AND origin='remote' LIMIT 1;";;
    messages) echo "SELECT origin FROM harness_shared.coord_event_log WHERE msg_id='msg-MX-$t' AND origin='remote' LIMIT 1;";;
    threads) echo "SELECT origin FROM harness_shared.coord_threads WHERE thread_id='thr-MX-$t' AND origin='remote' LIMIT 1;";;
