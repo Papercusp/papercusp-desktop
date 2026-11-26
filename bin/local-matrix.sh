@@ -56,6 +56,7 @@ ROOT="$(cd "$DESKTOP_DIR/.." && pwd)"
 OPERATOR_DIR="${PAPERCUSP_OPERATOR_DIR:-$ROOT/apps/operator}"
 
 NET="${PCUSP_LOCAL_RIG_NET:-pcusp-local-rig}"
+[[ "$NET" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || { echo "Invalid rig network name: $NET" >&2; exit 2; }
 SUBNET="${PCUSP_LOCAL_RIG_SUBNET:-10.99.0.0/24}"
 GW="${PCUSP_LOCAL_RIG_GW:-10.99.0.1}"
 IP_A="${PCUSP_LOCAL_RIG_IP_A:-10.99.0.11}"
@@ -105,6 +106,10 @@ RIG_HOME_HARNESS_SLUG="${RIG_HOME_HARNESS_SLUG:-${NET}-home}"
 # privilege. A root runner gets uid 10001 and chowns the frame dirs (pgvol_prepare).
 PGVOL_ENABLED="${PCUSP_RIG_PGVOL:-1}"
 PGVOL_ROOT="${PCUSP_RIG_PGVOL_ROOT:-$HOME/.papercusp/scratch/local-matrix-pgvol}"
+if [ "$PGVOL_ENABLED" = 1 ]; then
+  PGVOL_ROOT="$(realpath -m -- "$PGVOL_ROOT")" || exit 2
+  [ -n "$PGVOL_ROOT" ] && [ "$PGVOL_ROOT" != / ] || { echo "Invalid frame data root" >&2; exit 2; }
+fi
 PGVOL_DIR="$PGVOL_ROOT/$NET"
 PCUSP_UID="$(id -u)"; [ "$PCUSP_UID" = 0 ] && PCUSP_UID=10001
 PGVOL_ARGS_A=(); PGVOL_ARGS_B=(); PGVOL_ARGS_C=()
@@ -395,35 +400,55 @@ rig_local_bank_logs() {
 }
 
 # ── frame PG data volume helpers (WI-6554700010071472) ───────────────────────
-# pgvol_wipe: delete this rig's frame PG data dirs ($PGVOL_DIR = $PGVOL_ROOT/<net>).
-# Refuses an empty, root-level or dot-dot path. Call only once the frames are gone.
+# Wipe only a directory this rig created, after its containers have stopped.
 pgvol_wipe() {
   [ "$PGVOL_ENABLED" = 1 ] || return 0
-  case "$PGVOL_DIR" in ""|/|*/..|*/../*|"$PGVOL_ROOT"|"$PGVOL_ROOT/") log "pgvol: refusing to wipe '$PGVOL_DIR'"; return 1 ;; esac
+  [[ "$PGVOL_ROOT" = /* && "$PGVOL_ROOT" != / && "$NET" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ &&
+     "$PGVOL_DIR" = "$PGVOL_ROOT/$NET" && ! -L "$PGVOL_DIR" ]] || { log "pgvol: refused '$PGVOL_DIR'"; return 1; }
   [ -e "$PGVOL_DIR" ] || return 0
-  rm -rf -- "$PGVOL_DIR" || { log "pgvol: could not wipe $PGVOL_DIR"; return 1; }
+  local marker="$PGVOL_DIR/.local-matrix"
+  if [[ ! -O "$PGVOL_DIR" || -L "$marker" || ! -f "$marker" ]] || [ "$(cat -- "$marker")" != "$NET" ]; then
+    log "pgvol: preserving unrecognized directory $PGVOL_DIR"
+    return 1
+  fi
+  rm -rf --one-file-system -- "$PGVOL_DIR"
 }
 # pgvol_prepare: a fresh, empty, pcusp-owned 0700 data dir per frame. Run after the
 # old frames are removed and before the new ones start.
 pgvol_prepare() {
   [ "$PGVOL_ENABLED" = 1 ] || return 0
   pgvol_wipe || return 1
-  local f
-  for f in a b c; do
-    mkdir -p "$PGVOL_DIR/$f" && chmod 0700 "$PGVOL_DIR/$f" || return 1
-    if [ "$(id -u)" = 0 ]; then chown "$PCUSP_UID:$PCUSP_UID" "$PGVOL_DIR/$f" || return 1; fi
+  mkdir -p -- "$PGVOL_ROOT" && mkdir -m 0700 -- "$PGVOL_DIR" || return 1
+  printf '%s\n' "$NET" > "$PGVOL_DIR/.local-matrix" || { rmdir -- "$PGVOL_DIR"; return 1; }
+  local f frames=(a b)
+  [ "$FRAMES" != 3 ] || frames+=(c)
+  for f in "${frames[@]}"; do
+    mkdir -m 0700 -- "$PGVOL_DIR/$f" || return 1
+    if [ "$(id -u)" = 0 ]; then chown "$PCUSP_UID" "$PGVOL_DIR/$f" || return 1; fi
   done
+}
+
+# Take one complete inventory so absent containers are harmless and a failed daemon
+# read or removal cannot authorize a wipe of a mounted, possibly live cluster.
+remove_rig_containers() {
+  local inventory name existing=()
+  inventory="$(docker container ls -a --format '{{.Names}}')" || return 1
+  for name in "$@"; do
+    if grep -Fxq -- "$name" <<< "$inventory"; then existing+=("$name"); fi
+  done
+  [ "${#existing[@]}" -eq 0 ] || docker rm -f -- "${existing[@]}" >/dev/null
 }
 
 # ── teardown (also the EXIT-trap body) ────────────────────────────────────────
 rig_local_teardown() {
   rig_local_bank_logs   # EI-18660101091813036 — evidence out BEFORE the destroy
   log "teardown: frames + DHT"
-  docker rm -f "$CN_A" "$CN_B" "$CN_C" "$NET-dht" >/dev/null 2>&1 || true
+  remove_rig_containers "$CN_A" "$CN_B" "$CN_C" "$NET-dht" || { log "teardown: container removal failed; preserving frame data"; return 1; }
+  local cleanup_rc=0
   if [ "${PCUSP_RIG_PGVOL_KEEP:-0}" = 1 ]; then
     [ "$PGVOL_ENABLED" = 1 ] && log "teardown: keeping the frame PG data in $PGVOL_DIR (PCUSP_RIG_PGVOL_KEEP=1)"
   else
-    pgvol_wipe || true
+    pgvol_wipe || cleanup_rc=1
   fi
   rig_disable_exclusive   # release the system.slice exclusive-core grant (scopes now gone)
   if [ -f "$STATE_FILE" ]; then
@@ -432,8 +457,9 @@ rig_local_teardown() {
     rm -f "$STATE_FILE"
   fi
   docker network rm "$NET" >/dev/null 2>&1 || true
+  return "$cleanup_rc"
 }
-if [ "$MODE" = teardown ]; then rig_local_teardown; echo "torn down."; exit 0; fi
+if [ "$MODE" = teardown ]; then rig_local_teardown || exit 1; echo "torn down."; exit 0; fi
 
 # ── gate-cycle advisory probe (EI-18723401175637819) ──────────────────────────
 # THE GAP this closes: the rig lock above only covers the RIG. It does NOT cover
@@ -675,8 +701,8 @@ preflight_host_preconditions() {
 
 # ── host IO health: refuse a run whose frames' storage cannot fsync in time ──────
 # WI-6554700010071459. Every fresh frame runs embedded-PG initdb, whose 'syncing data
-# to disk' step fsyncs every file of the new cluster on the filesystem behind the
-# docker data root (the frames' writable layers). Measured 2026-11-26: frame c of a
+# to disk' step fsyncs every file of the new cluster on the frame data volume (or
+# the Docker root when the volume is disabled). Measured 2026-11-26: frame c of a
 # 3-frame run spent 305.7s in that step (about 300 ms per fsync on the root ext4 under
 # host write load) while frames a and b took about 2s, so the boot wait ran out with
 # ZERO scenarios run, after the image build, provisioning and core eviction. That is
@@ -775,8 +801,12 @@ RUN apt-get update -qq \
 RUN mkdir -p /run/sshd /root/.ssh && chmod 700 /root/.ssh
 ARG PCUSP_UID=10001
 RUN u="$(getent passwd "$PCUSP_UID" | cut -d: -f1)"; \
-    if [ -n "$u" ] && [ "$u" != pcusp ]; then userdel -r "$u" >/dev/null 2>&1 || userdel "$u"; fi; \
-    id pcusp >/dev/null 2>&1 || useradd -m -s /bin/bash -u "$PCUSP_UID" pcusp; \
+    case "$u" in \
+      ubuntu) usermod -l pcusp -d /home/pcusp -m -s /bin/bash ubuntu ;; \
+      '') useradd -m -s /bin/bash -u "$PCUSP_UID" pcusp ;; \
+      pcusp) : ;; \
+      *) echo "Frame uid $PCUSP_UID is reserved for $u" >&2; exit 1 ;; \
+    esac && \
     [ "$(id -u pcusp)" = "$PCUSP_UID" ]
 COPY authorized_keys /root/.ssh/authorized_keys
 RUN chmod 600 /root/.ssh/authorized_keys \
@@ -794,10 +824,26 @@ REUSE_OK=1
 frame_running "$CN_A" && frame_running "$CN_B" || REUSE_OK=0
 [ "$FRAMES" = 3 ] && { frame_running "$CN_C" || REUSE_OK=0; }
 if [ "$REUSE" = 1 ] && [ "$REUSE_OK" = 1 ]; then
+  # A kept frame may predate PG volumes or have been created with another root.
+  for entry in "a:$CN_A" "b:$CN_B" "c:$CN_C"; do
+    frame="${entry%%:*}"
+    [ "$frame" != c ] || [ "$FRAMES" = 3 ] || continue
+    mounted="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/home/pcusp/pgdata"}}{{.Source}}{{end}}{{end}}' "${entry#*:}")" || exit 1
+    expected=""
+    [ "$PGVOL_ENABLED" != 1 ] || expected="$PGVOL_DIR/$frame"
+    [ "$mounted" = "$expected" ] || { log "cannot reuse ${entry#*:} with the requested PG volume; use its original settings or provision fresh frames"; exit 1; }
+  done
   log "reuse running frames $CN_A@$IP_A $CN_B@$IP_B$( [ "$FRAMES" = 3 ] && echo " $CN_C@$IP_C" )"
 else
   REUSE=0
-  docker rm -f "$CN_A" "$CN_B" "$CN_C" >/dev/null 2>&1 || true
+  remove_rig_containers "$CN_A" "$CN_B" "$CN_C" || exit 1
+fi
+
+# Also clean up a failed or interrupted provision before --keep-up takes effect.
+trap 'rc=$?; rig_local_teardown || { [ "$rc" != 0 ] || rc=1; }; exit "$rc"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [ "$REUSE" = 0 ]; then
   pgvol_prepare || { echo "FATAL: could not prepare the frame PG data dirs under $PGVOL_DIR" >&2; exit 1; }
   log "provision $FRAMES frames $CN_A@$IP_A $CN_B@$IP_B$( [ "$FRAMES" = 3 ] && echo " $CN_C@$IP_C" )"
   # $CPU_ARGS_* / $MEM_ARGS word-split deliberately (frame CPU+memory reservation, defined above).
@@ -808,20 +854,7 @@ else
   fi
 fi
 
-# ARM teardown now (frames exist). --keep-up / --reuse leave everything running.
-#
-# EI-18660101091813036: an EXIT trap alone does NOT run when bash is killed by a
-# signal — a `timeout`, a gate leg budget or a ^C would tear the process down
-# with the trap never firing, which both LEAKS the frames (and their exclusive
-# core grant) and destroys their serve.log unbanked. Handling INT/TERM with a
-# plain `exit` is the minimal fix: the handler returns through the normal exit
-# path, so the EXIT trap above runs — banking, then destroying — and the
-# conventional 128+signo status is preserved for the caller.
-if [ "$KEEP_UP" = 1 ]; then :; else
-  trap rig_local_teardown EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-fi
+if [ "$KEEP_UP" = 1 ]; then trap - EXIT INT TERM; fi
 
 # Promote the reserved frame cores to genuine EXCLUSIVE cgroup-v2 partitions so
 # the host fleet cannot starve them (D-003). Runs for both fresh + --reuse frames

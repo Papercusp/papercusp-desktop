@@ -53,6 +53,7 @@ function pgvolHarness(body) {
     'log() { echo "LOG: $*" >&2; }',
     'PGVOL_ENABLED="${T_ENABLED:-1}"; PGVOL_ROOT="$1"; NET=testnet',
     'PGVOL_DIR="${T_DIR-$PGVOL_ROOT/$NET}"; PCUSP_UID="$(id -u)"',
+    'FRAMES="${T_FRAMES:-3}"',
     fnBody(matrix, 'pgvol_wipe'),
     fnBody(matrix, 'pgvol_prepare'),
     body,
@@ -78,7 +79,7 @@ test('every frame binds its own host data dir at /home/pcusp/pgdata', () => {
 });
 
 test('provisioning prepares fresh data dirs after removing the old frames and before starting new ones', () => {
-  const rm = matrixCode.indexOf('docker rm -f "$CN_A" "$CN_B" "$CN_C" >/dev/null 2>&1 || true');
+  const rm = matrixCode.indexOf('remove_rig_containers "$CN_A" "$CN_B" "$CN_C" || exit 1');
   const prep = matrixCode.indexOf('pgvol_prepare || {');
   const run = matrixCode.indexOf('docker run -d --name "$CN_A"');
   assert.ok(rm >= 0 && prep >= 0 && run >= 0, 'the provisioning anchors must exist');
@@ -87,7 +88,7 @@ test('provisioning prepares fresh data dirs after removing the old frames and be
 
 test('teardown wipes the data dirs after the frames are removed, unless asked to keep them', () => {
   const body = fnBody(matrix, 'rig_local_teardown');
-  const rm = body.indexOf('docker rm -f "$CN_A" "$CN_B" "$CN_C" "$NET-dht"');
+  const rm = body.indexOf('remove_rig_containers "$CN_A" "$CN_B" "$CN_C" "$NET-dht"');
   const wipe = body.indexOf('pgvol_wipe');
   assert.ok(rm >= 0 && wipe > rm, 'pgvol_wipe must follow the frame removal in rig_local_teardown');
   assert.match(body, /PCUSP_RIG_PGVOL_KEEP:-0\}" = 1/);
@@ -115,13 +116,15 @@ test('pgvol_prepare gives each frame an empty 0700 dir and clears the previous r
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pgvol-'));
   try {
     const net = path.join(tmp, 'testnet');
-    fs.mkdirSync(path.join(net, 'a'), { recursive: true });
+    const first = bash(pgvolHarness('pgvol_prepare'), [tmp], { env: { ...process.env, T_FRAMES: '2' } });
+    assert.equal(first.status, 0, first.stderr);
+    assert.deepEqual(fs.readdirSync(net).sort(), ['.local-matrix', 'a', 'b']);
     fs.writeFileSync(path.join(net, 'a', 'PG_VERSION'), '18');
     fs.mkdirSync(path.join(net, 'stale'), { recursive: true });
     fs.mkdirSync(path.join(tmp, 'othernet', 'a'), { recursive: true });
     const r = bash(pgvolHarness('pgvol_prepare'), [tmp]);
     assert.equal(r.status, 0, r.stderr);
-    assert.deepEqual(fs.readdirSync(net).sort(), ['a', 'b', 'c']);
+    assert.deepEqual(fs.readdirSync(net).sort(), ['.local-matrix', 'a', 'b', 'c']);
     for (const f of ['a', 'b', 'c']) {
       const dir = path.join(net, f);
       assert.deepEqual(fs.readdirSync(dir), [], `${f} must start empty`);
@@ -139,6 +142,10 @@ test('pgvol_wipe removes only this rig dir and refuses unsafe targets', () => {
     fs.mkdirSync(path.join(tmp, 'testnet', 'a'), { recursive: true });
     fs.writeFileSync(path.join(tmp, 'keep'), 'x');
     let r = bash(pgvolHarness('pgvol_wipe'), [tmp]);
+    assert.equal(r.status, 1, 'a pre-existing directory without the ownership marker must survive');
+    assert.ok(fs.existsSync(path.join(tmp, 'testnet', 'a')));
+    fs.writeFileSync(path.join(tmp, 'testnet', '.local-matrix'), 'testnet\n');
+    r = bash(pgvolHarness('pgvol_wipe'), [tmp]);
     assert.equal(r.status, 0, r.stderr);
     assert.ok(!fs.existsSync(path.join(tmp, 'testnet')), 'the rig dir must be gone');
     assert.ok(fs.existsSync(path.join(tmp, 'keep')), 'a sibling must survive');
@@ -150,6 +157,63 @@ test('pgvol_wipe removes only this rig dir and refuses unsafe targets', () => {
     r = bash(pgvolHarness('pgvol_prepare; pgvol_wipe'), [tmp], { env: { ...process.env, T_ENABLED: '0' } });
     assert.equal(r.status, 0, r.stderr);
     assert.ok(!fs.existsSync(path.join(tmp, 'testnet')), 'PCUSP_RIG_PGVOL=0 must create nothing');
+    fs.symlinkSync(tmp, path.join(tmp, 'testnet'));
+    assert.equal(bash(pgvolHarness('pgvol_wipe'), [tmp]).status, 1);
+    assert.ok(fs.existsSync(path.join(tmp, 'keep')));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('a failed second frame startup cleans the first container and both data directories', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pgvol-abort-'));
+  try {
+    const start = matrix.indexOf('if [ "$REUSE" = 1 ] && [ "$REUSE_OK" = 1 ]; then');
+    const end = matrix.indexOf('# Promote the reserved frame cores', start);
+    assert.ok(start >= 0 && end > start);
+    const provision = matrix.slice(start, end);
+    const script = pgvolHarness([
+      'CN_A=a; CN_B=b; CN_C=c; IP_A=a; IP_B=b; IP_C=c; CPU_ARGS_A=; CPU_ARGS_B=; MEM_ARGS=; IMAGE_TAG=test',
+      'REUSE=0; REUSE_OK=0; KEEP_UP=1; FRAMES=2; STATE_FILE="$1/state"',
+      'rig_local_bank_logs() { :; }; rig_disable_exclusive() { :; }',
+      'docker() {',
+      '  case "$1" in',
+      '    container) [ ! -f "$PGVOL_ROOT/running" ] || cat "$PGVOL_ROOT/running" ;;',
+      '    run) if [ "$4" = a ]; then echo a > "$PGVOL_ROOT/running"; else return 3; fi ;;',
+      '    rm) [ "$4" = a ] && rm -- "$PGVOL_ROOT/running" ;;',
+      '    network) return 0 ;;',
+      '    *) return 10 ;;',
+      '  esac',
+      '}',
+      fnBody(matrix, 'remove_rig_containers'),
+      fnBody(matrix, 'rig_local_teardown'),
+      provision,
+    ].join('\n'));
+    const r = bash(script, [tmp]);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /provision 2 frames/);
+    assert.match(r.stderr, /teardown: frames/);
+    assert.deepEqual(fs.readdirSync(tmp), []);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('teardown preserves PG data when the daemon cannot confirm removal', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pgvol-remove-'));
+  try {
+    const r = bash(pgvolHarness([
+      'pgvol_prepare || exit 12',
+      'touch "$PGVOL_DIR/a/PG_VERSION"',
+      'CN_A=a; CN_B=b; CN_C=c; STATE_FILE="$1/state"',
+      'rig_local_bank_logs() { :; }; rig_disable_exclusive() { :; }',
+      'docker() { case "$1" in container) echo a ;; rm) return 2 ;; esac; }',
+      fnBody(matrix, 'remove_rig_containers'),
+      fnBody(matrix, 'rig_local_teardown'),
+      'rig_local_teardown',
+    ].join('\n')), [tmp]);
+    assert.equal(r.status, 1, r.stderr);
+    assert.ok(fs.existsSync(path.join(tmp, 'testnet', 'a', 'PG_VERSION')));
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
