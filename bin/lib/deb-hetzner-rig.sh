@@ -893,7 +893,12 @@ if pgrep -u pcusp -f 'bin/postgres' >/dev/null; then
 fi
 for id in $(ipcs -m 2>/dev/null | awk '$3=="pcusp" {print $2}'); do ipcrm -m "$id" 2>/dev/null || true; done
 for id in $(ipcs -s 2>/dev/null | awk '$3=="pcusp" {print $2}'); do ipcrm -s "$id" 2>/dev/null || true; done
-rm -rf "$H/pgdata" "$H/.papercusp" "$H/.papercusp-workspaces"; mkdir -p "$H/pgdata" "$H/fed"
+# Empty pgdata IN PLACE rather than removing it: on the local docker rig it is a bind
+# mount (local-matrix.sh PCUSP_RIG_PGVOL, WI-6554700010071472), and rm -rf of a mount
+# point fails EBUSY on the final rmdir, which set -e turns into a failed launch. On a
+# Hetzner VM it is a plain directory and the effect is the same: an empty pgdata.
+mkdir -p "$H/pgdata"; find "$H/pgdata" -mindepth 1 -delete
+rm -rf "$H/.papercusp" "$H/.papercusp-workspaces"; mkdir -p "$H/fed"
 SIDE="${SIDE_DIR:-/usr/lib/Papercusp/sidecar}"
 set -a; . "$H/fed.env"; set +a
 cd "$SIDE"

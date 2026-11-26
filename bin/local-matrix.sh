@@ -91,7 +91,31 @@ fi
 # to a real registered project. Override with RIG_HOME_HARNESS_SLUG if a scenario
 # deliberately wants a specific (non-'papercusp') slug.
 RIG_HOME_HARNESS_SLUG="${RIG_HOME_HARNESS_SLUG:-${NET}-home}"
-IMAGE_TAG=pcusp-local-frame:ubuntu24
+# ── frame PG data volume (WI-6554700010071472) ───────────────────────────────────
+# Each frame's embedded-PG data dir (/home/pcusp/pgdata) is a bind mount of a host
+# directory, not a path in the container's overlay2 writable layer. initdb's 'syncing
+# data to disk' step is fsync-bound, and the docker root shares / with the whole fleet:
+# lm3's frame c spent 305.7s in that sync and missed its boot deadline
+# (WI-6554700010070220). PCUSP_RIG_PGVOL_ROOT picks the filesystem; the default is the
+# xfs scratch disk on the dev box. scratch-gc drops only marker-proven workspace roots
+# at the scratch top level, so it leaves this directory alone. PCUSP_RIG_PGVOL=0
+# restores the overlay2 layout; PCUSP_RIG_PGVOL_KEEP=1 keeps the data at teardown.
+# The frame image bakes a pcusp user with the HOST uid, so the bind directory (owned by
+# whoever runs this script) is pcusp's inside the frame and the host can wipe it without
+# privilege. A root runner gets uid 10001 and chowns the frame dirs (pgvol_prepare).
+PGVOL_ENABLED="${PCUSP_RIG_PGVOL:-1}"
+PGVOL_ROOT="${PCUSP_RIG_PGVOL_ROOT:-$HOME/.papercusp/scratch/local-matrix-pgvol}"
+PGVOL_DIR="$PGVOL_ROOT/$NET"
+PCUSP_UID="$(id -u)"; [ "$PCUSP_UID" = 0 ] && PCUSP_UID=10001
+PGVOL_ARGS_A=(); PGVOL_ARGS_B=(); PGVOL_ARGS_C=()
+if [ "$PGVOL_ENABLED" = 1 ]; then
+  # --mount, not -v: a missing source fails the run instead of docker creating a root-owned dir.
+  PGVOL_ARGS_A=(--mount "type=bind,source=$PGVOL_DIR/a,target=/home/pcusp/pgdata")
+  PGVOL_ARGS_B=(--mount "type=bind,source=$PGVOL_DIR/b,target=/home/pcusp/pgdata")
+  PGVOL_ARGS_C=(--mount "type=bind,source=$PGVOL_DIR/c,target=/home/pcusp/pgdata")
+fi
+# The tag carries the baked pcusp uid: a frame image built for another uid is a different image.
+IMAGE_TAG="pcusp-local-frame:ubuntu24-u$PCUSP_UID"
 SSH_KEY="${PCUSP_LOCAL_RIG_KEY:-$HOME/.papercusp/local-rig-ssh}"
 
 # ── frame CPU reservation (WI-5319 / plan D-003) ─────────────────────────────
@@ -370,11 +394,37 @@ rig_local_bank_logs() {
       | tail -n "+$((RIG_BANK_KEEP + 1))" | xargs -r rm -f -- ) 2>/dev/null || true
 }
 
+# ── frame PG data volume helpers (WI-6554700010071472) ───────────────────────
+# pgvol_wipe: delete this rig's frame PG data dirs ($PGVOL_DIR = $PGVOL_ROOT/<net>).
+# Refuses an empty, root-level or dot-dot path. Call only once the frames are gone.
+pgvol_wipe() {
+  [ "$PGVOL_ENABLED" = 1 ] || return 0
+  case "$PGVOL_DIR" in ""|/|*/..|*/../*|"$PGVOL_ROOT"|"$PGVOL_ROOT/") log "pgvol: refusing to wipe '$PGVOL_DIR'"; return 1 ;; esac
+  [ -e "$PGVOL_DIR" ] || return 0
+  rm -rf -- "$PGVOL_DIR" || { log "pgvol: could not wipe $PGVOL_DIR"; return 1; }
+}
+# pgvol_prepare: a fresh, empty, pcusp-owned 0700 data dir per frame. Run after the
+# old frames are removed and before the new ones start.
+pgvol_prepare() {
+  [ "$PGVOL_ENABLED" = 1 ] || return 0
+  pgvol_wipe || return 1
+  local f
+  for f in a b c; do
+    mkdir -p "$PGVOL_DIR/$f" && chmod 0700 "$PGVOL_DIR/$f" || return 1
+    if [ "$(id -u)" = 0 ]; then chown "$PCUSP_UID:$PCUSP_UID" "$PGVOL_DIR/$f" || return 1; fi
+  done
+}
+
 # ── teardown (also the EXIT-trap body) ────────────────────────────────────────
 rig_local_teardown() {
   rig_local_bank_logs   # EI-18660101091813036 — evidence out BEFORE the destroy
   log "teardown: frames + DHT"
   docker rm -f "$CN_A" "$CN_B" "$CN_C" "$NET-dht" >/dev/null 2>&1 || true
+  if [ "${PCUSP_RIG_PGVOL_KEEP:-0}" = 1 ]; then
+    [ "$PGVOL_ENABLED" = 1 ] && log "teardown: keeping the frame PG data in $PGVOL_DIR (PCUSP_RIG_PGVOL_KEEP=1)"
+  else
+    pgvol_wipe || true
+  fi
   rig_disable_exclusive   # release the system.slice exclusive-core grant (scopes now gone)
   if [ -f "$STATE_FILE" ]; then
     local pid; pid="$(sed -n 's/^DHT_PID=//p' "$STATE_FILE" | head -1)"
@@ -641,13 +691,21 @@ preflight_host_preconditions() {
 # (default: a writable directory on the docker root's filesystem).
 preflight_host_io() {
   local lib="$DESKTOP_DIR/bin/lib/federation-asserts.sh" root probe="${PCUSP_RIG_IO_PROBE_DIR:-}" out rc line
-  root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)"
-  [ -n "$root" ] || root=/var/lib/docker
+  local what="docker root"
+  if [ "$PGVOL_ENABLED" = 1 ]; then
+    # initdb's fsyncs land on the frame PG volume, so measure ITS filesystem. The
+    # nearest existing ancestor is that filesystem, and the preflight creates nothing.
+    what="frame PG volume"; root="$PGVOL_ROOT"
+    while [ ! -d "$root" ] && [ "$root" != / ]; do root="$(dirname "$root")"; done
+  else
+    root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)"
+    [ -n "$root" ] || root=/var/lib/docker
+  fi
   if [ -z "$probe" ]; then
     probe="$(bash -c 'source "$1" >/dev/null 2>&1 || exit 97; fed_io_probe_dir_for "$2"' _ "$lib" "$root")" || probe=""
   fi
   if [ -z "$probe" ]; then
-    log "WARN(preflight): host IO NOT measured: no writable directory shares a filesystem with the docker root $root (set PCUSP_RIG_IO_PROBE_DIR). A slow fsync there would surface only as a frame SLOW_IO boot failure after provisioning."
+    log "WARN(preflight): host IO NOT measured: no writable directory shares a filesystem with the $what $root (set PCUSP_RIG_IO_PROBE_DIR). A slow fsync there would surface only as a frame SLOW_IO boot failure after provisioning."
     return 0
   fi
   out="$(bash -c 'source "$1" >/dev/null 2>&1 || exit 97; shift; fed_io_preflight "$@"' _ "$lib" "$probe" \
@@ -655,13 +713,13 @@ preflight_host_io() {
   line="$(printf '%s\n' "$out" | grep '^FED_IO_PREFLIGHT ' | tail -1)"
   case "$rc" in
     0)
-      log "preflight: host IO OK for the docker root $root (probed in $probe): ${line#FED_IO_PREFLIGHT }"
+      log "preflight: host IO OK for the $what $root (probed in $probe): ${line#FED_IO_PREFLIGHT }"
       return 0 ;;
     2)
       log "WARN(preflight): host IO NOT measured in $probe: ${line#FED_IO_PREFLIGHT }"
       return 0 ;;
     75)
-      echo "FATAL(preflight): HOST_IO_UNHEALTHY: the filesystem behind the docker root $root cannot fsync fast enough for embedded-PG initdb in the frames: ${line#FED_IO_PREFLIGHT }" >&2
+      echo "FATAL(preflight): HOST_IO_UNHEALTHY: the filesystem behind the $what $root cannot fsync fast enough for embedded-PG initdb in the frames: ${line#FED_IO_PREFLIGHT }" >&2
       echo "  refusing to build the frame image, provision containers or evict cores for a run whose frames would fail to boot (SLOW_IO, WI-6554700010071459). Exit 75 means retry later; PCUSP_RIG_IO_PREFLIGHT=0 proceeds anyway." >&2
       printf '%s\n' "$line"
       return 75 ;;
@@ -700,7 +758,7 @@ fi
 #    best-effort pre-bake to cut the per-run apt download). git is REQUIRED by
 #    the sidecar's pots/from-repo clone (clone_git_missing, found 2026-07-03
 #    P-004 run #4 — Hetzner VMs shipped git; a bare ubuntu:24.04 image doesn't).
-#    After editing this package list: docker rmi pcusp-local-frame:ubuntu24 so
+#    After editing this package list: docker rmi "$IMAGE_TAG" (pcusp-local-frame:ubuntu24-u<uid>) so
 #    the build-once cache rebuilds (rig_setup_frame's per-run apt also
 #    self-heals a stale image, at per-run cost). ─────────────────────────────
 if ! docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
@@ -715,12 +773,17 @@ RUN apt-get update -qq \
       openssh-server ca-certificates curl gh git postgresql-client lsof \
  && apt-get install -y -qq libwebkit2gtk-4.1-0 xdg-utils || true
 RUN mkdir -p /run/sshd /root/.ssh && chmod 700 /root/.ssh
+ARG PCUSP_UID=10001
+RUN u="$(getent passwd "$PCUSP_UID" | cut -d: -f1)"; \
+    if [ -n "$u" ] && [ "$u" != pcusp ]; then userdel -r "$u" >/dev/null 2>&1 || userdel "$u"; fi; \
+    id pcusp >/dev/null 2>&1 || useradd -m -s /bin/bash -u "$PCUSP_UID" pcusp; \
+    [ "$(id -u pcusp)" = "$PCUSP_UID" ]
 COPY authorized_keys /root/.ssh/authorized_keys
 RUN chmod 600 /root/.ssh/authorized_keys \
  && printf 'PermitRootLogin prohibit-password\nUseDNS no\n' > /etc/ssh/sshd_config.d/pcusp-rig.conf
 CMD ["/usr/sbin/sshd","-D","-e"]
 DOCKEREOF
-  docker build -q -t "$IMAGE_TAG" "$bctx" >/dev/null || { echo "FATAL: frame image build failed" >&2; rm -rf "$bctx"; exit 1; }
+  docker build -q -t "$IMAGE_TAG" --build-arg PCUSP_UID="$PCUSP_UID" "$bctx" >/dev/null || { echo "FATAL: frame image build failed" >&2; rm -rf "$bctx"; exit 1; }
   rm -rf "$bctx"
 fi
 
@@ -735,12 +798,13 @@ if [ "$REUSE" = 1 ] && [ "$REUSE_OK" = 1 ]; then
 else
   REUSE=0
   docker rm -f "$CN_A" "$CN_B" "$CN_C" >/dev/null 2>&1 || true
+  pgvol_prepare || { echo "FATAL: could not prepare the frame PG data dirs under $PGVOL_DIR" >&2; exit 1; }
   log "provision $FRAMES frames $CN_A@$IP_A $CN_B@$IP_B$( [ "$FRAMES" = 3 ] && echo " $CN_C@$IP_C" )"
   # $CPU_ARGS_* / $MEM_ARGS word-split deliberately (frame CPU+memory reservation, defined above).
-  docker run -d --name "$CN_A" --hostname rig-a --network "$NET" --ip "$IP_A" $CPU_ARGS_A $MEM_ARGS "$IMAGE_TAG" >/dev/null || exit 1
-  docker run -d --name "$CN_B" --hostname rig-b --network "$NET" --ip "$IP_B" $CPU_ARGS_B $MEM_ARGS "$IMAGE_TAG" >/dev/null || exit 1
+  docker run -d --name "$CN_A" --hostname rig-a --network "$NET" --ip "$IP_A" $CPU_ARGS_A $MEM_ARGS ${PGVOL_ARGS_A[@]+"${PGVOL_ARGS_A[@]}"} "$IMAGE_TAG" >/dev/null || exit 1
+  docker run -d --name "$CN_B" --hostname rig-b --network "$NET" --ip "$IP_B" $CPU_ARGS_B $MEM_ARGS ${PGVOL_ARGS_B[@]+"${PGVOL_ARGS_B[@]}"} "$IMAGE_TAG" >/dev/null || exit 1
   if [ "$FRAMES" = 3 ]; then
-    docker run -d --name "$CN_C" --hostname rig-c --network "$NET" --ip "$IP_C" $CPU_ARGS_C $MEM_ARGS "$IMAGE_TAG" >/dev/null || exit 1
+    docker run -d --name "$CN_C" --hostname rig-c --network "$NET" --ip "$IP_C" $CPU_ARGS_C $MEM_ARGS ${PGVOL_ARGS_C[@]+"${PGVOL_ARGS_C[@]}"} "$IMAGE_TAG" >/dev/null || exit 1
   fi
 fi
 
