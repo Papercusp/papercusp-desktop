@@ -828,9 +828,139 @@ drv_appbundle() { drv_appbundle_local "$@"; }
 # the race both times.
 # MUST be called directly (NOT in a $(…) command substitution — the array
 # fills would die in the subshell). On failure sets FED_BOOT_ERR and returns 1.
+# FED_BOOT_ERR values: EMBEDDED_PG_FAILED (a fatal marker in the log), SLOW_IO
+# (the wait ran out while the boot was still progressing, with its longest silent
+# gap inside embedded-PG initdb, which is host IO rather than a wedge), or
+# BOOT_TIMEOUT (any other exhausted wait). On SLOW_IO/BOOT_TIMEOUT, FED_BOOT_DIAG
+# holds the measured longest silent gap and the line before it
+# (fed_boot_gap_diagnose; WI-6554700010071459).
 declare -g FED_BOOT_ERR=""
+declare -g FED_BOOT_DIAG=""
+# Minimum silent gap (seconds) inside initdb that classifies an exhausted wait as
+# SLOW_IO. A healthy initdb sync takes ~2s on this rig; the measured stall was 305.7s.
+FED_SLOW_IO_GAP_SEC="${FED_SLOW_IO_GAP_SEC:-60}"
+
+# fed_boot_gap_diagnose <inst> <logf> [slog] — run ON the instance (drv_exec) and
+# print ONE tab-separated line: gap_sec, from_ts, to_ts ('now' when the log is
+# still silent), trailing(0|1), context (the timestamped line before the gap plus
+# up to 3 untimestamped lines inside it, e.g. initdb's 'syncing data to disk ...').
+# Prints NOLOG when no log file exists and NOTS when no line carries a timestamp.
+# Only an ISO-8601 '[YYYY-MM-DDTHH:MM:SS(.fff)Z]' line prefix is measured. Pure
+# POSIX awk arithmetic (no mktime/strftime): the frames ship mawk.
+fed_boot_gap_diagnose() {
+  local inst="$1" logf="$2" slog="${3:-}"
+  { printf 'log=%q\nslog=%q\n' "$logf" "$slog"; cat <<'GAPEOF'
+now=$(date -u +%s)
+files=""
+for f in $log $slog; do [ -n "$f" ] && [ -f "$f" ] && files="$files $f"; done
+[ -n "$files" ] || { echo NOLOG; exit 0; }
+awk -v now="$now" '
+function dfc(y, m, d,    era, yoe, doy, doe) {
+  if (m <= 2) y = y - 1
+  era = int((y >= 0 ? y : y - 399) / 400)
+  yoe = y - era * 400
+  doy = int((153 * (m > 2 ? m - 3 : m + 9) + 2) / 5) + d - 1
+  doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+  return era * 146097 + doe - 719468
+}
+function epoch(s) {
+  return dfc(substr(s, 1, 4) + 0, substr(s, 6, 2) + 0, substr(s, 9, 2) + 0) * 86400 + substr(s, 12, 2) * 3600 + substr(s, 15, 2) * 60 + substr(s, 18, length(s) - 18)
+}
+function clip(x) { return length(x) > 200 ? substr(x, 1, 200) "..." : x }
+FNR == 1 { have = 0; ctx = ""; extra = 0 }
+{
+  sub(/\r$/, "")
+  if (match($0, /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9](\.[0-9]+)?Z\]/)) {
+    s = substr($0, 2, RLENGTH - 2); t = epoch(s)
+    if (have && (!found || t - pt > best)) { found = 1; best = t - pt; bfrom = ps; bto = s; bctx = ctx; btrail = 0 }
+    have = 1; ps = s; pt = t; ctx = clip($0); extra = 0
+    lastHave = 1; lastPs = ps; lastPt = pt; lastCtx = ctx
+  } else if (have && $0 ~ /[^ \t]/ && extra < 3) {
+    ctx = ctx " | " clip($0); extra++; lastCtx = ctx
+  }
+}
+END {
+  if (lastHave && (!found || now - lastPt > best)) { found = 1; best = now - lastPt; bfrom = lastPs; bto = "now"; bctx = lastCtx; btrail = 1 }
+  if (!found) { print "NOTS"; exit }
+  printf "%.1f\t%s\t%s\t%d\t%s\n", best, bfrom, bto, btrail, bctx
+}' $files
+GAPEOF
+  } | drv_exec "$inst" 2>/dev/null || true
+}
+
+# fed_io_snapshot [dir] — one-shot IO-health sample for the filesystem backing <dir>
+# (default /tmp): kernel IO pressure, Dirty/Writeback page totals, the backing
+# device, and the latency in ms of three 64KB write+fsync probes in <dir>. Every
+# line is labelled. An unreadable source prints '(unavailable: …)' and a failed
+# probe prints 'fail', never a guessed value. Self-contained, so `declare -f` can
+# ship it to an instance through drv_exec. Without these samples a slow boot's
+# mechanism cannot be confirmed afterwards (WI-6554700010071459).
+fed_io_snapshot() {
+  local dir="${1:-/tmp}" psi dw fs f i t0 t1 ms=""
+  psi="$(tr '\n' ' ' 2>/dev/null </proc/pressure/io)"
+  echo "io_psi: ${psi:-(unavailable: /proc/pressure/io)}"
+  dw="$(grep -E '^(Dirty|Writeback):' /proc/meminfo 2>/dev/null | tr -s ' \n' ' ')"
+  echo "dirty_writeback: ${dw:-(unavailable: /proc/meminfo)}"
+  fs="$(df -P "$dir" 2>/dev/null | awk 'NR == 2 { print $1 " on " $6 }')"
+  echo "probe_fs: ${fs:-(unavailable: df $dir)}"
+  f="$dir/.fed-fsync-probe.$$"
+  for i in 1 2 3; do
+    t0="$(date +%s%N)"
+    if dd if=/dev/zero of="$f" bs=65536 count=1 conv=fsync status=none 2>/dev/null; then
+      t1="$(date +%s%N)"; ms="$ms $(( (t1 - t0) / 1000000 ))"
+    else
+      ms="$ms fail"
+    fi
+  done
+  rm -f "$f" 2>/dev/null
+  echo "fsync_64k_ms:$ms"
+}
+
+# fed_boot_classify_timeout <inst> <waited_sec> <logf> [slog] — set FED_BOOT_ERR
+# (SLOW_IO | BOOT_TIMEOUT) and FED_BOOT_DIAG from the measured boot-log gap, and
+# print the verdict on stderr. Called only after the wait and the OS port-discovery
+# recovery have both failed. A fixed try count cannot tell a slow-but-progressing
+# boot from a wedged one, and the callers' 'tail -25' shows only the lines AFTER a
+# long stall (WI-6554700010071459: a 305.7s initdb sync read as a bare BOOT_TIMEOUT).
+fed_boot_classify_timeout() {
+  local inst="$1" waited="$2" logf="$3" slog="${4:-}" raw gap gfrom gto gtrail gctx initdb=0
+  raw="$(fed_boot_gap_diagnose "$inst" "$logf" "$slog")"
+  FED_BOOT_ERR="BOOT_TIMEOUT"
+  case "$raw" in
+    ''|NOLOG|NOTS)
+      FED_BOOT_DIAG="boot log has no timestamped lines to measure (${raw:-unreadable})"
+      echo "  ✗ $inst: BOOT_TIMEOUT after ~${waited}s; $FED_BOOT_DIAG" >&2
+      fed_boot_io_at_timeout "$inst" "$logf"
+      return 0 ;;
+  esac
+  IFS=$'\t' read -r gap gfrom gto gtrail gctx <<<"$raw"
+  case "$gctx" in
+    *'syncing data to disk'*|*'performing post-bootstrap initialization'*|*'running bootstrap script'*|*'creating subdirectories'*|*initdb*) initdb=1 ;;
+  esac
+  local trail=""
+  if [ "$gtrail" = 1 ]; then trail=", still silent at timeout"; fi
+  FED_BOOT_DIAG="longest silent gap ${gap}s (${gfrom} -> ${gto}${trail}) after: ${gctx}"
+  if [ "$initdb" = 1 ] && [ "${gap%.*}" -ge "$FED_SLOW_IO_GAP_SEC" ] 2>/dev/null; then
+    FED_BOOT_ERR="SLOW_IO"
+    echo "  ✗ $inst: SLOW_IO after ~${waited}s: the boot was still progressing, not wedged. Embedded-PG initdb was silent for ${gap}s. Check host fsync latency and /proc/pressure/io before re-running. $FED_BOOT_DIAG" >&2
+  else
+    echo "  ✗ $inst: BOOT_TIMEOUT after ~${waited}s; $FED_BOOT_DIAG" >&2
+  fi
+  fed_boot_io_at_timeout "$inst" "$logf"
+}
+
+# fed_boot_io_at_timeout <inst> <logf> — print fed_io_snapshot taken ON the
+# instance beside its boot log (stderr). It is the closest available measurement
+# to the stall window; a host-side bank taken later misses it.
+fed_boot_io_at_timeout() {
+  local inst="$1" logf="$2" io
+  io="$({ declare -f fed_io_snapshot; printf 'fed_io_snapshot %q\n' "$(dirname "$logf")"; } | drv_exec "$inst" 2>/dev/null | tr '\n' ';' || true)"
+  echo "  io at timeout on $inst: ${io:-(unavailable: instance unreachable)}" >&2
+}
+
 fed_wait_boot() {
   local inst="$1" tries="${2:-50}" i out pg sc logf slog
+  FED_BOOT_DIAG=""
   logf="$(drv_applog "$inst")"
   # WI-6180: scan the sidecar's OWN log as well as the GUI stdout capture — the
   # packaged app's boot markers live in the former, so grepping only the latter
@@ -900,7 +1030,8 @@ EOF
     fed_log "fed_wait_boot: $inst recovered via OS port discovery — PG=$pg2 sidecar=${FED_SC[$inst]} (sidecar log marker missing/drifted)" >&2
     FED_BOOT_ERR=""; return 0
   fi
-  FED_BOOT_ERR="BOOT_TIMEOUT"; return 1
+  fed_boot_classify_timeout "$inst" "$((tries * 3))" "$logf" "$slog"
+  return 1
 }
 
 # fed_assert_isolated <instA> <instB> — distinct PG + sidecar ports. (Trivially
