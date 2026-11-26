@@ -10,7 +10,15 @@ const { captureIdentity, captureSpa, copySpa, failureEvidenceRoot, inventory, re
   sourceState, validateResume, validateSpa, writeJson } = require('../bin/lib/sidecar-stage-state.js');
 const bin = path.resolve(__dirname, '../bin');
 const builder = fs.readFileSync(path.join(bin, 'build-desktop-sidecar.sh'), 'utf8');
-const finish = builder.match(/^__pc_finish_sidecar_build\(\) \{\n[\s\S]*?^\}$/m)[0];
+// The EXIT handler reaps tmp/old output through the WI-6554700010070220 mount-guard
+// helpers, so the fixture carries those real definitions; without them each call is
+// `command not found` and the success path silently keeps sidecar.old.<pid>.
+const mountGuardStart = builder.indexOf('__pc_mounts_under() {');
+const mountGuardEnd = builder.indexOf('# Fail fast, before any build or publish mutation');
+assert.ok(mountGuardStart >= 0 && mountGuardEnd > mountGuardStart,
+  'mount-guard helpers not found in build-desktop-sidecar.sh');
+const finish = builder.slice(mountGuardStart, mountGuardEnd)
+  + builder.match(/^__pc_finish_sidecar_build\(\) \{\n[\s\S]*?^\}$/m)[0];
 const trap = builder.match(/^trap '[^\n]*' EXIT$/m)[0];
 const failureTrap = builder.match(/^trap '[^\n]*' ERR$/m)[0];
 const resume = builder.slice(builder.indexOf('if [[ -n "${PAPERCUSP_SIDECAR_RESUME_FROM:-}" ]]'), builder.indexOf('# Assembly-only work.'));

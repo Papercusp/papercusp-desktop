@@ -16,7 +16,15 @@ const { failureEvidenceRoot, parsePruneArgs, pruneFailedStages, pruneFailedStage
 const bin = path.resolve(__dirname, '../bin');
 const helper = path.join(bin, 'lib/sidecar-stage-state.js');
 const builder = fs.readFileSync(path.join(bin, 'build-desktop-sidecar.sh'), 'utf8');
-const finish = builder.match(/^__pc_finish_sidecar_build\(\) \{\n[\s\S]*?^\}$/m)[0];
+// The EXIT handler reaps tmp/old output through the WI-6554700010070220 mount-guard
+// helpers, so the fixture carries those real definitions rather than letting each
+// call fail as `command not found`.
+const mountGuardStart = builder.indexOf('__pc_mounts_under() {');
+const mountGuardEnd = builder.indexOf('# Fail fast, before any build or publish mutation');
+assert.ok(mountGuardStart >= 0 && mountGuardEnd > mountGuardStart,
+  'mount-guard helpers not found in build-desktop-sidecar.sh');
+const finish = builder.slice(mountGuardStart, mountGuardEnd)
+  + builder.match(/^__pc_finish_sidecar_build\(\) \{\n[\s\S]*?^\}$/m)[0];
 const trap = builder.match(/^trap '[^\n]*' EXIT$/m)[0];
 const startPruneAt = builder.indexOf('# WI-6554700010010442 / plan disk-headroom');
 const startPrune = builder.slice(startPruneAt, builder.indexOf('export SIDECAR_STAGE_REPO_ROOT=', startPruneAt));
