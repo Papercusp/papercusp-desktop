@@ -456,6 +456,16 @@ rig_bank_logs() {  # [tag] — optional context tag (e.g. a scenario id) folded 
   { echo "=== bank $stamp: host /proc/loadavg ==="; cat /proc/loadavg 2>/dev/null || true
     echo "=== bank $stamp: host docker stats (informational — n/a for a pure-Hetzner rig) ==="
     command -v docker >/dev/null 2>&1 && docker stats --no-stream 2>/dev/null || echo "(docker unavailable)"
+    # WI-6554700010071459: loadavg + docker stats could not confirm or refute a
+    # 305.7s initdb fsync stall afterwards. Record IO pressure, dirty/writeback and
+    # fsync latency too, plus the device behind DockerRootDir so the reader can see
+    # whether the probe dir shares the frames' filesystem.
+    echo "=== bank $stamp: host IO health (probe dir $RIG_BANK_DIR) ==="
+    if command -v fed_io_snapshot >/dev/null 2>&1; then fed_io_snapshot "$RIG_BANK_DIR"; else echo "(fed_io_snapshot unavailable: federation-asserts.sh not sourced)"; fi
+    if command -v docker >/dev/null 2>&1; then
+      _droot="$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)"
+      echo "docker_root_fs: ${_droot:-?} $(df -P "${_droot:-/nonexistent}" 2>/dev/null | awk 'NR == 2 { print "(" $1 " on " $6 ")" }')"
+    fi
   } >"$RIG_BANK_DIR/load-$stamp.txt" 2>/dev/null || true
   # WI-5481 gap (2026-07-19): $RIG_WORK/scn.<id>.log holds each scenario's FULL
   # raw stdout (per-cycle detail a scenario's own summary line filters out —

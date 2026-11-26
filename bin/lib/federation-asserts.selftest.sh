@@ -1747,6 +1747,110 @@ fi
 unset -f drv_applog drv_sidecar_log drv_exec fed_discover_sidecar_os
 rm -rf "$BOOT_WORK"
 
+# --- RECURRENCE GUARD (WI-6554700010071459): an exhausted boot wait must report the
+# longest silent gap in the boot log and the line before it, and must classify a gap
+# inside embedded-PG initdb as SLOW_IO rather than a bare BOOT_TIMEOUT. Measured
+# case: frame c of a local-matrix run spent 305.7s silent in initdb's 'syncing data
+# to disk ...' (no timestamp of its own), then raced through migrations. The wait
+# gave up at migration 112 and the caller's 'tail -25' showed only fast migration
+# lines, which hid the stall. Timestamps are generated relative to NOW, because the
+# trailing silence (now minus the last line) is part of the measurement.
+GAP_WORK="$(mktemp -d /tmp/fed-gap-selftest.XXXXXX)"
+_gap_iso() { printf '%s.%sZ' "$(date -u -d "@$1" +%Y-%m-%dT%H:%M:%S)" "$2"; }
+_gap_now="$(date -u +%s)"
+declare -A FED_PG=() FED_SC=() FED_DB=() FED_KIND=([z]=vm)
+drv_exec()                { bash -s; }
+drv_sidecar_log()         { echo ""; }
+fed_discover_sidecar_os() { return 1; }
+
+# (1) end to end through fed_wait_boot: the frame c timeline (305.7s initdb sync gap).
+B=$((_gap_now - 320)); GAP_LOG="$GAP_WORK/serve-initdb.log"
+{
+  echo "[$(_gap_iso "$B" 000)] [serve] starting embedded Postgres on :39532 (data=/home/pcusp/pgdata)"
+  echo "[$(_gap_iso $((B + 0)) 900)] [serve] pg: pg: performing post-bootstrap initialization ... "
+  echo "[$(_gap_iso $((B + 9)) 000)] [serve] pg: pg: ok"
+  echo "syncing data to disk ... "
+  echo "[$(_gap_iso $((B + 314)) 700)] [serve] pg: pg: ok"
+  echo "[$(_gap_iso $((B + 316)) 200)] [serve] applying migration 001"
+  echo "[$(_gap_iso $((B + 317)) 000)] [serve] applying migration 112"
+} > "$GAP_LOG"
+drv_applog() { echo "$GAP_LOG"; }
+FED_BOOT_ERR=""; FED_BOOT_DIAG=""
+if fed_wait_boot z 1 >/dev/null 2>&1; then
+  bad "fed_wait_boot PASSED a boot log with no readiness markers — the gap guard cannot be exercised"
+elif [ "$FED_BOOT_ERR" = SLOW_IO ] && [[ "$FED_BOOT_DIAG" == *"305.7s"* ]] && [[ "$FED_BOOT_DIAG" == *"syncing data to disk"* ]]; then
+  ok "an exhausted wait whose longest gap is a 305.7s initdb sync reports SLOW_IO with the gap and its context (WI-6554700010071459)"
+else
+  bad "exhausted wait over a 305.7s initdb sync gap reported FED_BOOT_ERR='$FED_BOOT_ERR' DIAG='$FED_BOOT_DIAG' — expected SLOW_IO naming 305.7s after 'syncing data to disk'; a slow-IO boot will again read as an opaque BOOT_TIMEOUT"
+fi
+
+# (2) CONTROL: the same 305.7s gap OUTSIDE initdb stays BOOT_TIMEOUT, so the
+# classification keys on where the boot stalled, not on the gap size alone.
+GAP_LOG="$GAP_WORK/serve-migration.log"
+{
+  echo "[$(_gap_iso "$B" 000)] [serve] starting embedded Postgres on :39532 (data=/home/pcusp/pgdata)"
+  echo "[$(_gap_iso $((B + 1)) 000)] [serve] pg: pg: ok"
+  echo "[$(_gap_iso $((B + 2)) 000)] [serve] applying migration 050"
+  echo "[$(_gap_iso $((B + 307)) 700)] [serve] applying migration 051"
+  echo "[$(_gap_iso $((B + 317)) 000)] [serve] applying migration 112"
+} > "$GAP_LOG"
+fed_boot_classify_timeout z 3 "$GAP_LOG" "" 2>/dev/null
+if [ "$FED_BOOT_ERR" = BOOT_TIMEOUT ] && [[ "$FED_BOOT_DIAG" == *"305.7s"* ]] && [[ "$FED_BOOT_DIAG" == *"migration 050"* ]]; then
+  ok "CONTROL: a 305.7s gap during migrations stays BOOT_TIMEOUT and still names the gap and the line before it"
+else
+  bad "CONTROL FAILED: a non-initdb 305.7s gap gave FED_BOOT_ERR='$FED_BOOT_ERR' DIAG='$FED_BOOT_DIAG' — expected BOOT_TIMEOUT naming 305.7s after 'migration 050'"
+fi
+
+# (3) still IN initdb sync at timeout: the trailing silence is the measured gap.
+B2=$((_gap_now - 200)); GAP_LOG="$GAP_WORK/serve-trailing.log"
+{
+  echo "[$(_gap_iso "$B2" 000)] [serve] starting embedded Postgres on :39532 (data=/home/pcusp/pgdata)"
+  echo "[$(_gap_iso $((B2 + 1)) 000)] [serve] pg: pg: ok"
+  echo "syncing data to disk ... "
+} > "$GAP_LOG"
+fed_boot_classify_timeout z 3 "$GAP_LOG" "" 2>/dev/null
+if [ "$FED_BOOT_ERR" = SLOW_IO ] && [[ "$FED_BOOT_DIAG" == *"still silent at timeout"* ]] && [[ "$FED_BOOT_DIAG" == *"syncing data to disk"* ]]; then
+  ok "a wait that runs out DURING the initdb sync reports SLOW_IO with the trailing silence"
+else
+  bad "a wait exhausted mid-initdb-sync gave FED_BOOT_ERR='$FED_BOOT_ERR' DIAG='$FED_BOOT_DIAG' — expected SLOW_IO, 'still silent at timeout'"
+fi
+
+# (4) no timestamped lines: an explicit unmeasured diagnosis, never a guessed class.
+GAP_LOG="$GAP_WORK/app.log"
+printf 'libEGL warning: DRI3 error: Could not get DRI3 device\n' > "$GAP_LOG"
+fed_boot_classify_timeout z 3 "$GAP_LOG" "" 2>/dev/null
+if [ "$FED_BOOT_ERR" = BOOT_TIMEOUT ] && [[ "$FED_BOOT_DIAG" == *"no timestamped lines"* ]]; then
+  ok "a boot log with no timestamps yields BOOT_TIMEOUT with an explicit 'no timestamped lines' diagnosis"
+else
+  bad "an untimestamped boot log gave FED_BOOT_ERR='$FED_BOOT_ERR' DIAG='$FED_BOOT_DIAG' — expected BOOT_TIMEOUT + 'no timestamped lines'"
+fi
+
+# (5) IO health sample (WI-6554700010071459 step b): labelled lines, three numeric
+# fsync probes and no probe file left behind; an unwritable dir says 'fail' instead
+# of a number; and an exhausted wait prints the instance's sample beside its log.
+_io_out="$(fed_io_snapshot "$GAP_WORK")"
+if [[ "$_io_out" == *"io_psi: "* ]] && [[ "$_io_out" == *"dirty_writeback: "* ]] && [[ "$_io_out" == *"probe_fs: "* ]] \
+   && printf '%s\n' "$_io_out" | grep -qE '^fsync_64k_ms:( [0-9]+){3}$' \
+   && ! ls "$GAP_WORK"/.fed-fsync-probe.* >/dev/null 2>&1; then
+  ok "fed_io_snapshot reports IO pressure, dirty/writeback, the probe device and three numeric 64KB fsync latencies, and removes its probe file"
+else
+  bad "fed_io_snapshot output malformed or its probe file was left behind: $(printf '%s' "$_io_out" | tr '\n' '|')"
+fi
+if fed_io_snapshot /proc 2>/dev/null | grep -qE '^fsync_64k_ms: fail fail fail$'; then
+  ok "fed_io_snapshot reports 'fail' for an unwritable probe dir instead of a number"
+else
+  bad "fed_io_snapshot on an unwritable dir did not report 'fail fail fail'"
+fi
+_io_msg="$(fed_boot_classify_timeout z 3 "$GAP_WORK/serve-migration.log" "" 2>&1 >/dev/null)"
+if [[ "$_io_msg" == *"io at timeout on z: io_psi: "*"fsync_64k_ms: "* ]]; then
+  ok "an exhausted boot wait also prints the instance's IO health sampled beside its boot log"
+else
+  bad "fed_boot_classify_timeout printed no instance IO sample: $_io_msg"
+fi
+unset -f drv_applog drv_sidecar_log drv_exec fed_discover_sidecar_os _gap_iso
+unset B B2 _gap_now GAP_LOG _io_out _io_msg
+rm -rf "$GAP_WORK"
+
 # ── fed_diagnose_unmerged (WI-6209) ────────────────────────────────────────
 # A merge probe reading 0 has two utterly different causes and the bare 0 cannot
 # tell them apart: a MIS-TARGETED write (enqueued to a tuple this frame never
