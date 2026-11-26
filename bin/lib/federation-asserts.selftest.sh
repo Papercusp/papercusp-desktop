@@ -1859,13 +1859,14 @@ fi
 # of a number; and an exhausted wait prints the instance's sample beside its log.
 _io_out="$(fed_io_snapshot "$GAP_WORK")"
 if [[ "$_io_out" == *"io_psi: "* ]] && [[ "$_io_out" == *"dirty_writeback: "* ]] && [[ "$_io_out" == *"probe_fs: "* ]] \
-   && printf '%s\n' "$_io_out" | grep -qE '^fsync_64k_ms:( [0-9]+){3}$' \
+   && grep -qE '^fsync_64k_ms:( [0-9]+){3}$' <<<"$_io_out" \
    && ! ls "$GAP_WORK"/.fed-fsync-probe.* >/dev/null 2>&1; then
   ok "fed_io_snapshot reports IO pressure, dirty/writeback, the probe device and three numeric 64KB fsync latencies, and removes its probe file"
 else
   bad "fed_io_snapshot output malformed or its probe file was left behind: $(printf '%s' "$_io_out" | tr '\n' '|')"
 fi
-if fed_io_snapshot /proc 2>/dev/null | grep -qE '^fsync_64k_ms: fail fail fail$'; then
+_io_bad="$(fed_io_snapshot /proc 2>/dev/null)" || true
+if grep -qE '^fsync_64k_ms: fail fail fail$' <<<"$_io_bad"; then
   ok "fed_io_snapshot reports 'fail' for an unwritable probe dir instead of a number"
 else
   bad "fed_io_snapshot on an unwritable dir did not report 'fail fail fail'"
