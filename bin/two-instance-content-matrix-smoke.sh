@@ -338,9 +338,12 @@ ins() { local ty="$1" ws="$2" t="$3" nid; case "$t" in ba) nid=2;; ab) nid=3;; *
   esac; }
 poll() { local ty="$1" t="$2" nid; case "$t" in ba) nid=2;; ab) nid=3;; *) nid=1;; esac
   case "$ty" in
-   # Federated features are applied by the features-by-id projection, which labels them
-   # origin='remote:features-by-id'; a plain 'remote' is only seen briefly before that relabel.
-   # Requiring 'remote' alone reported rows that had crossed as misses (WI-6554700010070619).
+   # Arrival accepts the features-by-id marker as well as 'remote'. The marker
+   # 'remote:features-by-id' is a statement-only token (harness-features.ts) that the
+   # BEFORE UPDATE stamp trigger should consume into 'remote'. A row stored with it has
+   # still crossed, so requiring 'remote' alone reported delivered rows as misses
+   # (WI-6554700010070619). Whether the marker was consumed is checked separately by the
+   # STORED-ORIGIN assertion after the late re-checks.
    features) echo "SELECT origin FROM harness_shared.harness_features_consolidated WHERE feature_id='F-MX-$t' AND origin IN ('remote','remote:features-by-id') LIMIT 1;";;
    conversations) echo "SELECT origin FROM harness_shared.coord_conversations WHERE id='conv-MX-$t' AND origin='remote' LIMIT 1;";;
    messages) echo "SELECT origin FROM harness_shared.coord_event_log WHERE msg_id='msg-MX-$t' AND origin='remote' LIMIT 1;";;
@@ -541,12 +544,35 @@ else
   BACKFILL_LATE_TABLE=""
 fi
 
+# ── 7. STORED-ORIGIN: a delivered feature must be stored as origin='remote' ──────
+# The arrival polls accept the features-by-id marker so a delivered row is not reported
+# as a miss. harness-features.ts sends that marker only on the ON CONFLICT UPDATE path,
+# and the BEFORE UPDATE stamp trigger must consume it into 'remote'. A stored marker
+# means this build's trigger did not, so the row below stays FAIL until that is fixed
+# (WI-6554700010070619). It is read after every phase so the value has settled, and it
+# aggregates every stored row for the key instead of LIMIT 1. A failed query is a FAIL
+# (unmeasured), never a pass.
+STORED_TABLE=""
+case " $TYPES " in *" features "*)
+  log "STORED-ORIGIN: delivered features must be stored as origin='remote'"
+  for pair in b:seed b:ab a:ba; do
+    dst="${pair%%:*}"; t="${pair#*:}"
+    so="$(psql "$(dsn "$dst")" -tA -c "SELECT COALESCE(string_agg(DISTINCT origin, ',' ORDER BY origin), '') FROM harness_shared.harness_features_consolidated WHERE feature_id='F-MX-$t';" 2>"$WORK/stored-origin.err")" && rc=0 || rc=$?
+    so="$(printf '%s' "$so" | tr -d '[:space:]')"
+    if [ "$rc" -ne 0 ]; then printf '  ✗ %-16s F-MX-%s on %s: query failed (%s)\n' "features-origin" "$t" "$dst" "$(head -1 "$WORK/stored-origin.err" | head -c 80)"; STORED_TABLE+="| features | F-MX-$t on $dst | FAIL (unmeasured: psql rc=$rc) |\n"
+    elif [ -z "$so" ]; then printf '  - %-16s F-MX-%s on %s: not delivered (the arrival rows above report it)\n' "features-origin" "$t" "$dst"; STORED_TABLE+="| features | F-MX-$t on $dst | NOT-DELIVERED |\n"
+    elif [ "$so" = remote ]; then printf '  ✓ %-16s F-MX-%s on %s stored origin=remote\n' "features-origin" "$t" "$dst"; STORED_TABLE+="| features | F-MX-$t on $dst | PASS (remote) |\n"
+    else printf '  ✗ %-16s F-MX-%s on %s stored origin=%s, expected remote\n' "features-origin" "$t" "$dst" "$so"; STORED_TABLE+="| features | F-MX-$t on $dst | FAIL (stored $so) |\n"; fi
+  done ;;
+esac
+
 # ── report ──────────────────────────────────────────────────────────────────────
 log "RESULT (member=$SLUG hive=$HIVE_SLUG)"
 echo "BACKFILL (late-joiner gets pre-existing content):"; printf "| type | phase | result |\n|---|---|---|\n"; printf "$BACKFILL_TABLE"
 if [ -n "$BACKFILL_LATE_TABLE" ]; then echo; echo "BACKFILL LATE-RECHECK (post-incremental re-poll — PASS here + FAIL above = latency, not death):"; printf "| type | phase | result |\n|---|---|---|\n"; printf "$BACKFILL_LATE_TABLE"; fi
 echo; echo "INCREMENTAL (post-join, both directions):"; printf "| type | dir | result |\n|---|---|---|\n"; printf "$MATRIX"
 if [ -n "$BA_LATE_TABLE" ]; then echo; echo "INCREMENTAL B→A LATE-RECHECK (post-window re-poll — PASS here + FAIL above = latency/warm-up, not death; see WI-5673):"; printf "| type | dir | result |\n|---|---|---|\n"; printf "$BA_LATE_TABLE"; fi
+if [ -n "$STORED_TABLE" ]; then echo; echo "STORED-ORIGIN (a delivered feature must be stored as 'remote'; a stored features-by-id marker is a FAIL — WI-6554700010070619):"; printf "| type | key on dst | result |\n|---|---|---|\n"; printf '%b' "$STORED_TABLE"; fi
 echo; echo "negative-isolation=$NEG  topic-equal=$TEQ  b-to-a-directory=$BA_DIR"
 
 # ── WI-5673 ADMISSION-DELAY PROBE — the ONE number that explains the incr-B→A matrix ──
@@ -610,7 +636,7 @@ echo "A-tested-topic-unpaired-raw-participant-firings=${UNPAIRED_A:-0}  A-tested
 CONTENT_OVERALL=PASS
 [ "$NEG" = PASS ] || CONTENT_OVERALL=INCOMPLETE
 case "$TEQ" in PASS*) ;; *) CONTENT_OVERALL=INCOMPLETE ;; esac
-if printf '%b%b%b%b' "$BACKFILL_TABLE" "$BACKFILL_LATE_TABLE" "$MATRIX" "$BA_LATE_TABLE" | grep -q FAIL; then
+if printf '%b%b%b%b%b' "$BACKFILL_TABLE" "$BACKFILL_LATE_TABLE" "$MATRIX" "$BA_LATE_TABLE" "$STORED_TABLE" | grep -q FAIL; then
   CONTENT_OVERALL=INCOMPLETE
 fi
 if [ "$CONTENT_OVERALL" = PASS ]; then
