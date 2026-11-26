@@ -278,6 +278,107 @@ else
   bad "serve-*.log header is missing the subject-id-absence caveat: $serve_bank"
 fi
 
+# Exercise the same join driver as the package rig with only local response bytes.
+if python3 - "$LIB" "$WORK_TMP" "$BANK_TMP/joins" <<'PY'
+import json
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+lib, work, bank = sys.argv[1:]
+fixture = Path(work, 'join.fixture')
+driver = '''
+source "$1"
+fixture="$2"; RIG_WORK="$3"; RIG_BANK_DIR="$4"; RIG_SLUG=fixture
+RIG_HIVE_ID=hive; RIG_HIVE_PUBKEY=unused; RIG_HIVE_LINK=unused; RIG_OWNER_MEMBER_SLUG=home
+declare -A FED_SC=([b]=3070)
+FRAME_IP[b]=unused
+fed_log() { :; }
+rig_ssh_wait() { :; }
+drv_exec() { cat >/dev/null; cat "$fixture"; }
+rig_join_hive b; rc=$?
+printf 'selected=%s\\n' "${FRAME_MEMBER_SLUG[b]}"
+exit "$rc"
+'''
+
+def join(response, expected_rc, selected='', bank_dir=bank):
+    fixture.write_text(response if isinstance(response, str) else json.dumps(response))
+    run = subprocess.run(['bash', '-uc', driver, 'join-fixture', lib, str(fixture), work, bank_dir],
+                         capture_output=True, text=True, check=False)
+    assert run.returncode == expected_rc, (expected_rc, run.returncode, run.stderr)
+    assert f'selected={selected}\n' in run.stdout, run.stdout
+    assert not list(Path(work).glob('join-response.*')), 'private transport copy left behind'
+    return run.stdout + run.stderr
+
+def evidence(output):
+    paths = [Path(line.split('Full redacted join response at ', 1)[1])
+             for line in output.splitlines() if 'Full redacted join response at ' in line]
+    assert len(paths) == 1, output
+    path = paths[0]
+    assert path.parent.parent == Path(bank, 'fail'), path
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    return path
+
+secret = 'rig-canary'
+def member(slug, ok, detail, link='papercusp://harness?repo=fixture'):
+    return dict(slug=slug, link=link, ok=ok, detail=detail)
+
+saved = set()
+for size in (299, 300, 301, 180000):
+    link = 'papercusp://harness?topic=' + 'x' * size + '&token=' + secret
+    detail = 'upstream refused Bearer ' + secret
+    rows = [member('first', False, detail, link), member('second', False, 'repository unavailable')]
+    for ordered in (rows, list(reversed(rows))):
+        output = join(dict(ok=False, members=ordered, error='no_member_joined', token=secret), 1)
+        assert secret not in output and 'papercusp://' not in output, 'credential or link on console'
+        assert all(s in output for s in ('first', 'upstream refused', 'second', 'repository unavailable')), output
+        path = evidence(output)
+        assert path not in saved, 'overwrote a previous join failure'
+        saved.add(path)
+        body = path.read_text()
+        assert secret not in body
+        result = json.loads(body)
+        assert result['error'] == 'no_member_joined'
+        assert [row['slug'] for row in result['members']] == [row['slug'] for row in ordered]
+        assert ('x' * size + '&token=[REDACTED]') in body, 'lost non-secret bytes after a long link'
+        assert 'repository unavailable' in body and 'Bearer [REDACTED]' in body
+assert all(path.is_file() for path in saved)
+
+for length in (239, 240, 241):
+    reason = 'é' * (length - 1) + '界'
+    output = join(dict(ok=False, members=[member('bounded', False, reason)]), 1)
+    assert ('more characters in the full response' in output) == (length > 240)
+    assert json.loads(evidence(output).read_text())['members'][0]['detail'] == reason
+
+# An accepted partial join still selects its first successful member. A failed
+# top-level identity stamp must fail even if some nested member said ok.
+mixed = [member('accepted', True, 'joined'), member('denied', False, 'retry papercusp://harness?hidden=detail')]
+for accepted in (False, True):
+    output = join(dict(ok=accepted, members=mixed), 0 if accepted else 1, 'accepted' if accepted else '')
+    assert 'denied' in output and 'retry [link]' in output and 'hidden=detail' not in output
+    assert json.loads(evidence(output).read_text())['members'] == mixed
+
+broken = 'not JSON\nAuthorization: Bearer ' + secret + '\nfinal diagnostic line\n'
+output = join(broken, 1)
+assert 'invalid JSON response' in output and secret not in output and 'not JSON' not in output
+assert evidence(output).read_text() == broken.replace(secret, '[REDACTED]')
+output = join(dict(ok=False, members=[None, member('', False, 'slug exhausted')]), 1)
+assert 'member[0]' in output and 'missing member detail' in output and 'slug exhausted' in output
+assert len(json.loads(evidence(output).read_text())['members']) == 2
+
+for reply, slug in [(dict(ok=True, members=[member('ready', True, 'joined')]), 'ready'),
+                    (dict(ok=True, self_hive=True, members=[]), 'home')]:
+    assert 'Full redacted' not in join(reply, 0, slug)
+assert 'Could not save' in join(dict(ok=False, error='invalid_member_links'), 1, bank_dir=str(fixture))
+PY
+then
+  ok "join failures retain each redacted member result in private, recoverable evidence"
+else
+  bad "join result, credential redaction, or private evidence regression"
+fi
+
 echo
 if [ "$FAILS" = 0 ]; then echo "PASS — rig_bank_logs selftest"; exit 0; fi
 echo "FAIL — $FAILS check(s) failed"; exit 1
