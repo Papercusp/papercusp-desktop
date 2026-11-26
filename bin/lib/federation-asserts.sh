@@ -916,6 +916,124 @@ fed_io_snapshot() {
   echo "fsync_64k_ms:$ms"
 }
 
+# fed_io_probe_dir_for <target> [candidate...] — print a writable directory on the
+# SAME filesystem (st_dev) as <target>, so an fsync probe there measures the device
+# behind <target>. <target> need not be writable itself: the docker root
+# (/var/lib/docker) is root-only, but its filesystem usually also holds /var/tmp.
+# Candidates default to <target> /var/tmp /tmp $TMPDIR $HOME. Returns 1 when none
+# qualifies; the caller then reports the host as unmeasured, never as healthy.
+fed_io_probe_dir_for() {
+  local target="$1" dev c
+  shift
+  dev="$(stat -c %d "$target" 2>/dev/null)" || return 1
+  [ -n "$dev" ] || return 1
+  if [ "$#" = 0 ]; then set -- "$target" /var/tmp /tmp "${TMPDIR:-}" "${HOME:-}"; fi
+  for c in "$@"; do
+    [ -n "$c" ] && [ -d "$c" ] && [ -w "$c" ] || continue
+    [ "$(stat -c %d "$c" 2>/dev/null)" = "$dev" ] || continue
+    printf '%s\n' "$c"
+    return 0
+  done
+  return 1
+}
+
+# fed_io_health_verdict <max_fsync_ms> [max_psi_full_avg10] — read ONE fed_io_snapshot
+# on stdin and print one tab-separated line: verdict (OK | UNHEALTHY | UNMEASURED),
+# median_ms ('-' when unmeasured), psi_full_avg10, psi_full_avg60 ('-' when
+# unavailable), reason. The median covers the NUMERIC fsync probes only (upper median
+# for an even count) and the threshold is inclusive (median == max is OK). Failed
+# probes are counted in the reason; zero numeric probes is UNMEASURED. IO PSI is
+# host-wide (every device), so it gates only when max_psi_full_avg10 is given; the
+# per-filesystem fsync probe is the direct measure of what embedded-PG initdb waits on
+# (WI-6554700010071459: ~300 ms per fsync made 'syncing data to disk' take 305.7s).
+fed_io_health_verdict() {
+  local max_ms="$1" max_psi="${2:-}"
+  awk -v max="$max_ms" -v maxpsi="$max_psi" '
+    /^io_psi:/ {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "full") infull = 1
+        else if ($i == "some") infull = 0
+        if (infull && $i ~ /^avg10=/) a10 = substr($i, 7)
+        if (infull && $i ~ /^avg60=/) a60 = substr($i, 7)
+      }
+    }
+    /^fsync_64k_ms:/ {
+      for (i = 2; i <= NF; i++) {
+        if ($i ~ /^[0-9]+$/) v[n++] = $i + 0
+        else fails++
+      }
+    }
+    END {
+      if (a10 == "") a10 = "-"
+      if (a60 == "") a60 = "-"
+      if (n == 0) {
+        printf "UNMEASURED\t-\t%s\t%s\tno numeric 64KB fsync probe (%d failed)\n", a10, a60, fails
+        exit
+      }
+      for (i = 1; i < n; i++) {
+        x = v[i]
+        j = i - 1
+        while (j >= 0 && v[j] > x) { v[j + 1] = v[j]; j-- }
+        v[j + 1] = x
+      }
+      med = v[int(n / 2)]
+      why = ""
+      if (med > max + 0) why = sprintf("median 64KB fsync %d ms > %d ms", med, max)
+      if (maxpsi != "" && a10 != "-" && a10 + 0 > maxpsi + 0) {
+        why = (why == "" ? "" : why "; ") sprintf("IO PSI full avg10 %s%% > %s%%", a10, maxpsi)
+      }
+      fl = (fails > 0 ? sprintf(" (%d probe(s) failed)", fails) : "")
+      if (why != "") printf "UNHEALTHY\t%d\t%s\t%s\t%s%s\n", med, a10, a60, why, fl
+      else printf "OK\t%d\t%s\t%s\tmedian 64KB fsync %d ms <= %d ms%s\n", med, a10, a60, med, max, fl
+    }'
+}
+
+# fed_io_preflight <probe_dir> <max_fsync_ms> <wait_sec> <step_sec> [max_psi_full_avg10]
+# — sample IO health on <probe_dir>'s filesystem until it is healthy or the wait budget
+# is spent: at most 1 + floor(wait_sec / step_sec) samples, `sleep step_sec` between
+# them, so a short write burst is ridden out and a sustained stall is not. Progress and
+# the last unhealthy sample go to stderr. The LAST stdout line is machine-readable:
+#   FED_IO_PREFLIGHT verdict=… median_ms=… max_ms=… psi_full_avg10=… psi_full_avg60=…
+#   probe_fs="…" samples=<taken>/<budget> reason="…"
+# Returns 0 (OK), 2 (UNMEASURED: no numeric probe; the caller decides), 75 (UNHEALTHY
+# for the whole budget: EX_TEMPFAIL, retry later) or 64 (invalid arguments).
+fed_io_preflight() {
+  local dir="$1" max_ms="$2" wait="$3" step="$4" max_psi="${5:-}" x
+  local snap v verdict="" med="" a10="" a60="" why="" fs="" n=0 total
+  for x in "$max_ms" "$wait" "$step"; do
+    case "$x" in
+      ''|*[!0-9]*)
+        echo "fed_io_preflight: max_fsync_ms, wait_sec and step_sec must be non-negative integers (got '$max_ms' '$wait' '$step')" >&2
+        return 64 ;;
+    esac
+  done
+  if [ -n "$max_psi" ] && ! [[ "$max_psi" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "fed_io_preflight: max_psi_full_avg10 must be a number (got '$max_psi')" >&2
+    return 64
+  fi
+  [ "$step" -gt 0 ] || step=1
+  total=$(( 1 + wait / step ))
+  while :; do
+    n=$((n + 1))
+    snap="$(fed_io_snapshot "$dir")"
+    v="$(printf '%s\n' "$snap" | fed_io_health_verdict "$max_ms" "$max_psi")"
+    IFS=$'\t' read -r verdict med a10 a60 why <<<"$v"
+    fs="$(printf '%s\n' "$snap" | sed -n 's/^probe_fs: //p')"
+    case "$verdict" in OK|UNMEASURED) break ;; esac
+    [ "$n" -lt "$total" ] || break
+    echo "  fed_io_preflight: sample $n/$total UNHEALTHY on ${fs:-$dir}: $why (IO PSI full avg10=$a10 avg60=$a60); re-sampling in ${step}s" >&2
+    sleep "$step"
+  done
+  if [ "$verdict" = UNHEALTHY ]; then printf '%s\n' "$snap" | sed 's/^/    last sample: /' >&2; fi
+  printf 'FED_IO_PREFLIGHT verdict=%s median_ms=%s max_ms=%s psi_full_avg10=%s psi_full_avg60=%s probe_fs="%s" samples=%s/%s reason="%s"\n' \
+    "${verdict:-UNMEASURED}" "${med:--}" "$max_ms" "${a10:--}" "${a60:--}" "${fs:-$dir}" "$n" "$total" "${why:-no verdict}"
+  case "$verdict" in
+    OK) return 0 ;;
+    UNHEALTHY) return 75 ;;
+    *) return 2 ;;
+  esac
+}
+
 # fed_boot_classify_timeout <inst> <waited_sec> <logf> [slog] — set FED_BOOT_ERR
 # (SLOW_IO | BOOT_TIMEOUT) and FED_BOOT_DIAG from the measured boot-log gap, and
 # print the verdict on stderr. Called only after the wait and the OS port-discovery

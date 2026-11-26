@@ -611,10 +611,63 @@ preflight_host_preconditions() {
   return 0
 }
 
+# ── host IO health: refuse a run whose frames' storage cannot fsync in time ──────
+# WI-6554700010071459. Every fresh frame runs embedded-PG initdb, whose 'syncing data
+# to disk' step fsyncs every file of the new cluster on the filesystem behind the
+# docker data root (the frames' writable layers). Measured 2026-11-26: frame c of a
+# 3-frame run spent 305.7s in that step (about 300 ms per fsync on the root ext4 under
+# host write load) while frames a and b took about 2s, so the boot wait ran out with
+# ZERO scenarios run, after the image build, provisioning and core eviction. That is
+# the precondition class above (a cheap host-side condition discovered late), so it is
+# checked here, above the first state-creating step. A bounded re-sample rides out a
+# short burst; past it the run refuses with exit 75 (EX_TEMPFAIL), which
+# live-federation-gate.sh records as a window that did not decide, never as a verdict.
+# Host-wide IO PSI is reported but does not gate unless PCUSP_RIG_IO_MAX_PSI_FULL is
+# set: it sums every device, and a busy unrelated disk must not refuse a healthy run.
+# Knobs: PCUSP_RIG_IO_PREFLIGHT=0 skips this check; PCUSP_RIG_IO_MAX_FSYNC_MS (250),
+# PCUSP_RIG_IO_WAIT_SEC (300), PCUSP_RIG_IO_WAIT_STEP_SEC (30), PCUSP_RIG_IO_PROBE_DIR
+# (default: a writable directory on the docker root's filesystem).
+preflight_host_io() {
+  local lib="$DESKTOP_DIR/bin/lib/federation-asserts.sh" root probe="${PCUSP_RIG_IO_PROBE_DIR:-}" out rc line
+  root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)"
+  [ -n "$root" ] || root=/var/lib/docker
+  if [ -z "$probe" ]; then
+    probe="$(bash -c 'source "$1" >/dev/null 2>&1 || exit 97; fed_io_probe_dir_for "$2"' _ "$lib" "$root")" || probe=""
+  fi
+  if [ -z "$probe" ]; then
+    log "WARN(preflight): host IO NOT measured: no writable directory shares a filesystem with the docker root $root (set PCUSP_RIG_IO_PROBE_DIR). A slow fsync there would surface only as a frame SLOW_IO boot failure after provisioning."
+    return 0
+  fi
+  out="$(bash -c 'source "$1" >/dev/null 2>&1 || exit 97; shift; fed_io_preflight "$@"' _ "$lib" "$probe" \
+    "${PCUSP_RIG_IO_MAX_FSYNC_MS:-250}" "${PCUSP_RIG_IO_WAIT_SEC:-300}" "${PCUSP_RIG_IO_WAIT_STEP_SEC:-30}" "${PCUSP_RIG_IO_MAX_PSI_FULL:-}")" && rc=0 || rc=$?
+  line="$(printf '%s\n' "$out" | grep '^FED_IO_PREFLIGHT ' | tail -1)"
+  case "$rc" in
+    0)
+      log "preflight: host IO OK for the docker root $root (probed in $probe): ${line#FED_IO_PREFLIGHT }"
+      return 0 ;;
+    2)
+      log "WARN(preflight): host IO NOT measured in $probe: ${line#FED_IO_PREFLIGHT }"
+      return 0 ;;
+    75)
+      echo "FATAL(preflight): HOST_IO_UNHEALTHY: the filesystem behind the docker root $root cannot fsync fast enough for embedded-PG initdb in the frames: ${line#FED_IO_PREFLIGHT }" >&2
+      echo "  refusing to build the frame image, provision containers or evict cores for a run whose frames would fail to boot (SLOW_IO, WI-6554700010071459). Exit 75 means retry later; PCUSP_RIG_IO_PREFLIGHT=0 proceeds anyway." >&2
+      printf '%s\n' "$line"
+      return 75 ;;
+    *)
+      echo "FATAL(preflight): the host IO check itself failed (rc=$rc; 97 = could not source $lib; 64 = invalid PCUSP_RIG_IO_* value): ${out:-no output}" >&2
+      return 1 ;;
+  esac
+}
+
 if [ "${PCUSP_RIG_SKIP_PREFLIGHT:-0}" = 1 ]; then
-  log "WARN: PCUSP_RIG_SKIP_PREFLIGHT=1 — host preconditions NOT checked; a missing one will now surface AFTER provisioning and core eviction"
+  log "WARN: PCUSP_RIG_SKIP_PREFLIGHT=1 — host preconditions and host IO health NOT checked; a missing one will now surface AFTER provisioning and core eviction"
 else
   preflight_host_preconditions || exit 1
+  if [ "${PCUSP_RIG_IO_PREFLIGHT:-1}" = 0 ]; then
+    log "WARN: PCUSP_RIG_IO_PREFLIGHT=0 — host IO health NOT checked; a slow docker-root filesystem will surface as a frame SLOW_IO boot failure after provisioning"
+  else
+    preflight_host_io; _io_rc=$?; [ "$_io_rc" = 0 ] || exit "$_io_rc"
+  fi
 fi
 
 # ── ssh keypair (the frames' root login — rig contract: ssh -i KEY root@ip) ──

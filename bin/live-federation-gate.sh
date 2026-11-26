@@ -2799,13 +2799,25 @@ else
     # below 24 cores it disables pinning entirely), plus CN_C=pcusp-rig-c and IP_C=10.99.0.13.
     # A first-ever membership_churn RED is COVERAGE, not a regression: triage it, do not
     # revert to 2 frames to hide it. Set MATRIX_FRAMES=2 for a one-off cheaper run.
-    if ( cd "$DESKTOP_DIR/.." && PCUSP_LOCAL_RIG_SIDECAR_NODE="$GATE_SIDECAR_SRC/bin/node" bash "papercusp-desktop/bin/local-matrix.sh" --frames="${MATRIX_FRAMES:-3}" ${GATE_DEB:+--deb="$GATE_DEB"} ) >"$WORK/local-matrix.out" 2>&1; then
+    LOCAL_MATRIX_RC=0
+    ( cd "$DESKTOP_DIR/.." && PCUSP_LOCAL_RIG_SIDECAR_NODE="$GATE_SIDECAR_SRC/bin/node" bash "papercusp-desktop/bin/local-matrix.sh" --frames="${MATRIX_FRAMES:-3}" ${GATE_DEB:+--deb="$GATE_DEB"} ) >"$WORK/local-matrix.out" 2>&1 || LOCAL_MATRIX_RC=$?
+    if [ "$LOCAL_MATRIX_RC" = 0 ]; then
       MATRIXFULL_RES="PASS"; echo "$(now_s)" >"$STATE_DIR/last-matrix-green"
       # EI-18657324526667507: last-matrix-green answers "when was it last GOOD"; last-matrix-verdict
       # answers "when did it last DECIDE anything". They must stay separate — a leg that only ever
       # FAILS is still running (not stale), and a leg that has been green for a week but has since
       # been suppressed by load/rig-busy is stale even though last-matrix-green looks recent.
       echo "$(now_s)" >"$STATE_DIR/last-matrix-verdict"; rm -f "$STATE_DIR/matrix-stale-ei-filed"
+    elif [ "$LOCAL_MATRIX_RC" = 75 ] && grep -q '^FED_IO_PREFLIGHT verdict=UNHEALTHY ' "$WORK/local-matrix.out"; then
+      # WI-6554700010071459: local-matrix.sh refused in its host-IO preflight BEFORE building
+      # or provisioning anything, because the filesystem behind the docker root could not
+      # fsync fast enough for the frames' embedded-PG initdb. No scenario ran, so this window
+      # DID NOT DECIDE: the verdict clock is not stamped and the staleness clock keeps
+      # counting, exactly as for the other SKIPPED-* outcomes (EI-18657324526667507). Both the
+      # exit code and the preflight's own marker are required, so no other rc-75 path can be
+      # mistaken for this one.
+      MATRIXFULL_RES="SKIPPED-HOST-IO"
+      MATRIX_SKIP_REASON="local-matrix refused in its host-IO preflight, before provisioning any frame: $(grep '^FED_IO_PREFLIGHT verdict=UNHEALTHY ' "$WORK/local-matrix.out" | tail -1 | cut -c1-400)"
     else
       MATRIXFULL_RES="FAIL"
       # WI-2381 carve-out RETIRED 2026-07-18 [self, WI-5137/P-402]: the seat_offer/

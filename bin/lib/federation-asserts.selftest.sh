@@ -1053,6 +1053,35 @@ if [ -z "$missing_cover" ]; then
 else
   bad "local-matrix.sh's host preflight no longer checks:$missing_cover — the class fix has decayed back toward point-fixes (EI-20578660332729593)"
 fi
+# WI-6554700010071459 step c: the host-IO health check joins the same class and must run
+# above the same first state-creating step. Its body must sample the docker root's
+# filesystem through the shared fed_io_preflight and refuse with 75 (EX_TEMPFAIL); the gate
+# must record that refusal as a window that did not decide, never as a FAIL verdict and
+# never stamping the verdict clock.
+io_call_ln="$(grep -n 'preflight_host_io; _io_rc=\$?' "$lm_file" | head -1 | cut -d: -f1)"
+io_body="$(sed -n '/^preflight_host_io() {/,/^}/p' "$lm_file")"
+if [ -n "$io_call_ln" ] && [ -n "$first_state_ln" ] && [ "$io_call_ln" -lt "$first_state_ln" ] \
+   && [[ "$io_body" == *'DockerRootDir'* ]] && [[ "$io_body" == *'fed_io_probe_dir_for'* ]] \
+   && [[ "$io_body" == *'fed_io_preflight'* ]] && [[ "$io_body" == *'return 75'* ]]; then
+  ok "local-matrix.sh checks host IO health on the docker root's filesystem (line $io_call_ln) before any state-creating step (line $first_state_ln) and refuses with exit 75 (WI-6554700010071459)"
+else
+  bad "local-matrix.sh's host-IO preflight is missing, mis-ordered (call line '$io_call_ln' vs first state-creating step '$first_state_ln') or no longer samples the docker root through fed_io_preflight with exit 75; a slow-fsync host will again burn a provisioned run on a SLOW_IO boot (WI-6554700010071459)"
+fi
+gate_io_blk="$(sed -n '/elif \[ "\$LOCAL_MATRIX_RC" = 75 \]/,/^    else$/p' "$gate_file")"
+case "$gate_io_blk" in
+  *'MATRIXFULL_RES="SKIPPED-HOST-IO"'*'MATRIX_SKIP_REASON='*)
+    case "$gate_io_blk" in
+      *'>"$STATE_DIR/last-matrix-verdict"'*) _gate_io=stamps-verdict ;;
+      *) _gate_io=ok ;;
+    esac ;;
+  *) _gate_io=missing ;;
+esac
+if [ "$_gate_io" = ok ] && grep -q '|| LOCAL_MATRIX_RC=\$?' "$gate_file"; then
+  ok "live-federation-gate records a local-matrix host-IO refusal (exit 75 + FED_IO_PREFLIGHT marker) as SKIPPED-HOST-IO with a reason, without stamping the verdict clock (WI-6554700010071459)"
+else
+  bad "live-federation-gate's local-matrix host-IO refusal mapping is '$_gate_io'; a preflight refusal would be scored as a decided FAIL and reset the staleness clock (WI-6554700010071459, EI-18657324526667507)"
+fi
+unset io_call_ln io_body gate_io_blk _gate_io
 # The preflight probes a gh identity by name, so its default must track the one the run will
 # actually register; a silent drift would validate a user nobody uses and skip the one that fails.
 lm_b_default="$(grep -o 'P_B_USER:-[A-Za-z0-9_-]*' "$lm_file" | head -1)"
@@ -1847,8 +1876,73 @@ if [[ "$_io_msg" == *"io at timeout on z: io_psi: "*"fsync_64k_ms: "* ]]; then
 else
   bad "fed_boot_classify_timeout printed no instance IO sample: $_io_msg"
 fi
-unset -f drv_applog drv_sidecar_log drv_exec fed_discover_sidecar_os _gap_iso
-unset B B2 _gap_now GAP_LOG _io_out _io_msg
+
+# (6) host-IO preflight (WI-6554700010071459 step c). fed_io_health_verdict decides on the
+# median of the NUMERIC fsync probes against an INCLUSIVE threshold, so the boundary is
+# pinned at N-1/N/N+1; probes that all fail are UNMEASURED, never a pass; host-wide PSI
+# gates only when a PSI limit is given (and never when PSI is unavailable).
+_ioh() {  # <full-avg10> <probes> [max_psi] -> "<verdict> <median>"
+  printf 'io_psi: some avg10=1.00 avg60=2.00 avg300=3.00 total=9 full avg10=%s avg60=4.00 avg300=5.00 total=9\nfsync_64k_ms: %s\n' "$1" "$2" \
+    | fed_io_health_verdict 250 "${3:-}" | cut -f1,2 | tr '\t' ' '
+}
+_io_cases="$(_ioh 0.50 '240 249 260')|$(_ioh 0.50 '249 251 250')|$(_ioh 0.50 '900 251 251')|$(_ioh 0.50 '2254 654 82')|$(_ioh 0.50 'fail fail fail')|$(_ioh 0.50 'fail 300 fail')|$(_ioh 46.83 '10 10 10')|$(_ioh 46.83 '10 10 10' 30)"
+_io_cases="$_io_cases|$(printf 'io_psi: (unavailable: /proc/pressure/io)\nfsync_64k_ms: 10 10 10\n' | fed_io_health_verdict 250 30 | cut -f1,2 | tr '\t' ' ')"
+_io_want='OK 249|OK 250|UNHEALTHY 251|UNHEALTHY 654|UNMEASURED -|UNHEALTHY 300|OK 10|UNHEALTHY 10|OK 10'
+if [ "$_io_cases" = "$_io_want" ]; then
+  ok "fed_io_health_verdict: inclusive 250 ms threshold at N-1/N/N+1, the measured 2254/654/82 ms sample is UNHEALTHY, all-failed probes are UNMEASURED, and host-wide PSI gates only on request"
+else
+  bad "fed_io_health_verdict gave '$_io_cases', expected '$_io_want'"
+fi
+# fed_io_preflight rides out a burst and refuses only after its whole budget: at most
+# 1 + wait/step samples with \`sleep step\` between them. The sampler is stubbed with
+# scripted medians (one per call, the last repeating) and sleep is recorded, so the counts
+# are exact; the counters live in files because the sampler runs inside \$(...).
+_iop() {  # <wait> <step> <median...> -> "rc=<rc> sleeps=<n> <FED_IO_PREFLIGHT line>"
+  local wait="$1" step="$2"
+  shift 2
+  printf '%s\n' "$@" >"$GAP_WORK/iop-seq"
+  echo 0 >"$GAP_WORK/iop-k"
+  : >"$GAP_WORK/iop-sleeps"
+  (
+    fed_io_snapshot() {
+      local k m
+      k="$(cat "$GAP_WORK/iop-k")"
+      echo $((k + 1)) >"$GAP_WORK/iop-k"
+      m="$(sed -n "$((k + 1))p" "$GAP_WORK/iop-seq")"
+      [ -n "$m" ] || m="$(tail -1 "$GAP_WORK/iop-seq")"
+      printf 'io_psi: (unavailable: stub)\ndirty_writeback: (unavailable: stub)\nprobe_fs: stubfs on /stub\nfsync_64k_ms: %s %s %s\n' "$m" "$m" "$m"
+    }
+    sleep() { echo "$1" >>"$GAP_WORK/iop-sleeps"; }
+    _rc=0
+    fed_io_preflight "$GAP_WORK" 250 "$wait" "$step" >"$GAP_WORK/iop-out" 2>/dev/null || _rc=$?
+    echo "rc=$_rc sleeps=$(wc -l <"$GAP_WORK/iop-sleeps") $(tail -1 "$GAP_WORK/iop-out")"
+  )
+}
+_r1="$(_iop 60 30 100)"; _r2="$(_iop 60 30 900 100)"; _r3="$(_iop 60 30 900)"
+_r4="$(_iop 0 30 900)"; _r5="$(_iop 60 30 fail)"; _r6="$(_iop x 30 100)"
+if [[ "$_r1" == "rc=0 sleeps=0 FED_IO_PREFLIGHT verdict=OK median_ms=100 "*"samples=1/3 "* ]] \
+   && [[ "$_r2" == "rc=0 sleeps=1 FED_IO_PREFLIGHT verdict=OK median_ms=100 "*"samples=2/3 "* ]] \
+   && [[ "$_r3" == "rc=75 sleeps=2 FED_IO_PREFLIGHT verdict=UNHEALTHY median_ms=900 "*"samples=3/3 "*"900 ms > 250 ms"* ]] \
+   && [[ "$_r4" == "rc=75 sleeps=0 "*"samples=1/1 "* ]] \
+   && [[ "$_r5" == "rc=2 sleeps=0 FED_IO_PREFLIGHT verdict=UNMEASURED median_ms=- "* ]] \
+   && [[ "$_r6" == "rc=64 sleeps=0 "* ]]; then
+  ok "fed_io_preflight passes a healthy first sample, rides out a one-sample burst, refuses a sustained stall with 75 only after 1 + wait/step samples, never sleeps with wait 0, reports all-failed probes as UNMEASURED (2) and rejects a non-integer budget (64)"
+else
+  bad "fed_io_preflight sampling/exit contract broken: r1='$_r1' r2='$_r2' r3='$_r3' r4='$_r4' r5='$_r5' r6='$_r6'"
+fi
+# The probe directory must share the target's filesystem: /var/lib/docker is root-only,
+# so the probe lands in a writable sibling directory on the same st_dev, never elsewhere.
+mkdir -p "$GAP_WORK/ro-target" && chmod 555 "$GAP_WORK/ro-target"
+_pd="$(fed_io_probe_dir_for "$GAP_WORK/ro-target" /proc "$GAP_WORK/ro-target" "$GAP_WORK")"
+if [ -n "$_pd" ] && [ -w "$_pd" ] && [ "$(stat -c %d "$_pd")" = "$(stat -c %d "$GAP_WORK/ro-target")" ] \
+   && ! fed_io_probe_dir_for "$GAP_WORK" /proc >/dev/null; then
+  ok "fed_io_probe_dir_for picks a writable directory on the target's own filesystem and refuses one on another filesystem"
+else
+  bad "fed_io_probe_dir_for chose '$_pd' for $GAP_WORK/ro-target, or accepted /proc for $GAP_WORK"
+fi
+chmod 755 "$GAP_WORK/ro-target"
+unset -f drv_applog drv_sidecar_log drv_exec fed_discover_sidecar_os _gap_iso _ioh _iop
+unset B B2 _gap_now GAP_LOG _io_out _io_msg _io_cases _io_want _r1 _r2 _r3 _r4 _r5 _r6 _pd
 rm -rf "$GAP_WORK"
 
 # ── fed_diagnose_unmerged (WI-6209) ────────────────────────────────────────
