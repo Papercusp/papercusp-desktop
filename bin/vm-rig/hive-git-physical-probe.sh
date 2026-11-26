@@ -426,11 +426,12 @@ preserve_failed_run_diagnostics() {
   local exit_status="$1"
   [ -n "$failure_diagnostics_out" ] || return 0
 
-  node - "$run_dir" "$failure_diagnostics_out" "$exit_status" <<'NODE'
+  node - "$run_dir" "$failure_diagnostics_out" "$exit_status" "$HERE/../lib/rig-evidence-redaction.cjs" <<'NODE'
 const fs = require('node:fs');
 const path = require('node:path');
 
-const [sourceRoot, destinationRoot, rawExitStatus] = process.argv.slice(2);
+const [sourceRoot, destinationRoot, rawExitStatus, redactionModule] = process.argv.slice(2);
+const { sanitize, sanitizeText } = require(redactionModule);
 const perFileLimitBytes = 256 * 1024;
 const totalLimitBytes = 1024 * 1024;
 // Which files are banked is DERIVED from the run tree, never hand-listed. A
@@ -471,25 +472,6 @@ const phaseFiles = (phase) => {
   return out.sort(byPriority);
 };
 const allowed = ['failure.err', ...phaseDirs.flatMap(phaseFiles)];
-const sensitiveKey = /(authorization|cookie|credential|password|secret|token|private.?key)/i;
-const sanitizeText = (value) => value
-  .replace(
-    /-----BEGIN [^-\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\n]*PRIVATE KEY-----/g,
-    '[REDACTED PRIVATE KEY]',
-  )
-  .replace(/\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})\b/g, '[REDACTED TOKEN]')
-  .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer [REDACTED]')
-  .replace(/([a-z][a-z0-9+.-]*:\/\/[^:\s/@]+:)[^@\s/]+@/gi, '$1[REDACTED]@');
-const sanitize = (value, key = '') => {
-  if (key && sensitiveKey.test(key)) return '[REDACTED]';
-  if (typeof value === 'string') return sanitizeText(value);
-  if (Array.isArray(value)) return value.map((entry) => sanitize(entry));
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([childKey, child]) => [childKey, sanitize(child, childKey)]));
-  }
-  return value;
-};
-
 const temporaryRoot = fs.mkdtempSync(`${destinationRoot}.tmp.`);
 fs.chmodSync(temporaryRoot, 0o700);
 const included = [];

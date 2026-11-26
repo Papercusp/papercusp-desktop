@@ -1266,48 +1266,40 @@ print(cr.get("memberSlug") or "")' 2>/dev/null)"
   [ -n "$RIG_HIVE_PUBKEY" ] || echo "⚠ $owner surfaced NO hivePubkey — joiners will skip identity-materialize (no re-key → no federation)."
 }
 
-# join-hive member-slug reader (first ok member's slug).
-rig_join_member_slug() {
-  printf '%s' "$1" | python3 -c 'import json,sys
-d=json.load(sys.stdin)
-ms=[m for m in d.get("members",[]) if m.get("ok") and m.get("slug")]
-print(ms[0]["slug"] if ms else "")' 2>/dev/null
-}
-
 # rig_join_hive <inst> — JOIN <inst> to the published hive via /api/discovery/join-pot
 # (joinHiveAsView: boots the member substrate AND re-keys it onto the owner's
 # hive-pubkey topic — EI-681). Sets FRAME_MEMBER_SLUG[$inst]. hivePubkey is passed
 # EXPLICITLY (a joiner's local discovery is empty). Requires rig_owner_publish_hive.
 rig_join_hive() {
-  local inst="$1" resp slug try
+  local inst="$1" response_file result slug try
   [ -n "${RIG_HIVE_ID:-}" ] || { echo "FATAL: no hive published — call rig_owner_publish_hive first" >&2; return 1; }
+  FRAME_MEMBER_SLUG[$inst]=''
+  response_file="$(mktemp "${RIG_WORK:-${TMPDIR:-/tmp}}/join-response.XXXXXX")" || return 1
   fed_log "[$inst] JOIN hive via /api/discovery/join-pot (hiveId=$RIG_HIVE_ID)"
   # 2 attempts with a reconnect probe between: an EMPTY resp means the SSH leg
   # died (transient flap — hit twice on 2026-07-01), not that the API refused.
   # Safe to retry: re-join is idempotent (existing view reused, members skipped,
   # owner self-join is a self_hive no-op).
   for try in 1 2; do
-    resp="$(drv_exec "$inst" <<EOF
+    drv_exec "$inst" >"$response_file" <<EOF
 curl -s -m 610 -X POST http://127.0.0.1:${FED_SC[$inst]}/api/discovery/join-pot -H 'content-type: application/json' -d '{"potId":"$RIG_HIVE_ID","hivePubkey":"$RIG_HIVE_PUBKEY","memberLinks":["$RIG_HIVE_LINK"]}'
 EOF
-)"
-    [ -n "$resp" ] && break
+    [ -s "$response_file" ] && break
     [ "$try" = 1 ] && { echo "  ⚠ $inst join-hive got an empty response (ssh flap?) — re-probing + retrying once"; rig_ssh_wait "${FRAME_IP[$inst]}" 24 || break; }
   done
-  slug="$(rig_join_member_slug "$resp")"
-  # WI-1422 self-echo guard: the OWNER's self-join is now a NO-OP
-  # ({ok:true, self_hive:true, members:[]}) — the owner's member harness was
-  # already created by from-repo. Take its slug from the publish response.
-  if [ -z "$slug" ] && printf '%s' "$resp" | grep -q '"self_hive":true'; then
-    slug="${RIG_OWNER_MEMBER_SLUG:-}"
-    [ -n "$slug" ] && echo "✓ $inst is the hive OWNER (self-join no-op; member=$slug)"
+  if ! result="$(node "$(dirname "${BASH_SOURCE[0]}")/rig-join-result.cjs" \
+      "$inst" "${RIG_SLUG:-rig}" "$RIG_BANK_DIR" "${RIG_OWNER_MEMBER_SLUG:-}" <"$response_file")"; then
+    rm -- "$response_file"
+    return 1
   fi
+  rm -- "$response_file"
+  slug="${result#*:}"
   FRAME_MEMBER_SLUG[$inst]="$slug"
-  if printf '%s' "$resp" | grep -q '"ok":true' && [ -n "$slug" ]; then
-    printf '%s' "$resp" | grep -q '"self_hive":true' || echo "✓ $inst joined hive (member=$slug)"
-    return 0
+  if [[ "$result" == owner:* ]]; then
+    echo "✓ $inst is the hive OWNER (self-join no-op; member=$slug)"
+  else
+    echo "✓ $inst joined hive (member=$slug)"
   fi
-  echo "✗ $inst join-pot failed: $(printf '%s' "$resp" | head -c 300)"; return 1
 }
 
 # rig_join_all <owner-inst> — join every NON-owner frame to the hive. The owner
