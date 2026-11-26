@@ -358,17 +358,27 @@ poll() { local ty="$1" t="$2" nid; case "$t" in ba) nid=2;; ab) nid=3;; *) nid=1
   esac; }
 tbl() { case "$1" in features)echo harness_features_consolidated;;conversations)echo coord_conversations;;messages)echo coord_event_log;;threads)echo coord_threads;;thread-posts)echo coord_thread_posts;;plans)echo harness_plans;;plan-parts)echo harness_plan_parts;;item-assignments)echo plan_item_assignments;;presence)echo shared_presence;;hive-settings)echo pot_settings;;hive-members)echo pot_members;;esac; }
 
+# observe: on a miss, report what the destination actually holds for the key. It runs
+# the poll's own SELECT with the origin predicate removed, so "absent" means the row
+# never landed and any other value is the origin of a row that landed but that the
+# arrival poll does not accept. A failed query reports "unmeasured", never "absent"
+# (WI-6554700010070619). '%' is stripped because MATRIX is later used as a printf format.
+observe() { local dst="$1" ty="$2" t="$3" sql out
+  sql="$(poll "$ty" "$t" | sed -E "s/ AND origin( IN \\([^)]*\\)|='remote')//")"
+  if ! out="$(psql "$(dsn "$dst")" -tA -c "$sql" 2>/dev/null)"; then echo unmeasured; return 0; fi
+  out="$(printf '%s' "$out" | tr -d '[:space:]%')"; echo "${out:-absent}"; }
+
 MATRIX=""
 write_all() { local src="$1" ws="$2" t="$3" ty; for ty in $TYPES; do
   psql "$(dsn "$src")" -tA -c "$(ins "$ty" "$ws" "$t")" >/dev/null 2>"$WORK/ins.err" || echo "  ⚠ $ty $src write SETUP-FAIL: $(head -1 "$WORK/ins.err"|head -c 80)"; done; }
-check_all() { local dst="$1" t="$2" phase="$3" src="$4" ty row cap tries=24 i; for ty in $TYPES; do
+check_all() { local dst="$1" t="$2" phase="$3" src="$4" ty row cap tries=24 i seen; for ty in $TYPES; do
   # undrained/total: a growing undrained count = the capture landed in a scope
   # with NO drain (wrong workspace_id / unbooted harness — the WI-971 class);
   # 0/N = captured+drained, so a miss is receive-side (latency or apply).
   cap="$(q "$src" "SELECT count(*) FILTER (WHERE drained_at IS NULL) || '/' || count(*) FROM harness_shared.substrate_outbox WHERE table_name='$(tbl "$ty")';")"
   row=""; for i in $(seq 1 $tries); do row="$(psql "$(dsn "$dst")" -tA -c "$(poll "$ty" "$t")" 2>/dev/null | tr -d '[:space:]')"; [ -n "$row" ] && break; sleep 3; done
   if [ -n "$row" ]; then printf '  ✓ %-16s %s %s=%s\n' "$ty" "$phase" "$row" "ok"; MATRIX+="| $ty | $phase | PASS ($row) |\n"
-  else printf '  ✗ %-16s %s NEVER crossed (src outbox=%s)\n' "$ty" "$phase" "$cap"; MATRIX+="| $ty | $phase | FAIL (outbox=$cap) |\n"; fi; done; }
+  else seen="$(observe "$dst" "$ty" "$t")"; printf '  ✗ %-16s %s NEVER crossed (src outbox=%s; dst row=%s)\n' "$ty" "$phase" "$cap" "$seen"; MATRIX+="| $ty | $phase | FAIL (outbox=$cap; dst=$seen) |\n"; fi; done; }
 
 # ── 2. seed pre-existing content on A (for the backfill test) ───────────────────
 log "A: SEED pre-existing content (one row per type, BEFORE B joins)"; write_all a "$WS_A" seed
