@@ -256,7 +256,43 @@ else
   echo "· SKIP_INVITE set — single-hive run (isolating the 2nd-hive variable)"
 fi
 
-WS_A="$(q a "SELECT DISTINCT workspace_id FROM harness_shared.harness_features_consolidated LIMIT 1;")"; [ -z "$WS_A" ] && WS_A=default
+# pick_single_workspace <side> <account> <candidates> — EI-29800662001393491.
+# Sets PICKED_WS when exactly one workspace qualifies. Otherwise it prints every
+# candidate and returns 1: a Pot + membership pair that resolves to zero or to
+# several workspaces is a fixture fault to report, never a silent pick.
+pick_single_workspace() {
+  local side="$1" account="$2" candidates="$3" n
+  PICKED_WS=""
+  n="$(printf '%s\n' "$candidates" | grep -c .)"
+  if [ "$n" -eq 1 ]; then
+    PICKED_WS="$(printf '%s\n' "$candidates" | grep -m1 .)"
+    return 0
+  fi
+  echo "FATAL: $side's Pot '$HIVE_SLUG' + account '$account' membership resolves to $n workspace(s): [$(printf '%s\n' "$candidates" | grep . | paste -sd, -)]"
+  return 1
+}
+# EI-29800662001393491: A writes into the workspace of the Pot it just created,
+# joined to A's OWN membership, the same relational pair WI-38136 uses for B after
+# its join. The old selector read harness_features_consolidated (empty on a fresh
+# frame) and fell back to 'default', while the created Pot and its members lived in
+# papercusp-workspace on the 2026-11-25 packaged runs. Every A-sourced row then
+# landed outside the Pot: hive-members hit pot_members_pot_fkey, and the other nine
+# types were captured into a scope B never receives, so every A→B backfill and
+# incremental row read NEVER crossed.
+WS_A_CANDIDATES="$(fed_capture_nonempty_with_retry \
+  "${MEMBERSHIP_RETRIES:-40}" "${MEMBERSHIP_RETRY_DELAY_SEC:-3}" -- q a "
+  SELECT DISTINCT m.workspace_id
+  FROM harness_shared.pot_members m
+  JOIN harness_shared.pots p
+    ON p.workspace_id = m.workspace_id
+   AND p.canonical_pot_home_slug = m.pot_home_slug
+  WHERE m.pot_home_slug = '$HIVE_SLUG'
+    AND lower(m.github_username) = lower('$P_A_USER')
+  ORDER BY 1;")" || true
+pick_single_workspace A "$P_A_USER" "$WS_A_CANDIDATES" || exit 6
+WS_A="$PICKED_WS"
+# B has not joined yet, so it has no membership to resolve. Its write workspace is
+# bound after the join below (WI-38136); this pre-join read is only logged.
 WS_B="$(q b "SELECT DISTINCT workspace_id FROM harness_shared.harness_registry LIMIT 1;")"; [ -z "$WS_B" ] && WS_B=default
 echo "  member=$SLUG hiveHome=$HIVE_SLUG WS_A=$WS_A WS_B=$WS_B"
 
@@ -288,7 +324,7 @@ TYPES="${MATRIX_TYPES:-features conversations messages threads thread-posts plan
 # per tag) so every phase within a run gets a distinct numeric id.
 ins() { local ty="$1" ws="$2" t="$3" nid; case "$t" in ba) nid=2;; ab) nid=3;; *) nid=1;; esac
   case "$ty" in
-   features) echo "INSERT INTO harness_shared.harness_features_consolidated (harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES ('$SLUG','F-MX-$t','mx','x','todo',0,'local',${NONCE}000,${NONCE}000,${NONCE}000);";;
+   features) echo "INSERT INTO harness_shared.harness_features_consolidated (workspace_id,harness_slug,feature_id,title,summary,status,attempts,origin,ts,created_ts,updated_ts) VALUES ('$ws','$SLUG','F-MX-$t','mx','x','todo',0,'local',${NONCE}000,${NONCE}000,${NONCE}000);";;
    conversations) echo "INSERT INTO harness_shared.coord_conversations (workspace_id,id,kind,scope,harness_slug,asker_id,title,body,state,created_at,updated_at,origin) VALUES ('$ws','conv-MX-$t','discussion','harness','$SLUG','tester','mx','b-$t','open',now(),now(),'local');";;
    messages) echo "INSERT INTO harness_shared.coord_event_log (workspace_id,surface,writer_key,msg_id,body,harness_slug,ts,origin) VALUES ('$ws','messages','tester','msg-MX-$t','{\"summary\":\"mx $t\",\"to\":[\"x\"]}'::jsonb,'$SLUG',now(),'local');";;
    threads) echo "INSERT INTO harness_shared.coord_threads (workspace_id,thread_id,parent_kind,parent_ref,title,created_by,created_at,post_count,harness_slug,origin) VALUES ('$ws','thr-MX-$t','conversation','conv-MX-$t','mx','tester',now(),0,'$SLUG','local');";;
@@ -380,15 +416,14 @@ JOIN_MS="$(( $(date +%s) * 1000 ))"
 # relational pair instead: the joined Pot row plus THIS B account's membership.
 WS_B_JOINED="$(fed_capture_nonempty_with_retry \
   "${MEMBERSHIP_RETRIES:-40}" "${MEMBERSHIP_RETRY_DELAY_SEC:-3}" -- q b "
-  SELECT m.workspace_id
+  SELECT DISTINCT m.workspace_id
   FROM harness_shared.pot_members m
   JOIN harness_shared.pots p
     ON p.workspace_id = m.workspace_id
    AND p.canonical_pot_home_slug = m.pot_home_slug
   WHERE m.pot_home_slug = '$HIVE_SLUG'
     AND lower(m.github_username) = lower('$P_B_USER')
-  ORDER BY m.workspace_id
-  LIMIT 1;")" || true
+  ORDER BY 1;")" || true
 # WI-10003237: how long the membership projection took, measured from the join stamp.
 # The FATAL is intermittent, so the PASS runs carry the latency distribution — a PASS
 # landing near the 40x3s bound is evidence for the projection-latency reading.
@@ -421,6 +456,9 @@ if [ -z "$WS_B_JOINED" ]; then
   cat "$WORK/membership-fatal.diag" 2>/dev/null || true
   exit 6
 fi
+# EI-29800662001393491: several candidate workspaces is a FATAL, never a LIMIT 1 pick.
+pick_single_workspace B "$P_B_USER" "$WS_B_JOINED" || exit 6
+WS_B_JOINED="$PICKED_WS"
 echo "  membership-persistence=PASS workspace='$WS_B_JOINED' waited_s=$MEMB_WAITED_S bound_s=$MEMB_BOUND_S (bounded asynchronous projection wait)"
 if [ -n "$WS_B_JOINED" ] && [ "$WS_B_JOINED" != "$WS_B" ]; then
   echo "  WS_B re-derived post-join: '$WS_B' → '$WS_B_JOINED' (Pot '$HIVE_SLUG' + B member '$P_B_USER' persisted there)"
