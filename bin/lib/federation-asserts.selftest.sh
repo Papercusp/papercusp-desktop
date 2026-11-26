@@ -1139,6 +1139,61 @@ if grep -q 'FROM harness_shared.pot_members m' <<<"$ws_b_joined_block" \
 else
   bad "content-matrix post-join workspace selector is no longer bound to the persisted Pot + B account; duplicate registry projections can false-RED B→A (WI-38136)"
 fi
+if grep -q 'SELECT DISTINCT m.workspace_id' <<<"$ws_b_joined_block" \
+  && ! grep -q 'LIMIT 1;' <<<"$ws_b_joined_block" \
+  && grep -q 'pick_single_workspace B "\$P_B_USER" "\$WS_B_JOINED" || exit 6' "$matrix_file"; then
+  ok "content-matrix B selector lists every candidate workspace and refuses ambiguity instead of LIMIT 1 (EI-29800662001393491)"
+else
+  bad "content-matrix B selector can silently pick one of several candidate workspaces again (EI-29800662001393491)"
+fi
+
+# EI-29800662001393491: the same binding for A. The pre-join selector read
+# harness_features_consolidated (empty on a fresh frame) and fell back to 'default'
+# while the created Pot lived in papercusp-workspace, so every A-sourced row landed
+# outside the Pot (pot_members_pot_fkey plus ten NEVER-crossed A→B rows). A must
+# resolve from its created Pot + its OWN membership, and the feature write must carry
+# that workspace instead of leaving fill_ws_features_trg to pick a projects row.
+ws_a_block="$(sed -n '/^WS_A_CANDIDATES=/,/^WS_A=/p' "$matrix_file" 2>/dev/null || true)"
+if grep -q 'FROM harness_shared.pot_members m' <<<"$ws_a_block" \
+  && grep -q 'JOIN harness_shared.pots p' <<<"$ws_a_block" \
+  && grep -q "p.canonical_pot_home_slug = m.pot_home_slug" <<<"$ws_a_block" \
+  && grep -q "lower(m.github_username) = lower('\$P_A_USER')" <<<"$ws_a_block" \
+  && grep -q 'pick_single_workspace A "\$P_A_USER" "\$WS_A_CANDIDATES" || exit 6' <<<"$ws_a_block" \
+  && ! grep -qE 'harness_features_consolidated|LIMIT 1;' <<<"$ws_a_block" \
+  && ! grep -qE '\[ -z "\$WS_A" \] && WS_A=' "$matrix_file"; then
+  ok "content-matrix resolves A's write workspace from its created Pot + actual A membership, with no 'default' fallback (EI-29800662001393491)"
+else
+  bad "content-matrix A write workspace is no longer bound to the created Pot + A account, or regained a 'default' fallback; A→B rows land outside the Pot (EI-29800662001393491)"
+fi
+features_ins="$(grep -m1 '^ *features) echo "INSERT INTO harness_shared.harness_features_consolidated' "$matrix_file" || true)"
+if grep -q '(workspace_id,harness_slug,feature_id,' <<<"$features_ins" \
+  && grep -q "VALUES ('\$ws','\$SLUG','F-MX-" <<<"$features_ins"; then
+  ok "content-matrix feature write supplies the verified workspace instead of leaving it to fill_ws_features_trg (EI-29800662001393491)"
+else
+  bad "content-matrix feature INSERT omits the verified workspace_id; the trigger fallback can place it outside the Pot (EI-29800662001393491)"
+fi
+# Behavioural: exactly one candidate is accepted; zero or several FATAL and name them.
+selftest_pick_single_workspace() {
+  local HIVE_SLUG=probe-pot PICKED_WS="" one zero_out zero_rc many_out many_rc
+  eval "$(sed -n '/^pick_single_workspace() {/,/^}/p' "$matrix_file")"
+  if ! declare -F pick_single_workspace >/dev/null; then
+    bad "content-matrix lost pick_single_workspace; ambiguous Pot memberships can be silently picked again (EI-29800662001393491)"
+    return
+  fi
+  one="$(pick_single_workspace A acct 'papercusp-workspace' >/dev/null && printf '%s' "$PICKED_WS")"
+  zero_out="$(pick_single_workspace A acct '')"; zero_rc=$?
+  many_out="$(pick_single_workspace B acct "$(printf 'default\npapercusp-workspace')")"; many_rc=$?
+  if [ "$one" = papercusp-workspace ] \
+    && [ "$zero_rc" -ne 0 ] && grep -q "resolves to 0 workspace(s): \[\]" <<<"$zero_out" \
+    && [ "$many_rc" -ne 0 ] && grep -q "B's Pot 'probe-pot' + account 'acct' membership resolves to 2 workspace(s): \[default,papercusp-workspace\]" <<<"$many_out"; then
+    ok "content-matrix workspace picker accepts exactly one candidate and FATALs on zero or several, naming them (EI-29800662001393491)"
+  else
+    bad "content-matrix workspace picker silently picks or drops candidates (one='$one' zero_rc=$zero_rc many_rc=$many_rc many_out='$many_out')"
+  fi
+  unset -f pick_single_workspace
+}
+selftest_pick_single_workspace
+unset -f selftest_pick_single_workspace
 
 # 8b) RED-EI dedup guard (2026-07-09, EI-8385-class fix): a prior version filed a BRAND
 # NEW work_items:create bug on EVERY hourly RED run — no dedup key, and the title embeds a
