@@ -1025,7 +1025,7 @@ fi
 # by line number — not to the preflight's wording, so a rewritten but correctly-placed preflight
 # passes and one relocated below provisioning fails.
 lm_file="$DIR/../local-matrix.sh"
-pf_call_ln="$(grep -n 'preflight_host_preconditions || exit 1' "$lm_file" | head -1 | cut -d: -f1)"
+pf_call_ln="$(grep -n 'preflight_host_preconditions; _pc_rc=\$?' "$lm_file" | head -1 | cut -d: -f1)"
 first_state_ln=""
 for _pat in 'docker network create' 'docker build -q -t "\$IMAGE_TAG"' 'docker run -d --name "\$CN_A"'; do
   _ln="$(grep -n "$_pat" "$lm_file" | head -1 | cut -d: -f1)"
@@ -1067,7 +1067,7 @@ if [ -n "$io_call_ln" ] && [ -n "$first_state_ln" ] && [ "$io_call_ln" -lt "$fir
 else
   bad "local-matrix.sh's host-IO preflight is missing, mis-ordered (call line '$io_call_ln' vs first state-creating step '$first_state_ln') or no longer samples the docker root through fed_io_preflight with exit 75; a slow-fsync host will again burn a provisioned run on a SLOW_IO boot (WI-6554700010071459)"
 fi
-gate_io_blk="$(sed -n '/elif \[ "\$LOCAL_MATRIX_RC" = 75 \]/,/^    else$/p' "$gate_file")"
+gate_io_blk="$(sed -n '/elif \[ "\$LOCAL_MATRIX_RC" = 75 \]/,/^    el/p' "$gate_file")"
 case "$gate_io_blk" in
   *'MATRIXFULL_RES="SKIPPED-HOST-IO"'*'MATRIX_SKIP_REASON='*)
     case "$gate_io_blk" in
@@ -1082,6 +1082,63 @@ else
   bad "live-federation-gate's local-matrix host-IO refusal mapping is '$_gate_io'; a preflight refusal would be scored as a decided FAIL and reset the staleness clock (WI-6554700010071459, EI-18657324526667507)"
 fi
 unset io_call_ln io_body gate_io_blk _gate_io
+# WI-6554700010071473: a host-PRECONDITION refusal also runs zero scenarios, so it must reach
+# the gate as a window that did not decide, never as a FAIL verdict that resets the staleness
+# clock. local-matrix.sh exits 78 (EX_CONFIG) with one FED_HOST_PRECONDITIONS marker line and
+# its call site propagates that rc; the gate maps rc 78 + marker to SKIPPED-HOST-PRECONDITIONS.
+# (a) Behavioural: run the REAL function body three ways — everything missing, only the gh
+#     tokens missing (a stub gh), and everything present (the positive control).
+pc_tmp="$(mktemp -d)"
+mkdir -p "$pc_tmp/bin" "$pc_tmp/nogh"
+cat >"$pc_tmp/bin/gh" <<'GHSTUB'
+#!/bin/sh
+case "$1 $2" in
+  "auth token") [ -n "${STUB_GH_NO_TOKEN:-}" ] && exit 1; echo "tok-$4" ;;
+  "api user") echo "${GH_TOKEN#tok-}" ;;
+  *) exit 2 ;;
+esac
+GHSTUB
+printf '#!/bin/sh\n' >"$pc_tmp/node"
+chmod +x "$pc_tmp/bin/gh" "$pc_tmp/node"
+: >"$pc_tmp/ok.deb"
+pc_run() { # $1 PATH, $2 sidecar node, $3 --deb, $4 non-empty = the stub gh mints no token
+  ( log() { :; }
+    REUSE=0 STATE_FILE="$pc_tmp/none" NET=pc-selftest DESKTOP_DIR="$pc_tmp" FRAMES=2
+    P_A_USER=alpha P_B_USER=beta PCUSP_LOCAL_RIG_SIDECAR_NODE="$2" DEB="$3"
+    if [ -n "${4:-}" ]; then export STUB_GH_NO_TOKEN=1; else unset STUB_GH_NO_TOKEN; fi
+    eval "$pf_body"
+    PATH="$1"
+    preflight_host_preconditions 2>/dev/null; echo "rc=$?" )
+}
+_pc_all="$(pc_run "$pc_tmp/nogh" "$pc_tmp/no-node" "$pc_tmp/no.deb" "" | tr '\n' ' ')"
+_pc_gh="$(pc_run "$pc_tmp/bin" "$pc_tmp/node" "$pc_tmp/ok.deb" 1 | tr '\n' ' ')"
+_pc_ok="$(pc_run "$pc_tmp/bin" "$pc_tmp/node" "$pc_tmp/ok.deb" "" | tr '\n' ' ')"
+rm -rf "$pc_tmp"
+if [ "$_pc_all" = 'FED_HOST_PRECONDITIONS verdict=UNMET missing=3 reasons="sidecar-node deb gh-identity" rc=78 ' ] \
+   && [ "$_pc_gh" = 'FED_HOST_PRECONDITIONS verdict=UNMET missing=2 reasons="gh-identity" rc=78 ' ] \
+   && [ "$_pc_ok" = 'rc=0 ' ]; then
+  ok "local-matrix.sh's host preflight refuses with exit 78 and one FED_HOST_PRECONDITIONS marker naming the unmet classes, and passes when all are present (WI-6554700010071473)"
+else
+  bad "local-matrix.sh's host-precondition refusal no longer exits 78 with its marker (all-missing: '$_pc_all'; gh-only: '$_pc_gh'; positive control: '$_pc_ok'); the gate would score a host that cannot run the matrix as a decided FAIL (WI-6554700010071473)"
+fi
+# (b) Structural: the call site propagates the function's rc, and the gate maps rc 78 + marker
+#     to SKIPPED-HOST-PRECONDITIONS with a reason and WITHOUT stamping the verdict clock.
+gate_pc_blk="$(sed -n '/elif \[ "\$LOCAL_MATRIX_RC" = 78 \]/,/^    el/p' "$gate_file")"
+case "$gate_pc_blk" in
+  *'FED_HOST_PRECONDITIONS verdict=UNMET'*'MATRIXFULL_RES="SKIPPED-HOST-PRECONDITIONS"'*'MATRIX_SKIP_REASON='*)
+    case "$gate_pc_blk" in
+      *'>"$STATE_DIR/last-matrix-verdict"'*) _gate_pc=stamps-verdict ;;
+      *) _gate_pc=ok ;;
+    esac ;;
+  *) _gate_pc=missing ;;
+esac
+_pc_call="$( [ -n "$pf_call_ln" ] && sed -n "${pf_call_ln}p" "$lm_file" )"
+if [ "$_gate_pc" = ok ] && [[ "$_pc_call" == *'|| exit "$_pc_rc"'* ]]; then
+  ok "live-federation-gate records a local-matrix host-precondition refusal (exit 78 + FED_HOST_PRECONDITIONS marker) as SKIPPED-HOST-PRECONDITIONS with a reason, without stamping the verdict clock (WI-6554700010071473)"
+else
+  bad "the host-precondition refusal path is broken: gate mapping '$_gate_pc', local-matrix call site '$_pc_call'; a host that cannot run the matrix would be scored as a decided FAIL and reset the staleness clock (WI-6554700010071473, EI-18657324526667507)"
+fi
+unset pc_tmp _pc_all _pc_gh _pc_ok gate_pc_blk _gate_pc _pc_call
 # The preflight probes a gh identity by name, so its default must track the one the run will
 # actually register; a silent drift would validate a user nobody uses and skip the one that fails.
 lm_b_default="$(grep -o 'P_B_USER:-[A-Za-z0-9_-]*' "$lm_file" | head -1)"

@@ -524,7 +524,7 @@ fi
 # by line number, so moving this below provisioning fails the selftest rather
 # than silently restoring the bug.
 preflight_host_preconditions() {
-  local missing=0 u seen="" tok actual_login dht_reused=0 common_sh deb_out deb_rc
+  local missing=0 u seen="" tok actual_login dht_reused=0 common_sh deb_out deb_rc reasons="" m0=0
   local sidecar_node="${PCUSP_LOCAL_RIG_SIDECAR_NODE:-$DESKTOP_DIR/src-tauri/sidecar/bin/node}"
 
   # (1) sidecar node binary — needed to start the containerized testnet DHT. A
@@ -539,6 +539,8 @@ preflight_host_preconditions() {
     echo "  build it once: bin/build-desktop-sidecar.sh" >&2
     missing=$((missing + 1))
   fi
+
+  [ "$missing" = "$m0" ] || reasons="$reasons sidecar-node"; m0=$missing
 
   # (2) the .deb the frames install. An explicit --deb= is the caller's own
   #     choice and only has to EXIST (default_deb's staleness guard deliberately
@@ -567,6 +569,8 @@ preflight_host_preconditions() {
       missing=$((missing + 1))
     fi
   fi
+
+  [ "$missing" = "$m0" ] || reasons="$reasons deb"; m0=$missing
 
   # (3) a gh token for EVERY identity this run will register. Each scenario calls
   #     rig_set_identity a "$P_A_USER" / b "$P_B_USER" (and c "$P_C_USER" on a
@@ -602,10 +606,18 @@ preflight_host_preconditions() {
     done
   fi
 
+  [ "$missing" = "$m0" ] || reasons="$reasons gh-identity"
+
   if [ "$missing" != 0 ]; then
     echo "FATAL(preflight): $missing host precondition(s) unmet — refusing to build the frame image, provision containers or evict cores for a run that cannot reach a scenario (EI-20578660332729593)." >&2
     echo "  PCUSP_RIG_SKIP_PREFLIGHT=1 proceeds anyway — i.e. chooses to discover the miss after the cores are gone." >&2
-    return 1
+    # WI-6554700010071473: a refusal here ran ZERO scenarios, so it must not read as a
+    # matrix that ran and failed. It exits 78 (EX_CONFIG, sysexits.h) and prints one
+    # marker line on stdout; live-federation-gate.sh needs both to record the window as
+    # SKIPPED-HOST-PRECONDITIONS (did not decide) instead of a FAIL verdict. `reasons`
+    # names the unmet classes; the FATAL(preflight) lines above carry the detail.
+    printf 'FED_HOST_PRECONDITIONS verdict=UNMET missing=%s reasons="%s"\n' "$missing" "${reasons# }"
+    return 78
   fi
   log "preflight: host preconditions OK (sidecar node, .deb, authenticated gh identities)"
   return 0
@@ -662,7 +674,7 @@ preflight_host_io() {
 if [ "${PCUSP_RIG_SKIP_PREFLIGHT:-0}" = 1 ]; then
   log "WARN: PCUSP_RIG_SKIP_PREFLIGHT=1 — host preconditions and host IO health NOT checked; a missing one will now surface AFTER provisioning and core eviction"
 else
-  preflight_host_preconditions || exit 1
+  preflight_host_preconditions; _pc_rc=$?; [ "$_pc_rc" = 0 ] || exit "$_pc_rc"
   if [ "${PCUSP_RIG_IO_PREFLIGHT:-1}" = 0 ]; then
     log "WARN: PCUSP_RIG_IO_PREFLIGHT=0 — host IO health NOT checked; a slow docker-root filesystem will surface as a frame SLOW_IO boot failure after provisioning"
   else

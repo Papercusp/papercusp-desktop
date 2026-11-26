@@ -2818,6 +2818,18 @@ else
       # mistaken for this one.
       MATRIXFULL_RES="SKIPPED-HOST-IO"
       MATRIX_SKIP_REASON="local-matrix refused in its host-IO preflight, before provisioning any frame: $(grep '^FED_IO_PREFLIGHT verdict=UNHEALTHY ' "$WORK/local-matrix.out" | tail -1 | cut -c1-400)"
+    elif [ "$LOCAL_MATRIX_RC" = 78 ] && grep -q '^FED_HOST_PRECONDITIONS verdict=UNMET ' "$WORK/local-matrix.out"; then
+      # WI-6554700010071473: local-matrix.sh refused in its host-precondition preflight (a
+      # sidecar node binary, the .deb or an authenticated gh identity is missing) BEFORE
+      # building or provisioning anything. Zero scenarios ran, so this is a configuration gap,
+      # not a matrix regression: the window DID NOT DECIDE and the verdict clock is not stamped.
+      # A gap that persists (a missing token or .deb does not clear on retry) therefore trips
+      # check_matrix_staleness after MATRIX_STALE_H, whose EI points at this journal line;
+      # every window until then carries the reason on the verdict line (matrix_skip_suffix).
+      # Exit code AND marker are both required, as for SKIPPED-HOST-IO. The quoted detail is a
+      # display preview; the full FATAL(preflight) lines stay in $WORK/local-matrix.out.
+      MATRIXFULL_RES="SKIPPED-HOST-PRECONDITIONS"
+      MATRIX_SKIP_REASON="local-matrix refused in its host-precondition preflight, before provisioning any frame: $(grep '^FED_HOST_PRECONDITIONS verdict=UNMET ' "$WORK/local-matrix.out" | tail -1 | cut -c1-200); $(grep '^FATAL(preflight): ' "$WORK/local-matrix.out" | sed -n '1,3p' | cut -c1-160 | paste -sd'|' -) (full list: $WORK/local-matrix.out)"
     else
       MATRIXFULL_RES="FAIL"
       # WI-2381 carve-out RETIRED 2026-07-18 [self, WI-5137/P-402]: the seat_offer/
