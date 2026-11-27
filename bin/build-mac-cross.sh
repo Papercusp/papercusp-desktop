@@ -542,7 +542,7 @@ stage_update_helper() { # $1=helper binary $2=app
   [[ -n "$MAC_CERT_P12" && -f "$MAC_CERT_P12" && ! -L "$MAC_CERT_P12" ]] \
     || fail "protected update helper requires an Apple Developer ID Application certificate; ad-hoc signing is unavailable"
   [[ -f "$binary" && ! -L "$binary" ]] || fail "protected update helper binary missing or aliased: $binary"
-  file -b "$binary" | grep -q 'Mach-O' || fail "protected update helper is not Mach-O: $binary"
+  file -b "$binary" | grep -c 'Mach-O' >/dev/null || fail "protected update helper is not Mach-O: $binary"
   mkdir -p "$(dirname "$helper")" "$OUT_BUNDLE/macos/diagnostics"
   install -m 755 "$binary" "$helper"
   # The maintained signer enforces Apple's Developer ID profile, timestamp and
