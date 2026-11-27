@@ -16,12 +16,10 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
+const { TAURI_VERIFIER_INPUTS: nativeInputs } = require('../../scripts/verifier-source-preflight.mjs');
 
 const VERIFY_SCRIPT = path.resolve(__dirname, '../../scripts/verify-tauri-headless.sh');
 const source = fs.readFileSync(VERIFY_SCRIPT, 'utf8');
-const sourcePreview = fs.readFileSync(path.resolve(__dirname, '../../scripts/source-preview.mjs'), 'utf8');
-const nativeInputsBlock = sourcePreview.match(/export const TAURI_VERIFIER_INPUTS = Object.freeze\(\[([\s\S]*?)\]\);/)?.[1];
-const nativeInputs = [...(nativeInputsBlock || '').matchAll(/'([^']+)'/g)].map(match => match[1]);
 const DEV_OPERATOR_SCRIPT = path.resolve(__dirname, '../bin/dev-operator-ifneeded.sh');
 const devOperatorSource = fs.readFileSync(DEV_OPERATOR_SCRIPT, 'utf8');
 const dreamSource = fs.readFileSync(path.resolve(__dirname, '../../scripts/verify-dream-native.sh'), 'utf8');
@@ -34,7 +32,7 @@ test('desktop Tauri CLI is checked before verifier preparation', () => {
   const desktop = path.join(root, 'papercusp-desktop');
   const emptyPath = path.join(root, 'empty-bin');
   const command = preflight + '\npreflight_desktop_tauri_cli || exit $?\nprintf "PREPARATION_REACHED\\n"\n';
-  const env = { ...process.env, DESKTOP_DIR: desktop, PATH: emptyPath };
+  const env = { DESKTOP_DIR: desktop, PATH: emptyPath };
   try {
     fs.mkdirSync(emptyPath, { recursive: true });
     const missing = spawnSync('/bin/bash', ['-c', command], { encoding: 'utf8', env });
@@ -49,6 +47,14 @@ test('desktop Tauri CLI is checked before verifier preparation', () => {
     const installed = spawnSync('/bin/bash', ['-c', command], { encoding: 'utf8', env });
     assert.equal(installed.status, 0, installed.stderr);
     assert.match(installed.stdout, /PREPARATION_REACHED/);
+
+    const unsupported = spawnSync('/bin/bash', ['-c', command], {
+      encoding: 'utf8',
+      env: { ...env, PAPERCUSP_DEPENDENCY_GENERATION_ROOT: path.join(root, 'generation') },
+    });
+    assert.equal(unsupported.status, 2, unsupported.stderr);
+    assert.match(unsupported.stderr, /VERIFY_TAURI_GENERATION_UNSUPPORTED/);
+    assert.doesNotMatch(unsupported.stdout, /PREPARATION_REACHED/);
 
     const call = source.indexOf('preflight_desktop_tauri_cli || exit $?');
     assert.ok(call < source.indexOf('verifier_run_step native-cargo-capacity'));
@@ -194,7 +200,7 @@ test('pinned dependency preflight rejects a retained source shadow before alloca
       const result = spawnSync('bash', ['-c',
         'node() { printf "INSTALL_PEEK_REACHED\\n"; }\n' + preflight + '\n' +
         'install_in_flight_preflight || exit $?\nprintf "RIG_ALLOCATION_REACHED\\n"\n'],
-      { encoding: 'utf8', env: { ...process.env, REPO_DIR: root, VERIFY_TAURI_SOURCE_REF: 'a'.repeat(40) } });
+      { encoding: 'utf8', env: { PATH: process.env.PATH, REPO_DIR: root, VERIFY_TAURI_SOURCE_REF: 'a'.repeat(40) } });
       assert.equal(result.status, retained ? 2 : 0, result.stderr);
       if (retained) {
         assert.match(result.stderr, /VERIFY_TAURI_DEPENDENCY_DONOR_INVALID/);
