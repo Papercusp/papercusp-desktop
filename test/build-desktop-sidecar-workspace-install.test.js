@@ -1845,12 +1845,16 @@ test('sidecar source union declares every bare runtime import in operator-core',
   // admission-jobs.worker.mjs (admission-offthread.ts, WI-10005223 / WI-10005359).
   // The Codex-home worker follows the same bundled-worker selection. The BM25
   // helper is imported only by integration suites, never the host source graph.
+  // The installed-browser fixture preloads its own TypeScript loader in a test child.
+  const browserFixture = 'packages/operator-core/lib/workspace-host/installed-computer-served-browser.fixture';
+  const browserTestLoader = 'packages/operator-core/lib/workspace-host/installed-computer-runtime-loader.mjs';
   const sourceTreeOnly = new Set([
     'packages/operator-core/lib/sync/hyperbee/snapshot-fold.worker.dev.mjs',
     'packages/operator-core/lib/release/admission-jobs.tsx-worker.mjs',
     'packages/operator-core/lib/role-codex-home.worker.dev.mjs',
     'packages/operator-core/lib/code-intelligence/warm-cochange-index.worker.dev.mjs',
     'packages/operator-core/lib/search/lexical/test-pg/bm25-test-db.ts',
+    browserTestLoader,
   ]);
   for (const relative of sourceTreeOnly) {
     assert.ok(
@@ -1879,6 +1883,10 @@ test('sidecar source union declares every bare runtime import in operator-core',
   const inspectSpecifier = (specifier, file) => {
     if (specifier.startsWith('.')) {
       const resolved = path.relative(repoRoot, path.resolve(path.dirname(file), specifier));
+      if (!file.endsWith('.fixture.ts')) {
+        assert.ok(resolved !== browserTestLoader && resolved.replace(/\.ts$/, '') !== browserFixture,
+          `runtime source must not import the installed-browser test fixture or its loader: ${path.relative(repoRoot, file)}`);
+      }
       assert.notEqual(
         resolved.replace(/\.ts$/, ''),
         'packages/operator-core/lib/search/lexical/test-pg/bm25-test-db',
