@@ -23,16 +23,21 @@ const trap = builder.match(/^trap '[^\n]*' EXIT$/m)[0];
 const failureTrap = builder.match(/^trap '[^\n]*' ERR$/m)[0];
 const resume = builder.slice(builder.indexOf('if [[ -n "${PAPERCUSP_SIDECAR_RESUME_FROM:-}" ]]'), builder.indexOf('# Assembly-only work.'));
 
-function gitFixture(root) {
+function gitFixture(root, files = {}) {
   fs.mkdirSync(root, { recursive: true });
   const git = (args, input) => execFileSync('git', ['-C', root, ...args], {
     encoding: 'utf8', input,
     env: { ...process.env, GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' },
   }).trim();
   git(['init', '-q']);
-  fs.writeFileSync(path.join(root, 'package-lock.json'), '{}\n');
-  const blob = git(['hash-object', '-w', 'package-lock.json']);
-  const tree = git(['mktree'], `100644 blob ${blob}\tpackage-lock.json\n`);
+  const tracked = { 'package-lock.json': '{}\n', ...files };
+  for (const [name, content] of Object.entries(tracked)) {
+    const file = path.join(root, name);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, content);
+  }
+  git(['update-index', '--add', '--', ...Object.keys(tracked)]);
+  const tree = git(['write-tree']);
   const head = git(['commit-tree', tree], 'fixture\n');
   git(['update-ref', 'HEAD', head]);
   git(['read-tree', 'HEAD']);
@@ -679,7 +684,12 @@ test('real resume branch consumes validated failed bytes and bypasses assembly o
 // Run the SHIPPED qualification/publish tail against controlled verifier/audit
 // executables. This checks gate execution and rollback, not merely source order.
 function qualifyResume(f, failGate = '') {
-  const source = gitFixture(path.join(f.root, 'source'));
+  const entry = 'apps/operator/bin/serve.ts';
+  const source = gitFixture(path.join(f.root, 'source'), {
+    [entry]: failGate === 'host-qualification'
+      ? 'console.log("--verify-boot-imports");\n'
+      : fs.readFileSync(path.resolve(bin, '../..', entry)),
+  });
   const here = path.join(f.root, 'producer');
   const target = path.join(f.root, 'desktop');
   const shim = path.join(f.root, 'shims');
@@ -691,13 +701,21 @@ function qualifyResume(f, failGate = '') {
   for (const model of ['harrier-oss-v1-0.6b-ONNX', 'embeddinggemma-300m-ONNX']) {
     fs.mkdirSync(path.join(f.stage, 'node_modules/@huggingface/transformers/models/onnx-community', model), { recursive: true });
   }
+  const memoryPackage = path.join(f.stage, 'node_modules/mem0ai');
+  fs.mkdirSync(memoryPackage, { recursive: true });
+  writeJson(path.join(memoryPackage, 'package.json'), { name: 'mem0ai', exports: { './oss': './oss.mjs' } });
+  fs.writeFileSync(path.join(memoryPackage, 'oss.mjs'), [
+    "import { appendFileSync } from 'node:fs';",
+    "appendFileSync(process.env.GATE_LOG, 'mem0ai/oss\\n');",
+    failGate === 'mem0ai/oss' ? 'export const Memory = null;' : 'export class Memory {}',
+  ].join('\n'));
   const qualificationElf = Buffer.alloc(20);
   qualificationElf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1]);
   qualificationElf.writeUInt16LE(62, 18);
   fs.writeFileSync(path.join(f.stage, 'bin/node'), qualificationElf);
   fs.writeFileSync(path.join(f.stage, 'node_modules/qualification-order.node'), qualificationElf);
   fs.writeFileSync(path.join(shim, 'objdump'), '#!/usr/bin/env bash\necho addon-libraries >> "$GATE_LOG"\necho "NEEDED libc.so.6"\n', { mode: 0o755 });
-  for (const file of ['sidecar-stage-state.js', 'portable-sha256.sh', 'stamp-git-head.sh', 'server-container.mjs', 'host-runtime-closure.sh']) fs.copyFileSync(path.join(bin, 'lib', file), path.join(here, 'lib', file));
+  for (const file of ['sidecar-stage-state.js', 'portable-sha256.sh', 'stamp-git-head.sh', 'server-container.mjs', 'host-runtime-closure.sh', 'host-worker-bundler.sh']) fs.copyFileSync(path.join(bin, 'lib', file), path.join(here, 'lib', file));
   fs.writeFileSync(path.join(here, 'audit-release-bundle.py'), '# fixture gate\n');
   fs.writeFileSync(path.join(shim, 'python3'), '#!/usr/bin/env bash\nprintf "%s\\n" "$2" >> "$GATE_LOG"\n[[ "$2" != "$FAIL_GATE" ]]\n', { mode: 0o755 });
   fs.writeFileSync(path.join(shim, 'grype'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
@@ -713,6 +731,7 @@ function qualifyResume(f, failGate = '') {
   const tail = builder.slice(builder.indexOf('# ── D-043/P-052 immutable runtime-only profile'), builder.indexOf('}  # ── end self-read guard'));
   const result = spawnSync('bash', ['-c', [
     'set -euo pipefail', ...functions, finish,
+    'source "$HERE/lib/host-worker-bundler.sh"',
     '__pc_acquire_sidecar_publish_lock() { echo acquire >> "$GATE_LOG"; }',
     '__pc_release_sidecar_publish_lock() { echo release >> "$GATE_LOG"; }',
     '_sidecar_stage_phase=assembling; _sidecar_published=0; _sidecar_success=0',
@@ -737,7 +756,7 @@ test('resumed assembly executes every current qualification gate before acceptin
   try {
     const run = qualifyResume(f);
     assert.equal(run.result.status, 0, `${run.result.stdout}\n${run.result.stderr}`);
-    for (const gate of ['addon-libraries', '--prune-vm-release', '--audit-vm-release', '--audit-vulnerabilities', 'provenance', '--scan-dir']) assert(run.gates.includes(gate), `missing gate ${gate}`);
+    for (const gate of ['addon-libraries', '--prune-vm-release', '--audit-vm-release', '--audit-vulnerabilities', 'mem0ai/oss', 'provenance', '--scan-dir']) assert(run.gates.includes(gate), `missing gate ${gate}`);
     assert(run.gates.indexOf('addon-libraries') < run.gates.indexOf('--prune-vm-release'));
     assert(run.gates.indexOf('addon-libraries') < run.gates.indexOf('--audit-vulnerabilities'));
     assert.equal(run.gates.filter(gate => gate.startsWith('verify:')).length, 2);
@@ -749,8 +768,8 @@ test('resumed assembly executes every current qualification gate before acceptin
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test('resumed SBOM and final privacy failures stay refused and retain recoverable bytes', () => {
-  for (const gate of ['--audit-vulnerabilities', '--scan-dir']) {
+test('resumed SBOM, memory import and final privacy failures retain recoverable bytes', () => {
+  for (const gate of ['--audit-vulnerabilities', 'mem0ai/oss', '--scan-dir']) {
     const f = fixture();
     try {
       const run = qualifyResume(f, gate);
@@ -763,4 +782,18 @@ test('resumed SBOM and final privacy failures stay refused and retain recoverabl
       assert.equal(receipt.accepted, false);
     } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
   }
+});
+
+test('resumed assembly refuses incomplete host qualification before pruning or publication', () => {
+  const f = fixture();
+  try {
+    const run = qualifyResume(f, 'host-qualification');
+    assert.equal(run.result.status, 1, run.result.stdout + run.result.stderr);
+    assert.match(run.result.stderr, /lacks early final-image qualification seam --verify-boot-imports/);
+    assert.equal(run.gates.includes('--prune-vm-release'), false);
+    assert.equal(fs.readFileSync(path.join(f.finalDir, 'prior'), 'utf8'), 'accepted prior');
+    const failed = fs.readdirSync(f.root).find(name => /^sidecar\.failed-stage\.\d+$/.test(name));
+    assert.ok(failed);
+    assert.equal(validateResume(path.join(f.root, failed), f.identity).accepted, false);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
