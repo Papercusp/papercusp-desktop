@@ -31,6 +31,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 const { makeDesktopTestScratchDirSync } = require('./test-scratch.cjs');
+const { historicalSource } = require('./host-source-fixture.cjs');
 
 const BIN = path.join(__dirname, '..', 'bin');
 const EMITTER = path.join(BIN, 'emit-build-provenance.sh');
@@ -605,7 +606,7 @@ test('dirty build-start provenance content-binds source paths and each artifact 
 test('direct sidecar producer captures provenance before dependency mutations', () => {
   const builder = fs.readFileSync(path.join(BIN, 'build-desktop-sidecar.sh'), 'utf8');
   const captureAt = builder.indexOf('emit-build-provenance.sh" --capture-source');
-  const dependencyMutationAt = builder.indexOf('node scripts/npm-install-safe.mjs install');
+  const dependencyMutationAt = builder.search(/^\(cd "\$REPO_ROOT" && node [^\n]*?npm-install-safe\.mjs"?\s+(?:--repo-root "\$REPO_ROOT"\s+)?install\b/m);
   const emitAt = builder.lastIndexOf('bash "$HERE/emit-build-provenance.sh"');
 
   assert.ok(captureAt > 0, 'direct sidecar builder never captures its source phase boundary');
@@ -635,14 +636,17 @@ test('Mac VM build verifies the sidecar pui generation before packaging without 
   );
 });
 
-function sourceIdentityFixture() {
+function sourceIdentityFixture(t, { commit = true } = {}) {
   const root = tmp();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  historicalSource(root);
   const git = (args) => {
     const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
     return result.stdout.trim();
   };
   git(['init', '-q']);
+  if (!commit) return { root };
   git(['config', 'user.email', 'provenance@test']);
   git(['config', 'user.name', 'Provenance Test']);
   git(['config', 'commit.gpgsign', 'false']);
@@ -668,9 +672,9 @@ function runSourceIdentityPreflight(root, head) {
   });
 }
 
-test('sidecar preflight refuses a desktop SHA supplied for a different monorepo source', () => {
-  const monorepo = sourceIdentityFixture();
-  const desktop = sourceIdentityFixture();
+test('sidecar preflight refuses a desktop SHA supplied for a different monorepo source', t => {
+  const monorepo = sourceIdentityFixture(t);
+  const desktop = sourceIdentityFixture(t);
   assert.notEqual(monorepo.head, desktop.head);
   const result = runSourceIdentityPreflight(monorepo.root, desktop.head);
   assert.equal(result.status, 1, result.stderr);
@@ -681,33 +685,24 @@ test('sidecar preflight refuses a desktop SHA supplied for a different monorepo 
   assert.equal(fs.existsSync(path.join(monorepo.root, 'node_modules')), false);
 });
 
-test('sidecar preflight accepts the matching monorepo SHA before later input guards', () => {
-  const monorepo = sourceIdentityFixture();
-  const builder = fs.readFileSync(path.join(BIN, 'build-desktop-sidecar.sh'), 'utf8');
-  const guard = builder.match(/if \[\[ "\$\{PAPERCUSP_RELEASE_AUDIT:-0\}" == "1" \]\]; then\n  _provenance_entry_head=[\s\S]*?unset _provenance_entry_head\nfi/);
-  assert.ok(guard, 'entry source identity guard must remain executable');
-  const result = spawnSync('bash', ['-c', guard[0]], {
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      REPO_ROOT: monorepo.root,
-      PAPERCUSP_RELEASE_AUDIT: '1',
-      PROVENANCE_SOURCE_GIT_HEAD: monorepo.head,
-    },
-  });
-  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+test('sidecar preflight accepts the matching monorepo SHA before later input guards', t => {
+  const monorepo = sourceIdentityFixture(t);
+  const result = runSourceIdentityPreflight(monorepo.root, monorepo.head);
+  assert.equal(result.status, 1, `${result.stdout}${result.stderr}`);
+  assert.match(result.stderr, /transformers dependency contract mismatch/);
   assert.doesNotMatch(result.stderr, /source identity mismatch at entry/);
 });
 
-test('sidecar preflight refuses an explicitly empty source SHA', () => {
-  const monorepo = sourceIdentityFixture();
+test('sidecar preflight refuses an explicitly empty source SHA', t => {
+  const monorepo = sourceIdentityFixture(t);
   const result = runSourceIdentityPreflight(monorepo.root, '');
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stderr, /source identity mismatch at entry/);
 });
 
-test('sidecar preflight refuses unknown source identity even when the supplied value matches', () => {
-  const result = runSourceIdentityPreflight(tmp(), 'unknown');
+test('sidecar preflight refuses unknown source identity even when the supplied value matches', t => {
+  const monorepo = sourceIdentityFixture(t, { commit: false });
+  const result = runSourceIdentityPreflight(monorepo.root, 'unknown');
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stderr, /source identity mismatch at entry/);
 });

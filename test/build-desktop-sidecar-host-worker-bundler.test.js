@@ -8,6 +8,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { historicalSource } = require('./host-source-fixture.cjs');
 
 const root = path.resolve(__dirname, '..');
 const lib = path.join(root, 'bin/lib/host-worker-bundler.sh');
@@ -163,21 +164,6 @@ test('build-desktop-sidecar.sh resolves the bundler right after the target helpe
   const callAt = builder.indexOf('bundle_host_workers "$REPO_ROOT" "$SIDECAR_DIR"');
   assert.ok(sourceAt > 0 && ensureAt > sourceAt && callAt > ensureAt, `${sourceAt} ${ensureAt} ${callAt}`);
 });
-
-function historicalSource(dir) {
-  for (const [file, body] of Object.entries({
-    'packages/operator-core/lib/agent-tools/testing/run.ts': 'export default {};\n',
-    'apps/operator/bin/bundle-host-common.sh': '# historical helper\n',
-    'apps/operator/bin/serve.ts': 'console.log("historical host");\n',
-    'apps/operator/bin/ascii-escape-bundle.mjs': '// fixture syntax check\n',
-    'scripts/npm-install-safe.mjs': '// fixture cache lease\n',
-    'packages/plugin-loader/package.json': '{"dependencies":{}}\n',
-    'packages/plugin-loader/src/daemon/supervisor.ts': 'export default {};\n',
-  })) {
-    fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
-    fs.writeFileSync(path.join(dir, file), body);
-  }
-}
 
 function historicalQualificationSource(dir) {
   const files = {
