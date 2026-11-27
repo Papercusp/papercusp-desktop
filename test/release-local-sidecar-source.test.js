@@ -16,7 +16,7 @@ const bootGate = fs.readFileSync(path.join(bin, 'gate-sidecar-boots.sh'), 'utf8'
 function section(text, start, end) {
   const from = text.indexOf(start);
   const to = text.indexOf(end, from + start.length);
-  assert.ok(from >= 0 && to > from, `missing shell boundary: ${start}`);
+  assert.ok(from >= 0 && to > from, `missing source boundary: ${start}`);
   return text.slice(from, to);
 }
 
@@ -291,16 +291,36 @@ test('packed-sidecar boot gate discards a partial hardlink tree before fallback 
   assert.match(bootGate, /stage_isolated_bundle "\$SIDECAR" "\$ISO\/sidecar"/);
 });
 
+function productResourceNames(main) {
+  const spawn = section(main, '\nfn spawn_serve(', '\n}');
+  const headless = section(main, '\nfn run_headless_service(', '\n}');
+  const launch = [spawn, headless].join('\n');
+  const pathVariable = /"(PAPERCUSP_[A-Z0-9_]*(?:DIR|PATH|ROOT|ARCHIVE))"/g;
+  return new Set([...launch.matchAll(pathVariable)].map(([, name]) => name));
+}
+
+test('resource discovery includes both launch paths and excludes test artifact output', () => {
+  const main = `
+fn spawn_serve() {
+    cmd.env(
+        "PAPERCUSP_NEW_DIR", bundle);
+    cmd.envs([("PAPERCUSP_NEW_ROOT", root)]);
+}
+fn run_headless_service() {
+    std::env::var_os("PAPERCUSP_NEW_PATH");
+}
+#[test]
+fn writes_artifact() {
+    std::env::var_os("PAPERCUSP_TEST_ARTIFACT_DIR");
+}
+`;
+  assert.deepEqual([...productResourceNames(main)].sort(), [
+    'PAPERCUSP_NEW_DIR', 'PAPERCUSP_NEW_PATH', 'PAPERCUSP_NEW_ROOT',
+  ]);
+});
+
 test('packed-sidecar boot gate passes every product resource path into the isolated sidecar', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'main.rs'), 'utf8');
-  const productResourceNames = [
-    ...new Set(
-      [...main.matchAll(/"(PAPERCUSP_[A-Z_]*(?:DIR|PATH|ROOT|ARCHIVE))"/g)].map(
-        (match) => match[1],
-      ),
-    ),
-  ];
-
   // Keep this assertion derived from the production source: adding a path to
   // spawn_serve or the headless service must fail this test until the hermetic
   // packed gate forwards it too.
@@ -309,7 +329,7 @@ test('packed-sidecar boot gate passes every product resource path into the isola
     bootGate.indexOf('    "$B_NODE" "$B/serve.mjs"', bootGate.indexOf('  env -i \\\n')),
   );
   assert.ok(gateLaunch.length > 0, 'could not isolate the gate launch environment');
-  for (const name of productResourceNames) {
+  for (const name of productResourceNames(main)) {
     assert.match(gateLaunch, new RegExp(`${name}=`), `${name} is omitted from the gate env`);
   }
 
