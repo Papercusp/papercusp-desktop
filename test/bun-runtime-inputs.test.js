@@ -396,6 +396,18 @@ assert not list(shipped.parent.glob('.bun-archive-*'))
 `);
 });
 
+function retainedNodeProducer() {
+  const builder = fs.readFileSync(path.resolve(__dirname, '../bin/build-desktop-sidecar.sh'), 'utf8');
+  const heading = builder.indexOf('# Node.js — vendor');
+  const start = builder.indexOf('\nNODE_VERSION=', heading);
+  const outputCheck = builder.indexOf('\nif [[ -z "$node_dst" || ! -s "$node_dst" ]]; then', start);
+  const closingLine = '\nfi\n';
+  const end = builder.indexOf(closingLine, outputCheck);
+  assert.ok(heading >= 0 && start > heading && outputCheck > start && end > outputCheck,
+    'retained Node producer must include its final output check');
+  return builder.slice(start, end + closingLine.length);
+}
+
 for (const [target, failure] of [
   ['linux', 'download'], ['darwin', 'download'], ['windows', 'download'],
   ['linux', 'empty-extraction'], ['darwin', 'empty-extraction'],
@@ -425,11 +437,7 @@ for (const [target, failure] of [
     // inner path into a host-root glob. The stub prevents any such move.
     fs.writeFileSync(path.join(tools, 'unzip'), '#!/bin/sh\ntouch "$4/README"\n', { mode: 0o755 });
     fs.writeFileSync(path.join(tools, 'mv'), '#!/bin/sh\ntouch "$MOVE_MARKER"\nexit 97\n', { mode: 0o755 });
-    const producer = fs.readFileSync(path.resolve(__dirname, '../bin/build-desktop-sidecar.sh'), 'utf8');
-    const start = producer.indexOf('NODE_VERSION=', producer.indexOf('# Node.js — vendor'));
-    const end = producer.indexOf('# Bun is a packaged candidate', start);
-    assert.ok(start > 0 && end > start, 'maintained Node producer section exists');
-    const section = producer.slice(start, end).replace('node_tarball="/tmp/$node_archive"', 'node_tarball="$TMPDIR/$node_archive"');
+    const section = retainedNodeProducer().replace('node_tarball="/tmp/$node_archive"', 'node_tarball="$TMPDIR/$node_archive"');
     const result = spawnSync('bash', ['-c', 'set -euo pipefail\n' + section], {
       encoding: 'utf8', timeout: 20_000,
       env: { ...process.env, PATH: tools + path.delimiter + process.env.PATH,
@@ -476,9 +484,7 @@ function nodeArchiveFixture(t, target, arch = 'x64', missingMember = false) {
   fs.mkdirSync(tools);
   fs.mkdirSync(output);
   fs.writeFileSync(path.join(tools, 'curl'), '#!/bin/bash\nset -eu\necho "$2" >> "$DOWNLOAD_LOG"\n[[ "${DOWNLOAD_FAIL:-0}" != 1 ]] || exit 22\nwhile [[ "$1" != -o ]]; do shift; done\ncp "$FIXTURE_ARCHIVE" "$2"\n', { mode: 0o755 });
-  const producer = fs.readFileSync(path.resolve(__dirname, '../bin/build-desktop-sidecar.sh'), 'utf8');
-  const start = producer.indexOf('NODE_VERSION=', producer.indexOf('# Node.js — vendor'));
-  const section = producer.slice(start, producer.indexOf('# Bun is a packaged candidate', start))
+  const section = retainedNodeProducer()
     .replace(/node_archive_sha256=[a-f0-9]{64}/g, 'node_archive_sha256=' + digest);
   const env = { ...process.env, PATH: tools + path.delimiter + process.env.PATH,
     target_os: target, target_arch: arch, DISTRIBUTION_PROFILE: 'dogfood',
@@ -502,7 +508,8 @@ for (const [target, arch] of [['linux', 'x64'], ['linux', 'arm64'], ['darwin', '
     assert.equal(fs.readFileSync(f.output, 'utf8'), f.payload);
     assert.deepEqual(fs.readFileSync(f.cached), fs.readFileSync(f.archive));
     fs.unlinkSync(f.output);
-    const cached = f.run({ DOWNLOAD_FAIL: '1' });
+    // Reusing the Node archive is independent of the subsequent handler build.
+    const cached = f.run({ DOWNLOAD_FAIL: '1', PAPERCUSP_HANDLER_RUNTIME_CONTRACT: 'current' });
     assert.equal(cached.status, 0, cached.stderr);
     assert.equal(fs.readFileSync(f.output, 'utf8'), f.payload);
     assert.equal(fs.readFileSync(path.join(f.root, 'downloads'), 'utf8').trim().split('\n').length, 1);
