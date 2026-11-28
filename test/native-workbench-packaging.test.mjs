@@ -1,14 +1,50 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {spawnSync} from 'node:child_process';
+import {execFile, spawnSync} from 'node:child_process';
+import {once} from 'node:events';
 import {cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+import {createServer} from 'node:net';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import test from 'node:test';
+import {promisify} from 'node:util';
 import {stageNativeWorkbench, windowsWorkbenchFiles} from '../bin/package-native-workbench.mjs';
 
 const desktop = resolve(import.meta.dirname, '..');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+
+test('Linux stages the GNOME archive without contacting the desktop session bus',
+    {skip:process.platform !== 'linux'}, async () => {
+        const root = mkdtempSync(join(tmpdir(), 'workbench-pack-'));
+        const socketPath = join(root, 'bus');
+        let connections = 0;
+        const bus = createServer(socket => {
+            connections++;
+            socket.destroy();
+        });
+        try {
+            bus.listen(socketPath);
+            await once(bus, 'listening');
+            const env = {...process.env, DBUS_SESSION_BUS_ADDRESS:'unix:path=' + socketPath};
+            delete env.GIO_USE_VFS;
+            cpSync(join(desktop, 'native/gnome'), join(root, 'native/gnome'), {recursive:true});
+            cpSync(join(desktop, 'native/linux'), join(root, 'native/linux'), {recursive:true});
+            const {stdout} = await promisify(execFile)(process.execPath,
+                [join(desktop, 'bin/package-native-workbench.mjs'), '--stage-bundle', root, 'linux'],
+                {env, timeout:45000});
+            assert.equal(connections, 0, 'local packaging attempted to use the session bus');
+            const {archive, sha256} = JSON.parse(stdout);
+            assert.equal(hash(readFileSync(archive)), sha256);
+            const extension = spawnSync('unzip', ['-p', archive, 'extension.js']);
+            assert.equal(extension.status, 0, extension.stderr?.toString());
+            assert.deepEqual(extension.stdout, readFileSync(join(root, 'native/gnome/extension.js')));
+            assert.deepEqual(readFileSync(join(root, 'src-tauri/resources/workbench-install.js')),
+                readFileSync(join(root, 'native/linux/install-workbench.js')));
+        } finally {
+            if (bus.listening) await new Promise(done => bus.close(done));
+            rmSync(root, {recursive:true, force:true});
+        }
+    });
 
 function withWindowsSource(run) {
     const root = mkdtempSync(join(tmpdir(), 'workbench-packaging-'));

@@ -26,7 +26,8 @@ export function packageNativeWorkbench(outputDirectory, {
     const result = spawnSync('gnome-extensions', ['pack', '--force',
         '--extra-source=bridge.js', '--extra-source=helper.js', '--extra-source=audio.js', '--extra-source=panel-model.mjs', '--extra-source=chat-content.js',
         '--out-dir', resolve(outputDirectory), prepared],
-    {encoding: 'utf8', timeout: 30000});
+    // Cargo stages local files. GIO's desktop backend also contacts the session bus.
+    {encoding: 'utf8', timeout: 30000, env: {...process.env, GIO_USE_VFS: 'local'}});
     if (result.error || result.status !== 0)
         throw new Error('GNOME Workbench packaging failed: ' +
             (result.error?.message || result.stderr || result.stdout || result.status));
